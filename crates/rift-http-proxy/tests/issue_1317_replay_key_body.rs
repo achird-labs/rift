@@ -1,6 +1,7 @@
 //! Issue #1317: without `predicateGenerators` the proxy's replay store keys on method, path, query
 //! string and request body (headers stay out), so two POSTs with different bodies are different
-//! requests. With generators the user chose the identity and the key is unchanged.
+//! requests. With generators the user chose the identity: the generated predicates key it instead
+//! (issue #1333), so a body the generators ignore is the same request.
 
 use std::net::TcpListener;
 use std::sync::Arc;

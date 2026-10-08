@@ -21,8 +21,9 @@ pub struct RecordedResponse {
 /// Request signature for matching recorded responses.
 ///
 /// Build one with [`RequestSignature::new`] and, where the body is part of the identity,
-/// [`RequestSignature::with_body`]; the struct is `#[non_exhaustive]` so a new field is not a
-/// breaking change.
+/// [`RequestSignature::with_body`] — or, for a proxy with `predicateGenerators`,
+/// [`RequestSignature::with_predicates`]; the struct is `#[non_exhaustive]` so a new field is not
+/// a breaking change.
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RequestSignature {
@@ -35,6 +36,11 @@ pub struct RequestSignature {
     /// the serialized form when `None`, so a body-less key serializes as it did before the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_hash: Option<u64>,
+    /// FNV-1a 64 of the stub predicates a proxy's `predicateGenerators` produced for the request;
+    /// `None` without generators (issue #1333). The recorded stub's identity is those predicates,
+    /// so the claim keys on them too. Absent from the serialized form when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicates_hash: Option<u64>,
 }
 
 impl RequestSignature {
@@ -51,6 +57,7 @@ impl RequestSignature {
             query: query.map(|s| s.to_string()),
             headers: headers.to_vec(),
             body_hash: None,
+            predicates_hash: None,
         }
     }
 
@@ -62,6 +69,27 @@ impl RequestSignature {
             hasher.update(body);
             self.body_hash = Some(hasher.finish());
         }
+        self
+    }
+
+    /// Fold the predicates `predicateGenerators` generated for this request into the signature.
+    ///
+    /// Hashed as the compact JSON array of `predicates`. Objects in a `serde_json::Value` are
+    /// sorted maps (`preserve_order` is off workspace-wide), so predicates built from a `HashMap`
+    /// hash the same whatever its iteration order. An empty list is still an identity: every
+    /// request it was generated for shares it, as they share the match-all stub it records.
+    #[must_use]
+    pub fn with_predicates(mut self, predicates: &[serde_json::Value]) -> Self {
+        let mut hasher = Fnv1a::default();
+        hasher.update(b"[");
+        for (i, predicate) in predicates.iter().enumerate() {
+            if i > 0 {
+                hasher.update(b",");
+            }
+            hasher.update(predicate.to_string().as_bytes());
+        }
+        hasher.update(b"]");
+        self.predicates_hash = Some(hasher.finish());
         self
     }
 }
@@ -104,6 +132,48 @@ mod tests {
         let with = sig().with_body(b"abc");
         let json = serde_json::to_value(&with).expect("serialize");
         assert!(json["body_hash"].is_u64(), "{json}");
+        let back: RequestSignature = serde_json::from_value(json).expect("decode");
+        assert_eq!(back, with);
+    }
+
+    #[test]
+    fn equal_generated_predicates_give_equal_signatures_whatever_their_key_order() {
+        let a: serde_json::Value =
+            serde_json::from_str(r#"{"equals": {"path": "/o", "body": "1"}}"#).expect("json");
+        let b: serde_json::Value =
+            serde_json::from_str(r#"{"equals": {"body": "1", "path": "/o"}}"#).expect("json");
+        assert_eq!(sig().with_predicates(&[a]), sig().with_predicates(&[b]));
+    }
+
+    #[test]
+    fn different_generated_predicates_give_different_signatures() {
+        let one = serde_json::json!({"equals": {"body": "1"}});
+        let two = serde_json::json!({"equals": {"body": "2"}});
+        assert_ne!(
+            sig().with_predicates(std::slice::from_ref(&one)),
+            sig().with_predicates(std::slice::from_ref(&two))
+        );
+        assert_ne!(
+            sig().with_predicates(&[one.clone(), two.clone()]),
+            sig().with_predicates(&[two, one.clone()]),
+            "predicate order is part of the stub"
+        );
+        assert_ne!(sig().with_predicates(&[one]), sig());
+        assert_ne!(
+            sig().with_predicates(&[]),
+            sig(),
+            "an empty generated list is an identity, not the no-generator key"
+        );
+    }
+
+    #[test]
+    fn the_predicates_hash_round_trips_and_is_absent_without_generators() {
+        let json = serde_json::to_value(sig().with_body(b"abc")).expect("serialize");
+        assert!(json.get("predicates_hash").is_none(), "{json}");
+
+        let with = sig().with_predicates(&[serde_json::json!({"equals": {"path": "/o"}})]);
+        let json = serde_json::to_value(&with).expect("serialize");
+        assert!(json["predicates_hash"].is_u64(), "{json}");
         let back: RequestSignature = serde_json::from_value(json).expect("decode");
         assert_eq!(back, with);
     }

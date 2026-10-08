@@ -693,6 +693,77 @@ impl Imposter {
         });
     }
 
+    /// Run `predicateGenerators` over a request: the predicates of the stub its response is
+    /// recorded as.
+    ///
+    /// `Err((token, detail))` = generation failed and the predicates are unknown. The caller must
+    /// then record no stub: an empty or partial predicate list matches every future request (issue
+    /// #498). `token` is a short, header-safe category surfaced to the client; `detail` is logged.
+    async fn generate_stub_predicates<SH>(
+        &self,
+        proxy_config: &ProxyResponse,
+        method: &str,
+        uri: &hyper::Uri,
+        headers: &HashMap<String, Vec<String>, SH>,
+        body: Option<ProxyBody<'_>>,
+    ) -> Result<Vec<serde_json::Value>, (&'static str, String)>
+    where
+        SH: BuildHasher + Clone + Send + 'static,
+    {
+        // An `inject` generator executes a JS script; run the generator pass off the async worker
+        // under the script deadline (issue #476). Script-free generator lists (the common case)
+        // keep the inline path — pure predicate building, no script pool.
+        let has_inject_generator = proxy_config
+            .predicate_generators
+            .iter()
+            .any(|g| g.as_object().is_some_and(|o| o.contains_key("inject")));
+        if !has_inject_generator {
+            return self
+                .generate_predicates_from_request(
+                    &proxy_config.predicate_generators,
+                    method,
+                    uri.path(),
+                    headers,
+                    body.map(|b| b.text),
+                    uri.query(),
+                )
+                .map_err(|e| (e.kind(), e.to_string()));
+        }
+        let generators = proxy_config.predicate_generators.clone();
+        let method = method.to_string();
+        let path = uri.path().to_string();
+        let headers = headers.clone();
+        let body = body.map(|b| b.text.to_string());
+        let query = uri.query().map(str::to_string);
+        let timeout = std::time::Duration::from_millis(
+            crate::scripting::resolve_script_timeout_ms(&self.config),
+        );
+        // Plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987):
+        // `execute_predicate_generator_inject` never installs a flow store, so a predicate
+        // generator has no `ctx.state` and nothing here can annotate.
+        let handle = tokio::task::spawn_blocking(move || {
+            Self::generate_predicates_impl(
+                &generators,
+                &method,
+                &path,
+                &headers,
+                body.as_deref(),
+                query.as_deref(),
+            )
+        });
+        match tokio::time::timeout(timeout, handle).await {
+            Ok(Ok(Ok(preds))) => Ok(preds),
+            Ok(Ok(Err(gen_err))) => Err((gen_err.kind(), gen_err.to_string())),
+            Ok(Err(join_err)) => {
+                Err(("task-panic", format!("generator task panicked: {join_err}")))
+            }
+            Err(_elapsed) => Err((
+                "timeout",
+                format!("timed out after {}ms", timeout.as_millis()),
+            )),
+        }
+    }
+
     /// Forward a request through proxy and optionally record the response.
     ///
     /// `behaviors` are the proxy response's own behaviors. They run on the upstream response before
@@ -748,13 +819,40 @@ impl Imposter {
             debug!("Proxy request to: {}", target_url);
         }
 
-        // Create request signature for recording
-        // Without predicateGenerators nothing names the request's identity, so the replay key is
-        // method, path, query and body (issue #1317); headers stay out. With generators the user
-        // chose the identity and the key is unchanged.
+        let transparent = proxy_config.mode().unwrap_or_default() == ProxyMode::ProxyTransparent;
+        // A proxied response is recorded as a stub when predicateGenerators, addWaitBehavior or
+        // addDecorateBehavior is configured, as in Mountebank — never for `proxyTransparent`,
+        // which forwards every request and records nothing.
+        let generates_stub = !transparent
+            && (!proxy_config.predicate_generators.is_empty()
+                || proxy_config.add_wait_behavior
+                || proxy_config.add_decorate_behavior.is_some());
+        // The predicates come from the request alone, so they are generated before the claim:
+        // with generators they are the request's identity, and the claim keys on them.
+        let generation = if !generates_stub {
+            None
+        } else if proxy_config.predicate_generators.is_empty() {
+            // No generators: the stub has no predicates and matches every request.
+            Some(Ok(vec![]))
+        } else {
+            Some(
+                self.generate_stub_predicates(proxy_config, method, uri, headers, body)
+                    .await,
+            )
+        };
+
+        // The replay key. Without predicateGenerators nothing names the request's identity, so it
+        // is method, path, query and body (issue #1317); headers stay out. With generators the
+        // identity is the generated predicates (issue #1333): proxyOnce inserts the recorded stub
+        // before the proxy stub, so a request reaching the proxy stub missed every recording, and
+        // keying it on method, path and query alone answered it with another identity's recording
+        // instead of forwarding it — Mountebank's `proxyAndRecord` forwards and records on every
+        // miss.
         let mut signature = RequestSignature::new(method, uri.path(), uri.query(), &[]);
         if proxy_config.predicate_generators.is_empty() {
             signature = signature.with_body(body.map_or(&[][..], |b| b.raw.as_ref()));
+        } else if let Some(Ok(predicates)) = &generation {
+            signature = signature.with_predicates(predicates);
         }
         let port = self.journal_port();
 
@@ -764,8 +862,14 @@ impl Imposter {
         // The store's mode is imposter-wide (from the first proxy stub), so a response that is
         // itself `proxyTransparent` — or a `defaultForward` — must not consult it, or it would
         // replay what another stub's `proxyOnce` recorded (issue #1314).
-        let transparent = proxy_config.mode().unwrap_or_default() == ProxyMode::ProxyTransparent;
-        let claim = if transparent {
+        // A failed generation has no identity to key on, records no stub (issue #498) and must not
+        // replay either: under the method, path and query key it would answer with another
+        // request's recording, without the `x-rift-generator-error` the client should see.
+        let generation_failed = matches!(generation, Some(Err(_)));
+        // A concurrent proxyOnce loser forwards, but the winner records the identity: inserting
+        // its stub too would stack a duplicate per loser.
+        let mut lost_race = false;
+        let claim = if transparent || generation_failed {
             None
         } else {
             match self.proxy_store.try_claim(port, &signature) {
@@ -787,7 +891,10 @@ impl Imposter {
                     );
                     None
                 }
-                Ok(ClaimOutcome::InFlight) => None,
+                Ok(ClaimOutcome::InFlight) => {
+                    lost_race = true;
+                    None
+                }
                 Ok(ClaimOutcome::Claimed(token)) => Some(HeldClaim::new(
                     self.proxy_store.as_ref(),
                     port,
@@ -938,77 +1045,7 @@ impl Imposter {
             )
         });
 
-        // Generate and insert stub if predicateGenerators, addWaitBehavior, or addDecorateBehavior is configured
-        // (Mountebank generates stubs automatically when these are enabled) — never for
-        // `proxyTransparent`, which forwards every request and records nothing.
-        if proxy_config.mode().unwrap_or_default() != ProxyMode::ProxyTransparent
-            && (!proxy_config.predicate_generators.is_empty()
-                || proxy_config.add_wait_behavior
-                || proxy_config.add_decorate_behavior.is_some())
-        {
-            // An `inject` generator executes a JS script; run the generator pass off the async
-            // worker under the script deadline (issue #476). Script-free generator lists (the
-            // common case) keep the inline path — pure predicate building, no script pool.
-            let has_inject_generator = proxy_config
-                .predicate_generators
-                .iter()
-                .any(|g| g.as_object().is_some_and(|o| o.contains_key("inject")));
-            // `Ok(preds)` = predicates generated (possibly legitimately empty); `Err((token, detail))`
-            // = generation failed and predicates are unknown. On failure we must NOT record a stub:
-            // an empty/partial predicate list matches every future request (issue #498). The failure
-            // token is a short, header-safe category surfaced to the client; `detail` goes to the log.
-            let generation: Result<Vec<serde_json::Value>, (&'static str, String)> =
-                if !proxy_config.predicate_generators.is_empty() {
-                    if has_inject_generator {
-                        let generators = proxy_config.predicate_generators.clone();
-                        let method = method.to_string();
-                        let path = uri.path().to_string();
-                        let headers = headers.clone();
-                        let body = body.map(|b| b.text.to_string());
-                        let query = uri.query().map(str::to_string);
-                        let timeout = std::time::Duration::from_millis(
-                            crate::scripting::resolve_script_timeout_ms(&self.config),
-                        );
-                        // Plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987):
-                        // `execute_predicate_generator_inject` never installs a flow store, so a
-                        // predicate generator has no `ctx.state` and nothing here can annotate.
-                        let handle = tokio::task::spawn_blocking(move || {
-                            Self::generate_predicates_impl(
-                                &generators,
-                                &method,
-                                &path,
-                                &headers,
-                                body.as_deref(),
-                                query.as_deref(),
-                            )
-                        });
-                        match tokio::time::timeout(timeout, handle).await {
-                            Ok(Ok(Ok(preds))) => Ok(preds),
-                            Ok(Ok(Err(gen_err))) => Err((gen_err.kind(), gen_err.to_string())),
-                            Ok(Err(join_err)) => {
-                                Err(("task-panic", format!("generator task panicked: {join_err}")))
-                            }
-                            Err(_elapsed) => Err((
-                                "timeout",
-                                format!("timed out after {}ms", timeout.as_millis()),
-                            )),
-                        }
-                    } else {
-                        self.generate_predicates_from_request(
-                            &proxy_config.predicate_generators,
-                            method,
-                            uri.path(),
-                            headers,
-                            body.map(|b| b.text),
-                            uri.query(),
-                        )
-                        .map_err(|e| (e.kind(), e.to_string()))
-                    }
-                } else {
-                    // No predicateGenerators, generate empty predicates (matches all requests)
-                    Ok(vec![])
-                };
-
+        if let Some(generation) = generation {
             match generation {
                 Ok(predicates) => {
                     // `addDecorateBehavior` is written into the SAVED stub's behaviors and not
@@ -1056,6 +1093,12 @@ impl Imposter {
                              stubs; handed over: {settled})",
                             uri.path()
                         );
+                    } else if lost_race {
+                        debug!(
+                            "Skipping local stub insertion for path {} (a concurrent request holds \
+                             the claim and records it)",
+                            uri.path()
+                        );
                     } else {
                         self.insert_or_append_proxy_stub(new_stub, &proxy_config.to, mode);
                     }
@@ -1080,8 +1123,8 @@ impl Imposter {
             }
         }
 
-        // No stub was generated — nothing configured to generate one, or generation failed — so
-        // there is nothing to publish and the claim settles through `record` exactly as before.
+        // Nothing is configured to generate a stub (a failed generation took no claim), so there
+        // is nothing to publish and the claim settles through `record` exactly as before.
         if let Some((claim, resp)) = recording {
             claim.settle(resp, None);
         }

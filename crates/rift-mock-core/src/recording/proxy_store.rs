@@ -181,19 +181,19 @@ pub trait ProxyRecordingStore: Send + Sync {
     ///
     /// Called instead of [`record`](Self::record) whenever a stub was generated — that is, when
     /// `predicateGenerators`, `addWaitBehavior` or `addDecorateBehavior` is configured and
-    /// predicate generation succeeded. When no stub exists (none of those is configured, or
-    /// generation failed and recording a match-all stub would be wrong — issue #498) there is
-    /// nothing to publish and the engine calls [`record`](Self::record) as before.
+    /// predicate generation succeeded. When none of those is configured there is nothing to
+    /// publish and the engine calls [`record`](Self::record) as before. When generation fails the
+    /// engine takes no claim at all (issue #1333): recording a match-all stub would be wrong
+    /// (issue #498), and replaying under a key without the request's identity would answer it with
+    /// another request's recording.
     ///
     /// This ordering is the point: a store that publishes stubs to a shared or durable backend can
     /// make "this signature is Recorded" strictly conditional on its own publication ack, instead
     /// of committing it against a stub that does not exist yet.
     ///
-    /// It also means the claim is held for the whole of predicate generation. That is negligible
-    /// for the ordinary generators, but a `predicateGenerators.inject` script runs under the
-    /// script timeout (5s by default), and a concurrent `proxyOnce` request arriving inside that
-    /// window sees [`ClaimOutcome::InFlight`] rather than [`ClaimOutcome::AlreadyRecorded`] — so it
-    /// proxies upstream instead of replaying. The signature is still recorded exactly once.
+    /// The predicates are generated from the request before the claim is taken, since with
+    /// `predicateGenerators` they are part of the signature (issue #1333), so the claim is not
+    /// held across a `predicateGenerators.inject` script.
     ///
     /// The default delegates to [`record`](Self::record), so a store that does not publish is
     /// unaffected.

@@ -3,10 +3,7 @@
 //! (or every query parameter) and a request differing anywhere else missed it.
 //!
 //! A response the recorded stub serves carries no `x-rift-proxy` header; one that reaches the
-//! proxy (forwarded, or replayed from the proxy store) does. That header is what these tests read:
-//! the proxy store keys a generator's recording on method, path and query only, so a request that
-//! misses the recorded stub is answered from the store rather than forwarded, and the upstream's
-//! hit count cannot tell the two apart.
+//! proxy does, and is forwarded and recorded as a new stub (issue #1333).
 
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -128,12 +125,13 @@ async fn a_jsonpath_generator_replays_on_the_selected_value_only() {
             .served_by_recorded_stub(port, "/orders", r#"{"id": 1, "ts": "b"}"#)
             .await
     );
-    // A different `$.id` misses it.
+    // A different `$.id` misses it, and is forwarded.
     assert!(
         !admin
             .served_by_recorded_stub(port, "/orders", r#"{"id": 2, "ts": "a"}"#)
             .await
     );
+    assert_eq!(admin.upstream_hits(upstream).await, 2);
     admin.drop_all(&[port, upstream]).await;
 }
 
