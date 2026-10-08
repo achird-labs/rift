@@ -1754,174 +1754,172 @@ mod tests {
         );
     }
 
-    // Fix #103: caseSensitive is now always written to generated predicate JSON,
-    // so the matcher sees the generator's intended value.
+    // Issue #1329: a generator's `caseSensitive` is copied onto each predicate only when present,
+    // as in Mountebank. Absent, the predicate default (`false`) applies, as it does in Mountebank.
     #[test]
-    fn test_generator_always_writes_case_sensitive() {
+    fn test_generator_omits_absent_case_sensitive() {
         let imposter = make_test_imposter();
-
-        let generators = vec![json!({
-            "matches": { "method": true, "path": true }
-            // no caseSensitive field → generator defaults to true
-        })];
-
-        let headers = HashMap::new();
+        let generators = vec![json!({ "matches": { "method": true, "path": true } })];
         let predicates = imposter
             .generate_predicates_from_request(
                 &generators,
                 "GET",
                 "/API/Users",
-                &headers,
+                &HashMap::new(),
                 None,
                 None,
             )
             .expect("predicate generation succeeds");
 
-        assert_eq!(predicates.len(), 1);
-        let pred_json = &predicates[0];
-
-        // caseSensitive should now always be written
         assert_eq!(
-            pred_json.get("caseSensitive"),
-            Some(&serde_json::Value::Bool(true)),
-            "Generator should always write caseSensitive to the predicate JSON"
-        );
-
-        // Deserialize and verify the matcher sees the correct value
-        let pred: crate::imposter::types::Predicate = serde_json::from_value(pred_json.clone())
-            .expect("Generated predicate should deserialize");
-
-        assert_eq!(
-            pred.parameters.case_sensitive,
-            Some(true),
-            "Matcher should see caseSensitive=true from the generated predicate"
+            predicates,
+            vec![
+                json!({ "deepEquals": { "method": "GET" } }),
+                json!({ "deepEquals": { "path": "/API/Users" } }),
+            ]
         );
     }
 
-    // Fix: `except` is now applied to method in generate_predicates_from_request
     #[test]
-    fn test_generator_except_applied_to_method() {
+    fn test_generator_copies_a_present_case_sensitive() {
         let imposter = make_test_imposter();
-
-        let generators = vec![json!({
-            "matches": { "method": true },
-            "except": "^POST$"
-        })];
-
-        let headers = HashMap::new();
+        let generators = vec![json!({ "matches": { "path": true }, "caseSensitive": true })];
         let predicates = imposter
-            .generate_predicates_from_request(&generators, "POST", "/test", &headers, None, None)
+            .generate_predicates_from_request(&generators, "GET", "/A", &HashMap::new(), None, None)
             .expect("predicate generation succeeds");
 
-        assert_eq!(predicates.len(), 1);
-        let pred_json = &predicates[0];
-        let method_val = pred_json["equals"]["method"].as_str().unwrap();
-
         assert_eq!(
-            method_val, "",
-            "except pattern should be applied to method in predicate generator"
+            predicates,
+            vec![json!({ "deepEquals": { "path": "/A" }, "caseSensitive": true })]
         );
     }
 
-    // Issue #481: the `except` regex for the path site now resolves via the shared cache;
-    // this pins that the strip still applies (the method site alone left path/body untested).
+    // Issue #1329: `except` is persisted on the predicate and the captured value stays raw — the
+    // matcher strips both sides, as in Mountebank. Stripping at generation and dropping the pattern
+    // recorded stubs no later request could match.
     #[test]
-    fn test_generator_except_applied_to_path() {
+    fn test_generator_persists_except_for_method() {
         let imposter = make_test_imposter();
-
-        let generators = vec![json!({
-            "matches": { "path": true },
-            "except": r"\d+$"
-        })];
-
-        let headers = HashMap::new();
-        let predicates = imposter
-            .generate_predicates_from_request(
-                &generators,
-                "GET",
-                "/orders/123",
-                &headers,
-                None,
-                None,
-            )
-            .expect("predicate generation succeeds");
-
-        assert_eq!(predicates.len(), 1);
-        let path_val = predicates[0]["equals"]["path"].as_str().unwrap();
-        assert_eq!(
-            path_val, "/orders/",
-            "except pattern should strip the trailing digits from the path"
-        );
-    }
-
-    // Issue #481: same for the body except site.
-    #[test]
-    fn test_generator_except_applied_to_body() {
-        let imposter = make_test_imposter();
-
-        let generators = vec![json!({
-            "matches": { "body": true },
-            "except": r"\d+"
-        })];
-
-        let headers = HashMap::new();
+        let generators = vec![json!({ "matches": { "method": true }, "except": "^POST$" })];
         let predicates = imposter
             .generate_predicates_from_request(
                 &generators,
                 "POST",
                 "/test",
-                &headers,
+                &HashMap::new(),
+                None,
+                None,
+            )
+            .expect("predicate generation succeeds");
+
+        assert_eq!(
+            predicates,
+            vec![json!({ "deepEquals": { "method": "POST" }, "except": "^POST$" })]
+        );
+    }
+
+    #[test]
+    fn test_generator_persists_except_for_path() {
+        let imposter = make_test_imposter();
+        let generators = vec![json!({ "matches": { "path": true }, "except": r"\d+$" })];
+        let predicates = imposter
+            .generate_predicates_from_request(
+                &generators,
+                "GET",
+                "/orders/123",
+                &HashMap::new(),
+                None,
+                None,
+            )
+            .expect("predicate generation succeeds");
+
+        assert_eq!(
+            predicates,
+            vec![json!({ "deepEquals": { "path": "/orders/123" }, "except": r"\d+$" })]
+        );
+    }
+
+    #[test]
+    fn test_generator_persists_except_for_body() {
+        let imposter = make_test_imposter();
+        let generators = vec![json!({ "matches": { "body": true }, "except": r"\d+" })];
+        let predicates = imposter
+            .generate_predicates_from_request(
+                &generators,
+                "POST",
+                "/test",
+                &HashMap::new(),
                 Some("token=abc123"),
                 None,
             )
             .expect("predicate generation succeeds");
 
-        assert_eq!(predicates.len(), 1);
-        let body_val = predicates[0]["equals"]["body"].as_str().unwrap();
         assert_eq!(
-            body_val, "token=abc",
-            "except pattern should strip digits from the body"
+            predicates,
+            vec![json!({ "deepEquals": { "body": "token=abc123" }, "except": r"\d+" })]
         );
     }
 
-    // Fix #109: generate_predicates_from_request now handles query parameters
+    // Issue #1329: the predicate a generator records with `except` matches a later request that
+    // differs only in what `except` strips — and the recorded request itself.
+    #[test]
+    fn test_generated_except_predicate_matches_again() {
+        let imposter = make_test_imposter();
+        let generators = vec![json!({ "matches": { "path": true }, "except": r"\d+" })];
+        let predicates = imposter
+            .generate_predicates_from_request(
+                &generators,
+                "GET",
+                "/users/123",
+                &HashMap::new(),
+                None,
+                None,
+            )
+            .expect("predicate generation succeeds");
+        let predicates: Vec<crate::imposter::types::Predicate> = predicates
+            .into_iter()
+            .map(|p| serde_json::from_value(p).expect("generated predicate loads"))
+            .collect();
+        let headers: HashMap<String, String> = HashMap::new();
+        let matches = |path: &str| {
+            predicates.iter().all(|p| {
+                crate::imposter::predicates::predicate_matches(
+                    p, "GET", path, None, &headers, None, None, None, None, 0,
+                )
+                .expect("evaluates")
+            })
+        };
+        assert!(matches("/users/123"), "the recorded request matches again");
+        assert!(
+            matches("/users/456"),
+            "a request differing only in `except` matches"
+        );
+        assert!(!matches("/orders/1"));
+    }
+
+    // Fix #109, reshaped by #1329: one predicate per matched field, query as `deepEquals`.
     #[test]
     fn test_generator_includes_query_parameters() {
         let imposter = make_test_imposter();
-
-        let generators = vec![json!({
-            "matches": { "path": true, "query": true }
-        })];
-
-        let headers = HashMap::new();
+        let generators = vec![json!({ "matches": { "path": true, "query": true } })];
         let predicates = imposter
             .generate_predicates_from_request(
                 &generators,
                 "GET",
                 "/search",
-                &headers,
+                &HashMap::new(),
                 None,
                 Some("q=hello&page=1"),
             )
             .expect("predicate generation succeeds");
 
-        assert_eq!(predicates.len(), 1);
-        let pred_json = &predicates[0];
-        let equals_obj = pred_json["equals"].as_object().unwrap();
-
-        assert!(
-            equals_obj.contains_key("path"),
-            "Path should be in generated predicate"
+        assert_eq!(
+            predicates,
+            vec![
+                json!({ "deepEquals": { "path": "/search" } }),
+                json!({ "deepEquals": { "query": { "q": "hello", "page": "1" } } }),
+            ]
         );
-
-        assert!(
-            equals_obj.contains_key("query"),
-            "Query should be in generated predicate"
-        );
-
-        let query_obj = equals_obj["query"].as_object().unwrap();
-        assert_eq!(query_obj["q"].as_str().unwrap(), "hello");
-        assert_eq!(query_obj["page"].as_str().unwrap(), "1");
     }
 
     // =========================================================================

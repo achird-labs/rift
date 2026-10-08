@@ -138,9 +138,9 @@ Control how requests are matched when generating stubs:
 | Key | Description |
 |:----|:------------|
 | `matches` | Which request fields the generated predicate captures (table above) |
-| `predicateOperator` | The operator of the generated predicate; default `equals` |
-| `caseSensitive` | Default `true` (see [Case Sensitivity](#case-sensitivity)) |
-| `except` | A regex removed from the captured `path`, `method` and `body` |
+| `predicateOperator` | The operator of every generated predicate; omitted, see [What Gets Recorded](#what-gets-recorded) |
+| `caseSensitive` | Copied onto each generated predicate when set (see [Case Sensitivity](#case-sensitivity)) |
+| `except` | Copied onto each generated predicate; the recorded values stay whole and the matcher strips the regex from both sides (see [`except`](predicates.md#except)) |
 | `jsonpath` | `{"selector": "$.id"}`: capture only what the selector selects from the body, and scope the generated predicate with the same selector |
 | `xpath` | `{"selector": "//a:id", "ns": {"a": "urn:a"}}`: as `jsonpath`, for an XML body |
 | `ignore` | Keys to leave out of a captured object field: `{"query": "ts"}`, `{"query": ["ts", "nonce"]}`, `{"headers": "X-Request-Id"}` |
@@ -150,8 +150,7 @@ With `jsonpath` or `xpath`, the captured `body` is the selected value: one match
 are an array (the recorded stub then matches a request that selects all of them), and nothing
 selected is `""`. A selector that does not compile is not carried and the whole body is captured, as
 without one. `ignore` applies to the object-valued fields (`query`, `headers`); it has no effect on
-a string body. Rift still builds one predicate per generator, combining every field in `matches`
-(see #1329 for Mountebank's one-predicate-per-field shape). A key not in this table is accepted,
+a string body. A key not in this table is accepted,
 ignored when recording, and reported as [`config_key_ignored`](../features/stub-analysis.md#config_key_ignored)
 and by `rift-lint` `W020`.
 
@@ -167,6 +166,54 @@ and by `rift-lint` `W020`.
 
 A replay then matches any request to the same path whose body has the same `orderId` and whose
 query matches apart from `ts`.
+
+### What Gets Recorded
+
+As in Mountebank, a generator records **one predicate per field** in `matches`, always in the order
+`method`, `path`, `query`, `headers`, `body`, each carrying the generator's `caseSensitive` and
+`except` when they are set (and the body's carrying its `jsonpath` or `xpath`). The values are the
+request's, unmodified. A request `GET /users/123?page=2` through
+
+```json
+{
+  "predicateGenerators": [{
+    "matches": { "method": true, "path": true, "query": true, "headers": { "X-Tenant": true } },
+    "except": "\\d+"
+  }]
+}
+```
+
+records
+
+```json
+[
+  { "deepEquals": { "method": "GET" }, "except": "\\d+" },
+  { "deepEquals": { "path": "/users/123" }, "except": "\\d+" },
+  { "deepEquals": { "query": { "page": "2" } }, "except": "\\d+" },
+  { "equals": { "headers": { "X-Tenant": "acme" } }, "except": "\\d+" }
+]
+```
+
+| Matcher | Recorded predicate |
+|:--------|:-------------------|
+| `field: true` | `{"deepEquals": {field: value}}` — the whole field, exactly. A query with an extra parameter is a different request |
+| `query` / `headers: {"name": true, …}` | `{"equals": {field: {name: value, …}}}` over the listed names; a listed name the request lacks is left out |
+| `"predicateOperator": "exists"` | `{"exists": {field: true}}`, or `{"exists": {field: {name: true, …}}}` for `query` and `headers` |
+| any other `predicateOperator` | `{operator: {field: value}}` for each field |
+
+A field the request lacks is recorded empty: no query is `{}`, no body is `""`.
+
+Two deviations from Mountebank:
+
+- Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**
+  under the operator, once per field in `matches`. Rift stores that field's value only.
+- A whole `query` or `headers` field the generator's `ignore` filters is recorded with `equals` over
+  the kept names, so the ignored name may take any value. Mountebank records `deepEquals` without
+  the ignored name and does not persist `ignore`, so its recording never matches a request that
+  carries the name.
+
+Recordings made by earlier releases hold one `equals` predicate per generator, with `except` already
+applied and `caseSensitive` written; they still load and match as they did.
 
 ### Selective Matching
 
@@ -196,8 +243,9 @@ This generates stubs that match method and path, ignoring query and body.
 }
 ```
 
-A generated predicate is case-sensitive when `caseSensitive` is omitted. Set `"caseSensitive": false`
-to record a predicate that ignores case.
+A generated predicate carries `caseSensitive` only when the generator sets it. When it is omitted,
+the predicate default applies and the recording ignores case, as in Mountebank. Set
+`"caseSensitive": true` to record a predicate that compares case.
 
 ### Generation Failures
 

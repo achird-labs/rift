@@ -34,6 +34,12 @@ where
     F: Fn(&str, &str) -> bool,
     H: RequestHeaders,
 {
+    // Mountebank normalizes the expected value with the predicate's `except` as well as the actual
+    // one (issue #1329), so a raw value plus `except` — what a predicate generator records — matches
+    // every request differing only in the stripped part. `matches` is the exception: its expected
+    // value is a pattern (`check_predicate_fields_regex`).
+    let compare = |expected: &str, actual: &str| compare(&apply_except(expected), actual);
+
     // Helper for key comparison based on keyCaseSensitive
     let key_matches = |expected_key: &str, actual_key: &str| -> bool {
         if key_case_sensitive {

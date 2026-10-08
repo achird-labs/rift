@@ -452,16 +452,20 @@ defaults to the value of `caseSensitive`.
 
 ### except
 
-A regular expression whose matches are removed from each value before it is compared:
+A regular expression whose matches are removed from each value before it is compared — from the
+request's value and from the predicate's own, as in Mountebank:
 
 ```json
 {
-  "equals": { "path": "/orders/" },
+  "equals": { "path": "/orders/123" },
   "except": "\\d+"
 }
 ```
 
-This matches `/orders/123` and `/orders/456`, because the digits are stripped first.
+This matches `/orders/123` and `/orders/456`: both sides become `/orders/`. Under
+[`matches`](#matches) only the request's value is stripped; the predicate's value is a pattern. The
+expression ignores case unless the predicate sets `"caseSensitive": true` — except under
+`matches`, where it always compares case, as in Mountebank.
 
 ---
 
