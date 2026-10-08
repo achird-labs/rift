@@ -75,6 +75,7 @@ Without either flag each entry is the summary shown below, plus `_links`. In bot
 imposter's `defaultResponse` is included when it has one (#1334), as Mountebank prints it.
 
 **Response:**
+<!-- rift-lint: skip -->
 ```json
 {
   "imposters": [
@@ -568,6 +569,7 @@ locally (where operators like `xpath`/`inject` are impractical) or shipping the 
 the wire just to count it.
 
 **Request body:**
+<!-- rift-lint: skip -->
 ```json
 {
   "predicates": [ { "equals": { "path": "/api/users" } } ],

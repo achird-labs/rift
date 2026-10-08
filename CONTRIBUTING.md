@@ -73,6 +73,19 @@ parity, and all four SDKs replay it in their own CI — so a fixture that breaks
 downstream repos. Compatibility is the promise this project is built on, and it is tested rather
 than asserted.
 
+If you wrote or edited a config example — a corpus fixture, a file under `docs/demo/` or
+`examples/`, or a ```` ```json ```` block in `docs/` — check that the engine reads every key in it:
+
+```sh
+cargo test -p rift-http-proxy --test issue_1343_unread_keys
+```
+
+The engine accepts a key it does not read and drops it without a word (a misspelled
+`casesensitive`, a block at the wrong level), so this test is where that is caught. It also lints
+each docs example. A block that shows rejected input on purpose, or JSON that is not a config (an
+API response body), goes unchecked with a `<!-- rift-lint: skip -->` line directly above its fence.
+A key that is unread by choice goes in the test's `ALLOWED` list, with the reason.
+
 ## Mutation testing
 
 A scheduled workflow, [`mutants.yml`](.github/workflows/mutants.yml), runs `cargo-mutants` weekly over

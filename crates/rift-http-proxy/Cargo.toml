@@ -127,6 +127,8 @@ futures-util = "0.3"
 rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-features = false, features = ["test-backend"] }
 # Corpus lint gate (issue #460): lint every vendored fixture via the library API.
 rift-lint = { path = "../rift-lint", version = "0.1.0" }
+# Unread-key gate (issue #1343): reports every key a derived `Deserialize` skips.
+serde_ignored = "0.1"
 tempfile = "3.8"
 rcgen = "0.14"
 # Reads the PKCS#12 stores `rift intercept-ca export` writes (issue #1274); already in the tree.

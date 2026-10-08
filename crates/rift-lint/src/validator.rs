@@ -1425,6 +1425,15 @@ pub fn validate_response(
     let has_inject = response.get("inject").is_some();
     let has_fault = response.get("fault").is_some();
     let has_rift = response.get("_rift").is_some();
+    // The flat form (issue #304): the engine serves top-level `statusCode`/`headers`/`body` as an
+    // `is` response, under the same condition `TryFrom<StubResponseRaw>` uses.
+    let present = |key: &str| response.get(key).is_some_and(|v| !v.is_null());
+    let has_flat = present("statusCode")
+        || present("body")
+        || response
+            .get("headers")
+            .and_then(Value::as_object)
+            .is_some_and(|h| !h.is_empty());
 
     // W015 lives here rather than in `validate_is_response`, because it needs the whole response:
     // the body may be in an `is` wrapper or at the top level (the flat form, issue #304, which the
@@ -1496,7 +1505,13 @@ pub fn validate_response(
         );
     }
 
-    let response_types = [has_is, has_proxy, has_inject, has_fault, has_rift];
+    let response_types = [
+        has_is || has_flat,
+        has_proxy,
+        has_inject,
+        has_fault,
+        has_rift,
+    ];
     let active_types = response_types.iter().filter(|&&t| t).count();
 
     if active_types == 0 {
@@ -1538,7 +1553,6 @@ pub fn validate_response(
 
     // The engine picks `is`, then `proxy`, then `inject` (a `null` is absent), so an `inject` beside
     // either of the others never runs and is not checked as this response's script.
-    let present = |key: &str| response.get(key).is_some_and(|v| !v.is_null());
     if !present("is")
         && !present("proxy")
         && let Some(script) = response.get("inject").and_then(Value::as_str)

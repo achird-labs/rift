@@ -33,6 +33,11 @@ record.
 
 ### Fixed
 
+- **`rift-lint` no longer reports `E014` on a flat response** (#1343). A response that sets
+  `statusCode`, `headers` or `body` with no `is` wrapper is served as an `is` response (#304), but
+  the linter called it a response with no type, so `docs/mountebank/responses.md`'s own example
+  linted red.
+
 - **`rift-lint` no longer reports `keyCaseSensitive` as an unknown operator (E009)** (#1325): the engine decodes and honours the predicate modifier, but the linter's modifier set omitted it, so valid configs failed lint.
 - **An XPath with an unbound namespace prefix no longer fails the request** (#1326). A predicate,
   `copy` or `lookup` selector such as `//mb:name` without an `ns` binding for `mb` panicked inside
