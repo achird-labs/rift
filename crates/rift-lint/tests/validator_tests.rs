@@ -330,6 +330,19 @@ fn e009_unknown_predicate_operator() {
 }
 
 #[test]
+fn e009_not_fired_for_key_case_sensitive_modifier() {
+    let pred = json!({
+        "equals": { "path": "/foo", "headers": { "X-Tenant": "acme" } },
+        "caseSensitive": true,
+        "keyCaseSensitive": false
+    });
+    let mut r = LintResult::new();
+    validate_predicate(path(), &pred, "loc", &mut r, &opts());
+    assert!(!has_code(&r, "E009"), "unexpected E009: {:?}", codes(&r));
+    assert!(!has_code(&r, "E008"), "unexpected E008: {:?}", codes(&r));
+}
+
+#[test]
 fn e034_multiple_operators_in_predicate() {
     let pred = json!({ "equals": { "path": "/a" }, "contains": { "path": "/b" } });
     let mut r = LintResult::new();

@@ -11,6 +11,14 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`rift-lint` no longer reports `keyCaseSensitive` as an unknown operator (E009)** (#1325): the engine decodes and honours the predicate modifier, but the linter's modifier set omitted it, so valid configs failed lint.
+
+### Changed
+
+- **Conformance corpus fixture `02-predicates.json` gains three `keyCaseSensitive` stubs** (#1325), pinning the key and its inherit-from-`caseSensitive` default. SDK corpus replays must regenerate fixture 02.
+
 ## [0.21.0] - 2026-10-07
 
 ### Added

@@ -145,6 +145,27 @@
           { "request": { "method": "POST", "path": "/xmlthing", "body": "<user role=\"admin\"/>" }, "expect": { "status": 200, "bodyContains": "\"matched\":\"xpath\"" } }
         ]
       }
+    },
+    {
+      "name": "keyCaseSensitive=true — stub key X-Tenant matches the Title-Cased header",
+      "predicates": [{ "equals": { "path": "/kcs", "headers": { "X-Tenant": "acme" } }, "keyCaseSensitive": true }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "kcs-exact" } } }],
+      "_verify": { "sequence": [ { "request": { "path": "/kcs", "headers": { "X-Tenant": "acme" } }, "expect": { "status": 200, "bodyContains": "kcs-exact" } } ] }
+    },
+    {
+      "name": "keyCaseSensitive=true — stub key x-tenant never matches (listener stores X-Tenant)",
+      "predicates": [{ "equals": { "path": "/kcs-nomatch-lower", "headers": { "x-tenant": "acme" } }, "keyCaseSensitive": true }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "kcs-lower" } } }]
+    },
+    {
+      "name": "caseSensitive=true + keyCaseSensitive=false — key relaxed, value strict",
+      "predicates": [{ "equals": { "path": "/kcs-override", "headers": { "x-tenant": "ACME" } }, "caseSensitive": true, "keyCaseSensitive": false }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "kcs-override" } } }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/kcs-override", "headers": { "X-Tenant": "ACME" } }, "expect": { "status": 200, "bodyContains": "kcs-override" } }
+        ]
+      }
     }
   ]
 }

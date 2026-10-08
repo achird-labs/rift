@@ -1221,8 +1221,13 @@ pub fn validate_predicate(
         return;
     };
 
-    let modifier_keys: HashSet<&str> =
-        HashSet::from(["jsonpath", "xpath", "caseSensitive", "except"]);
+    let modifier_keys: HashSet<&str> = HashSet::from([
+        "jsonpath",
+        "xpath",
+        "caseSensitive",
+        "keyCaseSensitive",
+        "except",
+    ]);
     let operator_names: Vec<&str> = pred_obj
         .keys()
         .map(|k| k.as_str())
