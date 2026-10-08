@@ -221,7 +221,9 @@ nothing else would distinguish "honoured" from "dropped". Reported for `_rift.me
 `_rift.proxy` and `recordMatches: true` (imposter-level, no `stubIndex`), for a `_rift` block on
 a `proxy`, `inject` or `fault` response, and for a `_behaviors`/`behaviors` block setting anything
 besides `repeat` on a `fault` or `_rift`-only response (issues #1181, #1188, #1189) — one entry per key and shape,
-naming the stubs, with the first as `stubIndex`. The imposter-level keys and the stubs present when the imposter is created are also
+naming the stubs, with the first as `stubIndex`. A proxy `predicateGenerators` entry with a key the
+engine does not read (a typo such as `matchs`; issue #1327) is one entry naming the keys and the
+stubs, and `rift-lint` reports it as `W020`. The imposter-level keys and the stubs present when the imposter is created are also
 logged at `WARN` then, for doors that never see a response (`--configfile`, `--datadir`, the C-ABI);
 a stub added later is reported in `_rift.warnings` only. `rift-lint` flags the same keys as `W017`:
 

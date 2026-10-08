@@ -145,6 +145,8 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | W017 | A key the engine accepts but ignores (`_rift.metrics`, `_rift.proxy`, `recordMatches: true`, ...) |
 | W018 | A `behaviors` array element that sets several behaviors, which run in a fixed order |
 | W019 | `_rift.conditional` that can never answer 304 (script-only response, or a `method` predicate excluding GET and HEAD) |
+| W020 | A proxy `predicateGenerators` key the engine does not read (a typo such as `matchs`) |
+| W021 | A proxy `predicateGenerators` `jsonpath`, `xpath` or `ignore` the engine cannot use |
 
 ### Info
 

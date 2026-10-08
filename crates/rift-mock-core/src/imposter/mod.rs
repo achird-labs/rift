@@ -62,6 +62,7 @@ pub use journal::{
 };
 
 pub use core::Imposter;
+pub(crate) use core::unread_generator_keys;
 pub use datadir_file::sweep_interrupted_writes;
 // Builds a `proxy`-stub upstream client under a trust policy (issue #974), so the binary and any
 // embedder share one timeout/pooling configuration.

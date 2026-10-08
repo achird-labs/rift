@@ -133,13 +133,19 @@ fn stubs_with_shape(
     shape: &str,
     shape_of: fn(&StubResponse) -> Option<&'static str>,
 ) -> Option<(usize, String)> {
-    const LISTED: usize = 10;
     let indices: Vec<usize> = stubs
         .iter()
         .enumerate()
         .filter(|(_, stub)| stub.responses.iter().any(|r| shape_of(r) == Some(shape)))
         .map(|(index, _)| index)
         .collect();
+    listed_stubs(&indices)
+}
+
+/// The first of `indices`, and the indices as a warning lists them — at most ten, then "and N
+/// more".
+fn listed_stubs(indices: &[usize]) -> Option<(usize, String)> {
+    const LISTED: usize = 10;
     let &first = indices.first()?;
     let mut listed = indices
         .iter()
@@ -229,7 +235,52 @@ pub fn ignored_config_keys(config: &ImposterConfig, stubs: &[Stub]) -> Vec<StubW
             ));
         }
     }
+    if let Some(warning) = unread_generator_keys_warning(stubs) {
+        warnings.push(warning);
+    }
     warnings
+}
+
+/// One entry for every proxy `predicateGenerators` key the engine does not read (issue #1327),
+/// naming the keys and the stubs: accepted, so a Mountebank config keeps loading, and reported so a
+/// typo (`matchs`) is not a silent no-op generator.
+fn unread_generator_keys_warning(stubs: &[Stub]) -> Option<StubWarning> {
+    let mut keys: Vec<String> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    for (index, stub) in stubs.iter().enumerate() {
+        let unread: Vec<String> = stub
+            .responses
+            .iter()
+            .filter_map(|response| match response {
+                StubResponse::Proxy { proxy, .. } => Some(&proxy.predicate_generators),
+                _ => None,
+            })
+            .flatten()
+            .flat_map(crate::imposter::unread_generator_keys)
+            .collect();
+        if !unread.is_empty() {
+            indices.push(index);
+            keys.extend(unread);
+        }
+    }
+    let (first, listed) = listed_stubs(&indices)?;
+    keys.sort_unstable();
+    keys.dedup();
+    Some(StubWarning {
+        warning_type: WarningType::ConfigKeyIgnored,
+        message: format!(
+            "proxy `predicateGenerators` key(s) {} have no effect: this engine reads inject, \
+             matches, caseSensitive, predicateOperator, except, jsonpath, xpath and ignore \
+             (stubs {listed})",
+            keys.iter()
+                .map(|key| format!("`{key}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        stub_index: Some(first),
+        stub_id: stubs[first].id.clone(),
+        shadowed_by_index: None,
+    })
 }
 
 /// Result of stub analysis
@@ -1421,5 +1472,39 @@ mod tests {
         assert_eq!(count(&result, WarningType::PotentiallyShadowed), 1);
         let result = analyze_new_stub(&stubs[..1], &stubs[1], 1);
         assert_eq!(count(&result, WarningType::PotentiallyShadowed), 1);
+    }
+
+    /// Issue #1327: predicate-generator keys the engine does not read are one entry, naming the
+    /// keys and the stubs; a generator using only read keys adds nothing.
+    #[test]
+    fn unread_predicate_generator_keys_are_reported() {
+        let proxy = |generators: serde_json::Value| -> Stub {
+            serde_json::from_value(json!({
+                "responses": [{ "proxy": { "to": "http://127.0.0.1:9", "predicateGenerators": generators } }]
+            }))
+            .expect("valid stub")
+        };
+        let stubs = [
+            proxy(
+                json!([{ "matches": { "body": true }, "jsonpath": { "selector": "$.id" }, "ignore": { "query": "ts" } }]),
+            ),
+            proxy(json!([{ "matchs": { "path": true } }])),
+            proxy(
+                json!([{ "matches": { "path": true }, "keyCaseSensitive": true }, { "matchs": {} }]),
+            ),
+        ];
+        let config: ImposterConfig =
+            serde_json::from_value(json!({ "port": 0, "protocol": "http" })).expect("config");
+        let warnings = ignored_config_keys(&config, &stubs);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].warning_type, WarningType::ConfigKeyIgnored);
+        assert_eq!(warnings[0].stub_index, Some(1));
+        assert_eq!(
+            warnings[0].message,
+            "proxy `predicateGenerators` key(s) `keyCaseSensitive`, `matchs` have no effect: this \
+             engine reads inject, matches, caseSensitive, predicateOperator, except, jsonpath, \
+             xpath and ignore (stubs 1, 2)"
+        );
+        assert!(ignored_config_keys(&config, &stubs[..1]).is_empty());
     }
 }
