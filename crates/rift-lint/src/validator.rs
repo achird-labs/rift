@@ -2463,6 +2463,20 @@ fn extraction_problem(using: &Value) -> Option<&'static str> {
             return Some("`using.options` must be an object of boolean `ignoreCase`/`multiline`");
         }
     }
+    // Issue #1326: Mountebank's prefix→URI map for an XPath selector.
+    if let Some(ns) = obj.get("ns").filter(|ns| !ns.is_null()) {
+        if method != Some("xpath") {
+            return Some("`using.ns` only applies to `method: xpath`");
+        }
+        if !ns
+            .as_object()
+            .is_some_and(|map| map.values().all(Value::is_string))
+        {
+            return Some(
+                "`using.ns` must be an object mapping each prefix to a namespace URI string",
+            );
+        }
+    }
     None
 }
 

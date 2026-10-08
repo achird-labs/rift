@@ -3791,3 +3791,48 @@ fn w019_does_not_duplicate_w017_on_proxy() {
     assert!(w019.is_empty(), "{w019:?}");
     assert!(all.iter().any(|c| c == "W017"), "{all:?}");
 }
+
+/// Issue #1326: an XPath `using` may carry Mountebank's `ns` map; the engine refuses one that is
+/// not an object of strings, or one on another method.
+#[test]
+fn e051_copy_or_lookup_ns_map() {
+    let lint = |behavior: serde_json::Value| {
+        let mut r = LintResult::new();
+        validate_behavior(path(), &behavior, "loc", &mut r, &opts());
+        r
+    };
+    let copy = |using: serde_json::Value| json!({ "copy": [{ "from": "body", "into": "${N}", "using": using }] });
+
+    let fine = lint(copy(
+        json!({ "method": "xpath", "selector": "//mb:name", "ns": { "mb": "urn:mb" } }),
+    ));
+    assert!(codes(&fine).is_empty(), "{:?}", fine.issues);
+    let lookup = json!({ "lookup": {
+        "key": { "from": "body", "using": { "method": "xpath", "selector": "//mb:id", "ns": { "mb": "urn:mb" } } },
+        "fromDataSource": { "csv": { "path": "x.csv", "keyColumn": "id" } },
+        "into": "${R}"
+    } });
+    assert!(codes(&lint(lookup)).is_empty());
+
+    let malformed = lint(copy(
+        json!({ "method": "xpath", "selector": "//mb:name", "ns": "urn:mb" }),
+    ));
+    assert_eq!(codes(&malformed), vec!["E051"]);
+    assert_eq!(
+        malformed.issues[0].message,
+        "`using.ns` must be an object mapping each prefix to a namespace URI string; the engine refuses the file"
+    );
+    let numeric = lint(copy(
+        json!({ "method": "xpath", "selector": "//mb:name", "ns": { "mb": 1 } }),
+    ));
+    assert_eq!(codes(&numeric), vec!["E051"]);
+
+    let misplaced = lint(copy(
+        json!({ "method": "regex", "selector": "(.*)", "ns": { "mb": "urn:mb" } }),
+    ));
+    assert_eq!(codes(&misplaced), vec!["E051"]);
+    assert_eq!(
+        misplaced.issues[0].message,
+        "`using.ns` only applies to `method: xpath`; the engine refuses the file"
+    );
+}

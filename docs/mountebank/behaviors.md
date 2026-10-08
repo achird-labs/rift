@@ -338,7 +338,14 @@ from that value:
 |:---------|:-----------|:-------|
 | `regex` | A regular expression | The first capture group, or the whole match if the pattern has none. `options` takes `ignoreCase` and `multiline`. |
 | `jsonpath` | A JSONPath selector | The first selected value from a JSON source |
-| `xpath` | An XPath selector | The first selected value, in document order, from an XML source |
+| `xpath` | An XPath selector | The first selected value, in document order, from an XML source. `ns` maps each namespace prefix the selector uses to its URI. |
+
+A namespaced XML source needs `ns`, as in Mountebank: `"using": { "method": "xpath", "selector":
+"//mb:name", "ns": { "mb": "http://example.com/mb" } }`. A prefix the selector uses without a
+binding selects nothing. `ns` must be an object of strings and is only accepted with `method:
+xpath`; anything else is refused when the imposter is loaded (`rift-lint` `E051`). Releases up to
+0.21.0 accepted `ns` and ignored it, so a prefixed selector extracted nothing — and an unbound
+prefix failed the request without a response.
 
 Every occurrence of the `into` token in the body and header values is replaced. If the source is
 absent, or nothing is extracted, the token is replaced with an empty string. A selector that does

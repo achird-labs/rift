@@ -11,22 +11,37 @@ record.
 
 ## [Unreleased]
 
-### Fixed
-
-- **`rift-lint` no longer reports `keyCaseSensitive` as an unknown operator (E009)** (#1325): the engine decodes and honours the predicate modifier, but the linter's modifier set omitted it, so valid configs failed lint.
-
-### Changed
-
-- **Conformance corpus fixture `02-predicates.json` gains three `keyCaseSensitive` stubs** (#1325), pinning the key and its inherit-from-`caseSensitive` default. SDK corpus replays must regenerate fixture 02.
-
-## [0.21.0] - 2026-10-07
-
 ### Added
+
+- **`copy` and `lookup` XPath selectors take Mountebank's `ns` namespace map** (#1326):
+  `"using": {"method": "xpath", "selector": "//mb:name", "ns": {"mb": "http://example.com/mb"}}`
+  now binds the prefix, as Mountebank does. Rift accepted `ns` and dropped it, so a prefixed
+  selector extracted nothing on a namespaced document. An `ns` that is not an object of strings, or
+  one on a `regex`/`jsonpath` `using`, is refused at load (`rift-lint` `E051`); stored configs that
+  carry one still decode on replay.
 
 - **Embedded hosts can clear a whole flow** (#1328). `rift_flow_state_clear(h, port, flow_id)`
   is the C-ABI form of `DELETE /admin/imposters/{port}/flow-state/{flowId}`: it drops every key in
   the flow in one call and is idempotent (an absent flow returns `0`). Before this an embedder had
   to loop over keys it already knew. Additive symbol; detect it by presence.
+
+### Fixed
+
+- **`rift-lint` no longer reports `keyCaseSensitive` as an unknown operator (E009)** (#1325): the engine decodes and honours the predicate modifier, but the linter's modifier set omitted it, so valid configs failed lint.
+- **An XPath with an unbound namespace prefix no longer fails the request** (#1326). A predicate,
+  `copy` or `lookup` selector such as `//mb:name` without an `ns` binding for `mb` panicked inside
+  the XPath evaluator and the connection closed with no response; the prefix now selects nothing.
+
+### Changed
+
+- **Conformance corpus fixture `02-predicates.json` gains three `keyCaseSensitive` stubs** (#1325), pinning the key and its inherit-from-`caseSensitive` default. SDK corpus replays must regenerate fixture 02.
+- **Breaking for Rust embedders** (#1326): `behaviors::ExtractionMethod::XPath` gains a
+  `namespaces: Option<HashMap<String, String>>` field, so a pattern or literal naming only
+  `selector` must add `..` / `namespaces: None`.
+
+## [0.21.0] - 2026-10-07
+
+### Added
 
 - **Server flags are accepted after a subcommand** (#1316): `rift start --port 2525 --configfile imposters.json`, `rift save --port …` and `rift restart …` now parse, matching Mountebank's command line; the flags are also still accepted before the subcommand. `rift replay` and `rift script check` no longer carry their own `--configfile` / `--no-parse`: they take the global ones, and `rift replay` without a config file exits with `rift replay needs --configfile <file>`.
 

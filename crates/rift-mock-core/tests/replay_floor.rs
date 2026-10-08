@@ -114,12 +114,12 @@ const LEDGER: &[(&str, &str, usize)] = &[
     (
         "crates/rift-mock-core/src/imposter/types.rs",
         "decode fn `?`",
-        18,
+        19,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",
         "decode fn `Err(`",
-        15,
+        17,
     ),
     ("crates/rift-types/src/wire.rs", "::custom", 4),
     ("crates/rift-types/src/wire.rs", "serde error helper", 0),
@@ -175,7 +175,7 @@ const LEDGER: &[(&str, &str, usize)] = &[
     (
         "crates/rift-mock-core/src/behaviors/extraction.rs",
         "deserialize_with attr",
-        0,
+        1,
     ),
     (
         "crates/rift-mock-core/src/behaviors/extraction.rs",

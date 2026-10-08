@@ -72,6 +72,16 @@ const BAD_COPY_ON_FAULT: &str = r#"{
     }]
 }"#;
 
+/// An XPath `copy` whose `ns` is not a prefix→URI object (issue #1326). The engine ignored `ns`
+/// before #1326, so such bytes may be stored and must still decode on replay.
+const BAD_COPY_NS: &str = r#"{
+    "responses": [{
+        "is": { "statusCode": 200, "body": "${T}" },
+        "_behaviors": { "copy": { "from": "body", "into": "${T}",
+                                   "using": { "method": "xpath", "selector": "//a:b", "ns": "urn:a" } } }
+    }]
+}"#;
+
 fn replayed<T: DeserializeOwned>(json: &str) -> Result<T, serde_json::Error> {
     let mut deserializer = serde_json::Deserializer::from_str(json);
     let value = deserialize_replayed(&mut deserializer)?;
@@ -116,6 +126,10 @@ fn each_admission_refusal_is_skipped_on_replay_and_reported_by_admission_check()
             "`_rift.conditional.lastModified` must be \"load\" or an HTTP-date",
         ),
         (BAD_PROXY_MODE, "unknown proxy mode `bogus`"),
+        (
+            BAD_COPY_NS,
+            "`copy` behavior `xpath` `using.ns` must be an object mapping each prefix to a namespace URI string",
+        ),
     ];
     for (stub, refusal) in cases {
         let door = serde_json::from_str::<Stub>(stub)

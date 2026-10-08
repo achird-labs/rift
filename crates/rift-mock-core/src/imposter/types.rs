@@ -1162,7 +1162,8 @@ fn refuse_unparseable_object(block: &serde_json::Value) -> Result<(), String> {
         return Ok(());
     };
     if let Ok(behaviors) = crate::behaviors::ResponseBehaviors::deserialize(block) {
-        return validate_behavior_selectors(&behaviors);
+        validate_behavior_selectors(&behaviors)?;
+        return refuse_bad_extraction_namespaces(block);
     }
     // serde's message names nothing the author wrote ("did not match any variant of untagged enum
     // WaitBehavior"), so find the key. The behaviors are independent fields, so one key parses or
@@ -1204,6 +1205,50 @@ fn validate_behavior_selectors(
         .try_for_each(|(key, extraction)| validate_extraction_selector(key, extraction))
 }
 
+/// Every `copy`/`lookup` `using.ns` is an object of prefix → URI strings on an XPath `using`
+/// (issue #1326). Read from the raw block: the decode reads a malformed `ns` as absent, because the
+/// key was ignored before #1326 and stored configs may carry any shape there.
+fn refuse_bad_extraction_namespaces(block: &serde_json::Value) -> Result<(), String> {
+    fn items(value: Option<&serde_json::Value>) -> Vec<&serde_json::Value> {
+        match value {
+            Some(serde_json::Value::Array(items)) => items.iter().collect(),
+            Some(item @ serde_json::Value::Object(_)) => vec![item],
+            _ => Vec::new(),
+        }
+    }
+    let copies = items(block.get("copy"))
+        .into_iter()
+        .map(|copy| ("copy", copy.get("using")));
+    let lookups = items(block.get("lookup"))
+        .into_iter()
+        .map(|lookup| ("lookup", lookup.get("key").and_then(|key| key.get("using"))));
+    for (key, using) in copies.chain(lookups) {
+        let Some(using) = using else { continue };
+        let Some(ns) = using.get("ns").filter(|ns| !ns.is_null()) else {
+            continue;
+        };
+        let method = using
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if method != "xpath" {
+            return Err(format!(
+                "`{key}` behavior `{method}` has `using.ns`, which only applies to `method: xpath`"
+            ));
+        }
+        let well_formed = ns
+            .as_object()
+            .is_some_and(|map| map.values().all(serde_json::Value::is_string));
+        if !well_formed {
+            return Err(format!(
+                "`{key}` behavior `xpath` `using.ns` must be an object mapping each prefix to a \
+                 namespace URI string; got {ns}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_extraction_selector(
     key: &str,
     extraction: &crate::behaviors::ExtractionMethod,
@@ -1220,7 +1265,7 @@ fn validate_extraction_selector(
         ExtractionMethod::JsonPath { selector } => {
             ("jsonpath", selector, validate_jsonpath_selector(selector))
         }
-        ExtractionMethod::XPath { selector } => {
+        ExtractionMethod::XPath { selector, .. } => {
             ("xpath", selector, validate_xpath_selector(selector))
         }
     };
