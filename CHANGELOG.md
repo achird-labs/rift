@@ -37,6 +37,16 @@ record.
 - **An XPath with an unbound namespace prefix no longer fails the request** (#1326). A predicate,
   `copy` or `lookup` selector such as `//mb:name` without an `ns` binding for `mb` panicked inside
   the XPath evaluator and the connection closed with no response; the prefix now selects nothing.
+- **Proxy recordings made with a `predicateGenerators` `except` match again** (#1329). The
+  generator stripped the regex from the captured value and dropped the pattern, so the recorded stub
+  compared `/users/` against an unstripped `/users/456` and missed — under `proxyOnce` every such
+  request re-proxied and stacked another dead stub. The pattern is now copied onto each recorded
+  predicate with the raw value, and the matcher strips `except` from the predicate's value as well
+  as the request's (not under `matches`, whose value is a pattern), as Mountebank does. The
+  `except` regex also ignores case unless the predicate sets `caseSensitive: true` (under
+  `matches` it stays case sensitive), as in Mountebank. Both affect hand-written predicates that
+  use `except` too: `{"equals": {"path": "/api/users"}, "except": "/api"}` now matches
+  `/api/users`.
 
 ### Changed
 
@@ -48,6 +58,16 @@ record.
   read (a typo such as `matchs`) appears as `config_key_ignored` in `_rift.warnings`, and
   `rift-lint` reports it as `W020` and a malformed `jsonpath`/`xpath`/`ignore` as `W021`. The
   imposter still loads.
+- **Behaviour change — proxy recordings take Mountebank's shape** (#1329). A `predicateGenerators`
+  entry now records one predicate per field in `matches` (in the order method, path, query,
+  headers, body) instead of one `equals` over all of them: `deepEquals` for a whole field,
+  `equals` over the listed `query`/`headers` names, `exists` and explicit operators per field. A
+  recording from `/x?a=1` therefore no longer serves `/x?a=1&b=2`; Mountebank re-proxies it too.
+  `caseSensitive` is copied only when the generator sets it, so a recording without it now ignores
+  case (it used to be written as `true`). Only new recordings change shape; stored recordings
+  load and match as before (they never carried `except`). Documented deviations: an explicit operator stores the field's value, not the whole
+  request, and an `ignore`d whole field is recorded with `equals`. See
+  [What Gets Recorded](docs/mountebank/proxy.md#what-gets-recorded).
 
 ## [0.21.0] - 2026-10-07
 

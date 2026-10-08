@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::imposter::behavior_pipeline::{BehaviorOutcome, BehaviorRun, ServedParts};
-use crate::imposter::predicates::regex_cache::cached_regex;
 use crate::recording::{ClaimToken, ProxyStoreError, StubPlacement, StubPublication};
 use std::hash::BuildHasher;
 
@@ -254,11 +253,7 @@ fn generator_selector(
 
 /// What `selector` selects from `body`, as Mountebank's generator captures it: one value as a
 /// string, several as an array, nothing as `""`.
-fn selected_body(
-    selector: &crate::imposter::PredicateSelector,
-    body: &str,
-    except: Option<&regex::Regex>,
-) -> serde_json::Value {
+fn selected_body(selector: &crate::imposter::PredicateSelector, body: &str) -> serde_json::Value {
     use crate::behaviors::{Selection, jsonpath_selection, xpath_selection_in};
     use crate::imposter::PredicateSelector;
 
@@ -272,10 +267,7 @@ fn selected_body(
         } => xpath_selection_in(body, selector, namespaces.as_ref()),
     };
     match selection.unwrap_or(Selection::One(String::new())) {
-        Selection::One(value) => serde_json::Value::String(match except {
-            Some(re) => re.replace_all(&value, "").into_owned(),
-            None => value,
-        }),
+        Selection::One(value) => serde_json::Value::String(value),
         Selection::Many(values) => {
             serde_json::Value::Array(values.into_iter().map(serde_json::Value::String).collect())
         }
@@ -306,6 +298,212 @@ fn remove_ignored(
         }
         _ => {}
     }
+}
+
+/// The request fields a predicate generator records, in the order it records them. Fixed, not the
+/// generator's own key order, so two recordings of one request build equal predicate lists — the
+/// proxyAlways merge compares them.
+const RECORDED_FIELDS: [&str; 5] = ["method", "path", "query", "headers", "body"];
+
+/// The request a predicate generator captures from.
+struct GeneratorRequest<'a, SH> {
+    method: &'a str,
+    path: &'a str,
+    headers: &'a HashMap<String, Vec<String>, SH>,
+    body: Option<&'a str>,
+    query: Option<&'a str>,
+}
+
+impl<SH: BuildHasher> GeneratorRequest<'_, SH> {
+    /// A header's first value, its name compared case-insensitively. A generated predicate is
+    /// single-valued (issue #1025), so the first value of a repeated header is what gets recorded.
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .and_then(|(_, values)| values.first())
+            .map(String::as_str)
+    }
+
+    fn query(&self) -> serde_json::Map<String, serde_json::Value> {
+        self.query
+            .map(crate::imposter::parse_query_string)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .collect()
+    }
+
+    fn headers(&self) -> serde_json::Map<String, serde_json::Value> {
+        self.headers
+            .iter()
+            .filter_map(|(k, values)| {
+                values
+                    .first()
+                    .map(|first| (k.clone(), serde_json::Value::String(first.clone())))
+            })
+            .collect()
+    }
+}
+
+/// What a generator's `matches` captured for one field.
+enum Captured {
+    /// A scalar field (`method`, `path`, `body`) matched with `true`.
+    Scalar(serde_json::Value),
+    /// An object field (`query`, `headers`) matched whole with `true`; `filtered` when the
+    /// generator's `ignore` names this field.
+    Whole {
+        fields: serde_json::Map<String, serde_json::Value>,
+        filtered: bool,
+    },
+    /// An object field matched on the sub-keys the generator lists.
+    Listed(serde_json::Map<String, serde_json::Value>),
+}
+
+/// Captures `field` as `matcher` asks, or `None` when the matcher asks for nothing.
+fn capture<SH: BuildHasher>(
+    field: &str,
+    matcher: &serde_json::Value,
+    request: &GeneratorRequest<'_, SH>,
+    selector: Option<&crate::imposter::PredicateSelector>,
+    ignore: Option<&serde_json::Value>,
+) -> Option<Captured> {
+    let whole = matcher.as_bool() == Some(true);
+    match field {
+        "method" | "path" | "body" if whole => {
+            let value = match field {
+                "method" => serde_json::Value::String(request.method.to_string()),
+                "path" => serde_json::Value::String(request.path.to_string()),
+                _ => {
+                    let body = request.body.unwrap_or("");
+                    match selector {
+                        Some(selector) => selected_body(selector, body),
+                        None => serde_json::Value::String(body.to_string()),
+                    }
+                }
+            };
+            Some(Captured::Scalar(value))
+        }
+        "query" | "headers" => {
+            let mut fields = if whole {
+                if field == "query" {
+                    request.query()
+                } else {
+                    request.headers()
+                }
+            } else {
+                let listed = matcher.as_object()?;
+                let request_query = (field == "query").then(|| request.query());
+                listed
+                    .iter()
+                    .filter(|(_, wanted)| wanted.as_bool() == Some(true))
+                    .filter_map(|(key, _)| {
+                        let value = match &request_query {
+                            Some(query) => query.get(key).cloned(),
+                            None => request
+                                .header(key)
+                                .map(|v| serde_json::Value::String(v.to_string())),
+                        };
+                        value.map(|value| (key.clone(), value))
+                    })
+                    .collect()
+            };
+            if let Some(filter) = ignore {
+                remove_ignored(&mut fields, filter);
+            }
+            Some(if whole {
+                Captured::Whole {
+                    fields,
+                    filtered: ignore.is_some(),
+                }
+            } else {
+                Captured::Listed(fields)
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Mountebank's `predicatesFor` for one `matches` generator: one predicate per matched field.
+///
+/// With no `predicateOperator`, a field matched whole is recorded with `deepEquals` and one matched
+/// on listed sub-keys with `equals` over those keys. Two deviations, both documented in
+/// `docs/mountebank/proxy.md`: under an explicit operator Mountebank stores the whole request once
+/// per field, Rift stores that field's value; and a whole field the generator's `ignore` filters is
+/// recorded with `equals`, since Mountebank does not persist `ignore` and its `deepEquals` recording
+/// could never match a request carrying the ignored key.
+fn predicates_for_matcher<SH: BuildHasher>(
+    generator: &serde_json::Map<String, serde_json::Value>,
+    matches: &serde_json::Map<String, serde_json::Value>,
+    request: &GeneratorRequest<'_, SH>,
+) -> Vec<serde_json::Value> {
+    let operator = generator.get("predicateOperator").and_then(|p| p.as_str());
+    let selector = generator_selector(generator);
+    // Copied onto every predicate only when present: an absent `caseSensitive` leaves the
+    // predicate default (`false`), as in Mountebank.
+    let mut parameters = serde_json::Map::new();
+    if let Some(case_sensitive) = generator.get("caseSensitive").filter(|c| c.is_boolean()) {
+        parameters.insert("caseSensitive".to_string(), case_sensitive.clone());
+    }
+    if let Some(except) = generator.get("except").filter(|e| e.is_string()) {
+        parameters.insert("except".to_string(), except.clone());
+    }
+
+    let mut predicates = Vec::new();
+    for field in RECORDED_FIELDS {
+        let Some(matcher) = matches.get(field) else {
+            continue;
+        };
+        let ignore = generator.get("ignore").and_then(|ignore| ignore.get(field));
+        let Some(captured) = capture(field, matcher, request, selector.as_ref(), ignore) else {
+            continue;
+        };
+        let (operator, value) = match (operator, captured) {
+            (Some("exists"), Captured::Scalar(_)) => ("exists", serde_json::Value::Bool(true)),
+            (Some("exists"), Captured::Whole { fields, .. } | Captured::Listed(fields)) => (
+                "exists",
+                serde_json::Value::Object(
+                    fields
+                        .into_iter()
+                        .map(|(key, _)| (key, serde_json::Value::Bool(true)))
+                        .collect(),
+                ),
+            ),
+            (Some(operator), Captured::Scalar(value)) => (operator, value),
+            (Some(operator), Captured::Whole { fields, .. } | Captured::Listed(fields)) => {
+                (operator, serde_json::Value::Object(fields))
+            }
+            (None, Captured::Scalar(value)) => ("deepEquals", value),
+            (
+                None,
+                Captured::Whole {
+                    fields,
+                    filtered: false,
+                },
+            ) => ("deepEquals", serde_json::Value::Object(fields)),
+            (None, Captured::Whole { fields, .. } | Captured::Listed(fields)) => {
+                ("equals", serde_json::Value::Object(fields))
+            }
+        };
+
+        let mut predicate = serde_json::Map::new();
+        predicate.insert(
+            operator.to_string(),
+            serde_json::Value::Object(serde_json::Map::from_iter([(field.to_string(), value)])),
+        );
+        // The selector scopes the body match the way it scoped the capture. Mountebank copies it
+        // onto every predicate, where it would select from the path or method; Rift keeps it on
+        // the body's.
+        if field == "body"
+            && let Some(serde_json::Value::Object(selector)) =
+                selector.as_ref().and_then(|s| serde_json::to_value(s).ok())
+        {
+            predicate.extend(selector);
+        }
+        predicate.extend(parameters.clone());
+        predicates.push(serde_json::Value::Object(predicate));
+    }
+    predicates
 }
 
 impl Imposter {
@@ -384,152 +582,17 @@ impl Imposter {
                 continue;
             }
 
-            // Get the matches config
             let Some(matches) = gen_obj.get("matches").and_then(|m| m.as_object()) else {
                 continue;
             };
-
-            // Get options
-            let case_sensitive = gen_obj
-                .get("caseSensitive")
-                .and_then(|c| c.as_bool())
-                .unwrap_or(true);
-            let predicate_operator = gen_obj
-                .get("predicateOperator")
-                .and_then(|p| p.as_str())
-                .unwrap_or("equals");
-            let except_pattern = gen_obj.get("except").and_then(|e| e.as_str());
-            let selector = generator_selector(gen_obj);
-            let ignore = |field: &str| gen_obj.get("ignore").and_then(|ignore| ignore.get(field));
-
-            // Build predicate values
-            let mut pred_values = serde_json::Map::new();
-
-            // Handle path
-            if matches
-                .get("path")
-                .and_then(|p| p.as_bool())
-                .unwrap_or(false)
-            {
-                let mut path_val = path.to_string();
-                // Apply except pattern if present
-                if let Some(pattern) = except_pattern
-                    && let Some(re) = cached_regex(pattern, false)
-                {
-                    path_val = re.replace_all(&path_val, "").to_string();
-                }
-                pred_values.insert("path".to_string(), serde_json::Value::String(path_val));
-            }
-
-            // Handle method
-            if matches
-                .get("method")
-                .and_then(|m| m.as_bool())
-                .unwrap_or(false)
-            {
-                let mut method_val = method.to_string();
-                if let Some(pattern) = except_pattern
-                    && let Some(re) = cached_regex(pattern, false)
-                {
-                    method_val = re.replace_all(&method_val, "").to_string();
-                }
-                pred_values.insert("method".to_string(), serde_json::Value::String(method_val));
-            }
-
-            // Handle query
-            if matches
-                .get("query")
-                .and_then(|q| q.as_bool())
-                .unwrap_or(false)
-                && let Some(query_str) = query
-            {
-                let mut query_json: serde_json::Map<String, serde_json::Value> =
-                    crate::imposter::parse_query_string(query_str)
-                        .into_iter()
-                        .map(|(k, v)| (k, serde_json::Value::String(v)))
-                        .collect();
-                if let Some(filter) = ignore("query") {
-                    remove_ignored(&mut query_json, filter);
-                }
-                if !query_json.is_empty() {
-                    pred_values.insert("query".to_string(), serde_json::Value::Object(query_json));
-                }
-            }
-
-            // Handle headers
-            if let Some(header_matches) = matches.get("headers").and_then(|h| h.as_object()) {
-                let mut header_preds = serde_json::Map::new();
-                for (header_name, should_match) in header_matches {
-                    if should_match.as_bool().unwrap_or(false)
-                        // A generated predicate is single-valued (issue #1025): the first value of
-                        // a repeated header is what gets baked into the generated stub.
-                        && let Some(header_value) =
-                            headers.get(header_name).and_then(|values| values.first())
-                    {
-                        header_preds.insert(
-                            header_name.clone(),
-                            serde_json::Value::String(header_value.clone()),
-                        );
-                    }
-                }
-                if let Some(filter) = ignore("headers") {
-                    remove_ignored(&mut header_preds, filter);
-                }
-                if !header_preds.is_empty() {
-                    pred_values.insert(
-                        "headers".to_string(),
-                        serde_json::Value::Object(header_preds),
-                    );
-                }
-            }
-
-            // Handle body
-            if matches
-                .get("body")
-                .and_then(|b| b.as_bool())
-                .unwrap_or(false)
-                && let Some(body_str) = body
-            {
-                let except = except_pattern.and_then(|pattern| cached_regex(pattern, false));
-                let body_val = match &selector {
-                    Some(selector) => selected_body(selector, body_str, except.as_deref()),
-                    None => serde_json::Value::String(match &except {
-                        Some(re) => re.replace_all(body_str, "").into_owned(),
-                        None => body_str.to_string(),
-                    }),
-                };
-                pred_values.insert("body".to_string(), body_val);
-            }
-
-            if pred_values.is_empty() {
-                continue;
-            }
-
-            let captured_body = pred_values.contains_key("body");
-
-            // Build the predicate with the operator
-            let mut predicate = serde_json::Map::new();
-            predicate.insert(
-                predicate_operator.to_string(),
-                serde_json::Value::Object(pred_values),
-            );
-
-            // The selector scopes the match the same way it scoped the capture (Mountebank copies
-            // the generator's `jsonpath`/`xpath` onto the predicate).
-            if captured_body
-                && let Some(serde_json::Value::Object(selector)) =
-                    selector.as_ref().and_then(|s| serde_json::to_value(s).ok())
-            {
-                predicate.extend(selector);
-            }
-
-            // Always write caseSensitive so the matcher sees the generator's intent
-            predicate.insert(
-                "caseSensitive".to_string(),
-                serde_json::Value::Bool(case_sensitive),
-            );
-
-            predicates.push(serde_json::Value::Object(predicate));
+            let request = GeneratorRequest {
+                method,
+                path,
+                headers,
+                body,
+                query,
+            };
+            predicates.extend(predicates_for_matcher(gen_obj, matches, &request));
         }
 
         Ok(predicates)
@@ -1047,8 +1110,8 @@ mod proxy_dedup_tests {
         Imposter::new(cfg).expect("test imposter")
     }
 
-    /// A stub whose single predicate matches on several fields at once — the shape a Mountebank
-    /// `predicateGenerators: [{matches: {method, path, query}}]` produces.
+    /// A stub whose single predicate matches on several fields at once, as a hand-written stub or a
+    /// recording from before #1329 may (a generator now records one predicate per field).
     fn multi_key_stub(body: &str) -> Stub {
         serde_json::from_value(json!({
             "predicates": [{ "equals": { "method": "GET", "path": "/x", "query": { "a": "1" } } }],
@@ -1197,9 +1260,8 @@ mod predicate_generator_selector_tests {
         assert_eq!(
             predicates,
             vec![json!({
-                "equals": { "body": "42" },
-                "jsonpath": { "selector": "$.id" },
-                "caseSensitive": true
+                "deepEquals": { "body": "42" },
+                "jsonpath": { "selector": "$.id" }
             })]
         );
     }
@@ -1212,7 +1274,7 @@ mod predicate_generator_selector_tests {
             None,
             &[],
         );
-        assert_eq!(predicates[0]["equals"], json!({ "body": ["a", "b"] }));
+        assert_eq!(predicates[0]["deepEquals"], json!({ "body": ["a", "b"] }));
     }
 
     #[test]
@@ -1223,7 +1285,7 @@ mod predicate_generator_selector_tests {
             None,
             &[],
         );
-        assert_eq!(predicates[0]["equals"], json!({ "body": "" }));
+        assert_eq!(predicates[0]["deepEquals"], json!({ "body": "" }));
         assert_eq!(
             predicates[0]["jsonpath"],
             json!({ "selector": "$.missing" })
@@ -1245,22 +1307,31 @@ mod predicate_generator_selector_tests {
         assert_eq!(
             predicates,
             vec![json!({
-                "equals": { "body": "7" },
+                "deepEquals": { "body": "7" },
                 "xpath": { "selector": "//a:id", "ns": { "a": "urn:a" } },
                 "caseSensitive": false
             })]
         );
     }
 
+    /// Issue #1329: the selected value is recorded raw and `except` travels with the predicate,
+    /// which strips both sides at match time.
     #[test]
-    fn except_still_applies_to_a_selected_scalar() {
+    fn except_is_carried_beside_a_selected_scalar() {
         let predicates = generate(
             json!({ "matches": { "body": true }, "jsonpath": { "selector": "$.ref" }, "except": "-\\d+$" }),
             Some(r#"{"ref": "order-123"}"#),
             None,
             &[],
         );
-        assert_eq!(predicates[0]["equals"], json!({ "body": "order" }));
+        assert_eq!(
+            predicates,
+            vec![json!({
+                "deepEquals": { "body": "order-123" },
+                "jsonpath": { "selector": "$.ref" },
+                "except": "-\\d+$"
+            })]
+        );
     }
 
     /// A selector that does not compile would make the recorded stub unloadable (#1220), so it is
@@ -1275,7 +1346,7 @@ mod predicate_generator_selector_tests {
         );
         assert_eq!(
             predicates,
-            vec![json!({ "equals": { "body": r#"{"id": 1}"# }, "caseSensitive": true })]
+            vec![json!({ "deepEquals": { "body": r#"{"id": 1}"# } })]
         );
     }
 
@@ -1293,6 +1364,7 @@ mod predicate_generator_selector_tests {
             } else {
                 json!({ "query": { "a": "1" } })
             };
+            // An ignored key may vary, so the kept keys are matched with `equals` (issue #1329).
             assert_eq!(predicates[0]["equals"], expected, "ignore {ignore}");
             assert!(predicates[0].get("ignore").is_none());
         }
@@ -1345,6 +1417,254 @@ mod predicate_generator_selector_tests {
                 "except": "x", "jsonpath": {}, "xpath": {}, "ignore": {}, "inject": "f"
             }))
             .is_empty()
+        );
+    }
+}
+
+/// Issue #1329: a generator records Mountebank's shape — one predicate per matched field, in a fixed
+/// field order, with the generator's parameters copied onto each and the captured values raw.
+#[cfg(test)]
+mod predicate_generator_shape_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn generate(
+        generator: serde_json::Value,
+        body: Option<&str>,
+        query: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> Vec<serde_json::Value> {
+        let headers: HashMap<String, Vec<String>> = headers
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), vec![(*v).to_string()]))
+            .collect();
+        Imposter::generate_predicates_impl(&[generator], "POST", "/orders", &headers, body, query)
+            .expect("predicate generation succeeds")
+    }
+
+    #[test]
+    fn fields_are_emitted_in_a_fixed_order_with_parameters_on_each() {
+        let predicates = generate(
+            json!({
+                "matches": {
+                    "body": true,
+                    "headers": { "X-Tenant": true },
+                    "query": true,
+                    "path": true,
+                    "method": true
+                },
+                "caseSensitive": true,
+                "except": "\\d+"
+            }),
+            Some("b1"),
+            Some("a=1"),
+            &[("x-tenant", "acme")],
+        );
+        assert_eq!(
+            predicates,
+            vec![
+                json!({ "deepEquals": { "method": "POST" }, "caseSensitive": true, "except": "\\d+" }),
+                json!({ "deepEquals": { "path": "/orders" }, "caseSensitive": true, "except": "\\d+" }),
+                json!({ "deepEquals": { "query": { "a": "1" } }, "caseSensitive": true, "except": "\\d+" }),
+                json!({ "equals": { "headers": { "X-Tenant": "acme" } }, "caseSensitive": true, "except": "\\d+" }),
+                json!({ "deepEquals": { "body": "b1" }, "caseSensitive": true, "except": "\\d+" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_query_sub_key_matcher_records_equals_over_the_listed_keys_only() {
+        let predicates = generate(
+            json!({ "matches": { "query": { "a": true, "missing": true } } }),
+            None,
+            Some("a=1&b=2"),
+            &[],
+        );
+        assert_eq!(
+            predicates,
+            vec![json!({ "equals": { "query": { "a": "1" } } })]
+        );
+    }
+
+    #[test]
+    fn a_whole_field_matcher_records_an_absent_field_as_empty() {
+        let predicates = generate(
+            json!({ "matches": { "query": true, "body": true } }),
+            None,
+            None,
+            &[],
+        );
+        assert_eq!(
+            predicates,
+            vec![
+                json!({ "deepEquals": { "query": {} } }),
+                json!({ "deepEquals": { "body": "" } }),
+            ]
+        );
+    }
+
+    #[test]
+    fn whole_headers_are_recorded_with_deep_equals() {
+        let predicates = generate(
+            json!({ "matches": { "headers": true } }),
+            None,
+            None,
+            &[("x-tenant", "acme")],
+        );
+        assert_eq!(
+            predicates,
+            vec![json!({ "deepEquals": { "headers": { "x-tenant": "acme" } } })]
+        );
+    }
+
+    #[test]
+    fn exists_records_presence_per_field() {
+        let predicates = generate(
+            json!({
+                "matches": { "path": true, "query": true, "headers": { "X-Tenant": true } },
+                "predicateOperator": "exists"
+            }),
+            None,
+            Some("a=1&b=2"),
+            &[("x-tenant", "acme")],
+        );
+        assert_eq!(
+            predicates,
+            vec![
+                json!({ "exists": { "path": true } }),
+                json!({ "exists": { "query": { "a": true, "b": true } } }),
+                json!({ "exists": { "headers": { "X-Tenant": true } } }),
+            ]
+        );
+    }
+
+    /// Mountebank stores the whole request under an explicit operator, once per matched field; Rift
+    /// stores only that field's value (documented in docs/mountebank/proxy.md).
+    #[test]
+    fn an_explicit_operator_records_each_field_under_it() {
+        let predicates = generate(
+            json!({ "matches": { "path": true, "method": true }, "predicateOperator": "contains" }),
+            None,
+            None,
+            &[],
+        );
+        assert_eq!(
+            predicates,
+            vec![
+                json!({ "contains": { "method": "POST" } }),
+                json!({ "contains": { "path": "/orders" } }),
+            ]
+        );
+    }
+
+    /// An explicit `equals` stays `equals`, on an object field too: the field's captured value
+    /// under the operator, not the default `deepEquals`.
+    #[test]
+    fn an_explicit_equals_is_not_promoted_to_deep_equals() {
+        let predicates = generate(
+            json!({ "matches": { "query": true, "headers": { "X-Absent": true } },
+                    "predicateOperator": "equals" }),
+            None,
+            Some("a=1"),
+            &[],
+        );
+        assert_eq!(
+            predicates,
+            vec![
+                json!({ "equals": { "query": { "a": "1" } } }),
+                json!({ "equals": { "headers": {} } }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_selector_scopes_only_the_body_predicate() {
+        let predicates = generate(
+            json!({ "matches": { "path": true, "body": true }, "jsonpath": { "selector": "$.id" } }),
+            Some(r#"{"id": 42}"#),
+            None,
+            &[],
+        );
+        assert_eq!(
+            predicates,
+            vec![
+                json!({ "deepEquals": { "path": "/orders" } }),
+                json!({ "deepEquals": { "body": "42" }, "jsonpath": { "selector": "$.id" } }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_false_matcher_records_nothing() {
+        let predicates = generate(
+            json!({ "matches": { "path": false, "method": true } }),
+            None,
+            None,
+            &[],
+        );
+        assert_eq!(
+            predicates,
+            vec![json!({ "deepEquals": { "method": "POST" } })]
+        );
+    }
+
+    /// proxyAlways merges a recording into the group whose predicate list equals its own; with one
+    /// predicate per field that is a list comparison.
+    #[test]
+    fn proxy_always_groups_recordings_by_their_predicate_list() {
+        let imposter = Imposter::new(
+            serde_json::from_value(json!({
+                "port": 0,
+                "protocol": "http",
+                "stubs": [{ "responses": [{ "proxy": { "to": "http://up", "mode": "proxyAlways" } }] }],
+            }))
+            .expect("valid imposter config"),
+        )
+        .expect("test imposter");
+        let record = |path: &str, body: &str| {
+            let headers: HashMap<String, Vec<String>> = HashMap::new();
+            let predicates = Imposter::generate_predicates_impl(
+                &[json!({ "matches": { "method": true, "path": true } })],
+                "GET",
+                path,
+                &headers,
+                None,
+                None,
+            )
+            .expect("generates");
+            let stub: Stub = serde_json::from_value(json!({
+                "predicates": predicates,
+                "responses": [{ "is": { "statusCode": 200, "body": body } }],
+            }))
+            .expect("valid stub");
+            imposter.insert_or_append_proxy_stub(stub, "http://up", "proxyAlways");
+        };
+        record("/a", "1");
+        record("/b", "2");
+        record("/a", "3");
+
+        let stubs = imposter.get_stubs();
+        let groups: Vec<(serde_json::Value, usize)> = stubs[1..]
+            .iter()
+            .map(|s| {
+                (
+                    serde_json::to_value(&s.predicates).expect("serializes"),
+                    s.responses.len(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            groups,
+            vec![
+                (
+                    json!([{ "deepEquals": { "method": "GET" } }, { "deepEquals": { "path": "/b" } }]),
+                    1
+                ),
+                (
+                    json!([{ "deepEquals": { "method": "GET" } }, { "deepEquals": { "path": "/a" } }]),
+                    2
+                ),
+            ]
         );
     }
 }

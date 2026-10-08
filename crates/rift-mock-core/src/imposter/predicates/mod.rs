@@ -339,8 +339,9 @@ where
     let except_pattern = Some(predicate.parameters.except.as_str()).filter(|s| !s.is_empty());
     // Compile the except pattern once (cached across requests) and reuse it for every field,
     // instead of recompiling per field per request. An invalid pattern yields `None`, which
-    // preserves the previous fall-through-to-unchanged behavior.
-    let except_regex = except_pattern.and_then(|pattern| cached_regex(pattern, false));
+    // preserves the previous fall-through-to-unchanged behavior. Case-insensitive unless the
+    // predicate is case sensitive, as Mountebank compiles it (`gi`, issue #1329).
+    let except_regex = except_pattern.and_then(|pattern| cached_regex(pattern, !case_sensitive));
 
     // Helper to apply the except pattern. Borrows the input when no `except` is configured (the
     // common case) so a field comparison doesn't allocate a String per predicate (issue #294);
@@ -351,6 +352,13 @@ where
         f
     }
     let apply_except = as_except_fn(|value| match &except_regex {
+        Some(re) => re.replace_all(value, ""),
+        None => std::borrow::Cow::Borrowed(value),
+    });
+    // Mountebank's `matches` normalizes the request as case sensitive, so its `except` never
+    // ignores case whatever the predicate says.
+    let matches_except_regex = except_pattern.and_then(|pattern| cached_regex(pattern, false));
+    let apply_matches_except = as_except_fn(|value| match &matches_except_regex {
         Some(re) => re.replace_all(value, ""),
         None => std::borrow::Cow::Borrowed(value),
     });
@@ -510,7 +518,7 @@ where
                 query_map,
                 headers,
                 body,
-                &apply_except,
+                &apply_matches_except,
                 case_sensitive,
                 request_from,
                 client_ip,
@@ -1735,10 +1743,10 @@ mod tests {
 
         let pred = make_predicate_with_params(PredicateOperation::Equals(fields), params);
 
-        // except removes "/api" from actual path, so "/api/users" becomes "/users"
-        // which doesn't match "/api/users"
+        // except removes "/api" from both sides, as in Mountebank (issue #1329): "/users" on each,
+        // so the predicate holds. Rift used to strip only the actual value and miss.
         assert!(
-            !predicate_matches(
+            predicate_matches(
                 &pred,
                 "GET",
                 "/api/users",
@@ -3154,6 +3162,83 @@ mod tests {
             assert!(holds(xp("equals", json!("ann")), xml));
             assert!(!holds(xp("equals", json!("cat")), xml));
             assert!(holds(xp("deepEquals", json!(["bob", "ann"])), xml));
+        }
+    }
+
+    /// Issue #1329: Mountebank strips `except` from the expected value as well as the actual one
+    /// (`predicates.js` `create`/`deepEquals` normalize both with the predicate's config), except
+    /// under `matches`, whose expected value is a pattern. A predicate holding a raw value plus
+    /// `except` — what a predicate generator records — then matches every request that differs
+    /// only in the stripped part.
+    mod except_on_both_sides {
+        use super::*;
+
+        fn holds_on(predicate: serde_json::Value, path: &str, body: &str) -> bool {
+            let predicate: Predicate = serde_json::from_value(predicate).expect("predicate json");
+            predicate_matches(
+                &predicate,
+                "GET",
+                path,
+                Some("id=7"),
+                &empty_headers(),
+                Some(body),
+                None,
+                None,
+                None,
+                0,
+            )
+            .expect("evaluates")
+        }
+
+        #[test]
+        fn deep_equals_strips_the_expected_value() {
+            let pred = json!({ "deepEquals": { "path": "/users/123" }, "except": "\\d+" });
+            assert!(holds_on(pred.clone(), "/users/456", ""));
+            assert!(holds_on(pred, "/users/123", ""));
+        }
+
+        #[test]
+        fn equals_strips_the_expected_value() {
+            let pred = json!({ "equals": { "path": "/users/123" }, "except": "\\d+" });
+            assert!(holds_on(pred.clone(), "/users/456", ""));
+            assert!(!holds_on(pred, "/orders/456", ""));
+        }
+
+        #[test]
+        fn object_leaves_are_stripped_on_both_sides() {
+            let pred = json!({ "deepEquals": { "query": { "id": "3" } }, "except": "\\d+" });
+            assert!(holds_on(pred, "/", ""));
+            let body = json!({ "equals": { "body": { "ref": "a-1" } }, "except": "-\\d+$" });
+            assert!(holds_on(body, "/", r#"{"ref": "a-2"}"#));
+        }
+
+        #[test]
+        fn matches_keeps_the_pattern_whole() {
+            // Stripping `d` from the pattern would turn its `\d$` into `\$`, a literal dollar.
+            let pred = json!({ "matches": { "path": "^/users/\\d$" }, "except": "d" });
+            assert!(holds_on(pred, "/users/1", ""));
+            let stripping = json!({ "matches": { "path": "^/a$" }, "except": "a" });
+            assert!(
+                !holds_on(stripping, "/a", ""),
+                "the actual value is still stripped"
+            );
+        }
+
+        /// Under `matches` Mountebank compiles `except` case sensitive, whatever the predicate says.
+        #[test]
+        fn except_under_matches_stays_case_sensitive() {
+            let pred = json!({ "matches": { "path": "^/a$" }, "except": "X" });
+            assert!(!holds_on(pred, "/ax", ""));
+        }
+
+        /// Mountebank compiles `except` with `gi` unless the predicate is case sensitive.
+        #[test]
+        fn except_follows_case_sensitivity() {
+            let insensitive = json!({ "equals": { "path": "/a" }, "except": "X" });
+            assert!(holds_on(insensitive, "/ax", ""));
+            let sensitive =
+                json!({ "equals": { "path": "/a" }, "except": "X", "caseSensitive": true });
+            assert!(!holds_on(sensitive, "/ax", ""));
         }
     }
 }
