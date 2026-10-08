@@ -69,9 +69,10 @@ Earlier releases followed an internal hash map order, which could vary between c
 - `replayable` (boolean) - Return each imposter's full config, for export
 - `removeProxies` (boolean, with `replayable`) - Strip proxy responses from the export
 - `list` (boolean) - Return a shorter entry per imposter: `protocol`, `port`, `name`,
-  `numberOfRequests`, `_links`
+  `defaultResponse`, `numberOfRequests`, `_links`
 
-Without either flag each entry is the summary shown below, plus `_links`.
+Without either flag each entry is the summary shown below, plus `_links`. In both shapes an
+imposter's `defaultResponse` is included when it has one (#1334), as Mountebank prints it.
 
 **Response:**
 ```json
@@ -81,6 +82,7 @@ Without either flag each entry is the summary shown below, plus `_links`.
       "port": 4545,
       "protocol": "http",
       "name": "User Service",
+      "defaultResponse": { "statusCode": 404, "headers": {}, "body": "not mocked" },
       "numberOfRequests": 42,
       "stubCount": 3,
       "enabled": true,
@@ -126,7 +128,8 @@ Create a new imposter.
 }
 ```
 
-**Response:** `201 Created` with the imposter detail (as `GET /imposters/{port}`). `400` for invalid
+**Response:** `201 Created` with the imposter detail (as `GET /imposters/{port}`, so it carries
+`defaultResponse` and, for `https`, the TLS metadata). `400` for invalid
 JSON or an invalid imposter. That includes a single-valued header object (`proxy.injectHeaders`,
 `_rift.fault.error.headers`) naming one header twice in different cases (#1050), and a scripted
 config without `--allowInjection` (`400 invalid injection`).
@@ -225,7 +228,10 @@ Get imposter details.
   "port": 4545,
   "protocol": "http",
   "name": "My Service",
+  "defaultResponse": { "statusCode": 404, "headers": {}, "body": "not mocked" },
   "numberOfRequests": 42,
+  "enabled": true,
+  "recordRequests": true,
   "requests": [
     {
       "method": "GET",
@@ -234,9 +240,18 @@ Get imposter details.
       "timestamp": "2024-01-15T10:30:00.123456+00:00"
     }
   ],
-  "stubs": [...]
+  "stubs": [...],
+  "_links": { "self": { "href": "http://localhost:2525/imposters/4545" }, ... }
 }
 ```
+
+The detail prints the keys Mountebank's detail prints (#1334): `defaultResponse` when set, and for
+an `https` imposter its TLS metadata — `mutualAuth` and `rejectUnauthorized` always, `cert`, `key`
+and `ca` when the imposter configured them (a self-signed or server-default certificate is not
+printed). Rift-only config keys — `defaultForward`, `allowCORS`, `strictBehaviors`, `recordMatches`,
+`serviceName`, `serviceInfo` and the config `_rift` block — appear only with `?replayable=true`;
+Mountebank prints none of them, and the detail's `_rift` key carries `warnings` and a redacted
+`flowState` instead. Use `?replayable=true` to copy an imposter.
 
 **Example:**
 ```bash

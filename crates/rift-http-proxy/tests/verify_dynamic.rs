@@ -522,3 +522,137 @@ async fn verify_skips_unsynthesizable_xpath_stub() {
         "the skip reason must name the selector:\n{stdout}"
     );
 }
+
+#[tokio::test]
+async fn verify_dynamic_recreates_from_the_replayable_form() {
+    // Issue #1334: the `_verify` recreate must carry the imposter's whole config, not just the keys
+    // the plain `GET /imposters/:port` prints. `defaultForward` is replayable-only (Mountebank has
+    // no form for it), so a recreate from the plain detail answers 200 with an empty body here.
+    let manager = Arc::new(ImposterManager::new());
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 22991, "protocol": "http",
+            "stubs": [{ "responses": [{ "is": { "statusCode": 200, "body": "from-upstream" } }] }]
+        }),
+    )
+    .await;
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 22990, "protocol": "http",
+            "defaultForward": "http://127.0.0.1:22991",
+            "stubs": [{
+                "predicates": [{ "equals": { "path": "/local" } }],
+                "responses": [{ "is": { "statusCode": 200, "body": "local" } }],
+                "_verify": { "sequence": [
+                    { "request": { "path": "/local" }, "expect": { "bodyContains": "local" } },
+                    { "request": { "path": "/elsewhere" }, "expect": { "bodyContains": "from-upstream" } }
+                ]}
+            }]
+        }),
+    )
+    .await;
+
+    let admin = start_admin(manager).await;
+    let out = run_verify(&admin).await;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("_verify[1] GET /elsewhere"),
+        "the forwarded step must run:\n{stdout}"
+    );
+    assert!(
+        out.status.success() && !stdout.contains("FAIL"),
+        "the recreated imposter must keep defaultForward:\n{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn verify_dynamic_fails_when_the_replayable_fetch_errors() {
+    // Issue #1334: a per-imposter `?replayable=true` fetch answering an HTTP error used to parse
+    // the error body as an imposter with no stubs, so its dynamic checks vanished and the run
+    // still exited 0. A fake admin serves the list and the detail, and 500s the replayable form.
+    let admin = fake_admin(|target| match target {
+        "/imposters" => Some(r#"{"imposters":[{"port":1,"protocol":"http"}]}"#),
+        "/imposters/1" => Some(r#"{"port":1,"protocol":"http","stubs":[]}"#),
+        _ => None,
+    })
+    .await;
+
+    let out = run_verify(&admin).await;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "an errored replayable fetch must fail the run:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("HTTP 500"),
+        "the failure must name the status:\n{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn verify_fails_when_an_imposter_detail_fetch_errors() {
+    // A listed imposter whose `GET /imposters/:port` answers an HTTP error used to be dropped from
+    // the run without a word, so `rift-verify` reported success over an imposter it never checked.
+    let admin = fake_admin(|target| match target {
+        "/imposters" => {
+            Some(r#"{"imposters":[{"port":1,"protocol":"http"},{"port":2,"protocol":"http"}]}"#)
+        }
+        "/imposters/1" => Some(r#"{"port":1,"protocol":"http","stubs":[]}"#),
+        _ => None,
+    })
+    .await;
+
+    let out = Command::new(BIN)
+        .args(["--admin-url", &admin])
+        .output()
+        .await
+        .expect("run rift-verify");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "an unfetchable imposter must fail the run:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("FAIL") && stdout.contains("HTTP 500"),
+        "the failure must name the imposter's fetch status:\n{stdout}"
+    );
+}
+
+/// A minimal admin stand-in: `routes` maps a request target to a `200` JSON body; any target it
+/// returns `None` for answers `500`. Returns the base URL.
+async fn fake_admin(routes: fn(&str) -> Option<&'static str>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake admin");
+    let admin = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let target = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let (status, body) = match routes(&target) {
+                    Some(body) => ("200 OK", body),
+                    None => (
+                        "500 Internal Server Error",
+                        r#"{"errors":[{"code":"internal","message":"boom"}]}"#,
+                    ),
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    admin
+}

@@ -47,10 +47,30 @@ record.
   `matches` it stays case sensitive), as in Mountebank. Both affect hand-written predicates that
   use `except` too: `{"equals": {"path": "/api/users"}, "except": "/api"}` now matches
   `/api/users`.
+- **The imposter JSON prints `defaultResponse` in every form, as Mountebank does** (#1334). The
+  `POST /imposters` 201 body, `GET /imposters/{port}`, and each entry of `GET /imposters` and
+  `GET /imposters?list=true` now carry the imposter's `defaultResponse` when it has one; before
+  this only `?replayable=true` did, so a client mirroring an imposter from the detail lost it. An
+  `https` imposter's detail (and 201 body) also prints its TLS metadata — `mutualAuth` and
+  `rejectUnauthorized` always, `cert`, `key` and `ca` when configured — the same values
+  `?replayable=true` exports. Rift-only keys (`defaultForward`, `allowCORS`, `strictBehaviors`,
+  `recordMatches`, `serviceName`, `serviceInfo`, config `_rift`) stay replayable-only. The C-ABI
+  views match: `rift_list_imposters` entries and `rift_get_imposter` print `defaultResponse`, and
+  the https detail its TLS keys, so embedded and HTTP transports see one shape.
+- **`rift-verify --verify-dynamic` recreates a `_verify` imposter from its full config** (#1334).
+  It re-created the imposter from the plain `GET /imposters/{port}` body, which dropped
+  `defaultResponse`, `defaultForward`, `_rift` and TLS, so a `_verify` step depending on any of
+  them failed; it now reads `?replayable=true` (dropping `host`, since steps are driven at
+  `127.0.0.1`). A per-imposter fetch that answers an HTTP error is now a FAIL instead of an
+  imposter with no dynamic checks, and so is a listed imposter whose `GET /imposters/{port}`
+  errors in the main pass — it was dropped from the run without a word.
 
 ### Changed
 
 - **Conformance corpus fixture `02-predicates.json` gains three `keyCaseSensitive` stubs** (#1325), pinning the key and its inherit-from-`caseSensitive` default. SDK corpus replays must regenerate fixture 02.
+- **Fixture `02-predicates.json` restores the negative `_verify` steps on `/kcs-nomatch-lower` and
+  `/kcs-override`** (#1334), which expect the fixture's `defaultResponse` 400 and could not run
+  before `rift-verify` recreated from the replayable form.
 - **Breaking for Rust embedders** (#1326): `behaviors::ExtractionMethod::XPath` gains a
   `namespaces: Option<HashMap<String, String>>` field, so a pattern or literal naming only
   `selector` must add `..` / `namespaces: None`.

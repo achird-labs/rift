@@ -3,7 +3,7 @@
 use crate::admin_api::request_filter::{parse_match_clauses, parse_since, request_matches};
 use crate::admin_api::types::{
     ImposterDetail, ImposterListEntry, ImposterQueryParams, ImposterSummary, ListImpostersResponse,
-    RiftImposterExtensions, StubWithLinks, build_response_with_headers, collect_body,
+    RiftImposterExtensions, StubWithLinks, TlsHeader, build_response_with_headers, collect_body,
     error_response, json_response, make_imposter_links, make_stub_links, serialize_or_500,
 };
 use crate::extensions::decorate::backend_error_response;
@@ -208,6 +208,7 @@ fn imposter_list_value(
                     protocol: i.config.protocol.clone(),
                     port,
                     name: i.config.name.clone(),
+                    default_response: i.config.default_response.clone(),
                     number_of_requests: i.get_request_count(),
                     links: make_imposter_links(base_url, port),
                 })
@@ -222,6 +223,7 @@ fn imposter_list_value(
                     protocol: i.config.protocol.clone(),
                     port,
                     name: i.config.name.clone(),
+                    default_response: i.config.default_response.clone(),
                     number_of_requests: i.get_request_count(),
                     stub_count: i.stub_count(),
                     enabled: i.is_enabled(),
@@ -478,9 +480,11 @@ pub async fn handle_get(
                 protocol: imposter.config.protocol.clone(),
                 port: imposter.config.port.unwrap_or(port),
                 name: imposter.config.name.clone(),
+                default_response: imposter.config.default_response.clone(),
                 number_of_requests: imposter.get_request_count(),
                 enabled: imposter.is_enabled(),
                 record_requests: imposter.config.record_requests,
+                tls: tls_header(&imposter.config),
                 requests: imposter.get_recorded_requests(),
                 stubs: stubs_with_links,
                 links: make_imposter_links(base_url, port),
@@ -782,6 +786,19 @@ pub async fn handle_clear_proxy_responses(
 // =============================================================================
 // Helper functions
 // =============================================================================
+
+/// The TLS metadata an https imposter's detail prints (Mountebank `createHeader` copies the https
+/// server's metadata into every non-list form); `None` for any other protocol. `pub` so the FFI
+/// detail (`rift_get_imposter`) prints the same keys as `GET /imposters/{port}`.
+pub fn tls_header(config: &ImposterConfig) -> Option<TlsHeader> {
+    (config.protocol == "https").then(|| TlsHeader {
+        cert: config.cert.clone(),
+        key: config.key.clone(),
+        mutual_auth: config.mutual_auth,
+        reject_unauthorized: config.reject_unauthorized,
+        ca: config.ca.clone(),
+    })
+}
 
 /// The replayable (`?replayable=true`) projection of one imposter: its config, carrying the stubs it
 /// serves *now* — `config.stubs` is only what it was created with, so a stub added through the stub

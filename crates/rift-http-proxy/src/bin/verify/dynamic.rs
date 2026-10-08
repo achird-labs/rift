@@ -271,7 +271,8 @@ pub struct DynamicVerifier<'a> {
 
 impl<'a> DynamicVerifier<'a> {
     /// Verify every dynamic stub in one imposter, returning the asserted checks. `imposter` is the
-    /// raw JSON from `GET /imposters/:port` (so all engine-preserved fields are available).
+    /// raw JSON from `GET /imposters/:port?replayable=true`, so all engine-preserved fields are
+    /// available and a recreate from it is the full config.
     pub async fn verify_imposter(&self, imposter: &serde_json::Value) -> Vec<DynCheck> {
         let mut checks = Vec::new();
         let stubs = imposter.get("stubs").and_then(|v| v.as_array());
@@ -311,9 +312,12 @@ impl<'a> DynamicVerifier<'a> {
         };
         let mut config = imposter.clone();
         // Omit `port` entirely rather than sending 0: the server treats an explicit 0 as a literal
-        // port request, and only an absent port takes its find-and-bind-atomically path.
+        // port request, and only an absent port takes its find-and-bind-atomically path. Omit
+        // `host` too: the steps are driven at 127.0.0.1, so the recreate must bind the default
+        // all-interfaces address, not whatever the original was pinned to.
         if let Some(obj) = config.as_object_mut() {
             obj.remove("port");
+            obj.remove("host");
         }
         let port = match self.create_imposter(&config).await {
             Ok(port) => port,

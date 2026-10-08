@@ -155,7 +155,8 @@
     {
       "name": "keyCaseSensitive=true — stub key x-tenant never matches (listener stores X-Tenant)",
       "predicates": [{ "equals": { "path": "/kcs-nomatch-lower", "headers": { "x-tenant": "acme" } }, "keyCaseSensitive": true }],
-      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "kcs-lower" } } }]
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "kcs-lower" } } }],
+      "_verify": { "sequence": [ { "request": { "path": "/kcs-nomatch-lower", "headers": { "X-Tenant": "acme" } }, "expect": { "status": 400, "bodyContains": "no predicate matched" } } ] }
     },
     {
       "name": "caseSensitive=true + keyCaseSensitive=false — key relaxed, value strict",
@@ -163,7 +164,8 @@
       "responses": [{ "is": { "statusCode": 200, "body": { "matched": "kcs-override" } } }],
       "_verify": {
         "sequence": [
-          { "request": { "path": "/kcs-override", "headers": { "X-Tenant": "ACME" } }, "expect": { "status": 200, "bodyContains": "kcs-override" } }
+          { "request": { "path": "/kcs-override", "headers": { "X-Tenant": "ACME" } }, "expect": { "status": 200, "bodyContains": "kcs-override" } },
+          { "request": { "path": "/kcs-override", "headers": { "X-Tenant": "acme" } }, "expect": { "status": 400, "bodyContains": "no predicate matched" } }
         ]
       }
     }

@@ -36,6 +36,7 @@ use anyhow::Context;
 use parking_lot::Mutex;
 use rift_http_proxy::admin_api::{
     AdminApiServer, RunningAdminApi, SERVE_OPTION_KEYS, filter_proxy_stubs, replayable_config,
+    tls_header,
 };
 use rift_http_proxy::config_loader::{self, ConfigSource};
 use rift_http_proxy::injection_gate;
@@ -603,9 +604,9 @@ struct ImposterProjection {
 /// List imposters. `options_json` (null = defaults): `{"replayable":bool,"removeProxies":bool}`.
 /// Replayable returns `{"imposters":[<ImposterConfig>,...]}` (the same projection the admin
 /// `?replayable=true` route serves); otherwise a Mountebank-style summary
-/// `{"imposters":[{"protocol","port","name"?,"numberOfRequests","enabled"},...]}`, skipping any
-/// imposter with no assigned port (mirroring `handle_list`'s summary branch). Returns (caller
-/// frees with [`rift_free`]) null on any error (null handle or malformed options JSON).
+/// `{"imposters":[{"protocol","port","name"?,"defaultResponse"?,"numberOfRequests","enabled"},...]}`,
+/// skipping any imposter with no assigned port (mirroring `handle_list`'s summary branch). Returns
+/// (caller frees with [`rift_free`]) null on any error (null handle or malformed options JSON).
 ///
 /// # Safety
 /// `h` must be a live handle (or null); `options_json` must be null or a valid C string.
@@ -645,6 +646,9 @@ pub unsafe extern "C" fn rift_list_imposters(
                         if let Some(name) = &i.config.name {
                             entry["name"] = json!(name);
                         }
+                        if let Some(default_response) = &i.config.default_response {
+                            entry["defaultResponse"] = json!(default_response);
+                        }
                         entry
                     })
                 })
@@ -663,7 +667,9 @@ pub unsafe extern "C" fn rift_list_imposters(
 
 /// Get one imposter. `options_json` — same shape as [`rift_list_imposters`]. Replayable returns
 /// the single `ImposterConfig` (same `removeProxies` projection); otherwise a detail object
-/// `{"protocol","port","name"?,"numberOfRequests","enabled","recordRequests","stubs","requests"}`.
+/// `{"protocol","port","name"?,"defaultResponse"?,"numberOfRequests","enabled","recordRequests",
+/// "stubs","requests"}`, plus the TLS metadata `GET /imposters/{port}` prints for an https imposter
+/// (`mutualAuth`, `rejectUnauthorized`, and `cert`/`key`/`ca` when configured).
 /// Returns (caller frees) null on any error (null handle, unknown port, or malformed options).
 ///
 /// # Safety
@@ -718,6 +724,28 @@ pub unsafe extern "C" fn rift_get_imposter(
             });
             if let Some(name) = &imposter.config.name {
                 detail["name"] = json!(name);
+            }
+            if let Some(default_response) = &imposter.config.default_response {
+                detail["defaultResponse"] = json!(default_response);
+            }
+            if let Some(tls) = tls_header(&imposter.config) {
+                match serde_json::to_value(tls) {
+                    Ok(Value::Object(keys)) => {
+                        if let Some(obj) = detail.as_object_mut() {
+                            obj.extend(keys);
+                        }
+                    }
+                    Ok(other) => {
+                        set_last_error(format!(
+                            "rift_get_imposter: TLS metadata encoded as {other}, not an object"
+                        ));
+                        return std::ptr::null_mut();
+                    }
+                    Err(e) => {
+                        set_last_error(format!("rift_get_imposter: encode failed: {e}"));
+                        return std::ptr::null_mut();
+                    }
+                }
             }
             detail
         };
