@@ -115,6 +115,49 @@ mod rule_cycler_ordering_tests {
         );
     }
 
+    /// `peek_response_index` reports the response the next request will get without advancing,
+    /// and is clamped into range when the stub now has fewer responses than the cursor points at.
+    /// `reset` returns the cursor to the first response. Neither was asserted anywhere (both
+    /// survived as mutants in the weekly cargo-mutants run, #1345).
+    #[test]
+    fn peek_reports_the_next_response_without_advancing_and_reset_rewinds() {
+        let cycler = RuleCycler::new();
+        let once = |_: u32| None::<u32>;
+        assert_eq!(cycler.peek_response_index(3), 0);
+        assert_eq!(cycler.get_response_index_advance(3, once), 0);
+        assert_eq!(cycler.get_response_index_advance(3, once), 1);
+        assert_eq!(
+            cycler.peek_response_index(3),
+            2,
+            "peek sees the advanced cursor"
+        );
+        assert_eq!(
+            cycler.peek_response_index(3),
+            2,
+            "and peeking does not advance it"
+        );
+        assert_eq!(
+            cycler.peek_response_index(2),
+            1,
+            "a cursor past the last response is clamped to it"
+        );
+        assert_eq!(cycler.get_response_index_advance(3, once), 2);
+
+        assert_eq!(
+            cycler.get_response_index_advance(3, once),
+            0,
+            "wraps after the last"
+        );
+        assert_eq!(cycler.peek_response_index(3), 1);
+        cycler.reset();
+        assert_eq!(
+            cycler.peek_response_index(3),
+            0,
+            "reset rewinds to the first response"
+        );
+        assert_eq!(cycler.get_response_index_advance(3, once), 0);
+    }
+
     /// AC2 — the exact cycling the flaky `/retry` fixture asserts: two responses where the first
     /// repeats twice and the second once, i.e. index sequence 0,0,1 then wrap (503,503,200,...).
     #[test]

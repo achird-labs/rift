@@ -983,6 +983,36 @@ mod tests {
         }
     }
 
+    // A quoted name or a filter must end where it ends: the shorthand after it is still rewritten.
+    // The pass-through cases below cannot tell, since nothing follows the quote or filter, so a
+    // quote that never closes or a filter depth that never returns to zero left them all green
+    // (surviving mutants in the weekly cargo-mutants run, #1345).
+    #[test]
+    fn normalize_rewrites_after_a_quoted_name_or_filter_closes() {
+        let cases = [
+            // The quote closes, so the `.[` after it is outside it.
+            ("$['a'].b.[0]", "$['a'].b..[0]"),
+            // An escaped quote does not close the name; the one after it does. The escaped
+            // character itself is copied through.
+            ("$['it\\'s'].b.[0]", "$['it\\'s'].b..[0]"),
+            // A nested `[...]` inside a filter does not end the filter, and the filter's own `]`
+            // does.
+            ("$[?@.a[0] == 1].b.[0]", "$[?@.a[0] == 1].b..[0]"),
+            // A `]` inside a quoted string in a filter is not the filter's end.
+            ("$[?@.a[0] == ']'].b.[0]", "$[?@.a[0] == ']'].b..[0]"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(normalize_jsonpath(input), expected, "input {input:?}");
+        }
+        // And the converse: a `.[` after a nested `[...]` but still inside the filter is untouched.
+        let inside = "$[?@.a[0] == 1 && @.b.[0] == 2]";
+        assert!(
+            matches!(normalize_jsonpath(inside), Cow::Borrowed(_)),
+            "{inside:?} is one filter and must pass through, got {:?}",
+            normalize_jsonpath(inside)
+        );
+    }
+
     #[test]
     fn normalize_leaves_standard_and_quoted_selectors_alone() {
         for selector in [
