@@ -2,10 +2,55 @@
 
 use crate::types::{LintIssue, LintOptions, LintResult};
 use regex::Regex;
+// The predicate-generator keys the engine reads (issue #1327), from the crate it reads them from.
+use rift_types::PREDICATE_GENERATOR_KEYS;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::LazyLock;
+
+// ---------------------------------------------------------------------------------------------
+// The grammar lists this linter keeps by hand (issue #1342). Each is pinned to the generated
+// imposter schema (`sdk-conformance/schema/imposter.schema.json`) by `crate::grammar_tests`, so a
+// change to the engine's types fails here instead of drifting; the predicate operators,
+// parameters and generator keys are not kept at all — they come from `rift_types`, which the
+// engine reads them from.
+// ---------------------------------------------------------------------------------------------
+
+/// The fields E003 requires. The engine requires none of them (a `port` is auto-assigned,
+/// `protocol` and `stubs` default); this is the linter's own policy for a file meant to be loaded.
+pub(crate) const REQUIRED_FIELDS: [&str; 3] = ["port", "protocol", "stubs"];
+
+/// The protocols E004 recognizes. The engine serves the first two; `tcp` is recognized only to say
+/// it is not supported, rather than to call it a typo.
+pub(crate) const PROTOCOLS: [&str; 3] = ["http", "https", "tcp"];
+
+/// The operators whose value is a predicate (`not`) or a list of them (`and`, `or`), walked
+/// recursively.
+pub(crate) const NESTING_OPERATORS: [&str; 3] = ["and", "or", "not"];
+
+/// The response types a `_rift` block is kept on but never applied to (W017), in decode precedence.
+pub(crate) const UNAPPLIED_RIFT_SHAPES: [&str; 3] = ["proxy", "inject", "fault"];
+
+/// The response types other than `is`, in decode precedence, plus the `_rift`-only script response.
+pub(crate) const RESPONSE_SHAPES: [&str; 4] = ["proxy", "inject", "fault", "_rift"];
+
+/// `_rift` fields the engine stores and returns but never reads (I005): an embedder's extension does.
+pub(crate) const CARRIER_FIELDS: [&str; 2] = ["dataset", "sequencing"];
+
+/// The behaviors that rewrite the response body before it is served, so a binary body written
+/// as a placeholder can be correct (W015 / W004 stand down).
+pub(crate) const BODY_REWRITING_BEHAVIORS: [&str; 4] =
+    ["decorate", "copy", "lookup", "shellTransform"];
+
+/// The canonical proxy `mode` spellings.
+pub(crate) const PROXY_MODES: [&str; 3] = ["proxyOnce", "proxyAlways", "proxyTransparent"];
+
+/// The `using.method` values of a `copy`/`lookup` extraction.
+pub(crate) const EXTRACTION_METHODS: [&str; 3] = ["regex", "jsonpath", "xpath"];
+
+/// The boolean flags of a regex extraction's `options`.
+pub(crate) const REGEX_FLAGS: [&str; 2] = ["ignoreCase", "multiline"];
 
 // Fixed lint patterns (issue #560): compile once at first use rather than on every call. The TUI
 // stub editor lints on every keystroke, so these run far more often than a CLI lint pass suggests.
@@ -214,7 +259,7 @@ fn ignored_rift_shape(response: &Value) -> Option<&'static str> {
     if present("is") || !present("_rift") {
         return None;
     }
-    ["proxy", "inject", "fault"]
+    UNAPPLIED_RIFT_SHAPES
         .into_iter()
         .find(|shape| present(shape))
 }
@@ -332,9 +377,7 @@ fn ignored_behaviors(response: &Value) -> Option<(&'static str, &'static str)> {
     if present("is") {
         return None;
     }
-    let shape = ["proxy", "inject", "fault", "_rift"]
-        .into_iter()
-        .find(|shape| present(shape))?;
+    let shape = RESPONSE_SHAPES.into_iter().find(|shape| present(shape))?;
     if shape == "proxy" || shape == "inject" {
         return None;
     }
@@ -363,7 +406,7 @@ fn disclose_carrier_fields(file: &Path, imposter: &Value, result: &mut LintResul
     let Some(rift) = imposter.get("_rift") else {
         return;
     };
-    for key in ["dataset", "sequencing"] {
+    for key in CARRIER_FIELDS {
         if rift.get(key).is_some_and(|v| !v.is_null()) {
             result.add_issue(
                 LintIssue::info(
@@ -509,17 +552,18 @@ pub fn validate_imposter(
 /// A W-rule that fires on a correct file is worse than silence, so W015 stands down here, and so
 /// does W004 (a body that is JSON only once rendered, issue #1245).
 fn body_rewritten_before_decode(response: &Value) -> bool {
-    const REWRITING: [&str; 4] = ["decorate", "copy", "lookup", "shellTransform"];
     let templated = response
         .get("_rift")
         .and_then(|rift| rift.get("templated"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let behavior_rewrites = |block: &Value| match block {
-        Value::Object(map) => REWRITING.iter().any(|k| map.contains_key(*k)),
+        Value::Object(map) => BODY_REWRITING_BEHAVIORS
+            .iter()
+            .any(|k| map.contains_key(*k)),
         Value::Array(entries) => entries
             .iter()
-            .any(|e| REWRITING.iter().any(|k| e.get(*k).is_some())),
+            .any(|e| BODY_REWRITING_BEHAVIORS.iter().any(|k| e.get(*k).is_some())),
         _ => false,
     };
     templated
@@ -622,9 +666,9 @@ fn check_script_syntax(
 }
 
 /// The `_rift.fault.tcp` fault kinds Rift accepts, canonical names plus short aliases — mirrors
-/// `TcpFaultKind::parse` (rift-mock-core `imposter/fault_io.rs`). Kept in sync by hand because
-/// rift-lint does not depend on rift-mock-core.
-const TCP_FAULT_KINDS: &[&str] = &[
+/// `TcpFaultKind::SPELLINGS` (rift-mock-core `imposter/fault_io.rs`), and is pinned to the
+/// schema's enum of them by `crate::grammar_tests` since rift-lint does not depend on the engine.
+pub(crate) const TCP_FAULT_KINDS: &[&str] = &[
     "reset",
     "CONNECTION_RESET_BY_PEER",
     "empty",
@@ -846,9 +890,7 @@ fn validate_script_registry(file: &Path, registry: &Value, result: &mut LintResu
 
 /// Check that required fields are present.
 fn check_required_fields(file: &Path, imposter: &Value, result: &mut LintResult) {
-    let required = ["port", "protocol", "stubs"];
-
-    for field in required {
+    for field in REQUIRED_FIELDS {
         // `null` is missing to the engine too: `port` is `Option<u16>` (auto-assigned), and
         // `protocol`/`stubs` refuse it, since `#[serde(default)]` only covers an absent key.
         if imposter.get(field).is_none_or(Value::is_null) {
@@ -867,7 +909,7 @@ fn check_required_fields(file: &Path, imposter: &Value, result: &mut LintResult)
 /// Check that the protocol is valid.
 fn check_protocol(file: &Path, imposter: &Value, result: &mut LintResult) {
     if let Some(protocol) = imposter.get("protocol").and_then(|v| v.as_str()) {
-        if !["http", "https", "tcp"].contains(&protocol) {
+        if !PROTOCOLS.contains(&protocol) {
             result.add_issue(
                 LintIssue::error(
                     "E004",
@@ -1199,19 +1241,7 @@ pub fn validate_predicate(
     result: &mut LintResult,
     options: &LintOptions,
 ) {
-    let valid_operators = [
-        "equals",
-        "deepEquals",
-        "contains",
-        "startsWith",
-        "endsWith",
-        "matches",
-        "exists",
-        "not",
-        "or",
-        "and",
-        "inject",
-    ];
+    let valid_operators = rift_types::PREDICATE_OPERATORS;
 
     let Some(pred_obj) = predicate.as_object() else {
         result.add_issue(
@@ -1221,13 +1251,7 @@ pub fn validate_predicate(
         return;
     };
 
-    let modifier_keys: HashSet<&str> = HashSet::from([
-        "jsonpath",
-        "xpath",
-        "caseSensitive",
-        "keyCaseSensitive",
-        "except",
-    ]);
+    let modifier_keys: HashSet<&str> = HashSet::from(rift_types::PREDICATE_PARAMETERS);
     let operator_names: Vec<&str> = pred_obj
         .keys()
         .map(|k| k.as_str())
@@ -1292,7 +1316,7 @@ pub fn validate_predicate(
     }
 
     // Recursively validate nested predicates
-    for key in ["and", "or", "not"] {
+    for key in NESTING_OPERATORS {
         if let Some(nested) = predicate.get(key) {
             if key == "not" {
                 // `not` wraps a single predicate object — pass it directly
@@ -1577,7 +1601,8 @@ pub fn validate_response(
 
 /// The behaviors that are steps of the program the engine runs; mirrors `CANONICAL_ORDER` in
 /// rift-mock-core's `behaviors/types.rs` (issue #1198). `repeat` is not a step.
-const STEP_BEHAVIORS: [&str; 5] = ["wait", "lookup", "copy", "shellTransform", "decorate"];
+pub(crate) const STEP_BEHAVIORS: [&str; 5] =
+    ["wait", "lookup", "copy", "shellTransform", "decorate"];
 
 /// Validate the behaviors block the engine will actually read (issue #1099).
 ///
@@ -2049,18 +2074,6 @@ pub fn validate_headers(file: &Path, headers: &Value, location: &str, result: &m
     }
 }
 
-/// The predicate-generator keys the engine reads (issue #1327).
-const PREDICATE_GENERATOR_KEYS: [&str; 8] = [
-    "inject",
-    "matches",
-    "caseSensitive",
-    "predicateOperator",
-    "except",
-    "jsonpath",
-    "xpath",
-    "ignore",
-];
-
 /// W020 for a predicate-generator key the engine does not read, W021 for a `jsonpath`, `xpath` or
 /// `ignore` whose shape the engine cannot use (issue #1327). Both are warnings: the engine loads
 /// the imposter, and records with the key ignored.
@@ -2237,9 +2250,8 @@ pub fn validate_proxy_response(
         // The engine reads `mode` trimmed and case-insensitively, `""` as proxyOnce, and refuses
         // anything else at the config door (issue #1314) — so an unknown mode is an error here,
         // and a known one in another spelling only a nudge toward the canonical name.
-        let valid_modes = ["proxyOnce", "proxyAlways", "proxyTransparent"];
         let trimmed = mode.trim();
-        match valid_modes
+        match PROXY_MODES
             .iter()
             .find(|valid| valid.eq_ignore_ascii_case(trimmed))
         {
@@ -2265,7 +2277,7 @@ pub fn validate_proxy_response(
                 .with_location(format!("{location}.mode"))
                 .with_suggestion(format!(
                     "Use one of: {}, or omit `mode` for proxyOnce",
-                    valid_modes.join(", ")
+                    PROXY_MODES.join(", ")
                 )),
             ),
         }
@@ -2569,7 +2581,7 @@ fn extraction_problem(using: &Value) -> Option<&'static str> {
         return Some("`using` must be an object");
     };
     let method = obj.get("method").and_then(Value::as_str);
-    if !matches!(method, Some("regex" | "jsonpath" | "xpath")) {
+    if !method.is_some_and(|method| EXTRACTION_METHODS.contains(&method)) {
         return Some("`using.method` must be \"regex\", \"jsonpath\" or \"xpath\"");
     }
     if !obj.get("selector").is_some_and(Value::is_string) {
@@ -2579,7 +2591,7 @@ fn extraction_problem(using: &Value) -> Option<&'static str> {
         && let Some(options) = obj.get("options").filter(|o| !o.is_null())
     {
         let flags_ok = options.as_object().is_some_and(|o| {
-            ["ignoreCase", "multiline"]
+            REGEX_FLAGS
                 .iter()
                 .all(|flag| o.get(*flag).is_none_or(Value::is_boolean))
         });

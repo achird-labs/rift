@@ -13,6 +13,17 @@ record.
 
 ### Added
 
+- **The imposter grammar ships as a JSON Schema** (#1342). `sdk-conformance/schema/imposter.schema.json`
+  (draft 2020-12) is generated from the engine's own config types — the raw wire shapes, aliases
+  and spellings included — and packaged in `sdk-conformance-<version>.tar.gz`. Every object is
+  closed (`additionalProperties: false`) except the two provider maps an embedder reads, so an SDK
+  can validate what its DSL emits and learn which keys the engine never reads; `x-rift-*`
+  extensions carry the key lists a consumer would otherwise keep by hand. `rift-lint schema`
+  (builds with the `schema` feature) regenerates it, CI fails when the checked-in copy drifts, and
+  every corpus fixture and docs example validates against it. `rift-lint`'s predicate operator,
+  parameter and generator-key lists now come from `rift-types`, and its remaining hand lists are
+  tested against the schema.
+
 - **`copy` and `lookup` XPath selectors take Mountebank's `ns` namespace map** (#1326):
   `"using": {"method": "xpath", "selector": "//mb:name", "ns": {"mb": "http://example.com/mb"}}`
   now binds the prefix, as Mountebank does. Rift accepted `ns` and dropped it, so a prefixed

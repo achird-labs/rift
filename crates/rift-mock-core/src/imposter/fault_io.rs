@@ -45,16 +45,39 @@ pub enum TcpFaultKind {
 }
 
 impl TcpFaultKind {
+    /// Every spelling and the kind it names: each kind's canonical WireMock name and Rift's short
+    /// aliases. [`Self::parse`] reads this table and [`Self::SPELLINGS`] is its first column, so
+    /// there is one list, not two to keep in step (issue #1342).
+    const TABLE: [(&'static str, Self); 9] = [
+        ("reset", Self::Reset),
+        ("CONNECTION_RESET_BY_PEER", Self::Reset),
+        ("empty", Self::Empty),
+        ("EMPTY_RESPONSE", Self::Empty),
+        ("garbage", Self::RandomData),
+        ("random", Self::RandomData),
+        ("RANDOM_DATA_THEN_CLOSE", Self::RandomData),
+        ("malformed", Self::MalformedChunk),
+        ("MALFORMED_RESPONSE_CHUNK", Self::MalformedChunk),
+    ];
+
+    /// Every spelling [`Self::parse`] accepts, the list `rift-lint` and the JSON Schema enumerate.
+    pub const SPELLINGS: [&'static str; 9] = {
+        let mut spellings = [""; 9];
+        let mut i = 0;
+        while i < spellings.len() {
+            spellings[i] = Self::TABLE[i].0;
+            i += 1;
+        }
+        spellings
+    };
+
     /// Parse a `_rift.fault.tcp` string. Accepts the WireMock names and Rift's short aliases.
     #[must_use]
     pub(crate) fn parse(value: &str) -> Option<Self> {
-        match value {
-            "reset" | "CONNECTION_RESET_BY_PEER" => Some(Self::Reset),
-            "empty" | "EMPTY_RESPONSE" => Some(Self::Empty),
-            "garbage" | "random" | "RANDOM_DATA_THEN_CLOSE" => Some(Self::RandomData),
-            "malformed" | "MALFORMED_RESPONSE_CHUNK" => Some(Self::MalformedChunk),
-            _ => None,
-        }
+        Self::TABLE
+            .iter()
+            .find(|(spelling, _)| *spelling == value)
+            .map(|(_, kind)| *kind)
     }
 
     /// The canonical name for this fault — the WireMock-style name the docs present as canonical,
@@ -251,6 +274,25 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use http_body_util::Full;
+
+    /// The table behind `SPELLINGS` and `parse`: every spelling parses to the kind beside it, every
+    /// kind's canonical name is one of its spellings, and the lookup is case-sensitive.
+    #[test]
+    fn spellings_parse_to_their_kind() {
+        for (spelling, kind) in TcpFaultKind::TABLE {
+            assert_eq!(TcpFaultKind::parse(spelling), Some(kind), "{spelling}");
+            assert!(TcpFaultKind::SPELLINGS.contains(&spelling));
+            assert!(
+                TcpFaultKind::SPELLINGS.contains(&kind.canonical_name()),
+                "{kind:?}"
+            );
+        }
+        assert!(
+            TcpFaultKind::parse("RESET").is_none(),
+            "spellings are case-sensitive"
+        );
+        assert!(TcpFaultKind::parse("").is_none());
+    }
 
     #[test]
     fn parses_wiremock_names_and_aliases() {

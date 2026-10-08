@@ -31,6 +31,7 @@ static WAIT_SOLO_MAX_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Wait behavior - add latency before response
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum WaitBehavior {
     /// Fixed delay in milliseconds

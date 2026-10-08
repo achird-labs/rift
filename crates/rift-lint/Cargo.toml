@@ -26,6 +26,12 @@ serde_norway.workspace = true
 # Regex for pattern validation
 regex = "1"
 rift-ejs = { path = "../rift-ejs", version = "0.1.0" }
+# The predicate grammar's names — operators, parameters, generator keys — come from the crate the
+# engine reads them from (issue #1342), so the linter cannot drift from it.
+rift-types = { path = "../rift-types", version = "0.1.0" }
+# `rift-lint schema` (issue #1342): the engine crate generates the schema from its own types.
+# Optional and off by default: the linter binary must not carry the engine.
+rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-features = false, features = ["schema"], optional = true }
 
 # Structured error types
 thiserror.workspace = true
@@ -47,6 +53,10 @@ tempfile = "3"
 default = ["cli", "javascript"]
 cli = ["dep:clap"]
 javascript = ["dep:boa_engine"]
+# The `schema` subcommand, which emits the imposter JSON Schema (issue #1342). Needs the engine
+# crate, so it is off by default and off in the released binary; the generated file ships in
+# `sdk-conformance/schema/` instead.
+schema = ["dep:rift-mock-core"]
 
 [[bin]]
 name = "rift-lint"

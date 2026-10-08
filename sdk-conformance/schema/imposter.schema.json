@@ -1,0 +1,1828 @@
+{
+  "$defs": {
+    "ConditionalGet": {
+      "anyOf": [
+        {
+          "description": "`true` is `{\"etag\": true, \"lastModified\": \"load\"}`; `false` turns the feature off.",
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/ConditionalValidators"
+        }
+      ],
+      "description": "`_rift.conditional`: `true`/`false`, or the validators spelled out."
+    },
+    "ConditionalValidators": {
+      "additionalProperties": false,
+      "description": "The spelled-out form of [`ConditionalGet`]. Both fields keep their absence, so the admin API\nechoes what was declared rather than the defaults.",
+      "properties": {
+        "etag": {
+          "description": "Whether to send a strong `ETag` over the served bytes. Absent means `true`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "lastModified": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LastModified"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where `Last-Modified` comes from. Absent means [`LastModified::Load`]."
+        }
+      },
+      "type": "object"
+    },
+    "CopyBehavior": {
+      "additionalProperties": false,
+      "description": "Copy behavior - copy request fields into response",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/CopySource",
+          "description": "Request field to copy from"
+        },
+        "into": {
+          "description": "Response token to replace (e.g., \"${NAME}\")",
+          "type": "string"
+        },
+        "using": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "description": "Extraction method"
+        }
+      },
+      "required": [
+        "from",
+        "into",
+        "using"
+      ],
+      "type": "object"
+    },
+    "CopySource": {
+      "anyOf": [
+        {
+          "description": "Simple field: \"path\", \"body\", \"method\"",
+          "type": "string"
+        },
+        {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Nested field: {\"query\": \"name\"} or {\"headers\": \"Content-Type\"}",
+          "type": "object"
+        }
+      ],
+      "description": "Source of data to copy from request"
+    },
+    "CsvDataSource": {
+      "additionalProperties": false,
+      "description": "CSV data source configuration",
+      "properties": {
+        "delimiter": {
+          "default": ",",
+          "description": "Delimiter character (default: ',')",
+          "maxLength": 1,
+          "minLength": 1,
+          "type": "string"
+        },
+        "keyColumn": {
+          "description": "Column to use as lookup key",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path to CSV file",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "keyColumn"
+      ],
+      "type": "object"
+    },
+    "DataSource": {
+      "additionalProperties": false,
+      "description": "External data source configuration",
+      "properties": {
+        "csv": {
+          "$ref": "#/$defs/CsvDataSource",
+          "description": "CSV data source"
+        }
+      },
+      "required": [
+        "csv"
+      ],
+      "type": "object"
+    },
+    "DatasetBinding": {
+      "additionalProperties": false,
+      "description": "A `_rift.dataset` block: a [`LookupBehavior`] named by *dataset* instead of by file path.\n\n**Carried, never executed.** Nothing in this crate reads this type beyond serializing it back\nout, and a standalone Rift serves a response bearing one exactly as if it were absent. It\nexists because the path a `lookup` needs is node-local, so a clustered deployment cannot put\none in a config that replicates: `rift-cluster` resolves the name to a content-addressed file\non each node and rewrites this block into a real [`LookupBehavior`] at apply time. The engine\nthen runs the same unmodified lookup code it always has.\n\nKeeping the declarative form in the config — rather than only the compiled result — is what\nlets the cluster hand back the binding the operator actually wrote, and is why this type is\npart of the config schema rather than an internal detail of the cluster.",
+      "properties": {
+        "digest": {
+          "description": "The digest of the exact bytes this binding resolved to.\n\nWritten by the binder when it pins `version`, not by the author of the config. It is the\npin: two nodes compiling the same block reach the same file because they agree on this,\nnot because they independently re-resolve a name whose latest version may have moved.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "into": {
+          "description": "The token replaced in the response, e.g. `${row}`.",
+          "type": "string"
+        },
+        "key": {
+          "$ref": "#/$defs/LookupKey",
+          "description": "Where the lookup key comes from — the same extraction a [`LookupBehavior`] uses, so the\ncompiled form carries this across unchanged."
+        },
+        "keyColumn": {
+          "description": "The dataset column matched against the key. Distinct from a CSV path's `keyColumn` only in\nthat a dataset *declares* its key columns, so a binder can reject an unknown one up front.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The dataset's name, unique per tenant.",
+          "type": "string"
+        },
+        "version": {
+          "description": "Which version to bind. Absent means \"the latest at bind time\"; the binder is expected to\nresolve it to a concrete version and record that here, so a later upload cannot silently\nchange what a serving stub returns.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "key",
+        "keyColumn",
+        "into"
+      ],
+      "type": "object"
+    },
+    "DefaultResponse": {
+      "additionalProperties": false,
+      "description": "The response served when no stub matches (`defaultResponse`). Unlike an `is` response, `statusCode` is a number here.",
+      "properties": {
+        "_mode": {
+          "$ref": "#/$defs/ResponseMode",
+          "description": "Response mode: \"text\" (default) or \"binary\" (body is base64-encoded)"
+        },
+        "body": true,
+        "headers": {
+          "$ref": "#/$defs/MultiValueHeaders",
+          "default": {}
+        },
+        "statusCode": {
+          "default": 200,
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "DelayRange": {
+      "additionalProperties": false,
+      "description": "A stub-level latency range in milliseconds, rewritten into a `wait` on every response.",
+      "properties": {
+        "max": {
+          "$ref": "#/$defs/U64OrNumericString"
+        },
+        "min": {
+          "$ref": "#/$defs/U64OrNumericString"
+        }
+      },
+      "required": [
+        "min",
+        "max"
+      ],
+      "type": "object"
+    },
+    "ExtractionMethod": {
+      "description": "Method for extracting values from source",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Regular expression with capture groups",
+          "properties": {
+            "method": {
+              "const": "regex",
+              "type": "string"
+            },
+            "options": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RegexOptions"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "selector": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "selector"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "JSONPath expression",
+          "properties": {
+            "method": {
+              "const": "jsonpath",
+              "type": "string"
+            },
+            "selector": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "selector"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "XPath expression for XML, with Mountebank's optional `ns` prefix→URI map (issue #1326)",
+          "properties": {
+            "method": {
+              "const": "xpath",
+              "type": "string"
+            },
+            "ns": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Read leniently: before #1326 the key was ignored, so a stored config may carry any\nshape here and must still decode (rift-cluster replays stored bytes). Admission refuses\na malformed one.",
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "selector": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "selector"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "IsResponse": {
+      "additionalProperties": false,
+      "description": "A canned response.",
+      "properties": {
+        "_mode": {
+          "$ref": "#/$defs/ResponseMode",
+          "default": "text",
+          "description": "Response mode: \"text\" (default) or \"binary\" (body is base64-encoded)"
+        },
+        "body": true,
+        "headers": {
+          "$ref": "#/$defs/MultiValueHeaders",
+          "default": {}
+        },
+        "statusCode": {
+          "$ref": "#/$defs/StatusCode",
+          "default": 200
+        }
+      },
+      "type": "object"
+    },
+    "LastModified": {
+      "description": "`\"load\"` for the time the stub was loaded, or a fixed HTTP-date served verbatim.",
+      "type": "string"
+    },
+    "LookupBehavior": {
+      "additionalProperties": false,
+      "description": "Lookup behavior - query external data source",
+      "properties": {
+        "fromDataSource": {
+          "$ref": "#/$defs/DataSource",
+          "description": "Data source configuration"
+        },
+        "into": {
+          "description": "Token to replace in response (e.g., \"${RESULT}\")",
+          "type": "string"
+        },
+        "key": {
+          "$ref": "#/$defs/LookupKey",
+          "description": "Key extraction from request"
+        }
+      },
+      "required": [
+        "key",
+        "fromDataSource",
+        "into"
+      ],
+      "type": "object"
+    },
+    "LookupKey": {
+      "additionalProperties": false,
+      "description": "Key extraction configuration for lookup",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/CopySource",
+          "description": "Request field to extract key from"
+        },
+        "index": {
+          "description": "Which of the selector's matches keys the row, as in Mountebank (issue #1240): for a regex,\n`0` is the whole match and `n` the `n`th capture group; for JSONPath/XPath, the `n`th\nselected value. Absent keeps Rift's default, the first capture group (or the whole match\nwhen the pattern has none) and the first selected value.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "using": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "description": "Extraction method"
+        }
+      },
+      "required": [
+        "from",
+        "using"
+      ],
+      "type": "object"
+    },
+    "MultiValueHeaders": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          },
+          {
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean"
+              ]
+            },
+            "type": "array"
+          }
+        ]
+      },
+      "description": "Header names to one value or an array of values. A number or a boolean value is written as its text.",
+      "type": "object"
+    },
+    "PathRewrite": {
+      "additionalProperties": false,
+      "description": "Path rewrite configuration for proxy responses (Mountebank compatible)",
+      "properties": {
+        "from": {
+          "description": "Pattern to match in the path (string to replace)",
+          "type": "string"
+        },
+        "to": {
+          "description": "Replacement string",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "PemList": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "One PEM string or an array of them."
+    },
+    "Predicate": {
+      "additionalProperties": false,
+      "description": "A request predicate: exactly one operator, plus the matcher parameters it applies with. `jsonpath` and `xpath` are the two spellings of one selector, so at most one is given.",
+      "not": {
+        "required": [
+          "jsonpath",
+          "xpath"
+        ]
+      },
+      "oneOf": [
+        {
+          "required": [
+            "equals"
+          ]
+        },
+        {
+          "required": [
+            "deepEquals"
+          ]
+        },
+        {
+          "required": [
+            "contains"
+          ]
+        },
+        {
+          "required": [
+            "startsWith"
+          ]
+        },
+        {
+          "required": [
+            "endsWith"
+          ]
+        },
+        {
+          "required": [
+            "matches"
+          ]
+        },
+        {
+          "required": [
+            "exists"
+          ]
+        },
+        {
+          "required": [
+            "not"
+          ]
+        },
+        {
+          "required": [
+            "or"
+          ]
+        },
+        {
+          "required": [
+            "and"
+          ]
+        },
+        {
+          "required": [
+            "inject"
+          ]
+        }
+      ],
+      "properties": {
+        "and": {
+          "items": {
+            "$ref": "#/$defs/Predicate"
+          },
+          "type": "array"
+        },
+        "caseSensitive": {
+          "type": "boolean"
+        },
+        "contains": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "deepEquals": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "endsWith": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "equals": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "except": {
+          "type": "string"
+        },
+        "exists": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "inject": {
+          "type": "string"
+        },
+        "jsonpath": {
+          "additionalProperties": false,
+          "properties": {
+            "selector": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "selector"
+          ],
+          "type": "object"
+        },
+        "keyCaseSensitive": {
+          "type": "boolean"
+        },
+        "matches": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "not": {
+          "$ref": "#/$defs/Predicate"
+        },
+        "or": {
+          "items": {
+            "$ref": "#/$defs/Predicate"
+          },
+          "type": "array"
+        },
+        "startsWith": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "xpath": {
+          "additionalProperties": false,
+          "properties": {
+            "ns": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "selector": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "selector"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "ProxyResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "addDecorateBehavior": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "addWaitBehavior": {
+          "default": false,
+          "type": "boolean"
+        },
+        "injectHeaders": {
+          "$ref": "#/$defs/SingleValueHeaders",
+          "default": {}
+        },
+        "mode": {
+          "default": "",
+          "description": "The recording mode: `proxyOnce` (the default, also spelled `\"\"`), `proxyAlways` or `proxyTransparent`.",
+          "enum": [
+            "proxyOnce",
+            "proxyAlways",
+            "proxyTransparent",
+            ""
+          ],
+          "type": "string"
+        },
+        "pathRewrite": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PathRewrite"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Path rewrite configuration for transforming the request path before proxying"
+        },
+        "predicateGenerators": {
+          "default": [],
+          "description": "How a recorded response's predicates are generated from the request that was proxied (Mountebank's `predicateGenerators`).",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "caseSensitive": {
+                "type": "boolean"
+              },
+              "except": {
+                "type": "string"
+              },
+              "ignore": {
+                "type": "object"
+              },
+              "inject": {
+                "type": "string"
+              },
+              "jsonpath": {
+                "additionalProperties": false,
+                "properties": {
+                  "selector": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "selector"
+                ],
+                "type": "object"
+              },
+              "matches": {
+                "type": "object"
+              },
+              "predicateOperator": {
+                "type": "string"
+              },
+              "xpath": {
+                "additionalProperties": false,
+                "properties": {
+                  "ns": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "selector": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "selector"
+                ],
+                "type": "object"
+              }
+            },
+            "type": "object",
+            "x-rift-known-keys": [
+              "inject",
+              "matches",
+              "caseSensitive",
+              "predicateOperator",
+              "except",
+              "jsonpath",
+              "xpath",
+              "ignore"
+            ]
+          },
+          "type": "array"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "to"
+      ],
+      "type": "object"
+    },
+    "RegexOptions": {
+      "additionalProperties": false,
+      "description": "Regex matching options (Mountebank-compatible)",
+      "properties": {
+        "ignoreCase": {
+          "default": false,
+          "description": "Case-insensitive matching",
+          "type": "boolean"
+        },
+        "multiline": {
+          "default": false,
+          "description": "Multiline mode (`^`/`$` match line boundaries)",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ResponseBehaviors": {
+      "additionalProperties": false,
+      "description": "The behaviors run on a response, in canonical order (`x-rift-canonical-order`), plus `repeat`. A `null` value configures nothing and, in the array form, removes the earlier steps of that key.",
+      "properties": {
+        "copy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CopyBehavior"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/CopyBehavior"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Copy fields from request to response\nMountebank allows both single object and array format",
+          "x-rift-rewrites-body": true
+        },
+        "decorate": {
+          "description": "Decorate - Rhai script to post-process response (Mountebank-compatible)\nScript receives `request` and `response` variables and can modify response",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-rift-rewrites-body": true
+        },
+        "lookup": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LookupBehavior"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/LookupBehavior"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Lookup from external data source",
+          "x-rift-rewrites-body": true
+        },
+        "repeat": {
+          "description": "Repeat response N times before advancing to next",
+          "format": "uint32",
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "shellTransform": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Shell transform - external program(s) transform response.\nAccepts a single command string or an array of commands chained in sequence.\nEach program receives MB_REQUEST and MB_RESPONSE env vars; stdout becomes the next response.",
+          "x-rift-rewrites-body": true
+        },
+        "wait": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WaitBehavior"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Add latency before response"
+        }
+      },
+      "type": "object",
+      "x-rift-canonical-order": [
+        "wait",
+        "lookup",
+        "copy",
+        "shellTransform",
+        "decorate"
+      ]
+    },
+    "ResponseMode": {
+      "description": "Response mode for body handling (Mountebank compatible)",
+      "oneOf": [
+        {
+          "const": "text",
+          "description": "Body is UTF-8 text (default)",
+          "type": "string"
+        },
+        {
+          "const": "binary",
+          "description": "Body is base64-encoded binary data",
+          "type": "string"
+        }
+      ]
+    },
+    "RiftConfig": {
+      "additionalProperties": false,
+      "description": "Top-level Rift configuration block for imposters\nExtends Mountebank format with advanced features while maintaining backward compatibility",
+      "properties": {
+        "flowState": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiftFlowStateConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Flow state configuration (enables stateful scripting)"
+        },
+        "metrics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiftMetricsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Metrics configuration"
+        },
+        "proxy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiftProxyConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Proxy/upstream configuration"
+        },
+        "scriptEngine": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiftScriptEngineConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Global script engine configuration"
+        },
+        "scripts": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RiftScriptConfig"
+          },
+          "description": "Named script registry (issue #356): a response script can reference an entry here via\n`{ \"ref\": \"name\" }` instead of inlining `code`/`file`. Each entry is itself a `code:` or\n`file:` script — not `ref:` (no chains).",
+          "type": "object"
+        },
+        "sequencing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiftSequencingConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Response-sequencing configuration: **carried, never executed here.**\n\n[`ResponseSequencer`] lets an embedder replace the per-stub response cursor, but the trait\nis registered once per [`ImposterManager`] — so a backend that should apply to some\nimposters and not others, or that needs per-imposter options, has nowhere to read them\nfrom. This block is that surface. Nothing in this crate reads it beyond serializing it\nback out, and the built-in cycler behaves identically whether it is present or absent.\n\nWithout a declared field the block would be dropped on parse, since `_rift` has no\ncatch-all.\n\n[`ResponseSequencer`]: crate::behaviors::ResponseSequencer\n[`ImposterManager`]: crate::imposter::ImposterManager",
+          "x-rift-carrier": true
+        }
+      },
+      "type": "object"
+    },
+    "RiftConnectionPoolConfig": {
+      "additionalProperties": false,
+      "description": "Connection pool configuration",
+      "properties": {
+        "idleTimeoutSecs": {
+          "default": 90,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxIdlePerHost": {
+          "default": 100,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "RiftErrorFault": {
+      "additionalProperties": false,
+      "description": "Error fault configuration",
+      "properties": {
+        "body": {
+          "description": "Response body for error",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "$ref": "#/$defs/SingleValueHeaders",
+          "description": "Custom headers for error response"
+        },
+        "probability": {
+          "default": 1.0,
+          "description": "Probability of error injection (0.0 to 1.0)",
+          "format": "double",
+          "type": "number"
+        },
+        "status": {
+          "default": 503,
+          "description": "HTTP status code for error response",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "RiftFaultConfig": {
+      "additionalProperties": false,
+      "description": "Fault injection configuration for responses",
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiftErrorFault"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Error injection"
+        },
+        "latency": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiftLatencyFault"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Latency injection"
+        },
+        "tcp": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiftTcpFault"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "TCP-level fault"
+        }
+      },
+      "type": "object"
+    },
+    "RiftFlowStateConfig": {
+      "additionalProperties": true,
+      "description": "Flow state configuration for Rift extensions",
+      "properties": {
+        "backend": {
+          "default": "inmemory",
+          "description": "Backend type: \"inmemory\" (the only built-in)",
+          "type": "string"
+        },
+        "flowIdSource": {
+          "description": "Source for the correlation `flow_id`: `\"imposter_port\"` (default) or `\"header:<Name>\"`.\nFlattened directly under `flowState` (issue #266). Absent ⇒ `\"imposter_port\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ttlSeconds": {
+          "default": 300,
+          "description": "Default TTL for state entries in seconds",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "RiftLatencyFault": {
+      "additionalProperties": false,
+      "description": "Latency fault configuration",
+      "properties": {
+        "maxMs": {
+          "default": 0,
+          "description": "Maximum latency in milliseconds",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minMs": {
+          "default": 0,
+          "description": "Minimum latency in milliseconds",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ms": {
+          "description": "Fixed latency (alternative to min/max)",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "probability": {
+          "default": 1.0,
+          "description": "Probability of fault injection (0.0 to 1.0)",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "RiftMetricsConfig": {
+      "additionalProperties": false,
+      "description": "Metrics configuration for Rift extensions",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Enable metrics collection",
+          "type": "boolean"
+        },
+        "port": {
+          "default": 9090,
+          "description": "Metrics server port",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "RiftProxyConfig": {
+      "additionalProperties": false,
+      "description": "Proxy configuration for Rift extensions",
+      "properties": {
+        "connectionPool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiftConnectionPoolConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Connection pool settings"
+        },
+        "upstream": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiftUpstreamConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Upstream target configuration"
+        }
+      },
+      "type": "object"
+    },
+    "RiftResponseExtension": {
+      "additionalProperties": false,
+      "description": "Rift response extensions (added to stub responses)",
+      "properties": {
+        "conditional": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConditionalGet"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Declarative conditional GET (issue #1280): an `ETag` and a `Last-Modified` on the response,\nand a `304 Not Modified` to a request whose `If-None-Match` / `If-Modified-Since` matches\nthem. **`is` responses only**, and only for a `GET`/`HEAD` answered with a 2xx (see\n`crate::imposter::conditional`). Echoed exactly as written."
+        },
+        "dataset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatasetBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A dataset-named `lookup` (`_rift.dataset`): **carried, never executed here.**\n\nA `lookup` behavior needs a filesystem path, which is node-local and so cannot travel in a\nconfig that replicates. `rift-cluster` resolves the dataset on each node and rewrites this\ninto a real `behaviors.lookup` at apply time; standalone Rift serves a response carrying\none exactly as if it were absent. The field lives here so the declarative form survives a\nconfig round-trip — without it the block is dropped on parse and the binding cannot be\nstored at all. See [`crate::behaviors::DatasetBinding`].\n\nBoxed (issue #1206): this extension is embedded by value in the `Is` variant of\n`StubResponse`, which sizes every response, so the binding's 192 bytes were charged to\nevery response whether or not one was written.",
+          "x-rift-carrier": true
+        },
+        "fault": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiftFaultConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Fault injection configuration"
+        },
+        "script": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiftScriptConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Script-based response generation"
+        },
+        "stateOps": {
+          "description": "Declarative post-response flow-state writes (issue #969): run in order against the\nrequest's resolved flow id after the response is rendered, just before it is written (see\n`crate::extensions::state_ops`). **`is` responses only** — carried here because this block\nbelongs to an `is` response; on a `proxy`, `inject` or script-only response it is not run\n(`stub_analysis` warns). Absent or empty ⇒ nothing runs and the response is served exactly\nas before, prepared fast path included.",
+          "items": {
+            "$ref": "#/$defs/StateOp"
+          },
+          "type": "array"
+        },
+        "templated": {
+          "default": false,
+          "description": "Opt-in declarative response templating (issue #359): when `true`, `{{ function args |\nfilter }}` tokens in the response body and every header value are evaluated (see\n`crate::extensions::template_fn`). Off by default so recorded fixtures containing a\nliteral `{{` are served verbatim.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "RiftScriptConfig": {
+      "additionalProperties": false,
+      "description": "Script configuration for response generation.\n\nExactly one of `code`, `file`, or `ref` must be set (issue #356). This is enforced by the\nconfig-time script-resolution pass (`imposter::script_resolve`) rather than at deserialize\ntime, so a validation error can name the offending stub/registry entry instead of a generic\nserde failure — and so existing configs using only `code` keep deserializing unchanged.",
+      "properties": {
+        "code": {
+          "description": "Inline script code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "engine": {
+          "description": "Script engine: \"rhai\" or \"javascript\". When absent, the resolver infers it from\n`file`'s extension (`.rhai`/`.js`; a `.lua` file still resolves to the now-removed \"lua\"\nengine so it is rejected with a clear error rather than silently mis-run), falling back to\n\"rhai\" — the legacy default — when neither `engine` nor an inferable extension is present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "file": {
+          "description": "Path to a script file. Resolved relative to the config file's directory for\n`--configfile`/`--datadir` loads, or to `--scripts-dir` for admin-API-created imposters\n(a path that escapes `--scripts-dir` is rejected rather than read).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ref": {
+          "description": "Name of a `_rift.scripts` registry entry (see [`RiftConfig::scripts`]) to resolve this\nscript from. The referenced entry must itself use `code` or `file` — a `ref` chain is a\nvalidation error.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RiftScriptEngineConfig": {
+      "additionalProperties": false,
+      "description": "Global script engine configuration",
+      "properties": {
+        "defaultEngine": {
+          "default": "rhai",
+          "description": "Engine for a script that names none and has no `.rhai`/`.js`/`.lua` file extension:\n\"rhai\" or \"javascript\" (issue #1159). See [`ImposterConfig::default_script_engine`].",
+          "type": "string"
+        },
+        "timeoutMs": {
+          "default": 5000,
+          "description": "Script execution timeout in milliseconds",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "RiftSequencingConfig": {
+      "additionalProperties": true,
+      "description": "Per-imposter configuration for a provider-supplied response-cursor backend\n([`ResponseSequencer`]).\n\nDeliberately shaped like [`RiftFlowStateConfig`]: the same problem — an embedder plugging in a\nseam implementation with nowhere to put its configuration — already solved once for the\n[`FlowStore`] seam, so the answer is the same one rather than a second convention.\n\n[`ResponseSequencer`]: crate::behaviors::ResponseSequencer\n[`FlowStore`]: crate::extensions::flow_state::FlowStore",
+      "properties": {
+        "mode": {
+          "description": "Which cursor backend this imposter wants, interpreted by the registered\n[`ResponseSequencer`]. Absent ⇒ the embedder's own default; with no sequencer registered\nit means nothing at all.\n\n[`ResponseSequencer`]: crate::behaviors::ResponseSequencer",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RiftTcpFault": {
+      "anyOf": [
+        {
+          "enum": [
+            "reset",
+            "CONNECTION_RESET_BY_PEER",
+            "empty",
+            "EMPTY_RESPONSE",
+            "garbage",
+            "random",
+            "RANDOM_DATA_THEN_CLOSE",
+            "malformed",
+            "MALFORMED_RESPONSE_CHUNK"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "probability": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "type": {
+              "enum": [
+                "reset",
+                "CONNECTION_RESET_BY_PEER",
+                "empty",
+                "EMPTY_RESPONSE",
+                "garbage",
+                "random",
+                "RANDOM_DATA_THEN_CLOSE",
+                "malformed",
+                "MALFORMED_RESPONSE_CHUNK"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "probability",
+            "type"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "A transport fault: the bare kind string always fires; the object form fires with the given probability."
+    },
+    "RiftUpstreamConfig": {
+      "additionalProperties": false,
+      "description": "Upstream configuration for Rift proxy",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocol": {
+          "default": "http",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "port"
+      ],
+      "type": "object"
+    },
+    "SingleValueHeaders": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Header names to one string value each; a name given twice in different cases is refused.",
+      "type": "object"
+    },
+    "StateOp": {
+      "description": "One post-response state mutation. Serialized with `op` as the tag, camelCase, so it reads as\n`{ \"op\": \"set\", \"key\": \"...\", \"value\": \"...\" }` in a stub.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Set `key` to the rendered `value` template (`{{ }}` grammar plus `previousValue`).",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "op": {
+              "const": "set",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "key",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Add `by` (default 1) to an integer key, creating it at 0. Atomic where the backend is.",
+          "properties": {
+            "by": {
+              "default": 1,
+              "format": "int64",
+              "type": "integer"
+            },
+            "key": {
+              "type": "string"
+            },
+            "op": {
+              "const": "increment",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "key"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Delete one key.",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "op": {
+              "const": "delete",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "key"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Delete every key in the request's flow.",
+          "properties": {
+            "op": {
+              "const": "clearFlow",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StatusCode": {
+      "anyOf": [
+        {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "pattern": "^\\+?0*(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[0-9]{1,4})$",
+          "type": "string"
+        }
+      ],
+      "description": "An HTTP status code, as a number or a numeric string."
+    },
+    "Stub": {
+      "additionalProperties": false,
+      "description": "A stub: the predicates a request must match and the responses it then cycles through.",
+      "properties": {
+        "_verify": {
+          "default": null,
+          "description": "Engine-ignored verification annotation, preserved verbatim (issue #251)."
+        },
+        "delayRange": {
+          "description": "Stub-level latency range: `[{ \"min\": \"50\", \"max\": \"100\" }]`",
+          "items": {
+            "$ref": "#/$defs/DelayRange"
+          },
+          "type": "array"
+        },
+        "id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "newScenarioState": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "predicates": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Predicate"
+          },
+          "type": "array"
+        },
+        "recordedFrom": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requiredScenarioState": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "responses": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StubResponse"
+          },
+          "type": "array"
+        },
+        "routePattern": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rules": {
+          "default": [],
+          "description": "Alternative field name \"rules\" used instead of \"predicates\" in some recorded formats",
+          "items": {
+            "$ref": "#/$defs/Predicate"
+          },
+          "type": "array"
+        },
+        "scenarioName": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "space": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "StubResponse": {
+      "additionalProperties": false,
+      "description": "One response of a stub: an `is`, `proxy`, `inject` or `fault` response, a `_rift`-only script response, or the flat recorded form (`statusCode`/`headers`/`body` at the top level). The first of `is`, `proxy`, `inject`, `fault` present is the one read.",
+      "properties": {
+        "_behaviors": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseBehaviors"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Mountebank-style behaviors (with underscore prefix): an object, or absent/`null`."
+        },
+        "_mode": {
+          "$ref": "#/$defs/ResponseMode",
+          "default": "text"
+        },
+        "_rift": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiftResponseExtension"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Rift extensions for advanced features"
+        },
+        "behaviors": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseBehaviors"
+            },
+            {
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ResponseBehaviors"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Alternative behaviors field (without underscore, used by some tools): an object or an\narray of behavior objects, or absent/`null`."
+        },
+        "body": true,
+        "fault": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "$ref": "#/$defs/MultiValueHeaders",
+          "default": {}
+        },
+        "inject": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "is": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IsResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proxy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProxyResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repeat": {
+          "default": null,
+          "description": "Mountebank's canonical `repeat` (issue #1188): it lifts `_behaviors.repeat` to the response,\nso this is the form `mb save` writes. Merged into the behaviors block at parse, where it\nwins over a `repeat` inside the block, as it does in Mountebank. `null` is absent.",
+          "format": "uint32",
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "statusCode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StatusCode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Flat / recorded response form (issue #304): `statusCode`/`headers`/`body`/`_mode` at the\ntop level with no `is` wrapper (the shape emitted by recorded/migrated mocks). Mountebank\nrenders these exactly like `is: { … }`. `is` still takes precedence when both are present."
+        }
+      },
+      "type": "object",
+      "x-rift-response-variants": [
+        "is",
+        "proxy",
+        "inject",
+        "fault"
+      ]
+    },
+    "U64OrNumericString": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "pattern": "^\\+?[0-9]+$",
+          "type": "string"
+        }
+      ],
+      "description": "A non-negative integer, as a number or a numeric string."
+    },
+    "WaitBehavior": {
+      "anyOf": [
+        {
+          "description": "Fixed delay in milliseconds",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Random delay within range",
+          "properties": {
+            "max": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "min": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "JavaScript function that returns delay — the Mountebank-compatible spelling.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The same JavaScript function in Rift's object spelling (issue #608), as written by\n`docs/features/fault-injection.md`, the shipped examples, and the SDKs. Executes\nidentically to [`Self::Function`]; kept as a distinct variant only so a config\nround-trips to the spelling its author wrote. Not portable to Mountebank, which has no\nobject form — like [`Self::Range`], this is a documented Rift superset.",
+          "properties": {
+            "inject": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "inject"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Wait behavior - add latency before response"
+    }
+  },
+  "$id": "https://github.com/achird-labs/rift/sdk-conformance/schema/imposter.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An imposter: a mock server on one port, with its stubs and Rift extensions.",
+  "properties": {
+    "_rift": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RiftConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Rift extensions for advanced features (flow state, scripting, faults)"
+    },
+    "allowCORS": {
+      "description": "Allow CORS headers (Mountebank compatible). Written as Mountebank spells it, `allowCORS`;\n`allowCors` — what releases before #1341 wrote into replayable exports and `--datadir`\nfiles — still reads.",
+      "type": "boolean"
+    },
+    "allowCors": {
+      "description": "Alias of `allowCORS`, read the same way.",
+      "type": "boolean"
+    },
+    "ca": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PemList"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "PEM trust anchor(s) client certificates must chain to (Mountebank `ca`, issue #977).\nAccepts a single string or an array of them, as Mountebank does."
+    },
+    "cert": {
+      "description": "Inline PEM certificate for `protocol: \"https\"` (Mountebank-compatible). Paired with `key`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "defaultForward": {
+      "description": "Fallback upstream for unmatched requests (issue #196): when set and no stub matches,\nthe request is transparently forwarded to `defaultForward + path` (no recording).\nTakes precedence over `defaultResponse`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "defaultResponse": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DefaultResponse"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "enabled": {
+      "description": "Whether the imposter serves data-plane traffic. Toggled at runtime by\nPOST /imposters/:port/{enable,disable}; persisted so a restart with\n--datadir restores the operator's last decision instead of silently\nre-enabling a paused imposter. Serialized only when `false`, so configs\nfor the (universal) enabled case stay byte-identical.",
+      "type": "boolean"
+    },
+    "host": {
+      "description": "Host/IP address to bind the imposter to. Defaults to \"0.0.0.0\" (all interfaces).\nUse \"127.0.0.1\" or \"localhost\" for local-only access.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "key": {
+      "description": "Inline PEM private key for `protocol: \"https\"` (Mountebank-compatible). Paired with `cert`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mutualAuth": {
+      "description": "Request and **require** a client certificate (Mountebank `mutualAuth`, issue #977).\n\nStricter than Mountebank, deliberately: there `mutualAuth` only *requests* a certificate and\nnever rejects one — and its implementation gates `requestCert` on `rejectUnauthorized` too,\nso a bare `mutualAuth: true` is a no-op. For a mock whose job is to virtualize a server that\ndemands mutual auth, a client that presents nothing must fail the handshake.\n\nWithout `reject_unauthorized` the chain is not validated — any certificate the peer holds\nthe key for is accepted. `https` only; `true` on an `http` imposter is a creation error.",
+      "type": "boolean"
+    },
+    "name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "port": {
+      "description": "Port for the imposter. If not specified, an available port will be auto-assigned.",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "protocol": {
+      "default": "http",
+      "description": "The protocol the imposter serves.",
+      "enum": [
+        "http",
+        "https"
+      ],
+      "type": "string"
+    },
+    "recordMatches": {
+      "default": false,
+      "description": "Record which stub matched each request (Mountebank compatible)",
+      "type": "boolean"
+    },
+    "recordRequests": {
+      "default": false,
+      "type": "boolean"
+    },
+    "rejectUnauthorized": {
+      "description": "Validate the client certificate against `ca` (Mountebank `rejectUnauthorized`, issue #977).\n\nRequires `ca`. Mountebank falls back to Node's bundled public roots when `ca` is absent;\nvalidating a *client* certificate against public CAs is meaningless for a mock, so that\ncombination is a creation error here rather than a silent fallback.",
+      "type": "boolean"
+    },
+    "serviceInfo": {
+      "description": "Service info for documentation (optional metadata, stored as-is)"
+    },
+    "serviceName": {
+      "description": "Service name for documentation (optional metadata)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "service_info": {
+      "description": "Alias of `serviceInfo`, read the same way."
+    },
+    "service_name": {
+      "description": "Alias of `serviceName`, read the same way.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "strictBehaviors": {
+      "description": "Strict behavior mode (issue #375): when true, a requested response behavior that FAILS\n(decorate / shellTransform / binary base64 decode) returns a 500 — still carrying the #323\n`x-rift-<behavior>-error` header — instead of serving the fallback body. Default false keeps\nthe lenient contract (#269): the fallback body is served and only the header signals the\nfailure. Can also be forced process-wide via the `RIFT_STRICT_BEHAVIORS` env var.",
+      "type": "boolean"
+    },
+    "stubs": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Stub"
+      },
+      "type": "array"
+    }
+  },
+  "title": "Rift imposter",
+  "type": "object"
+}

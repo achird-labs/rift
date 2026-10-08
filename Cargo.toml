@@ -60,6 +60,11 @@ serde = { version = "1.0", features = ["derive"] }
 # `serde_json_parses_floats_correctly_rounded`. `arbitrary_precision` and `preserve_order` stay off.
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_norway = "0.9"
+# Issue #1342: the imposter JSON Schema. `schemars` generates it (optional in every crate that
+# derives it); `jsonschema` validates documents against it, in tests only — no resolvers, since the
+# schema is self-contained and the defaults would pull in reqwest.
+schemars = "1.2"
+jsonschema = { version = "0.58", default-features = false }
 
 # Scripting — pinned to =1.21.0 to match rift-mock-core's deliberate exact pin
 rhai = { version = "=1.21.0", features = ["sync", "serde"] }

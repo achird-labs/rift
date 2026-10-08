@@ -5,6 +5,7 @@
 //!
 //! Usage:
 //!   rift-lint <directory_or_file> [OPTIONS]
+//!   rift-lint schema [--out FILE]     (builds with the `schema` feature only)
 
 use clap::Parser;
 use rift_lint::{
@@ -79,10 +80,20 @@ fn palette() -> Palette {
     version,
     about = "Validate imposter configuration files for Rift compatibility"
 )]
+#[cfg_attr(
+    feature = "schema",
+    command(subcommand_negates_reqs = true, args_conflicts_with_subcommands = true)
+)]
 struct Args {
     /// Path to imposter file or directory containing imposter files
     #[arg(required = true)]
-    path: PathBuf,
+    path: Option<PathBuf>,
+
+    // Builds with the `schema` feature only (issue #1342): the released binary lints, and the
+    // generated schema ships in the SDK-conformance tarball instead.
+    #[cfg(feature = "schema")]
+    #[command(subcommand)]
+    command: Option<Command>,
 
     /// Fix issues automatically where possible
     #[arg(short, long)]
@@ -105,6 +116,35 @@ struct Args {
     no_parse: bool,
 }
 
+#[cfg(feature = "schema")]
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Print the imposter JSON Schema generated from the engine's config types
+    Schema {
+        /// Write the schema to this file instead of stdout
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
+}
+
+/// `rift-lint schema`: the generated schema, pretty-printed with a trailing newline — the exact
+/// bytes the checked-in `sdk-conformance/schema/imposter.schema.json` must hold.
+#[cfg(feature = "schema")]
+fn emit_schema(out: Option<&Path>) -> Result<(), String> {
+    let text = rift_lint::schema::imposter_schema_text().map_err(|e| e.to_string())?;
+    match out {
+        Some(path) => {
+            std::fs::write(path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))
+        }
+        None => {
+            use std::io::Write as _;
+            std::io::stdout()
+                .write_all(text.as_bytes())
+                .map_err(|e| format!("cannot write to stdout: {e}"))
+        }
+    }
+}
+
 /// Print to stdout in text mode, or stderr in json mode. In `-o json`, stdout is reserved
 /// exclusively for the final `print_results_json` payload — every other message is decoration.
 fn emit(json_mode: bool, msg: &str) {
@@ -117,6 +157,19 @@ fn emit(json_mode: bool, msg: &str) {
 
 fn main() {
     let args = Args::parse();
+    #[cfg(feature = "schema")]
+    if let Some(Command::Schema { out }) = &args.command {
+        if let Err(e) = emit_schema(out.as_deref()) {
+            eprintln!("rift-lint schema: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    let Some(path) = args.path.as_deref() else {
+        // clap requires `path` whenever no subcommand ran; only a subcommand can leave it unset.
+        eprintln!("rift-lint: a path to lint is required");
+        std::process::exit(2);
+    };
     let json_mode = args.output == "json";
     let _ = PALETTE.set(Palette::detect(json_mode));
     let Palette {
@@ -139,15 +192,12 @@ fn main() {
     };
 
     // Collect all imposter files
-    let files = collect_imposter_files(&args.path);
+    let files = collect_imposter_files(path);
 
     if files.is_empty() {
         emit(
             json_mode,
-            &format!(
-                "{yellow}Warning:{reset} No JSON or YAML files found in {:?}",
-                args.path
-            ),
+            &format!("{yellow}Warning:{reset} No JSON or YAML files found in {path:?}"),
         );
         // In json mode still emit a (zero) result so stdout is always valid JSON — a consumer
         // piping to `jq` shouldn't get empty input for the no-files case (issue #347).
@@ -157,7 +207,7 @@ fn main() {
         std::process::exit(0);
     }
 
-    eprintln!("{dim}Scanning:{reset} {cyan}{}{reset}", args.path.display());
+    eprintln!("{dim}Scanning:{reset} {cyan}{}{reset}", path.display());
     eprintln!(
         "{dim}Found:{reset}    {bold}{}{reset} imposter file(s)\n",
         files.len()

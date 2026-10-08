@@ -62,6 +62,13 @@ impl BehaviorProgram {
 
 /// Response behaviors that modify how responses are generated
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[cfg_attr(
+    feature = "schema",
+    derive(schemars::JsonSchema),
+    schemars(
+        description = "The behaviors run on a response, in canonical order (`x-rift-canonical-order`), plus `repeat`. A `null` value configures nothing and, in the array form, removes the earlier steps of that key."
+    )
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ResponseBehaviors {
     /// Add latency before response
@@ -70,6 +77,7 @@ pub struct ResponseBehaviors {
 
     /// Repeat response N times before advancing to next
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(range(max = 4_294_967_295_u64)))]
     pub repeat: Option<u32>,
 
     /// Copy fields from request to response
@@ -79,6 +87,13 @@ pub struct ResponseBehaviors {
         deserialize_with = "deserialize_copy_behaviors",
         skip_serializing_if = "Vec::is_empty"
     )]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(
+            with = "rift_types::schema::OneOrMany<CopyBehavior>",
+            extend("x-rift-rewrites-body" = true)
+        )
+    )]
     pub copy: Vec<CopyBehavior>,
 
     /// Lookup from external data source
@@ -86,6 +101,13 @@ pub struct ResponseBehaviors {
         default,
         deserialize_with = "deserialize_lookup_behaviors",
         skip_serializing_if = "Vec::is_empty"
+    )]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(
+            with = "rift_types::schema::OneOrMany<LookupBehavior>",
+            extend("x-rift-rewrites-body" = true)
+        )
     )]
     pub lookup: Vec<LookupBehavior>,
 
@@ -97,11 +119,19 @@ pub struct ResponseBehaviors {
         deserialize_with = "deserialize_shell_transforms",
         skip_serializing_if = "Vec::is_empty"
     )]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(
+            with = "rift_types::schema::OneOrMany<String>",
+            extend("x-rift-rewrites-body" = true)
+        )
+    )]
     pub shell_transform: Vec<String>,
 
     /// Decorate - Rhai script to post-process response (Mountebank-compatible)
     /// Script receives `request` and `response` variables and can modify response
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("x-rift-rewrites-body" = true)))]
     pub decorate: Option<String>,
 }
 

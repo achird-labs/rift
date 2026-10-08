@@ -14,8 +14,15 @@
 //! - A walk over the JSON for what `serde_ignored` cannot see: keys under a `#[serde(flatten)]`
 //!   (predicates), inside a tagged or untagged enum (`wait`, `using`, `_rift.fault.tcp`,
 //!   `_rift.conditional`, `stateOps`), or in a `Value` the engine reads by key
-//!   (`predicateGenerators`), and the response fields a higher-priority variant shadows. Each list
-//!   below names the code it mirrors; #1342 replaces them with schema-derived sets.
+//!   (`predicateGenerators`), and the response fields a higher-priority variant shadows. The
+//!   predicate and generator lists come from `rift-types`, where the engine reads them from; each
+//!   list this file still keeps names the code it mirrors and is pinned to the generated schema
+//!   (`the_hand_lists_here_match_the_schema`).
+//!
+//! Since #1342 the same inputs are also validated against `sdk-conformance/schema/imposter.schema.json`,
+//! the grammar generated from the engine's types. The two gates overlap on purpose: the schema is
+//! what a consumer validates against, so it must accept everything the engine reads here, and it
+//! closes every object, so it refuses an unread key the walk above would have to be taught.
 //!
 //! The docs blocks are also linted, so an example that teaches an error is caught too. A block that
 //! shows rejected input on purpose opts out with ```` ```json title="invalid" ```` or a
@@ -26,43 +33,11 @@ use std::path::{Path, PathBuf};
 use rift_http_proxy::front_door::RouteTable;
 use rift_mock_core::behaviors::{CANONICAL_ORDER, ResponseBehaviors};
 use rift_mock_core::imposter::ImposterConfig;
+use rift_types::{
+    PREDICATE_GENERATOR_KEYS as GENERATOR_KEYS, PREDICATE_OPERATORS as OPERATORS,
+    PREDICATE_PARAMETERS,
+};
 use serde_json::{Value, json};
-
-/// `PredicateOperation`'s variants (`rift-types/src/predicate.rs`).
-const OPERATORS: [&str; 11] = [
-    "equals",
-    "deepEquals",
-    "contains",
-    "startsWith",
-    "endsWith",
-    "matches",
-    "exists",
-    "not",
-    "or",
-    "and",
-    "inject",
-];
-
-/// `PredicateParameters`' fields (`rift-types/src/predicate.rs`).
-const PREDICATE_PARAMETERS: [&str; 5] = [
-    "caseSensitive",
-    "keyCaseSensitive",
-    "except",
-    "jsonpath",
-    "xpath",
-];
-
-/// `GENERATOR_KEYS` in `rift-mock-core/src/imposter/core/proxy.rs`.
-const GENERATOR_KEYS: [&str; 8] = [
-    "inject",
-    "matches",
-    "caseSensitive",
-    "predicateOperator",
-    "except",
-    "jsonpath",
-    "xpath",
-    "ignore",
-];
 
 /// The wrapper keys `parse_document` reads (`rift-http-proxy/src/config_loader.rs`).
 const WRAPPER_KEYS: [&str; 3] = ["imposters", "intercept", "routes"];
@@ -721,6 +696,192 @@ fn failures(examples: &[Example]) -> Vec<String> {
         }
     }
     failures
+}
+
+// ---------------------------------------------------------------------------------------------
+// The schema (issue #1342)
+// ---------------------------------------------------------------------------------------------
+
+const SCHEMA: &str = "sdk-conformance/schema/imposter.schema.json";
+
+fn schema() -> Value {
+    let path = repo_root().join(SCHEMA);
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{SCHEMA} is not JSON: {e}"))
+}
+
+fn schema_validator() -> jsonschema::Validator {
+    jsonschema::validator_for(&schema()).expect("the checked-in schema compiles")
+}
+
+/// `value` without the keys [`ALLOWED`] excuses: the walk above reports and excuses them, but the
+/// schema refuses them outright, so they are dropped before validation for the same reasons.
+fn strip_allowed(value: &mut Value, path: &str) {
+    match value {
+        Value::Object(object) => {
+            object.retain(|key, _| !allowed(&join(path, key)));
+            for (key, child) in object.iter_mut() {
+                strip_allowed(child, &join(path, key));
+            }
+        }
+        Value::Array(items) => {
+            for (i, item) in items.iter_mut().enumerate() {
+                strip_allowed(item, &join(path, &i.to_string()));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The imposters a document holds — several under a wrapper's `imposters`, else the document
+/// itself — each stripped of the keys [`ALLOWED`] excuses.
+fn imposters_of(document: &Value) -> Vec<Value> {
+    let imposters = match document.get("imposters").and_then(Value::as_array) {
+        Some(imposters) => imposters.clone(),
+        None => vec![document.clone()],
+    };
+    imposters
+        .into_iter()
+        .map(|mut imposter| {
+            strip_allowed(&mut imposter, "");
+            imposter
+        })
+        .collect()
+}
+
+/// Every schema violation across `examples`, one line each: origin, instance path, message.
+fn schema_failures(examples: &[Example]) -> Vec<String> {
+    let validator = schema_validator();
+    let mut failures = Vec::new();
+    for example in examples {
+        for (i, imposter) in imposters_of(&example.document).iter().enumerate() {
+            failures.extend(validator.iter_errors(imposter).map(|error| {
+                format!(
+                    "{}: imposter {i} at {}: {error}",
+                    example.origin,
+                    error.instance_path()
+                )
+            }));
+        }
+    }
+    failures
+}
+
+#[test]
+fn corpus_fixtures_validate_against_the_schema() {
+    let examples = corpus_examples();
+    assert!(
+        examples.len() >= 15,
+        "expected the full corpus, found {}",
+        examples.len()
+    );
+    let failures = schema_failures(&examples);
+    assert!(
+        failures.is_empty(),
+        "corpus fixtures do not validate against {SCHEMA} — fix the fixture, or the type the \
+         schema is generated from:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn docs_examples_validate_against_the_schema() {
+    let examples = docs_examples();
+    assert!(
+        examples.len() >= 150,
+        "expected the docs examples, found {}",
+        examples.len()
+    );
+    let failures = schema_failures(&examples);
+    assert!(
+        failures.is_empty(),
+        "docs examples do not validate against {SCHEMA} — fix the example, mark a deliberately \
+         invalid one `<!-- rift-lint: skip -->`, or fix the type the schema is generated from:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// The schema refuses what this gate reports, at the same path: an unread key is a validation
+/// error naming it, and an allowed one is stripped rather than refused.
+#[test]
+fn the_schema_refuses_an_unread_key_and_excuses_an_allowed_one() {
+    let misspelled = json!({ "protocol": "http", "stubs": [{
+        "name": "excused",
+        "predicates": [{ "equals": { "path": "/x" }, "casesensitive": true }],
+        "responses": [{ "is": { "statusCode": 200 }, "_behaviors": { "waitt": 5 } }]
+    }] });
+    let failures = schema_failures(&[Example {
+        origin: "inline".to_owned(),
+        document: misspelled,
+    }]);
+    assert_eq!(failures.len(), 2, "{failures:?}");
+    assert!(
+        failures[0].contains("/stubs/0/predicates/0"),
+        "{}",
+        failures[0]
+    );
+    assert!(failures[0].contains("casesensitive"), "{}", failures[0]);
+    assert!(
+        failures[1].contains("/stubs/0/responses/0/_behaviors"),
+        "{}",
+        failures[1]
+    );
+    assert!(failures[1].contains("waitt"), "{}", failures[1]);
+    assert!(!failures.iter().any(|f| f.contains("name")), "{failures:?}");
+}
+
+/// Each list this file keeps by hand equals the set the generated schema carries for it.
+#[test]
+fn the_hand_lists_here_match_the_schema() {
+    let schema = schema();
+    let defs = &schema["$defs"];
+    let keys = |object: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = object["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("no properties in {object}"))
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    };
+    let sorted = |list: &[&str]| -> Vec<String> {
+        let mut list: Vec<String> = list.iter().map(|s| (*s).to_owned()).collect();
+        list.sort();
+        list
+    };
+    assert_eq!(keys(&defs["RiftFlowStateConfig"]), sorted(&FLOW_STATE_KEYS));
+    assert_eq!(
+        defs["StubResponse"]["x-rift-response-variants"],
+        json!(RESPONSE_VARIANTS)
+    );
+    // The flat form mirrors an `is` response field for field.
+    assert_eq!(keys(&defs["IsResponse"]), sorted(&FLAT_RESPONSE_KEYS));
+    assert_eq!(
+        keys(&defs["RiftResponseExtension"]),
+        sorted(&RIFT_RESPONSE_KEYS)
+    );
+    assert_eq!(
+        defs["ResponseBehaviors"]["x-rift-canonical-order"],
+        json!(CANONICAL_ORDER)
+    );
+    let generator = &defs["ProxyResponse"]["properties"]["predicateGenerators"]["items"];
+    assert_eq!(generator["x-rift-known-keys"], json!(GENERATOR_KEYS));
+    // Predicates: the operators are the `oneOf` branches, the parameters the other properties.
+    let mut operators: Vec<String> = defs["Predicate"]["oneOf"]
+        .as_array()
+        .expect("oneOf")
+        .iter()
+        .map(|branch| branch["required"][0].as_str().expect("required").to_owned())
+        .collect();
+    operators.sort();
+    assert_eq!(operators, sorted(&OPERATORS));
+    let parameters: Vec<String> = keys(&defs["Predicate"])
+        .into_iter()
+        .filter(|key| !operators.contains(key))
+        .collect();
+    assert_eq!(parameters, sorted(&PREDICATE_PARAMETERS));
 }
 
 // ---------------------------------------------------------------------------------------------

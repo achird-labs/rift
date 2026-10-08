@@ -48,6 +48,9 @@ pub use types::{
     TriedWhy, admission_check, admission_check_stub, deserialize_replayed,
 };
 
+#[cfg(feature = "schema")]
+pub(crate) use types::RESPONSE_VARIANT_KEYS;
+
 // Re-export script `file:`/`ref:` resolution (issue #356)
 pub use script_resolve::{
     ScriptBaseDir, ScriptResolveError, resolve_scripts, resolve_stub_scripts,

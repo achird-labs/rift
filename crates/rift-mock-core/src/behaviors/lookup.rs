@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 /// Lookup behavior - query external data source
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LookupBehavior {
     /// Key extraction from request
     pub key: LookupKey,
@@ -26,6 +27,7 @@ pub struct LookupBehavior {
 
 /// Key extraction configuration for lookup
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LookupKey {
     /// Request field to extract key from
     pub from: CopySource,
@@ -58,6 +60,7 @@ impl LookupKey {
 
 /// External data source configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DataSource {
     /// CSV data source
     pub csv: CsvDataSource,
@@ -65,6 +68,7 @@ pub struct DataSource {
 
 /// CSV data source configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CsvDataSource {
     /// Path to CSV file
     pub path: String,
@@ -93,6 +97,7 @@ fn default_delimiter() -> char {
 /// lets the cluster hand back the binding the operator actually wrote, and is why this type is
 /// part of the config schema rather than an internal detail of the cluster.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DatasetBinding {
     /// The dataset's name, unique per tenant.
     pub name: String,

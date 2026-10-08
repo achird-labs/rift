@@ -20,7 +20,15 @@
 //! ```
 
 mod duplicate_keys;
+#[cfg(test)]
+mod grammar_tests;
+
+/// The generated imposter schema, relative to this crate (issue #1342); the tests read it.
+#[cfg(test)]
+pub(crate) const CHECKED_IN_SCHEMA: &str = "../../sdk-conformance/schema/imposter.schema.json";
 mod number_fidelity;
+#[cfg(feature = "schema")]
+pub mod schema;
 mod types;
 mod validator;
 

@@ -53,6 +53,9 @@ serde_json.workspace = true
 
 # Shared workspace types
 rift-types = { path = "../rift-types", version = "0.1.0" }
+# Issue #1342: `schema::imposter_schema()`, the imposter grammar as a JSON Schema. Optional: only
+# `rift-lint schema` and the drift test need it.
+schemars = { workspace = true, optional = true }
 
 # Scripting engines
 rhai.workspace = true
@@ -111,6 +114,8 @@ papaya = "0.2.4"
 
 [dev-dependencies]
 tempfile = "3.8"
+# The schema module's tests validate literal documents against the generated schema (issue #1342).
+jsonschema.workspace = true
 serde_norway.workspace = true
 # Renders the shipped templates exactly as the config loader does (tests/shipped_templates_load.rs).
 rift-ejs = { path = "../rift-ejs", version = "0.1.0" }
@@ -144,3 +149,5 @@ javascript = ["boa_engine"]
 quamina-matching = ["dep:quamina"]
 # Deliberately failing flow-store backend for backend-outage tests (issue #318)
 test-backend = []
+# The imposter JSON Schema generated from the config types (issue #1342).
+schema = ["dep:schemars", "rift-types/schema"]

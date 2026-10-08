@@ -15,3 +15,14 @@ workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+# Issue #1342: the imposter JSON Schema is generated from these types. Optional so the default
+# build of every dependent stays as light as before.
+schemars = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The schema carriers' tests validate literal shapes against them (issue #1342).
+jsonschema.workspace = true
+
+[features]
+# `JsonSchema` on the wire types, plus the hand-written `Predicate` schema (issue #1342).
+schema = ["dep:schemars"]

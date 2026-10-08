@@ -458,8 +458,9 @@ jobs:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
-      # Publish in dependency order: rift-ejs -> rift-lint, rift-types -> rift-mock-core ->
-      # rift-http-proxy (which also needs rift-ejs). Failures are LOUD (issue #474): the old `|| echo` masked a broken
+      # Publish in dependency order: rift-ejs, rift-types -> rift-mock-core -> rift-lint ->
+      # rift-http-proxy. rift-lint depends on rift-types, and (optionally, for `rift-lint schema`,
+      # issue #1342) on rift-mock-core — an optional dependency must be on the index too. Failures are LOUD (issue #474): the old `|| echo` masked a broken
       # rift-http-proxy publish so releases went green while the crate stayed frozen at 0.4.0.
       - name: Publish to crates.io (in dependency order)
         env:
@@ -506,11 +507,11 @@ jobs:
           # `rift-store-redis` (removed in 0.22.0) is no longer published; its old versions stay on
           # crates.io.
           # rift-ejs was extracted from rift-http-proxy in #1108; rift-lint and rift-http-proxy both
-          # depend on it, so it goes first.
+          # depend on it, so it goes first. rift-lint goes after rift-mock-core since #1342.
           publish_crate rift-ejs
-          publish_crate rift-lint
           publish_crate rift-types
           publish_crate rift-mock-core
+          publish_crate rift-lint
           publish_crate rift-http-proxy
 
   # =============================================================================

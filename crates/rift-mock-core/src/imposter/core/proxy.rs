@@ -5,6 +5,10 @@
 use super::*;
 use crate::imposter::behavior_pipeline::{BehaviorOutcome, BehaviorRun, ServedParts};
 use crate::recording::{ClaimToken, ProxyStoreError, StubPlacement, StubPublication};
+// The predicate-generator keys this engine reads (issue #1327). Any other key is accepted and
+// reported as unread, never refused: Mountebank configs carry keys Rift may not implement yet.
+// Shared with `rift-lint` and the JSON Schema through `rift-types` (issue #1342).
+use rift_types::PREDICATE_GENERATOR_KEYS as GENERATOR_KEYS;
 use std::hash::BuildHasher;
 
 /// Parts read from a successful upstream proxy response, before recording:
@@ -183,19 +187,6 @@ async fn transform_upstream<SH: BuildHasher>(
         Transformed::Applied(parts.status, headers, body)
     }
 }
-
-/// The predicate-generator keys this engine reads (issue #1327). Any other key is accepted and
-/// reported as unread, never refused: Mountebank configs carry keys Rift may not implement yet.
-const GENERATOR_KEYS: [&str; 8] = [
-    "inject",
-    "matches",
-    "caseSensitive",
-    "predicateOperator",
-    "except",
-    "jsonpath",
-    "xpath",
-    "ignore",
-];
 
 /// The keys of a predicate generator this engine does not read, sorted.
 pub(crate) fn unread_generator_keys(generator: &serde_json::Value) -> Vec<String> {

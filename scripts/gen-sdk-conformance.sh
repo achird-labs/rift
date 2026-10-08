@@ -3,8 +3,9 @@
 # Package sdk-conformance-<version>.tar.gz (issue #460): the vendored SDK-conformance corpus that
 # every official Rift SDK's CI replays over embedded and remote transports. The tarball unpacks to a
 # single versioned root `sdk-conformance-<version>/` containing README.md, manifest.json (with the
-# real engineVersion stamped in — the checked-in copy carries a `0.0.0-dev` placeholder), and the
-# corpus/ tree. A `.sha256` sidecar is emitted alongside so consumers can verify the download.
+# real engineVersion stamped in — the checked-in copy carries a `0.0.0-dev` placeholder), the
+# corpus/ tree, and schema/imposter.schema.json — the imposter grammar generated from the engine's
+# types (issue #1342). A `.sha256` sidecar is emitted alongside so consumers can verify the download.
 #
 # The corpus itself is engine-canonical and is proven to serve + verify on this commit by
 # `crates/rift-http-proxy/tests/corpus_replay.rs`; this script only packages it.
@@ -45,6 +46,7 @@ package() {
   [ -d "$SRC_DIR" ] || fail "corpus source not found: $SRC_DIR"
   [ -f "$SRC_DIR/manifest.json" ] || fail "manifest.json missing under $SRC_DIR"
   [ -d "$SRC_DIR/corpus/imposters" ] || fail "corpus/imposters missing under $SRC_DIR"
+  [ -f "$SRC_DIR/schema/imposter.schema.json" ] || fail "schema/imposter.schema.json missing under $SRC_DIR"
   command -v jq >/dev/null 2>&1 || fail "jq is required"
 
   # Absolutize the output path before we cd around.
@@ -58,6 +60,7 @@ package() {
 
   cp "$SRC_DIR/README.md" "$root/"
   cp -R "$SRC_DIR/corpus" "$root/"
+  cp -R "$SRC_DIR/schema" "$root/"
   # Stamp the real engine version into the packaged manifest (checked-in copy is a placeholder).
   jq --arg v "$version" '.engineVersion = $v' "$SRC_DIR/manifest.json" > "$root/manifest.json"
 
@@ -83,6 +86,9 @@ self_test() {
   [ -f "$extracted/README.md" ] || fail "README.md missing from tarball"
   [ -f "$extracted/manifest.json" ] || fail "manifest.json missing from tarball"
   [ -d "$extracted/corpus/imposters" ] || fail "corpus/imposters missing from tarball"
+  [ -f "$extracted/schema/imposter.schema.json" ] || fail "schema/imposter.schema.json missing from tarball"
+  jq -e '."$id" and ."$defs".Stub' "$extracted/schema/imposter.schema.json" >/dev/null \
+    || fail "packaged schema is not the imposter schema"
 
   local stamped
   stamped="$(jq -r '.engineVersion' "$extracted/manifest.json")"
@@ -96,7 +102,7 @@ self_test() {
   listed="$(jq '.fixtures | length' "$extracted/manifest.json")"
   [ "$listed" = "$pkg" ] || fail "manifest lists $listed fixtures but $pkg are packaged"
 
-  echo "[ok] self-test passed ($pkg fixtures, version stamped, checksum written)"
+  echo "[ok] self-test passed ($pkg fixtures, schema packaged, version stamped, checksum written)"
 }
 
 main() {

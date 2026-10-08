@@ -33,6 +33,48 @@ pub enum PredicateOperation {
     Inject(String),
 }
 
+/// The wire names of [`PredicateOperation`]'s variants, one per variant, in declaration order.
+///
+/// The grammar's single list of operators (issue #1342): the JSON Schema, `rift-lint` and the
+/// unread-key gate read it from here. Pinned to the enum by `operators_name_every_variant`.
+pub const PREDICATE_OPERATORS: [&str; 11] = [
+    "equals",
+    "deepEquals",
+    "contains",
+    "startsWith",
+    "endsWith",
+    "matches",
+    "exists",
+    "not",
+    "or",
+    "and",
+    "inject",
+];
+
+/// The wire names of [`PredicateParameters`]' fields, the selector's two spellings included.
+/// Pinned to the struct by `parameters_name_every_field`.
+pub const PREDICATE_PARAMETERS: [&str; 5] = [
+    "caseSensitive",
+    "keyCaseSensitive",
+    "except",
+    "jsonpath",
+    "xpath",
+];
+
+/// The keys of a proxy `predicateGenerators` entry the engine reads (issue #1327). Any other key
+/// is accepted and reported as unread, never refused: Mountebank configs carry keys Rift may not
+/// implement yet. Lives here so the recorder, `rift-lint` and the schema share one list (#1342).
+pub const PREDICATE_GENERATOR_KEYS: [&str; 8] = [
+    "inject",
+    "matches",
+    "caseSensitive",
+    "predicateOperator",
+    "except",
+    "jsonpath",
+    "xpath",
+    "ignore",
+];
+
 /// Matcher parameters shared across operations (case sensitivity, selectors, etc.).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,10 +103,212 @@ pub enum PredicateSelector {
     },
 }
 
+/// The JSON Schema of [`Predicate`], hand-written (issue #1342): its three flattened fields
+/// defeat derivation, and the shape the engine reads — exactly one operator beside the parameters —
+/// is a `oneOf` over [`PREDICATE_OPERATORS`] that a derive could not express.
+#[cfg(feature = "schema")]
+mod schema {
+    use super::{PREDICATE_OPERATORS, PREDICATE_PARAMETERS, Predicate};
+    use crate::schema::{jsonpath_selector, xpath_selector};
+    use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+    use serde_json::{Map, Value, json};
+    use std::borrow::Cow;
+
+    impl JsonSchema for Predicate {
+        fn schema_name() -> Cow<'static, str> {
+            "Predicate".into()
+        }
+
+        fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+            let predicate = generator.subschema_for::<Self>().to_value();
+            let fields = json!({"type": "object", "additionalProperties": true});
+            let mut properties = Map::new();
+            // Every name is matched explicitly; a name added to the list without a shape here
+            // gets `true`, which `every_predicate_property_has_a_deliberate_shape` refuses.
+            for operator in PREDICATE_OPERATORS {
+                let schema = match operator {
+                    "equals" | "deepEquals" | "contains" | "startsWith" | "endsWith"
+                    | "matches" | "exists" => fields.clone(),
+                    "not" => predicate.clone(),
+                    "and" | "or" => json!({"type": "array", "items": predicate}),
+                    "inject" => json!({"type": "string"}),
+                    _ => Value::Bool(true),
+                };
+                properties.insert(operator.to_owned(), schema);
+            }
+            for parameter in PREDICATE_PARAMETERS {
+                let schema = match parameter {
+                    "caseSensitive" | "keyCaseSensitive" => json!({"type": "boolean"}),
+                    "except" => json!({"type": "string"}),
+                    "jsonpath" => jsonpath_selector(),
+                    "xpath" => xpath_selector(),
+                    _ => Value::Bool(true),
+                };
+                properties.insert(parameter.to_owned(), schema);
+            }
+            let one_operator: Vec<Value> = PREDICATE_OPERATORS
+                .iter()
+                .map(|operator| json!({"required": [operator]}))
+                .collect();
+            json_schema!({
+                "type": "object",
+                "description": "A request predicate: exactly one operator, plus the matcher \
+                                parameters it applies with. `jsonpath` and `xpath` are the two \
+                                spellings of one selector, so at most one is given.",
+                "properties": properties,
+                "oneOf": one_operator,
+                "not": {"required": ["jsonpath", "xpath"]},
+                "additionalProperties": false
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Every variant of `PredicateOperation` is named in `PREDICATE_OPERATORS`, under the key
+    /// serde writes for it — so the list is pinned to the enum, not to anyone's memory of it.
+    /// The wildcard-free `match` makes a twelfth variant a compile error here.
+    #[test]
+    fn operators_name_every_variant() {
+        let fields = HashMap::from([("path".to_owned(), json!("/x"))]);
+        let leaf = Predicate {
+            parameters: PredicateParameters::default(),
+            operation: PredicateOperation::Equals(fields.clone()),
+        };
+        match &leaf.operation {
+            PredicateOperation::Equals(_)
+            | PredicateOperation::DeepEquals(_)
+            | PredicateOperation::Contains(_)
+            | PredicateOperation::StartsWith(_)
+            | PredicateOperation::EndsWith(_)
+            | PredicateOperation::Matches(_)
+            | PredicateOperation::Exists(_)
+            | PredicateOperation::Not(_)
+            | PredicateOperation::Or(_)
+            | PredicateOperation::And(_)
+            | PredicateOperation::Inject(_) => {}
+        }
+        let variants = [
+            PredicateOperation::Equals(fields.clone()),
+            PredicateOperation::DeepEquals(fields.clone()),
+            PredicateOperation::Contains(fields.clone()),
+            PredicateOperation::StartsWith(fields.clone()),
+            PredicateOperation::EndsWith(fields.clone()),
+            PredicateOperation::Matches(fields.clone()),
+            PredicateOperation::Exists(fields),
+            PredicateOperation::Not(Box::new(leaf.clone())),
+            PredicateOperation::Or(vec![leaf.clone()]),
+            PredicateOperation::And(vec![leaf]),
+            PredicateOperation::Inject("function () {}".to_owned()),
+        ];
+        let written: Vec<String> = variants
+            .iter()
+            .map(|operation| {
+                let value = serde_json::to_value(operation).unwrap();
+                let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+                assert_eq!(keys.len(), 1, "{value}");
+                keys.remove(0)
+            })
+            .collect();
+        assert_eq!(written, PREDICATE_OPERATORS);
+    }
+
+    /// Every field of `PredicateParameters` — and both selector spellings — is named in
+    /// `PREDICATE_PARAMETERS`, under the key serde writes for it. The `..`-free destructuring
+    /// makes a new field a compile error here.
+    #[test]
+    fn parameters_name_every_field() {
+        let with = |selector| PredicateParameters {
+            case_sensitive: Some(true),
+            key_case_sensitive: Some(true),
+            except: "^x".to_owned(),
+            selector: Some(selector),
+        };
+        let PredicateParameters {
+            case_sensitive: _,
+            key_case_sensitive: _,
+            except: _,
+            selector: _,
+        } = PredicateParameters::default();
+        match (PredicateSelector::JsonPath {
+            selector: String::new(),
+        }) {
+            PredicateSelector::XPath { .. } | PredicateSelector::JsonPath { .. } => {}
+        }
+        let mut written: Vec<String> = Vec::new();
+        for parameters in [
+            with(PredicateSelector::JsonPath {
+                selector: "$.a".to_owned(),
+            }),
+            with(PredicateSelector::XPath {
+                selector: "//a".to_owned(),
+                namespaces: None,
+            }),
+        ] {
+            let value = serde_json::to_value(&parameters).unwrap();
+            written.extend(value.as_object().unwrap().keys().cloned());
+        }
+        written.sort();
+        written.dedup();
+        let mut expected: Vec<&str> = PREDICATE_PARAMETERS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(written, expected);
+    }
+
+    /// Every operator and parameter has a shape of its own in the hand-written schema — none fell
+    /// through to the `true` a name without a shape gets.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn every_predicate_property_has_a_deliberate_shape() {
+        let schema = schemars::schema_for!(Predicate).to_value();
+        let properties = schema["properties"].as_object().expect("properties");
+        let mut names: Vec<&str> = properties.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        let mut expected: Vec<&str> = PREDICATE_OPERATORS
+            .iter()
+            .chain(PREDICATE_PARAMETERS.iter())
+            .copied()
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(names, expected);
+        for (name, property) in properties {
+            assert!(property.is_object(), "{name} has no shape: {property}");
+        }
+        // The schema refuses what the engine never reads: no operator, a mistyped one, a
+        // mistyped parameter.
+        let validator = jsonschema::validator_for(&schema).expect("compiles");
+        for bad in [
+            json!({ "caseSensitive": true }),
+            json!({ "equals": "x" }),
+            json!({ "and": {} }),
+            json!({ "inject": 1 }),
+            json!({ "equals": { "path": "/" }, "caseSensitive": "x" }),
+        ] {
+            assert!(!validator.is_valid(&bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn generator_keys_are_the_documented_eight() {
+        // A literal pin (issue #1327): the recorder, the linter and the schema all read this list.
+        assert_eq!(
+            PREDICATE_GENERATOR_KEYS,
+            [
+                "inject",
+                "matches",
+                "caseSensitive",
+                "predicateOperator",
+                "except",
+                "jsonpath",
+                "xpath",
+                "ignore",
+            ]
+        );
+    }
 
     #[test]
     fn deserializes_into_concrete_operation() {

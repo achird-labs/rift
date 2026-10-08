@@ -61,6 +61,7 @@ pub(crate) mod counters {
 
 /// Regex matching options (Mountebank-compatible)
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RegexOptions {
     /// Case-insensitive matching
@@ -73,6 +74,7 @@ pub struct RegexOptions {
 
 /// Method for extracting values from source
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "method", rename_all = "lowercase")]
 pub enum ExtractionMethod {
     /// Regular expression with capture groups
