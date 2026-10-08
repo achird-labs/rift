@@ -733,6 +733,7 @@ pub use rift_types::{Predicate, PredicateOperation, PredicateParameters, Predica
 /// present is the response, and the rest are kept only to be reported. Pinned to that conversion
 /// by `response_variant_keys_follow_the_decode_precedence`; the JSON Schema carries it as
 /// `x-rift-response-variants` (issue #1342).
+#[cfg(feature = "schema")]
 pub(crate) const RESPONSE_VARIANT_KEYS: [&str; 4] = ["is", "proxy", "inject", "fault"];
 
 /// Response within a stub - wrapper type that handles various formats

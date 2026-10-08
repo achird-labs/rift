@@ -103,7 +103,7 @@ pub enum PredicateSelector {
     },
 }
 
-/// The JSON Schema of [`Predicate`], hand-written (issue #1342): its three `#[serde(flatten)]`s
+/// The JSON Schema of [`Predicate`], hand-written (issue #1342): its three flattened fields
 /// defeat derivation, and the shape the engine reads — exactly one operator beside the parameters —
 /// is a `oneOf` over [`PREDICATE_OPERATORS`] that a derive could not express.
 #[cfg(feature = "schema")]
