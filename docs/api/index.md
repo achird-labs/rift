@@ -760,7 +760,7 @@ inspect and arrange it directly.
 | `GET` | `/admin/imposters/{port}/flow-state/{flow_id}/{key}` | Read a value: `{"flowId","key","value"}`, or `404` if absent |
 | `PUT` | `/admin/imposters/{port}/flow-state/{flow_id}/{key}` | Set a value. Body `{ "value": <any JSON> }` (a missing `value` is a `400`); returns `{"flowId","key","value"}` |
 | `DELETE` | `/admin/imposters/{port}/flow-state/{flow_id}/{key}` | Delete a key: `{"flowId","key","deleted":true}` |
-| `DELETE` | `/admin/imposters/{port}/flow-state/{flow_id}` | Delete every key under `flow_id` (issue #530). Idempotent: `{"flowId","cleared":true}` |
+| `DELETE` | `/admin/imposters/{port}/flow-state/{flow_id}` | Delete every key under `flow_id` (issue #530). Idempotent: `{"flowId","cleared":true}`. Embedded hosts: `rift_flow_state_clear` |
 
 Each route answers `404` for an unknown imposter, and returns the backend-unavailable `503` when
 the flow store fails.

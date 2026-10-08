@@ -1278,6 +1278,43 @@ pub unsafe extern "C" fn rift_flow_state_delete(
     })
 }
 
+/// Clear every key in `flow_id` on the imposter at `port` — the `DELETE
+/// /admin/imposters/{port}/flow-state/{flowId}` route. Idempotent: an absent or empty flow returns
+/// `0`. A null `flow_id` is an error (no default-flow rule here). Returns `0` on success, `-1` on
+/// any error (unknown port, invalid UTF-8, store error).
+///
+/// # Safety
+/// `h` must be a live handle (or null); `flow_id` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_flow_state_clear(
+    h: *mut RiftHandle,
+    port: u16,
+    flow_id: *const c_char,
+) -> i32 {
+    ffi_guard!("rift_flow_state_clear", -1, unsafe {
+        clear_last_error();
+        let (Some(handle), Some(flow_id)) = (handle(h), c_str(flow_id)) else {
+            set_last_error("rift_flow_state_clear: null handle or string pointer");
+            return -1;
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_flow_state_clear: {e}"));
+                return -1;
+            }
+        };
+        match imposter.flow_clear(flow_id) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!("rift_flow_state_clear: {e}"));
+                warn_anyhow_failure(&e, port, "rift_flow_state_clear failed");
+                -1
+            }
+        }
+    })
+}
+
 /// Register a stub scoped to `flow_id` (its `space` is set from `flow_id`, ignoring any `space`
 /// in the JSON, mirroring the admin path). Returns `0` on success, `-1` on any error.
 ///
