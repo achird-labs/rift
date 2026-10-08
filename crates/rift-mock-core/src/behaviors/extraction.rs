@@ -84,9 +84,30 @@ pub enum ExtractionMethod {
     /// JSONPath expression
     #[serde(rename = "jsonpath")]
     JsonPath { selector: String },
-    /// XPath expression for XML
+    /// XPath expression for XML, with Mountebank's optional `ns` prefix→URI map (issue #1326)
     #[serde(rename = "xpath")]
-    XPath { selector: String },
+    XPath {
+        selector: String,
+        /// Read leniently: before #1326 the key was ignored, so a stored config may carry any
+        /// shape here and must still decode (rift-cluster replays stored bytes). Admission refuses
+        /// a malformed one.
+        #[serde(
+            rename = "ns",
+            default,
+            deserialize_with = "lenient_namespaces",
+            skip_serializing_if = "Option::is_none"
+        )]
+        namespaces: Option<HashMap<String, String>>,
+    },
+}
+
+/// An `ns` that is an object of strings, else `None`.
+fn lenient_namespaces<'de, D>(deserializer: D) -> Result<Option<HashMap<String, String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 impl ExtractionMethod {
@@ -110,7 +131,10 @@ impl ExtractionMethod {
                 }
             }
             ExtractionMethod::JsonPath { selector } => extract_jsonpath(value, selector),
-            ExtractionMethod::XPath { selector } => extract_xpath(value, selector),
+            ExtractionMethod::XPath {
+                selector,
+                namespaces,
+            } => extract_xpath_with_ns(value, selector, namespaces.as_ref()),
         }
     }
 
@@ -153,7 +177,10 @@ impl ExtractionMethod {
                     .map(|node| Some(json_node_text(node)))
                     .collect()
             }
-            ExtractionMethod::XPath { selector } => xpath_all(value, selector),
+            ExtractionMethod::XPath {
+                selector,
+                namespaces,
+            } => xpath_all(value, selector, namespaces.as_ref()),
         }
     }
 }
@@ -171,13 +198,17 @@ pub(crate) fn json_node_text(node: &serde_json::Value) -> String {
 }
 
 /// Every value an XPath selector yields against `xml_str`, in document order.
-fn xpath_all(xml_str: &str, selector: &str) -> Vec<Option<String>> {
+fn xpath_all(
+    xml_str: &str,
+    selector: &str,
+    ns: Option<&HashMap<String, String>>,
+) -> Vec<Option<String>> {
     #[cfg(test)]
     counters::bump_dom_parse();
     let Ok(package) = sxd_document::parser::parse(xml_str) else {
         return Vec::new();
     };
-    eval_xpath_all_on(&package.as_document(), selector, None)
+    eval_xpath_all_on(&package.as_document(), selector, ns)
         .map(|values| values.into_iter().map(Some).collect())
         .unwrap_or_default()
 }
@@ -491,8 +522,65 @@ pub fn extract_xpath_with_ns(
 // so a per-thread cache amortizes the compile across every request that thread ever handles, not
 // just within one request. `Rc` (not `Arc`) mirrors the type's own `!Send` bound.
 thread_local! {
-    static XPATH_CACHE: RefCell<HashMap<(String, String), Rc<sxd_xpath::XPath>>> =
+    static XPATH_CACHE: RefCell<HashMap<(String, String), Rc<CompiledXPath>>> =
         RefCell::new(HashMap::new());
+}
+
+/// A compiled selector and every namespace prefix its text may use.
+struct CompiledXPath {
+    xpath: sxd_xpath::XPath,
+    prefixes: Vec<String>,
+}
+
+/// The URI an unbound prefix is bound to. `sxd_xpath` panics when a name test's prefix has no
+/// binding (`No namespace for prefix`), which dropped the connection mid-request; bound to a URI no
+/// document declares, the step selects nothing, as for any other name absent from the document.
+const UNBOUND_PREFIX_URI: &str = "urn:rift:unbound-xpath-prefix";
+
+/// Every `prefix` in a `prefix:name` / `prefix:*` of `selector`. An over-approximation — a
+/// `p:x` inside a string literal is listed too — which is harmless: binding a prefix the
+/// expression never resolves changes nothing. An axis (`child::`) is not a prefix. A `-` may be
+/// part of a name (`my-ns:x`) or the minus operator (`count(//a)-p:x`), so both readings are
+/// listed.
+fn xpath_prefixes(selector: &str) -> Vec<String> {
+    static QNAME_PREFIX: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(?:^|::|[^\w.:])([^\W\d][\w.-]*):(?:[^\W\d]|\*)")
+            .expect("static regex compiles")
+    });
+    let mut prefixes: Vec<String> = Vec::new();
+    for caps in QNAME_PREFIX.captures_iter(selector) {
+        let name = &caps[1];
+        prefixes.push(name.to_string());
+        prefixes.extend(
+            name.match_indices('-')
+                .map(|(at, _)| &name[at + 1..])
+                .filter(|rest| rest.starts_with(|c: char| c.is_alphabetic() || c == '_'))
+                .map(str::to_string),
+        );
+    }
+    prefixes.sort_unstable();
+    prefixes.dedup();
+    prefixes
+}
+
+/// An evaluation context binding `ns`, and every other prefix `xpath` uses to
+/// [`UNBOUND_PREFIX_URI`].
+fn xpath_context(
+    xpath: &CompiledXPath,
+    ns: Option<&HashMap<String, String>>,
+) -> sxd_xpath::Context<'static> {
+    let mut context = sxd_xpath::Context::new();
+    for prefix in &xpath.prefixes {
+        if !ns.is_some_and(|ns| ns.contains_key(prefix)) {
+            context.set_namespace(prefix, UNBOUND_PREFIX_URI);
+        }
+    }
+    if let Some(namespaces) = ns {
+        for (prefix, uri) in namespaces {
+            context.set_namespace(prefix, uri);
+        }
+    }
+    context
 }
 
 /// Per-thread ceiling on distinct cached XPath selectors, mirroring [`MAX_CACHED_JSONPATHS`]/the
@@ -525,10 +613,7 @@ fn ns_key(ns: Option<&HashMap<String, String>>) -> String {
 /// in [`eval_xpath_on`]. So the key's `ns_key` component can at worst duplicate an entry (or, on the
 /// theoretical `ns_key` collision where a URI contains the `,`/`=` delimiters, share one) — either
 /// way the compiled selector returned is correct, because it carries no namespace state.
-fn cached_xpath(
-    selector: &str,
-    ns: Option<&HashMap<String, String>>,
-) -> Option<Rc<sxd_xpath::XPath>> {
+fn cached_xpath(selector: &str, ns: Option<&HashMap<String, String>>) -> Option<Rc<CompiledXPath>> {
     let key = (selector.to_string(), ns_key(ns));
     XPATH_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
@@ -537,7 +622,10 @@ fn cached_xpath(
         }
         #[cfg(test)]
         counters::bump_xpath_compile();
-        let xpath = Rc::new(sxd_xpath::Factory::new().build(selector).ok()??);
+        let xpath = Rc::new(CompiledXPath {
+            xpath: sxd_xpath::Factory::new().build(selector).ok()??,
+            prefixes: xpath_prefixes(selector),
+        });
         if cache.len() >= MAX_CACHED_XPATHS {
             cache.clear();
         }
@@ -574,19 +662,11 @@ pub(crate) fn eval_xpath_on(
     selector: &str,
     ns: Option<&HashMap<String, String>>,
 ) -> Option<String> {
-    use sxd_xpath::{Context, Value};
+    use sxd_xpath::Value;
 
     let xpath = cached_xpath(selector, ns)?;
-
-    let mut context = Context::new();
-    if let Some(namespaces) = ns {
-        for (prefix, uri) in namespaces {
-            context.set_namespace(prefix, uri);
-        }
-    }
-
-    let root = document.root();
-    match xpath.evaluate(&context, root) {
+    let context = xpath_context(&xpath, ns);
+    match xpath.xpath.evaluate(&context, document.root()) {
         Ok(Value::String(s)) => Some(s),
         Ok(Value::Number(n)) => Some(n.to_string()),
         Ok(Value::Boolean(b)) => Some(b.to_string()),
@@ -604,16 +684,11 @@ fn eval_xpath_all_on(
     selector: &str,
     ns: Option<&HashMap<String, String>>,
 ) -> Option<Vec<String>> {
-    use sxd_xpath::{Context, Value};
+    use sxd_xpath::Value;
 
     let xpath = cached_xpath(selector, ns)?;
-    let mut context = Context::new();
-    if let Some(namespaces) = ns {
-        for (prefix, uri) in namespaces {
-            context.set_namespace(prefix, uri);
-        }
-    }
-    match xpath.evaluate(&context, document.root()) {
+    let context = xpath_context(&xpath, ns);
+    match xpath.xpath.evaluate(&context, document.root()) {
         Ok(Value::String(s)) => Some(vec![s]),
         Ok(Value::Number(n)) => Some(vec![n.to_string()]),
         Ok(Value::Boolean(b)) => Some(vec![b.to_string()]),
@@ -1126,5 +1201,120 @@ mod tests {
         ns.insert("b".to_string(), "http://b.com".to_string());
         let result = extract_xpath_with_ns(xml, "//a:x/b:y", Some(&ns));
         assert_eq!(result, Some("found".to_string()));
+    }
+
+    /// Issue #1326: the `ns` map Mountebank's copy/lookup xpath carries reaches the evaluator
+    /// through the enum, for both the single-value and the all-values path.
+    #[test]
+    fn xpath_extraction_method_binds_its_ns_map() {
+        let method: ExtractionMethod = serde_json::from_value(serde_json::json!({
+            "method": "xpath",
+            "selector": "//mb:name",
+            "ns": {"mb": "http://example.com/mb"}
+        }))
+        .unwrap();
+        let xml = r#"<mb:root xmlns:mb="http://example.com/mb"><mb:name>first</mb:name><mb:name>second</mb:name></mb:root>"#;
+        assert_eq!(method.extract(xml), Some("first".to_string()));
+        assert_eq!(
+            method.matches(xml),
+            vec![Some("first".to_string()), Some("second".to_string())]
+        );
+    }
+
+    #[test]
+    fn xpath_extraction_method_without_ns_selects_nothing_prefixed() {
+        let method: ExtractionMethod = serde_json::from_value(serde_json::json!({
+            "method": "xpath",
+            "selector": "//mb:name"
+        }))
+        .unwrap();
+        let xml = r#"<mb:root xmlns:mb="http://example.com/mb"><mb:name>first</mb:name></mb:root>"#;
+        assert_eq!(method.extract(xml), None);
+        assert!(method.matches(xml).is_empty());
+    }
+
+    /// A stored `ns` the engine never read must still decode (rift-cluster replays stored bytes):
+    /// anything but an object of strings decodes as no map; admission refuses it instead.
+    #[test]
+    fn xpath_extraction_method_decodes_a_malformed_ns_as_absent() {
+        for ns in [
+            serde_json::json!("x"),
+            serde_json::json!(null),
+            serde_json::json!(["a"]),
+            serde_json::json!({"mb": 1}),
+        ] {
+            let method: ExtractionMethod = serde_json::from_value(serde_json::json!({
+                "method": "xpath",
+                "selector": "//name",
+                "ns": ns
+            }))
+            .unwrap_or_else(|e| panic!("ns {ns} must decode: {e}"));
+            assert!(
+                matches!(
+                    method,
+                    ExtractionMethod::XPath {
+                        namespaces: None,
+                        ..
+                    }
+                ),
+                "ns {ns} decoded as {method:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn xpath_extraction_method_serializes_ns_only_when_present() {
+        let bare: ExtractionMethod = serde_json::from_value(serde_json::json!({
+            "method": "xpath", "selector": "//a"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!({"method": "xpath", "selector": "//a"})
+        );
+        let with_ns: ExtractionMethod = serde_json::from_value(serde_json::json!({
+            "method": "xpath", "selector": "//a:b", "ns": {"a": "urn:a"}
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&with_ns).unwrap(),
+            serde_json::json!({"method": "xpath", "selector": "//a:b", "ns": {"a": "urn:a"}})
+        );
+    }
+
+    #[test]
+    fn xpath_prefixes_lists_name_test_prefixes_but_not_axes() {
+        assert_eq!(
+            xpath_prefixes("//a:x/child::b:y[@c:z='1']/d:*"),
+            vec!["a", "b", "c", "d"]
+        );
+        assert_eq!(xpath_prefixes("/root/child::item[1]"), Vec::<String>::new());
+        assert_eq!(xpath_prefixes("count(//p:n) > 1"), vec!["p"]);
+        assert_eq!(xpath_prefixes("count(//a)-p:n"), vec!["p"]);
+        assert_eq!(xpath_prefixes("1 -p:x"), vec!["p"]);
+        assert_eq!(xpath_prefixes("-p:x"), vec!["p"]);
+        assert_eq!(xpath_prefixes("//my-ns:x"), vec!["my-ns", "ns"]);
+    }
+
+    /// An unbound prefix used to panic inside `sxd_xpath` (`No namespace for prefix`) and drop
+    /// the request; it now selects nothing, on the copy and on the predicate path.
+    #[test]
+    fn an_unbound_prefix_selects_nothing_instead_of_panicking() {
+        let xml = r#"<mb:root xmlns:mb="http://example.com/mb"><mb:name>first</mb:name></mb:root>"#;
+        assert_eq!(extract_xpath(xml, "//mb:name"), None);
+        assert!(xpath_all(xml, "//mb:name", None).is_empty());
+        let mut ns = HashMap::new();
+        ns.insert("other".to_string(), "urn:other".to_string());
+        assert_eq!(extract_xpath_with_ns(xml, "//mb:name", Some(&ns)), None);
+        assert_eq!(
+            extract_xpath(xml, "count(//mb:name)-mb:n"),
+            Some("NaN".to_string())
+        );
+        let package = sxd_document::parser::parse(xml).unwrap();
+        let selection = xpath_selection(&package.as_document(), "//mb:name", None);
+        assert!(
+            matches!(&selection, Some(Selection::One(s)) if s.is_empty()),
+            "nothing selected reads as the empty string: {selection:?}"
+        );
     }
 }

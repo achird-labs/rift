@@ -253,3 +253,67 @@ async fn well_formed_behavior_selectors_still_load() {
     );
     running.shutdown().await;
 }
+
+/// Issue #1326: an XPath `using` may carry Mountebank's `ns` map, on `copy` and on `lookup`.
+#[tokio::test]
+async fn xpath_selectors_with_an_ns_map_load() {
+    let (running, base) = admin().await;
+    let client = reqwest::Client::new();
+    let ns = json!({ "mb": "http://example.com/mb" });
+    let mut copy = copy_block("xpath", "//mb:name");
+    copy["copy"]["using"]["ns"] = ns.clone();
+    let mut lookup = lookup_block("xpath", "//mb:id");
+    lookup["lookup"]["key"]["using"]["ns"] = ns;
+    let response = client
+        .post(format!("{base}/imposters"))
+        .json(&json!({ "protocol": "http", "stubs": [is_stub(copy), is_stub(lookup)] }))
+        .send()
+        .await
+        .expect("POST /imposters");
+    assert_eq!(
+        response.status(),
+        201,
+        "{}",
+        response.text().await.unwrap_or_default()
+    );
+    running.shutdown().await;
+}
+
+/// Issue #1326: an `ns` that is not a prefix→URI object, or one on a method that has no
+/// namespaces, is refused at the door rather than dropped.
+#[tokio::test]
+async fn a_malformed_or_misplaced_ns_map_is_refused() {
+    let mut string_ns = copy_block("xpath", "//mb:name");
+    string_ns["copy"]["using"]["ns"] = json!("http://example.com/mb");
+    let mut number_uri = lookup_block("xpath", "//mb:id");
+    number_uri["lookup"]["key"]["using"]["ns"] = json!({ "mb": 1 });
+    let mut on_regex = copy_block("regex", "(.*)");
+    on_regex["copy"]["using"]["ns"] = json!({ "mb": "http://example.com/mb" });
+    let cases = [
+        (
+            is_stub(string_ns),
+            "`copy` behavior `xpath` `using.ns` must be an object mapping each prefix to a namespace URI string",
+        ),
+        (
+            is_stub(number_uri),
+            "`lookup` behavior `xpath` `using.ns` must be an object mapping each prefix to a namespace URI string",
+        ),
+        (
+            proxy_stub(on_regex),
+            "`copy` behavior `regex` has `using.ns`, which only applies to `method: xpath`",
+        ),
+    ];
+    for (stub, refusal) in cases {
+        let (running, base) = admin().await;
+        let response = reqwest::Client::new()
+            .post(format!("{base}/imposters"))
+            .json(&json!({ "protocol": "http", "stubs": [stub] }))
+            .send()
+            .await
+            .expect("POST /imposters");
+        assert_eq!(response.status(), 400, "{refusal}");
+        let body = response.text().await.expect("body");
+        assert!(body.contains(refusal), "{refusal}: {body}");
+        running.shutdown().await;
+    }
+}
