@@ -4,9 +4,15 @@ name: Mutation testing
 # proxy-generation code. Mutation testing finds a test that cannot kill a mutant in the code it
 # claims to cover (the shape that let #1329 ship next to three generator tests that never replayed).
 #
-# Deliberately NOT a PR check: the run takes hours (one mutant at a time). It is scheduled + manual only, so it
+# Deliberately NOT a PR check: the run takes hours of compute. It is scheduled + manual only, so it
 # can never block a merge. It reports; it does not gate. Surviving mutants are triaged into test
 # gaps by hand.
+#
+# Sharded: the scope is ~650 mutants at ~90 s each (an incremental build plus the package tests),
+# about 17 h serially. One job cannot finish that (300-minute limit, 6-hour hosted-runner cap; the
+# first serial run was shut down at 2 h 52 min with nothing uploaded). Each of SHARDS jobs takes
+# `--shard k/SHARDS` of the mutants, about 1.5 h, and uploads its own `mutants.out`; the `report`
+# job merges them.
 on:
   schedule:
     - cron: "17 3 * * 1" # Mondays 03:17 UTC
@@ -24,22 +30,33 @@ env:
 
 jobs:
   mutants:
-    name: cargo-mutants
+    name: cargo-mutants (shard ${{ matrix.shard }}/12)
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 240
+    strategy:
+      # One shard failing (a runner lost, a baseline flake) must not cancel the others' findings.
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Twelve jobs share one cache key; only shard 0 writes it back.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ matrix.shard == 0 }}
 
-      - name: Install cargo-mutants
-        run: cargo install cargo-mutants --locked
+      - name: Install cargo-mutants and cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,cargo-nextest
 
       # --in-place mutates this checkout directly (no tree copy); the runner is throwaway. It runs
-      # one mutant at a time: cargo-mutants refuses --in-place together with --jobs.
+      # one mutant at a time: cargo-mutants refuses --in-place together with --jobs, so the
+      # parallelism is the shard matrix. nextest runs each mutant's tests faster than `cargo test`.
       # Exit code 2 means "some mutants were missed" and 3 "some timed out"; both are findings, not
       # a broken run, so only other non-zero codes (1 usage error, 4 baseline test failure) fail.
       - name: Run cargo-mutants
@@ -48,6 +65,8 @@ jobs:
           cargo mutants \
             -p rift-mock-core -p rift-types \
             --in-place \
+            --shard ${{ matrix.shard }}/12 \
+            --test-tool nextest \
             -f 'crates/rift-mock-core/src/imposter/predicates/**/*.rs' \
             -f 'crates/rift-mock-core/src/behaviors/**/*.rs' \
             -f 'crates/rift-mock-core/src/imposter/core/proxy.rs' \
@@ -59,29 +78,54 @@ jobs:
             exit "$code"
           fi
 
-      - name: Summarize
-        if: always()
-        run: |
-          {
-            echo "## cargo-mutants"
-            echo
-            for f in missed timeout caught unviable; do
-              n=0
-              [ -f "mutants.out/$f.txt" ] && n=$(wc -l < "mutants.out/$f.txt")
-              echo "- $f: $n"
-            done
-            echo
-            echo "Surviving mutants (top 50 of mutants.out/missed.txt):"
-            echo
-            echo '```'
-            [ -f mutants.out/missed.txt ] && head -n 50 mutants.out/missed.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Upload mutants.out
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: mutants-out
+          name: mutants-out-${{ matrix.shard }}
           path: mutants.out/
           if-no-files-found: warn
+
+  report:
+    name: Merge shard results
+    needs: mutants
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: mutants-out-*
+          path: shards
+
+      # A shard with no outcome files did not finish (runner lost, timeout, baseline failure); the
+      # totals are then partial, and the summary says which shards are missing.
+      - name: Summarize
+        run: |
+          {
+            echo "## cargo-mutants"
+            echo
+            missing=""
+            for k in $(seq 0 11); do
+              [ -f "shards/mutants-out-$k/caught.txt" ] || missing="$missing $k"
+            done
+            if [ -n "$missing" ]; then
+              echo "**Partial:** shards with no results:$missing"
+              echo
+            fi
+            for f in missed timeout caught unviable; do
+              n=$(cat shards/*/"$f.txt" 2>/dev/null | wc -l)
+              echo "- $f: $n"
+            done
+            echo
+            echo "Surviving mutants (all shards, sorted):"
+            echo
+            echo '```'
+            cat shards/*/missed.txt 2>/dev/null | sort
+            echo '```'
+            echo
+            echo "Timeouts:"
+            echo
+            echo '```'
+            cat shards/*/timeout.txt 2>/dev/null | sort
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

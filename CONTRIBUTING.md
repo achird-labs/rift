@@ -90,10 +90,11 @@ A key that is unread by choice goes in the test's `ALLOWED` list, with the reaso
 
 A scheduled workflow, [`mutants.yml`](.github/workflows/mutants.yml), runs `cargo-mutants` weekly over
 predicate matching, behaviors, proxy generation and `rift-types`' predicate model. It is not a PR
-check (it runs one mutant at a time, a rebuild and a test run each, so it takes hours) and never
-blocks a merge: it reports surviving mutants, meaning code a test claims to cover but cannot tell
-was changed. The counts land in the job summary and the full `mutants.out/` is attached as an
-artifact. Trigger it by hand from the Actions tab (`workflow_dispatch`), or locally with
+check (each of its ~650 mutants is a rebuild and a test run, about 17 hours of compute, split
+across 12 parallel shards of about 1.5 hours) and never blocks a merge: it reports surviving
+mutants, meaning code a test claims to cover but cannot tell was changed. The `Merge shard results`
+job writes the merged counts, survivors and timeouts to the run summary, and each shard's
+`mutants.out/` is attached as a `mutants-out-<k>` artifact. Trigger it by hand from the Actions tab (`workflow_dispatch`), or locally with
 `cargo install cargo-mutants --locked` and the same `-p`/`-f` arguments the workflow uses; add
 `--list` to see the mutants without running them, or narrow `-f` to one file to iterate quickly.
 [`.cargo/mutants.toml`](.cargo/mutants.toml) holds the exclusions.
