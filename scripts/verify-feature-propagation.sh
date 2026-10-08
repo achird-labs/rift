@@ -34,8 +34,17 @@ MANIFEST="${MANIFEST:-$repo_root/Cargo.toml}"
 #
 # The invariant this gate encodes is "on by default in the library means on by default in what
 # ships", and it finds dependents structurally — anything taking rift-mock-core with
-# default-features = false. Currently empty: every such dependent forwards every feature.
-DELIBERATELY_NOT_FORWARDED=()
+# default-features = false.
+#
+# rift-lint (issue #1342): its rift-mock-core dependency is optional and exists only so
+# `rift-lint schema` can generate the imposter JSON Schema from the engine's config types. Neither
+# engine feature changes those types, and forwarding them would compile the whole engine into the
+# default linter build — the released `rift-lint` is built without `schema` at all, and the
+# generated schema ships in the SDK-conformance tarball instead.
+DELIBERATELY_NOT_FORWARDED=(
+  "rift-lint:javascript=schema generation does not run scripts; the engine is optional here"
+  "rift-lint:quamina-matching=schema generation does not match requests; the engine is optional here"
+)
 
 check() {
   local manifest="$1"
