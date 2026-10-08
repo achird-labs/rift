@@ -1,0 +1,16 @@
+# cargo-mutants configuration (issue #1345). Used only by .github/workflows/mutants.yml and by a
+# manual `cargo mutants`; it does not affect build or test.
+
+# Never mutate test code: a "surviving" mutant in a test helper is noise, not a test gap.
+exclude_globs = [
+    "**/tests/**",
+    "**/tests.rs",
+    "**/*_tests.rs",
+    "**/benches/**",
+    "**/build.rs",
+]
+
+# Skip mutants inside logging calls; changing a log line is not an observable behaviour.
+exclude_re = [
+    "tracing::",
+]

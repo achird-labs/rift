@@ -728,8 +728,9 @@ mod tests {
         let fields = ca_fields(ca.ca_cert_der());
         assert!(fields.is_ca);
         assert_eq!(fields.common_name.as_deref(), Some("Acme Test CA"));
-        // Five minutes back for clock skew, at whole-second precision.
-        assert!(fields.not_before <= before - time::Duration::minutes(5));
+        // Five minutes back for clock skew, at whole-second precision. The upper bound is taken
+        // from `after`: generation can land in a later second than `before`.
+        assert!(fields.not_before <= after - time::Duration::minutes(5));
         assert!(
             fields.not_before >= before - time::Duration::minutes(5) - time::Duration::seconds(2)
         );
