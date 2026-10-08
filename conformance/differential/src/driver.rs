@@ -41,6 +41,13 @@ pub async fn run_case(client: &reqwest::Client, engines: &Engines, case: &Case) 
         }
     };
     let (mb_ports, rift_ports) = actual.split_at(logical.len());
+    // `logical` is ascending; sort each engine's ports too so the mapping preserves order. Both
+    // engines list imposters by ascending port, so an order-scrambling map turns an identical
+    // `GET`/`PUT`/`DELETE /imposters` list into a false positional divergence.
+    let mut mb_ports = mb_ports.to_vec();
+    let mut rift_ports = rift_ports.to_vec();
+    mb_ports.sort_unstable();
+    rift_ports.sort_unstable();
     let mut maps = [
         PortMap::new(
             logical.iter().copied().zip(mb_ports.iter().copied()),
