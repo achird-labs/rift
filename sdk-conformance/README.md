@@ -92,4 +92,6 @@ Fixtures are **numbered and append-only** (`NN-name.json`, never renumbered) so 
 is stable across versions. Add a new fixture with the next free number, register it in
 `manifest.json` (with its `port`, `requires`, and `hasVerify`), and the engine gate
 (`corpus_replay.rs`) will enforce that it serves and its `_verify` transcripts hold before it can
-ship. Seed material for new fixtures lives in the engine's `tests/compatibility` and `examples/`.
+ship. A second gate (`issue_1343_unread_keys.rs`) fails when the fixture carries a key the
+engine accepts but never reads, so a fixture cannot assert behaviour through a key that does
+nothing. Seed material for new fixtures lives in the engine's `tests/compatibility` and `examples/`.

@@ -122,7 +122,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E008 | Predicate has no operator | `{"caseSensitive": true}` on its own |
 | E009 | Unknown predicate operator | `{"equalz": {"path": "/a"}}` |
 | E011 | JSONPath missing `selector` field | `"jsonpath": {}` |
-| E014 | Response has no response type | Neither `is`, `proxy`, `inject`, `fault` nor `_rift` |
+| E014 | Response has no response type | Neither `is`, `proxy`, `inject`, `fault`, `_rift` nor a flat `statusCode`/`headers`/`body` |
 | E015 | Invalid HTTP status code | `"statusCode": 999` |
 | E016 | `statusCode` is not a number or numeric string | `"statusCode": true` |
 | E017 | Empty header name | `"headers": {"": "value"}` |
@@ -355,6 +355,7 @@ fi
 ### JavaScript Must Be Function Expression
 
 **Problem:**
+<!-- rift-lint: skip -->
 ```json
 {
   "wait": "return Math.random() * 1000"

@@ -318,14 +318,23 @@ already scoped to the request's resolved flow id — no explicit flow id argumen
 ```json
 {
   "_rift": {
-    "flowState": { "backend": "inmemory", "ttlSeconds": 300 },
-    "script": {
-      "engine": "rhai",
-      "code": "fn respond(ctx) { let n = ctx.state.incr(\"count\"); http(200, `count ${n}`) }"
-    }
-  }
+    "flowState": { "backend": "inmemory", "ttlSeconds": 300 }
+  },
+  "stubs": [{
+    "responses": [{
+      "_rift": {
+        "script": {
+          "engine": "rhai",
+          "code": "fn respond(ctx) { let n = ctx.state.incr(\"count\"); http(200, `count ${n}`) }"
+        }
+      }
+    }]
+  }]
 }
 ```
+
+`flowState` is read from the imposter's `_rift` and `script` from a response's; either one in the
+other's block is accepted and ignored.
 
 - `rhai` is built in; `javascript` requires the `javascript` feature. JavaScript can also use the
   Mountebank `inject` response format directly.

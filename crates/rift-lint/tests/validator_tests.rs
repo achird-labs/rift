@@ -478,6 +478,46 @@ fn e014_not_fired_for_is_response() {
     assert!(!has_code(&r, "E014"), "unexpected E014: {:?}", codes(&r));
 }
 
+/// The flat form (issue #304) is served as an `is` response, so it has a type (issue #1343).
+#[test]
+fn e014_not_fired_for_flat_response() {
+    for resp in [
+        json!({ "statusCode": 404 }),
+        json!({ "body": { "error": "not found" } }),
+        json!({ "headers": { "Content-Type": "application/json" } }),
+    ] {
+        let mut r = LintResult::new();
+        validate_response(
+            path(),
+            &resp,
+            "loc",
+            &mut r,
+            &opts(),
+            &serde_json::Value::Null,
+        );
+        assert!(
+            !has_code(&r, "E014"),
+            "{resp}: unexpected E014: {:?}",
+            codes(&r)
+        );
+    }
+}
+
+#[test]
+fn e014_still_fired_for_empty_flat_fields() {
+    let resp = json!({ "statusCode": null, "headers": {} });
+    let mut r = LintResult::new();
+    validate_response(
+        path(),
+        &resp,
+        "loc",
+        &mut r,
+        &opts(),
+        &serde_json::Value::Null,
+    );
+    assert!(has_code(&r, "E014"), "expected E014: {:?}", codes(&r));
+}
+
 #[test]
 fn e014_not_fired_for_rift_response() {
     let resp = json!({ "_rift": { "script": "console.log('hi')" } });
