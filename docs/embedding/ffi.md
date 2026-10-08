@@ -229,7 +229,7 @@ you must not feature-detect by sending the option and watching for an error:
   deliberately provoking a failure, and it still tells you nothing about the older engines.
 
 `serveOptions` is deliberately separate from `features`, which lists compiled cargo features
-(`redis-backend`, `javascript`) — different question, different array. The same list is published
+(`javascript`) — different question, different array. The same list is published
 over HTTP at `GET /config` for consumers that do not link the C-ABI.
 
 ## Intercept proxy over FFI
@@ -301,7 +301,7 @@ which engines are compiled in:
 ```c
 const char* info = rift_build_info();
 // {"version":"<release>","commit":"<sha>|null","builtAt":"<iso8601>|null",
-//  "features":["redis-backend","javascript"],"serveOptions":[...]}
+//  "features":["javascript"],"serveOptions":[...]}
 // Do NOT call rift_free on this pointer.
 ```
 
@@ -350,7 +350,7 @@ is present, gate on it; if absent (an older cdylib), fall back to probing the sy
 ## Cargo features
 
 `rift-ffi` forwards engine features rather than hard-coding them, so a per-platform build can drop
-engines it doesn't need: `default = ["redis-backend", "javascript", "quamina-matching"]`. (`rift_build_info().features` reports only `redis-backend` and `javascript`.) The `mimalloc` allocator
+engines it doesn't need: `default = ["javascript", "quamina-matching"]`. (`rift_build_info().features` reports only `javascript`.) The `mimalloc` allocator
 feature is **deliberately never forwarded** — a `cdylib` must not impose a global allocator on its
 host process.
 
@@ -358,7 +358,7 @@ host process.
 # Full-featured cdylib (default)
 cargo build -p rift-ffi --release
 
-# Minimal cdylib — no scripting engine, no Redis, no Quamina prefilter
+# Minimal cdylib — no scripting engine, no Quamina prefilter
 cargo build -p rift-ffi --release --no-default-features
 ```
 

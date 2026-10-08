@@ -25,7 +25,7 @@ fn now_nanos() -> u64 {
 ///
 /// The mask sets a floor on enforcement: a script that never reaches the next multiple is never
 /// checked. That window must stay small enough not to contain an I/O loop, because the flow-store
-/// natives call the *synchronous* redis backend inline on this thread — a handful of slow `get`s is
+/// natives call the *synchronous* store inline on this thread — a handful of slow `get`s is
 /// only a few hundred ops, but can hold the worker far past its deadline. A wider mask (1024) makes
 /// such a script invisible to the deadline entirely, which strands the worker and sheds load
 /// through the queue (the liberation property issue #541 pins).

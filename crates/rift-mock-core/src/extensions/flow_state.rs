@@ -14,7 +14,7 @@ pub enum CasOutcome {
 ///
 /// This trait is intentionally synchronous to avoid async bridging issues
 /// when called from scripts or other synchronous contexts.
-/// Redis operations are performed using a blocking client with connection pooling.
+/// A networked implementation (supplied by an embedder) is expected to use a blocking client.
 pub trait FlowStore: Send + Sync {
     /// Get a value from flow state
     fn get(&self, flow_id: &str, key: &str) -> Result<Option<Value>>;
@@ -32,7 +32,7 @@ pub trait FlowStore: Send + Sync {
     /// request path consults this to decide whether to offload flow-store calls to
     /// `spawn_blocking`, so a slow or pool-exhausted backend can't stall a tokio worker and
     /// head-of-line-block every task multiplexed on it (issue #475). In-memory stores never
-    /// block, so the default is `false`; the Redis backend overrides it.
+    /// block, so the default is `false`; a networked store overrides it.
     fn is_blocking(&self) -> bool {
         false
     }
@@ -46,7 +46,7 @@ pub trait FlowStore: Send + Sync {
     ///
     /// The provided default is a NON-ATOMIC get-then-set fallback kept so existing third-party
     /// `FlowStore` impls keep compiling; real backends should override with a genuinely atomic
-    /// implementation (see `InMemoryFlowStore`/`RedisFlowStore`).
+    /// implementation (see `InMemoryFlowStore`).
     fn increment_by(&self, flow_id: &str, key: &str, by: i64) -> Result<i64> {
         let current = match self.get(flow_id, key)? {
             Some(Value::Number(n)) if n.is_i64() => n.as_i64().unwrap_or(0),
@@ -164,8 +164,8 @@ pub trait FlowStoreProvider: Send + Sync {
 /// A backend selectable by name through `_rift.flowState.backend` (issue #853).
 ///
 /// This is how a store lives outside `rift-mock-core` while still being chosen by config: the
-/// `"redis"` backend ships in the separate `rift-store-redis` crate and registers here, so the
-/// core engine carries no redis dependency. Distinct from [`FlowStoreProvider`] in two ways that
+/// engine ships only `"inmemory"`; an embedder registers any other store here, so the
+/// core engine carries no store dependency. Distinct from [`FlowStoreProvider`] in two ways that
 /// matter:
 ///
 /// - **It has an error channel.** `provide` returns `Option`, so a provider can only *decline* —
@@ -174,7 +174,7 @@ pub trait FlowStoreProvider: Send + Sync {
 /// - **It is selected by the config, not imposed on it.** A provider overrides any
 ///   `_rift.flowState`; a factory is only consulted when the config names it.
 pub trait FlowStoreBackendFactory: Send + Sync {
-    /// The `_rift.flowState.backend` string this factory serves, e.g. `"redis"`.
+    /// The `_rift.flowState.backend` string this factory serves, e.g. `"fake"`.
     fn name(&self) -> &'static str;
 
     /// Build a store for this imposter's `flowState` block. An `Err` fails imposter creation
@@ -188,8 +188,7 @@ pub trait FlowStoreBackendFactory: Send + Sync {
 ///
 /// Empty by default: `rift-mock-core` alone serves only `"inmemory"`, and any other name fails
 /// construction with an error listing what *is* available. The `rift` binary and the C-ABI
-/// register `"redis"` (from `rift-store-redis`) when built with the `redis-backend` feature, so
-/// shipped artifacts behave exactly as before.
+/// register nothing beyond that (`default_flow_store_backends()` is empty).
 #[derive(Clone, Default)]
 pub struct FlowStoreBackends {
     factories: Vec<Arc<dyn FlowStoreBackendFactory>>,
@@ -253,7 +252,7 @@ pub(crate) fn unknown_backend_error(backend: &str, backends: &FlowStoreBackends)
     let mut available = vec!["inmemory"];
     for name in backends.names() {
         // A name can legitimately appear twice in the registry (first registration wins), but
-        // showing an operator `available: "inmemory", "redis", "redis"` would just look broken.
+        // showing an operator `available: "inmemory", "fake", "fake"` would just look broken.
         if !available.contains(&name) {
             available.push(name);
         }
@@ -263,15 +262,17 @@ pub(crate) fn unknown_backend_error(backend: &str, backends: &FlowStoreBackends)
         .map(|n| format!("\"{n}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    // Only reached when `backend` resolved to no factory, so an unregistered redis needs no
-    // second lookup to confirm it.
-    let hint = if backend == "redis" {
-        " — this build has no redis backend registered (rebuild with --features redis-backend)"
-    } else {
-        ""
-    };
+    // Only reached when `backend` resolved to no factory, so a removed backend needs no second
+    // lookup to confirm it. Raised at admission only — never from a deserializer, because
+    // rift-cluster replays stored configs that may still name it.
+    if backend == "redis" {
+        return anyhow!(
+            "flowState backend \"redis\" was removed in 0.22.0; state shared across processes is a \
+             rift-cluster deployment — see docs/deployment/kubernetes.md"
+        );
+    }
     anyhow!(
-        "flowState.backend is \"{backend}\" but no such backend is registered (available: {list}){hint}"
+        "flowState.backend is \"{backend}\" but no such backend is registered (available: {list})"
     )
 }
 
@@ -327,7 +328,7 @@ impl FlowStore for NoOpFlowStore {
 /// to an inner store.
 ///
 /// Wrapped once around the store `create_flow_store` returns, so the provider path, `inmemory`,
-/// the `failing` test backend, every registered backend (`redis`) and the NoOp fallback are all
+/// the `failing` test backend, every registered backend and the NoOp fallback are all
 /// covered without touching a single call site.
 ///
 /// **Every trait method is forwarded, including the ones with default bodies — that is a
@@ -335,7 +336,7 @@ impl FlowStore for NoOpFlowStore {
 /// forward it would silently reclassify a *blocking* backend as non-blocking and break the
 /// `spawn_blocking` routing added in #985/#988/#989. The other defaults are written in terms of
 /// `get`/`set`, so inheriting them would discard the inner store's atomic implementations —
-/// turning an atomic Redis `INCRBY` (or `InMemoryFlowStore::increment_by`) into a racy
+/// turning an atomic networked `INCRBY` (or `InMemoryFlowStore::increment_by`) into a racy
 /// get-then-set. Recording happens *after* the inner call and never alters the returned `Result`.
 pub struct MeteredFlowStore {
     inner: Arc<dyn FlowStore>,
@@ -423,14 +424,13 @@ impl FlowStore for MeteredFlowStore {
 /// Create a server-level FlowStore from the `flowState` block of a proxy config file.
 ///
 /// `"inmemory"` is built in; every other name is resolved through `backends` (issue #853), so a
-/// backend living outside this crate — `"redis"`, from `rift-store-redis` — is selectable without
-/// `rift-mock-core` depending on it. An unregistered name is an error listing what is available,
+/// backend living outside this crate is selectable without `rift-mock-core` depending on it. An unregistered name is an error listing what is available,
 /// never a silent downgrade to [`NoOpFlowStore`] (issues #325/#377).
 /// Reject a non-positive flow-state TTL at construction (issue #530, extended to the server-level
 /// path by #860).
 ///
 /// A non-positive TTL fails late and differently per backend — in-memory expires every write
-/// immediately, Redis errors on the first `SETEX` — so a static config error would otherwise
+/// immediately, a networked store may error on the first `SETEX` — so a static config error would otherwise
 /// surface as a runtime mystery. Shared by both the per-imposter and server-level factories so the
 /// two paths cannot drift on the rule or the wording.
 pub(crate) fn validate_ttl_seconds(ttl_seconds: i64) -> Result<()> {
@@ -474,14 +474,6 @@ fn server_flow_state_config(
     crate::imposter::RiftFlowStateConfig {
         backend: config.backend.clone(),
         ttl_seconds: config.ttl_seconds,
-        redis: config
-            .redis
-            .as_ref()
-            .map(|r| crate::imposter::RiftRedisConfig {
-                url: r.url.clone(),
-                pool_size: r.pool_size,
-                key_prefix: r.key_prefix.clone(),
-            }),
         flow_id_source: None,
         extra: serde_json::Map::new(),
     }
@@ -605,7 +597,6 @@ mod tests {
         let config = FlowStateConfig {
             backend: "inmemory".to_string(),
             ttl_seconds: 300,
-            redis: None,
         };
         let store = create_flow_store(&config, &FlowStoreBackends::new());
         assert!(store.is_ok());
@@ -617,7 +608,6 @@ mod tests {
         let config = FlowStateConfig {
             backend: "inmemory".to_string(),
             ttl_seconds: 7200,
-            redis: None,
         };
         let store = create_flow_store(&config, &FlowStoreBackends::new());
         assert!(store.is_ok());
@@ -633,7 +623,6 @@ mod tests {
             let config = FlowStateConfig {
                 backend: "inmemory".to_string(),
                 ttl_seconds: ttl,
-                redis: None,
             };
             let err = build_error(
                 create_flow_store(&config, &FlowStoreBackends::new()),
@@ -652,7 +641,6 @@ mod tests {
         let config = FlowStateConfig {
             backend: "inmemory".to_string(),
             ttl_seconds: 1,
-            redis: None,
         };
         assert!(create_flow_store(&config, &FlowStoreBackends::new()).is_ok());
     }
@@ -666,7 +654,6 @@ mod tests {
         let config = FlowStateConfig {
             backend: "definitely-not-a-backend".to_string(),
             ttl_seconds: 0,
-            redis: None,
         };
         let err = build_error(
             create_flow_store(&config, &FlowStoreBackends::new()),
@@ -699,7 +686,7 @@ mod tests {
         }
     }
 
-    /// A fake out-of-crate backend: proves the registry seam works with NO redis dependency in
+    /// A fake out-of-crate backend: proves the registry seam works with NO store dependency in
     /// `rift-mock-core`, which is the whole point of issue #853.
     struct FakeBackend;
 
@@ -732,15 +719,14 @@ mod tests {
 
     // Issue #853 AC3: an explicitly-named backend that nothing registered must fail with an error
     // naming it AND listing what IS selectable — never a silent NoOp downgrade (#325/#377). This
-    // covers "redis" specifically, since after the extraction core registers nothing itself.
+    // uses names that were never built in, since core registers nothing itself.
     #[test]
     fn create_flow_store_unregistered_backend_names_the_available_ones() {
         use crate::config::FlowStateConfig;
-        for backend in ["redis", "unknown"] {
+        for backend in ["postgres", "unknown"] {
             let config = FlowStateConfig {
                 backend: backend.to_string(),
                 ttl_seconds: 300,
-                redis: None,
             };
             let err = build_error(
                 create_flow_store(&config, &FlowStoreBackends::new()),
@@ -757,23 +743,23 @@ mod tests {
         }
     }
 
-    // Issue #853: the redis case earns a rebuild hint, because a missing feature (not a typo) is
-    // overwhelmingly the reason it is absent.
+    // Issue #1337: "redis" is a removed backend, not a typo or a missing feature — the refusal says
+    // so, and points at the supported way to share state across processes.
     #[test]
-    fn create_flow_store_unregistered_redis_hints_at_the_feature() {
+    fn create_flow_store_redis_is_refused_with_the_removal_text() {
         use crate::config::FlowStateConfig;
         let config = FlowStateConfig {
             backend: "redis".to_string(),
             ttl_seconds: 300,
-            redis: None,
         };
         let err = build_error(
             create_flow_store(&config, &FlowStoreBackends::new()),
-            "redis is not registered in core",
+            "the removed redis backend must be refused",
         );
-        assert!(
-            err.contains("--features redis-backend"),
-            "an absent redis backend must say how to get one, got: {err}"
+        assert_eq!(
+            err,
+            "flowState backend \"redis\" was removed in 0.22.0; state shared across processes is a \
+             rift-cluster deployment — see docs/deployment/kubernetes.md"
         );
     }
 
@@ -786,7 +772,6 @@ mod tests {
         let config = FlowStateConfig {
             backend: "fake".to_string(),
             ttl_seconds: 300,
-            redis: None,
         };
         assert!(
             create_flow_store(&config, &backends).is_ok(),
@@ -796,7 +781,6 @@ mod tests {
         let missing = FlowStateConfig {
             backend: "nope".to_string(),
             ttl_seconds: 300,
-            redis: None,
         };
         let err = build_error(create_flow_store(&missing, &backends), "unregistered");
         assert!(
@@ -814,7 +798,6 @@ mod tests {
         let config = FlowStateConfig {
             backend: "broken".to_string(),
             ttl_seconds: 300,
-            redis: None,
         };
         let err = build_error(
             create_flow_store(&config, &backends),
@@ -851,7 +834,6 @@ mod tests {
         let config = crate::config::FlowStateConfig {
             backend: "dup".to_string(),
             ttl_seconds: 300,
-            redis: None,
         };
         let err = build_error(create_flow_store(&config, &backends), "always errors");
         assert!(
@@ -882,35 +864,11 @@ mod tests {
         let config = crate::config::FlowStateConfig {
             backend: "inmemory".to_string(),
             ttl_seconds: 300,
-            redis: None,
         };
         assert!(
             create_flow_store(&config, &backends).is_ok(),
             "the built-in inmemory backend must win over a registered factory of the same name"
         );
-    }
-
-    // Issue #853: the server-level `redis` block must reach the factory — otherwise a config-file
-    // deployment would hand the backend an empty config and fail for the wrong reason.
-    #[test]
-    fn server_level_redis_block_reaches_the_factory() {
-        use crate::config::{FlowStateConfig, RedisConfig};
-        let config = FlowStateConfig {
-            backend: "redis".to_string(),
-            ttl_seconds: 900,
-            redis: Some(RedisConfig {
-                url: "redis://example:6379".to_string(),
-                pool_size: 7,
-                key_prefix: "pfx:".to_string(),
-            }),
-        };
-        let adapted = server_flow_state_config(&config);
-        assert_eq!(adapted.backend, "redis");
-        assert_eq!(adapted.ttl_seconds, 900);
-        let redis = adapted.redis.expect("the redis block must carry over");
-        assert_eq!(redis.url, "redis://example:6379");
-        assert_eq!(redis.pool_size, 7);
-        assert_eq!(redis.key_prefix, "pfx:");
     }
 
     // ============================================
@@ -1128,13 +1086,13 @@ mod last_flow_error_tests {
     #[test]
     fn log_flow_err_records_error_and_clears_on_ok() {
         let _ = take_last_flow_error(); // start clean on this thread
-        let out = log_flow_err("get", None::<i32>, Err(anyhow::anyhow!("redis down")));
+        let out = log_flow_err("get", None::<i32>, Err(anyhow::anyhow!("store down")));
         assert_eq!(out, None);
         let recorded = take_last_flow_error();
         assert!(
             recorded
                 .as_deref()
-                .is_some_and(|s| s.contains("get") && s.contains("redis down")),
+                .is_some_and(|s| s.contains("get") && s.contains("store down")),
             "a failed op must record its error, got {recorded:?}"
         );
         // take() cleared it
@@ -1307,7 +1265,7 @@ mod metered_flow_store_tests {
     }
 
     /// `is_blocking()` defaults to `false`. A decorator that fails to forward it silently
-    /// reclassifies a blocking backend (Redis) as non-blocking, which breaks the `spawn_blocking`
+    /// reclassifies a blocking backend as non-blocking, which breaks the `spawn_blocking`
     /// routing added in #985/#988/#989 — a concurrency bug, not a metrics inaccuracy.
     #[test]
     fn metered_store_forwards_is_blocking_in_both_directions() {
@@ -1326,7 +1284,7 @@ mod metered_flow_store_tests {
 
     /// Every defaulted method must be forwarded, not inherited. `increment_by`'s default body is
     /// written in terms of `get`/`set`, so relying on it would discard the inner store's atomic
-    /// implementation — turning an atomic Redis INCRBY into a racy get-then-set.
+    /// implementation — turning an atomic INCRBY into a racy get-then-set.
     #[test]
     fn metered_store_forwards_defaulted_methods_to_inner() {
         let store = MeteredFlowStore::new(Arc::new(FakeInner { blocking: false }));

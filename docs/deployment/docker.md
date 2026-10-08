@@ -72,8 +72,8 @@ Two consequences worth knowing before you switch:
   healthcheck:
     test: ["CMD", "rift", "--rcfile", "/etc/rift/rc.json", "healthcheck"]
   ```
-- **No mimalloc.** The musl binaries are built without the mimalloc allocator. Scripting and the
-  Redis backend are both present. If you are benchmarking allocation-heavy workloads, use the
+- **No mimalloc.** The musl binaries are built without the mimalloc allocator. Scripting is
+  present. If you are benchmarking allocation-heavy workloads, use the
   default flavor on `amd64` (the `arm64` default image is built without mimalloc too).
 
 HTTPS upstream proxying works in both: the CA bundle is copied into the static image, because rift's
@@ -462,12 +462,12 @@ docker run -p 2525:2525 -p 4545:4545 my-rift:latest
 The published images are assembled from the release binaries. To build an image from source
 instead, use `crates/rift-http-proxy/Dockerfile` from the repository root
 (`docker build -f crates/rift-http-proxy/Dockerfile .`); its runtime stage is `debian:trixie-slim`,
-and it builds with `ARG FEATURES=javascript,redis-backend` by default (on top of the crate's default
+and it builds with `ARG FEATURES=javascript` by default (on top of the crate's default
 features). If you're building a slimmer image (or embedding Rift as a `cdylib` instead of running the
 container), see the Cargo feature table in [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#cargo-features)
 and the [Embedding & SPI]({{ site.baseurl }}/embedding/) overview — the same features gate both the
 binary and the `rift-ffi` cdylib, and `cargo build --no-default-features` (plus an explicit
-`--features` list) drops the scripting engines and Redis backend you don't need.
+`--features` list) drops the scripting engines you don't need.
 
 ---
 

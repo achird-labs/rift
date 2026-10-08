@@ -114,14 +114,14 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             archive: tar.gz
-            features: javascript,redis-backend
+            features: javascript
             classifier: linux-x86_64
 
           # Linux ARM64 (glibc)
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04
             archive: tar.gz
-            features: javascript,redis-backend
+            features: javascript
             no_default_features: true
             cross: true
             classifier: linux-aarch64
@@ -130,7 +130,7 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-22.04
             archive: tar.gz
-            features: javascript,redis-backend
+            features: javascript
             no_default_features: true
             cross: true
             classifier: linux-x86_64-musl
@@ -139,7 +139,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-22.04
             archive: tar.gz
-            features: javascript,redis-backend
+            features: javascript
             no_default_features: true
             cross: true
             classifier: linux-aarch64-musl
@@ -148,7 +148,7 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-14
             archive: tar.gz
-            features: javascript,redis-backend
+            features: javascript
             no_default_features: true
             classifier: darwin-x86_64
 
@@ -156,14 +156,14 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-14
             archive: tar.gz
-            features: javascript,redis-backend
+            features: javascript
             classifier: darwin-aarch64
 
           # Windows x86_64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
-            features: javascript,redis-backend
+            features: javascript
             no_default_features: true
             classifier: windows-x86_64
 
@@ -501,16 +501,16 @@ jobs:
             sleep 30
           }
           # Dependency order — a crate must be on the index before anything that depends on it is
-          # packaged. rift-store-redis was extracted from rift-mock-core in #853 and never added
-          # here, so v0.17.0 published three crates and then died packaging rift-http-proxy with
-          # "no matching package named `rift-store-redis` found".
+          # packaged. A workspace crate that rift-http-proxy depends on but is missing here makes the
+          # release die packaging rift-http-proxy with "no matching package named ... found".
+          # `rift-store-redis` (removed in 0.22.0) is no longer published; its old versions stay on
+          # crates.io.
           # rift-ejs was extracted from rift-http-proxy in #1108; rift-lint and rift-http-proxy both
           # depend on it, so it goes first.
           publish_crate rift-ejs
           publish_crate rift-lint
           publish_crate rift-types
           publish_crate rift-mock-core
-          publish_crate rift-store-redis
           publish_crate rift-http-proxy
 
   # =============================================================================
@@ -641,7 +641,6 @@ jobs:
           All binaries include:
           - **Rhai scripting** (built-in)
           - **JavaScript scripting** (Boa engine)
-          - **Redis backend** for distributed state
 
           ### Verification
 

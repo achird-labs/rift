@@ -43,10 +43,10 @@ a working directory should absolutize them at load time against the extracted `c
 - **`engineVersion`** — the Rift release this corpus ships with. Corpus version **==** engine
   release version; there is no independent corpus versioning.
 - **`requires`** — capability gates from the closed set
-  `["injection", "proxy", "redis", "https", "shell"]`. An SDK CI may skip a fixture **only** when
+  `["injection", "proxy", "https", "shell"]`. An SDK CI may skip a fixture **only** when
   its lane lacks a capability the fixture declares — never ad hoc. (`injection` fixtures need the
   engine started with `--allowInjection`; `proxy` fixtures need an upstream — `rift-verify` stands
-  up its own; `https`/`redis`/`shell` gate on TLS / a Redis backend / a host shell.)
+  up its own; `https`/`shell` gate on TLS / a host shell.)
 - **`hasVerify`** — the fixture carries a `_verify` sequence (see below).
 
 ## The replay contract

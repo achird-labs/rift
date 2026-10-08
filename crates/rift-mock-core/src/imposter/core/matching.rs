@@ -289,7 +289,7 @@ impl Imposter {
         let snapshot = self.snapshot();
         let has_inject = snapshot.has_inject();
         // A scenario-gated stub reads flow state inside the matching pass; on a blocking backend
-        // (Redis) that read must not run on the tokio worker either (issue #475). A scenario-free
+        // (a networked store) that read must not run on the tokio worker either (issue #475). A scenario-free
         // snapshot on a blocking backend still takes the inline fast path — no gate read happens.
         let needs_offload =
             has_inject || (snapshot.has_scenario_gate() && self.flow_store.is_blocking());
@@ -471,7 +471,7 @@ impl Imposter {
     }
 
     /// Run a blocking flow-store closure off the tokio worker when the backend actually blocks
-    /// (Redis), otherwise inline. This keeps a slow or pool-exhausted backend from
+    /// (a networked store), otherwise inline. This keeps a slow or pool-exhausted backend from
     /// head-of-line-blocking the worker thread every request is multiplexed on (issue #475),
     /// while adding zero overhead for the non-blocking in-memory store (the common case — the
     /// closure runs directly on the caller with no task hop).
@@ -985,7 +985,7 @@ mod bounded_matching_tests {
 
     /// A FlowStore that reports `is_blocking() == true` (delegating storage to an in-memory store)
     /// so the spawn_blocking dispatch path and the blocking-backend offload decision are exercised
-    /// without a real Redis (issue #475).
+    /// without a real networked store (issue #475).
     struct BlockingProbeStore {
         inner: crate::backends::inmemory::InMemoryFlowStore,
     }
@@ -1042,9 +1042,8 @@ mod bounded_matching_tests {
         Arc::new(imp)
     }
 
-    /// A blocking store whose `get` annotates the way `rift-store-redis`'s `backend_err` does.
-    /// The point is the pairing: Redis is the only production backend that annotates, and the only
-    /// one that reports `is_blocking() == true` (issue #987).
+    /// A blocking store whose `get` annotates the way a networked store's error mapper does.
+    /// The point is the pairing: a store that annotates is also the kind that reports `is_blocking() == true` (issue #987).
     struct AnnotatingBlockingStore {
         inner: crate::backends::inmemory::InMemoryFlowStore,
     }

@@ -91,23 +91,11 @@ async fn server_builder_with_injected_manager_serves_admin_api() {
     manager.delete_all().await;
 }
 
-// Issue #853: the manager `ServerBuilder` builds ITSELF must register the shipped flow-state
-// backends. Deliberately no `.manager(...)` here — injecting one would test the wrong object.
-//
-// Why this guard exists: `default_flow_store_backends()` is unit-tested, and the admin API is
-// tested against a manager the test builds by hand, so if a refactor dropped
-// `.with_flow_store_backends(...)` from `ServerBuilder`, everything would still compile, clippy
-// would pass, `verify-feature-propagation.sh` would pass (it checks the Cargo feature chain, not
-// the registration call) — and every `rift` binary user with `backend: "redis"` would get
-// "no such backend is registered". That is the #777 shape moved from the manifest to the code.
-//
-// The probe needs no Redis server: an UNREACHABLE url separates the two outcomes. Registered ⇒ the
-// factory runs and fails to connect ("failed to build the Redis flow store"); not registered ⇒ the
-// registry lookup misses first ("no such backend is registered"). Both are 400, so the body is what
-// discriminates.
-#[cfg(feature = "redis-backend")]
+// Issue #1337: the Redis backend is gone, so the server `ServerBuilder` starts refuses
+// `backend: "redis"` at admission with the removal text and the rift-cluster pointer — a 400, not a
+// silent NoOp downgrade.
 #[tokio::test]
-async fn server_builder_registers_the_shipped_flow_store_backends() {
+async fn server_builder_refuses_the_removed_redis_backend() {
     let cli = Cli::try_parse_from([
         "rift",
         "--host",
@@ -142,20 +130,11 @@ async fn server_builder_registers_the_shipped_flow_store_backends() {
         .await
         .expect("post imposter");
 
-    assert_eq!(
-        response.status(),
-        400,
-        "an unreachable redis must fail imposter creation, not downgrade to NoOp"
-    );
+    assert_eq!(response.status(), 400, "backend \"redis\" must be refused");
     let body = response.text().await.expect("body");
     assert!(
-        body.contains("failed to build the Redis flow store"),
-        "the redis backend must be REGISTERED on the manager ServerBuilder builds — got {body:?}, \
-         which means ServerBuilder no longer calls default_flow_store_backends()"
-    );
-    assert!(
-        !body.contains("no such backend is registered"),
-        "redis resolved as an unknown backend, so it was never registered: {body}"
+        body.contains("removed in 0.22.0") && body.contains("rift-cluster"),
+        "the refusal must say the backend was removed and point at rift-cluster, got: {body}"
     );
 }
 

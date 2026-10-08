@@ -5,7 +5,7 @@
 //!
 //! - **Fault Injection** (`fault`): Probabilistic fault injection with latency,
 //!   error responses, and TCP-level faults
-//! - **Flow State** (`flow_state`): Stateful testing with in-memory or Redis backends
+//! - **Flow State** (`flow_state`): Stateful testing with the in-memory backend (other stores plug in via the SPI)
 //! - **Rule Matching** (`matcher`): Enhanced request matching with compiled predicates
 //! - **Metrics** (`metrics`): Prometheus metrics for observability
 //! - **Stub Analysis** (`stub_analysis`): Conflict detection and overlap warnings

@@ -940,9 +940,9 @@ any matcher failure that is not an injection error) enriches the envelope's erro
   "errors": [{
     "code": "503",
     "type": "backend unavailable",
-    "message": "flowState: redis connection refused",
+    "message": "flowState: store connection refused",
     "feature": "flowState",
-    "detail": "redis connection refused"
+    "detail": "store connection refused"
   }]
 }
 ```

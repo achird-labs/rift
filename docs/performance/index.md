@@ -588,10 +588,10 @@ Cargo feature named `mimalloc`, enabled in the binary's default feature set:
 cargo build --release
 
 # Drop it (e.g. for a cross-compile or FFI build) by opting out of default features
-cargo build --release --no-default-features --features redis-backend,javascript,quamina-matching
+cargo build --release --no-default-features --features javascript,quamina-matching
 
 # Or swap in jemalloc (bake-off candidate, issue #717)
-cargo build --release --no-default-features --features redis-backend,javascript,quamina-matching,jemalloc
+cargo build --release --no-default-features --features javascript,quamina-matching,jemalloc
 ```
 
 An opt-in `jemalloc` feature builds the binary with

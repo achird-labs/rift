@@ -30,7 +30,7 @@ sdk-conformance-<version>/
 ```
 
 `manifest.json` indexes each fixture with its `port`, a `name`, a `requires` capability list (closed
-set: `injection`, `proxy`, `redis`, `https`, `shell`), and `hasVerify`. `engineVersion` equals the
+set: `injection`, `proxy`, `https`, `shell`), and `hasVerify`. `engineVersion` equals the
 Rift release — the corpus and engine move together, so an SDK pinning engine `X.Y.Z` downloads
 `sdk-conformance-X.Y.Z.tar.gz` from that release.
 

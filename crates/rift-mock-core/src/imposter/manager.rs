@@ -335,7 +335,7 @@ pub struct ImposterManager {
     /// Embedder hook to supply a custom flow store per imposter (issue #312)
     flow_store_provider: Option<Arc<dyn FlowStoreProvider>>,
     /// Named `_rift.flowState.backend` implementations beyond the built-in `"inmemory"`
-    /// (issue #853) — `"redis"` arrives here from the `rift-store-redis` crate.
+    /// (issue #853) — an embedder's store arrives here.
     flow_store_backends: crate::extensions::flow_state::FlowStoreBackends,
     /// Pluggable response-cursor backend (issue #313); None = embedded per-stub cycler.
     sequencer: Option<Arc<dyn ResponseSequencer>>,
@@ -505,9 +505,8 @@ impl ImposterManager {
 
     /// Register the named flow-store backends this build serves (issue #853).
     ///
-    /// Supplies every `_rift.flowState.backend` beyond the built-in `"inmemory"` — notably
-    /// `"redis"`, which lives in the `rift-store-redis` crate so that this one carries no redis
-    /// dependency. Without it, an imposter naming an unregistered backend fails construction with
+    /// Supplies every `_rift.flowState.backend` beyond the built-in `"inmemory"`.
+    /// Without it, an imposter naming an unregistered backend fails construction with
     /// an error listing what is available (never a silent `NoOpFlowStore`, #325/#377).
     ///
     /// Unlike [`Self::with_flow_store_provider`], a factory does not override an imposter's

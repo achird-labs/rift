@@ -4045,9 +4045,8 @@ mod backend_errors {
     // entrypoint returns the structured 503, and the decorator sees the phase, the
     // imposter port, and the annotations the failing backend attached.
 
-    /// `FailingStore`, but reporting `is_blocking() == true` — i.e. shaped like the one production
-    /// backend that actually annotates (`rift-store-redis`, whose `backend_err` annotates and whose
-    /// `is_blocking()` is `true`). Delegates every op to `FailingStore` so the failure behaviour and
+    /// `FailingStore`, but reporting `is_blocking() == true` — i.e. shaped like a networked
+    /// backend that annotates its errors and whose `is_blocking()` is `true`. Delegates every op to `FailingStore` so the failure behaviour and
     /// the annotations are identical; only the routing differs.
     struct BlockingFailingStore;
 

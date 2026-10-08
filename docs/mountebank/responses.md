@@ -391,7 +391,7 @@ Standard response cycling is **global** - all users share the same position in t
 | Capability | Mountebank Cycling | Rift Flow State |
 |:-----------|:-------------------|:----------------|
 | State scope | Global (all users) | Per flow_id (isolated) |
-| State persistence | Lost on restart | Redis backend available |
+| State persistence | Lost on restart | Lost on restart (in-memory flow store) |
 | Complex logic | Not possible | Full scripting support |
 | Time-based rules | Not possible | TTL + timestamp checks |
 | Per-user tracking | Not possible | Use user ID as flow_id |
@@ -473,7 +473,7 @@ Now each user experiences their own retry sequence:
 | Multi-user with isolated state | ❌ | ✅ |
 | Time-based rate limiting | ❌ | ✅ |
 | Complex conditional logic | ❌ | ✅ |
-| State survives restart | ❌ | ✅ (Redis) |
+| State survives restart | ❌ | ❌ (in-memory flow store; shared state is a rift-cluster deployment) |
 | Per-session behavior | ❌ | ✅ |
 
 See [Scripting]({{ site.baseurl }}/features/scripting/) and [Fault Injection]({{ site.baseurl }}/features/fault-injection/) for more examples.
@@ -525,8 +525,7 @@ A client that polls with validators (a CDN-hosted datafile, a feature-flag SDK) 
   admin API, a reset or a space teardown. Writing the state a scenario already has is not a
   transition, and only scenarios gating a stub at or ahead of a `_rift.conditional` stub are
   tracked. A transition in one flow moves the stamp for every flow of that scenario (one extra
-  `200` for the others), and it is per process: a transition made by another node sharing a Redis
-  flow store does not move this node's stamp. State written around the scenario API is not seen
+  `200` for the others), and it is per process: a transition made by another node does not move this node's stamp. State written around the scenario API is not seen
   either: `_rift.stateOps`, a script's `ctx.state`, and the raw `…/flow-state` routes (including
   clearing a flow) change scenario state without moving `Last-Modified` — revalidate with
   `If-None-Match` (the `ETag` follows the body) if your scenarios are driven that way.

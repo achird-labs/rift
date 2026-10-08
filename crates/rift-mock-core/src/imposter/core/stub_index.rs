@@ -1244,7 +1244,7 @@ pub(crate) struct StubSnapshot {
     /// gate the bounded (spawn_blocking) matching route on it for free (issue #476).
     has_inject: bool,
     /// Whether any stub is scenario-gated (`requiredScenarioState`). The eligibility gate reads
-    /// flow state during matching; on a blocking backend (Redis) that read must run off the tokio
+    /// flow state during matching; on a blocking backend (a networked store) that read must run off the tokio
     /// worker, so the bounded matcher offloads only when this is set — a scenario-free snapshot
     /// keeps the inline fast path even on a blocking backend (issue #475).
     has_scenario_gate: bool,

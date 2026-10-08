@@ -682,7 +682,7 @@ fn render_template_parts(
 /// flow store blocks (issue #971) — and not at all when nothing here can reach the store (#986).
 ///
 /// `{{ state.<key> }}` reads the flow store, and doing that inline on the request task
-/// head-of-line-blocks the worker for the backend round trip on a blocking backend (Redis, or an
+/// head-of-line-blocks the worker for the backend round trip on a blocking backend (a networked store, or an
 /// embedder's store that parks on an owner RPC) — the same defect issue #475 removed for the
 /// scenario FSM and #969 for `_rift.stateOps`. On a current-thread runtime whose store is served by
 /// that same runtime it does not merely stall: it deadlocks until the store times out and the token
@@ -1119,7 +1119,7 @@ async fn handle_request_inner(
         // Resolve flow_id from the same header map the matcher used (`request_headers`) so the
         // transition writes the exact key the gate read.
         let scenario_flow_id = imposter.resolve_flow_id(&request_headers);
-        // Offload the FSM transition to spawn_blocking on a blocking backend (Redis) so it can't
+        // Offload the FSM transition to spawn_blocking on a blocking backend (a networked store) so it can't
         // stall the tokio worker; inline on the in-memory backend (issue #475).
         //
         // Guarded on `new_scenario_state` because that is the identical check
@@ -1933,7 +1933,7 @@ async fn handle_request_inner(
             // this request's ops (the semantics `state_ops`'s module doc pins: "show the count,
             // then bump it"). Ops run sequentially, in array order. `run_flow_blocking` offloads
             // the store calls onto a blocking backend exactly like the FSM transition above
-            // (issue #475's Redis rule): inline on the in-memory store, off the tokio worker on a
+            // (issue #475's blocking-store rule): inline on the in-memory store, off the tokio worker on a
             // backend that actually blocks.
             if let Some(ops) = rift_ext.map(|r| &r.state_ops).filter(|ops| !ops.is_empty()) {
                 let request_data = RequestData::new(

@@ -416,7 +416,7 @@ docker compose -f docker-compose-retry-proxy.yml down
 
 Rift extends Mountebank with advanced features through the `_rift` namespace:
 
-- **Flow State**: Stateful testing with in-memory or Redis backends
+- **Flow State**: Stateful testing with the in-memory backend
 - **Fault Injection**: Probabilistic latency, error, and TCP faults
 - **Scripting**: Multi-engine scripting (Rhai, JavaScript)
 

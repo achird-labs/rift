@@ -47,95 +47,25 @@ Enable stateful testing scenarios with flow state:
 | Backend | Description | Use Case |
 |:--------|:------------|:---------|
 | `inmemory` | In-process storage (default) | Single instance, testing |
-| `redis` | Redis-backed distributed storage | Multi-instance, production |
 
 ### Configuration Options
 
 | Option | Type | Default | Description |
 |:-------|:-----|:--------|:------------|
-| `backend` | string | `"inmemory"` | Storage backend: inmemory or redis |
+| `backend` | string | `"inmemory"` | Storage backend: `inmemory` (the only built-in; `redis` was removed in 0.22.0 and is refused) |
 | `ttlSeconds` | integer | `300` | Time-to-live for state entries (5 minutes); must be at least `1` |
-| `redis` | object | - | Redis-specific configuration (required for redis backend) |
 | `flowIdSource` | string | `"imposter_port"` | Where the flow id comes from: `"imposter_port"`, or `"header:<Name>"` to key state by a request header |
 
 Other keys under `flowState` are kept and passed to an embedder-supplied store; the built-in
 backends ignore them.
 
-**Fail-loud backend errors**: an unknown `backend` string, or a `redis` backend that can't be
-created (missing `redis` config, a connection/pool failure, or a binary built without the
-`redis-backend` feature), fails imposter creation with `400 Bad Request` rather than silently
+**Fail-loud backend errors**: an unknown `backend` string, or the removed `"redis"` backend (whose
+error points at rift-cluster for state shared across processes), fails imposter creation with `400 Bad Request` rather than silently
 degrading to a no-op store. See
 [Flow State → Backend configuration is fail-loud]({{ site.baseurl }}/features/flow-state/#backend-configuration-is-fail-loud)
 for details. With no `flowState` block, an imposter that has a script, scenario or `stateOps` stub
 gets an in-memory store auto-provisioned (with a warning); only an imposter with no state surface at
 all uses a no-op store.
-
-### Redis Configuration
-
-When using `redis` backend:
-
-```json
-"_rift": {
-  "flowState": {
-    "backend": "redis",
-    "ttlSeconds": 600,
-    "redis": {
-      "url": "redis://localhost:6379",
-      "poolSize": 10,
-      "keyPrefix": "rift:"
-    }
-  }
-}
-```
-
-| Option | Type | Default | Description |
-|:-------|:-----|:--------|:------------|
-| `url` | string | required | Redis connection URL |
-| `poolSize` | integer | `10` | Connection pool size |
-| `keyPrefix` | string | `"rift:"` | Prefix for all keys (namespace isolation) |
-
-**Connection URL formats:**
-
-```bash
-# Basic
-redis://localhost:6379
-
-# With password
-redis://:password@localhost:6379
-
-# With database selection
-redis://localhost:6379/0
-```
-
-The Redis client is built without TLS or Sentinel support, so `rediss://` and `redis+sentinel://`
-URLs are rejected when the imposter is created. Imposter creation also fails if the server cannot be
-reached: the store connects and sends a `PING` up front (5-second pool timeout).
-
-**Key isolation example:**
-
-```json
-{
-  "flowState": {
-    "backend": "redis",
-    "redis": {
-      "url": "redis://localhost:6379",
-      "keyPrefix": "rift:staging:"
-    }
-  }
-}
-```
-
-This prefixes all keys with `rift:staging:` to isolate test environments.
-
-### Enabling Redis Backend
-
-Redis support is the `redis-backend` Cargo feature. It is on by default, and every release binary
-and container image includes it, so nothing needs enabling. Only a build with
-`--no-default-features` has to add it back:
-
-```bash
-cargo build --release --no-default-features --features javascript,redis-backend
-```
 
 ---
 

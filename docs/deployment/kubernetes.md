@@ -377,8 +377,8 @@ re-applies the rules; the listener itself is boot-only.
 Each replica is an independent Rift: an imposter created through the admin API exists only on the
 replica that received the request, and so do recorded requests. Behind a `Service`, admin calls and
 verification land on arbitrary pods. Replicate only when every pod loads the same imposters at
-startup (`--configfile` from a ConfigMap) and nothing mutates them at runtime; a Redis
-`flowState` backend shares flow state between pods, not imposters.
+startup (`--configfile` from a ConfigMap) and nothing mutates them at runtime. Replicas do not
+share flow state either — see [Shared state across pods](#shared-state-across-pods).
 
 ```yaml
 apiVersion: apps/v1
@@ -403,9 +403,19 @@ spec:
           image: zainalpour/rift-proxy:latest
 ```
 
+### Shared state across pods
+
+The engine ships the in-memory flow store only (the Redis backend was removed in 0.22.0), so
+scenario state, `ctx.state` / `stateOps` values and their TTLs are **per pod**: N pods behind a
+`Service` are N independent state machines, and stub cycling, proxy recordings and the request
+journal are per pod too. If you need state shared across processes, run
+[rift-cluster](https://github.com/achird-labs/rift-cluster) instead of scaling this engine
+horizontally. Until then, keep stateful mocks on a single replica.
+
 ### Horizontal Pod Autoscaler
 
-The same caveat applies: a pod the autoscaler adds starts with only the startup config.
+The same caveat applies: a pod the autoscaler adds starts with only the startup config and none of
+the existing flow state. Autoscale only stateless mocks.
 
 ```yaml
 apiVersion: autoscaling/v2

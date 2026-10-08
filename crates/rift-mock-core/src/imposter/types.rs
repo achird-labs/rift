@@ -2030,15 +2030,12 @@ impl ImposterConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RiftFlowStateConfig {
-    /// Backend type: "inmemory" or "redis"
+    /// Backend type: "inmemory" (the only built-in)
     #[serde(default = "default_flow_backend")]
     pub backend: String,
     /// Default TTL for state entries in seconds
     #[serde(default = "default_flow_ttl")]
     pub ttl_seconds: i64,
-    /// Redis configuration (required when backend is "redis")
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub redis: Option<RiftRedisConfig>,
     /// Source for the correlation `flow_id`: `"imposter_port"` (default) or `"header:<Name>"`.
     /// Flattened directly under `flowState` (issue #266). Absent ⇒ `"imposter_port"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2051,8 +2048,10 @@ pub struct RiftFlowStateConfig {
     /// their vocabulary). Unrecognised keys under `flowState` therefore collect
     /// here instead of being dropped, and the provider parses what it owns.
     ///
-    /// Built-in backends ignore this entirely — `"inmemory"` and `"redis"` read
-    /// only the typed fields above, so an unknown key changes nothing for them.
+    /// The built-in `"inmemory"` backend ignores this entirely — it reads only the typed fields
+    /// above, so an unknown key changes nothing for it. This is also what keeps a `redis: {…}`
+    /// block from a config written before that backend was removed decodable (it is refused at
+    /// admission, not at decode — rift-cluster replays stored bytes).
     ///
     /// [`FlowStoreProvider`]: crate::extensions::flow_state::FlowStoreProvider
     /// [`FlowStore`]: crate::extensions::flow_state::FlowStore
@@ -2073,33 +2072,10 @@ impl Default for RiftFlowStateConfig {
         Self {
             backend: default_flow_backend(),
             ttl_seconds: default_flow_ttl(),
-            redis: None,
             flow_id_source: None,
             extra: serde_json::Map::new(),
         }
     }
-}
-
-/// Redis configuration for flow state
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RiftRedisConfig {
-    /// Redis connection URL
-    pub url: String,
-    /// Connection pool size
-    #[serde(default = "default_redis_pool")]
-    pub pool_size: usize,
-    /// Key prefix for all flow state keys
-    #[serde(default = "default_redis_prefix")]
-    pub key_prefix: String,
-}
-
-fn default_redis_pool() -> usize {
-    10
-}
-
-fn default_redis_prefix() -> String {
-    "rift:".to_string()
 }
 
 /// Metrics configuration for Rift extensions
@@ -2982,9 +2958,8 @@ mod tests {
     #[test]
     fn an_empty_extra_adds_nothing_to_the_wire_form() {
         let input = json!({
-            "backend": "redis",
+            "backend": "inmemory",
             "ttlSeconds": 900,
-            "redis": { "url": "redis://localhost:6379" },
             "flowIdSource": "header:X-Flow"
         });
         let fs: RiftFlowStateConfig = serde_json::from_value(input.clone()).unwrap();
@@ -2992,10 +2967,29 @@ mod tests {
 
         let out = serde_json::to_value(&fs).unwrap();
         let keys: Vec<&String> = out.as_object().unwrap().keys().collect();
-        assert_eq!(keys.len(), 4, "serializing gained or lost a key: {keys:?}");
+        assert_eq!(keys.len(), 3, "serializing gained or lost a key: {keys:?}");
         assert_eq!(out.get("backend"), input.get("backend"));
         assert_eq!(out.get("ttlSeconds"), input.get("ttlSeconds"));
         assert_eq!(out.get("flowIdSource"), input.get("flowIdSource"));
+    }
+
+    // Issue #1337: the Redis backend was removed, but a stored config naming it must still DECODE
+    // (rift-cluster replays admitted bytes; a decode-time refusal would make them unreadable). The
+    // leftover `redis` block is carried in `extra` and survives a re-serialize unchanged.
+    #[test]
+    fn a_leftover_redis_backend_and_block_still_decode_and_round_trip() {
+        let input = json!({
+            "backend": "redis",
+            "ttlSeconds": 900,
+            "redis": { "url": "redis://localhost:6379", "poolSize": 4 }
+        });
+        let fs: RiftFlowStateConfig = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(fs.backend, "redis");
+        assert_eq!(
+            fs.extra.get("redis"),
+            Some(&json!({ "url": "redis://localhost:6379", "poolSize": 4 }))
+        );
+        assert_eq!(serde_json::to_value(&fs).unwrap(), input);
     }
 
     // Absent `flowState` keys entirely: `extra` defaults empty rather than

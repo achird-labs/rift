@@ -16,7 +16,7 @@ use std::time::Duration;
 const VERIFY: &str = env!("CARGO_BIN_EXE_rift-verify");
 /// The closed set of capability gates a fixture may declare in `manifest.json` `requires`
 /// (extended additively). An SDK CI skips a fixture only when it lacks a declared capability.
-const CLOSED_CAPS: &[&str] = &["injection", "proxy", "redis", "https", "shell"];
+const CLOSED_CAPS: &[&str] = &["injection", "proxy", "https", "shell"];
 
 /// `<repo>/sdk-conformance` (this test lives in `<repo>/crates/rift-http-proxy`).
 fn sdk_conformance_dir() -> PathBuf {

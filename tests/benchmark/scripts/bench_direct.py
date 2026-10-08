@@ -494,14 +494,14 @@ ALLOCATORS = ("mimalloc", "jemalloc", "system")
 DEFAULT_RIFT_BIN = os.path.join(REPO_ROOT, "target", "release", "rift-http-proxy")
 
 def allocator_build_args(name):
-    """Cargo flags that swap ONLY the global allocator, keeping redis-backend+javascript on in
+    """Cargo flags that swap ONLY the global allocator, keeping javascript on in
     every variant so the three builds are functionally identical apart from the allocator (#717)."""
     if name == "mimalloc":
         return []   # default features already include mimalloc
     if name == "jemalloc":
-        return ["--no-default-features", "--features", "redis-backend,javascript,jemalloc"]
+        return ["--no-default-features", "--features", "javascript,jemalloc"]
     if name == "system":
-        return ["--no-default-features", "--features", "redis-backend,javascript"]
+        return ["--no-default-features", "--features", "javascript"]
     raise ValueError(f"unknown allocator {name!r}: choose from {','.join(ALLOCATORS)}")
 
 # ---- quamina body-field dimension A/B (issue #779): same discipline as --allocator ----
@@ -515,12 +515,12 @@ QUAMINA_MARKER = "Matching dimensions: "
 QUAMINA_PROBE_PORT = 3527
 
 def quamina_build_args(variant):
-    """Cargo flags that swap ONLY the body-field dimension, keeping redis-backend + javascript +
+    """Cargo flags that swap ONLY the body-field dimension, keeping javascript +
     mimalloc on in both variants so the builds are functionally identical apart from it."""
     if variant == "on":
         return []   # default features include quamina-matching (#777)
     if variant == "off":
-        return ["--no-default-features", "--features", "redis-backend,javascript,mimalloc"]
+        return ["--no-default-features", "--features", "javascript,mimalloc"]
     raise ValueError(f"unknown quamina variant {variant!r}: choose from {','.join(QUAMINA_VARIANTS)}")
 
 def quamina_bin_path(variant):

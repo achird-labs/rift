@@ -566,8 +566,8 @@ async fn handle_set_enabled(
 
 /// Build the public projection of a `flowState` for `GET /imposters` (issue #260). Fail-closed
 /// allowlist: only the non-sensitive fields tools need are exposed, so a credential-bearing field
-/// added to the config later (e.g. inside `redis`, or a new backend's auth block) is excluded by
-/// default rather than leaked.
+/// added to the config later (or carried in the flattened `extra` map, e.g. a leftover `redis` block
+/// from a config written before the backend was removed) is excluded by default rather than leaked.
 fn expose_flow_state(fs: &rift_mock_core::imposter::RiftFlowStateConfig) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     out.insert("backend".to_string(), serde_json::json!(fs.backend));
