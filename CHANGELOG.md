@@ -15,6 +15,11 @@ record.
 
 ### Added
 
+- **Embedded hosts can clear a whole flow** (#1328). `rift_flow_state_clear(h, port, flow_id)`
+  is the C-ABI form of `DELETE /admin/imposters/{port}/flow-state/{flowId}`: it drops every key in
+  the flow in one call and is idempotent (an absent flow returns `0`). Before this an embedder had
+  to loop over keys it already knew. Additive symbol; detect it by presence.
+
 - **Server flags are accepted after a subcommand** (#1316): `rift start --port 2525 --configfile imposters.json`, `rift save --port …` and `rift restart …` now parse, matching Mountebank's command line; the flags are also still accepted before the subcommand. `rift replay` and `rift script check` no longer carry their own `--configfile` / `--no-parse`: they take the global ones, and `rift replay` without a config file exits with `rift replay needs --configfile <file>`.
 
 ### Changed

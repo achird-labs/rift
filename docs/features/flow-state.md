@@ -295,7 +295,7 @@ Note: an imposter gets a real store when `_rift.flowState` is configured, or it 
 stubs, or it has a `_rift.script` stub, or a `_rift.stateOps` block (auto-provisioned in-memory);
 only an imposter with none of those uses a no-op store where values never persist.
 
-> **Embedding over the C-ABI (non-Rust)**: a non-Rust host can read, write, and delete flow-state
+> **Embedding over the C-ABI (non-Rust)**: a non-Rust host can read, write, delete, and clear flow-state
 > keys with zero loopback HTTP via [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#admin-long-tail-over-ffi) —
-> `rift_flow_state_get` / `rift_flow_state_put` / `rift_flow_state_delete` mirror the admin-API
+> `rift_flow_state_get` / `rift_flow_state_put` / `rift_flow_state_delete` / `rift_flow_state_clear` mirror the admin-API
 > calls above exactly (same `ImposterManager` calls, same JSON shapes).

@@ -1474,6 +1474,75 @@ fn ffi_flow_state_get_absent_vs_error() {
     }
 }
 
+/// Issue #1328: `rift_flow_state_clear` drops every key in a flow, is idempotent, and refuses an
+/// unknown port or a NULL flow id without clearing anything.
+#[test]
+fn ffi_flow_state_clear() {
+    unsafe {
+        let h = rift_start();
+        assert!(!h.is_null());
+        let config = cstr(
+            r#"{ "port": 0, "protocol": "http",
+                 "_rift": { "flowState": { "backend": "inmemory" } }, "stubs": [] }"#,
+        );
+        let port = rift_create_imposter(h, config.as_ptr());
+        assert!(port > 0);
+
+        let flow = cstr("flow-clear");
+        let other = cstr("flow-keep");
+        let (a, b) = (cstr("a"), cstr("b"));
+        let val = cstr("1");
+        for (f, k) in [(&flow, &a), (&flow, &b), (&other, &a)] {
+            assert_eq!(
+                rift_flow_state_put(h, port, f.as_ptr(), k.as_ptr(), val.as_ptr()),
+                0
+            );
+        }
+        let found = |f: &CString, k: &CString| -> bool {
+            let v: serde_json::Value = serde_json::from_str(&take_json(rift_flow_state_get(
+                h,
+                port,
+                f.as_ptr(),
+                k.as_ptr(),
+            )))
+            .unwrap();
+            v["found"].as_bool().unwrap()
+        };
+
+        assert_eq!(rift_flow_state_clear(h, port, flow.as_ptr()), 0);
+        assert!(!found(&flow, &a), "key a is gone after clear");
+        assert!(!found(&flow, &b), "key b is gone after clear");
+        assert!(found(&other, &a), "another flow is untouched");
+
+        // Idempotent: clearing an already-empty flow succeeds.
+        assert_eq!(rift_flow_state_clear(h, port, flow.as_ptr()), 0);
+
+        // Unknown port -> -1 with last_error.
+        assert_eq!(rift_flow_state_clear(h, 65002, flow.as_ptr()), -1);
+        let err = rift_last_error();
+        assert!(!err.is_null(), "unknown port records last_error");
+        rift_free(err);
+
+        // NULL flow id -> -1 with the null-pointer message, and nothing is cleared.
+        assert_eq!(rift_flow_state_clear(h, port, std::ptr::null()), -1);
+        let err = rift_last_error();
+        assert!(!err.is_null());
+        let msg = CStr::from_ptr(err).to_str().expect("utf8").to_owned();
+        rift_free(err);
+        assert!(msg.contains("null handle or string pointer"), "got: {msg}");
+        assert!(found(&other, &a), "a refused clear must not clear anything");
+
+        // NULL handle -> -1.
+        assert_eq!(
+            rift_flow_state_clear(std::ptr::null_mut(), port, flow.as_ptr()),
+            -1
+        );
+
+        assert_eq!(rift_delete_all(h), 0);
+        rift_stop(h);
+    }
+}
+
 /// Issue #410: the intercept listener + control plane entirely over FFI — start the listener,
 /// add serve + forward rules, fetch the CA, and drive an HTTPS client (trusting only that CA)
 /// through the intercept port to both a served stub and a forwarded FFI imposter.

@@ -262,6 +262,17 @@ int32_t rift_flow_state_put(RiftHandle *h,
 int32_t rift_flow_state_delete(RiftHandle *h, uint16_t port, const char *flow_id, const char *key);
 
 /**
+ * Clear every key in `flow_id` on the imposter at `port` — the `DELETE
+ * /admin/imposters/{port}/flow-state/{flowId}` route. Idempotent: an absent or empty flow returns
+ * `0`. A null `flow_id` is an error (no default-flow rule here). Returns `0` on success, `-1` on
+ * any error (unknown port, invalid UTF-8, store error).
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `flow_id` must be null or a valid C string.
+ */
+int32_t rift_flow_state_clear(RiftHandle *h, uint16_t port, const char *flow_id);
+
+/**
  * Register a stub scoped to `flow_id` (its `space` is set from `flow_id`, ignoring any `space`
  * in the JSON, mirroring the admin path). Returns `0` on success, `-1` on any error.
  *
