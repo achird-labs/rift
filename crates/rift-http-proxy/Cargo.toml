@@ -129,6 +129,8 @@ rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-featur
 rift-lint = { path = "../rift-lint", version = "0.1.0" }
 # Unread-key gate (issue #1343): reports every key a derived `Deserialize` skips.
 serde_ignored = "0.1"
+# Issue #1342: every corpus fixture and docs example validates against the generated imposter schema.
+jsonschema.workspace = true
 tempfile = "3.8"
 rcgen = "0.14"
 # Reads the PKCS#12 stores `rift intercept-ca export` writes (issue #1274); already in the tree.

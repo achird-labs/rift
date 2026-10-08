@@ -71,6 +71,7 @@ fn one() -> i64 {
 /// One post-response state mutation. Serialized with `op` as the tag, camelCase, so it reads as
 /// `{ "op": "set", "key": "...", "value": "..." }` in a stub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", tag = "op")]
 pub enum StateOp {
     /// Set `key` to the rendered `value` template (`{{ }}` grammar plus `previousValue`).

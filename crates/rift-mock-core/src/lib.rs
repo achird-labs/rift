@@ -20,6 +20,9 @@ pub mod config;
 pub mod imposter;
 pub mod proxy;
 pub mod recording;
+/// The imposter grammar as a JSON Schema (issue #1342).
+#[cfg(feature = "schema")]
+pub mod schema;
 
 // ===== Rift Extensions (features beyond Mountebank) =====
 pub mod extensions;

@@ -360,6 +360,13 @@ impl Gate<'_> {
 /// - `delayRange` array (stub-level latency) converted to per-response `wait` behavior
 /// - `recordedFrom` URL from Mountebank proxy recording
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(
+    feature = "schema",
+    derive(schemars::JsonSchema),
+    schemars(
+        description = "A stub: the predicates a request must match and the responses it then cycles through."
+    )
+)]
 #[serde(rename_all = "camelCase")]
 struct StubRaw {
     #[serde(default)]
@@ -403,10 +410,25 @@ struct DelayRange {
 /// The wire shape. `DelayRange` is rewritten into a `wait` by the `TryFrom<StubRaw>` conversion, so an
 /// inverted range has to be refused here, at parse, or it reaches the draw and panics (issue #1148).
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "schema",
+    derive(schemars::JsonSchema),
+    schemars(
+        description = "A stub-level latency range in milliseconds, rewritten into a `wait` on every response."
+    )
+)]
 struct DelayRangeRaw {
     #[serde(deserialize_with = "de_u64_or_string")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "rift_types::schema::U64OrNumericString")
+    )]
     min: u64,
     #[serde(deserialize_with = "de_u64_or_string")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "rift_types::schema::U64OrNumericString")
+    )]
     max: u64,
 }
 
@@ -707,6 +729,12 @@ fn inject_wait_behavior(response: StubResponse, wait_val: serde_json::Value) -> 
 // paths keep resolving unchanged.
 pub use rift_types::{Predicate, PredicateOperation, PredicateParameters, PredicateSelector};
 
+/// The response-type keys, in the precedence `TryFrom<StubResponseRaw>` reads them: the first one
+/// present is the response, and the rest are kept only to be reported. Pinned to that conversion
+/// by `response_variant_keys_follow_the_decode_precedence`; the JSON Schema carries it as
+/// `x-rift-response-variants` (issue #1342).
+pub(crate) const RESPONSE_VARIANT_KEYS: [&str; 4] = ["is", "proxy", "inject", "fault"];
+
 /// Response within a stub - wrapper type that handles various formats
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "StubResponseRaw", into = "StubResponseOut")]
@@ -939,6 +967,13 @@ fn parse_behaviors(
 /// - `statusCode` as either string or number
 /// - Rift extensions via `_rift` field
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(
+    feature = "schema",
+    derive(schemars::JsonSchema),
+    schemars(
+        description = "One response of a stub: an `is`, `proxy`, `inject` or `fault` response, a `_rift`-only script response, or the flat recorded form (`statusCode`/`headers`/`body` at the top level). The first of `is`, `proxy`, `inject`, `fault` present is the one read."
+    )
+)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StubResponseRaw {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -955,10 +990,18 @@ pub(crate) struct StubResponseRaw {
         default,
         deserialize_with = "deserialize_underscore_behaviors"
     )]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "Option<crate::behaviors::ResponseBehaviors>")
+    )]
     pub underscore_behaviors: Option<serde_json::Value>,
     /// Alternative behaviors field (without underscore, used by some tools): an object or an
     /// array of behavior objects, or absent/`null`.
     #[serde(default, deserialize_with = "deserialize_behaviors")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "crate::schema::behaviors_block")
+    )]
     pub behaviors: Option<serde_json::Value>,
     /// Rift extensions for advanced features
     #[serde(rename = "_rift", skip_serializing_if = "Option::is_none")]
@@ -967,8 +1010,16 @@ pub(crate) struct StubResponseRaw {
     /// top level with no `is` wrapper (the shape emitted by recorded/migrated mocks). Mountebank
     /// renders these exactly like `is: { … }`. `is` still takes precedence when both are present.
     #[serde(default, deserialize_with = "deserialize_optional_status_code")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "Option<rift_types::schema::StatusCode>")
+    )]
     pub status_code: Option<u16>,
     #[serde(default, deserialize_with = "multi_value_headers::deserialize")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "rift_types::schema::MultiValueHeaders")
+    )]
     pub headers: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
@@ -978,6 +1029,10 @@ pub(crate) struct StubResponseRaw {
     /// so this is the form `mb save` writes. Merged into the behaviors block at parse, where it
     /// wins over a `repeat` inside the block, as it does in Mountebank. `null` is absent.
     #[serde(default)]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "Option<u32>", range(max = 4_294_967_295_u64))
+    )]
     pub repeat: Option<serde_json::Value>,
 }
 
@@ -1010,14 +1065,24 @@ pub(crate) struct StubResponseOut {
 
 /// Raw IsResponse that handles statusCode as string or number (for deserialization)
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(
+    feature = "schema",
+    derive(schemars::JsonSchema),
+    schemars(rename = "IsResponse", description = "A canned response.")
+)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IsResponseRaw {
     #[serde(
         default = "default_status_code",
         deserialize_with = "deserialize_status_code"
     )]
+    #[cfg_attr(feature = "schema", schemars(with = "rift_types::schema::StatusCode"))]
     pub status_code: u16,
     #[serde(default, deserialize_with = "multi_value_headers::deserialize")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "rift_types::schema::MultiValueHeaders")
+    )]
     pub headers: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
@@ -1638,6 +1703,7 @@ fn program_element(element: &serde_json::Value) -> Option<(&String, &serde_json:
 
 /// Response mode for body handling (Mountebank compatible)
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ResponseMode {
     /// Body is UTF-8 text (default)
@@ -1648,11 +1714,23 @@ pub enum ResponseMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(
+    feature = "schema",
+    derive(schemars::JsonSchema),
+    schemars(
+        rename = "DefaultResponse",
+        description = "The response served when no stub matches (`defaultResponse`). Unlike an `is` response, `statusCode` is a number here."
+    )
+)]
 #[serde(rename_all = "camelCase")]
 pub struct IsResponse {
     #[serde(default = "default_status_code")]
     pub status_code: u16,
     #[serde(default, with = "multi_value_headers")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "rift_types::schema::MultiValueHeaders")
+    )]
     pub headers: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
@@ -1667,6 +1745,7 @@ fn is_text_mode(mode: &ResponseMode) -> bool {
 
 /// Path rewrite configuration for proxy responses (Mountebank compatible)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PathRewrite {
     /// Pattern to match in the path (string to replace)
     pub from: String,
@@ -1675,16 +1754,29 @@ pub struct PathRewrite {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyResponse {
     pub to: String,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "crate::schema::proxy_mode")
+    )]
     pub mode: String,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "crate::schema::predicate_generators")
+    )]
     pub predicate_generators: Vec<serde_json::Value>,
     #[serde(default)]
     pub add_wait_behavior: bool,
     #[serde(default, deserialize_with = "single_value_headers::deserialize")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "rift_types::schema::SingleValueHeaders")
+    )]
     pub inject_headers: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add_decorate_behavior: Option<String>,
@@ -1809,6 +1901,14 @@ pub(crate) mod ca_pem_list {
 
 /// Configuration for creating an imposter
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "schema",
+    derive(schemars::JsonSchema),
+    schemars(
+        description = "An imposter: a mock server on one port, with its stubs and Rift extensions.",
+        transform = crate::schema::alias_properties
+    )
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ImposterConfig {
     /// Port for the imposter. If not specified, an available port will be auto-assigned.
@@ -1819,6 +1919,7 @@ pub struct ImposterConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     #[serde(default = "default_protocol")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "crate::schema::protocol"))]
     pub protocol: String,
     /// Inline PEM certificate for `protocol: "https"` (Mountebank-compatible). Paired with `key`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1851,6 +1952,10 @@ pub struct ImposterConfig {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "ca_pem_list::deserialize",
         serialize_with = "ca_pem_list::serialize"
+    )]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "Option<rift_types::schema::PemList>")
     )]
     pub ca: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1914,6 +2019,7 @@ pub struct ImposterConfig {
 /// Top-level Rift configuration block for imposters
 /// Extends Mountebank format with advanced features while maintaining backward compatibility
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftConfig {
     /// Flow state configuration (enables stateful scripting)
@@ -1947,6 +2053,7 @@ pub struct RiftConfig {
     /// [`ResponseSequencer`]: crate::behaviors::ResponseSequencer
     /// [`ImposterManager`]: crate::imposter::ImposterManager
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("x-rift-carrier" = true)))]
     pub sequencing: Option<RiftSequencingConfig>,
 }
 
@@ -1960,6 +2067,7 @@ pub struct RiftConfig {
 /// [`ResponseSequencer`]: crate::behaviors::ResponseSequencer
 /// [`FlowStore`]: crate::extensions::flow_state::FlowStore
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftSequencingConfig {
     /// Which cursor backend this imposter wants, interpreted by the registered
@@ -2031,6 +2139,7 @@ impl ImposterConfig {
 
 /// Flow state configuration for Rift extensions
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftFlowStateConfig {
     /// Backend type: "inmemory" (the only built-in)
@@ -2083,6 +2192,7 @@ impl Default for RiftFlowStateConfig {
 
 /// Metrics configuration for Rift extensions
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftMetricsConfig {
     /// Enable metrics collection
@@ -2099,6 +2209,7 @@ fn default_metrics_port() -> u16 {
 
 /// Proxy configuration for Rift extensions
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftProxyConfig {
     /// Upstream target configuration
@@ -2111,6 +2222,7 @@ pub struct RiftProxyConfig {
 
 /// Upstream configuration for Rift proxy
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftUpstreamConfig {
     pub host: String,
@@ -2125,6 +2237,7 @@ fn default_upstream_protocol() -> String {
 
 /// Connection pool configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftConnectionPoolConfig {
     #[serde(default = "default_max_idle")]
@@ -2143,6 +2256,7 @@ fn default_idle_timeout() -> u64 {
 
 /// Global script engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftScriptEngineConfig {
     /// Engine for a script that names none and has no `.rhai`/`.js`/`.lua` file extension:
@@ -2165,6 +2279,7 @@ fn default_script_timeout() -> u64 {
 
 /// Rift response extensions (added to stub responses)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftResponseExtension {
     /// Fault injection configuration
@@ -2200,6 +2315,7 @@ pub struct RiftResponseExtension {
     /// `StubResponse`, which sizes every response, so the binding's 192 bytes were charged to
     /// every response whether or not one was written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("x-rift-carrier" = true)))]
     pub dataset: Option<Box<crate::behaviors::DatasetBinding>>,
     /// Declarative conditional GET (issue #1280): an `ETag` and a `Last-Modified` on the response,
     /// and a `304 Not Modified` to a request whose `If-None-Match` / `If-Modified-Since` matches
@@ -2211,6 +2327,7 @@ pub struct RiftResponseExtension {
 
 /// `_rift.conditional`: `true`/`false`, or the validators spelled out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum ConditionalGet {
     /// `true` is `{"etag": true, "lastModified": "load"}`; `false` turns the feature off.
@@ -2221,6 +2338,7 @@ pub enum ConditionalGet {
 /// The spelled-out form of [`ConditionalGet`]. Both fields keep their absence, so the admin API
 /// echoes what was declared rather than the defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ConditionalValidators {
     /// Whether to send a strong `ETag` over the served bytes. Absent means `true`.
@@ -2281,6 +2399,7 @@ impl ConditionalGet {
 
 /// Fault injection configuration for responses
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftFaultConfig {
     /// Latency injection
@@ -2386,6 +2505,7 @@ impl RiftTcpFault {
 
 /// Latency fault configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftLatencyFault {
     /// Probability of fault injection (0.0 to 1.0)
@@ -2408,6 +2528,7 @@ fn default_probability() -> f64 {
 
 /// Error fault configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftErrorFault {
     /// Probability of error injection (0.0 to 1.0)
@@ -2425,6 +2546,10 @@ pub struct RiftErrorFault {
         skip_serializing_if = "HashMap::is_empty",
         deserialize_with = "single_value_headers::deserialize"
     )]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "rift_types::schema::SingleValueHeaders")
+    )]
     pub headers: HashMap<String, String>,
 }
 
@@ -2439,6 +2564,7 @@ fn default_error_status() -> u16 {
 /// time, so a validation error can name the offending stub/registry entry instead of a generic
 /// serde failure — and so existing configs using only `code` keep deserializing unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftScriptConfig {
     /// Script engine: "rhai" or "javascript". When absent, the resolver infers it from
@@ -2513,6 +2639,91 @@ pub enum ImposterError {
     Backend(anyhow::Error),
     #[error("an explicit port is required to reconcile a single imposter")]
     ExplicitPortRequired,
+}
+
+/// JSON Schema for the door types (issue #1342). The wire shape of `Stub`, `StubResponse` and
+/// `DelayRange` is their raw type's — that is what `POST /imposters` and a config file accept — so
+/// each forwards to it under its own name. `LastModified` and `RiftTcpFault` decode by hand, so
+/// their schemas are written by hand too.
+#[cfg(feature = "schema")]
+mod schema_impls {
+    use super::{
+        DelayRange, DelayRangeRaw, LastModified, RiftTcpFault, Stub, StubRaw, StubResponse,
+        StubResponseRaw,
+    };
+    use crate::imposter::fault_io::TcpFaultKind;
+    use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+    use std::borrow::Cow;
+
+    impl JsonSchema for Stub {
+        fn schema_name() -> Cow<'static, str> {
+            "Stub".into()
+        }
+
+        fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+            StubRaw::json_schema(generator)
+        }
+    }
+
+    impl JsonSchema for StubResponse {
+        fn schema_name() -> Cow<'static, str> {
+            "StubResponse".into()
+        }
+
+        fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+            StubResponseRaw::json_schema(generator)
+        }
+    }
+
+    impl JsonSchema for DelayRange {
+        fn schema_name() -> Cow<'static, str> {
+            "DelayRange".into()
+        }
+
+        fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+            DelayRangeRaw::json_schema(generator)
+        }
+    }
+
+    impl JsonSchema for LastModified {
+        fn schema_name() -> Cow<'static, str> {
+            "LastModified".into()
+        }
+
+        fn json_schema(_: &mut SchemaGenerator) -> Schema {
+            json_schema!({
+                "description": "`\"load\"` for the time the stub was loaded, or a fixed HTTP-date \
+                                served verbatim.",
+                "type": "string"
+            })
+        }
+    }
+
+    impl JsonSchema for RiftTcpFault {
+        fn schema_name() -> Cow<'static, str> {
+            "RiftTcpFault".into()
+        }
+
+        fn json_schema(_: &mut SchemaGenerator) -> Schema {
+            let kind = serde_json::json!({ "type": "string", "enum": TcpFaultKind::SPELLINGS });
+            json_schema!({
+                "description": "A transport fault: the bare kind string always fires; the object \
+                                form fires with the given probability.",
+                "anyOf": [
+                    kind,
+                    {
+                        "type": "object",
+                        "properties": {
+                            "probability": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                            "type": kind
+                        },
+                        "required": ["probability", "type"],
+                        "additionalProperties": false
+                    }
+                ]
+            })
+        }
+    }
 }
 
 #[cfg(test)]

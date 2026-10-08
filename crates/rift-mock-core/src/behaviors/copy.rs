@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 /// Copy behavior - copy request fields into response
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CopyBehavior {
     /// Request field to copy from
     pub from: CopySource,
@@ -20,6 +21,7 @@ pub struct CopyBehavior {
 
 /// Source of data to copy from request
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum CopySource {
     /// Simple field: "path", "body", "method"

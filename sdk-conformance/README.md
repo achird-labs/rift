@@ -16,6 +16,9 @@ the whole corpus on every commit, so a published artifact is verified, never mer
 sdk-conformance-<version>/
 ├── README.md            # this file — the normative replay contract
 ├── manifest.json        # machine-readable index (schemaVersion, engineVersion, fixtures[])
+├── schema/
+│   └── imposter.schema.json   # the imposter grammar as a JSON Schema (draft 2020-12), generated
+│                              #   from the engine's config types — see "The grammar schema"
 └── corpus/
     ├── imposters/NN-name.json   # a standard Mountebank/Rift imposter config, optionally with
     │                            #   `_verify` (expected request/response transcripts) and `_behaviors`
@@ -48,6 +51,29 @@ a working directory should absolutize them at load time against the extracted `c
   engine started with `--allowInjection`; `proxy` fixtures need an upstream — `rift-verify` stands
   up its own; `https`/`shell` gate on TLS / a host shell.)
 - **`hasVerify`** — the fixture carries a `_verify` sequence (see below).
+
+## The grammar schema
+
+`schema/imposter.schema.json` is the imposter document's grammar, generated from the engine's own
+serde types (`rift-lint schema`, issue #1342) and verified against this corpus and every docs
+example on every commit. It is the machine-readable answer to "which keys does this engine read":
+
+- Every object is `additionalProperties: false`, except the two provider maps an embedder's
+  extension reads (`_rift.flowState`, `_rift.sequencing`). The engine itself accepts and drops an
+  unknown key (stored configs must stay decodable), so a DSL validating its output against this
+  schema is how it learns that a key it emits is never read.
+- `$defs/Stub` and `$defs/StubResponse` are the *wire* shapes — every alias (`rules`), every
+  spelling (`statusCode` as a number or a string, a header as one value or a list) and the flat
+  recorded response form — not the engine's internal types.
+- `x-rift-*` extensions carry the lists an SDK or a linter would otherwise keep by hand:
+  `x-rift-known-keys` (the `predicateGenerators` keys the recorder reads), `x-rift-canonical-order`
+  (the order one object's behaviors run in), `x-rift-response-variants` (the response-type keys in
+  decode precedence), `x-rift-carrier: true` (a field the engine stores and returns but never
+  reads) and `x-rift-rewrites-body: true` (a behavior that rewrites the response body).
+
+An SDK SHOULD validate every document its DSL emits against this schema in its conformance run,
+and SHOULD derive its own key sets from `$defs` rather than maintain them by hand. `schemaVersion`
+in `manifest.json` is unchanged by its addition.
 
 ## The replay contract
 

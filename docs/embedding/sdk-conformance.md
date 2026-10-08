@@ -23,6 +23,7 @@ corpus on every commit, so a published artifact is always verified rather than m
 sdk-conformance-<version>/
 ├── README.md            # the normative replay contract (packaged in the tarball)
 ├── manifest.json        # { schemaVersion, engineVersion, fixtures[] }
+├── schema/imposter.schema.json   # the imposter grammar (JSON Schema, draft 2020-12)
 └── corpus/
     ├── imposters/NN-name.json   # imposter config, optionally with `_verify` transcripts
     ├── data/…                   # data files referenced as `data/<file>` (cwd = corpus/)
@@ -33,6 +34,22 @@ sdk-conformance-<version>/
 set: `injection`, `proxy`, `https`, `shell`), and `hasVerify`. `engineVersion` equals the
 Rift release — the corpus and engine move together, so an SDK pinning engine `X.Y.Z` downloads
 `sdk-conformance-X.Y.Z.tar.gz` from that release.
+
+## The grammar schema
+
+`schema/imposter.schema.json` is the imposter document's grammar as a JSON Schema, generated from
+the engine's config types rather than written by hand, so it says exactly which keys this release
+reads. It closes every object (`additionalProperties: false`) except the two provider maps an
+embedder's extension owns (`_rift.flowState`, `_rift.sequencing`), and it describes the wire
+shapes — `rules` as an alias of `predicates`, `statusCode` as a number or a numeric string, a header
+as one value or a list, the flat recorded response form. `x-rift-*` extensions carry the lists a
+consumer would otherwise keep by hand: `x-rift-known-keys` on `predicateGenerators` entries,
+`x-rift-canonical-order` on the behaviors block, `x-rift-response-variants` on a response, and
+`x-rift-carrier` / `x-rift-rewrites-body` markers on fields.
+
+Validate what your DSL emits against it, and derive your key sets from its `$defs`. The engine
+repo regenerates it with `cargo run -p rift-lint --features schema -- schema` and fails CI when the
+checked-in copy drifts, and validates every corpus fixture and every docs example against it.
 
 ## The replay contract (for SDK authors)
 

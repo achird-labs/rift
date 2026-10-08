@@ -78,6 +78,23 @@ Options:
 With `-o json`, stdout carries only the JSON result (an empty result when no files are found); the
 banner, progress and `--fix` messages go to stderr.
 
+### The imposter JSON Schema
+
+The grammar `rift-lint` checks is also published as a JSON Schema (draft 2020-12), generated from
+the engine's own config types so it cannot drift from what the engine reads. It ships in every
+release's `sdk-conformance-<version>.tar.gz` as `schema/imposter.schema.json` and is checked in at
+[`sdk-conformance/schema/imposter.schema.json`](https://github.com/achird-labs/rift/blob/master/sdk-conformance/schema/imposter.schema.json).
+A build with the `schema` feature regenerates it:
+
+```bash
+cargo run -p rift-lint --features schema -- schema --out sdk-conformance/schema/imposter.schema.json
+```
+
+The released `rift-lint` binary is built without that feature — it would carry the whole engine —
+so use the checked-in or packaged file. The linter's own key lists (predicate operators and
+parameters, behavior names, fault kinds, proxy modes, …) are tested against the schema, and the
+predicate names come from the same crate the engine reads them from.
+
 ### Templated files
 
 A JSON or YAML file with EJS `<% %>` tags is rendered before it is linted, exactly as `--configfile`

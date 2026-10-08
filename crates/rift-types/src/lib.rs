@@ -6,6 +6,11 @@
 //! the wire — it lives here for the same reason the types do: so no two crates can disagree.
 
 pub mod predicate;
+#[cfg(feature = "schema")]
+pub mod schema;
 pub mod wire;
 
-pub use predicate::{Predicate, PredicateOperation, PredicateParameters, PredicateSelector};
+pub use predicate::{
+    PREDICATE_GENERATOR_KEYS, PREDICATE_OPERATORS, PREDICATE_PARAMETERS, Predicate,
+    PredicateOperation, PredicateParameters, PredicateSelector,
+};
