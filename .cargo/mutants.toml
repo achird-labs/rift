@@ -13,4 +13,9 @@ exclude_globs = [
 # Skip mutants inside logging calls; changing a log line is not an observable behaviour.
 exclude_re = [
     "tracing::",
+    # `Debug` output is for humans; a mutant that blanks it is not a behaviour change.
+    "<impl (fmt::|std::fmt::|core::fmt::)?Debug for ",
+    # Equivalent mutant: `join` ORs a value shifted left 32 bits with a `u32`, so the bits never
+    # overlap and `^` computes the same number as `|`.
+    "behaviors/cycler.rs:.*replace \\| with \\^ in join",
 ]
