@@ -374,6 +374,10 @@ fn generate_writes_the_requested_name_and_validity() {
             .and_then(|cn| cn.as_str().ok()),
         Some("Acme CI CA")
     );
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
     let now = before
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -383,7 +387,13 @@ fn generate_writes_the_requested_name_and_validity() {
         (30 * 86_400 - 5..=30 * 86_400 + 60).contains(&lifetime),
         "valid for 30 days from now, got {lifetime}s"
     );
-    assert!(cert.validity().not_before.timestamp() <= now - 5 * 60);
+    // Generation can land in a later second than `before`, so the upper bound comes from `after`.
+    let not_before = cert.validity().not_before.timestamp();
+    assert!(
+        (now - 5 * 60..=after - 5 * 60).contains(&not_before),
+        "backdated five minutes, got {}s before `before`",
+        now - not_before
+    );
 }
 
 #[test]
