@@ -1,0 +1,87 @@
+name: Mutation testing
+
+# Issue #1345 (epic #1338): a scheduled cargo-mutants run over the matching, behavior and
+# proxy-generation code. Mutation testing finds a test that cannot kill a mutant in the code it
+# claims to cover (the shape that let #1329 ship next to three generator tests that never replayed).
+#
+# Deliberately NOT a PR check: the run takes tens of minutes. It is scheduled + manual only, so it
+# can never block a merge. It reports; it does not gate. Surviving mutants are triaged into test
+# gaps by hand.
+on:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays 03:17 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutants:
+    name: cargo-mutants
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      # --in-place mutates this checkout directly (no tree copy); the runner is throwaway.
+      # Exit code 2 means "some mutants were missed" and 3 "some timed out"; both are findings, not
+      # a broken run, so only other non-zero codes (1 usage error, 4 baseline test failure) fail.
+      - name: Run cargo-mutants
+        run: |
+          set +e
+          cargo mutants \
+            -p rift-mock-core -p rift-types \
+            --in-place \
+            -f 'crates/rift-mock-core/src/imposter/predicates/**/*.rs' \
+            -f 'crates/rift-mock-core/src/behaviors/**/*.rs' \
+            -f 'crates/rift-mock-core/src/imposter/core/proxy.rs' \
+            -f 'crates/rift-types/src/predicate.rs' \
+            --timeout-multiplier 3 \
+            -j 2
+          code=$?
+          echo "cargo-mutants exit code: $code"
+          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ] && [ "$code" -ne 3 ]; then
+            exit "$code"
+          fi
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## cargo-mutants"
+            echo
+            for f in missed timeout caught unviable; do
+              n=0
+              [ -f "mutants.out/$f.txt" ] && n=$(wc -l < "mutants.out/$f.txt")
+              echo "- $f: $n"
+            done
+            echo
+            echo "Surviving mutants (top 50 of mutants.out/missed.txt):"
+            echo
+            echo '```'
+            [ -f mutants.out/missed.txt ] && head -n 50 mutants.out/missed.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload mutants.out
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-out
+          path: mutants.out/
+          if-no-files-found: warn

@@ -74,6 +74,16 @@ parity, and all four SDKs replay it in their own CI — so a fixture that breaks
 downstream repos. Compatibility is the promise this project is built on, and it is tested rather
 than asserted.
 
+## Mutation testing
+
+A scheduled workflow, [`mutants.yml`](.github/workflows/mutants.yml), runs `cargo-mutants` weekly over
+predicate matching, behaviors, proxy generation and `rift-types`' predicate model. It is not a PR
+check (it takes tens of minutes) and never blocks a merge: it reports surviving mutants, meaning
+code a test claims to cover but cannot tell was changed. The counts land in the job summary and the
+full `mutants.out/` is attached as an artifact. Trigger it by hand from the Actions tab
+(`workflow_dispatch`), or locally with `cargo install cargo-mutants --locked` and the same `-p`/`-f`
+arguments the workflow uses; [`.cargo/mutants.toml`](.cargo/mutants.toml) holds the exclusions.
+
 ## Fixed test ports
 
 A test that binds a fixed port takes it from **15000-24999**, and **each port belongs to exactly
