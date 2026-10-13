@@ -929,6 +929,97 @@
           "path": "/test"
         }
       ]
+    },
+    {
+      "name": "proxy: forwards OPTIONS and an extension method as sent (#1380)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "method": "OPTIONS"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "options"
+                    }
+                  }
+                ]
+              },
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "other"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "method": true,
+                            "path": true
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "OPTIONS",
+          "path": "/p"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "OPTIONS",
+          "path": "/p"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "PROPFIND",
+          "path": "/p"
+        }
+      ]
     }
   ]
 }
