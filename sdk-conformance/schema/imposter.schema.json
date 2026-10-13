@@ -164,7 +164,7 @@
     },
     "DefaultResponse": {
       "additionalProperties": false,
-      "description": "The response served when no stub matches (`defaultResponse`). Unlike an `is` response, `statusCode` is a number here.",
+      "description": "The response served when no stub matches (`defaultResponse`).",
       "properties": {
         "_mode": {
           "$ref": "#/$defs/ResponseMode",
@@ -176,11 +176,8 @@
           "default": {}
         },
         "statusCode": {
-          "default": 200,
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0,
-          "type": "integer"
+          "$ref": "#/$defs/StatusCode",
+          "default": 200
         }
       },
       "type": "object"

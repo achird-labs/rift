@@ -898,6 +898,50 @@ async fn default_response_printed_in_every_imposter_form() {
     }
 }
 
+// Issue #1377: `defaultResponse.statusCode` accepts a numeric string, as `is.statusCode` and
+// Mountebank do. It was refused with a 400 ("expected u16"). Printing stays a number.
+#[tokio::test]
+async fn default_response_status_code_accepts_a_numeric_string() {
+    let manager = std::sync::Arc::new(ImposterManager::new());
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
+    let c = reqwest::Client::new();
+
+    let created = c
+        .post(format!("{admin}/imposters"))
+        .json(&serde_json::json!({
+            "protocol": "http",
+            "defaultResponse": { "statusCode": "404" },
+            "stubs": []
+        }))
+        .send()
+        .await
+        .expect("POST /imposters");
+    assert_eq!(created.status(), 201);
+    let created: serde_json::Value = created.json().await.expect("201 json");
+    let port = created["port"].as_u64().expect("assigned port");
+
+    let served = c
+        .get(format!("http://127.0.0.1:{port}/unmatched"))
+        .send()
+        .await
+        .expect("request to the imposter");
+    assert_eq!(served.status().as_u16(), 404);
+
+    let detail = json(&c, format!("{admin}/imposters/{port}")).await;
+    assert_eq!(
+        detail["defaultResponse"]["statusCode"],
+        serde_json::json!(404),
+        "detail: {detail}"
+    );
+
+    let _ = manager.delete_imposter(port as u16).await;
+}
+
 // Issue #206: an imposter declared `protocol: "https"` terminates TLS on its own port.
 mod https {
     use super::*;

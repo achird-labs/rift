@@ -1720,12 +1720,16 @@ pub enum ResponseMode {
     derive(schemars::JsonSchema),
     schemars(
         rename = "DefaultResponse",
-        description = "The response served when no stub matches (`defaultResponse`). Unlike an `is` response, `statusCode` is a number here."
+        description = "The response served when no stub matches (`defaultResponse`)."
     )
 )]
 #[serde(rename_all = "camelCase")]
 pub struct IsResponse {
-    #[serde(default = "default_status_code")]
+    #[serde(
+        default = "default_status_code",
+        deserialize_with = "deserialize_status_code"
+    )]
+    #[cfg_attr(feature = "schema", schemars(with = "rift_types::schema::StatusCode"))]
     pub status_code: u16,
     #[serde(default, with = "multi_value_headers")]
     #[cfg_attr(
@@ -2798,6 +2802,51 @@ mod imposter_error_chain_tests {
 
 #[cfg(test)]
 mod tests {
+
+    // ===== Issue #1377: `defaultResponse.statusCode` reads like every other `statusCode` =====
+
+    #[test]
+    fn default_response_status_code_accepts_numeric_string() {
+        let config: super::ImposterConfig = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "defaultResponse": {"statusCode": "404"}
+        }))
+        .expect("a numeric-string defaultResponse.statusCode is accepted");
+        assert_eq!(
+            config
+                .default_response
+                .expect("defaultResponse")
+                .status_code,
+            404
+        );
+    }
+
+    #[test]
+    fn default_response_status_code_refuses_non_numeric() {
+        for bad in [
+            serde_json::json!("abc"),
+            serde_json::json!(true),
+            serde_json::Value::Null,
+        ] {
+            let parsed = serde_json::from_value::<super::ImposterConfig>(serde_json::json!({
+                "protocol": "http",
+                "defaultResponse": {"statusCode": bad.clone()}
+            }));
+            assert!(parsed.is_err(), "statusCode {bad} must be refused");
+        }
+    }
+
+    #[test]
+    fn default_response_status_code_still_prints_as_a_number() {
+        let config: super::ImposterConfig = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "defaultResponse": {"statusCode": "404"}
+        }))
+        .expect("accepted");
+        let printed = serde_json::to_value(config.default_response.expect("defaultResponse"))
+            .expect("serializes");
+        assert_eq!(printed["statusCode"], serde_json::json!(404));
+    }
 
     // ===== Issue #1314: one parse for a proxy's `mode` =====
 
