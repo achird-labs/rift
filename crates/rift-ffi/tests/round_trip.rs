@@ -1932,6 +1932,56 @@ fn ffi_serve_admin_shares_intercept_slot() {
     }
 }
 
+/// Issue #1351: the other order. An SDK that serves its admin plane lazily calls
+/// `rift_start_intercept` *before* `rift_serve_admin`; the admin plane must still see that listener,
+/// because it is handed the handle's slot, not a snapshot of it. An admin-plane stop then frees the
+/// slot for the next C-ABI start.
+#[test]
+fn ffi_intercept_started_before_serve_admin_is_visible_to_the_admin_plane() {
+    unsafe {
+        let h = rift_start();
+        let started: serde_json::Value =
+            serde_json::from_str(&take_json(rift_start_intercept(h, std::ptr::null()))).unwrap();
+        let port = started["interceptPort"].as_u64().expect("interceptPort") as u16;
+
+        let info = serve_admin(h, "{}");
+        let admin_url = info["adminUrl"].as_str().expect("adminUrl").to_string();
+
+        let (status, body): (u16, serde_json::Value) = rt().block_on(async {
+            let r = reqwest::get(format!("{admin_url}/intercept"))
+                .await
+                .unwrap();
+            let s = r.status().as_u16();
+            (s, r.json().await.unwrap())
+        });
+        assert_eq!(
+            status, 200,
+            "GET /intercept sees a listener started before the admin plane"
+        );
+        assert_eq!(body["interceptPort"].as_u64().unwrap() as u16, port);
+
+        let deleted = rt().block_on(async {
+            reqwest::Client::new()
+                .delete(format!("{admin_url}/intercept"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        });
+        assert_eq!(deleted, 204, "DELETE /intercept stops the C-ABI listener");
+
+        let restarted = rift_start_intercept(h, std::ptr::null());
+        assert!(
+            !restarted.is_null(),
+            "the admin-plane stop freed the slot for a new C-ABI start"
+        );
+        let _ = take_json(restarted);
+
+        rift_stop(h);
+    }
+}
+
 /// Issue #425: the start response's interceptUrl reflects the ACTUAL bound host, not a hardcoded
 /// 127.0.0.1. A non-loopback bind (0.0.0.0) must surface as the bound address; the loopback default
 /// is unchanged.
