@@ -199,6 +199,10 @@ record.
 
 ### Changed
 
+- **Docs: Differences from Mountebank lists that `decorate` always gets a `headers` object** (#1373),
+  and how a failing decorate is reported (Mountebank 2.9.1 answers `500` with a stack trace; Rift
+  serves the undecorated response with `x-rift-decorate-error: true`). No behaviour change.
+
 - **rift-lint codes `E019`, `E020` and `W005` are retired; `E054` is new** (#1358). CI filters that
   key on codes need to know this.
 

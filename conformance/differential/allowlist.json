@@ -2196,48 +2196,58 @@
   },
   {
     "case": "sdk-corpus: 13-js-config-decorate.json",
-    "kind": "known-bug",
-    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500) (#1373)",
+    "kind": "documented",
+    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500)",
     "id": "decorate-without-headers#0",
     "location": "step[1].status",
     "mountebank": "500",
-    "rift": "202"
+    "rift": "202",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "`decorate` always receives a `headers` object on the response, empty when the response has none; in Mountebank `response.headers` is `undefined` there, so a decorate that writes a header fails."
   },
   {
     "case": "sdk-corpus: 13-js-config-decorate.json",
-    "kind": "known-bug",
-    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500) (#1373)",
+    "kind": "documented",
+    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500)",
     "id": "decorate-without-headers#1",
     "location": "step[1].header.content-type",
     "mountebank": "application/json",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "`decorate` always receives a `headers` object on the response, empty when the response has none; in Mountebank `response.headers` is `undefined` there, so a decorate that writes a header fails."
   },
   {
     "case": "sdk-corpus: 13-js-config-decorate.json",
-    "kind": "known-bug",
-    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500) (#1373)",
+    "kind": "documented",
+    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500)",
     "id": "decorate-without-headers#2",
     "location": "step[1].header.x-decorated-by",
     "mountebank": "(absent)",
-    "rift": "config-arrow"
+    "rift": "config-arrow",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "`decorate` always receives a `headers` object on the response, empty when the response has none; in Mountebank `response.headers` is `undefined` there, so a decorate that writes a header fails."
   },
   {
     "case": "sdk-corpus: 13-js-config-decorate.json",
-    "kind": "known-bug",
-    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500) (#1373)",
+    "kind": "documented",
+    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500)",
     "id": "decorate-without-headers#3",
     "location": "step[1].body/errors",
     "mountebankMatches": "\\[\\{\"message\":\"Converting circular structure to JS(?s:.*)",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "`decorate` always receives a `headers` object on the response, empty when the response has none; in Mountebank `response.headers` is `undefined` there, so a decorate that writes a header fails."
   },
   {
     "case": "sdk-corpus: 13-js-config-decorate.json",
-    "kind": "known-bug",
-    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500) (#1373)",
+    "kind": "documented",
+    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500)",
     "id": "decorate-without-headers#4",
     "location": "step[1].body/v",
     "mountebank": "(absent)",
-    "rift": "1"
+    "rift": "1",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "`decorate` always receives a `headers` object on the response, empty when the response has none; in Mountebank `response.headers` is `undefined` there, so a decorate that writes a header fails."
   },
   {
     "case": "sdk-corpus: 07-proxy-record.json",
