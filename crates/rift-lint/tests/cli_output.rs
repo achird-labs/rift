@@ -585,16 +585,16 @@ fn cli_reports_a_byte_identical_duplicate_key() {
 // repeated key is already gone by the time it runs. Writing that back silently discards a value
 // the author wrote — and in the `is.headers` case below, one the engine deliberately honours.
 
-/// A numeric header is an E019 error, which both opens the `--fix` gate and is the thing `--fix`
-/// repairs. Pins the baseline the refusals below are measured against.
+/// A header array with a `null` element is an E018 error, which both opens the `--fix` gate and is
+/// the thing `--fix` repairs. Pins the baseline the refusals below are measured against.
 #[test]
-fn fix_quotes_a_numeric_header_and_rewrites_the_file() {
+fn fix_stringifies_a_bad_header_element_and_rewrites_the_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let f = dir.path().join("imposter.json");
     std::fs::write(
         &f,
         r#"{"port":3000,"protocol":"http","stubs":[
-            {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256}}}]}
+            {"responses":[{"is":{"statusCode":200,"headers":{"X-Fix":["a",null]}}}]}
         ]}"#,
     )
     .expect("write");
@@ -606,8 +606,8 @@ fn fix_quotes_a_numeric_header_and_rewrites_the_file() {
 
     let after = std::fs::read_to_string(&f).expect("read back");
     assert!(
-        after.contains(r#""Content-Length": "256""#),
-        "the numeric header was quoted, got: {after}"
+        after.contains(r#""null""#),
+        "the null element was stringified, got: {after}"
     );
     let stdout = String::from_utf8(out.stdout).expect("utf8");
     assert!(stdout.contains("Applied 1 fixes"), "got: {stdout}");
@@ -626,7 +626,7 @@ fn fix_refuses_a_file_whose_parse_dropped_a_deliberate_is_headers_duplicate() {
     let f = dir.path().join("imposter.json");
     let original = r#"{"port":3000,"protocol":"http","stubs":[
         {"responses":[{"is":{"statusCode":200,"headers":{
-            "Content-Length":256,
+            "X-Fix":["a",null],
             "Set-Cookie":"a=1",
             "Set-Cookie":"b=2"
         }}}]}
@@ -669,7 +669,7 @@ fn fix_refuses_a_file_carrying_e044() {
     let f = dir.path().join("imposter.json");
     let original = r#"{"port":3000,"protocol":"http","stubs":[
         {"responses":[
-            {"is":{"statusCode":200,"headers":{"Content-Length":256}}},
+            {"is":{"statusCode":200,"headers":{"X-Fix":["a",null]}}},
             {"proxy":{"to":"http://x","injectHeaders":{"X-Id":"a","X-Id":"b"}}}
         ]}
     ]}"#;
@@ -701,7 +701,7 @@ fn fix_still_repairs_a_clean_file_when_another_is_skipped() {
     std::fs::write(
         &clean,
         r#"{"port":3001,"protocol":"http","stubs":[
-            {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256}}}]}
+            {"responses":[{"is":{"statusCode":200,"headers":{"X-Fix":["a",null]}}}]}
         ]}"#,
     )
     .expect("write");
@@ -720,7 +720,7 @@ fn fix_still_repairs_a_clean_file_when_another_is_skipped() {
     assert!(
         std::fs::read_to_string(&clean)
             .expect("read back")
-            .contains(r#""Content-Length": "256""#),
+            .contains(r#""null""#),
         "the clean file is still repaired"
     );
     assert_eq!(
@@ -767,7 +767,7 @@ fn fix_names_the_document_root_when_the_duplicate_is_top_level() {
     let dir = tempfile::tempdir().expect("tempdir");
     let f = dir.path().join("imposter.json");
     let original = r#"{"port":3000,"port":3001,"protocol":"http","stubs":[
-        {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256}}}]}
+        {"responses":[{"is":{"statusCode":200,"headers":{"X-Fix":["a",null]}}}]}
     ]}"#;
     std::fs::write(&f, original).expect("write");
 
@@ -795,7 +795,7 @@ fn several_duplicates_in_one_file_are_reported_each_but_counted_once() {
     let original = r#"{"port":3000,"protocol":"http","stubs":[
         {"responses":[
             {"is":{"statusCode":200,"headers":{
-                "Content-Length":256,"Set-Cookie":"a=1","Set-Cookie":"b=2"
+                "X-Fix":["a",null],"Set-Cookie":"a=1","Set-Cookie":"b=2"
             }}},
             {"proxy":{"to":"http://x","injectHeaders":{"X-Id":"a","X-Id":"b"}}}
         ]}
@@ -828,7 +828,7 @@ fn json_mode_keeps_refusals_off_stdout() {
     let f = dir.path().join("imposter.json");
     let original = r#"{"port":3000,"protocol":"http","stubs":[
         {"responses":[{"is":{"statusCode":200,"headers":{
-            "Content-Length":256,"Set-Cookie":"a=1","Set-Cookie":"b=2"
+            "X-Fix":["a",null],"Set-Cookie":"a=1","Set-Cookie":"b=2"
         }}}]}
     ]}"#;
     std::fs::write(&f, original).expect("write");
@@ -859,7 +859,7 @@ fn an_unparseable_file_is_not_reported_as_skipped() {
     std::fs::write(
         &good,
         r#"{"port":3003,"protocol":"http","stubs":[
-            {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256}}}]}
+            {"responses":[{"is":{"statusCode":200,"headers":{"X-Fix":["a",null]}}}]}
         ]}"#,
     )
     .expect("write");
@@ -877,7 +877,7 @@ fn an_unparseable_file_is_not_reported_as_skipped() {
     assert!(
         std::fs::read_to_string(&good)
             .expect("read back")
-            .contains(r#""Content-Length": "256""#),
+            .contains(r#""null""#),
         "its sibling is still repaired"
     );
     let stdout = String::from_utf8(out.stdout).expect("utf8");
@@ -889,7 +889,7 @@ fn an_unparseable_file_is_not_reported_as_skipped() {
 
 // ─── Issue #1071: the CLI lints YAML, and `--fix` refuses to rewrite it ────────────────────────
 
-const YAML_WITH_NUMERIC_HEADER: &str = "\
+const YAML_WITH_BAD_HEADER: &str = "\
 - port: 3000
   protocol: http
   stubs:
@@ -897,7 +897,7 @@ const YAML_WITH_NUMERIC_HEADER: &str = "\
         - is:
             statusCode: 200
             headers:
-              Content-Length: 256
+              X-Fix: [a, ~]
 ";
 
 /// The headline symptom: `rift-lint config.yaml` used to print "No JSON files found" and exit 0,
@@ -906,7 +906,7 @@ const YAML_WITH_NUMERIC_HEADER: &str = "\
 fn cli_lints_a_yaml_file_instead_of_skipping_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let f = dir.path().join("config.yaml");
-    std::fs::write(&f, YAML_WITH_NUMERIC_HEADER).expect("write");
+    std::fs::write(&f, YAML_WITH_BAD_HEADER).expect("write");
 
     let out = Command::new(BIN)
         .args([f.to_str().unwrap(), "-o", "json"])
@@ -922,7 +922,7 @@ fn cli_lints_a_yaml_file_instead_of_skipping_it() {
         .filter_map(|i| i["code"].as_str())
         .collect();
     assert!(
-        codes.contains(&"E019"),
+        codes.contains(&"E018"),
         "the YAML file was linted, got {codes:?}"
     );
     assert!(
@@ -938,7 +938,7 @@ fn cli_lints_a_yaml_file_instead_of_skipping_it() {
 fn fix_refuses_to_rewrite_a_yaml_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let f = dir.path().join("config.yaml");
-    std::fs::write(&f, YAML_WITH_NUMERIC_HEADER).expect("write");
+    std::fs::write(&f, YAML_WITH_BAD_HEADER).expect("write");
 
     let out = Command::new(BIN)
         .args([f.to_str().unwrap(), "--fix"])
@@ -947,7 +947,7 @@ fn fix_refuses_to_rewrite_a_yaml_file() {
 
     assert_eq!(
         std::fs::read_to_string(&f).expect("read back"),
-        YAML_WITH_NUMERIC_HEADER,
+        YAML_WITH_BAD_HEADER,
         "the YAML file must be byte-identical; --fix writes JSON"
     );
     let stdout = String::from_utf8(out.stdout).expect("utf8");
@@ -965,11 +965,11 @@ fn fix_still_repairs_json_when_a_yaml_file_is_present() {
     let dir = tempfile::tempdir().expect("tempdir");
     let y = dir.path().join("config.yaml");
     let j = dir.path().join("imposter.json");
-    std::fs::write(&y, YAML_WITH_NUMERIC_HEADER).expect("write");
+    std::fs::write(&y, YAML_WITH_BAD_HEADER).expect("write");
     std::fs::write(
         &j,
         r#"{"port":3001,"protocol":"http","stubs":[
-            {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256}}}]}
+            {"responses":[{"is":{"statusCode":200,"headers":{"X-Fix":["a",null]}}}]}
         ]}"#,
     )
     .expect("write");
@@ -981,13 +981,13 @@ fn fix_still_repairs_json_when_a_yaml_file_is_present() {
 
     assert_eq!(
         std::fs::read_to_string(&y).expect("read back"),
-        YAML_WITH_NUMERIC_HEADER,
+        YAML_WITH_BAD_HEADER,
         "YAML untouched"
     );
     assert!(
         std::fs::read_to_string(&j)
             .expect("read back")
-            .contains(r#""Content-Length": "256""#),
+            .contains(r#""null""#),
         "the JSON sibling is still repaired"
     );
 }
@@ -1110,7 +1110,7 @@ fn fix_one(original: &str, extra: &[&str]) -> (String, String, String) {
 #[test]
 fn fix_refuses_a_file_whose_integer_literal_would_be_rewritten() {
     let original = r#"{"port":3000,"protocol":"http","stubs":[
-        {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256},
+        {"responses":[{"is":{"statusCode":200,"headers":{"X-Fix":["a",null]},
             "body":{"big":123456789012345678901234567890}}}]}
     ]}"#;
 
@@ -1139,7 +1139,7 @@ fn fix_refuses_a_file_whose_integer_literal_would_be_rewritten() {
 #[test]
 fn fix_refuses_a_file_whose_decimal_literal_would_be_rewritten() {
     let original = r#"{"port":3000,"protocol":"http","stubs":[
-        {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256},
+        {"responses":[{"is":{"statusCode":200,"headers":{"X-Fix":["a",null]},
             "body":{"precise":0.1000000000000000055511151231257827}}}]}
     ]}"#;
 
@@ -1176,7 +1176,7 @@ fn fix_refuses_to_quote_a_header_whose_own_number_it_cannot_write_back() {
 #[test]
 fn fix_still_rewrites_a_file_whose_numbers_only_change_spelling() {
     let original = r#"{"port":3000,"protocol":"http","stubs":[
-        {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256},
+        {"responses":[{"is":{"statusCode":200,"headers":{"X-Fix":["a",null]},
             "body":{"a":0.10,"b":1e2,"c":18446744073709551615,"d":-9223372036854775808}}}]}
     ]}"#;
 
@@ -1189,7 +1189,7 @@ fn fix_still_rewrites_a_file_whose_numbers_only_change_spelling() {
         r#""b": 100.0"#,
         r#""c": 18446744073709551615"#,
         r#""d": -9223372036854775808"#,
-        r#""Content-Length": "256""#,
+        r#""null""#,
     ] {
         assert!(after.contains(expected), "missing {expected} in: {after}");
     }
@@ -1222,7 +1222,7 @@ fn fix_says_nothing_about_a_lossy_number_in_a_file_it_would_not_have_written() {
 #[test]
 fn json_mode_keeps_number_refusals_off_stdout() {
     let original = r#"{"port":3000,"protocol":"http","stubs":[
-        {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256},
+        {"responses":[{"is":{"statusCode":200,"headers":{"X-Fix":["a",null]},
             "body":{"big":123456789012345678901234567890}}}]}
     ]}"#;
 
@@ -1242,7 +1242,7 @@ fn json_mode_keeps_number_refusals_off_stdout() {
 fn a_file_with_a_repeated_key_and_a_lossy_number_reports_both_and_counts_once() {
     let original = r#"{"port":3000,"protocol":"http","stubs":[
         {"responses":[{"is":{"statusCode":200,"headers":{
-            "Content-Length":256,"Set-Cookie":"a=1","Set-Cookie":"b=2"},
+            "X-Fix":["a",null],"Set-Cookie":"a=1","Set-Cookie":"b=2"},
             "body":{"big":123456789012345678901234567890}}}]}
     ]}"#;
 
