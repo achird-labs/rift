@@ -441,7 +441,8 @@ Unicode.
 ### keyCaseSensitive
 
 Controls whether the *names* in `query`, `headers` and `form` are compared case-sensitively. It
-defaults to the value of `caseSensitive`.
+defaults to the value of `caseSensitive`. Mountebank reads it differently; see
+[Differences from Mountebank](differences.md#keycasesensitive-is-honoured-as-written).
 
 ```json
 {

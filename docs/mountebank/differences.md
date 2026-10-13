@@ -62,6 +62,22 @@ JavaScript stack trace in the body (its error handler fails while logging the re
 the undecorated response with `x-rift-decorate-error: true` instead, and `500` only under
 `strictBehaviors` — see [Behaviors](behaviors.md).
 
+## keyCaseSensitive is honoured as written
+
+Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`. Three consequences:
+
+- `keyCaseSensitive: true` on its own makes the names in `query`, `headers` and `form` compare
+  exactly. In Mountebank it does nothing unless `caseSensitive: true` is also set.
+- Under `matches`, Rift honours the setting. Mountebank replaces it with `caseSensitive`, so
+  `caseSensitive: true, keyCaseSensitive: false` compares keys exactly there and relaxes them in Rift.
+- With a `jsonpath` selector that has an upper-case letter, `keyCaseSensitive: true` still matches in
+  Rift; in Mountebank it never matches (the selector keeps its case while the body's keys are
+  lowercased).
+
+Header names are compared against the Title-Cased names the listener stores (`X-Tenant`), because
+Rift cannot see the spelling the client sent (see [Request header names](#request-header-names)).
+The setting is described in [Predicates](predicates.md#keycasesensitive).
+
 ## Elsewhere in these docs
 
 Each of these is described where the feature is:

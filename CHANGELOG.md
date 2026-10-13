@@ -199,6 +199,10 @@ record.
 
 ### Changed
 
+- **Docs: `keyCaseSensitive` is a documented deviation from Mountebank** (#1367). Rift honours
+  `keyCaseSensitive: true` on its own and under `matches`; Mountebank applies the setting only to turn
+  key matching off under `caseSensitive: true`. No behaviour change.
+
 - **Docs: Differences from Mountebank lists that `decorate` always gets a `headers` object** (#1373),
   and how a failing decorate is reported (Mountebank 2.9.1 answers `500` with a stack trace; Rift
   serves the undecorated response with `x-rift-decorate-error: true`). No behaviour change.
