@@ -199,6 +199,10 @@ record.
 
 ### Changed
 
+- **Docs: how Rift's generated predicates differ from Mountebank 2.9.1's** (#1364): order, selector
+  scope, selected-value type and header-name lookup, and the claim that the order is Mountebank's is
+  corrected. A test pins that Rift replays Mountebank's typed recordings. No behaviour change.
+
 - **Docs: a proxy without `predicateGenerators` records into a store, not a stub** (#1363), so
   printed and exported imposters do not show its recordings. Mountebank records an empty-predicate
   stub that answers every later request with the first response. Documented as a deliberate

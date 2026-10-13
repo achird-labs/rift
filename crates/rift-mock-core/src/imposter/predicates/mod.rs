@@ -2304,6 +2304,35 @@ mod tests {
         );
     }
 
+    // Issue #1364: a recording Mountebank made (the selected value typed, `1`) loads and replays in
+    // Rift, which records the string form (`"1"`) itself.
+    #[test]
+    fn a_mountebank_typed_jsonpath_recording_matches() {
+        for recorded in [json!(1), json!("1")] {
+            let pred: crate::imposter::Predicate = serde_json::from_value(json!({
+                "deepEquals": { "body": recorded.clone() },
+                "jsonpath": { "selector": "$.id" }
+            }))
+            .expect("the recorded predicate decodes");
+            for (body, expected) in [(r#"{"id":1,"name":"a"}"#, true), (r#"{"id":2}"#, false)] {
+                let matched = predicate_matches(
+                    &pred,
+                    "POST",
+                    "/items",
+                    None,
+                    &empty_headers(),
+                    Some(body),
+                    None,
+                    None,
+                    None,
+                    0,
+                )
+                .expect("evaluates");
+                assert_eq!(matched, expected, "{recorded} against {body}");
+            }
+        }
+    }
+
     // Issue #306: a bare jsonpath selector (no leading `$`) must match, just like
     // the rooted form `$.searchValue`.
     #[test]

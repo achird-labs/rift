@@ -1802,489 +1802,597 @@
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/step[4].body#0",
     "location": "step[4].body",
     "mountebank": "upstream saw POST /items {\"id\":1,\"note\":\"third\"}",
-    "rift": "upstream saw POST /items {\"id\":1,\"note\":\"first\"}"
+    "rift": "upstream saw POST /items {\"id\":1,\"note\":\"first\"}",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#0",
     "location": "stored[4545]/stubs/0/predicates/0/deepEquals/body",
     "mountebank": "1",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#1",
     "location": "stored[4545]/stubs/0/predicates/0/deepEquals/path",
     "mountebank": "(absent)",
-    "rift": "\"/items\""
+    "rift": "\"/items\"",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#2",
     "location": "stored[4545]/stubs/0/predicates/0/jsonpath",
     "mountebank": "{\"selector\":\"$.id\"}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#3",
     "location": "stored[4545]/stubs/0/predicates/1/deepEquals/body",
     "mountebank": "(absent)",
-    "rift": "\"1\""
+    "rift": "\"1\"",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#4",
     "location": "stored[4545]/stubs/0/predicates/1/deepEquals/path",
     "mountebank": "\"\"",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#5",
     "location": "stored[4545]/stubs/1/predicates/0/deepEquals/body",
     "mountebank": "2",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#6",
     "location": "stored[4545]/stubs/1/predicates/0/deepEquals/path",
     "mountebank": "(absent)",
-    "rift": "\"/items\""
+    "rift": "\"/items\"",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#7",
     "location": "stored[4545]/stubs/1/predicates/0/jsonpath",
     "mountebank": "{\"selector\":\"$.id\"}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#8",
     "location": "stored[4545]/stubs/1/predicates/1/deepEquals/body",
     "mountebank": "(absent)",
-    "rift": "\"2\""
+    "rift": "\"2\"",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#9",
     "location": "stored[4545]/stubs/1/predicates/1/deepEquals/path",
     "mountebank": "\"\"",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#10",
     "location": "stored[4545]/stubs/2/predicates/0",
     "mountebank": "{\"deepEquals\":{\"body\":1},\"jsonpath\":{\"selector\":\"$.id\"}}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#11",
     "location": "stored[4545]/stubs/2/predicates/1",
     "mountebank": "{\"deepEquals\":{\"path\":\"\"},\"jsonpath\":{\"selector\":\"$.id\"}}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#12",
     "location": "stored[4545]/stubs/2/responses/0/is",
     "mountebank": "{\"_mode\":\"text\",\"body\":\"upstream saw POST /items {\\\"id\\\":1,\\\"note\\\":\\\"third\\\"}\",\"headers\":{},\"statusCode\":200}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#13",
     "location": "stored[4545]/stubs/2/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}"
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#14",
     "location": "stored[4545]/stubs/3",
     "mountebank": "{\"responses\":[{\"proxy\":{\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#0",
     "location": "replayable[4545]/stubs/0/predicates/0/deepEquals/body",
     "mountebank": "1",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#1",
     "location": "replayable[4545]/stubs/0/predicates/0/deepEquals/path",
     "mountebank": "(absent)",
-    "rift": "\"/items\""
+    "rift": "\"/items\"",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#2",
     "location": "replayable[4545]/stubs/0/predicates/0/jsonpath",
     "mountebank": "{\"selector\":\"$.id\"}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#3",
     "location": "replayable[4545]/stubs/0/predicates/1/deepEquals/body",
     "mountebank": "(absent)",
-    "rift": "\"1\""
+    "rift": "\"1\"",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#4",
     "location": "replayable[4545]/stubs/0/predicates/1/deepEquals/path",
     "mountebank": "\"\"",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#5",
     "location": "replayable[4545]/stubs/1/predicates/0/deepEquals/body",
     "mountebank": "2",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#6",
     "location": "replayable[4545]/stubs/1/predicates/0/deepEquals/path",
     "mountebank": "(absent)",
-    "rift": "\"/items\""
+    "rift": "\"/items\"",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#7",
     "location": "replayable[4545]/stubs/1/predicates/0/jsonpath",
     "mountebank": "{\"selector\":\"$.id\"}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#8",
     "location": "replayable[4545]/stubs/1/predicates/1/deepEquals/body",
     "mountebank": "(absent)",
-    "rift": "\"2\""
+    "rift": "\"2\"",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#9",
     "location": "replayable[4545]/stubs/1/predicates/1/deepEquals/path",
     "mountebank": "\"\"",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#10",
     "location": "replayable[4545]/stubs/2/predicates/0",
     "mountebank": "{\"deepEquals\":{\"body\":1},\"jsonpath\":{\"selector\":\"$.id\"}}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#11",
     "location": "replayable[4545]/stubs/2/predicates/1",
     "mountebank": "{\"deepEquals\":{\"path\":\"\"},\"jsonpath\":{\"selector\":\"$.id\"}}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#12",
     "location": "replayable[4545]/stubs/2/responses/0/is",
     "mountebank": "{\"_mode\":\"text\",\"body\":\"upstream saw POST /items {\\\"id\\\":1,\\\"note\\\":\\\"third\\\"}\",\"headers\":{},\"statusCode\":200}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#13",
     "location": "replayable[4545]/stubs/2/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}"
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#14",
     "location": "replayable[4545]/stubs/3",
     "mountebank": "{\"responses\":[{\"proxy\":{\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4546]/numberOfRequests#0",
     "location": "stored[4546]/numberOfRequests",
     "mountebank": "3",
-    "rift": "2"
+    "rift": "2",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
   {
     "case": "proxy: predicateGenerators with jsonpath",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank records the selected JSON value; Rift records its string form",
     "id": "generator-shape/predicategenerators-with-jsonp/stored[4545]/stubs/0/predicates#0",
     "location": "stored[4545]/stubs/0/predicates/0/deepEquals/body",
     "mountebank": "123",
-    "rift": "\"123\""
+    "rift": "\"123\"",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank records the selected JSON value (`1`); Rift records its string form (`\"1\"`), which Mountebank also matches."
   },
   {
     "case": "proxy: predicateGenerators with jsonpath",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank records the selected JSON value; Rift records its string form",
     "id": "generator-shape/predicategenerators-with-jsonp/replayable[4545]/stubs/0/predicates#0",
     "location": "replayable[4545]/stubs/0/predicates/0/deepEquals/body",
     "mountebank": "123",
-    "rift": "\"123\""
+    "rift": "\"123\"",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank records the selected JSON value (`1`); Rift records its string form (`\"1\"`), which Mountebank also matches."
   },
   {
     "case": "proxy: predicateGenerators with method and headers",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank orders generated predicates by the keys of matches; Rift's order is fixed",
     "id": "generator-shape/predicategenerators-with-metho/stored[4545]/stubs/0/predicates#0",
     "location": "stored[4545]/stubs/0/predicates/0/deepEquals",
     "mountebank": "(absent)",
-    "rift": "{\"method\":\"GET\"}"
+    "rift": "{\"method\":\"GET\"}",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank emits the predicates in the key order of `matches`; Rift's order is fixed, so two recordings of one request always build equal lists."
   },
   {
     "case": "proxy: predicateGenerators with method and headers",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank looks a listed header name up in the client's case and records {} on a miss; Rift finds it in any case",
     "id": "generator-shape/predicategenerators-with-metho/stored[4545]/stubs/0/predicates#1",
     "location": "stored[4545]/stubs/0/predicates/0/equals",
     "mountebank": "{\"headers\":{}}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank finds a listed header name only in the case the client sent it, and otherwise records `{}`, which matches any request; Rift finds it in any case."
   },
   {
     "case": "proxy: predicateGenerators with method and headers",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank orders generated predicates by the keys of matches; Rift's order is fixed",
     "id": "generator-shape/predicategenerators-with-metho/stored[4545]/stubs/0/predicates#2",
     "location": "stored[4545]/stubs/0/predicates/1/deepEquals",
     "mountebank": "{\"method\":\"GET\"}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank emits the predicates in the key order of `matches`; Rift's order is fixed, so two recordings of one request always build equal lists."
   },
   {
     "case": "proxy: predicateGenerators with method and headers",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank looks a listed header name up in the client's case and records {} on a miss; Rift finds it in any case",
     "id": "generator-shape/predicategenerators-with-metho/stored[4545]/stubs/0/predicates#3",
     "location": "stored[4545]/stubs/0/predicates/1/equals",
     "mountebank": "(absent)",
-    "rift": "{\"headers\":{\"Accept\":\"application/json\"}}"
+    "rift": "{\"headers\":{\"Accept\":\"application/json\"}}",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank finds a listed header name only in the case the client sent it, and otherwise records `{}`, which matches any request; Rift finds it in any case."
   },
   {
     "case": "proxy: predicateGenerators with method and headers",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank orders generated predicates by the keys of matches; Rift's order is fixed",
     "id": "generator-shape/predicategenerators-with-metho/replayable[4545]/stubs/0/predicates#0",
     "location": "replayable[4545]/stubs/0/predicates/0/deepEquals",
     "mountebank": "(absent)",
-    "rift": "{\"method\":\"GET\"}"
+    "rift": "{\"method\":\"GET\"}",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank emits the predicates in the key order of `matches`; Rift's order is fixed, so two recordings of one request always build equal lists."
   },
   {
     "case": "proxy: predicateGenerators with method and headers",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank looks a listed header name up in the client's case and records {} on a miss; Rift finds it in any case",
     "id": "generator-shape/predicategenerators-with-metho/replayable[4545]/stubs/0/predicates#1",
     "location": "replayable[4545]/stubs/0/predicates/0/equals",
     "mountebank": "{\"headers\":{}}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank finds a listed header name only in the case the client sent it, and otherwise records `{}`, which matches any request; Rift finds it in any case."
   },
   {
     "case": "proxy: predicateGenerators with method and headers",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank orders generated predicates by the keys of matches; Rift's order is fixed",
     "id": "generator-shape/predicategenerators-with-metho/replayable[4545]/stubs/0/predicates#2",
     "location": "replayable[4545]/stubs/0/predicates/1/deepEquals",
     "mountebank": "{\"method\":\"GET\"}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank emits the predicates in the key order of `matches`; Rift's order is fixed, so two recordings of one request always build equal lists."
   },
   {
     "case": "proxy: predicateGenerators with method and headers",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "Mountebank looks a listed header name up in the client's case and records {} on a miss; Rift finds it in any case",
     "id": "generator-shape/predicategenerators-with-metho/replayable[4545]/stubs/0/predicates#3",
     "location": "replayable[4545]/stubs/0/predicates/1/equals",
     "mountebank": "(absent)",
-    "rift": "{\"headers\":{\"Accept\":\"application/json\"}}"
+    "rift": "{\"headers\":{\"Accept\":\"application/json\"}}",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank finds a listed header name only in the case the client sent it, and otherwise records `{}`, which matches any request; Rift finds it in any case."
   },
   {
     "case": "proxy: predicateGenerators with predicateOperator",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "under predicateOperator, Mountebank stores the whole request per field; Rift stores the field's value",
     "id": "generator-shape/predicategenerators-with-predi/stored[4545]/stubs/0/predicates#0",
     "location": "stored[4545]/stubs/0/predicates/0/contains/body",
     "mountebank": "\"\"",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**"
   },
   {
     "case": "proxy: predicateGenerators with predicateOperator",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "under predicateOperator, Mountebank stores the whole request per field; Rift stores the field's value",
     "id": "generator-shape/predicategenerators-with-predi/stored[4545]/stubs/0/predicates#1",
     "location": "stored[4545]/stubs/0/predicates/0/contains/headers",
     "mountebank": "{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**"
   },
   {
     "case": "proxy: predicateGenerators with predicateOperator",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "under predicateOperator, Mountebank stores the whole request per field; Rift stores the field's value",
     "id": "generator-shape/predicategenerators-with-predi/stored[4545]/stubs/0/predicates#2",
     "location": "stored[4545]/stubs/0/predicates/0/contains/ip",
     "mountebankMatches": "\"(?:::ffff:)?127\\.0\\.0\\.1\"",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**"
   },
   {
     "case": "proxy: predicateGenerators with predicateOperator",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "under predicateOperator, Mountebank stores the whole request per field; Rift stores the field's value",
     "id": "generator-shape/predicategenerators-with-predi/stored[4545]/stubs/0/predicates#3",
     "location": "stored[4545]/stubs/0/predicates/0/contains/method",
     "mountebank": "\"GET\"",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**"
   },
   {
     "case": "proxy: predicateGenerators with predicateOperator",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "under predicateOperator, Mountebank stores the whole request per field; Rift stores the field's value",
     "id": "generator-shape/predicategenerators-with-predi/stored[4545]/stubs/0/predicates#4",
     "location": "stored[4545]/stubs/0/predicates/0/contains/query",
     "mountebank": "{}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**"
   },
   {
     "case": "proxy: predicateGenerators with predicateOperator",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "under predicateOperator, Mountebank stores the whole request per field; Rift stores the field's value",
     "id": "generator-shape/predicategenerators-with-predi/stored[4545]/stubs/0/predicates#5",
     "location": "stored[4545]/stubs/0/predicates/0/contains/requestFrom",
     "mountebankMatches": "\"(?:::ffff:)?127\\.0\\.0\\.1:\\d{4,5}\"",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**"
   },
   {
     "case": "proxy: predicateGenerators with predicateOperator",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "under predicateOperator, Mountebank stores the whole request per field; Rift stores the field's value",
     "id": "generator-shape/predicategenerators-with-predi/replayable[4545]/stubs/0/predicates#0",
     "location": "replayable[4545]/stubs/0/predicates/0/contains/body",
     "mountebank": "\"\"",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**"
   },
   {
     "case": "proxy: predicateGenerators with predicateOperator",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "under predicateOperator, Mountebank stores the whole request per field; Rift stores the field's value",
     "id": "generator-shape/predicategenerators-with-predi/replayable[4545]/stubs/0/predicates#1",
     "location": "replayable[4545]/stubs/0/predicates/0/contains/headers",
     "mountebank": "{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**"
   },
   {
     "case": "proxy: predicateGenerators with predicateOperator",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "under predicateOperator, Mountebank stores the whole request per field; Rift stores the field's value",
     "id": "generator-shape/predicategenerators-with-predi/replayable[4545]/stubs/0/predicates#2",
     "location": "replayable[4545]/stubs/0/predicates/0/contains/ip",
     "mountebankMatches": "\"(?:::ffff:)?127\\.0\\.0\\.1\"",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**"
   },
   {
     "case": "proxy: predicateGenerators with predicateOperator",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "under predicateOperator, Mountebank stores the whole request per field; Rift stores the field's value",
     "id": "generator-shape/predicategenerators-with-predi/replayable[4545]/stubs/0/predicates#3",
     "location": "replayable[4545]/stubs/0/predicates/0/contains/method",
     "mountebank": "\"GET\"",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**"
   },
   {
     "case": "proxy: predicateGenerators with predicateOperator",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "under predicateOperator, Mountebank stores the whole request per field; Rift stores the field's value",
     "id": "generator-shape/predicategenerators-with-predi/replayable[4545]/stubs/0/predicates#4",
     "location": "replayable[4545]/stubs/0/predicates/0/contains/query",
     "mountebank": "{}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**"
   },
   {
     "case": "proxy: predicateGenerators with predicateOperator",
-    "kind": "known-bug",
-    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "kind": "documented",
+    "reason": "under predicateOperator, Mountebank stores the whole request per field; Rift stores the field's value",
     "id": "generator-shape/predicategenerators-with-predi/replayable[4545]/stubs/0/predicates#5",
     "location": "replayable[4545]/stubs/0/predicates/0/contains/requestFrom",
     "mountebankMatches": "\"(?:::ffff:)?127\\.0\\.0\\.1:\\d{4,5}\"",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**"
   },
   {
     "id": "default-response-not-merged",
