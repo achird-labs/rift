@@ -52,6 +52,11 @@ record.
 
 ### Fixed
 
+- **A proxy forwards the request's own method** (#1380). OPTIONS, TRACE and extension methods such
+  as PROPFIND reached the upstream as GET, and the GET answer was recorded under the original
+  method. The method is now forwarded as sent, as Mountebank does; a lowercase extension method is
+  no longer upcased. `rift-verify` likewise probed such stubs with GET and reported a mismatch.
+
 - **`defaultResponse.statusCode` accepts a numeric string** (#1377). `"404"` was refused with a 400
   ("expected u16"); it now reads like `is.statusCode` and Mountebank do. It still prints as a
   number, and the shipped JSON Schema now types it as a status code.
