@@ -128,37 +128,13 @@ impl Served {
 /// The `proxyOnce` replay key: method, path, query and the generated predicates (#1317, #1333).
 type ClaimKey = (Method, &'static str, bool, Option<Option<&'static str>>);
 
-/// The mode of the imposter's proxy store, fixed when the imposter is built from its first proxy
-/// stub. Known divergence (#1387): Mountebank has no store; each proxy stub's own mode decides.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum StoreMode {
-    Once,
-    Always,
-    /// No proxy stub at build time: the store never gates.
-    #[default]
-    Transparent,
-}
-
-impl StoreMode {
-    fn of(kinds: &[Kind]) -> Self {
-        match kinds.iter().find_map(|k| match k {
-            Kind::Authored(Spec::Proxy { mode, .. }) => Some(*mode),
-            _ => None,
-        }) {
-            Some(Mode::Once) => StoreMode::Once,
-            Some(Mode::Always) => StoreMode::Always,
-            None => StoreMode::Transparent,
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct Model {
     pub stubs: Vec<Slot>,
-    store_mode: StoreMode,
-    /// `proxyOnce` recordings by identity. Known divergence (#1386): they outlive the stub they
-    /// were recorded as, so a request reaching the proxy again for an identity whose stub was
-    /// deleted or replaced is answered from here instead of being forwarded and re-recorded.
+    /// `proxyOnce` recordings by identity; only a `proxyOnce` stub consults or fills them. Known
+    /// divergence (#1386): they outlive the stub they were recorded as, so a request reaching the
+    /// proxy again for an identity whose stub was deleted or replaced is answered from here instead
+    /// of being forwarded and re-recorded.
     claims: BTreeMap<ClaimKey, String>,
     /// Raw flow state, keyed `(flow, key)`: the `FLOW_KEYS` values and the scenario states.
     pub kv: BTreeMap<(&'static str, &'static str), Value>,
@@ -231,13 +207,13 @@ impl Model {
             }
             Kind::Authored(Spec::Proxy { mode, gen_body, .. }) => {
                 let key = (r.method, r.path, r.query, gen_body.then_some(r.body));
-                if self.store_mode == StoreMode::Once
+                if mode == Mode::Once
                     && let Some(body) = self.claims.get(&key)
                 {
                     return Served::plain(body.clone(), true);
                 }
                 let body = self.forward(r);
-                if self.store_mode == StoreMode::Once {
+                if mode == Mode::Once {
                     self.claims.insert(key, body.clone());
                 }
                 self.record(r, mode, gen_body, body.clone());
@@ -413,10 +389,8 @@ impl Model {
         self.recreate_with(desired);
     }
 
-    /// A new imposter: new slots, an empty flow store, and a proxy store whose mode is taken from
-    /// the first proxy stub.
+    /// A new imposter: new slots, an empty flow store and an empty proxy store.
     fn recreate_with(&mut self, desired: Vec<Kind>) {
-        self.store_mode = StoreMode::of(&desired);
         self.claims.clear();
         self.stubs = desired.into_iter().map(Slot::new).collect();
         self.kv.clear();

@@ -496,7 +496,7 @@ impl Imposter {
             tracing::warn!(port = ?config.port, "{}", ignored.message);
         }
 
-        let proxy_mode = Self::extract_proxy_mode(&config.stubs);
+        Self::report_unknown_proxy_modes(&config.stubs);
 
         // Initialize flow store: a registered provider wins; otherwise the built-in
         // `_rift.flowState` selection.
@@ -518,7 +518,8 @@ impl Imposter {
             stubs_write: Mutex::new(()),
             load_clock,
             scenario_transitions: ArcSwap::from_pointee(HashMap::new()),
-            proxy_store: Arc::new(LocalProxyStore::new(proxy_mode)),
+            // Each request claims with its own proxy response's mode (issue #1387).
+            proxy_store: Arc::new(LocalProxyStore::new(ProxyMode::ProxyOnce)),
             upstream_client: None,
             event_bus: None,
             no_match_interceptor: None,
@@ -883,22 +884,19 @@ impl Imposter {
         self.config.port.unwrap_or(0)
     }
 
-    /// Extract proxy mode from stubs
-    fn extract_proxy_mode(stubs: &[Stub]) -> ProxyMode {
+    /// Report each proxy response whose `mode` this engine does not know. A config door refuses
+    /// one (issue #1314), so it was replayed from an older engine's store; it runs as Mountebank's
+    /// default (proxyOnce), where the older engine ran it as pass-through, so say so once, here.
+    fn report_unknown_proxy_modes(stubs: &[Stub]) {
         for stub in stubs {
             for response in &stub.responses {
-                if let StubResponse::Proxy { proxy, .. } = response {
-                    // A config door refuses an unknown mode (issue #1314); one that reaches here
-                    // was replayed from an older engine's store. Run it as Mountebank does
-                    // (proxyOnce), but say so: an older engine ran it as pass-through.
-                    return proxy.mode().unwrap_or_else(|e| {
-                        error!("{e}; this replayed config runs as proxyOnce");
-                        ProxyMode::default()
-                    });
+                if let StubResponse::Proxy { proxy, .. } = response
+                    && let Err(e) = proxy.mode()
+                {
+                    error!("{e}; this replayed config runs as proxyOnce");
                 }
             }
         }
-        ProxyMode::ProxyTransparent
     }
 }
 

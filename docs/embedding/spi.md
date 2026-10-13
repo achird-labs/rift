@@ -182,6 +182,9 @@ pub trait ProxyRecordingStore: Send + Sync {
     /// First caller per `(port, signature)` wins the right to record once.
     /// `Err` = backend unavailable (built-ins never fail).
     fn try_claim(&self, port: u16, sig: &RequestSignature) -> Result<ClaimOutcome>;
+    /// The claim the engine takes: `mode` is the proxy response's own. Defaults to `try_claim`.
+    fn try_claim_as(&self, port: u16, sig: &RequestSignature, mode: ProxyMode)
+        -> Result<ClaimOutcome> { /* -> try_claim */ }
     /// Release a claim the engine will not settle, so the signature is retryable.
     fn release_claim(&self, port: u16, sig: &RequestSignature, token: ClaimToken);
     fn record(&self, /* port, sig, response, token */) -> Result<()>;
@@ -198,6 +201,17 @@ pub trait ProxyRecordingStore: Send + Sync {
 
 Its typed error is `ProxyStoreError`, `#[non_exhaustive]`. Inject with
 `.with_proxy_store(Arc<dyn ProxyRecordingStore>)`.
+
+**The engine claims with `try_claim_as`**, passing the mode of the proxy response being served
+(issue #1387). Each proxy stub has its own `mode`, as in Mountebank, so only a `proxyOnce` request
+is gated: a `proxyAlways` request is always granted a claim, even on an imposter whose other proxy
+stub is `proxyOnce`, and a `proxyOnce` stub added after the imposter was created gates like one
+declared with it. The default implementation calls `try_claim`, so a store that decides the mode
+itself keeps doing so; override `try_claim_as` to gate on the mode the engine names. A store that
+wraps another must forward `try_claim_as`, or the wrapped store applies its constructor's mode. The built-in
+`LocalProxyStore` overrides it, keeps `proxyAlways` recordings apart from `proxyOnce` ones so a
+`proxyAlways` recording never answers a `proxyOnce` claim, and applies its constructor's mode only
+to a direct `try_claim`.
 
 `RequestSignature` is `#[non_exhaustive]`: build it with `RequestSignature::new` (and `.with_body(&[u8])`
 or `.with_predicates(&[Value])`), not a struct literal. It carries two optional hashes, each omitted

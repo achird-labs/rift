@@ -52,6 +52,14 @@ record.
 
 ### Fixed
 
+- **Each proxy stub records and replays by its own `mode`** (#1387). The proxy store took its mode
+  from the first proxy stub when the imposter was built, so a `proxyOnce` stub added later (by
+  `POST`/`PUT .../stubs`) to an imposter created without a proxy never gated, and a `proxyAlways`
+  stub on an imposter whose first proxy was `proxyOnce` replayed its first recording instead of
+  forwarding. Embedders: `ProxyRecordingStore` gains `try_claim_as(port, sig, mode)`, which the
+  engine now calls; its default defers to `try_claim`, so an existing store is unchanged until it
+  overrides it.
+
 - **Clearing or editing a flow's scenario state through the flow-state API moves `Last-Modified`**
   (#1344). A scenario's state is a key in its flow, so `DELETE /admin/imposters/{port}/flow-state/
   {flowId}` (and a `PUT` or `DELETE` of that key) changes which stub answers, but it was not

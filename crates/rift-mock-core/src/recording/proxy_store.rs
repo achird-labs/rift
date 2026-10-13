@@ -154,6 +154,23 @@ pub trait ProxyRecordingStore: Send + Sync {
     /// does **not** forward it. Built-ins never fail.
     fn try_claim(&self, port: u16, sig: &RequestSignature) -> Result<ClaimOutcome>;
 
+    /// [`try_claim`](Self::try_claim) for a request answered by a proxy response in `mode` (issue
+    /// #1387). Each proxy stub has its own `mode`, as in Mountebank: only a `proxyOnce` request is
+    /// gated, and a `proxyAlways` one is always granted a claim, whatever other proxy stubs the
+    /// imposter has. The engine calls this, never `try_claim`.
+    ///
+    /// The default defers to `try_claim`, for a store that resolves the mode itself. A store that
+    /// wraps another must forward this too, or the wrapped store applies its constructor's mode.
+    fn try_claim_as(
+        &self,
+        port: u16,
+        sig: &RequestSignature,
+        mode: ProxyMode,
+    ) -> Result<ClaimOutcome> {
+        let _ = mode;
+        self.try_claim(port, sig)
+    }
+
     /// Releases a claim the engine will not settle, so the signature stays retryable: after a
     /// failed forward or behavior, and when the request is dropped mid-flight (client disconnect,
     /// imposter stop, panic — issue #1193). The last case calls it from a destructor, possibly
@@ -241,7 +258,11 @@ pub trait ProxyRecordingStore: Send + Sync {
 /// Per-port recording state: the responses map plus the in-flight claim gate.
 #[derive(Debug, Default)]
 struct PortState {
+    /// `proxyOnce` recordings: what the gate answers `AlreadyRecorded` from.
     responses: RwLock<HashMap<RequestSignature, Vec<RecordedResponse>>>,
+    /// `proxyAlways` recordings, kept apart so a `proxyAlways` stub recording an identity never
+    /// makes a `proxyOnce` stub replay it (issue #1387).
+    always: RwLock<HashMap<RequestSignature, Vec<RecordedResponse>>>,
     /// Signatures with an in-flight `proxyOnce` claim, mapped to the active claim token.
     /// Presence is the TOCTOU-safe "someone is recording this" flag (#171/#118); the token
     /// lets [`record`](ProxyRecordingStore::record) and
@@ -252,10 +273,10 @@ struct PortState {
 /// Reference proxy-recording backend with the exact semantics of the embedded store it
 /// replaced, plus the release-on-error fix and explicit port scoping.
 ///
-/// A `LocalProxyStore` carries a single [`ProxyMode`]: the per-imposter default is constructed
-/// with that imposter's mode. An embedder sharing one store across imposters via
-/// [`with_proxy_store`](crate::imposter::ImposterManager::with_proxy_store) therefore shares one
-/// mode across the ports it serves.
+/// The engine claims through [`try_claim_as`](ProxyRecordingStore::try_claim_as) with the mode of
+/// the proxy response being served, so one store serves any mix of modes (issue #1387). The
+/// constructor's mode is what [`try_claim`](ProxyRecordingStore::try_claim) applies, for a caller
+/// that does not name one.
 #[derive(Debug)]
 pub struct LocalProxyStore {
     mode: ProxyMode,
@@ -265,7 +286,7 @@ pub struct LocalProxyStore {
 }
 
 impl LocalProxyStore {
-    /// Create a store for the given proxy mode.
+    /// Create a store whose [`try_claim`](ProxyRecordingStore::try_claim) applies `mode`.
     #[must_use]
     pub fn new(mode: ProxyMode) -> Self {
         Self {
@@ -275,7 +296,7 @@ impl LocalProxyStore {
         }
     }
 
-    /// The proxy mode this store dispatches on.
+    /// The mode [`try_claim`](ProxyRecordingStore::try_claim) applies.
     #[must_use]
     pub fn mode(&self) -> ProxyMode {
         self.mode
@@ -294,27 +315,35 @@ impl LocalProxyStore {
 
     #[cfg(test)]
     fn recorded_len(&self, port: u16, sig: &RequestSignature) -> usize {
-        self.slot(port)
-            .responses
-            .read()
-            .get(sig)
-            .map_or(0, Vec::len)
+        self.recordings(port, sig).len()
     }
 
     #[cfg(test)]
     fn recordings(&self, port: u16, sig: &RequestSignature) -> Vec<RecordedResponse> {
-        self.slot(port)
-            .responses
-            .read()
-            .get(sig)
-            .cloned()
-            .unwrap_or_default()
+        let state = self.slot(port);
+        let once = state.responses.read().get(sig).cloned().unwrap_or_default();
+        let always = state.always.read().get(sig).cloned().unwrap_or_default();
+        once.into_iter().chain(always).collect()
     }
 }
 
+/// Set on a token for a claim that does not gate (`proxyAlways`, `proxyTransparent`), so `record`
+/// and `release_claim` tell the two kinds of claim apart without consulting a mode. Tokens are
+/// counted from zero and never reach it.
+const UNGATED: u64 = 1 << 63;
+
 impl ProxyRecordingStore for LocalProxyStore {
     fn try_claim(&self, port: u16, sig: &RequestSignature) -> Result<ClaimOutcome> {
-        match self.mode {
+        self.try_claim_as(port, sig, self.mode)
+    }
+
+    fn try_claim_as(
+        &self,
+        port: u16,
+        sig: &RequestSignature,
+        mode: ProxyMode,
+    ) -> Result<ClaimOutcome> {
+        match mode {
             ProxyMode::ProxyOnce => {
                 let state = self.slot(port);
                 // Hold the responses read guard across the pending claim so record() (which
@@ -333,15 +362,15 @@ impl ProxyRecordingStore for LocalProxyStore {
                 Ok(ClaimOutcome::Claimed(ClaimToken(token)))
             }
             // proxyAlways / proxyTransparent never gate: every request proxies. The claim is a
-            // formality so the caller path is uniform; record() dispatches on mode.
-            ProxyMode::ProxyAlways | ProxyMode::ProxyTransparent => {
-                Ok(ClaimOutcome::Claimed(ClaimToken(self.mint_token())))
-            }
+            // formality so the caller path is uniform.
+            ProxyMode::ProxyAlways | ProxyMode::ProxyTransparent => Ok(ClaimOutcome::Claimed(
+                ClaimToken(self.mint_token() | UNGATED),
+            )),
         }
     }
 
     fn release_claim(&self, port: u16, sig: &RequestSignature, token: ClaimToken) {
-        if self.mode != ProxyMode::ProxyOnce {
+        if token.0 & UNGATED != 0 {
             return;
         }
         let state = self.slot(port);
@@ -361,66 +390,72 @@ impl ProxyRecordingStore for LocalProxyStore {
         resp: RecordedResponse,
     ) -> Result<()> {
         let state = self.slot(port);
-        match self.mode {
-            ProxyMode::ProxyOnce => {
-                // Lock order (responses then pending) matches try_claim to avoid deadlock.
-                let mut responses = state.responses.write();
-                let mut pending = state.pending.lock();
-                // Stale or already-settled claim: drop the recording rather than clobber.
-                if pending.get(&sig).copied() != Some(token.0) {
-                    tracing::debug!(
-                        "Stale claim token; dropping recording (claim released/re-taken)"
-                    );
-                    return Ok(());
-                }
-                if responses.len() >= MAX_TOTAL_SIGNATURES && !responses.contains_key(&sig) {
-                    tracing::debug!(
-                        max = MAX_TOTAL_SIGNATURES,
-                        "Recording store full, dropping new recording"
-                    );
-                    pending.remove(&sig);
-                    return Ok(());
-                }
-                responses.entry(sig.clone()).or_insert_with(|| vec![resp]);
-                pending.remove(&sig);
-                Ok(())
+        if token.0 & UNGATED != 0 {
+            // A store built for proxyTransparent records nothing an ungated claim brings.
+            if self.mode == ProxyMode::ProxyTransparent {
+                return Ok(());
             }
-            ProxyMode::ProxyAlways => {
-                let mut responses = state.responses.write();
-                if responses.len() >= MAX_TOTAL_SIGNATURES && !responses.contains_key(&sig) {
-                    tracing::debug!(
-                        max = MAX_TOTAL_SIGNATURES,
-                        "Recording store full, dropping new recording"
-                    );
-                    return Ok(());
-                }
-                let recordings = responses.entry(sig).or_default();
-                if recordings.len() >= MAX_RECORDINGS_PER_SIGNATURE {
-                    tracing::debug!(
-                        max = MAX_RECORDINGS_PER_SIGNATURE,
-                        "Recording limit reached, dropping oldest"
-                    );
-                    recordings.remove(0);
-                }
-                recordings.push(resp);
-                Ok(())
+            let mut responses = state.always.write();
+            if responses.len() >= MAX_TOTAL_SIGNATURES && !responses.contains_key(&sig) {
+                tracing::debug!(
+                    max = MAX_TOTAL_SIGNATURES,
+                    "Recording store full, dropping new recording"
+                );
+                return Ok(());
             }
-            // proxyTransparent never records.
-            ProxyMode::ProxyTransparent => Ok(()),
+            let recordings = responses.entry(sig).or_default();
+            if recordings.len() >= MAX_RECORDINGS_PER_SIGNATURE {
+                tracing::debug!(
+                    max = MAX_RECORDINGS_PER_SIGNATURE,
+                    "Recording limit reached, dropping oldest"
+                );
+                recordings.remove(0);
+            }
+            recordings.push(resp);
+            return Ok(());
         }
+        // Lock order (responses then pending) matches try_claim to avoid deadlock.
+        let mut responses = state.responses.write();
+        let mut pending = state.pending.lock();
+        // Stale or already-settled claim: drop the recording rather than clobber.
+        if pending.get(&sig).copied() != Some(token.0) {
+            tracing::debug!("Stale claim token; dropping recording (claim released/re-taken)");
+            return Ok(());
+        }
+        if responses.len() >= MAX_TOTAL_SIGNATURES && !responses.contains_key(&sig) {
+            tracing::debug!(
+                max = MAX_TOTAL_SIGNATURES,
+                "Recording store full, dropping new recording"
+            );
+            pending.remove(&sig);
+            return Ok(());
+        }
+        responses.entry(sig.clone()).or_insert_with(|| vec![resp]);
+        pending.remove(&sig);
+        Ok(())
     }
 
     fn lookup(&self, port: u16, sig: &RequestSignature) -> Option<RecordedResponse> {
-        self.slot(port)
-            .responses
-            .read()
-            .get(sig)
-            .and_then(|responses| responses.first().cloned())
+        let state = self.slot(port);
+        let first = |map: &HashMap<RequestSignature, Vec<RecordedResponse>>| {
+            map.get(sig)
+                .and_then(|responses| responses.first().cloned())
+        };
+        // The engine looks up only after a proxyOnce `AlreadyRecorded`, so it must never be handed
+        // a proxyAlways recording; a store built for proxyAlways still replays its own.
+        if self.mode == ProxyMode::ProxyAlways {
+            first(&state.always.read())
+        } else {
+            first(&state.responses.read())
+        }
     }
 
     fn clear(&self, port: u16) {
         if let Some(state) = self.ports.read().get(&port) {
-            state.responses.write().clear();
+            let mut once = state.responses.write();
+            let mut always = state.always.write();
+            once.clear();
+            always.clear();
             state.pending.lock().clear();
         }
     }
@@ -527,6 +562,182 @@ mod tests {
 
         assert!(store.lookup(1, &s).is_none());
         assert_eq!(store.recorded_len(1, &s), 0);
+    }
+
+    // Issue #1387: the gate is the requesting proxy's mode, not the mode the store was built with.
+    #[test]
+    fn a_proxy_always_claim_never_gates_on_a_store_built_for_proxy_once() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyOnce);
+        let s = sig("/always");
+
+        let t1 = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyAlways).unwrap());
+        store.record(1, s.clone(), t1, resp(200, "first")).unwrap();
+
+        assert!(matches!(
+            store.try_claim_as(1, &s, ProxyMode::ProxyAlways).unwrap(),
+            ClaimOutcome::Claimed(_)
+        ));
+    }
+
+    #[test]
+    fn a_proxy_once_claim_gates_on_a_store_built_without_a_proxy() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyTransparent);
+        let s = sig("/once");
+
+        let t1 = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap());
+        assert_eq!(
+            store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap(),
+            ClaimOutcome::InFlight
+        );
+        store.record(1, s.clone(), t1, resp(200, "first")).unwrap();
+
+        assert_eq!(
+            store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap(),
+            ClaimOutcome::AlreadyRecorded
+        );
+        assert_eq!(store.lookup(1, &s).unwrap().body, b"first");
+    }
+
+    // A proxyAlways recording of an identity is not a proxyOnce recording of it: a proxyOnce stub
+    // reached with the same signature must still forward and record its own.
+    #[test]
+    fn a_proxy_always_recording_does_not_satisfy_a_proxy_once_claim() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyOnce);
+        let s = sig("/shared");
+
+        let t1 = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyAlways).unwrap());
+        store.record(1, s.clone(), t1, resp(200, "always")).unwrap();
+
+        let t2 = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap());
+        store.record(1, s.clone(), t2, resp(201, "once")).unwrap();
+        assert_eq!(
+            store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap(),
+            ClaimOutcome::AlreadyRecorded
+        );
+        assert_eq!(store.lookup(1, &s).unwrap().body, b"once");
+    }
+
+    // Releasing a proxyAlways claim must not free a proxyOnce claim in flight for the signature.
+    #[test]
+    fn releasing_a_proxy_always_claim_leaves_a_proxy_once_claim_in_flight() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyOnce);
+        let s = sig("/inflight");
+
+        let _once = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap());
+        let always = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyAlways).unwrap());
+        store.release_claim(1, &s, always);
+
+        assert_eq!(
+            store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap(),
+            ClaimOutcome::InFlight
+        );
+    }
+
+    // A proxyAlways claim still records every response, whatever mode the store was built with.
+    #[test]
+    fn a_proxy_always_claim_appends_on_a_store_built_for_proxy_once() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyOnce);
+        let s = sig("/append");
+
+        for body in ["a", "b"] {
+            let t = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyAlways).unwrap());
+            store.record(1, s.clone(), t, resp(200, body)).unwrap();
+        }
+
+        assert_eq!(store.recorded_len(1, &s), 2);
+    }
+
+    // A stale proxyOnce token is dropped on any store, not appended as a proxyAlways recording.
+    #[test]
+    fn a_stale_proxy_once_token_is_dropped_on_a_store_built_for_proxy_always() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyAlways);
+        let s = sig("/stale-always");
+
+        let stale = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap());
+        store.release_claim(1, &s, stale);
+        let _live = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap());
+        store
+            .record(1, s.clone(), stale, resp(200, "late"))
+            .unwrap();
+
+        assert_eq!(store.recorded_len(1, &s), 0);
+        assert!(store.lookup(1, &s).is_none());
+    }
+
+    // Releasing a proxyOnce claim frees it whatever mode the store was built with.
+    #[test]
+    fn a_released_proxy_once_claim_is_reclaimable_on_a_store_built_without_a_proxy() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyTransparent);
+        let s = sig("/release");
+
+        let t = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap());
+        store.release_claim(1, &s, t);
+
+        assert!(matches!(
+            store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap(),
+            ClaimOutcome::Claimed(_)
+        ));
+    }
+
+    #[test]
+    fn clear_drops_proxy_always_recordings_too() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyAlways);
+        let s = sig("/clear");
+
+        let t = claim_token(store.try_claim(1, &s).unwrap());
+        store.record(1, s.clone(), t, resp(200, "always")).unwrap();
+        store.clear(1);
+
+        assert_eq!(store.recorded_len(1, &s), 0);
+        assert!(store.lookup(1, &s).is_none());
+    }
+
+    // `lookup` replays proxyAlways recordings only on a store built for proxyAlways: the engine
+    // looks up after a proxyOnce `AlreadyRecorded` and must never get another stub's recording.
+    #[test]
+    fn lookup_serves_proxy_always_recordings_only_on_a_store_built_for_them() {
+        let s = sig("/lookup");
+        let always = LocalProxyStore::new(ProxyMode::ProxyAlways);
+        let once = LocalProxyStore::new(ProxyMode::ProxyOnce);
+        for store in [&always, &once] {
+            let t = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyAlways).unwrap());
+            store.record(1, s.clone(), t, resp(200, "always")).unwrap();
+        }
+
+        assert_eq!(always.lookup(1, &s).unwrap().body, b"always");
+        assert!(once.lookup(1, &s).is_none());
+    }
+
+    // The trait default defers to `try_claim`, so a store that resolves its own mode is unchanged.
+    #[test]
+    fn the_default_try_claim_as_defers_to_try_claim() {
+        struct AlwaysRecorded;
+        impl ProxyRecordingStore for AlwaysRecorded {
+            fn try_claim(&self, _: u16, _: &RequestSignature) -> Result<ClaimOutcome> {
+                Ok(ClaimOutcome::AlreadyRecorded)
+            }
+            fn release_claim(&self, _: u16, _: &RequestSignature, _: ClaimToken) {}
+            fn record(
+                &self,
+                _: u16,
+                _: RequestSignature,
+                _: ClaimToken,
+                _: RecordedResponse,
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn lookup(&self, _: u16, _: &RequestSignature) -> Option<RecordedResponse> {
+                None
+            }
+            fn clear(&self, _: u16) {}
+        }
+
+        assert_eq!(
+            AlwaysRecorded
+                .try_claim_as(1, &sig("/x"), ProxyMode::ProxyAlways)
+                .unwrap(),
+            ClaimOutcome::AlreadyRecorded
+        );
     }
 
     // AC3: concurrent claimers get exactly one Claimed; the rest see InFlight.

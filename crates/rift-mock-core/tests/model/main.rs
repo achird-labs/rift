@@ -596,3 +596,54 @@ fn flow_writes_that_change_nothing_keep_last_modified() {
         sut.manager.delete_all().await;
     });
 }
+
+/// #1387: a `proxyOnce` stub added to an imposter that was created without a proxy replays its
+/// recording; it is not left ungated by the mode the imposter was built with.
+#[test]
+fn a_proxy_once_stub_added_later_gates_by_its_own_mode() {
+    let post = |path| {
+        Op::Request(Shape {
+            method: Method::Post,
+            path,
+            query: false,
+            body: Some("x"),
+            flow: "f1",
+        })
+    };
+    run(
+        &[conditional("/b", "p")],
+        &[
+            Op::AddStub {
+                index: 1,
+                spec: Spec::Proxy {
+                    pred: ops::Pred::default(),
+                    mode: ops::Mode::Once,
+                    gen_body: true,
+                },
+            },
+            post("/a"),
+            // The recording, in front of the proxy: the next request reaches the proxy again.
+            Op::DeleteStub(1),
+            post("/a"),
+        ],
+    );
+}
+
+/// #1387: a `proxyAlways` stub behind a `proxyOnce` one forwards every request that reaches it,
+/// rather than replaying what the imposter-wide `proxyOnce` store recorded for it. The recording
+/// is deleted so the next request reaches the proxy again (it lands at index 1, #1389).
+#[test]
+fn a_proxy_always_stub_behind_a_proxy_once_stub_always_forwards() {
+    let proxy = |path, mode| Spec::Proxy {
+        pred: ops::Pred {
+            path: Some(path),
+            ..ops::Pred::default()
+        },
+        mode,
+        gen_body: false,
+    };
+    run(
+        &[proxy("/a", ops::Mode::Once), proxy("/b", ops::Mode::Always)],
+        &[get("/b"), Op::DeleteStub(1), get("/b")],
+    );
+}
