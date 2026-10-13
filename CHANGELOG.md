@@ -13,6 +13,14 @@ record.
 
 ### Added
 
+- **A model-based state-machine test of the stateful core** (#1344). Random sequences of stub
+  edits, scenario and flow-state writes, reloads, re-created imposters and proxied requests run
+  against a live engine and a reference model that follows Mountebank, compared after every step
+  (responses, the stub list and its recordings, flow state, upstream calls, `Last-Modified`). 64
+  cases per `cargo test`, 2048 nightly (`model-tests.yml`), failing seeds checked in. Reverting
+  the fixes for #1303 or #1333 fails it; it found the flow-state stamping gap below and two
+  proxy-store divergences from Mountebank, filed as #1386 and #1387.
+
 - **The imposter grammar ships as a JSON Schema** (#1342). `sdk-conformance/schema/imposter.schema.json`
   (draft 2020-12) is generated from the engine's own config types — the raw wire shapes, aliases
   and spellings included — and packaged in `sdk-conformance-<version>.tar.gz`. Every object is
@@ -43,6 +51,14 @@ record.
   and a recorded stub matched the whole body.
 
 ### Fixed
+
+- **Clearing or editing a flow's scenario state through the flow-state API moves `Last-Modified`**
+  (#1344). A scenario's state is a key in its flow, so `DELETE /admin/imposters/{port}/flow-state/
+  {flowId}` (and a `PUT` or `DELETE` of that key) changes which stub answers, but it was not
+  stamped as a transition the way `PUT .../scenarios/{name}/state` is (#1307): a conditional stub's
+  changed answer was served under the previous `Last-Modified`, and a client revalidating with
+  `If-Modified-Since` got `304` and kept the stale one. `_rift.stateOps` and script `ctx.state`
+  writes still have the gap (#1388).
 
 - **`rift-lint` no longer reports `E014` on a flat response** (#1343). A response that sets
   `statusCode`, `headers` or `body` with no `is` wrapper is served as an `is` response (#304), but

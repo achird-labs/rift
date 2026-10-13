@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past (tests/model/main.rs, issue #1344).
+# They are replayed before any novel case is generated, so check in every seed a failing run
+# writes here alongside its fix. A seed regenerates its case through the strategies in ops.rs, so
+# an edit to those strategies can change what an old seed exercises; the named tests in main.rs
+# are the version-proof form of each one.
+#
+# #1303 (delete_stub without restamp_exposed): shrinks to a stub deleted ahead of an older
+# conditional stub answering the same GET.
+cc 7e0da2ec75118fdc66058e6fcb3570b54333ecc0ca53d50f6aafd5142436d1eb # shrinks to ([Is { pred: Pred { method: None, path: None, query: false, body: None }, gate: Some(Gate { scenario: "S1", required: Some("A"), next: None }), label: "p", responses: 1, conditional: false }, Is { pred: Pred { method: None, path: None, query: false, body: None }, gate: Some(Gate { scenario: "S2", required: Some("A"), next: None }), label: "q", responses: 1, conditional: true }], [AddStub { index: 2, spec: Is { pred: Pred { method: None, path: None, query: false, body: None }, gate: None, label: "p", responses: 1, conditional: true } }, FlowPut { flow: "f1", key: "S2", value: String("A") }, Request(Shape { method: Get, path: "/a", query: false, body: None, flow: "f1" }), DeleteStub(1), Request(Shape { method: Get, path: "/a", query: false, body: None, flow: "f1" })])
+# #1333 (proxyOnce claim keyed without the generated predicates): shrinks to two POSTs to one
+# path with different bodies under a body generator, the second answered from the first's recording.
+cc 110ba276c2b24b450d987857ac58b81b60f9940e16b92662aee4664bc6887435 # shrinks to ([Proxy { pred: Pred { method: None, path: None, query: false, body: None }, mode: Once, gen_body: true }], [Request(Shape { method: Post, path: "/a", query: false, body: None, flow: "f1" }), Request(Shape { method: Post, path: "/a", query: false, body: Some("x"), flow: "f1" })])
