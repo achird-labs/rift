@@ -619,7 +619,9 @@ option is set.
 
 ### DELETE /imposters/{port}/savedRequests
 
-Clear recorded requests. Also available under the alias `DELETE /imposters/{port}/requests`.
+Clear recorded requests. Also available under the alias `DELETE /imposters/{port}/requests`
+(in Mountebank that alias clears saved proxy responses instead; see
+[Differences from Mountebank](../mountebank/differences.md)).
 Accepts the same `match=` query parameters as the `GET`, in which case only matching requests are
 removed.
 

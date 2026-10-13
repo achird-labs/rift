@@ -78,6 +78,12 @@ Header names are compared against the Title-Cased names the listener stores (`X-
 Rift cannot see the spelling the client sent (see [Request header names](#request-header-names)).
 The setting is described in [Predicates](predicates.md#keycasesensitive).
 
+## `/imposters/:port/requests` means recorded requests
+
+`DELETE /imposters/:port/requests` clears the imposter's recorded requests, like `DELETE /imposters/:port/savedRequests`, and `GET /imposters/:port/requests` reads them. In Mountebank the `DELETE` is a deprecated alias of `DELETE /imposters/:port/savedProxyResponses`
+and leaves recorded requests alone, and there is no `GET`. To clear saved proxy responses on Rift, use
+`savedProxyResponses`.
+
 ## Elsewhere in these docs
 
 Each of these is described where the feature is:
