@@ -33,18 +33,27 @@ impl Imposter {
     /// its match index, in place rather than rebuilding an identical copy (issue #1254), which is
     /// why this does not go through [`mutate_stubs`](Self::mutate_stubs).
     pub(crate) fn reconcile_stubs(&self, desired: &[Stub]) -> StubReconcile {
-        let _writer = self.stubs_write.lock();
-        let current = self.stubs_snapshot.load();
-        match plan_stub_reconcile(current.stubs(), desired, &self.load_clock) {
-            StubPlan::Unchanged => StubReconcile::Unchanged,
-            StubPlan::Degenerate => StubReconcile::Degenerate,
-            StubPlan::Patched { next, removed_keys } => {
-                self.stubs_snapshot
-                    .store(Arc::new(StubSnapshot::build(next)));
-                self.stub_warnings.store(None);
-                StubReconcile::Patched { removed_keys }
+        let (outcome, swapped) = {
+            let _writer = self.stubs_write.lock();
+            let current = self.stubs_snapshot.load_full();
+            match plan_stub_reconcile(current.stubs(), desired, &self.load_clock) {
+                StubPlan::Unchanged => (StubReconcile::Unchanged, None),
+                StubPlan::Degenerate => (StubReconcile::Degenerate, None),
+                StubPlan::Patched { next, removed_keys } => {
+                    let after = Arc::new(StubSnapshot::build(next));
+                    self.stubs_snapshot.store(Arc::clone(&after));
+                    self.stub_warnings.store(None);
+                    (
+                        StubReconcile::Patched { removed_keys },
+                        Some((current, after)),
+                    )
+                }
             }
+        };
+        if let Some((before, after)) = swapped {
+            self.forget_orphaned_claims(before.stubs(), after.stubs());
         }
+        outcome
     }
 
     /// Add a stub at a specific index

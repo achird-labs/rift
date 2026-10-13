@@ -151,6 +151,15 @@ record.
   generated before the claim, so a `predicateGenerators.inject` script no longer runs while the
   claim is held, but does run before a replay from the store.
 
+- **Deleting a `proxyOnce` recording records the identity again** (#1386). A recording lived both
+  as the stub in front of the proxy and as a claim in the proxy store. Deleting the stub, or
+  replacing the stubs without it (`DELETE …/stubs/:i`, `PUT …/stubs`, a reload), left the claim, so
+  the next request for that identity got the old upstream response replayed: never forwarded, never
+  recorded again, and the stub never came back. The claim now goes with its stub, as in Mountebank,
+  where the stub is the recording. Embedders: `ProxyRecordingStore` gains
+  `forget_recorded(port, sig)` (default no-op), and `Imposter::insert_or_append_proxy_stub` takes
+  the settled claim's signature as a new last argument.
+
 ### Changed
 
 - **Conformance corpus fixture `02-predicates.json` gains three `keyCaseSensitive` stubs** (#1325), pinning the key and its inherit-from-`caseSensitive` default. SDK corpus replays must regenerate fixture 02.

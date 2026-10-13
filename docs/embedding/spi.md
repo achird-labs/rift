@@ -195,12 +195,24 @@ pub trait ProxyRecordingStore: Send + Sync {
     /// `true` = this store publishes generated stubs itself; the engine then inserts none.
     fn publishes_stubs(&self) -> bool { false }
     fn lookup(&self, port: u16, sig: &RequestSignature) -> Option<RecordedResponse>;
+    /// Forget the proxyOnce recording made under `sig`: a stub edit removed its stub (#1386).
+    /// Defaults to a no-op.
+    fn forget_recorded(&self, port: u16, sig: &RequestSignature) -> Result<()> { Ok(()) }
     fn clear(&self, port: u16);
 }
 ```
 
 Its typed error is `ProxyStoreError`, `#[non_exhaustive]`. Inject with
 `.with_proxy_store(Arc<dyn ProxyRecordingStore>)`.
+
+**A recording lives as long as its stub** (issue #1386). When a delete, a replace or a reload
+removes a stub the engine inserted for a `proxyOnce` recording, it calls
+`forget_recorded(port, sig)` with the signature that recording was claimed under. The next
+request with that signature is then claimed, forwarded and recorded again, as in Mountebank. A
+claim still in flight must be left to settle. The default does nothing, so a store that cannot
+forget keeps replaying, as before. The engine logs an `Err` and does not undo the stub edit. A
+store that publishes stubs itself sees no such call, because the engine inserted nothing; it
+forgets on its own when the published stub goes.
 
 **The engine claims with `try_claim_as`**, passing the mode of the proxy response being served
 (issue #1387). Each proxy stub has its own `mode`, as in Mountebank, so only a `proxyOnce` request

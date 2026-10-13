@@ -219,6 +219,10 @@ pub struct StubState {
     /// "new" by content hash (#1294), and take the stamp from the imposter's [`LoadClock`] (#1301);
     /// the constructors' wall-clock default is only what proxy recording keeps.
     loaded_at: chrono::DateTime<chrono::Utc>,
+    /// The `proxyOnce` claim this stub was recorded under (issue #1386). Kept while the state is
+    /// (a move, a restamp, a reconcile that keeps it) and gone with any new content, so the claim
+    /// lives exactly as long as the recording; see [`Imposter::forget_orphaned_claims`].
+    pub(crate) recorded_claim: Option<Arc<RequestSignature>>,
 }
 
 impl StubState {
@@ -230,6 +234,7 @@ impl StubState {
             slot: NEXT_STUB_SLOT.fetch_add(1, Ordering::Relaxed),
             content_hash: OnceLock::new(),
             loaded_at: chrono::Utc::now(),
+            recorded_claim: None,
         }
     }
 
@@ -298,6 +303,7 @@ impl StubState {
             slot: self.slot,
             content_hash: OnceLock::new(),
             loaded_at: chrono::Utc::now(),
+            recorded_claim: None,
         }
     }
 
@@ -599,18 +605,52 @@ impl Imposter {
     /// content-identical clone. Any `f` added here must uphold that: never partially mutate the
     /// vector and then return an error/no-op, or the partial change would be committed silently.
     pub(crate) fn mutate_stubs<R>(&self, f: impl FnOnce(&mut Vec<Arc<StubState>>) -> R) -> R {
-        let _writer = self.stubs_write.lock();
-        let mut next: Vec<Arc<StubState>> = self.stubs_snapshot.load().stubs().to_vec();
-        let result = f(&mut next);
-        // One store of stubs+index together (issue #707): the index is built from the very vector
-        // it is stored with, so the two cannot diverge by construction.
-        self.stubs_snapshot
-            .store(Arc::new(StubSnapshot::build(next)));
-        // Invalidate the cached stub-analysis warnings (issue #423). This is O(1) — the actual
-        // O(n) recompute is deferred to the next `stub_warnings()` read — so high-frequency
-        // mutations (e.g. proxy recording) don't pay analysis cost on every recorded stub.
-        self.stub_warnings.store(None);
+        let (result, before, after) = {
+            let _writer = self.stubs_write.lock();
+            let before = self.stubs_snapshot.load_full();
+            let mut next: Vec<Arc<StubState>> = before.stubs().to_vec();
+            let result = f(&mut next);
+            // One store of stubs+index together (issue #707): the index is built from the very
+            // vector it is stored with, so the two cannot diverge by construction.
+            let after = Arc::new(StubSnapshot::build(next));
+            self.stubs_snapshot.store(Arc::clone(&after));
+            // Invalidate the cached stub-analysis warnings (issue #423). This is O(1) — the actual
+            // O(n) recompute is deferred to the next `stub_warnings()` read — so high-frequency
+            // mutations (e.g. proxy recording) don't pay analysis cost on every recorded stub.
+            self.stub_warnings.store(None);
+            (result, before, after)
+        };
+        self.forget_orphaned_claims(before.stubs(), after.stubs());
         result
+    }
+
+    /// Forget the `proxyOnce` claims of the recordings an edit removed (issue #1386): those held
+    /// by a state in `before` and by none in `after`. Called after the swap and outside
+    /// `stubs_write`, since a store may be slow. A store error is logged, not propagated: the stub
+    /// edit has already happened, and the cost is that identity replaying until the store is
+    /// cleared, today's behaviour.
+    pub(crate) fn forget_orphaned_claims(
+        &self,
+        before: &[Arc<StubState>],
+        after: &[Arc<StubState>],
+    ) {
+        if before.iter().all(|s| s.recorded_claim.is_none()) {
+            return;
+        }
+        let kept: std::collections::HashSet<&RequestSignature> = after
+            .iter()
+            .filter_map(|s| s.recorded_claim.as_deref())
+            .collect();
+        let port = self.journal_port();
+        for sig in before
+            .iter()
+            .filter_map(|s| s.recorded_claim.as_deref())
+            .filter(|sig| !kept.contains(sig))
+        {
+            if let Err(e) = self.proxy_store.forget_recorded(port, sig) {
+                error!(port, path = %sig.path, "Failed to forget a deleted proxy recording: {e}");
+            }
+        }
     }
 
     /// The imposter's stub-overlap analysis warnings (issue #423), computed once and cached until
@@ -1538,7 +1578,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        imp.insert_or_append_proxy_stub(rec, "http://upstream", "proxyAlways", None);
+        imp.insert_or_append_proxy_stub(rec, "http://upstream", "proxyAlways", None, None);
 
         let rec_index = imp
             .snapshot()
@@ -1555,7 +1595,7 @@ mod tests {
             "responses": [{ "is": { "statusCode": 200, "body": "R3" } }]
         }))
         .unwrap();
-        imp.insert_or_append_proxy_stub(rec2, "http://upstream", "proxyAlways", None);
+        imp.insert_or_append_proxy_stub(rec2, "http://upstream", "proxyAlways", None, None);
 
         assert_eq!(
             imp.snapshot().stubs()[rec_index].slot,
