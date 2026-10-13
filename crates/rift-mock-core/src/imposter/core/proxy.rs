@@ -497,12 +497,22 @@ fn predicates_for_matcher<SH: BuildHasher>(
     predicates
 }
 
+/// A generator pass's predicates, as written and as decoded (issue #1353).
+///
+/// `raw` keys the proxyOnce claim (`RequestSignature::with_predicates` hashes the values as the
+/// generator wrote them, so re-serializing would move every claim key); `typed` becomes the
+/// recorded stub. Every `raw` element decoded into `typed` and passed the config doors' predicate
+/// validation, so recording a stub cannot drop or refuse one.
+#[derive(Debug, Default)]
+pub(crate) struct GeneratedPredicates {
+    raw: Vec<serde_json::Value>,
+    typed: Vec<rift_types::Predicate>,
+}
+
 impl Imposter {
-    /// Generate predicates from request based on predicateGenerators config.
-    ///
-    /// Returns `Err` when an `inject` generator could not produce predicates (script/pool/output
-    /// failure) so the caller can skip auto-stub creation instead of silently recording a match-all
-    /// stub (issue #498). An `Ok(empty)` list means the generators legitimately produced nothing.
+    /// The predicates a generator pass writes, for tests that pin their shape. Recording goes
+    /// through `generate_stub_predicates`, which keeps the typed form too.
+    #[cfg(test)]
     pub(crate) fn generate_predicates_from_request<SH: BuildHasher>(
         &self,
         generators: &[serde_json::Value],
@@ -513,6 +523,7 @@ impl Imposter {
         query: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
         Self::generate_predicates_impl(generators, method, path, headers, body, query)
+            .map(|generated| generated.raw)
     }
 
     /// [`Self::generate_predicates_from_request`] without `&self`, so the proxy-recording path
@@ -525,7 +536,7 @@ impl Imposter {
         headers: &HashMap<String, Vec<String>, SH>,
         body: Option<&str>,
         query: Option<&str>,
-    ) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
+    ) -> Result<GeneratedPredicates, crate::scripting::PredicateGeneratorError> {
         let mut predicates = Vec::new();
 
         for r#gen in generators {
@@ -562,15 +573,17 @@ impl Imposter {
                     let inject_preds =
                         execute_predicate_generator_inject(inject_fn, &mb_request, &predicates)?;
                     predicates.extend(inject_preds);
+                    continue;
                 }
+                // Ignoring it would record the remaining predicates, or none: a match-all stub
+                // (issues #498, #1353). Without a script engine the generation fails instead.
                 #[cfg(not(feature = "javascript"))]
                 {
-                    tracing::warn!(
-                        "predicateGenerator inject requires the 'javascript' feature; generator ignored"
-                    );
                     let _ = inject_fn;
+                    return Err(crate::scripting::PredicateGeneratorError::Script(
+                        "predicateGenerator inject requires the 'javascript' feature".to_string(),
+                    ));
                 }
-                continue;
             }
 
             let Some(matches) = gen_obj.get("matches").and_then(|m| m.as_object()) else {
@@ -586,7 +599,22 @@ impl Imposter {
             predicates.extend(predicates_for_matcher(gen_obj, matches, &request));
         }
 
-        Ok(predicates)
+        // Every generator kind ends here, so an inject typo, an operator that cannot hold a field
+        // map, or a `matches` value that is no regex fails the generation (#498) instead of being
+        // dropped from the stub or recorded as a stub no config door admits (issue #1353).
+        let invalid = crate::scripting::PredicateGeneratorError::Invalid;
+        let typed = predicates
+            .iter()
+            .map(|value| {
+                serde_json::from_value::<rift_types::Predicate>(value.clone())
+                    .map_err(|e| invalid(format!("{value}: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::imposter::types::validate_predicates(&typed).map_err(invalid)?;
+        Ok(GeneratedPredicates {
+            raw: predicates,
+            typed,
+        })
     }
 
     /// Resolve a proxy mode string to the placement its recorded stubs take.
@@ -694,7 +722,7 @@ impl Imposter {
         uri: &hyper::Uri,
         headers: &HashMap<String, Vec<String>, SH>,
         body: Option<ProxyBody<'_>>,
-    ) -> Result<Vec<serde_json::Value>, (&'static str, String)>
+    ) -> Result<GeneratedPredicates, (&'static str, String)>
     where
         SH: BuildHasher + Clone + Send + 'static,
     {
@@ -706,16 +734,15 @@ impl Imposter {
             .iter()
             .any(|g| g.as_object().is_some_and(|o| o.contains_key("inject")));
         if !has_inject_generator {
-            return self
-                .generate_predicates_from_request(
-                    &proxy_config.predicate_generators,
-                    method,
-                    uri.path(),
-                    headers,
-                    body.map(|b| b.text),
-                    uri.query(),
-                )
-                .map_err(|e| (e.kind(), e.to_string()));
+            return Self::generate_predicates_impl(
+                &proxy_config.predicate_generators,
+                method,
+                uri.path(),
+                headers,
+                body.map(|b| b.text),
+                uri.query(),
+            )
+            .map_err(|e| (e.kind(), e.to_string()));
         }
         let generators = proxy_config.predicate_generators.clone();
         let method = method.to_string();
@@ -829,7 +856,7 @@ impl Imposter {
             None
         } else if proxy_config.predicate_generators.is_empty() {
             // No generators: the stub has no predicates and matches every request.
-            Some(Ok(vec![]))
+            Some(Ok(GeneratedPredicates::default()))
         } else {
             Some(
                 self.generate_stub_predicates(proxy_config, method, uri, headers, body)
@@ -848,7 +875,7 @@ impl Imposter {
         if proxy_config.predicate_generators.is_empty() {
             signature = signature.with_body(body.map_or(&[][..], |b| b.raw.as_ref()));
         } else if let Some(Ok(predicates)) = &generation {
-            signature = signature.with_predicates(predicates);
+            signature = signature.with_predicates(&predicates.raw);
         }
         let port = self.journal_port();
 
@@ -1046,7 +1073,7 @@ impl Imposter {
                     // stub holds their result — never the behaviors themselves, so nothing runs
                     // twice (Mountebank's `newIsResponse`).
                     let new_stub = create_stub_from_proxy_response(
-                        predicates,
+                        predicates.typed,
                         status,
                         &response_headers,
                         &body_bytes,
@@ -1302,6 +1329,7 @@ mod predicate_generator_selector_tests {
             .collect();
         Imposter::generate_predicates_impl(&[generator], "POST", "/orders", &headers, body, query)
             .expect("predicate generation succeeds")
+            .raw
     }
 
     #[test]
@@ -1495,6 +1523,7 @@ mod predicate_generator_shape_tests {
             .collect();
         Imposter::generate_predicates_impl(&[generator], "POST", "/orders", &headers, body, query)
             .expect("predicate generation succeeds")
+            .raw
     }
 
     #[test]
@@ -1686,7 +1715,8 @@ mod predicate_generator_shape_tests {
                 None,
                 None,
             )
-            .expect("generates");
+            .expect("generates")
+            .raw;
             let stub: Stub = serde_json::from_value(json!({
                 "predicates": predicates,
                 "responses": [{ "is": { "statusCode": 200, "body": body } }],
