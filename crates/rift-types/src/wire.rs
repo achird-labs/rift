@@ -77,11 +77,27 @@ pub mod multi_value_headers {
         Bool(bool),
     }
 
+    /// A number as JS `String()` writes it, which is what Mountebank serves (issue #1358): an
+    /// integral float below 1e21 loses its fraction (`124.0` → `124`, `-0.0` → `0`); anything
+    /// else keeps `serde_json`'s spelling.
+    fn js_number_string(n: &serde_json::Number) -> String {
+        match n.as_f64() {
+            Some(f) if n.is_f64() && f.is_finite() && f.fract() == 0.0 && f.abs() < 1e21 => {
+                if f == 0.0 {
+                    "0".to_string()
+                } else {
+                    format!("{f:.0}")
+                }
+            }
+            _ => n.to_string(),
+        }
+    }
+
     impl Scalar {
         fn into_string(self) -> String {
             match self {
                 Scalar::Str(s) => s,
-                Scalar::Num(n) => n.to_string(),
+                Scalar::Num(n) => js_number_string(&n),
                 Scalar::Bool(b) => b.to_string(),
             }
         }
@@ -310,6 +326,18 @@ mod tests {
     }
 
     // Issue #754: recorded imposters carry non-string scalars; they coerce rather than 400.
+    #[test]
+    fn integral_float_header_value_serves_without_fraction() {
+        // Issue #1358: Mountebank serves JS `String(124.0)`, which is `124`.
+        let r: HeadersIn =
+            serde_json::from_str(r#"{"headers":{"X":124.0,"Y":1.5,"Z":-0.0,"W":[2.0,"a"]}}"#)
+                .expect("numeric header values are accepted");
+        assert_eq!(r.headers["X"], vec!["124".to_string()]);
+        assert_eq!(r.headers["Y"], vec!["1.5".to_string()]);
+        assert_eq!(r.headers["Z"], vec!["0".to_string()]);
+        assert_eq!(r.headers["W"], vec!["2".to_string(), "a".to_string()]);
+    }
+
     #[test]
     fn headers_coerce_numeric_and_bool_scalars() {
         let r: HeadersIn = serde_json::from_str(

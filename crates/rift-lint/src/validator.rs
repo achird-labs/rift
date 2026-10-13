@@ -543,6 +543,9 @@ pub fn validate_imposter(
 
     if let Some(default) = imposter.get("defaultResponse") {
         check_binary_body(file, default, "defaultResponse", result);
+        if let Some(headers) = default.get("headers") {
+            validate_headers(file, headers, "defaultResponse.headers", result);
+        }
     }
 }
 
@@ -2007,58 +2010,42 @@ pub fn validate_headers(file: &Path, headers: &Value, location: &str, result: &m
             );
         }
 
+        // The engine's own rule (`rift_types::wire::multi_value_headers`, issue #1358): a string,
+        // number or boolean, or an array of them, is coerced to strings, as Mountebank does. A
+        // `null`, an object or a nested array makes the engine refuse the whole document.
+        let refused = |v: &Value| v.is_null() || v.is_object() || v.is_array();
         if let Some(elements) = value.as_array() {
-            // Arrays of strings are valid multi-value headers (e.g. Set-Cookie),
-            // supported by the engine since #238. Only non-string elements are invalid.
-            if !elements.iter().all(Value::is_string) {
+            if elements.iter().any(refused) {
                 result.add_issue(
                     LintIssue::error(
                         "E018",
                         format!(
-                            "Header '{name}' array contains a non-string element, \
-                             all multi-value header entries must be strings"
+                            "Header '{name}' array contains a null, object or array element; the \
+                             engine rejects this document"
                         ),
                         file.to_path_buf(),
                     )
                     .with_location(format!("{location}.{name}"))
-                    .with_suggestion("Use an array of strings, e.g. [\"a=1\", \"b=2\"]"),
+                    .with_suggestion("Use strings, numbers or booleans, e.g. [\"a=1\", \"b=2\"]"),
                 );
             }
-        } else if value.is_number() {
+        } else if value.is_null() || value.is_object() {
+            let kind = if value.is_null() { "null" } else { "an object" };
             result.add_issue(
                 LintIssue::error(
-                    "E019",
-                    format!("Header '{name}' value is a number, must be a string"),
+                    "E054",
+                    format!("Header '{name}' value is {kind}; the engine rejects this document"),
                     file.to_path_buf(),
                 )
                 .with_location(format!("{location}.{name}"))
-                .with_suggestion(format!("Change to: \"{name}\": \"{value}\"")),
-            );
-        } else if value.is_boolean() {
-            result.add_issue(
-                LintIssue::error(
-                    "E020",
-                    format!("Header '{name}' value is a boolean, must be a string"),
-                    file.to_path_buf(),
-                )
-                .with_location(format!("{location}.{name}"))
-                .with_suggestion(format!("Change to: \"{name}\": \"{value}\"")),
-            );
-        } else if value.is_null() {
-            result.add_issue(
-                LintIssue::warning(
-                    "W005",
-                    format!("Header '{name}' value is null"),
-                    file.to_path_buf(),
-                )
-                .with_location(format!("{location}.{name}"))
-                .with_suggestion("Remove header or set a string value"),
+                .with_suggestion("Remove the header or give it a string value"),
             );
         }
 
         if name.to_lowercase() == "content-length"
-            && let Some(len_str) = value.as_str()
-            && let Ok(len) = len_str.parse::<u64>()
+            && let Some(len) = value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|v| v.parse::<u64>().ok()))
             && len < 10
         {
             result.add_issue(
@@ -3021,17 +3008,18 @@ mod header_value_tests {
     }
 
     #[test]
-    fn array_with_non_string_errors() {
-        // An array with any non-string element (scalar or nested) is not a valid
-        // multi-value header — the engine's `OneOrMany` deserialize would reject it.
+    fn array_with_a_refused_element_errors() {
+        // The engine's `OneOrMany` deserialize rejects a null, object or array element; it
+        // coerces numbers and booleans (#1358).
         for bad in [
-            json!(["ok", 42]),
             json!(["ok", null]),
             json!(["ok", { "k": "v" }]),
+            json!(["ok", ["nested"]]),
         ] {
             let result = lint(json!({ "X-Bad": bad }));
             assert!(has_code(&result, "E018"));
         }
+        assert_eq!(lint(json!({ "X-Ok": ["ok", 42, true] })).errors, 0);
     }
 
     #[test]
@@ -3042,11 +3030,10 @@ mod header_value_tests {
     }
 
     #[test]
-    fn scalar_non_string_still_errors() {
-        let number = lint(json!({ "X-Count": 5 }));
-        assert!(has_code(&number, "E019"));
-        let boolean = lint(json!({ "X-Flag": true }));
-        assert!(has_code(&boolean, "E020"));
+    fn scalars_the_engine_coerces_are_valid_and_null_is_not() {
+        assert_eq!(lint(json!({ "X-Count": 5 })).errors, 0);
+        assert_eq!(lint(json!({ "X-Flag": true })).errors, 0);
+        assert!(has_code(&lint(json!({ "X-Gone": null })), "E054"));
     }
 
     #[test]

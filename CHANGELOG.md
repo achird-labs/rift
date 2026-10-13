@@ -52,6 +52,15 @@ record.
 
 ### Fixed
 
+- **`rift-lint` agrees with the engine on header values** (#1358). Number and boolean header values,
+  and arrays mixing them with strings, are coerced by the engine as in Mountebank, and no longer
+  lint as errors. A `null` or object value, which the engine refuses, is now an error (`E054`,
+  formerly the `W005` warning for `null`; an object was not reported at all), and
+  `defaultResponse.headers` is now checked. `--fix` no longer rewrites numbers and booleans.
+
+- **An integral float header value is served without a fraction** (#1358): `"Content-Length": 124.0`
+  sends `124`, as Mountebank does, not `124.0`.
+
 - **A proxy no longer records a predicate the engine would not admit** (#1353). A generated predicate
   that did not decode was dropped with a warning; when every one was dropped (an unknown
   `predicateOperator` does that to all of them), the recording matched every later request and
@@ -177,6 +186,9 @@ record.
   gates nothing, still does not. A positive TTL running out on a scenario's key is not seen.
 
 ### Changed
+
+- **rift-lint codes `E019`, `E020` and `W005` are retired; `E054` is new** (#1358). CI filters that
+  key on codes need to know this.
 
 - **An unknown proxy `predicateOperator` is refused** (#1353) at every config door (400, or a
   startup error), and `rift-lint` reports it as E053. Such an imposter used to load; every recording

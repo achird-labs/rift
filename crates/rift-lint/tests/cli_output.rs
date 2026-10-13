@@ -707,7 +707,7 @@ fn fix_still_repairs_a_clean_file_when_another_is_skipped() {
     .expect("write");
     let dup_original = r#"{"port":3002,"protocol":"http","stubs":[
         {"responses":[{"is":{"statusCode":200,"headers":{
-            "Content-Length":512,"Set-Cookie":"a=1","Set-Cookie":"b=2"
+            "X-Dup":["b",null],"Set-Cookie":"a=1","Set-Cookie":"b=2"
         }}}]}
     ]}"#;
     std::fs::write(&dup, dup_original).expect("write");
@@ -1153,10 +1153,11 @@ fn fix_refuses_a_file_whose_decimal_literal_would_be_rewritten() {
     );
 }
 
-/// The header `--fix` repairs is itself the literal it would corrupt: quoting it turns
-/// `123456789012345678901234567890` into the string `"1.2345678901234568e29"`.
+/// A numeric header is valid since #1358 (the engine coerces it, as Mountebank does), so `--fix`
+/// never quotes one, and so never turns `123456789012345678901234567890` into the string
+/// `"1.2345678901234568e29"`.
 #[test]
-fn fix_refuses_to_quote_a_header_whose_own_number_it_cannot_write_back() {
+fn fix_leaves_a_numeric_header_as_written() {
     let original = r#"{"port":3000,"protocol":"http","stubs":[
         {"responses":[{"is":{"statusCode":200,"headers":{"X-Trace":123456789012345678901234567890}}}]}
     ]}"#;
@@ -1165,9 +1166,8 @@ fn fix_refuses_to_quote_a_header_whose_own_number_it_cannot_write_back() {
 
     assert_eq!(after, original);
     assert!(
-        stdout.contains("Skipped:")
-            && stdout.contains("would be written as 1.2345678901234568e+29"),
-        "the refusal itself names the number (W012 also prints the literal), got: {stdout}"
+        !stdout.contains("Fixed header"),
+        "nothing to fix, got: {stdout}"
     );
 }
 
@@ -1488,7 +1488,7 @@ fn cli_fix_refuses_to_rewrite_a_template() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("imposters.json");
     let original = format!(
-        r#"{{"port": <%= process.env.{UNSET} || '4545' %>, "protocol": "http", "stubs": [{{"responses": [{{"is": {{"statusCode": 200, "headers": {{"X-Count": 5}}}}}}]}}]}}"#
+        r#"{{"port": <%= process.env.{UNSET} || '4545' %>, "protocol": "http", "stubs": [{{"responses": [{{"is": {{"statusCode": 200, "headers": {{"X-Count": ["a", null]}}}}}}]}}]}}"#
     );
     std::fs::write(&path, &original).expect("write");
     let out = Command::new(BIN)
@@ -1516,15 +1516,24 @@ fn cli_fix_refuses_to_rewrite_a_template() {
 #[test]
 fn fix_repairs_every_imposter_in_an_imposters_wrapper() {
     let original = r#"{"imposters":[
-        {"port":4990,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-N":7}}}]}]},
-        {"port":4991,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-B":true}}}]}]}
+        {"port":4990,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-N":["a",null]}}}]}]},
+        {"port":4991,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-B":[{"k":1}]}}}]}]}
     ]}"#;
 
     let (after, stdout, _) = fix_one(original, &[]);
 
-    assert!(after.contains(r#""X-N": "7""#), "got: {after}");
-    assert!(after.contains(r#""X-B": "true""#), "got: {after}");
     let doc: serde_json::Value = serde_json::from_str(&after).expect("still JSON");
+    let headers = |i: usize| &doc["imposters"][i]["stubs"][0]["responses"][0]["is"]["headers"];
+    assert_eq!(
+        headers(0)["X-N"],
+        serde_json::json!(["a", "null"]),
+        "got: {after}"
+    );
+    assert_eq!(
+        headers(1)["X-B"],
+        serde_json::json!(["{\"k\":1}"]),
+        "got: {after}"
+    );
     assert_eq!(
         doc["imposters"].as_array().map(Vec::len),
         Some(2),
@@ -1536,18 +1545,21 @@ fn fix_repairs_every_imposter_in_an_imposters_wrapper() {
 #[test]
 fn fix_repairs_every_imposter_in_a_bare_array() {
     let original = r#"[
-        {"port":4990,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-N":7}}}]}]},
-        {"port":4991,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-M":[1,"a"]}}}]}]}
+        {"port":4990,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-N":["a",null]}}}]}]},
+        {"port":4991,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-M":[["x"],"a"]}}}]}]}
     ]"#;
 
     let (after, stdout, _) = fix_one(original, &[]);
 
-    assert!(after.contains(r#""X-N": "7""#), "got: {after}");
     let doc: serde_json::Value = serde_json::from_str(&after).expect("still JSON");
     assert!(doc.is_array(), "the bare-array shape is kept: {after}");
     assert_eq!(
+        doc[0]["stubs"][0]["responses"][0]["is"]["headers"]["X-N"],
+        serde_json::json!(["a", "null"])
+    );
+    assert_eq!(
         doc[1]["stubs"][0]["responses"][0]["is"]["headers"]["X-M"],
-        serde_json::json!(["1", "a"])
+        serde_json::json!(["[\"x\"]", "a"])
     );
     assert!(stdout.contains("Applied 2 fixes"), "got: {stdout}");
 }
@@ -1557,7 +1569,7 @@ fn fix_repairs_every_imposter_in_a_bare_array() {
 #[test]
 fn fix_still_refuses_a_wrapper_whose_number_it_cannot_write_back() {
     let original = r#"{"imposters":[
-        {"port":4990,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-N":7},
+        {"port":4990,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-N":["a",null]},
             "body":{"big":123456789012345678901234567890}}}]}]}
     ]}"#;
 
@@ -1566,4 +1578,29 @@ fn fix_still_refuses_a_wrapper_whose_number_it_cannot_write_back() {
     assert_eq!(after, original, "the file must be byte-identical");
     assert!(stdout.contains("Skipped"), "got: {stdout}");
     assert!(stdout.contains("Applied 0 fixes"), "got: {stdout}");
+}
+
+/// Issue #1358: number and boolean header values are coerced by the engine, as Mountebank does,
+/// so a file holding only those lints clean and exits 0.
+#[test]
+fn numeric_and_boolean_header_values_exit_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("imposter.json");
+    std::fs::write(
+        &f,
+        r#"{"port":3000,"protocol":"http","stubs":[
+            {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":124,"X-Cache-Hit":true}}}]}
+        ]}"#,
+    )
+    .expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap()])
+        .output()
+        .expect("run rift-lint");
+    assert!(
+        out.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }

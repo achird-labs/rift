@@ -76,19 +76,9 @@ const ALLOWED: &[(&str, &str)] = &[(
 
 /// Lint errors the gate accepts on a docs example, as `(file, code, why)`: the file the example is
 /// in, so the entry survives edits that move it.
-const LINT_ALLOWED: &[(&str, &str, &str)] = &[
-    (
-        "docs/mountebank/responses.md",
-        "E019",
-        "the page documents that the engine coerces a number header value, as Mountebank does; \
-     rift-lint still calls it an error (#1358)",
-    ),
-    (
-        "docs/mountebank/responses.md",
-        "E020",
-        "the same coercion for a boolean header value (#1358)",
-    ),
-];
+// Empty since #1358 made the lint agree with the engine on header values. The mechanism stays for
+// the next documented divergence between a docs example and the linter.
+const LINT_ALLOWED: &[(&str, &str, &str)] = &[];
 
 fn allowed(path: &str) -> bool {
     let segments: Vec<&str> = path.split('.').collect();
@@ -1184,10 +1174,10 @@ fn a_failure_names_the_origin_and_the_path() {
 }
 
 #[test]
-fn a_lint_error_on_a_docs_example_is_reported_unless_excused() {
+fn a_lint_error_on_a_docs_example_is_reported() {
     let dir = tempfile::tempdir().expect("tempdir");
     let bad_header =
-        imposter_of(json!({ "responses": [{ "is": { "headers": { "X-Count": 5 } } }] }));
+        imposter_of(json!({ "responses": [{ "is": { "headers": { "X-Count": null } } }] }));
     let reported = lint_errors(
         &Example {
             origin: "docs/features/x.md:3".to_owned(),
@@ -1197,17 +1187,21 @@ fn a_lint_error_on_a_docs_example_is_reported_unless_excused() {
     );
     assert_eq!(reported.len(), 1, "{reported:?}");
     assert!(
-        reported[0].starts_with("docs/features/x.md:3: E019"),
+        reported[0].starts_with("docs/features/x.md:3: E054"),
         "{reported:?}"
     );
-    let excused = lint_errors(
+    // A number is not an error since #1358 (the engine coerces it), so the example the excusal
+    // list used to carry now lints clean on its own.
+    let coerced = lint_errors(
         &Example {
             origin: "docs/mountebank/responses.md:122".to_owned(),
-            document: bad_header,
+            document: imposter_of(
+                json!({ "responses": [{ "is": { "headers": { "X-Count": 5 } } }] }),
+            ),
         },
         dir.path(),
     );
-    assert_eq!(excused, Vec::<String>::new());
+    assert_eq!(coerced, Vec::<String>::new());
     // A fragment's elided port, protocol and responses are not what the example says.
     let fragment = lint_errors(
         &Example {

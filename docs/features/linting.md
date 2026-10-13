@@ -132,8 +132,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E005 | Port out of range, or `0` — the engine auto-assigns `0` like an absent port, but a config file must pin its ports | Port 70000 (max is 65535), port 0 |
 | E010 | Unbalanced brackets in JSONPath | `$.user[0` missing `]` |
 | E013 | Invalid regex | `[invalid(` |
-| E018 | `is.headers` array contains a non-string element (a string array is legal, #238) | `"Accept": ["text/html", 1]` |
-| E019 | Header is number | `"Content-Length": 256` |
+| E018 | A header array (`is.headers`, `defaultResponse.headers`) contains a `null`, object or array element; the engine refuses the document. Strings, numbers and booleans are legal, and the engine coerces them, as Mountebank does | `"Accept": ["text/html", null]` |
 | E006 | Stub missing `responses` field | A stub with `predicates` but no `responses` |
 | E007 | Predicate is not an object | `"predicates": ["equals"]` |
 | E008 | Predicate has no operator | `{"caseSensitive": true}` on its own |
@@ -143,7 +142,6 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E015 | Invalid HTTP status code | `"statusCode": 999` |
 | E016 | `statusCode` is not a number or numeric string | `"statusCode": true` |
 | E017 | Empty header name | `"headers": {"": "value"}` |
-| E020 | Header value is a boolean, must be a string | `"X-Debug": true` |
 | E021 | Headers is not an object | `"headers": []` |
 | E022 | Proxy `to` URL does not start with `http://` or `https://` | `"to": "ftp://host/x"` |
 | E023 | Proxy `to` is not a string URL | `"to": 8080` |
@@ -176,6 +174,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E051 | A behavior value the engine refuses the file for, on any response type: a `copy` or `lookup` item that is not an object; a missing or malformed `using` (an object with `method` `regex`, `jsonpath` or `xpath`, a string `selector`, boolean regex `options`, and an `ns` only on `xpath`, as an object of prefix → URI strings), or a regex `selector` that does not compile (the engine also refuses a JSONPath or XPath selector that does not compile, which `rift-lint` does not check); a `from` that is neither a field name nor an object of names; a non-string `into`; a `fromDataSource` without a `csv` object of string `path` and `keyColumn` and a one-character `delimiter`; a `decorate` that is not a string; a `shellTransform` that is neither a command string nor an array of them | `"copy": {"from": "path", "into": "${P}"}` |
 | E052 | An unknown proxy `mode` — Rift refuses the imposter; use `proxyOnce`, `proxyAlways` or `proxyTransparent`, or omit `mode` for `proxyOnce` | `"mode": "proxyEverything"` |
 | E053 | A proxy `predicateGenerators` entry's `predicateOperator` is not one of `equals`, `deepEquals`, `contains`, `startsWith`, `endsWith`, `matches`, `exists`. Rift refuses the imposter; every recording would otherwise match every request | `"predicateOperator": "bogus"` |
+| E054 | A header value (`is.headers`, `defaultResponse.headers`) is `null` or an object; the engine refuses the document. A number or boolean is fine: the engine coerces it, as Mountebank does | `"X-Request-Id": null` |
 
 ### Warnings
 
@@ -187,7 +186,6 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | W002 | Stub has no responses defined | `{"predicates": [...], "responses": []}` |
 | W003 | Response has both `is` and `proxy` defined | `{"is": {...}, "proxy": {...}}` |
 | W004 | Invalid JSON body | Body isn't JSON but Content-Type is application/json. Not reported when `_rift.templated` or a `copy`/`lookup`/`decorate`/`shellTransform` behavior rewrites the body before it is served |
-| W005 | Header value is null | `"X-Request-Id": null` |
 | W006 | `Content-Length` header is a numeric string below 10 | `"Content-Length": "5"` |
 | W007 | A proxy mode in a non-canonical spelling — Rift reads `mode` case-insensitively, so it works, but the canonical names are `proxyOnce`, `proxyAlways`, `proxyTransparent` | `"mode": "proxyalways"` |
 | W008 | `shellTransform` contains a potentially dangerous command | `"shellTransform": "rm -rf /tmp/x"` |
@@ -222,12 +220,14 @@ Informational messages about configuration patterns.
 **Retired codes.** A code number is never reused. `E012` was never assigned. `E042` was renumbered
 to `W014` in #1156 — it had always been reported as a warning, and a consumer filtering on the `E`
 prefix saw a different rule set from one filtering on severity. A rule's letter now always matches
-its severity.
+its severity. `E019`/`E020` were retired in #1358: the engine coerces number and boolean header
+values, as Mountebank does, so they are not findings. `W005` became `E054`, because the engine
+refuses a `null` header value.
 
 ## Auto-Fix
 
-The `--fix` flag automatically corrects certain value shapes in `is.headers` (the E018, E019 and
-E020 findings). It runs only when the lint found at least one error, and repairs every imposter in
+The `--fix` flag automatically corrects a header array the engine would refuse in `is.headers`
+(the E018 finding). It runs only when the lint found at least one error, and repairs every imposter in
 each of the three shapes `--configfile` loads: a single imposter object, the `{"imposters": [...]}`
 wrapper (what `rift save` writes), and a bare `[...]` array. The file keeps its shape:
 
@@ -235,10 +235,10 @@ wrapper (what `rift save` writes), and a bare `[...]` array. The file keeps its 
 re-serializing it would put JSON text under a YAML name, which the engine would then silently
 read back as JSON.
 
-- A number → the same number as a string
-- A boolean → the same boolean as a string
-- An array containing a non-string element → each element quoted in place (a string-only array is
-  already legal and is left alone)
+- An array containing a `null`, object or array element → that element quoted in place, as its
+  JSON text (strings, numbers and booleans are legal and left as written)
+
+A scalar `null` or object header value (E054) is not fixed: there is no value to infer.
 
 ```bash
 rift-lint ./imposters/ --fix
