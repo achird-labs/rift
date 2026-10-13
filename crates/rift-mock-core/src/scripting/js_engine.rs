@@ -2119,6 +2119,119 @@ pub struct MountebankRequest {
 }
 
 /// Create a Mountebank-style request object
+/// `request.headers` for a Mountebank-shaped script, read case-insensitively (issue #1368).
+///
+/// Mountebank hands scripts the names the client sent; Rift's HTTP stack cannot see them (hyper keeps
+/// the wire case private), and the listener Title-Cases them. A lookup in any case therefore finds the
+/// header, which answers every lookup Mountebank answers whatever spelling the client used. `get`,
+/// `has`, `set`, `deleteProperty` and `getOwnPropertyDescriptor` resolve the name, so a write or a
+/// delete in another case acts on the stored header rather than creating a hidden duplicate.
+/// `ownKeys` is not trapped: `Object.keys`, `for…in`, spread and `JSON.stringify` enumerate the
+/// stored names.
+fn case_insensitive_headers(target: JsObject, context: &mut Context) -> JsResult<JsObject> {
+    use boa_engine::object::builtins::JsProxy;
+
+    /// The target's own key matching `key`: the exact key when it exists, else the first own string
+    /// key equal to it ignoring ASCII case, else `key` unchanged (symbols and prototype methods).
+    fn resolve(target: &JsObject, key: &JsValue, context: &mut Context) -> JsResult<PropertyKey> {
+        let property = key.to_property_key(context)?;
+        let PropertyKey::String(name) = &property else {
+            return Ok(property);
+        };
+        if target.has_own_property(property.clone(), context)? {
+            return Ok(property);
+        }
+        let wanted = name.to_std_string_escaped();
+        for own in target.own_property_keys(context)? {
+            if let PropertyKey::String(candidate) = &own
+                && candidate
+                    .to_std_string_escaped()
+                    .eq_ignore_ascii_case(&wanted)
+            {
+                return Ok(own);
+            }
+        }
+        Ok(property)
+    }
+
+    fn target_of(args: &[JsValue]) -> JsResult<JsObject> {
+        args.first().and_then(JsValue::as_object).ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("proxy trap without a target")
+                .into()
+        })
+    }
+
+    fn key_of(args: &[JsValue]) -> JsValue {
+        args.get(1).cloned().unwrap_or_default()
+    }
+
+    fn get(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+        let target = target_of(args)?;
+        let key = resolve(&target, &key_of(args), context)?;
+        target.get(key, context)
+    }
+
+    fn has(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+        let target = target_of(args)?;
+        let key = resolve(&target, &key_of(args), context)?;
+        target.has_property(key, context).map(JsValue::from)
+    }
+
+    fn set(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+        let target = target_of(args)?;
+        let key = resolve(&target, &key_of(args), context)?;
+        let value = args.get(2).cloned().unwrap_or_default();
+        target.set(key, value, false, context).map(JsValue::from)
+    }
+
+    fn delete_property(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+        let target = target_of(args)?;
+        let key = resolve(&target, &key_of(args), context)?;
+        target
+            .delete_property_or_throw(key, context)
+            .map(JsValue::from)
+    }
+
+    fn get_own_property_descriptor(
+        _: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        let target = target_of(args)?;
+        // A non-extensible target may only report descriptors for keys it has under that exact
+        // name (a Proxy invariant), so a frozen or sealed headers object answers exact names only.
+        let key = if target.is_extensible(context)? {
+            resolve(&target, &key_of(args), context)?
+        } else {
+            key_of(args).to_property_key(context)?
+        };
+        let describe = context
+            .intrinsics()
+            .constructors()
+            .object()
+            .constructor()
+            .get(js_string!("getOwnPropertyDescriptor"), context)?;
+        let describe = describe.as_callable().ok_or_else(|| {
+            JsNativeError::typ().with_message("Object.getOwnPropertyDescriptor is not callable")
+        })?;
+        describe.call(
+            &JsValue::undefined(),
+            &[JsValue::from(target), JsValue::from(key)],
+            context,
+        )
+    }
+
+    let proxy = JsProxy::builder(target)
+        .get(get)
+        .has(has)
+        .set(set)
+        .delete_property(delete_property)
+        .get_own_property_descriptor(get_own_property_descriptor)
+        .build(context)?;
+    Ok(proxy.into())
+}
+
 fn create_mountebank_request_object(
     context: &mut Context,
     request: &MountebankRequest,
@@ -2170,6 +2283,8 @@ fn create_mountebank_request_object(
             )
             .map_err(|e| anyhow!("Failed to set header: {e}"))?;
     }
+    let headers_obj = case_insensitive_headers(headers_obj, context)
+        .map_err(|e| anyhow!("Failed to wrap headers: {e}"))?;
     obj.set(js_string!("headers"), headers_obj, false, context)
         .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
 
@@ -3745,6 +3860,102 @@ function respond(ctx) {
         )
         .expect("predicate inject runs");
         assert!(matched);
+    }
+
+    /// Issue #1368: a request whose headers the listener Title-Cased, as it does for every imposter.
+    fn mb_req_with_headers() -> MountebankRequest {
+        let mut request = mb_req("GET", "/h");
+        request
+            .headers
+            .insert("Content-Type".to_string(), "application/json".to_string());
+        request.headers.insert("X-Id".to_string(), "7".to_string());
+        request
+    }
+
+    #[test]
+    fn inject_headers_lookup_is_case_insensitive() {
+        let script = r#"function(config) { var h = config.request.headers; return { body: [h['content-type'], h['CONTENT-TYPE'], h['Content-Type'], String(h['x-missing'])].join('|') }; }"#;
+        let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
+            .expect("inject runs");
+        assert_eq!(
+            resp.body,
+            "application/json|application/json|application/json|undefined"
+        );
+    }
+
+    #[test]
+    fn inject_headers_in_and_has_own_property_ignore_case() {
+        let script = r#"function(config) { var h = config.request.headers; return { body: ('x-id' in h) + ',' + h.hasOwnProperty('x-id') + ',' + Object.prototype.hasOwnProperty.call(h, 'X-ID') + ',' + ('nope' in h) }; }"#;
+        let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
+            .expect("inject runs");
+        assert_eq!(resp.body, "true,true,true,false");
+    }
+
+    #[test]
+    fn inject_headers_enumerate_title_case() {
+        // Enumeration is unchanged: the names the listener stored.
+        let script = r#"function(config) { var h = config.request.headers; return { body: JSON.stringify(Object.keys(h).sort()) + ' ' + JSON.stringify(h) .length }; }"#;
+        let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
+            .expect("inject runs");
+        assert!(
+            resp.body.starts_with(r#"["Content-Type","X-Id"] "#),
+            "{}",
+            resp.body
+        );
+    }
+
+    /// A write or delete under another spelling acts on the stored header: no hidden duplicate.
+    #[test]
+    fn inject_headers_write_and_delete_ignore_case() {
+        let script = r#"function(config) {
+            var h = config.request.headers;
+            h['content-type'] = 'text/plain';
+            h['content-type'] = 'text/csv';
+            delete h['x-id'];
+            h['x-new'] = 'n';
+            return { body: [h['Content-Type'], String(h['X-Id']), ('x-id' in h), JSON.stringify(Object.keys(h).sort())].join('|') };
+        }"#;
+        let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
+            .expect("inject runs");
+        assert_eq!(
+            resp.body,
+            r#"text/csv|undefined|false|["Content-Type","x-new"]"#
+        );
+    }
+
+    /// A frozen headers object still answers lookups; a descriptor for another spelling would
+    /// break a Proxy invariant on a non-extensible target, so that case reports exact names only.
+    #[test]
+    fn inject_headers_frozen_does_not_throw() {
+        let script = r#"function(config) {
+            var h = Object.freeze(config.request.headers);
+            return { body: [h['x-id'], h.hasOwnProperty('X-Id'), h.hasOwnProperty('x-id')].join('|') };
+        }"#;
+        let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
+            .expect("inject runs");
+        assert_eq!(resp.body, "7|true|false");
+    }
+
+    #[test]
+    fn predicate_inject_and_decorate_share_case_insensitive_headers() {
+        let matched = execute_predicate_inject(
+            r#"function(config) { return config.request.headers['x-id'] === '7'; }"#,
+            &mb_req_with_headers(),
+            test_port(),
+        )
+        .expect("predicate inject runs");
+        assert!(matched);
+        let decorated = execute_mountebank_decorate(
+            r#"function(request, response) { response.body = request.headers['content-type']; }"#,
+            &mb_req_with_headers(),
+            "original",
+            200,
+            &HashMap::new(),
+            test_port(),
+            None,
+        )
+        .expect("decorate runs");
+        assert_eq!(decorated.body, "application/json");
     }
 
     // (b) legacy positional: function(request, state, logger) { ...request.path... }

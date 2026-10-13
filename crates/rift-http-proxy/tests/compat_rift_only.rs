@@ -591,9 +591,9 @@ async fn empty_rift_config_is_ignored() {
 }
 
 /// Ported from rift_extensions.feature: "Per-client rate limiting using headers". Essential
-/// engine behaviour: the request sends `X-Client-ID`, the script reads `X-Client-Id`. Today the
-/// engine hands inject scripts Title-Case header names, so only the `X-Client-Id` spelling finds
-/// the value; the sent spelling and the lowercase spelling are undefined.
+/// engine behaviour: the request sends `X-Client-ID`, the script reads `X-Client-Id`. The engine
+/// stores header names Title-Cased, and since #1368 a script's lookup ignores case, so every
+/// spelling finds the value.
 #[tokio::test]
 async fn inject_header_lookup_case() {
     let rift = Rift::start().await;
@@ -611,7 +611,7 @@ async fn inject_header_lookup_case() {
         )
         .await;
     assert_eq!(status, 200);
-    assert_eq!(body, "exact=client-a sent=undefined lower=undefined");
+    assert_eq!(body, "exact=client-a sent=client-a lower=client-a");
 }
 
 // =============================================================================

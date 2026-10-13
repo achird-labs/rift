@@ -80,7 +80,7 @@ JavaScript uses the standard Mountebank `inject` response format for compatibili
 config.request.method      // "GET", "POST", etc.
 config.request.path        // "/api/users/123"
 config.request.query       // { page: "1", limit: "10" }
-config.request.headers     // { "content-type": "application/json" }
+config.request.headers     // { "Content-Type": "application/json" }; any spelling finds it, e.g. ["content-type"]
 config.request.body        // Request body (string or parsed object)
 ```
 
