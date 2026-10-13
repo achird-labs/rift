@@ -616,12 +616,16 @@ impl Imposter {
     /// gone (deleted while the request was in flight), the anchor is the first stub proxying to
     /// `proxy_to`. With neither, a `proxyOnce` recording goes last and a `proxyAlways` one merges
     /// from the top of the list.
+    ///
+    /// `claim` is the `proxyOnce` signature the recording settled under: the new stub carries it,
+    /// so a later edit that removes the stub forgets the claim too (issue #1386).
     pub fn insert_or_append_proxy_stub(
         &self,
         stub: Stub,
         proxy_to: &str,
         proxy_mode: &str,
         answering: Option<u64>,
+        claim: Option<RequestSignature>,
     ) {
         let placement = Self::placement_for_mode(proxy_mode);
         self.mutate_stubs(|stubs| {
@@ -666,7 +670,9 @@ impl Imposter {
                 );
             } else {
                 let index = anchor.unwrap_or(stubs.len());
-                stubs.insert(index, Arc::new(StubState::new(stub)));
+                let mut state = StubState::new(stub);
+                state.recorded_claim = claim.map(Arc::new);
+                stubs.insert(index, Arc::new(state));
                 debug!(
                     "Inserted generated stub at index {} before proxy (proxyOnce mode)",
                     index
@@ -808,6 +814,8 @@ impl Imposter {
         // An unknown mode is admitted only from a replayed config; it runs as the default.
         let mode = proxy_config.mode().unwrap_or_default();
         let transparent = mode == ProxyMode::ProxyTransparent;
+        // Only a proxyOnce claim is ever replayed, so only it ties a recorded stub to the store.
+        let mode_is_once = mode == ProxyMode::ProxyOnce;
         // A proxied response is recorded as a stub when predicateGenerators, addWaitBehavior or
         // addDecorateBehavior is configured, as in Mountebank — never for `proxyTransparent`,
         // which forwards every request and records nothing.
@@ -871,9 +879,10 @@ impl Imposter {
                             latency_ms: recorded.latency_ms,
                         }));
                     }
-                    // AlreadyRecorded but nothing to replay: a race (concurrent clear) or a
-                    // misbehaving backend. Forward without recording rather than fail, but leave
-                    // a trace since this is not an expected outcome.
+                    // AlreadyRecorded but nothing to replay: a race (a concurrent clear, or the
+                    // recording forgotten because its stub was just deleted, #1386) or a
+                    // misbehaving backend. Forward without recording rather than fail; the next
+                    // request claims and records it.
                     warn!(
                         "Proxy store reported AlreadyRecorded but lookup found nothing; forwarding without recording"
                     );
@@ -1096,6 +1105,7 @@ impl Imposter {
                             &proxy_config.to,
                             mode,
                             answering,
+                            (settled && mode_is_once).then(|| signature.clone()),
                         );
                     }
                     debug!(
@@ -1179,11 +1189,13 @@ mod proxy_dedup_tests {
             "http://upstream",
             "proxyAlways",
             None,
+            None,
         );
         imposter.insert_or_append_proxy_stub(
             multi_key_stub("second"),
             "http://upstream",
             "proxyAlways",
+            None,
             None,
         );
 
@@ -1685,7 +1697,7 @@ mod predicate_generator_shape_tests {
                 "responses": [{ "is": { "statusCode": 200, "body": body } }],
             }))
             .expect("valid stub");
-            imposter.insert_or_append_proxy_stub(stub, "http://up", "proxyAlways", None);
+            imposter.insert_or_append_proxy_stub(stub, "http://up", "proxyAlways", None, None);
         };
         record("/a", "1");
         record("/b", "2");
@@ -1791,6 +1803,7 @@ mod placement_tests {
             "http://up",
             "proxyOnce",
             Some(answering),
+            None,
         );
 
         assert_eq!(layout(&imp), ["proxy", "authored", "rec", "proxy"]);
@@ -1806,6 +1819,7 @@ mod placement_tests {
             "http://up",
             "proxyAlways",
             Some(answering),
+            None,
         );
 
         assert_eq!(layout(&imp), ["proxy", "authored", "rec"]);
@@ -1823,6 +1837,7 @@ mod placement_tests {
             "http://up",
             "proxyAlways",
             Some(slot_at(&imp, 0)),
+            None,
         );
         assert_eq!(layout(&imp), ["proxy", "proxy", "early"]);
 
@@ -1832,6 +1847,7 @@ mod placement_tests {
             "http://up",
             "proxyAlways",
             Some(slot_at(&imp, 1)),
+            None,
         );
         assert_eq!(layout(&imp), ["proxy", "proxy", "early+second"]);
     }
@@ -1849,6 +1865,7 @@ mod placement_tests {
             "http://up",
             "proxyAlways",
             Some(answering),
+            None,
         );
 
         assert_eq!(layout(&imp), ["ahead", "proxy", "rec"]);
@@ -1866,7 +1883,13 @@ mod placement_tests {
                 "responses": [{ "is": { "statusCode": 200, "body": body } }],
             }))
             .expect("valid stub");
-            imp.insert_or_append_proxy_stub(stub, "http://up", "proxyAlways", Some(answering));
+            imp.insert_or_append_proxy_stub(
+                stub,
+                "http://up",
+                "proxyAlways",
+                Some(answering),
+                None,
+            );
         }
 
         assert_eq!(layout(&imp), ["proxy", "1+2+3"]);
@@ -1889,6 +1912,7 @@ mod placement_tests {
             "http://up",
             "proxyOnce",
             Some(answering),
+            None,
         );
 
         assert_eq!(layout(&imp), ["authored", "rec", "proxy"]);
@@ -1908,6 +1932,7 @@ mod placement_tests {
             "http://up",
             "proxyAlways",
             Some(answering),
+            None,
         );
         imp.delete_stub(1).expect("delete");
 
@@ -1916,12 +1941,14 @@ mod placement_tests {
             "http://up",
             "proxyAlways",
             Some(answering),
+            None,
         );
         imp.insert_or_append_proxy_stub(
             recording("/c", "third"),
             "http://up",
             "proxyAlways",
             Some(answering),
+            None,
         );
 
         assert_eq!(layout(&imp), ["proxy", "first+second", "third"]);
@@ -1932,8 +1959,136 @@ mod placement_tests {
     fn with_no_anchor_and_no_proxy_stub_a_recording_goes_last() {
         let imp = imposter(json!([is("authored")]));
 
-        imp.insert_or_append_proxy_stub(recording("/a", "rec"), "http://up", "proxyOnce", None);
+        imp.insert_or_append_proxy_stub(
+            recording("/a", "rec"),
+            "http://up",
+            "proxyOnce",
+            None,
+            None,
+        );
 
         assert_eq!(layout(&imp), ["authored", "rec"]);
+    }
+}
+
+/// Issue #1386: a recorded stub carries the `proxyOnce` claim it was recorded under, and the claim
+/// goes when the stub does — or when the stub's content does.
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn imposter() -> Imposter {
+        Imposter::new(
+            serde_json::from_value(json!({
+                "port": 0,
+                "protocol": "http",
+                "stubs": [{ "responses": [{ "proxy": { "to": "http://up", "mode": "proxyOnce" } }] }],
+            }))
+            .expect("valid imposter config"),
+        )
+        .expect("test imposter")
+    }
+
+    fn stub(body: &str) -> Stub {
+        serde_json::from_value(json!({
+            "predicates": [{ "deepEquals": { "path": "/a" } }],
+            "responses": [{ "is": { "statusCode": 200, "body": body } }],
+        }))
+        .expect("valid stub")
+    }
+
+    /// Records `sig` in the store and inserts its stub in front of the proxy, as the engine does.
+    fn record(imp: &Imposter) -> RequestSignature {
+        let sig = RequestSignature::new("POST", "/a", None, &[]);
+        let port = imp.journal_port();
+        let token = match imp
+            .proxy_store
+            .try_claim_as(port, &sig, ProxyMode::ProxyOnce)
+            .expect("claim")
+        {
+            ClaimOutcome::Claimed(token) => token,
+            other => panic!("expected a claim, got {other:?}"),
+        };
+        imp.proxy_store
+            .record(
+                port,
+                sig.clone(),
+                token,
+                crate::recording::RecordedResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: b"up".to_vec(),
+                    latency_ms: None,
+                    timestamp_secs: 0,
+                },
+            )
+            .expect("record");
+        imp.insert_or_append_proxy_stub(
+            stub("up"),
+            "http://up",
+            "proxyOnce",
+            None,
+            Some(sig.clone()),
+        );
+        sig
+    }
+
+    fn recorded(imp: &Imposter, sig: &RequestSignature) -> bool {
+        imp.proxy_store
+            .try_claim_as(imp.journal_port(), sig, ProxyMode::ProxyOnce)
+            .expect("claim")
+            == ClaimOutcome::AlreadyRecorded
+    }
+
+    #[test]
+    fn replacing_a_recording_with_new_content_forgets_its_claim() {
+        let imp = imposter();
+        let sig = record(&imp);
+
+        imp.replace_stub(0, stub("edited")).expect("replace");
+
+        assert!(!recorded(&imp, &sig));
+    }
+
+    #[test]
+    fn replacing_a_recording_with_identical_content_keeps_its_claim() {
+        let imp = imposter();
+        let sig = record(&imp);
+
+        imp.replace_stub(0, stub("up")).expect("replace");
+
+        assert!(recorded(&imp, &sig));
+    }
+
+    #[test]
+    fn moving_a_recording_keeps_its_claim() {
+        let imp = imposter();
+        let sig = record(&imp);
+
+        imp.move_stub(0, 1).expect("move");
+
+        assert!(recorded(&imp, &sig));
+    }
+
+    #[test]
+    fn deleting_a_recording_forgets_its_claim() {
+        let imp = imposter();
+        let sig = record(&imp);
+
+        imp.delete_stub(0).expect("delete");
+
+        assert!(!recorded(&imp, &sig));
+    }
+
+    // A stub edit that leaves the recording alone keeps its claim.
+    #[test]
+    fn deleting_another_stub_keeps_the_claim() {
+        let imp = imposter();
+        let sig = record(&imp);
+
+        imp.delete_stub(1).expect("delete the proxy stub");
+
+        assert!(recorded(&imp, &sig));
     }
 }

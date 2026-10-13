@@ -52,6 +52,15 @@ record.
 
 ### Fixed
 
+- **Deleting a `proxyOnce` recording records the identity again** (#1386). A recording lived both
+  as the stub in front of the proxy and as a claim in the proxy store. Deleting the stub, or
+  replacing the stubs without it (`DELETE …/stubs/:i`, `PUT …/stubs`, a reload), left the claim, so
+  the next request for that identity got the old upstream response replayed: never forwarded, never
+  recorded again, and the stub never came back. The claim now goes with its stub, as in Mountebank,
+  where the stub is the recording. Embedders: `ProxyRecordingStore` gains
+  `forget_recorded(port, sig)` (default no-op), and `Imposter::insert_or_append_proxy_stub` takes
+  the settled claim's signature as a new last argument.
+
 - **A proxy recording is placed by the proxy stub that answered, as in Mountebank** (#1389).
   - **Placement.** Rift placed it relative to the first stub proxying to the same upstream. With
     two proxy stubs, or a stub between them, a `proxyOnce` recording could land in front of the

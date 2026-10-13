@@ -259,6 +259,19 @@ pub trait ProxyRecordingStore: Send + Sync {
     /// Returns the recorded response for replay, if any.
     fn lookup(&self, port: u16, sig: &RequestSignature) -> Option<RecordedResponse>;
 
+    /// Forgets the `proxyOnce` recording made under `sig` (issue #1386), so the next request with
+    /// that signature is claimed, forwarded and recorded again. The engine calls this after a stub
+    /// edit (delete, replace, reconcile) removes the stub that recording was inserted as: in
+    /// Mountebank the stub *is* the recording, so a deleted recording is recorded anew.
+    ///
+    /// A claim still in flight is not a recording yet and must be left to settle. `Err` is logged
+    /// by the engine, which does not undo the stub edit that has already happened. The default does
+    /// nothing, so a store that cannot forget keeps replaying the recording, as before #1386.
+    fn forget_recorded(&self, port: u16, sig: &RequestSignature) -> Result<()> {
+        let _ = (port, sig);
+        Ok(())
+    }
+
     /// Clears all saved proxy responses for a port. Backs the DELETE endpoint for saved
     /// proxy responses and the manager's port reclaim on imposter deletion.
     fn clear(&self, port: u16);
@@ -457,6 +470,13 @@ impl ProxyRecordingStore for LocalProxyStore {
         } else {
             first(&state.responses.read())
         }
+    }
+
+    fn forget_recorded(&self, port: u16, sig: &RequestSignature) -> Result<()> {
+        if let Some(state) = self.ports.read().get(&port) {
+            state.responses.write().remove(sig);
+        }
+        Ok(())
     }
 
     fn clear(&self, port: u16) {
@@ -715,6 +735,79 @@ mod tests {
 
         assert_eq!(always.lookup(1, &s).unwrap().body, b"always");
         assert!(once.lookup(1, &s).is_none());
+    }
+
+    // Issue #1386: forgetting a recording makes exactly that signature claimable again.
+    #[test]
+    fn forget_recorded_frees_exactly_that_signature() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyOnce);
+        let (a, b) = (sig("/a"), sig("/b"));
+        for (port, s) in [(1, &a), (1, &b), (2, &a)] {
+            let t = claim_token(store.try_claim_as(port, s, ProxyMode::ProxyOnce).unwrap());
+            store.record(port, s.clone(), t, resp(200, "rec")).unwrap();
+        }
+
+        store.forget_recorded(1, &a).unwrap();
+
+        assert!(matches!(
+            store.try_claim_as(1, &a, ProxyMode::ProxyOnce).unwrap(),
+            ClaimOutcome::Claimed(_)
+        ));
+        assert!(store.lookup(1, &a).is_none());
+        assert_eq!(
+            store.try_claim_as(1, &b, ProxyMode::ProxyOnce).unwrap(),
+            ClaimOutcome::AlreadyRecorded,
+            "another signature on the port keeps its recording"
+        );
+        assert_eq!(
+            store.try_claim_as(2, &a, ProxyMode::ProxyOnce).unwrap(),
+            ClaimOutcome::AlreadyRecorded,
+            "the same signature on another port keeps its recording"
+        );
+    }
+
+    // A claim in flight is not a recording yet: forgetting leaves it pending, so it still settles.
+    #[test]
+    fn forget_recorded_leaves_an_in_flight_claim_alone() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyOnce);
+        let s = sig("/inflight");
+        let t = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap());
+
+        store.forget_recorded(1, &s).unwrap();
+        store.record(1, s.clone(), t, resp(200, "settled")).unwrap();
+
+        assert_eq!(store.lookup(1, &s).unwrap().body, b"settled");
+    }
+
+    // The trait default keeps a store that cannot forget replaying, as before #1386.
+    #[test]
+    fn the_default_forget_recorded_is_a_no_op() {
+        struct Fixed;
+        impl ProxyRecordingStore for Fixed {
+            fn try_claim(&self, _: u16, _: &RequestSignature) -> Result<ClaimOutcome> {
+                Ok(ClaimOutcome::AlreadyRecorded)
+            }
+            fn release_claim(&self, _: u16, _: &RequestSignature, _: ClaimToken) {}
+            fn record(
+                &self,
+                _: u16,
+                _: RequestSignature,
+                _: ClaimToken,
+                _: RecordedResponse,
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn lookup(&self, _: u16, _: &RequestSignature) -> Option<RecordedResponse> {
+                None
+            }
+            fn clear(&self, _: u16) {}
+        }
+
+        assert!(Fixed.forget_recorded(1, &sig("/x")).is_ok());
+        assert_eq!(
+            Fixed.try_claim(1, &sig("/x")).unwrap(),
+            ClaimOutcome::AlreadyRecorded
+        );
     }
 
     // The trait default defers to `try_claim`, so a store that resolves its own mode is unchanged.

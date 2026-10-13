@@ -80,11 +80,19 @@ pub struct Slot {
     pub kind: Kind,
     /// How many times this slot has answered: its next response is `cursor % responses`.
     cursor: usize,
+    /// The `proxyOnce` claim this slot was recorded under. It travels with the slot (moves,
+    /// reload survivors) and ends with it: when the slot goes, or its content changes, so does
+    /// the claim (#1386).
+    claim: Option<ClaimKey>,
 }
 
 impl Slot {
     fn new(kind: Kind) -> Self {
-        Slot { kind, cursor: 0 }
+        Slot {
+            kind,
+            cursor: 0,
+            claim: None,
+        }
     }
 }
 
@@ -127,10 +135,10 @@ type ClaimKey = (Method, &'static str, bool, Option<Option<&'static str>>);
 #[derive(Debug, Default)]
 pub struct Model {
     pub stubs: Vec<Slot>,
-    /// `proxyOnce` recordings by identity; only a `proxyOnce` stub consults or fills them. Known
-    /// divergence (#1386): they outlive the stub they were recorded as, so a request reaching the
-    /// proxy again for an identity whose stub was deleted or replaced is answered from here instead
-    /// of being forwarded and re-recorded.
+    /// `proxyOnce` recordings by identity; only a `proxyOnce` stub consults or fills them. Each
+    /// lives exactly as long as the stub it was recorded as (#1386): with that stub deleted or
+    /// replaced, the next request for the identity is forwarded and recorded again, as in
+    /// Mountebank, where the stub is the recording.
     claims: BTreeMap<ClaimKey, String>,
     /// Raw flow state, keyed `(flow, key)`: the `FLOW_KEYS` values and the scenario states.
     pub kv: BTreeMap<(&'static str, &'static str), Value>,
@@ -209,10 +217,12 @@ impl Model {
                     return Served::plain(body.clone(), true);
                 }
                 let body = self.forward(r);
-                if mode == Mode::Once {
+                let claim = (mode == Mode::Once).then_some(key);
+                if let Some(key) = claim {
                     self.claims.insert(key, body.clone());
                 }
-                self.record(i, r, mode, gen_body, body.clone());
+                self.record(i, r, mode, gen_body, body.clone(), claim);
+                self.drop_orphaned_claims();
                 Served::plain(body, true)
             }
         }
@@ -228,7 +238,15 @@ impl Model {
     /// Record a forwarded response next to the proxy stub at `anchor`, the one that answered: a
     /// `proxyOnce` recording goes in front of it; a `proxyAlways` one merges into the first stub
     /// after it recorded with the same predicates, else goes at the end of the list.
-    fn record(&mut self, anchor: usize, r: &Shape, mode: Mode, gen_body: bool, response: String) {
+    fn record(
+        &mut self,
+        anchor: usize,
+        r: &Shape,
+        mode: Mode,
+        gen_body: bool,
+        response: String,
+        claim: Option<ClaimKey>,
+    ) {
         let path = r.path;
         let body = gen_body.then_some(r.body);
         let recorded = |responses| {
@@ -239,16 +257,27 @@ impl Model {
             })
         };
         match mode {
-            Mode::Once => self.stubs.insert(anchor, recorded(vec![response])),
+            Mode::Once => self.stubs.insert(
+                anchor,
+                Slot {
+                    claim,
+                    ..recorded(vec![response])
+                },
+            ),
             Mode::Always => {
                 let existing = self.stubs.iter_mut().skip(anchor + 1).find(|s| {
                     matches!(&s.kind, Kind::Recorded { path: p, body: b, .. } if *p == path && *b == body)
                 });
                 match existing {
+                    // New content: whatever claim the stub was recorded under ends here.
                     Some(Slot {
                         kind: Kind::Recorded { responses, .. },
+                        claim,
                         ..
-                    }) => responses.push(response),
+                    }) => {
+                        responses.push(response);
+                        *claim = None;
+                    }
                     _ => self.stubs.push(recorded(vec![response])),
                 }
             }
@@ -266,6 +295,7 @@ impl Model {
     /// `PUT /imposters/:port/stubs`: every slot is new, so every response cycle restarts.
     pub fn replace_stubs(&mut self, edits: &[Edit]) {
         self.stubs = self.edited(edits).into_iter().map(Slot::new).collect();
+        self.drop_orphaned_claims();
     }
 
     /// Where the stub went.
@@ -283,6 +313,7 @@ impl Model {
         }
         let at = index % self.stubs.len();
         self.stubs.remove(at);
+        self.drop_orphaned_claims();
         Some(at)
     }
 
@@ -360,6 +391,7 @@ impl Model {
                     .unwrap_or_else(|| Slot::new(kind))
             })
             .collect();
+        self.drop_orphaned_claims();
         Reload::Patched
     }
 
@@ -367,6 +399,12 @@ impl Model {
     pub fn recreate(&mut self, edits: &[Edit]) {
         let desired = self.edited(edits);
         self.recreate_with(desired);
+    }
+
+    /// Forget every claim no remaining slot was recorded under.
+    fn drop_orphaned_claims(&mut self) {
+        let held: Vec<ClaimKey> = self.stubs.iter().filter_map(|s| s.claim).collect();
+        self.claims.retain(|key, _| held.contains(key));
     }
 
     /// A new imposter: new slots, an empty flow store and an empty proxy store.

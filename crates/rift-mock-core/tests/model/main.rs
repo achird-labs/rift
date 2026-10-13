@@ -636,8 +636,9 @@ fn a_proxy_once_stub_added_later_gates_by_its_own_mode() {
                 },
             },
             post("/a"),
-            // The recording, in front of the proxy: the next request reaches the proxy again.
-            Op::DeleteStub(1),
+            // Move the recording behind the proxy (moving keeps its claim, #1386): the next
+            // request reaches the proxy, which must replay rather than forward.
+            Op::MoveStub(1, 2),
             post("/a"),
         ],
     );
@@ -712,5 +713,88 @@ fn a_proxy_always_recording_is_appended_at_the_end() {
     run(
         &[catch_all, conditional("/b", "p")],
         &[get("/a"), get("/a")],
+    );
+}
+
+/// #1386: deleting a `proxyOnce` recording forgets its claim, so the next request for that
+/// identity is forwarded and recorded again, as in Mountebank, where the stub is the recording.
+#[test]
+fn deleting_a_proxy_once_recording_records_the_identity_again() {
+    let post = Op::Request(Shape {
+        method: Method::Post,
+        path: "/a",
+        query: false,
+        body: None,
+        flow: "f1",
+    });
+    run(
+        &[Spec::Proxy {
+            pred: ops::Pred::default(),
+            mode: ops::Mode::Once,
+            gen_body: false,
+        }],
+        &[post.clone(), Op::DeleteStub(0), post.clone(), post],
+    );
+}
+
+/// #1386: `PUT /imposters/:port/stubs` without the recording forgets its claim too.
+#[test]
+fn replacing_the_stubs_without_a_recording_records_the_identity_again() {
+    let post = Op::Request(Shape {
+        method: Method::Post,
+        path: "/a",
+        query: false,
+        body: None,
+        flow: "f1",
+    });
+    run(
+        &[Spec::Proxy {
+            pred: ops::Pred::default(),
+            mode: ops::Mode::Once,
+            gen_body: false,
+        }],
+        &[
+            post.clone(),
+            Op::ReplaceStubs(vec![ops::Edit::Remove(0)]),
+            post,
+        ],
+    );
+}
+
+fn post_a() -> Op {
+    Op::Request(Shape {
+        method: Method::Post,
+        path: "/a",
+        query: false,
+        body: None,
+        flow: "f1",
+    })
+}
+
+fn once_catch_all() -> Spec {
+    Spec::Proxy {
+        pred: ops::Pred::default(),
+        mode: ops::Mode::Once,
+        gen_body: false,
+    }
+}
+
+/// #1386: a reload that patches the recording away (a stub-level reconcile, not a replacement of
+/// the imposter) forgets its claim.
+#[test]
+fn a_reload_that_drops_a_recording_records_the_identity_again() {
+    run(
+        &[once_catch_all()],
+        &[post_a(), Op::Reload(vec![ops::Edit::Remove(0)]), post_a()],
+    );
+}
+
+/// #1386: a reload that only moves the recording keeps its state, and with it the claim: moved
+/// behind the proxy, the identity is replayed, not forwarded.
+#[test]
+fn a_reload_that_moves_a_recording_keeps_its_claim() {
+    run(
+        &[once_catch_all()],
+        &[post_a(), Op::Reload(vec![ops::Edit::Swap(0, 1)]), post_a()],
     );
 }
