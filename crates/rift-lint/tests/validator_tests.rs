@@ -798,6 +798,50 @@ fn e052_unknown_proxy_mode() {
     assert!(!has_code(&r, "W007"));
 }
 
+/// The engine refuses an unknown generator `predicateOperator` (issue #1353), so lint reports it as
+/// an error; the seven field operators and an absent or `null` key pass.
+#[test]
+fn e053_unknown_generator_predicate_operator() {
+    let proxy = |operator: serde_json::Value| {
+        json!({ "to": "http://example.com", "predicateGenerators": [
+            { "matches": { "path": true }, "predicateOperator": operator }
+        ]})
+    };
+    let mut r = LintResult::new();
+    validate_proxy_response(path(), &proxy(json!("bogus")), "loc", &mut r);
+    assert!(has_code(&r, "E053"), "got {:?}", codes(&r));
+    let issue = r.issues.iter().find(|i| i.code == "E053").expect("E053");
+    assert!(issue.message.contains("bogus"), "{}", issue.message);
+
+    for operator in [
+        json!("equals"),
+        json!("deepEquals"),
+        json!("contains"),
+        json!("startsWith"),
+        json!("endsWith"),
+        json!("matches"),
+        json!("exists"),
+        serde_json::Value::Null,
+    ] {
+        let mut r = LintResult::new();
+        validate_proxy_response(path(), &proxy(operator.clone()), "loc", &mut r);
+        assert!(!has_code(&r, "E053"), "E053 fired for {operator}");
+    }
+    let mut r = LintResult::new();
+    validate_proxy_response(
+        path(),
+        &json!({ "to": "http://example.com", "predicateGenerators": [{ "matches": { "path": true } }] }),
+        "loc",
+        &mut r,
+    );
+    assert!(!has_code(&r, "E053"));
+    for operator in [json!("not"), json!(5)] {
+        let mut r = LintResult::new();
+        validate_proxy_response(path(), &proxy(operator.clone()), "loc", &mut r);
+        assert!(has_code(&r, "E053"), "E053 missing for {operator}");
+    }
+}
+
 /// The engine accepts any casing (issue #1314); lint nudges toward the canonical spelling.
 #[test]
 fn w007_non_canonical_casing_of_a_known_mode() {

@@ -75,6 +75,20 @@ pub const PREDICATE_GENERATOR_KEYS: [&str; 8] = [
     "ignore",
 ];
 
+/// The values a `predicateGenerators` entry's `predicateOperator` may take (issue #1353): the
+/// field operators, the prefix of [`PREDICATE_OPERATORS`] whose body is `{field: value}`. `not`,
+/// `or`, `and` and `inject` cannot hold a field map, so a generator naming one records a predicate
+/// that never decodes.
+pub const GENERATOR_OPERATORS: [&str; 7] = [
+    "equals",
+    "deepEquals",
+    "contains",
+    "startsWith",
+    "endsWith",
+    "matches",
+    "exists",
+];
+
 /// Matcher parameters shared across operations (case sensitivity, selectors, etc.).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -290,6 +304,23 @@ mod tests {
         ] {
             assert!(!validator.is_valid(&bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn generator_operators_are_the_field_operators() {
+        assert_eq!(
+            GENERATOR_OPERATORS,
+            [
+                "equals",
+                "deepEquals",
+                "contains",
+                "startsWith",
+                "endsWith",
+                "matches",
+                "exists"
+            ]
+        );
+        assert_eq!(GENERATOR_OPERATORS, PREDICATE_OPERATORS[..7]);
     }
 
     #[test]

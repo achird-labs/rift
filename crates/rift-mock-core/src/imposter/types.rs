@@ -594,7 +594,8 @@ pub fn admission_check_stub(stub: &Stub) -> Result<(), String> {
         refuse_bad_conditional(response.rift_block(), Admission::Checked)?;
         match response {
             StubResponse::Proxy { proxy, .. } => {
-                refuse_unknown_proxy_mode(Some(proxy), Admission::Checked)
+                refuse_unknown_proxy_mode(Some(proxy), Admission::Checked)?;
+                refuse_unknown_generator_operator(Some(proxy), Admission::Checked)
             }
             _ => Ok(()),
         }
@@ -617,7 +618,7 @@ pub fn admission_check_stub(stub: &Stub) -> Result<(), String> {
 /// #181 and #1220). A `matches` pattern that does not compile was accepted and then never matched,
 /// so the stub was silently dead (issue #1221). Walks `not`/`and`/`or` so a nested predicate is held
 /// to the same rules.
-fn validate_predicates(predicates: &[Predicate]) -> Result<(), String> {
+pub(crate) fn validate_predicates(predicates: &[Predicate]) -> Result<(), String> {
     predicates.iter().try_for_each(validate_predicate)
 }
 
@@ -1434,6 +1435,7 @@ impl TryFrom<StubResponseRaw> for StubResponse {
         // Only when the response really is a proxy (`is` wins the priority below).
         if raw.is.is_none() {
             refuse_unknown_proxy_mode(raw.proxy.as_ref(), admission())?;
+            refuse_unknown_generator_operator(raw.proxy.as_ref(), admission())?;
         }
         // Priority: is > proxy > inject > fault > rift-script-only
         Ok(if let Some(is_raw) = raw.is {
@@ -1814,6 +1816,46 @@ fn refuse_unknown_proxy_mode(
         return Ok(());
     }
     proxy.map_or(Ok(()), |proxy| proxy.mode().map(|_| ()))
+}
+
+/// Refuse a `predicateGenerators` entry whose `predicateOperator` is not a field operator (issue
+/// #1353), at a config door only, like [`refuse_unknown_proxy_mode`]: Mountebank and older engines
+/// admitted it. Such a generator wraps every field in an operator that never decodes, so each
+/// recording used to drop all its predicates and match every later request. Absent or `null` keeps
+/// the default, `deepEquals`.
+fn refuse_unknown_generator_operator(
+    proxy: Option<&ProxyResponse>,
+    admission: Admission,
+) -> Result<(), String> {
+    if admission == Admission::Skipped {
+        return Ok(());
+    }
+    let Some(proxy) = proxy else {
+        return Ok(());
+    };
+    for (i, generator) in proxy.predicate_generators.iter().enumerate() {
+        let Some(operator) = generator.get("predicateOperator") else {
+            continue;
+        };
+        if operator.is_null() {
+            continue;
+        }
+        if operator
+            .as_str()
+            .is_some_and(|op| rift_types::GENERATOR_OPERATORS.contains(&op))
+        {
+            continue;
+        }
+        let shown = operator
+            .as_str()
+            .map_or_else(|| operator.to_string(), str::to_string);
+        return Err(format!(
+            "predicateGenerators[{i}].predicateOperator `{shown}` is not a predicate operator; \
+             expected one of {}",
+            rift_types::GENERATOR_OPERATORS.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 // ============================================================================

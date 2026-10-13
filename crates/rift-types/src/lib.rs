@@ -11,6 +11,6 @@ pub mod schema;
 pub mod wire;
 
 pub use predicate::{
-    PREDICATE_GENERATOR_KEYS, PREDICATE_OPERATORS, PREDICATE_PARAMETERS, Predicate,
-    PredicateOperation, PredicateParameters, PredicateSelector,
+    GENERATOR_OPERATORS, PREDICATE_GENERATOR_KEYS, PREDICATE_OPERATORS, PREDICATE_PARAMETERS,
+    Predicate, PredicateOperation, PredicateParameters, PredicateSelector,
 };

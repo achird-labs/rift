@@ -90,6 +90,10 @@ pub enum PredicateGeneratorError {
     /// The generator ran but did not return a usable predicate array.
     #[error("generator produced invalid output: {0}")]
     Output(String),
+    /// A generated predicate does not decode, or the engine would refuse it at a config door
+    /// (issue #1353). Recording it would drop it, or write a stub the engine cannot re-import.
+    #[error("generated predicate is invalid: {0}")]
+    Invalid(String),
 }
 
 impl PredicateGeneratorError {
@@ -101,6 +105,7 @@ impl PredicateGeneratorError {
             Self::Pool(_) => "pool-failure",
             Self::Script(_) => "script-error",
             Self::Output(_) => "invalid-output",
+            Self::Invalid(_) => "invalid-predicate",
         }
     }
 }

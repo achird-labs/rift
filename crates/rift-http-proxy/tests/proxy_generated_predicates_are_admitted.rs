@@ -1,0 +1,240 @@
+//! Issue #1353: a proxy records only predicates the engine would admit. A generated predicate that
+//! did not decode was dropped with a warn, and when every one was dropped the recording became a
+//! match-all stub that answered every later request with the first response. An unknown
+//! `predicateOperator` is now refused at the config door; anything a generator produces that does
+//! not decode or validate is a generation failure (#498): nothing recorded, the response forwarded
+//! with `x-rift-generator-error: invalid-predicate`.
+
+use std::net::TcpListener;
+use std::sync::Arc;
+
+use rift_http_proxy::admin_api::AdminApiServer;
+use rift_http_proxy::imposter::ImposterManager;
+use serde_json::{Value, json};
+
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind")
+        .local_addr()
+        .expect("addr")
+        .port()
+}
+
+struct Admin {
+    client: reqwest::Client,
+    url: String,
+    manager: Arc<ImposterManager>,
+}
+
+impl Admin {
+    async fn start() -> Self {
+        let manager = Arc::new(ImposterManager::new());
+        let running =
+            AdminApiServer::new("127.0.0.1:0".parse().expect("addr"), manager.clone(), None)
+                .bind()
+                .await
+                .expect("admin API binds");
+        Admin {
+            client: reqwest::Client::new(),
+            url: format!("http://{}", running.local_addr()),
+            manager,
+        }
+    }
+
+    async fn post(&self, imposter: &Value) -> (u16, String) {
+        let response = self
+            .client
+            .post(format!("{}/imposters", self.url))
+            .json(imposter)
+            .send()
+            .await
+            .expect("POST");
+        let status = response.status().as_u16();
+        (status, response.text().await.expect("body"))
+    }
+
+    async fn upstream(&self) -> u16 {
+        let port = free_port();
+        let (status, body) = self
+            .post(
+                &json!({"port": port, "protocol": "http", "recordRequests": true,
+                "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "up"}}]}]}),
+            )
+            .await;
+        assert_eq!(status, 201, "{body}");
+        port
+    }
+
+    async fn printed(&self, port: u16, query: &str) -> Value {
+        self.client
+            .get(format!("{}/imposters/{port}{query}", self.url))
+            .send()
+            .await
+            .expect("GET")
+            .json()
+            .await
+            .expect("json")
+    }
+
+    async fn upstream_hits(&self, port: u16) -> usize {
+        self.printed(port, "").await["requests"]
+            .as_array()
+            .expect("requests")
+            .len()
+    }
+
+    async fn stubs(&self, port: u16) -> Vec<Value> {
+        self.printed(port, "").await["stubs"]
+            .as_array()
+            .expect("stubs")
+            .clone()
+    }
+
+    async fn drop_all(&self, ports: &[u16]) {
+        for port in ports {
+            let _ = self.manager.delete_imposter(*port).await;
+        }
+    }
+}
+
+fn proxy(port: u16, upstream: u16, generators: Value) -> Value {
+    json!({"port": port, "protocol": "http", "stubs": [{"responses": [{"proxy": {
+        "to": format!("http://127.0.0.1:{upstream}"),
+        "mode": "proxyOnce",
+        "predicateGenerators": generators
+    }}]}]})
+}
+
+async fn get(admin: &Admin, port: u16, path: &str) -> (Option<String>, String) {
+    let response = admin
+        .client
+        .get(format!("http://127.0.0.1:{port}{path}"))
+        .send()
+        .await
+        .expect("request");
+    let header = response
+        .headers()
+        .get("x-rift-generator-error")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    (header, response.text().await.expect("body"))
+}
+
+#[tokio::test]
+async fn an_unknown_predicate_operator_is_refused_at_create() {
+    let admin = Admin::start().await;
+    let (status, body) = admin
+        .post(&proxy(
+            free_port(),
+            1,
+            json!([{"matches": {"path": true}, "predicateOperator": "bogus"}]),
+        ))
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.contains(
+            "predicateGenerators[0].predicateOperator `bogus` is not a predicate operator"
+        ),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn an_inject_generator_returning_a_non_predicate_records_nothing() {
+    let admin = Admin::start().await;
+    let upstream = admin.upstream().await;
+    let port = free_port();
+    // Created through the manager: the admin API refuses `inject` without `--allowInjection`.
+    let config = serde_json::from_value(proxy(
+        port,
+        upstream,
+        json!([{"inject":
+            "function(config) { return [{ equal: { path: config.request.path } }]; }"}]),
+    ))
+    .expect("imposter config");
+    admin
+        .manager
+        .create_imposter(config)
+        .await
+        .expect("create proxy");
+
+    let (header, body) = get(&admin, port, "/a").await;
+    assert_eq!(header.as_deref(), Some("invalid-predicate"));
+    assert_eq!(body, "up");
+    let (_, body) = get(&admin, port, "/b").await;
+    assert_eq!(
+        body, "up",
+        "/b is forwarded, not answered by /a's recording"
+    );
+    assert_eq!(admin.upstream_hits(upstream).await, 2);
+    assert_eq!(admin.stubs(port).await.len(), 1, "no stub was recorded");
+    admin.drop_all(&[port, upstream]).await;
+}
+
+#[tokio::test]
+async fn a_matches_operator_over_a_non_regex_path_records_nothing() {
+    let admin = Admin::start().await;
+    let upstream = admin.upstream().await;
+    let port = free_port();
+    let (status, body) = admin
+        .post(&proxy(
+            port,
+            upstream,
+            json!([{"matches": {"path": true}, "predicateOperator": "matches"}]),
+        ))
+        .await;
+    assert_eq!(status, 201, "{body}");
+
+    let (header, body) = get(&admin, port, "/a(b").await;
+    assert_eq!(header.as_deref(), Some("invalid-predicate"));
+    assert_eq!(body, "up");
+    assert_eq!(admin.stubs(port).await.len(), 1, "no stub was recorded");
+
+    // The export is still one the engine admits.
+    let export = admin.printed(port, "?replayable=true").await;
+    admin.drop_all(&[port]).await;
+    let (status, body) = admin.post(&export).await;
+    assert_eq!(status, 201, "the export re-imports: {body}");
+    admin.drop_all(&[port, upstream]).await;
+}
+
+#[tokio::test]
+async fn every_valid_operator_still_records() {
+    let admin = Admin::start().await;
+    let upstream = admin.upstream().await;
+    for operator in [
+        "equals",
+        "deepEquals",
+        "contains",
+        "startsWith",
+        "endsWith",
+        "matches",
+        "exists",
+    ] {
+        let port = free_port();
+        let (status, body) = admin
+            .post(&proxy(
+                port,
+                upstream,
+                json!([{"matches": {"path": true}, "predicateOperator": operator}]),
+            ))
+            .await;
+        assert_eq!(status, 201, "{operator}: {body}");
+        let (header, _) = get(&admin, port, "/rec").await;
+        assert_eq!(header, None, "{operator}");
+        let stubs = admin.stubs(port).await;
+        assert_eq!(
+            stubs.len(),
+            2,
+            "{operator}: one recording in front of the proxy"
+        );
+        let predicates = stubs[0]["predicates"].as_array().expect("predicates");
+        assert_eq!(predicates.len(), 1, "{operator}: {predicates:?}");
+        assert!(
+            predicates[0].get(operator).is_some(),
+            "{operator}: {predicates:?}"
+        );
+        admin.drop_all(&[port]).await;
+    }
+    admin.drop_all(&[upstream]).await;
+}

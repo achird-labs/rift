@@ -155,7 +155,7 @@ Control how requests are matched when generating stubs:
 | Key | Description |
 |:----|:------------|
 | `matches` | Which request fields the generated predicate captures (table above) |
-| `predicateOperator` | The operator of every generated predicate; omitted, see [What Gets Recorded](#what-gets-recorded) |
+| `predicateOperator` | The operator of every generated predicate: `equals`, `deepEquals`, `contains`, `startsWith`, `endsWith`, `matches` or `exists`; omitted, see [What Gets Recorded](#what-gets-recorded). Any other value is refused (400, or a startup error; `rift-lint` E053). Mountebank admits it and then answers `500` to every request after the first recording |
 | `caseSensitive` | Copied onto each generated predicate when set (see [Case Sensitivity](#case-sensitivity)) |
 | `except` | Copied onto each generated predicate; the recorded values stay whole and the matcher strips the regex from both sides (see [`except`](predicates.md#except)) |
 | `jsonpath` | `{"selector": "$.id"}`: capture only what the selector selects from the body, and scope the generated predicate with the same selector |
@@ -274,7 +274,13 @@ match-all stub that shadows every future request, so the failure is surfaced ins
 
 - **no stub is recorded** for that request (the proxied response is still returned to the client), and
 - the proxied response carries an `x-rift-generator-error` header whose value names the failure —
-  `script-error`, `invalid-output`, `pool-failure`, `timeout`, or `task-panic`.
+  `script-error`, `invalid-output`, `invalid-predicate`, `pool-failure`, `timeout`, or `task-panic`.
+
+`invalid-predicate` covers any generated predicate the engine would not admit, from any generator:
+an `inject` that returns a misspelled operator (`{"equal": …}`), or a `"predicateOperator":
+"matches"` over a value that is not a regular expression (a path such as `/a(b`). Rift used to drop
+such a predicate and record the rest; when it dropped all of them, the recording matched every
+later request.
 
 A generator that legitimately returns an empty array (`[]`) is **not** a failure — it records a
 match-all stub as before. Only genuine generation failures skip recording and set the header.

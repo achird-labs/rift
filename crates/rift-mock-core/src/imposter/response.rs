@@ -383,7 +383,7 @@ pub fn get_rift_script_config(response: &StubResponse) -> Option<RiftScriptConfi
 /// the stub's `IsResponse` (multi-value headers, issue #238). Hop-by-hop headers
 /// are dropped.
 pub fn create_stub_from_proxy_response(
-    predicates: Vec<serde_json::Value>,
+    predicates: Vec<Predicate>,
     status: u16,
     headers: &[(String, String)],
     body: &[u8],
@@ -430,20 +430,6 @@ pub fn create_stub_from_proxy_response(
         None
     };
 
-    let predicates: Vec<Predicate> = predicates
-        .into_iter()
-        .filter_map(|value| match serde_json::from_value(value.clone()) {
-            Ok(pred) => Some(pred),
-            Err(e) => {
-                tracing::warn!(
-                    "Skipping malformed generated predicate: {} (from: {})",
-                    e,
-                    value
-                );
-                None
-            }
-        })
-        .collect();
     super::types::Stub {
         id: None,
         route_pattern: None,
@@ -1111,44 +1097,6 @@ mod tests {
     #[test]
     fn test_truncate_with_ellipsis_zero_max_len() {
         assert_eq!(truncate_with_ellipsis("hello", 0), "...");
-    }
-
-    // Issue #119: Malformed predicates are skipped instead of panicking
-    #[test]
-    fn test_create_stub_malformed_predicate_skipped() {
-        // A valid predicate alongside a completely invalid one
-        let valid_predicate = serde_json::json!({
-            "equals": { "method": "GET" }
-        });
-        // This is not a valid Predicate shape — should be skipped via filter_map
-        let malformed_predicate = serde_json::json!({
-            "notARealPredicate": { "foo": "bar" }
-        });
-
-        let stub = create_stub_from_proxy_response(
-            vec![valid_predicate, malformed_predicate],
-            200,
-            &[],
-            b"OK",
-            None,
-            None,
-            None,
-        );
-
-        // The malformed predicate should be silently skipped
-        assert_eq!(stub.predicates.len(), 1);
-    }
-
-    #[test]
-    fn test_create_stub_all_predicates_malformed() {
-        // All predicates are invalid — stub should have zero predicates
-        let bad1 = serde_json::json!({"garbage": 123});
-        let bad2 = serde_json::json!("just a string");
-
-        let stub =
-            create_stub_from_proxy_response(vec![bad1, bad2], 200, &[], b"OK", None, None, None);
-
-        assert!(stub.predicates.is_empty());
     }
 
     #[test]

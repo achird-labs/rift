@@ -155,7 +155,11 @@ pub(crate) fn predicate_generators(_: &mut SchemaGenerator) -> Schema {
     // which `generator_keys_have_a_deliberate_shape` refuses.
     for key in PREDICATE_GENERATOR_KEYS {
         let schema = match key {
-            "inject" | "predicateOperator" | "except" => json!({ "type": "string" }),
+            "inject" | "except" => json!({ "type": "string" }),
+            // The engine refuses any other operator (issue #1353).
+            "predicateOperator" => {
+                json!({ "type": "string", "enum": rift_types::GENERATOR_OPERATORS })
+            }
             "caseSensitive" => json!({ "type": "boolean" }),
             "matches" | "ignore" => json!({ "type": "object" }),
             "jsonpath" => rift_types::schema::jsonpath_selector(),

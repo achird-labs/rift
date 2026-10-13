@@ -641,6 +641,15 @@
                 "type": "object"
               },
               "predicateOperator": {
+                "enum": [
+                  "equals",
+                  "deepEquals",
+                  "contains",
+                  "startsWith",
+                  "endsWith",
+                  "matches",
+                  "exists"
+                ],
                 "type": "string"
               },
               "xpath": {

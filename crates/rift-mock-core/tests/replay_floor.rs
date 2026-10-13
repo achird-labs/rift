@@ -116,12 +116,14 @@ const LEDGER: &[(&str, &str, usize)] = &[
     (
         "crates/rift-mock-core/src/imposter/types.rs",
         "decode fn `?`",
-        19,
+        // #1353 `refuse_unknown_generator_operator`: an admission check (Admission::Checked only, re-run
+        // in admission_check_stub, fixture in issue_1267_replay_decode.rs).
+        20,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",
         "decode fn `Err(`",
-        17,
+        18,
     ),
     ("crates/rift-types/src/wire.rs", "::custom", 4),
     ("crates/rift-types/src/wire.rs", "serde error helper", 0),

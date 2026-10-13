@@ -52,6 +52,14 @@ record.
 
 ### Fixed
 
+- **A proxy no longer records a predicate the engine would not admit** (#1353). A generated predicate
+  that did not decode was dropped with a warning; when every one was dropped (an unknown
+  `predicateOperator` does that to all of them), the recording matched every later request and
+  answered it with the first response. An `inject` generator returning a misspelled operator did the
+  same, and `"predicateOperator": "matches"` could record a regex the engine refuses on re-import.
+  Any such generation now records nothing and the response carries
+  `x-rift-generator-error: invalid-predicate`.
+
 - **A proxy forwards the request's own method** (#1380). OPTIONS, TRACE and extension methods such
   as PROPFIND reached the upstream as GET, and the GET answer was recorded under the original
   method. The method is now forwarded as sent, as Mountebank does; a lowercase extension method is
@@ -152,6 +160,10 @@ record.
   claim is held, but does run before a replay from the store.
 
 ### Changed
+
+- **An unknown proxy `predicateOperator` is refused** (#1353) at every config door (400, or a
+  startup error), and `rift-lint` reports it as E053. Such an imposter used to load; every recording
+  it made matched every request. Mountebank admits it and answers `500` after the first recording.
 
 - **Conformance corpus fixture `02-predicates.json` gains three `keyCaseSensitive` stubs** (#1325), pinning the key and its inherit-from-`caseSensitive` default. SDK corpus replays must regenerate fixture 02.
 - **Fixture `02-predicates.json` restores the negative `_verify` steps on `/kcs-nomatch-lower` and

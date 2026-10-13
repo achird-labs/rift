@@ -3,7 +3,7 @@
 use crate::types::{LintIssue, LintOptions, LintResult};
 use regex::Regex;
 // The predicate-generator keys the engine reads (issue #1327), from the crate it reads them from.
-use rift_types::PREDICATE_GENERATOR_KEYS;
+use rift_types::{GENERATOR_OPERATORS, PREDICATE_GENERATOR_KEYS};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -2109,6 +2109,32 @@ fn validate_predicate_generator_keys(
                 "The engine reads inject, matches, caseSensitive, predicateOperator, except, \
                  jsonpath, xpath and ignore",
             ),
+        );
+    }
+    // The engine refuses any other `predicateOperator` (issue #1353): it would wrap every field in
+    // an operator that never decodes, and the recording would match every request.
+    if let Some(operator) = generator.get("predicateOperator").filter(|v| !v.is_null())
+        && !operator
+            .as_str()
+            .is_some_and(|op| GENERATOR_OPERATORS.contains(&op))
+    {
+        let shown = operator
+            .as_str()
+            .map_or_else(|| operator.to_string(), str::to_string);
+        result.add_issue(
+            LintIssue::error(
+                "E053",
+                format!(
+                    "predicateGenerator `predicateOperator` `{shown}` is not a predicate operator \
+                     (Rift refuses the imposter)"
+                ),
+                file.to_path_buf(),
+            )
+            .with_location(format!("{location}.predicateOperator"))
+            .with_suggestion(format!(
+                "Use one of: {}, or omit it for deepEquals",
+                GENERATOR_OPERATORS.join(", ")
+            )),
         );
     }
     let strings = |value: &Value| {

@@ -28,6 +28,13 @@ const BAD_COPY: &str = r#"{
     }]
 }"#;
 
+/// An unknown generator `predicateOperator` (#1353): Mountebank and older engines admitted it, so it
+/// is an admission check, never a decode refusal.
+const BAD_GENERATOR_OPERATOR: &str = r#"{
+    "responses": [{ "proxy": { "to": "http://localhost:1",
+        "predicateGenerators": [{ "matches": { "path": true }, "predicateOperator": "bogus" }] } }]
+}"#;
+
 const GOOD: &str = r#"{
     "predicates": [{ "equals": { "path": "/ok" } }],
     "responses": [{ "is": { "statusCode": 200, "body": "ok" } }]
@@ -126,6 +133,10 @@ fn each_admission_refusal_is_skipped_on_replay_and_reported_by_admission_check()
             "`_rift.conditional.lastModified` must be \"load\" or an HTTP-date",
         ),
         (BAD_PROXY_MODE, "unknown proxy mode `bogus`"),
+        (
+            BAD_GENERATOR_OPERATOR,
+            "predicateGenerators[0].predicateOperator `bogus` is not a predicate operator",
+        ),
         (
             BAD_COPY_NS,
             "`copy` behavior `xpath` `using.ns` must be an object mapping each prefix to a namespace URI string",
