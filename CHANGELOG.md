@@ -52,6 +52,21 @@ record.
 
 ### Fixed
 
+- **A proxy recording is placed by the proxy stub that answered, as in Mountebank** (#1389).
+  - **Placement.** Rift placed it relative to the first stub proxying to the same upstream. With
+    two proxy stubs, or a stub between them, a `proxyOnce` recording could land in front of the
+    wrong proxy and answer requests meant for another stub.
+  - **`proxyAlways` order.** A `proxyAlways` recording with no equal-predicate stub after the proxy
+    now goes at the **end** of the stub list instead of right behind the proxy. Exported and
+    printed imposters list recordings in the order they were made.
+  - **Empty predicates.** `proxyAlways` recordings with no predicates (`addWaitBehavior` or
+    `addDecorateBehavior` without `predicateGenerators`) merge into one stub instead of stacking a
+    catch-all stub per request. As in Mountebank, that can be a predicate-less stub you wrote after
+    the proxy.
+  - **Embedders.** `Imposter::insert_or_append_proxy_stub` takes the answering stub's slot as a
+    new last argument (`None` keeps the old first-proxy anchor), and `StubPublication` gains
+    `anchor_index`.
+
 - **Each proxy stub records and replays by its own `mode`** (#1387). The proxy store took its mode
   from the first proxy stub when the imposter was built, so a `proxyOnce` stub added later (by
   `POST`/`PUT .../stubs`) to an imposter created without a proxy never gated, and a `proxyAlways`

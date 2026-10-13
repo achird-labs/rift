@@ -1538,7 +1538,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        imp.insert_or_append_proxy_stub(rec, "http://upstream", "proxyAlways");
+        imp.insert_or_append_proxy_stub(rec, "http://upstream", "proxyAlways", None);
 
         let rec_index = imp
             .snapshot()
@@ -1555,7 +1555,7 @@ mod tests {
             "responses": [{ "is": { "statusCode": 200, "body": "R3" } }]
         }))
         .unwrap();
-        imp.insert_or_append_proxy_stub(rec2, "http://upstream", "proxyAlways");
+        imp.insert_or_append_proxy_stub(rec2, "http://upstream", "proxyAlways", None);
 
         assert_eq!(
             imp.snapshot().stubs()[rec_index].slot,

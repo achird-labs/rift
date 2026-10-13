@@ -569,6 +569,207 @@
           "port": 4545
         }
       ]
+    },
+    {
+      "name": "#1389 proxyOnce: a recording goes in front of the proxy stub that answered",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "up"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "path": true
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "method": "GET",
+                      "path": "/a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "authored"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "path": true
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/a"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/a"
+        }
+      ]
+    },
+    {
+      "name": "#1389 proxyAlways: a recording merges after the proxy that answered, else goes last",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "up"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyAlways",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "path": true
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/z"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "authored"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/a"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/a"
+        }
+      ]
     }
   ]
 }

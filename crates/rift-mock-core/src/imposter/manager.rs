@@ -6311,6 +6311,9 @@ mod tests {
         // Issue #910: complete-after-stub + store-owned stub publication
         // =====================================================================
 
+        /// What `complete` saw: port, placement, `proxy_to`, the stub and the anchor index.
+        type Completion = (u16, StubPlacement, String, Stub, Option<usize>);
+
         /// A store that settles claims through `complete` and can own stub publication.
         /// `publishes` drives `publishes_stubs()`; `fail_complete` injects the publication-failed
         /// path a distributed backend takes when it cannot commit the stub.
@@ -6319,7 +6322,7 @@ mod tests {
             publishes: bool,
             fail_complete: bool,
             /// `(port, placement, proxy_to, stub)` for every completion the engine handed over.
-            completions: Mutex<Vec<(u16, StubPlacement, String, Stub)>>,
+            completions: Mutex<Vec<Completion>>,
             /// Recordings settled through the pre-#910 `record` path (no stub was generated).
             records: Mutex<Vec<u16>>,
             releases: Mutex<Vec<u16>>,
@@ -6381,6 +6384,7 @@ mod tests {
                     publication.placement,
                     publication.proxy_to.to_string(),
                     publication.stub.clone(),
+                    publication.anchor_index,
                 ));
                 if self.fail_complete {
                     return Err(ProxyStoreError::Unavailable("publication failed".into()));
@@ -6497,6 +6501,49 @@ mod tests {
                 "the engine still inserts the recorded stub next to the proxy stub"
             );
 
+            manager.delete_all().await;
+        }
+
+        // Issue #1389: a publisher learns which stub answered, by index, so it can place the
+        // recording by that stub rather than by the first proxy to the same upstream.
+        #[tokio::test]
+        async fn completion_names_the_index_of_the_stub_that_answered() {
+            raise_fd_limit();
+            let spy = Arc::new(PublishingProxyStore::new(true, false));
+            let manager = ImposterManager::new()
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+            let up = upstream(&manager).await;
+            let to = format!("http://127.0.0.1:{up}");
+            let proxy = |path: &str| {
+                json!({
+                    "predicates": [{ "equals": { "path": path } }],
+                    "responses": [{ "proxy": {
+                        "to": to,
+                        "mode": "proxyOnce",
+                        "predicateGenerators": [{ "matches": { "path": true } }]
+                    } }]
+                })
+            };
+            let port = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http",
+                    "stubs": [proxy("/first"), { "responses": [{ "is": { "body": "x" } }],
+                              "predicates": [{ "equals": { "path": "/other" } }] }, proxy("/third")]
+                })))
+                .await
+                .expect("create imposter");
+
+            let _ = reqwest::get(format!("http://127.0.0.1:{port}/third")).await;
+
+            {
+                let completions = spy.completions.lock();
+                assert_eq!(completions.len(), 1);
+                assert_eq!(
+                    completions[0].4,
+                    Some(2),
+                    "the third stub answered, not the first proxy to the same upstream"
+                );
+            }
             manager.delete_all().await;
         }
 

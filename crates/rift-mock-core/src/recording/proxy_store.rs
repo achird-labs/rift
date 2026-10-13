@@ -114,11 +114,13 @@ pub type Result<T> = std::result::Result<T, ProxyStoreError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StubPlacement {
-    /// `proxyOnce`: insert **before** the proxy stub, so the recording matches first next time.
+    /// `proxyOnce`: insert **before** the proxy stub that answered, so the recording matches first
+    /// next time.
     BeforeProxy,
-    /// `proxyAlways`: place **after** the proxy stub — so the proxy keeps running and recording —
-    /// merging the responses into an existing stub whose predicates are structurally equal and
-    /// non-empty (issue #611) instead of appending a duplicate.
+    /// `proxyAlways`: merge the responses into the first stub **after** the proxy stub that
+    /// answered whose predicates are structurally equal (issue #611; an empty list included), else
+    /// **append at the end** of the list (issue #1389), as Mountebank does. The proxy keeps running
+    /// and recording either way.
     AfterProxyMerging,
 }
 
@@ -135,11 +137,18 @@ pub enum StubPlacement {
 pub struct StubPublication<'a> {
     /// The generated stub, exactly as the engine would insert it.
     pub stub: &'a Stub,
-    /// Where the stub belongs relative to the proxy stub named by [`proxy_to`](Self::proxy_to).
+    /// Where the stub belongs relative to the anchor: the stub at
+    /// [`anchor_index`](Self::anchor_index), else the first stub proxying to
+    /// [`proxy_to`](Self::proxy_to).
     pub placement: StubPlacement,
-    /// `proxy.to` of the proxy stub this recording came from — the anchor
-    /// [`placement`](Self::placement) is relative to.
+    /// `proxy.to` of the proxy stub this recording came from. Locates the anchor when
+    /// [`anchor_index`](Self::anchor_index) is `None`: the first stub proxying to it.
     pub proxy_to: &'a str,
+    /// Index of the stub that answered the request when the recording was made — the anchor
+    /// [`placement`](Self::placement) is relative to (issue #1389). `None` when that stub is no
+    /// longer in the list, or when no stub answered. Read from the stub list before the stub is
+    /// published, so a publisher applying recordings out of order may find it off by one.
+    pub anchor_index: Option<usize>,
 }
 
 /// Pluggable proxy-recording backend, keyed by imposter port.
@@ -897,6 +906,7 @@ mod tests {
             stub: &stub,
             placement: StubPlacement::BeforeProxy,
             proxy_to: "http://upstream",
+            anchor_index: None,
         };
 
         let dynamic: &dyn ProxyRecordingStore = &store;
@@ -931,6 +941,7 @@ mod tests {
             stub: &stub,
             placement: StubPlacement::BeforeProxy,
             proxy_to: "http://upstream",
+            anchor_index: None,
         };
 
         let t = claim_token(store.try_claim(1, &s).unwrap());

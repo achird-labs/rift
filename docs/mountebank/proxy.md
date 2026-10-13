@@ -90,6 +90,20 @@ Forward the first request, then replay the recorded response:
 
 Use when: Recording a fixed set of responses for offline testing.
 
+### Where recordings go
+
+As in Mountebank, a recorded stub is placed relative to the proxy stub that answered the request:
+
+- **`proxyOnce`**: in front of that proxy stub, so the recording answers the next matching request.
+- **`proxyAlways`**: its response is added to the first stub after that proxy stub with the same
+  predicates. With none, the recording goes at the **end** of the stub list, behind any stub
+  written after the proxy. It answers only once the proxy stops matching, for example after
+  `mb replay` or when the proxy stub is removed.
+
+A `proxyAlways` recording made without `predicateGenerators` (with `addWaitBehavior` or
+`addDecorateBehavior`) has no predicates. It therefore merges into the first stub after the proxy
+that has none, including a catch-all stub you wrote, as in Mountebank.
+
 ### proxyTransparent
 
 Forward without recording (pure reverse proxy):

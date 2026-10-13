@@ -43,10 +43,6 @@ impl Kind {
         }
     }
 
-    fn is_proxy(&self) -> bool {
-        matches!(self, Kind::Authored(Spec::Proxy { .. }))
-    }
-
     /// What the engine's stub list should show for this stub; see `fingerprint` in `main.rs`.
     pub fn fingerprint(&self, upstream: &str) -> String {
         match self {
@@ -216,7 +212,7 @@ impl Model {
                 if mode == Mode::Once {
                     self.claims.insert(key, body.clone());
                 }
-                self.record(r, mode, gen_body, body.clone());
+                self.record(i, r, mode, gen_body, body.clone());
                 Served::plain(body, true)
             }
         }
@@ -229,29 +225,23 @@ impl Model {
         body
     }
 
-    /// Record a forwarded response next to a proxy stub. Known divergence (#1389): placement is
-    /// relative to the first stub proxying to this upstream, and a `proxyAlways` recording with no
-    /// equal-predicate stub goes right behind it; Mountebank places it by the stub that answered and
-    /// appends the `proxyAlways` one at the end of the list.
-    fn record(&mut self, r: &Shape, mode: Mode, gen_body: bool, response: String) {
+    /// Record a forwarded response next to the proxy stub at `anchor`, the one that answered: a
+    /// `proxyOnce` recording goes in front of it; a `proxyAlways` one merges into the first stub
+    /// after it recorded with the same predicates, else goes at the end of the list.
+    fn record(&mut self, anchor: usize, r: &Shape, mode: Mode, gen_body: bool, response: String) {
         let path = r.path;
         let body = gen_body.then_some(r.body);
-        let proxy = self
-            .stubs
-            .iter()
-            .position(|s| s.kind.is_proxy())
-            .unwrap_or(self.stubs.len());
+        let recorded = |responses| {
+            Slot::new(Kind::Recorded {
+                path,
+                body,
+                responses,
+            })
+        };
         match mode {
-            Mode::Once => self.stubs.insert(
-                proxy,
-                Slot::new(Kind::Recorded {
-                    path,
-                    body,
-                    responses: vec![response],
-                }),
-            ),
+            Mode::Once => self.stubs.insert(anchor, recorded(vec![response])),
             Mode::Always => {
-                let existing = self.stubs.iter_mut().skip(proxy + 1).find(|s| {
+                let existing = self.stubs.iter_mut().skip(anchor + 1).find(|s| {
                     matches!(&s.kind, Kind::Recorded { path: p, body: b, .. } if *p == path && *b == body)
                 });
                 match existing {
@@ -259,17 +249,7 @@ impl Model {
                         kind: Kind::Recorded { responses, .. },
                         ..
                     }) => responses.push(response),
-                    _ => {
-                        let at = (proxy + 1).min(self.stubs.len());
-                        self.stubs.insert(
-                            at,
-                            Slot::new(Kind::Recorded {
-                                path,
-                                body,
-                                responses: vec![response],
-                            }),
-                        );
-                    }
+                    _ => self.stubs.push(recorded(vec![response])),
                 }
             }
         }
