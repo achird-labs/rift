@@ -919,15 +919,10 @@ impl Imposter {
         // call errored.
         let start = Instant::now();
         let forwarded: anyhow::Result<ForwardedResponse> = async {
-            let mut request = match method.to_uppercase().as_str() {
-                "GET" => client.get(&target_url),
-                "POST" => client.post(&target_url),
-                "PUT" => client.put(&target_url),
-                "DELETE" => client.delete(&target_url),
-                "PATCH" => client.patch(&target_url),
-                "HEAD" => client.head(&target_url),
-                _ => client.get(&target_url),
-            };
+            // Forward the method verbatim, as Mountebank does (issue #1380).
+            let forwarded_method = reqwest::Method::from_bytes(method.as_bytes())
+                .with_context(|| format!("invalid request method `{method}`"))?;
+            let mut request = client.request(forwarded_method, &target_url);
 
             // Copy headers (excluding host). One `.header()` call PER VALUE, in send order
             // (issue #1025) — reqwest appends rather than replacing on a repeated call, so a

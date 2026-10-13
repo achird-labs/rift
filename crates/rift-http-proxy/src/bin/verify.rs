@@ -1939,15 +1939,25 @@ async fn execute_test(
     }
 
     // Build request
-    let mut request = match test_case.method.to_uppercase().as_str() {
-        "GET" => client.get(&url),
-        "POST" => client.post(&url),
-        "PUT" => client.put(&url),
-        "DELETE" => client.delete(&url),
-        "PATCH" => client.patch(&url),
-        "HEAD" => client.head(&url),
-        _ => client.get(&url),
+    // Any method a stub predicates on, not a fixed list with a GET fallback (issue #1380). The
+    // predicate matches case-insensitively by default, so `options` in a stub means OPTIONS.
+    let method = match reqwest::Method::from_bytes(test_case.method.to_uppercase().as_bytes()) {
+        Ok(method) => method,
+        Err(e) => {
+            let error_msg = format!("invalid request method `{}`: {e}", test_case.method);
+            return TestResult {
+                test_case: test_case.clone(),
+                success: false,
+                actual_status: None,
+                actual_headers: None,
+                actual_body: None,
+                error: Some(error_msg.clone()),
+                duration_ms: start.elapsed().as_millis(),
+                failure_reasons: vec![FailureReason::RequestError(error_msg)],
+            };
+        }
     };
+    let mut request = client.request(method, &url);
 
     // Add headers
     for (name, value) in &test_case.headers {

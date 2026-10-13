@@ -522,14 +522,10 @@ impl<'a> DynamicVerifier<'a> {
         request: &VerifyRequest,
     ) -> Result<(u16, String), String> {
         let url = format!("http://127.0.0.1:{port}{}", request.path);
-        let mut req = match request.method.to_uppercase().as_str() {
-            "POST" => self.client.post(&url),
-            "PUT" => self.client.put(&url),
-            "DELETE" => self.client.delete(&url),
-            "PATCH" => self.client.patch(&url),
-            "HEAD" => self.client.head(&url),
-            _ => self.client.get(&url),
-        };
+        // Any method, not a fixed list with a GET fallback (issue #1380).
+        let method = reqwest::Method::from_bytes(request.method.to_uppercase().as_bytes())
+            .map_err(|e| format!("invalid request method `{}`: {e}", request.method))?;
+        let mut req = self.client.request(method, &url);
         for (k, v) in &request.headers {
             req = req.header(k, v);
         }

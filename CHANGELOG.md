@@ -52,14 +52,10 @@ record.
 
 ### Fixed
 
-- **Deleting a `proxyOnce` recording records the identity again** (#1386). A recording lived both
-  as the stub in front of the proxy and as a claim in the proxy store. Deleting the stub, or
-  replacing the stubs without it (`DELETE …/stubs/:i`, `PUT …/stubs`, a reload), left the claim, so
-  the next request for that identity got the old upstream response replayed: never forwarded, never
-  recorded again, and the stub never came back. The claim now goes with its stub, as in Mountebank,
-  where the stub is the recording. Embedders: `ProxyRecordingStore` gains
-  `forget_recorded(port, sig)` (default no-op), and `Imposter::insert_or_append_proxy_stub` takes
-  the settled claim's signature as a new last argument.
+- **A proxy forwards the request's own method** (#1380). OPTIONS, TRACE and extension methods such
+  as PROPFIND reached the upstream as GET, and the GET answer was recorded under the original
+  method. The method is now forwarded as sent, as Mountebank does; a lowercase extension method is
+  no longer upcased. `rift-verify` likewise probed such stubs with GET and reported a mismatch.
 
 - **`defaultResponse.statusCode` accepts a numeric string** (#1377). `"404"` was refused with a 400
   ("expected u16"); it now reads like `is.statusCode` and Mountebank do. It still prints as a
@@ -154,6 +150,15 @@ record.
   node of a cluster is upgraded an old node keys a new node's claim the old way. Predicates are now
   generated before the claim, so a `predicateGenerators.inject` script no longer runs while the
   claim is held, but does run before a replay from the store.
+
+- **Deleting a `proxyOnce` recording records the identity again** (#1386). A recording lived both
+  as the stub in front of the proxy and as a claim in the proxy store. Deleting the stub, or
+  replacing the stubs without it (`DELETE …/stubs/:i`, `PUT …/stubs`, a reload), left the claim, so
+  the next request for that identity got the old upstream response replayed: never forwarded, never
+  recorded again, and the stub never came back. The claim now goes with its stub, as in Mountebank,
+  where the stub is the recording. Embedders: `ProxyRecordingStore` gains
+  `forget_recorded(port, sig)` (default no-op), and `Imposter::insert_or_append_proxy_stub` takes
+  the settled claim's signature as a new last argument.
 
 ### Changed
 
