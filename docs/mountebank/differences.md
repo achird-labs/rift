@@ -54,6 +54,14 @@ shows in two places that are not scripts: a header-name predicate with `caseSens
 `keyCaseSensitive: true`) compares against the Title-Cased name, and `savedRequests` record the
 Title-Cased name.
 
+## `decorate` and a response without headers
+
+`decorate` always receives a `headers` object on the response, empty when the response has none; in Mountebank `response.headers` is `undefined` there, so a decorate that writes a header fails. Rift accepts that script, so `config.response.headers['X-D'] = 'y'` on an `is` with no headers
+adds the header. More generally, in Mountebank 2.9.1 any decorate that throws answers `500` with a
+JavaScript stack trace in the body (its error handler fails while logging the request). Rift serves
+the undecorated response with `x-rift-decorate-error: true` instead, and `500` only under
+`strictBehaviors` — see [Behaviors](behaviors.md).
+
 ## Elsewhere in these docs
 
 Each of these is described where the feature is:
