@@ -1450,291 +1450,355 @@
   },
   {
     "case": "proxy: Basic proxy forwards requests to backend",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/stored#0",
     "location": "stored[4545]/stubs/0/responses/0/is",
     "mountebank": "{\"_mode\":\"text\",\"body\":\"backend response\",\"headers\":{},\"statusCode\":200}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Basic proxy forwards requests to backend",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/stored#1",
     "location": "stored[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Basic proxy forwards requests to backend",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/stored#2",
     "location": "stored[4545]/stubs/1",
     "mountebank": "{\"responses\":[{\"proxy\":{\"to\":\"http://localhost:4546\"}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Basic proxy forwards requests to backend",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/replayable#0",
     "location": "replayable[4545]/stubs/0/responses/0/is",
     "mountebank": "{\"_mode\":\"text\",\"body\":\"backend response\",\"headers\":{},\"statusCode\":200}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Basic proxy forwards requests to backend",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/replayable#1",
     "location": "replayable[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Basic proxy forwards requests to backend",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/replayable#2",
     "location": "replayable[4545]/stubs/1",
     "mountebank": "{\"responses\":[{\"proxy\":{\"to\":\"http://localhost:4546\"}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Proxy records requests when recordRequests enabled",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxy-records-requests-w/stored#0",
     "location": "stored[4545]/stubs/0/responses/0/is",
     "mountebank": "{\"_mode\":\"text\",\"body\":\"backend response\",\"headers\":{},\"statusCode\":200}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Proxy records requests when recordRequests enabled",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxy-records-requests-w/stored#1",
     "location": "stored[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Proxy records requests when recordRequests enabled",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxy-records-requests-w/stored#2",
     "location": "stored[4545]/stubs/1",
     "mountebank": "{\"responses\":[{\"proxy\":{\"to\":\"http://localhost:4546\"}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Proxy records requests when recordRequests enabled",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxy-records-requests-w/replayable#0",
     "location": "replayable[4545]/stubs/0/responses/0/is",
     "mountebank": "{\"_mode\":\"text\",\"body\":\"backend response\",\"headers\":{},\"statusCode\":200}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Proxy records requests when recordRequests enabled",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxy-records-requests-w/replayable#1",
     "location": "replayable[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Proxy records requests when recordRequests enabled",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxy-records-requests-w/replayable#2",
     "location": "replayable[4545]/stubs/1",
     "mountebank": "{\"responses\":[{\"proxy\":{\"to\":\"http://localhost:4546\"}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: proxyOnce mode saves response and replays",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/stored#0",
     "location": "stored[4545]/stubs/0/responses/0/is",
     "mountebank": "{\"_mode\":\"text\",\"body\":\"tracked\",\"headers\":{},\"statusCode\":200}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: proxyOnce mode saves response and replays",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/stored#1",
     "location": "stored[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: proxyOnce mode saves response and replays",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/stored#2",
     "location": "stored[4545]/stubs/1",
     "mountebank": "{\"responses\":[{\"proxy\":{\"mode\":\"proxyOnce\",\"to\":\"http://localhost:4546\"}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: proxyOnce mode saves response and replays",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/replayable#0",
     "location": "replayable[4545]/stubs/0/responses/0/is",
     "mountebank": "{\"_mode\":\"text\",\"body\":\"tracked\",\"headers\":{},\"statusCode\":200}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: proxyOnce mode saves response and replays",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/replayable#1",
     "location": "replayable[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: proxyOnce mode saves response and replays",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/replayable#2",
     "location": "replayable[4545]/stubs/1",
     "mountebank": "{\"responses\":[{\"proxy\":{\"mode\":\"proxyOnce\",\"to\":\"http://localhost:4546\"}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: injectHeaders adds headers to proxied request",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/stored#0",
     "location": "stored[4545]/stubs/0/responses/0/is",
     "mountebank": "{\"_mode\":\"text\",\"body\":\"echo\",\"headers\":{},\"statusCode\":200}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: injectHeaders adds headers to proxied request",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/stored#1",
     "location": "stored[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: injectHeaders adds headers to proxied request",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/stored#2",
     "location": "stored[4545]/stubs/1",
     "mountebank": "{\"responses\":[{\"proxy\":{\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"to\":\"http://localhost:4546\"}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: injectHeaders adds headers to proxied request",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/replayable#0",
     "location": "replayable[4545]/stubs/0/responses/0/is",
     "mountebank": "{\"_mode\":\"text\",\"body\":\"echo\",\"headers\":{},\"statusCode\":200}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: injectHeaders adds headers to proxied request",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/replayable#1",
     "location": "replayable[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: injectHeaders adds headers to proxied request",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/replayable#2",
     "location": "replayable[4545]/stubs/1",
     "mountebank": "{\"responses\":[{\"proxy\":{\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"to\":\"http://localhost:4546\"}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: proxyAlways mode always forwards to backend",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxyalways-mode-always-/stored#0",
     "location": "stored[4545]/stubs/1",
     "mountebank": "{\"predicates\":[],\"responses\":[{\"is\":{\"_mode\":\"text\",\"body\":\"tracked\",\"headers\":{},\"statusCode\":200}},{\"is\":{\"_mode\":\"text\",\"body\":\"tracked\",\"headers\":{},\"statusCode\":200}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: proxyAlways mode always forwards to backend",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/proxyalways-mode-always-/replayable#0",
     "location": "replayable[4545]/stubs/1",
     "mountebank": "{\"predicates\":[],\"responses\":[{\"is\":{\"_mode\":\"text\",\"body\":\"tracked\",\"headers\":{},\"statusCode\":200}},{\"is\":{\"_mode\":\"text\",\"body\":\"tracked\",\"headers\":{},\"statusCode\":200}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Stubs take priority over proxy",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/stubs-take-priority-over/stored#0",
     "location": "stored[4545]/stubs/1/responses/0/is",
     "mountebank": "{\"_mode\":\"text\",\"body\":\"from backend\",\"headers\":{},\"statusCode\":200}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Stubs take priority over proxy",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/stubs-take-priority-over/stored#1",
     "location": "stored[4545]/stubs/1/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Stubs take priority over proxy",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/stubs-take-priority-over/stored#2",
     "location": "stored[4545]/stubs/2",
     "mountebank": "{\"responses\":[{\"proxy\":{\"to\":\"http://localhost:4546\"}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Stubs take priority over proxy",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/stubs-take-priority-over/replayable#0",
     "location": "replayable[4545]/stubs/1/responses/0/is",
     "mountebank": "{\"_mode\":\"text\",\"body\":\"from backend\",\"headers\":{},\"statusCode\":200}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Stubs take priority over proxy",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/stubs-take-priority-over/replayable#1",
     "location": "replayable[4545]/stubs/1/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "proxy: Stubs take priority over proxy",
-    "kind": "known-bug",
-    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "kind": "documented",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways)",
     "id": "proxy-recording-not-a-stub/stubs-take-priority-over/replayable#2",
     "location": "replayable[4545]/stubs/2",
     "mountebank": "{\"responses\":[{\"proxy\":{\"to\":\"http://localhost:4546\"}}]}",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
   {
     "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
