@@ -1346,21 +1346,25 @@
   },
   {
     "case": "predicates: Inject predicate accessing multiple request fields",
-    "kind": "known-bug",
-    "reason": "inject sees request header names Title-Cased (X-Custom); Mountebank passes them as the client sent them (reqwest sends x-custom), so the predicate matches only in Rift (#1368)",
+    "kind": "documented",
+    "reason": "a script finds a request header under any spelling (X-Custom); Mountebank passes them as the client sent them (reqwest sends x-custom), so the predicate matches only in Rift",
     "id": "inject-header-names-title-cased#0",
     "location": "step[1].body",
     "mountebank": "",
-    "rift": "multi-field match"
+    "rift": "multi-field match",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift cannot see the spelling a client used for a header name: an imposter sees names Title-Cased, and an inject or decorate script finds a header under any spelling."
   },
   {
     "id": "inject-header-names-title-cased/targeted",
     "case": "targeted: an inject function reads request headers by the name the client sent",
     "location": "step[1].body",
-    "kind": "known-bug",
-    "reason": "inject sees request header names Title-Cased; Mountebank passes them as sent (#1368)",
+    "kind": "documented",
+    "reason": "a script finds a request header under any spelling; Mountebank passes them as sent",
     "mountebank": "lower=abc title=undefined",
-    "rift": "lower=undefined title=abc"
+    "rift": "lower=abc title=abc",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift cannot see the spelling a client used for a header name: an imposter sees names Title-Cased, and an inject or decorate script finds a header under any spelling."
   },
   {
     "id": "key-case-sensitive-true",

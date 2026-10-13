@@ -52,6 +52,12 @@ record.
 
 ### Fixed
 
+- **`inject`, `decorate` and predicate scripts find a request header under any spelling** (#1368).
+  `request.headers` stays Title-Cased when enumerated, but `headers['content-type']` now finds
+  `Content-Type`. Mountebank passes names as the client sent them, which Rift's HTTP stack cannot
+  see; see [Differences from Mountebank](docs/mountebank/differences.md#request-header-names). Docs
+  that claimed names arrive as sent, or lowercased, are corrected.
+
 - **A request without a body is `""`, as in Mountebank** (#1365). It is now recorded with
   `"body": ""` (the key was absent), and inject, decorate, predicate-inject and
   predicateGenerator-inject scripts see `request.body === ""` (was `undefined`); `shellTransform`'s

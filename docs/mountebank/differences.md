@@ -44,6 +44,16 @@ Error envelopes carry `code` (the HTTP status), `type` and `message` — see the
 does not add Mountebank's `source`, `name` or `stack` fields, and its messages are worded
 differently.
 
+## Request header names
+
+Rift cannot see the spelling a client used for a header name: an imposter sees names Title-Cased, and an inject or decorate script finds a header under any spelling. Mountebank passes scripts the names exactly as the client wrote them, so
+`request.headers['content-type']` is `undefined` there when the client sent `Content-Type`, and
+the reverse. In Rift both spellings find the header; `Object.keys(request.headers)` and
+`JSON.stringify(request.headers)` show the Title-Cased names (`Content-Type`). The same root cause
+shows in two places that are not scripts: a header-name predicate with `caseSensitive: true` (or
+`keyCaseSensitive: true`) compares against the Title-Cased name, and `savedRequests` record the
+Title-Cased name.
+
 ## Elsewhere in these docs
 
 Each of these is described where the feature is:
