@@ -34,7 +34,8 @@ pub fn apply_shell_transform(
         "path": request.path,
         "query": request.query,
         "headers": request.headers,
-        "body": request.body,
+        // `""` for a request without a body, as Mountebank's `JSON.stringify(request)` (#1365).
+        "body": request.body.as_deref().unwrap_or(""),
     });
 
     // Serialize response to JSON for MB_RESPONSE
@@ -236,6 +237,23 @@ mod tests {
             output.contains("GET") || output.contains("method"),
             "MB_REQUEST should contain request method"
         );
+    }
+
+    /// Issue #1365: `MB_REQUEST` carries `"body": ""` for a request without a body, as Mountebank's
+    /// `JSON.stringify(request)` does, not `null`.
+    #[test]
+    fn mb_request_body_is_empty_string_when_absent() {
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/nobody".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+        };
+        let out = apply_shell_transform("printf '%s' \"$MB_REQUEST\"", &request, "x", 200)
+            .expect("shell transform runs");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("MB_REQUEST is JSON");
+        assert_eq!(parsed["body"], serde_json::json!(""));
     }
 
     #[test]

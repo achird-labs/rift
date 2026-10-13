@@ -305,15 +305,6 @@
     "rift": "\"\""
   },
   {
-    "id": "recorded-request-empty-body",
-    "case": "*",
-    "location": "*/requests/*/body",
-    "kind": "known-bug",
-    "reason": "a recorded request without a body has no `body`; Mountebank records `\"\"` (#1365)",
-    "mountebank": "\"\"",
-    "rift": "(absent)"
-  },
-  {
     "id": "recorded-response-text-mode",
     "case": "*",
     "location": "*/is/_mode",
@@ -2189,42 +2180,6 @@
     "location": "replayable[4545]/stubs/0/predicates/0/contains/requestFrom",
     "mountebankMatches": "\"(?:::ffff:)?127\\.0\\.0\\.1:\\d{4,5}\"",
     "rift": "(absent)"
-  },
-  {
-    "case": "targeted: predicateGenerator except strips the varying part so the second id replays the recording (#1329)",
-    "kind": "known-bug",
-    "reason": "an inject sees request.body undefined for a request without a body; Mountebank passes \"\" (the upstream here echoes it) (#1365)",
-    "id": "inject-empty-body-undefined#0",
-    "location": "step[2].body",
-    "mountebank": "upstream saw GET /users/1 ",
-    "rift": "upstream saw GET /users/1 undefined"
-  },
-  {
-    "case": "targeted: predicateGenerator except strips the varying part so the second id replays the recording (#1329)",
-    "kind": "known-bug",
-    "reason": "the recorded upstream answer carries the same undefined (#1365)",
-    "id": "inject-empty-body-undefined/step[3].body#0",
-    "location": "step[3].body",
-    "mountebank": "upstream saw GET /users/1 ",
-    "rift": "upstream saw GET /users/1 undefined"
-  },
-  {
-    "case": "targeted: predicateGenerator except strips the varying part so the second id replays the recording (#1329)",
-    "kind": "known-bug",
-    "reason": "the recorded upstream answer carries the same undefined (#1365)",
-    "id": "inject-empty-body-undefined/stored[4545]/stubs/0/responses/0/is/body#0",
-    "location": "stored[4545]/stubs/0/responses/0/is/body",
-    "mountebank": "\"upstream saw GET /users/1 \"",
-    "rift": "\"upstream saw GET /users/1 undefined\""
-  },
-  {
-    "case": "targeted: predicateGenerator except strips the varying part so the second id replays the recording (#1329)",
-    "kind": "known-bug",
-    "reason": "the recorded upstream answer carries the same undefined (#1365)",
-    "id": "inject-empty-body-undefined/replayable[4545]/stubs/0/responses/0/is/body#0",
-    "location": "replayable[4545]/stubs/0/responses/0/is/body",
-    "mountebank": "\"upstream saw GET /users/1 \"",
-    "rift": "\"upstream saw GET /users/1 undefined\""
   },
   {
     "id": "default-response-not-merged",
