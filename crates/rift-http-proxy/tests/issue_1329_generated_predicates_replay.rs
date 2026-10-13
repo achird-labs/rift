@@ -195,16 +195,18 @@ async fn proxy_always_groups_responses_per_distinct_request() {
             )
         })
         .collect();
+    // In recording order, as Mountebank keeps them: a new proxyAlways recording goes at the end
+    // of the list (issue #1389).
     assert_eq!(
         groups,
         vec![
             (
-                json!([{"deepEquals": {"method": "POST"}}, {"deepEquals": {"path": "/b"}}]),
-                1
-            ),
-            (
                 json!([{"deepEquals": {"method": "POST"}}, {"deepEquals": {"path": "/a"}}]),
                 2
+            ),
+            (
+                json!([{"deepEquals": {"method": "POST"}}, {"deepEquals": {"path": "/b"}}]),
+                1
             ),
         ]
     );

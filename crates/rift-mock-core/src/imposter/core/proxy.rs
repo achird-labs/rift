@@ -604,48 +604,43 @@ impl Imposter {
         }
     }
 
-    /// Insert or append a generated stub based on proxy mode.
+    /// Place a recorded stub next to the proxy stub that answered (issue #1389), as Mountebank
+    /// places it by `stubIndex()`:
     ///
-    /// Instead of trusting a previously-obtained stub index (which may be stale
-    /// if concurrent requests modified the stub list), this method re-locates the
-    /// proxy stub under the write lock using `proxy_to` as identifier.
+    /// - `proxyOnce`: in front of that stub, so the recording matches first next time;
+    /// - `proxyAlways`: merged into the first stub after it with equal predicates, else at the end
+    ///   of the list.
     ///
-    /// For proxyOnce: Insert new stub BEFORE the proxy stub (so it matches first next time)
-    /// For proxyAlways: Append response to existing stub AFTER proxy stub, or insert new AFTER proxy
-    pub fn insert_or_append_proxy_stub(&self, stub: Stub, proxy_to: &str, proxy_mode: &str) {
+    /// `answering` is the answering stub's slot, re-located under the write lock so an index made
+    /// stale by a concurrent edit cannot misplace the recording. When it is `None` or that stub is
+    /// gone (deleted while the request was in flight), the anchor is the first stub proxying to
+    /// `proxy_to`. With neither, a `proxyOnce` recording goes last and a `proxyAlways` one merges
+    /// from the top of the list.
+    pub fn insert_or_append_proxy_stub(
+        &self,
+        stub: Stub,
+        proxy_to: &str,
+        proxy_mode: &str,
+        answering: Option<u64>,
+    ) {
         let placement = Self::placement_for_mode(proxy_mode);
         self.mutate_stubs(|stubs| {
-            // Re-locate the proxy stub inside the write critical section to avoid stale-index races.
-            let proxy_stub_index = stubs
-                .iter()
-                .position(|s| {
-                    s.stub
-                        .responses
-                        .iter()
-                        .any(|r| matches!(r, StubResponse::Proxy { proxy, .. } if proxy.to == proxy_to))
-                })
-                .unwrap_or(stubs.len());
+            let anchor = answering
+                .and_then(|slot| stubs.iter().position(|s| s.slot == slot))
+                .or_else(|| stubs.iter().position(|s| proxies_to(&s.stub, proxy_to)));
 
             if placement == StubPlacement::AfterProxyMerging {
-                // For proxyAlways, recorded stubs go AFTER the proxy stub
-                // This ensures proxy always runs first and records each request
-
-                // Try to find existing stub with matching predicates (after the proxy stub)
-                let matching_stub_idx = stubs
+                // Structural comparison, not serialized JSON (issue #611): a predicate's operands
+                // are `HashMap`s, which serialize in iteration order. An empty list merges too, as
+                // in Mountebank: a recording made without generators has no predicates.
+                let from = anchor.map_or(0, |a| a + 1);
+                let matching = stubs
                     .iter()
-                    .map(|stub_state| &stub_state.stub)
-                    .enumerate()
-                    .skip(proxy_stub_index + 1) // Only look after the proxy stub
-                    .find(|(_, existing)| {
-                        // Structural comparison, not serialized JSON (issue #611): a predicate's
-                        // operands are `HashMap`s, which serialize in iteration order, so two
-                        // semantically equal multi-key predicate sets reliably produced different
-                        // strings and dedup appended a duplicate stub instead of merging into it.
-                        existing.predicates == stub.predicates && !existing.predicates.is_empty()
-                    })
-                    .map(|(idx, _)| idx);
+                    .skip(from)
+                    .position(|existing| existing.stub.predicates == stub.predicates)
+                    .map(|p| p + from);
 
-                if let Some(idx) = matching_stub_idx {
+                if let Some(idx) = matching {
                     // Append responses to the existing stub. States live behind `Arc` (issue #287),
                     // so rebuild the entry from a stub with the extended responses while reusing the
                     // slot's cycler + slot token.
@@ -664,17 +659,13 @@ impl Imposter {
                     return;
                 }
 
-                // No matching stub found: insert new stub AFTER the proxy stub
-                let insert_index = (proxy_stub_index + 1).min(stubs.len());
-                stubs.insert(insert_index, Arc::new(StubState::new(stub)));
+                stubs.push(Arc::new(StubState::new(stub)));
                 debug!(
-                    "Inserted generated stub at index {} after proxy (proxyAlways mode)",
-                    insert_index
+                    "Appended generated stub at index {} (proxyAlways mode)",
+                    stubs.len() - 1
                 );
             } else {
-                // For proxyOnce: insert new stub BEFORE the proxy stub
-                // This ensures the recorded stub matches first on subsequent requests
-                let index = proxy_stub_index.min(stubs.len());
+                let index = anchor.unwrap_or(stubs.len());
                 stubs.insert(index, Arc::new(StubState::new(stub)));
                 debug!(
                     "Inserted generated stub at index {} before proxy (proxyOnce mode)",
@@ -762,6 +753,9 @@ impl Imposter {
     /// transformed response, as in Mountebank's `proxyAndRecord` (issue #1189). A replay of a
     /// recording runs none of them — it was recorded transformed. A behavior that failed records
     /// nothing.
+    // The request's parts are borrowed from the handler's own locals; bundling them would only
+    // move the same eight borrows into a struct built at the two call sites.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn handle_proxy_request<SH>(
         &self,
         proxy_config: &ProxyResponse,
@@ -770,6 +764,7 @@ impl Imposter {
         headers: &HashMap<String, Vec<String>, SH>,
         body: Option<ProxyBody<'_>>,
         behaviors: Option<&BehaviorRun<'_, SH>>,
+        answering: Option<u64>,
     ) -> anyhow::Result<ProxyOutcome>
     where
         // `Clone + Send + 'static`: an inject predicateGenerator clones `headers` into a
@@ -1069,6 +1064,9 @@ impl Imposter {
                             stub: &new_stub,
                             placement: Self::placement_for_mode(mode),
                             proxy_to: &proxy_config.to,
+                            anchor_index: answering.and_then(|slot| {
+                                self.snapshot().stubs().iter().position(|s| s.slot == slot)
+                            }),
                         };
                         claim.settle(resp, Some(&publication));
                         true
@@ -1093,7 +1091,12 @@ impl Imposter {
                             uri.path()
                         );
                     } else {
-                        self.insert_or_append_proxy_stub(new_stub, &proxy_config.to, mode);
+                        self.insert_or_append_proxy_stub(
+                            new_stub,
+                            &proxy_config.to,
+                            mode,
+                            answering,
+                        );
                     }
                     debug!(
                         "Generated stub from proxy response for path {} (mode: {})",
@@ -1129,6 +1132,13 @@ impl Imposter {
             latency_ms: recorded_latency,
         }))
     }
+}
+
+/// Whether `stub` has a response proxying to `to`.
+fn proxies_to(stub: &Stub, to: &str) -> bool {
+    stub.responses
+        .iter()
+        .any(|r| matches!(r, StubResponse::Proxy { proxy, .. } if proxy.to == to))
 }
 
 #[cfg(test)]
@@ -1168,11 +1178,13 @@ mod proxy_dedup_tests {
             multi_key_stub("first"),
             "http://upstream",
             "proxyAlways",
+            None,
         );
         imposter.insert_or_append_proxy_stub(
             multi_key_stub("second"),
             "http://upstream",
             "proxyAlways",
+            None,
         );
 
         let stubs = imposter.get_stubs();
@@ -1673,7 +1685,7 @@ mod predicate_generator_shape_tests {
                 "responses": [{ "is": { "statusCode": 200, "body": body } }],
             }))
             .expect("valid stub");
-            imposter.insert_or_append_proxy_stub(stub, "http://up", "proxyAlways");
+            imposter.insert_or_append_proxy_stub(stub, "http://up", "proxyAlways", None);
         };
         record("/a", "1");
         record("/b", "2");
@@ -1691,16 +1703,237 @@ mod predicate_generator_shape_tests {
             .collect();
         assert_eq!(
             groups,
+            // In recording order: a new proxyAlways recording goes at the end (issue #1389).
             vec![
-                (
-                    json!([{ "deepEquals": { "method": "GET" } }, { "deepEquals": { "path": "/b" } }]),
-                    1
-                ),
                 (
                     json!([{ "deepEquals": { "method": "GET" } }, { "deepEquals": { "path": "/a" } }]),
                     2
                 ),
+                (
+                    json!([{ "deepEquals": { "method": "GET" } }, { "deepEquals": { "path": "/b" } }]),
+                    1
+                ),
             ]
         );
+    }
+}
+
+/// Issue #1389: a recording is placed by the proxy stub that answered (its slot), as Mountebank
+/// places it by `stubIndex()`; a `proxyAlways` one merges from after that stub, else goes last.
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn imposter(stubs: Value) -> Imposter {
+        Imposter::new(
+            serde_json::from_value(json!({ "port": 0, "protocol": "http", "stubs": stubs }))
+                .expect("valid imposter config"),
+        )
+        .expect("test imposter")
+    }
+
+    fn proxy(path: &str, mode: &str) -> Value {
+        json!({
+            "predicates": [{ "equals": { "path": path } }],
+            "responses": [{ "proxy": { "to": "http://up", "mode": mode } }],
+        })
+    }
+
+    fn is(body: &str) -> Value {
+        json!({ "responses": [{ "is": { "body": body } }] })
+    }
+
+    fn recording(path: &str, body: &str) -> Stub {
+        serde_json::from_value(json!({
+            "predicates": [{ "deepEquals": { "path": path } }],
+            "responses": [{ "is": { "statusCode": 200, "body": body } }],
+        }))
+        .expect("valid stub")
+    }
+
+    fn slot_at(imposter: &Imposter, index: usize) -> u64 {
+        imposter.snapshot().stubs()[index].slot
+    }
+
+    /// The first response body of each stub, or `proxy` for a proxy stub.
+    fn layout(imposter: &Imposter) -> Vec<String> {
+        imposter
+            .get_stubs()
+            .iter()
+            .map(|s| {
+                let v = serde_json::to_value(s).expect("serializes");
+                let bodies: Vec<String> = v["responses"]
+                    .as_array()
+                    .expect("responses")
+                    .iter()
+                    .map(|r| match r.get("proxy") {
+                        Some(_) => "proxy".to_string(),
+                        None => r["is"]["body"].as_str().expect("body").to_string(),
+                    })
+                    .collect();
+                bodies.join("+")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_proxy_once_recording_goes_in_front_of_the_proxy_that_answered() {
+        let imp = imposter(json!([
+            proxy("/b", "proxyOnce"),
+            is("authored"),
+            proxy("/a", "proxyOnce")
+        ]));
+        let answering = slot_at(&imp, 2);
+
+        imp.insert_or_append_proxy_stub(
+            recording("/a", "rec"),
+            "http://up",
+            "proxyOnce",
+            Some(answering),
+        );
+
+        assert_eq!(layout(&imp), ["proxy", "authored", "rec", "proxy"]);
+    }
+
+    #[test]
+    fn a_proxy_always_recording_is_appended_after_every_later_stub() {
+        let imp = imposter(json!([proxy("/a", "proxyAlways"), is("authored")]));
+        let answering = slot_at(&imp, 0);
+
+        imp.insert_or_append_proxy_stub(
+            recording("/a", "rec"),
+            "http://up",
+            "proxyAlways",
+            Some(answering),
+        );
+
+        assert_eq!(layout(&imp), ["proxy", "authored", "rec"]);
+    }
+
+    // Mountebank searches for a merge target from the answering stub on, never before it.
+    #[test]
+    fn a_proxy_always_recording_merges_only_into_a_stub_after_the_proxy_that_answered() {
+        let imp = imposter(json!([
+            proxy("/b", "proxyAlways"),
+            proxy("/a", "proxyAlways")
+        ]));
+        imp.insert_or_append_proxy_stub(
+            recording("/a", "early"),
+            "http://up",
+            "proxyAlways",
+            Some(slot_at(&imp, 0)),
+        );
+        assert_eq!(layout(&imp), ["proxy", "proxy", "early"]);
+
+        // The second proxy answers: the recording after it merges.
+        imp.insert_or_append_proxy_stub(
+            recording("/a", "second"),
+            "http://up",
+            "proxyAlways",
+            Some(slot_at(&imp, 1)),
+        );
+        assert_eq!(layout(&imp), ["proxy", "proxy", "early+second"]);
+    }
+
+    #[test]
+    fn a_proxy_always_recording_does_not_merge_into_an_equal_stub_ahead_of_the_proxy() {
+        let imp = imposter(json!([
+            { "predicates": [{ "deepEquals": { "path": "/a" } }], "responses": [{ "is": { "body": "ahead" } }] },
+            proxy("/a", "proxyAlways"),
+        ]));
+        let answering = slot_at(&imp, 1);
+
+        imp.insert_or_append_proxy_stub(
+            recording("/a", "rec"),
+            "http://up",
+            "proxyAlways",
+            Some(answering),
+        );
+
+        assert_eq!(layout(&imp), ["ahead", "proxy", "rec"]);
+    }
+
+    // `addWaitBehavior` / `addDecorateBehavior` without generators record `predicates: []`;
+    // Mountebank merges every such response into one stub instead of stacking catch-alls.
+    #[test]
+    fn proxy_always_recordings_with_no_predicates_merge_into_one_stub() {
+        let imp = imposter(json!([proxy("/a", "proxyAlways")]));
+        let answering = slot_at(&imp, 0);
+        for body in ["1", "2", "3"] {
+            let stub: Stub = serde_json::from_value(json!({
+                "predicates": [],
+                "responses": [{ "is": { "statusCode": 200, "body": body } }],
+            }))
+            .expect("valid stub");
+            imp.insert_or_append_proxy_stub(stub, "http://up", "proxyAlways", Some(answering));
+        }
+
+        assert_eq!(layout(&imp), ["proxy", "1+2+3"]);
+    }
+
+    // The answering stub was deleted while its request was in flight: fall back to the first
+    // stub proxying to the same upstream.
+    #[test]
+    fn a_vanished_anchor_falls_back_to_the_first_proxy_to_the_upstream() {
+        let imp = imposter(json!([
+            is("authored"),
+            proxy("/b", "proxyOnce"),
+            proxy("/a", "proxyOnce")
+        ]));
+        let answering = slot_at(&imp, 2);
+        imp.delete_stub(2).expect("delete");
+
+        imp.insert_or_append_proxy_stub(
+            recording("/a", "rec"),
+            "http://up",
+            "proxyOnce",
+            Some(answering),
+        );
+
+        assert_eq!(layout(&imp), ["authored", "rec", "proxy"]);
+    }
+
+    // proxyAlways with a vanished anchor: the merge search runs after the first proxy to the
+    // upstream, and with nothing equal there the recording goes last.
+    #[test]
+    fn a_vanished_proxy_always_anchor_merges_after_the_first_proxy_to_the_upstream() {
+        let imp = imposter(json!([
+            proxy("/b", "proxyAlways"),
+            proxy("/a", "proxyAlways")
+        ]));
+        let answering = slot_at(&imp, 1);
+        imp.insert_or_append_proxy_stub(
+            recording("/a", "first"),
+            "http://up",
+            "proxyAlways",
+            Some(answering),
+        );
+        imp.delete_stub(1).expect("delete");
+
+        imp.insert_or_append_proxy_stub(
+            recording("/a", "second"),
+            "http://up",
+            "proxyAlways",
+            Some(answering),
+        );
+        imp.insert_or_append_proxy_stub(
+            recording("/c", "third"),
+            "http://up",
+            "proxyAlways",
+            Some(answering),
+        );
+
+        assert_eq!(layout(&imp), ["proxy", "first+second", "third"]);
+    }
+
+    // No anchor at all (no stub answered) and no proxy stub: the recording goes last.
+    #[test]
+    fn with_no_anchor_and_no_proxy_stub_a_recording_goes_last() {
+        let imp = imposter(json!([is("authored")]));
+
+        imp.insert_or_append_proxy_stub(recording("/a", "rec"), "http://up", "proxyOnce", None);
+
+        assert_eq!(layout(&imp), ["authored", "rec"]);
     }
 }

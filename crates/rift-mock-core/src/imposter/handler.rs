@@ -1190,6 +1190,7 @@ async fn handle_request_inner(
                     &request_headers,
                     proxy_body(body_bytes.as_ref(), body_string.as_deref()),
                     run.as_ref(),
+                    Some(stub_state.slot),
                 )
                 .await
             {
@@ -2029,6 +2030,7 @@ async fn handle_request_inner(
                 &uri,
                 &request_headers,
                 proxy_body(body_bytes.as_ref(), body_string.as_deref()),
+                None,
                 None,
             )
             .await

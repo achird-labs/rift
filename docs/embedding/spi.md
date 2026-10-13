@@ -274,19 +274,24 @@ alongside the stub:
 ```rust
 pub struct StubPublication<'a> {
     pub stub: &'a Stub,              // the generated stub, exactly as the engine would insert it
-    pub placement: StubPlacement,    // where it belongs relative to the proxy stub
-    pub proxy_to: &'a str,           // `proxy.to` of that proxy stub — the anchor
+    pub placement: StubPlacement,    // where it belongs relative to the anchor
+    pub proxy_to: &'a str,           // `proxy.to` of the proxy stub that answered
+    pub anchor_index: Option<usize>, // that stub's index when the recording was made (#1389)
 }
 
 pub enum StubPlacement {
-    /// proxyOnce: insert BEFORE the proxy stub, so the recording matches first next time.
+    /// proxyOnce: insert BEFORE the anchor, so the recording matches first next time.
     BeforeProxy,
-    /// proxyAlways: place AFTER the proxy stub (so the proxy keeps recording), merging responses
-    /// into an existing stub with structurally equal, non-empty predicates rather than appending
-    /// a duplicate.
+    /// proxyAlways: merge the responses into the first stub AFTER the anchor with structurally
+    /// equal predicates (an empty list included), else append at the END of the list.
     AfterProxyMerging,
 }
 ```
+
+The anchor is the stub that answered, as Mountebank's `stubIndex()` (issue #1389). Use
+`anchor_index` when it is `Some`. When it is `None`, because the stub was edited away mid-request
+or no stub answered, fall back to the first stub proxying to `proxy_to`, which is what the engine
+does. With neither, a `proxyOnce` recording goes last.
 
 Both additions are defaulted, so a store written against the pre-`complete` trait keeps compiling
 and behaving identically. `StubPublication` and `StubPlacement` are `#[non_exhaustive]` — match the

@@ -28,17 +28,21 @@ use std::sync::LazyLock;
 
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence, TestCaseError, TestRunner};
-use rift_mock_core::imposter::{ImposterConfig, ImposterManager, Stub};
+use rift_mock_core::imposter::{ImposterConfig, ImposterError, ImposterManager, Stub};
 use serde_json::{Value, json};
 
 use model::{Model, Reload, Served, UPSTREAM_RESPONSES, upstream_body};
 use ops::{Edit, FLOW_KEYS, FLOWS, Method, Op, PATHS, SCENARIOS, Shape, Spec, apply_edits};
 
-static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
-
-/// The property's imposter. Fixed because `Recreate` deletes and re-creates it on its own port: an
-/// auto-assigned port, once released, can be taken by any other test in between.
-const PROPERTY_PORT: u16 = 23441;
+/// No connection pool: ports are reused (auto-assignment hands out the lowest free one, and
+/// `Recreate` re-binds the same one), and a pooled connection to a deleted imposter is closed by the
+/// time the next request is written on it.
+static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .expect("http client")
+});
 
 /// The engine side of a case: the imposter under test and the upstream its proxies forward to.
 struct Sut {
@@ -98,7 +102,7 @@ fn fingerprint(stub: &Stub) -> String {
 }
 
 impl Sut {
-    async fn start(specs: &[Spec], port: u16) -> Self {
+    async fn start(specs: &[Spec]) -> Self {
         let manager = ImposterManager::new();
         let upstream_stubs: Vec<Value> = PATHS
             .iter()
@@ -118,7 +122,7 @@ impl Sut {
         let upstream = format!("http://127.0.0.1:{upstream_port}");
         let stubs: Vec<Value> = specs.iter().map(|s| s.to_json(&upstream)).collect();
         let port = manager
-            .create_imposter(config(imposter_json(port, json!(stubs))))
+            .create_imposter(config(imposter_json(0, json!(stubs))))
             .await
             .expect("imposter under test");
         Sut {
@@ -321,12 +325,22 @@ async fn apply(
                 .delete_imposter(sut.port)
                 .await
                 .expect("delete imposter");
-            let port = sut
-                .manager
-                .create_imposter(config)
-                .await
-                .expect("re-create imposter");
-            prop_assert_eq!(port, sut.port);
+            // The port was free a moment ago, but the manager auto-assigns ports to every other
+            // test in this binary, so one may have taken it. Then the imposter moves to a new port,
+            // which a client sees as a new URL holding nothing cached.
+            let port = match sut.manager.create_imposter(config.clone()).await {
+                Err(ImposterError::BindError(..)) => {
+                    lm.0.clear();
+                    let mut moved = config;
+                    moved.port = None;
+                    sut.manager
+                        .create_imposter(moved)
+                        .await
+                        .expect("re-create imposter on a new port")
+                }
+                created => created.expect("re-create imposter"),
+            };
+            sut.port = port;
         }
     }
     compare_state(sut, model)
@@ -358,8 +372,8 @@ fn compare_state(sut: &Sut, model: &Model) -> Result<(), TestCaseError> {
     Ok(())
 }
 
-async fn run_case(specs: &[Spec], ops: &[Op], port: u16) -> Result<(), TestCaseError> {
-    let mut sut = Sut::start(specs, port).await;
+async fn run_case(specs: &[Spec], ops: &[Op]) -> Result<(), TestCaseError> {
+    let mut sut = Sut::start(specs).await;
     let mut model = Model::new(specs);
     let mut lm = Revalidation::default();
     let mut outcome = compare_state(&sut, &model);
@@ -407,14 +421,14 @@ fn engine_matches_the_model() {
         ..Config::default()
     });
     let result = runner.run(&ops::case(), |(specs, ops)| {
-        rt.block_on(run_case(&specs, &ops, PROPERTY_PORT))
+        rt.block_on(run_case(&specs, &ops))
     });
     result.unwrap_or_else(|e| panic!("{e}"));
 }
 
 fn run(specs: &[Spec], ops: &[Op]) {
     runtime()
-        .block_on(run_case(specs, ops, 0))
+        .block_on(run_case(specs, ops))
         .unwrap_or_else(|e| panic!("{e}"));
 }
 
@@ -566,7 +580,7 @@ fn a_generator_miss_is_forwarded_and_recorded() {
 #[test]
 fn flow_writes_that_change_nothing_keep_last_modified() {
     runtime().block_on(async {
-        let sut = Sut::start(&gated_ahead_of_ungated(), 0).await;
+        let sut = Sut::start(&gated_ahead_of_ungated()).await;
         let imposter = sut.imposter();
         let shape = Shape {
             method: Method::Get,
@@ -645,5 +659,58 @@ fn a_proxy_always_stub_behind_a_proxy_once_stub_always_forwards() {
     run(
         &[proxy("/a", ops::Mode::Once), proxy("/b", ops::Mode::Always)],
         &[get("/b"), Op::DeleteStub(1), get("/b")],
+    );
+}
+
+/// #1389: a `proxyOnce` recording goes in front of the proxy stub that answered, not the first
+/// proxy stub to the same upstream, so the `GET` stub between the two proxies still answers.
+#[test]
+fn a_proxy_once_recording_is_placed_by_the_proxy_that_answered() {
+    let proxy = |path| Spec::Proxy {
+        pred: ops::Pred {
+            path: Some(path),
+            ..ops::Pred::default()
+        },
+        mode: ops::Mode::Once,
+        gen_body: false,
+    };
+    let get_a = Spec::Is {
+        pred: ops::Pred {
+            method: Some(Method::Get),
+            path: Some("/a"),
+            ..ops::Pred::default()
+        },
+        gate: None,
+        label: "p",
+        responses: 1,
+        conditional: false,
+    };
+    run(
+        &[proxy("/b"), get_a, proxy("/a")],
+        &[
+            Op::Request(Shape {
+                method: Method::Post,
+                path: "/a",
+                query: false,
+                body: None,
+                flow: "f1",
+            }),
+            get("/a"),
+        ],
+    );
+}
+
+/// #1389: a `proxyAlways` recording with no equal-predicate stub after the proxy goes at the end
+/// of the list, behind every stub authored after the proxy.
+#[test]
+fn a_proxy_always_recording_is_appended_at_the_end() {
+    let catch_all = Spec::Proxy {
+        pred: ops::Pred::default(),
+        mode: ops::Mode::Always,
+        gen_body: false,
+    };
+    run(
+        &[catch_all, conditional("/b", "p")],
+        &[get("/a"), get("/a")],
     );
 }
