@@ -52,6 +52,10 @@ record.
 
 ### Fixed
 
+- **`defaultResponse.statusCode` accepts a numeric string** (#1377). `"404"` was refused with a 400
+  ("expected u16"); it now reads like `is.statusCode` and Mountebank do. It still prints as a
+  number, and the shipped JSON Schema now types it as a status code.
+
 - **A proxy recording is placed by the proxy stub that answered, as in Mountebank** (#1389).
   - **Placement.** Rift placed it relative to the first stub proxying to the same upstream. With
     two proxy stubs, or a stub between them, a `proxyOnce` recording could land in front of the

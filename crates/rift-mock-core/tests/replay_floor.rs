@@ -91,7 +91,9 @@ const LEDGER: &[(&str, &str, usize)] = &[
     (
         "crates/rift-mock-core/src/imposter/types.rs",
         "deserialize_with attr",
-        12,
+        // #1377 widened `defaultResponse.statusCode` from `u16` (refused every string) to
+        // `deserialize_status_code` (accepts numeric strings): fewer refusals, none new.
+        13,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",

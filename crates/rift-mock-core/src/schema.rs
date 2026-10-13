@@ -464,14 +464,22 @@ mod tests {
                 "responses": [{ "is": {} }]
             }]
         }));
-        // `defaultResponse` reads `statusCode` as a number only, unlike an `is` response.
+        // `defaultResponse` reads `statusCode` like an `is` response does (#1377): a number or a
+        // numeric string, nothing else.
         valid(json!({ "protocol": "http", "defaultResponse": { "statusCode": 404 } }));
         let default_string =
             json!({ "protocol": "http", "defaultResponse": { "statusCode": "404" } });
-        refused(default_string.clone());
+        valid(default_string.clone());
         assert!(
-            serde_json::from_value::<ImposterConfig>(default_string).is_err(),
-            "the engine refuses it too"
+            serde_json::from_value::<ImposterConfig>(default_string).is_ok(),
+            "the engine accepts it too"
+        );
+        let default_word =
+            json!({ "protocol": "http", "defaultResponse": { "statusCode": "abc" } });
+        refused(default_word.clone());
+        assert!(
+            serde_json::from_value::<ImposterConfig>(default_word).is_err(),
+            "the engine refuses a non-numeric string too"
         );
         // `repeat` is a u32 wherever it is read.
         valid(imposter(json!({ "is": {}, "repeat": 3 })));
