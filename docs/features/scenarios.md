@@ -133,5 +133,8 @@ curl -X POST http://localhost:2525/imposters/4602/scenarios/reset -d '{}'
 See the [API Reference]({{ site.baseurl }}/api/#scenarios) for the full endpoint contract.
 
 A stub serving `_rift.conditional` behind a scenario gate re-stamps its `Last-Modified` on every
-transition of that scenario, so a polling client sees the switch; see
+transition of that scenario, however it is made (`newScenarioState`, the scenarios or flow-state
+admin API, `_rift.stateOps`, a script's `ctx.state`), so a polling client sees the switch. A
+positive TTL running out on a scenario's key is the exception: no write happens, so nothing is
+stamped. See
 [Conditional GET]({{ site.baseurl }}/mountebank/responses/#conditional-get).

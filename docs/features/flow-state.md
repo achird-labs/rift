@@ -258,6 +258,9 @@ A rendered `value` that is exactly a canonical integer (`"42"`, `"-3"`, `"0"` â€
 *string* value would otherwise silently restart at `0` â€” and what keeps `{% raw %}{{ state.hits }}{% endraw %}` reading
 back as the number it looks like.
 
+A key named after a scenario holds that scenario's state, so `set`, `delete` and `clearFlow` there
+are scenario transitions, and move `Last-Modified` on a conditional stub the scenario gates.
+
 ### Auto-provisioning and `rift-lint`
 
 Like a `_rift.script` stub, a `stateOps` block gets a real in-memory store auto-provisioned when no

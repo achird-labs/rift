@@ -527,10 +527,11 @@ A client that polls with validators (a CDN-hosted datafile, a feature-flag SDK) 
   too). Writing the state a scenario already has is not a transition, and only scenarios gating a
   stub at or ahead of a `_rift.conditional` stub are tracked. A transition in one flow moves the
   stamp for every flow of that scenario (one extra `200` for the others), and it is per process: a
-  transition made by another node does not move this node's stamp. State written from a response
-  is not seen either: `_rift.stateOps` and a script's `ctx.state` change scenario state without
-  moving `Last-Modified` (#1388) — revalidate with `If-None-Match` (the `ETag` follows the body) if
-  your scenarios are driven that way.
+  transition made by another node does not move this node's stamp. A response that writes a
+  scenario's key counts too: `_rift.stateOps` and a script's `ctx.state`, including a TTL of zero,
+  which deletes at once (#1388). The one change it cannot see is a positive TTL running out on a
+  scenario's key, which returns the scenario to `Started` with no write; revalidate with
+  `If-None-Match` (the `ETag` follows the body) if your scenarios expire that way.
 
 On a script-only response, or behind a non-GET method predicate, it never fires; `rift-lint` W019 says so.
 

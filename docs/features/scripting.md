@@ -407,6 +407,9 @@ casing.
 
 ### `ctx.state` and `ctx.store`
 
+A key named after a scenario holds that scenario's state, so writing it from a script is a scenario
+transition (it moves `Last-Modified` on a conditional stub the scenario gates).
+
 `ctx.state` is a flow-scoped state handle, already bound to the request's resolved flow id (per
 `flowIdSource` — the same resolution the scenario-state gate uses):
 
