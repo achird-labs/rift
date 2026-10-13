@@ -1436,7 +1436,10 @@ async fn handle_request_inner(
             // #308): a runaway script is interrupted at `_rift.scriptEngine.timeoutMs`
             // (default 5s) instead of wedging the whole engine.
             let timeout_ms = resolve_script_timeout_ms(&imposter.config);
-            let flow_store = imposter.flow_store.clone();
+            // Scenario-key writes stamp a transition (issue #1388).
+            let flow_store: Arc<dyn crate::extensions::flow_state::FlowStore> = Arc::new(
+                super::core::ScenarioStampingStore::new(Arc::clone(&imposter)),
+            );
 
             // ctx.stub (issue #357 Item 1): thread the matched stub's identity through, resolving
             // its current scenario state (if it belongs to a scenario) the same way the FSM gate
@@ -1952,7 +1955,7 @@ async fn handle_request_inner(
                     .run_flow_blocking(move |imp| {
                         crate::extensions::execute_state_ops(
                             &ops,
-                            imp.flow_store.as_ref(),
+                            &super::core::ScenarioStampingStore::new(imp),
                             &flow_id,
                             &request_data,
                             state_ops_debug,

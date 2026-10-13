@@ -6,6 +6,7 @@ use super::*;
 use crate::imposter::predicates::stub_matches_explained;
 // The differential oracle below is the ONLY remaining caller of the boolean scan here — the live
 // path asks for the failing predicate's index instead (and discards it when untraced).
+use crate::extensions::flow_state::CasOutcome;
 use crate::imposter::predicates::RequestHeaders;
 #[cfg(test)]
 use crate::imposter::predicates::stub_matches_inner;
@@ -694,24 +695,13 @@ impl Imposter {
         key: &str,
         value: serde_json::Value,
     ) -> anyhow::Result<()> {
-        let changed =
-            self.is_conditional_gate(key) && self.would_change(flow_id, key, Some(&value));
-        self.flow_store.set(flow_id, key, value)?;
-        if changed {
-            self.stamp_scenario_transition(key);
-        }
-        Ok(())
+        ScenarioStampingStore::new(self).set(flow_id, key, value)
     }
 
     /// Delete a raw flow-state value (admin flow-state teardown). Deleting a scenario's key returns
     /// it to its initial state, which is stamped as a transition (issue #1344).
     pub fn flow_delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
-        let changed = self.is_conditional_gate(key) && self.would_change(flow_id, key, None);
-        self.flow_store.delete(flow_id, key)?;
-        if changed {
-            self.stamp_scenario_transition(key);
-        }
-        Ok(())
+        ScenarioStampingStore::new(self).delete(flow_id, key)
     }
 
     /// Clear every key under a flow (issue #530) — backs `DELETE /admin/imposters/:port/flow-state/
@@ -719,17 +709,7 @@ impl Imposter {
     /// for returns to its initial state, and each one gating a conditional stub is stamped as a
     /// transition (issue #1344).
     pub fn flow_clear(&self, flow_id: &str) -> anyhow::Result<()> {
-        let gates: std::collections::BTreeSet<String> = self
-            .snapshot()
-            .conditional_gates_through(usize::MAX)
-            .filter(|scenario| self.would_change(flow_id, scenario, None))
-            .map(str::to_string)
-            .collect();
-        self.flow_store.clear_flow(flow_id)?;
-        for scenario in &gates {
-            self.stamp_scenario_transition(scenario);
-        }
-        Ok(())
+        ScenarioStampingStore::new(self).clear_flow(flow_id)
     }
 
     /// Whether writing `after` (`None`: deleting) to `key` changes what the flow holds. An unreadable
@@ -852,6 +832,160 @@ impl Imposter {
 // set actually contains an inject predicate (StubIndex::has_inject), so scriptless imposters
 // keep the exact inline fast path.
 // =============================================================================================
+/// The imposter's flow store, seen through a scenario lens (issues #1344, #1388): a write to a key
+/// that is a scenario gating a conditional stub is a scenario transition, and is stamped as one
+/// after the write succeeds, so the changed answer is served under a later `Last-Modified` (#1307).
+/// Writing the state a scenario already holds is not a transition. Every other key, and every
+/// read, passes straight through. A TTL of zero or less deletes, so it is stamped like a delete;
+/// a TTL that later expires on its own is no write and is not seen.
+///
+/// Every door that writes flow state goes through it: the admin flow-state methods above, a
+/// response's `_rift.stateOps`, and a script's `ctx.state`. It is built per request, not wrapped
+/// around the store for good: `I` borrows the imposter (`&Imposter`) or, for a script that needs a
+/// `'static` store, shares it (`Arc<Imposter>`) for the script's run only.
+pub(crate) struct ScenarioStampingStore<I> {
+    imposter: I,
+}
+
+impl<I: std::ops::Deref<Target = Imposter>> ScenarioStampingStore<I> {
+    pub(crate) fn new(imposter: I) -> Self {
+        Self { imposter }
+    }
+
+    fn store(&self) -> &dyn FlowStore {
+        self.imposter.flow_store.as_ref()
+    }
+
+    /// Run `clear`, which empties `flow_id`, then stamp every scenario gating a conditional stub
+    /// that the flow held a state for.
+    fn clearing(
+        &self,
+        flow_id: &str,
+        clear: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let gates: std::collections::BTreeSet<String> = self
+            .imposter
+            .snapshot()
+            .conditional_gates_through(usize::MAX)
+            .filter(|scenario| self.imposter.would_change(flow_id, scenario, None))
+            .map(str::to_string)
+            .collect();
+        clear()?;
+        for scenario in &gates {
+            self.imposter.stamp_scenario_transition(scenario);
+        }
+        Ok(())
+    }
+
+    /// Run `write`, then stamp `key` when it gates a conditional stub and `changed` says the write
+    /// moved it. `changed` is asked before the write, which is when the old value is readable.
+    fn stamped<T>(
+        &self,
+        key: &str,
+        changed: impl FnOnce() -> bool,
+        write: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let stamp = self.imposter.is_conditional_gate(key) && changed();
+        let result = write()?;
+        if stamp {
+            self.imposter.stamp_scenario_transition(key);
+        }
+        Ok(result)
+    }
+}
+
+impl<I: std::ops::Deref<Target = Imposter> + Send + Sync> FlowStore for ScenarioStampingStore<I> {
+    fn get(&self, flow_id: &str, key: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        self.store().get(flow_id, key)
+    }
+
+    fn set(&self, flow_id: &str, key: &str, value: serde_json::Value) -> anyhow::Result<()> {
+        let changed = || self.imposter.would_change(flow_id, key, Some(&value));
+        let stamp = self.imposter.is_conditional_gate(key) && changed();
+        self.store().set(flow_id, key, value)?;
+        if stamp {
+            self.imposter.stamp_scenario_transition(key);
+        }
+        Ok(())
+    }
+
+    fn exists(&self, flow_id: &str, key: &str) -> anyhow::Result<bool> {
+        self.store().exists(flow_id, key)
+    }
+
+    fn delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
+        self.stamped(
+            key,
+            || self.imposter.would_change(flow_id, key, None),
+            || self.store().delete(flow_id, key),
+        )
+    }
+
+    fn is_blocking(&self) -> bool {
+        self.store().is_blocking()
+    }
+
+    // A number is never a scenario state (`scenario_state` refuses one), so an increment of a
+    // scenario's key always moves it.
+    fn increment(&self, flow_id: &str, key: &str) -> anyhow::Result<i64> {
+        self.stamped(key, || true, || self.store().increment(flow_id, key))
+    }
+
+    fn increment_by(&self, flow_id: &str, key: &str, by: i64) -> anyhow::Result<i64> {
+        self.stamped(key, || true, || self.store().increment_by(flow_id, key, by))
+    }
+
+    // A TTL of zero or less drops the flow at once: a clear.
+    fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> anyhow::Result<()> {
+        if ttl_seconds > 0 {
+            return self.store().set_ttl(flow_id, ttl_seconds);
+        }
+        self.clearing(flow_id, || self.store().set_ttl(flow_id, ttl_seconds))
+    }
+
+    // A TTL of zero or less deletes the key at once.
+    fn set_key_ttl(&self, flow_id: &str, key: &str, ttl_seconds: i64) -> anyhow::Result<bool> {
+        if ttl_seconds > 0 {
+            return self.store().set_key_ttl(flow_id, key, ttl_seconds);
+        }
+        let stamp = self.imposter.is_conditional_gate(key)
+            && self.imposter.would_change(flow_id, key, None);
+        let deleted = self.store().set_key_ttl(flow_id, key, ttl_seconds)?;
+        if stamp && deleted {
+            self.imposter.stamp_scenario_transition(key);
+        }
+        Ok(deleted)
+    }
+
+    fn clear_flow(&self, flow_id: &str) -> anyhow::Result<()> {
+        self.clearing(flow_id, || self.store().clear_flow(flow_id))
+    }
+
+    fn entry_count(&self, flow_id: &str) -> anyhow::Result<Option<usize>> {
+        self.store().entry_count(flow_id)
+    }
+
+    fn compare_and_set(
+        &self,
+        flow_id: &str,
+        key: &str,
+        expected: Option<&serde_json::Value>,
+        new: serde_json::Value,
+    ) -> anyhow::Result<CasOutcome> {
+        let moves = expected != Some(&new);
+        let gate = self.imposter.is_conditional_gate(key);
+        let outcome = self.store().compare_and_set(flow_id, key, expected, new)?;
+        if gate && moves && matches!(outcome, CasOutcome::Applied) {
+            self.imposter.stamp_scenario_transition(key);
+        }
+        Ok(outcome)
+    }
+
+    fn flow_ids(&self) -> anyhow::Result<Option<Vec<String>>> {
+        self.store().flow_ids()
+    }
+}
+
 #[cfg(test)]
 mod bounded_matching_tests {
     use super::*;
@@ -1631,5 +1765,129 @@ mod bounded_matching_tests {
             )
             .expect("no error");
         assert_eq!(hit.map(|(_, i)| i), Some(0));
+    }
+}
+
+/// Issue #1388: which writes through [`ScenarioStampingStore`] are stamped as a transition of a
+/// scenario gating a conditional stub.
+#[cfg(test)]
+mod scenario_stamping_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// An imposter whose scenario `S1` gates a conditional stub.
+    fn imposter() -> Imposter {
+        Imposter::new(
+            serde_json::from_value(json!({
+                "port": 0,
+                "protocol": "http",
+                "_rift": { "flowState": { "flowIdSource": "header:X-Session" } },
+                "stubs": [{
+                    "scenarioName": "S1", "requiredScenarioState": "A",
+                    "responses": [{
+                        "is": { "body": "q" },
+                        "_rift": { "conditional": { "etag": false, "lastModified": "load" } }
+                    }]
+                }],
+            }))
+            .expect("valid imposter config"),
+        )
+        .expect("test imposter")
+    }
+
+    fn stamped(imp: &Imposter) -> bool {
+        imp.scenario_transitions().contains_key("S1")
+    }
+
+    #[test]
+    fn a_compare_and_set_that_loses_is_not_a_transition() {
+        let imp = imposter();
+        let store = ScenarioStampingStore::new(&imp);
+
+        let outcome = store
+            .compare_and_set("f", "S1", Some(&json!("B")), json!("A"))
+            .expect("cas");
+
+        assert!(matches!(outcome, CasOutcome::Conflict(_)));
+        assert!(!stamped(&imp));
+    }
+
+    #[test]
+    fn a_compare_and_set_that_applies_is_a_transition() {
+        let imp = imposter();
+        let store = ScenarioStampingStore::new(&imp);
+
+        let outcome = store
+            .compare_and_set("f", "S1", None, json!("A"))
+            .expect("cas");
+
+        assert!(matches!(outcome, CasOutcome::Applied));
+        assert!(stamped(&imp));
+    }
+
+    #[test]
+    fn an_increment_of_a_scenario_key_is_a_transition() {
+        let imp = imposter();
+
+        ScenarioStampingStore::new(&imp)
+            .increment("f", "S1")
+            .expect("increment");
+
+        assert!(stamped(&imp));
+    }
+
+    // A zero TTL deletes at once, so it is a delete.
+    #[test]
+    fn a_zero_key_ttl_on_a_scenario_key_is_a_transition() {
+        let imp = imposter();
+        imp.flow_store.set("f", "S1", json!("A")).expect("seed");
+
+        let deleted = ScenarioStampingStore::new(&imp)
+            .set_key_ttl("f", "S1", 0)
+            .expect("ttl");
+
+        assert!(deleted);
+        assert!(stamped(&imp));
+    }
+
+    #[test]
+    fn a_zero_flow_ttl_clears_and_is_a_transition() {
+        let imp = imposter();
+        imp.flow_store.set("f", "S1", json!("A")).expect("seed");
+
+        ScenarioStampingStore::new(&imp)
+            .set_ttl("f", 0)
+            .expect("ttl");
+
+        assert_eq!(imp.flow_store.get("f", "S1").expect("read"), None);
+        assert!(stamped(&imp));
+    }
+
+    // A positive TTL only schedules expiry: nothing changes now, so nothing is stamped.
+    #[test]
+    fn a_positive_ttl_is_not_a_transition() {
+        let imp = imposter();
+        imp.flow_store.set("f", "S1", json!("A")).expect("seed");
+        let store = ScenarioStampingStore::new(&imp);
+
+        store.set_key_ttl("f", "S1", 60).expect("key ttl");
+        store.set_ttl("f", 60).expect("flow ttl");
+
+        assert!(!stamped(&imp));
+    }
+
+    #[test]
+    fn reads_and_counts_pass_through() {
+        let imp = imposter();
+        imp.flow_store.set("f", "k", json!(1)).expect("seed");
+        let store = ScenarioStampingStore::new(&imp);
+
+        assert_eq!(store.get("f", "k").expect("get"), Some(json!(1)));
+        assert!(store.exists("f", "k").expect("exists"));
+        assert_eq!(
+            store.entry_count("f").expect("count"),
+            imp.flow_store.entry_count("f").expect("count")
+        );
+        assert!(!stamped(&imp));
     }
 }

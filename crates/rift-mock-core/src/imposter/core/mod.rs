@@ -943,6 +943,7 @@ impl Imposter {
 mod bitset;
 mod lifecycle;
 mod matching;
+pub(crate) use matching::ScenarioStampingStore;
 mod stub_index;
 use stub_index::StubSnapshot;
 mod proxy;

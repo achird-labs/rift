@@ -160,6 +160,14 @@ record.
   `forget_recorded(port, sig)` (default no-op), and `Imposter::insert_or_append_proxy_stub` takes
   the settled claim's signature as a new last argument.
 
+- **A response that writes a scenario's state moves `Last-Modified`** (#1388). `_rift.stateOps`
+  (`set`, `increment`, `delete`, `clearFlow`) and a script's `ctx.state` (`set`, `cas`, `incr`,
+  `delete`, `clear`, and a TTL of zero, which deletes) wrote a scenario's key without stamping a
+  transition, so a conditional stub's changed answer was served under the old `Last-Modified` and
+  a client revalidating with `If-Modified-Since` got `304`. They now stamp exactly like
+  `newScenarioState` and the admin API; writing the state a scenario already has, or a key that
+  gates nothing, still does not. A positive TTL running out on a scenario's key is not seen.
+
 ### Changed
 
 - **Conformance corpus fixture `02-predicates.json` gains three `keyCaseSensitive` stubs** (#1325), pinning the key and its inherit-from-`caseSensitive` default. SDK corpus replays must regenerate fixture 02.
