@@ -589,37 +589,29 @@ fn severity_color(severity: &Severity) -> &'static str {
     }
 }
 
-/// Rewrite a single header *value* only when it is actually invalid, returning a short
-/// description of the fix (for reporting) or `None` when the value is already valid and left
-/// untouched. A string-only array is a valid multi-value header (engine support since #238) and
-/// is never rewritten; an array carrying a non-string element is stringified element-wise so it
-/// stays a multi-value header (rather than being joined into one comma-string, which changes HTTP
-/// semantics and dropped non-string elements — issue #547).
+/// Rewrite a header *value* only when the engine would refuse it, returning a short description of
+/// the fix (for reporting) or `None` when the value is left untouched. Strings, numbers and booleans,
+/// alone or in an array, are valid: the engine coerces them (issue #1358). An array carrying a
+/// `null`, object or array element (E018) has those elements stringified in place, so it stays a
+/// multi-value header (joining it into one comma-string would change HTTP semantics — issue #547).
+/// A scalar `null` or object (E054) has no value to infer and is left for the author.
 fn fix_header_value(value: &mut Value) -> Option<&'static str> {
-    if let Some(arr) = value.as_array_mut() {
-        if arr.iter().all(Value::is_string) {
-            return None;
-        }
-        for element in arr.iter_mut() {
-            if !element.is_string() {
-                *element = Value::String(element.to_string());
-            }
-        }
-        Some("array elements -> strings")
-    } else if value.is_number() {
-        *value = Value::String(value.to_string());
-        Some("number -> string")
-    } else if value.is_boolean() {
-        let bool_str = if value.as_bool().unwrap_or(false) {
-            "true"
-        } else {
-            "false"
-        };
-        *value = Value::String(bool_str.to_string());
-        Some("boolean -> string")
-    } else {
-        None
+    let arr = value.as_array_mut()?;
+    if !arr.iter().any(refused_header_element) {
+        return None;
     }
+    for element in arr.iter_mut() {
+        if refused_header_element(element) {
+            *element = Value::String(element.to_string());
+        }
+    }
+    Some("array elements -> strings")
+}
+
+/// An array element the engine refuses (E018): it coerces strings, numbers and booleans, as
+/// Mountebank does (issue #1358), and refuses anything else.
+fn refused_header_element(element: &Value) -> bool {
+    element.is_null() || element.is_object() || element.is_array()
 }
 
 /// Whether `--fix` would change anything in this document.
@@ -638,7 +630,10 @@ fn has_fixable_header(value: &serde_json::Value) -> bool {
             .filter_map(|response| response.get("is").and_then(|is| is.get("headers")))
             .filter_map(|headers| headers.as_object())
             .flat_map(|headers| headers.values())
-            .any(|v| !v.is_string())
+            .any(|v| {
+                v.as_array()
+                    .is_some_and(|arr| arr.iter().any(refused_header_element))
+            })
     }
 
     rift_lint::imposters_in(value)
@@ -649,7 +644,7 @@ fn has_fixable_header(value: &serde_json::Value) -> bool {
 /// Every imposter `value` holds, mutably: the three document shapes `rift --configfile` loads (a
 /// single imposter, the `{"imposters": [...]}` wrapper, a bare array), dispatched exactly as
 /// [`rift_lint::imposters_in`] dispatches them. `--fix` once walked only the first shape, so the
-/// other two linted with E018/E019/E020 and were then left unrepaired with no reason (#1238).
+/// other two linted with header errors and were then left unrepaired with no reason (#1238).
 fn imposters_in_mut(value: &mut Value) -> Vec<&mut Value> {
     if value.get("imposters").is_some_and(Value::is_array) {
         return value
@@ -844,25 +839,41 @@ mod tests {
 
     #[test]
     fn fix_header_value_stringifies_invalid_array() {
-        // A non-string element makes the array invalid (E018); fix by stringifying elements in
-        // place, preserving the array (multi-value) and dropping nothing.
-        let mut v = json!(["a=1", 2, true]);
+        // A null element makes the array invalid (E018); fix by stringifying only what the engine
+        // refuses, in place, preserving the array (multi-value) and dropping nothing. Numbers and
+        // booleans are coerced by the engine (#1358), so they stay as written.
+        let mut v = json!(["a=1", 2, null]);
         assert!(fix_header_value(&mut v).is_some());
-        assert_eq!(v, json!(["a=1", "2", "true"]));
+        assert_eq!(v, json!(["a=1", 2, "null"]));
     }
 
     #[test]
-    fn fix_header_value_number_to_string() {
+    fn fix_header_value_number_left_alone() {
         let mut v = json!(200);
-        assert!(fix_header_value(&mut v).is_some());
-        assert_eq!(v, Value::String("200".to_string()));
+        assert_eq!(fix_header_value(&mut v), None);
+        assert_eq!(v, json!(200));
     }
 
     #[test]
-    fn fix_header_value_boolean_to_string() {
+    fn fix_header_value_boolean_left_alone() {
         let mut v = json!(true);
-        assert!(fix_header_value(&mut v).is_some());
-        assert_eq!(v, Value::String("true".to_string()));
+        assert_eq!(fix_header_value(&mut v), None);
+        assert_eq!(v, json!(true));
+    }
+
+    #[test]
+    fn fix_header_value_mixed_scalar_array_left_alone() {
+        let mut v = json!(["a", 1, true]);
+        assert_eq!(fix_header_value(&mut v), None);
+        assert_eq!(v, json!(["a", 1, true]));
+    }
+
+    #[test]
+    fn fix_header_value_scalar_null_is_not_guessed() {
+        // E054: there is no value to infer, so `--fix` leaves it for the author.
+        let mut v = Value::Null;
+        assert_eq!(fix_header_value(&mut v), None);
+        assert_eq!(v, Value::Null);
     }
 
     #[test]

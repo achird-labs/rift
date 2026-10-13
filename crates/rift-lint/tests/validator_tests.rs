@@ -699,35 +699,86 @@ fn e018_not_fired_for_string_array() {
 }
 
 #[test]
-fn e018_header_array_with_non_string() {
-    let is_resp = json!({ "headers": { "X-Custom": ["a", 2] } });
+fn e018_header_array_with_a_null_element() {
+    let is_resp = json!({ "headers": { "X-Custom": ["a", null] } });
     let mut r = LintResult::new();
     validate_is_response(path(), &is_resp, "loc", &mut r);
     assert!(has_code(&r, "E018"));
 }
 
+/// Issue #1358: the engine coerces number and boolean header values, as Mountebank does, so they
+/// lint clean (E019/E020 are retired). `null` and objects make the engine refuse the document.
 #[test]
-fn e019_header_value_is_number() {
-    let is_resp = json!({ "headers": { "X-Retry": 3 } });
+fn number_and_boolean_header_values_lint_clean() {
+    let is_resp = json!({ "headers": { "Content-Length": 124, "X-Cache-Hit": true } });
     let mut r = LintResult::new();
     validate_is_response(path(), &is_resp, "loc", &mut r);
-    assert!(has_code(&r, "E019"));
+    assert_eq!(r.errors, 0, "got {:?}", codes(&r));
+    assert!(!has_code(&r, "E019") && !has_code(&r, "E020"));
 }
 
 #[test]
-fn e020_header_value_is_boolean() {
-    let is_resp = json!({ "headers": { "X-Cached": true } });
+fn mixed_scalar_header_array_lints_clean() {
+    let is_resp = json!({ "headers": { "X-Mixed": ["a", 1, true] } });
     let mut r = LintResult::new();
     validate_is_response(path(), &is_resp, "loc", &mut r);
-    assert!(has_code(&r, "E020"));
+    assert!(!has_code(&r, "E018"), "got {:?}", codes(&r));
 }
 
 #[test]
-fn w005_header_value_is_null() {
-    let is_resp = json!({ "headers": { "X-Missing": null } });
+fn null_header_value_is_e054_error() {
+    let is_resp = json!({ "headers": { "X-H": null } });
     let mut r = LintResult::new();
     validate_is_response(path(), &is_resp, "loc", &mut r);
-    assert!(has_code(&r, "W005"));
+    assert!(has_code(&r, "E054"), "got {:?}", codes(&r));
+    assert!(!has_code(&r, "W005"));
+}
+
+#[test]
+fn object_header_value_is_e054_error() {
+    let is_resp = json!({ "headers": { "X-H": { "a": 1 } } });
+    let mut r = LintResult::new();
+    validate_is_response(path(), &is_resp, "loc", &mut r);
+    assert!(has_code(&r, "E054"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn array_with_a_null_object_or_array_element_is_e018() {
+    for bad in [
+        json!(["a", null]),
+        json!(["a", {"b": 1}]),
+        json!(["a", ["b"]]),
+    ] {
+        let is_resp = json!({ "headers": { "X-H": bad.clone() } });
+        let mut r = LintResult::new();
+        validate_is_response(path(), &is_resp, "loc", &mut r);
+        assert!(has_code(&r, "E018"), "{bad}: got {:?}", codes(&r));
+    }
+}
+
+#[test]
+fn default_response_null_header_is_e054() {
+    let v = make_imposter(json!([]));
+    let mut v = v;
+    v["defaultResponse"] = json!({ "statusCode": 404, "headers": { "X-H": null } });
+    let r = lint_value(&v, "<test>", &opts());
+    let issue = r
+        .issues
+        .iter()
+        .find(|i| i.code == "E054")
+        .unwrap_or_else(|| panic!("E054 missing: {:?}", codes(&r)));
+    assert_eq!(
+        issue.location.as_deref(),
+        Some("defaultResponse.headers.X-H")
+    );
+}
+
+#[test]
+fn small_numeric_content_length_warns_w006() {
+    let is_resp = json!({ "headers": { "Content-Length": 5 } });
+    let mut r = LintResult::new();
+    validate_is_response(path(), &is_resp, "loc", &mut r);
+    assert!(has_code(&r, "W006"), "got {:?}", codes(&r));
 }
 
 #[test]

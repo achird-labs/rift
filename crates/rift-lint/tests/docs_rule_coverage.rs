@@ -210,14 +210,19 @@ fn every_code_prefix_matches_its_constructor_severity() {
 }
 
 /// Retired numbers are never reused, so a stale reference or a revived number is caught: `E012` was
-/// never assigned, and `E042` was renumbered to `W014` (issue #1156). Neither may appear as an
-/// emitted code or as a documented rule.
+/// never assigned, `E042` was renumbered to `W014` (issue #1156), and `E019`/`E020`/`W005` went when
+/// the engine's header coercion became the lint rule (issue #1358; `W005` is now `E054`). None may
+/// appear as an emitted code or as a documented rule.
 #[test]
 fn retired_codes_are_neither_emitted_nor_documented() {
-    for retired in ["E012", "E042"] {
+    for retired in ["E012", "E042", "E019", "E020", "W005"] {
+        let letter = retired
+            .chars()
+            .next()
+            .expect("a code starts with its letter");
         let emitted: Vec<&str> = EMITTING_SOURCES
             .iter()
-            .filter(|(_, src)| codes_in(src, 'E').contains(&retired.to_string()))
+            .filter(|(_, src)| codes_in(src, letter).contains(&retired.to_string()))
             .map(|(file, _)| *file)
             .collect();
         assert!(
