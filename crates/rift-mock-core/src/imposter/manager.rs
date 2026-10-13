@@ -550,13 +550,14 @@ impl ImposterManager {
 
     /// Register a pluggable proxy-recording backend (issue #315), shared across imposters and
     /// keyed by port. Without one, each imposter keeps a private in-memory
-    /// [`LocalProxyStore`](crate::recording::LocalProxyStore) for its own proxy mode with the
-    /// historical semantics (proxyOnce once-gate, caps) plus the release-on-error fix. Imposter
-    /// deletion clears the port's saved responses so a later imposter reusing the port starts
-    /// clean.
+    /// [`LocalProxyStore`](crate::recording::LocalProxyStore) with the historical semantics
+    /// (proxyOnce once-gate, caps) plus the release-on-error fix. Imposter deletion clears the
+    /// port's saved responses so a later imposter reusing the port starts clean.
     ///
-    /// A shared store carries a single proxy mode; embedders mixing proxy modes across ports
-    /// should keep the per-imposter default instead.
+    /// Every claim names the mode of the proxy response being served
+    /// ([`try_claim_as`](crate::recording::ProxyRecordingStore::try_claim_as), issue #1387), so a
+    /// shared store serves any mix of modes; a store that keeps the default `try_claim_as`
+    /// resolves the mode itself.
     #[must_use]
     pub fn with_proxy_store(mut self, store: Arc<dyn ProxyRecordingStore>) -> Self {
         self.proxy_store = Some(store);
@@ -6053,6 +6054,14 @@ mod tests {
                 port: u16,
                 sig: &RequestSignature,
             ) -> std::result::Result<ClaimOutcome, ProxyStoreError> {
+                self.try_claim_as(port, sig, self.inner.mode())
+            }
+            fn try_claim_as(
+                &self,
+                port: u16,
+                sig: &RequestSignature,
+                mode: ProxyMode,
+            ) -> std::result::Result<ClaimOutcome, ProxyStoreError> {
                 self.claims.lock().push(port);
                 if self.refuse_claim {
                     return Err(ProxyStoreError::Refused(BackendUnavailable {
@@ -6063,7 +6072,7 @@ mod tests {
                 if self.fail_claim {
                     return Err(ProxyStoreError::Unavailable("spy".into()));
                 }
-                self.inner.try_claim(port, sig)
+                self.inner.try_claim_as(port, sig, mode)
             }
             fn release_claim(&self, port: u16, sig: &RequestSignature, token: ClaimToken) {
                 self.releases.lock().push(port);
@@ -6336,6 +6345,14 @@ mod tests {
                 sig: &RequestSignature,
             ) -> std::result::Result<ClaimOutcome, ProxyStoreError> {
                 self.inner.try_claim(port, sig)
+            }
+            fn try_claim_as(
+                &self,
+                port: u16,
+                sig: &RequestSignature,
+                mode: ProxyMode,
+            ) -> std::result::Result<ClaimOutcome, ProxyStoreError> {
+                self.inner.try_claim_as(port, sig, mode)
             }
             fn release_claim(&self, port: u16, sig: &RequestSignature, token: ClaimToken) {
                 self.releases.lock().push(port);

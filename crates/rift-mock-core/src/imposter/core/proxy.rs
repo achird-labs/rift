@@ -810,7 +810,9 @@ impl Imposter {
             debug!("Proxy request to: {}", target_url);
         }
 
-        let transparent = proxy_config.mode().unwrap_or_default() == ProxyMode::ProxyTransparent;
+        // An unknown mode is admitted only from a replayed config; it runs as the default.
+        let mode = proxy_config.mode().unwrap_or_default();
+        let transparent = mode == ProxyMode::ProxyTransparent;
         // A proxied response is recorded as a stub when predicateGenerators, addWaitBehavior or
         // addDecorateBehavior is configured, as in Mountebank — never for `proxyTransparent`,
         // which forwards every request and records nothing.
@@ -850,9 +852,9 @@ impl Imposter {
         // Consult the proxy-recording gate. `AlreadyRecorded` replays; `Claimed` grants the
         // right to record; `InFlight` (a concurrent proxyOnce loser) and an unavailable
         // store proxy upstream without recording.
-        // The store's mode is imposter-wide (from the first proxy stub), so a response that is
-        // itself `proxyTransparent` — or a `defaultForward` — must not consult it, or it would
-        // replay what another stub's `proxyOnce` recorded (issue #1314).
+        // The claim carries this response's own mode (issue #1387), so a `proxyAlways` stub never
+        // replays what a `proxyOnce` one recorded. A `proxyTransparent` response — or a
+        // `defaultForward` — records nothing and takes no claim at all (issue #1314).
         // A failed generation has no identity to key on, records no stub (issue #498) and must not
         // replay either: under the method, path and query key it would answer with another
         // request's recording, without the `x-rift-generator-error` the client should see.
@@ -863,7 +865,7 @@ impl Imposter {
         let claim = if transparent || generation_failed {
             None
         } else {
-            match self.proxy_store.try_claim(port, &signature) {
+            match self.proxy_store.try_claim_as(port, &signature, mode) {
                 Ok(ClaimOutcome::AlreadyRecorded) => {
                     if let Some(recorded) = self.proxy_store.lookup(port, &signature) {
                         debug!("Returning recorded proxy response (proxyOnce mode)");

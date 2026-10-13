@@ -275,7 +275,16 @@ impl ProxyRecordingStore for CountingStore {
         port: u16,
         sig: &RequestSignature,
     ) -> Result<ClaimOutcome, ProxyStoreError> {
-        let outcome = self.inner.try_claim(port, sig)?;
+        self.try_claim_as(port, sig, self.inner.mode())
+    }
+
+    fn try_claim_as(
+        &self,
+        port: u16,
+        sig: &RequestSignature,
+        mode: ProxyMode,
+    ) -> Result<ClaimOutcome, ProxyStoreError> {
+        let outcome = self.inner.try_claim_as(port, sig, mode)?;
         if outcome == ClaimOutcome::InFlight {
             *self.in_flight.lock().expect("lock") += 1;
         }
