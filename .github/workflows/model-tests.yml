@@ -1,0 +1,55 @@
+name: Model tests
+
+# Issue #1344 (epic #1338): the model-based state-machine test (crates/rift-mock-core/tests/model/)
+# at depth. Every PR already runs it at the default 64 cases inside `cargo test`; this run takes
+# 2048 random operation sequences against the reference model, which reaches the rarer interactions
+# (a recording deleted and re-requested, a reload that turns degenerate, a scenario reset behind a
+# conditional stub) that 64 cases only sometimes do.
+#
+# A failing case is shrunk and its seed written to tests/proptest-regressions/model.txt, which is
+# uploaded: check the line in alongside the fix, and every later run replays it first.
+on:
+  schedule:
+    - cron: "41 2 * * *" # nightly 02:41 UTC
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: "Random cases to run (PROPTEST_CASES)"
+        required: false
+        default: "2048"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  model:
+    name: model test (${{ inputs.cases || '2048' }} cases)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run the model test
+        env:
+          PROPTEST_CASES: ${{ inputs.cases || '2048' }}
+        run: cargo test -p rift-mock-core --test model
+
+      - name: Upload the failing seed
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: proptest-regressions
+          path: crates/rift-mock-core/tests/proptest-regressions/model.txt
+          if-no-files-found: ignore

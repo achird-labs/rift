@@ -126,6 +126,8 @@ rift-ejs = { path = "../rift-ejs", version = "0.1.0" }
 # names its provider explicitly, so the engine under test still runs on ring.
 reqwest = { workspace = true, features = ["rustls"] }
 tokio-test = "0.4"
+# The model-based state-machine test, tests/model/ (issue #1344).
+proptest.workspace = true
 tracing-test = "0.2"
 criterion = { version = "0.8", features = ["html_reports"] }
 

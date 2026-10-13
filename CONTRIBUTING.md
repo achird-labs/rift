@@ -112,6 +112,24 @@ A surviving mutant (a line of `mutants.out/missed.txt`) is one of three things:
 A survivor that replaces a value with `Default::default()` on a data path deserves a look first: it
 means nothing tests the case where that value is wrong, which is where silent fallbacks hide.
 
+## Model-based tests
+
+[`crates/rift-mock-core/tests/model/`](crates/rift-mock-core/tests/model/) drives random sequences of
+admin operations and requests (stub add/delete/move/replace, scenario and flow-state writes, hot
+reload, re-creating the imposter, and requests through `proxyOnce`/`proxyAlways` stubs to a real
+upstream) against a live `ImposterManager` and a small reference model, and compares the two after
+every step: each response, the stub list with its recordings, every scenario and flow-state value,
+the upstream's request count, and that a changed answer never reuses an older `Last-Modified`. It
+runs in `cargo test` at 64 cases; set `PROPTEST_CASES` for more, as the nightly
+[`model-tests.yml`](.github/workflows/model-tests.yml) does (2048).
+
+A failure prints the shrunk operation sequence and writes its seed to
+`crates/rift-mock-core/tests/proptest-regressions/model.txt` (the nightly run uploads it as an
+artifact). Check the seed in with the fix, and add the sequence as a named test in `main.rs` too: a
+seed regenerates its case through the strategies, so it stops meaning the same case once they
+change. The model follows Mountebank, except where `model.rs` names a known divergence by issue;
+fixing one of those means deleting that branch of the model.
+
 ## Fixed test ports
 
 A test that binds a fixed port takes it from **15000-24999**, and **each port belongs to exactly

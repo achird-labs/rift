@@ -686,25 +686,56 @@ impl Imposter {
         self.flow_store.get(flow_id, key)
     }
 
-    /// Set a raw flow-state value (admin flow-state arrange).
+    /// Set a raw flow-state value (admin flow-state arrange). A scenario's state lives under its
+    /// name, so a write there is a transition like any other and is stamped as one (issue #1344).
     pub fn flow_set(
         &self,
         flow_id: &str,
         key: &str,
         value: serde_json::Value,
     ) -> anyhow::Result<()> {
-        self.flow_store.set(flow_id, key, value)
+        let changed =
+            self.is_conditional_gate(key) && self.would_change(flow_id, key, Some(&value));
+        self.flow_store.set(flow_id, key, value)?;
+        if changed {
+            self.stamp_scenario_transition(key);
+        }
+        Ok(())
     }
 
-    /// Delete a raw flow-state value (admin flow-state teardown).
+    /// Delete a raw flow-state value (admin flow-state teardown). Deleting a scenario's key returns
+    /// it to its initial state, which is stamped as a transition (issue #1344).
     pub fn flow_delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
-        self.flow_store.delete(flow_id, key)
+        let changed = self.is_conditional_gate(key) && self.would_change(flow_id, key, None);
+        self.flow_store.delete(flow_id, key)?;
+        if changed {
+            self.stamp_scenario_transition(key);
+        }
+        Ok(())
     }
 
     /// Clear every key under a flow (issue #530) — backs `DELETE /admin/imposters/:port/flow-state/
-    /// :flow_id`. Idempotent: clearing an absent flow succeeds.
+    /// :flow_id`. Idempotent: clearing an absent flow succeeds. Every scenario the flow held a state
+    /// for returns to its initial state, and each one gating a conditional stub is stamped as a
+    /// transition (issue #1344).
     pub fn flow_clear(&self, flow_id: &str) -> anyhow::Result<()> {
-        self.flow_store.clear_flow(flow_id)
+        let gates: std::collections::BTreeSet<String> = self
+            .snapshot()
+            .conditional_gates_through(usize::MAX)
+            .filter(|scenario| self.would_change(flow_id, scenario, None))
+            .map(str::to_string)
+            .collect();
+        self.flow_store.clear_flow(flow_id)?;
+        for scenario in &gates {
+            self.stamp_scenario_transition(scenario);
+        }
+        Ok(())
+    }
+
+    /// Whether writing `after` (`None`: deleting) to `key` changes what the flow holds. An unreadable
+    /// current value counts as a change, as in `set_scenario_state`: it is what the write repairs.
+    fn would_change(&self, flow_id: &str, key: &str, after: Option<&serde_json::Value>) -> bool {
+        !matches!(self.flow_store.get(flow_id, key), Ok(current) if current.as_ref() == after)
     }
 
     /// Distinct scenario names declared by this imposter's stubs (sorted).
