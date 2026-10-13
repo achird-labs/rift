@@ -1370,46 +1370,67 @@
     "id": "key-case-sensitive-true",
     "case": "targeted: keyCaseSensitive makes a query key comparison exact",
     "location": "step[2].body",
-    "kind": "known-bug",
-    "reason": "keyCaseSensitive: true compares names exactly in Rift; in Mountebank 2.9.1 it only takes effect with caseSensitive: true (predicates.js normalize), so the lower-case key still matches (#1367)",
+    "kind": "documented",
+    "reason": "keyCaseSensitive: true compares names exactly in Rift; in Mountebank 2.9.1 it only takes effect with caseSensitive: true (predicates.js normalize), so the lower-case key still matches",
     "mountebank": "exact key",
-    "rift": ""
+    "rift": "",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`."
   },
   {
     "case": "sdk-corpus: 02-predicates.json",
-    "kind": "known-bug",
-    "reason": "same keyCaseSensitive divergence, in the corpus's own kcs-nomatch-lower stub (#1367)",
+    "kind": "documented",
+    "reason": "same keyCaseSensitive divergence, in the corpus's own kcs-nomatch-lower stub",
     "id": "key-case-sensitive-true/corpus#0",
     "location": "step[14].status",
     "mountebank": "200",
-    "rift": "400"
+    "rift": "400",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`."
   },
   {
     "case": "sdk-corpus: 02-predicates.json",
-    "kind": "known-bug",
-    "reason": "same keyCaseSensitive divergence, in the corpus's own kcs-nomatch-lower stub (#1367)",
+    "kind": "documented",
+    "reason": "same keyCaseSensitive divergence, in the corpus's own kcs-nomatch-lower stub",
     "id": "key-case-sensitive-true/corpus#1",
     "location": "step[14].body/error",
     "mountebank": "(absent)",
-    "rift": "\"no predicate matched\""
+    "rift": "\"no predicate matched\"",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`."
   },
   {
     "case": "sdk-corpus: 02-predicates.json",
-    "kind": "known-bug",
-    "reason": "same keyCaseSensitive divergence, in the corpus's own kcs-nomatch-lower stub (#1367)",
+    "kind": "documented",
+    "reason": "same keyCaseSensitive divergence, in the corpus's own kcs-nomatch-lower stub",
     "id": "key-case-sensitive-true/corpus#2",
     "location": "step[14].body/hint",
     "mountebank": "(absent)",
-    "rift": "\"see README §02 for matching requests\""
+    "rift": "\"see README §02 for matching requests\"",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`."
   },
   {
     "case": "sdk-corpus: 02-predicates.json",
-    "kind": "known-bug",
-    "reason": "same keyCaseSensitive divergence, in the corpus's own kcs-nomatch-lower stub (#1367)",
+    "kind": "documented",
+    "reason": "same keyCaseSensitive divergence, in the corpus's own kcs-nomatch-lower stub",
     "id": "key-case-sensitive-true/corpus#3",
     "location": "step[14].body/matched",
     "mountebank": "\"kcs-lower\"",
-    "rift": "(absent)"
+    "rift": "(absent)",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`."
+  },
+  {
+    "id": "key-case-sensitive-under-matches",
+    "case": "targeted: matches with caseSensitive true and keyCaseSensitive false (#1367)",
+    "location": "step[1].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`.",
+    "reason": "under matches, Rift honours keyCaseSensitive: false; Mountebank replaces it with caseSensitive and compares the key exactly",
+    "mountebank": "",
+    "rift": "relaxed key"
   },
   {
     "case": "proxy: Basic proxy forwards requests to backend",
