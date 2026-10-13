@@ -92,6 +92,12 @@ string and body). To record exportable stubs, give the proxy `predicateGenerator
 `{"matches": {"method": true, "path": true, "query": true, "body": true}}`. See
 [Proxy](proxy.md).
 
+## Generated predicates
+
+A proxy's `predicateGenerators` record predicates whose order, selector scope, selected-value type
+and header-name lookup differ from Mountebank 2.9.1's; each difference, and why Rift's recording is
+the one that replays, is listed under [Proxy: What Gets Recorded](proxy.md#what-gets-recorded).
+
 ## Elsewhere in these docs
 
 Each of these is described where the feature is:

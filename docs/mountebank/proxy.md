@@ -190,8 +190,8 @@ query matches apart from `ts`.
 
 ### What Gets Recorded
 
-As in Mountebank, a generator records **one predicate per field** in `matches`, always in the order
-`method`, `path`, `query`, `headers`, `body`, each carrying the generator's `caseSensitive` and
+A generator records **one predicate per field** in `matches`, as Mountebank does, in the fixed order
+`method`, `path`, `query`, `headers`, `body` (Mountebank's order differs; see below), each carrying the generator's `caseSensitive` and
 `except` when they are set (and the body's carrying its `jsonpath` or `xpath`). The values are the
 request's, unmodified. A request `GET /users/123?page=2` through
 
@@ -224,8 +224,12 @@ records
 
 A field the request lacks is recorded empty: no query is `{}`, no body is `""`.
 
-Two deviations from Mountebank:
+Deviations from Mountebank:
 
+- **Order.** Mountebank emits the predicates in the key order of `matches`; Rift's order is fixed, so two recordings of one request always build equal lists.
+- **Selector scope.** Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `""`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only.
+- **Selected value.** Mountebank records the selected JSON value (`1`); Rift records its string form (`"1"`), which Mountebank also matches.
+- **Listed header names.** Mountebank finds a listed header name only in the case the client sent it, and otherwise records `{}`, which matches any request; Rift finds it in any case.
 - Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**
   under the operator, once per field in `matches`. Rift stores that field's value only.
 - A whole `query` or `headers` field the generator's `ignore` filters is recorded with `equals` over
