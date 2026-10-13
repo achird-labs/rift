@@ -899,7 +899,9 @@ async fn handle_request_inner(
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
-            body: body_string.as_deref().map(str::to_string),
+            // A request without a body is recorded as `""`, as Mountebank records it (issue
+            // #1365). Still an `Option`, so journals written before decode unchanged.
+            body: Some(body_string.as_deref().unwrap_or_default().to_string()),
             mode: body_mode.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             // Filled in after the match, via `attach_match_outcome` below.

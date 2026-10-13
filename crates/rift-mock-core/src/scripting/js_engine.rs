@@ -2173,20 +2173,15 @@ fn create_mountebank_request_object(
     obj.set(js_string!("headers"), headers_obj, false, context)
         .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
 
-    // Set body - always as a string to match Mountebank behavior
-    // Users should call JSON.parse(request.body) themselves if they want parsed JSON
-    if let Some(body) = &request.body {
-        obj.set(
-            js_string!("body"),
-            JsValue::from(js_string!(body.clone())),
-            false,
-            context,
-        )
-        .map_err(|e| anyhow!("Failed to set body: {e}"))?;
-    } else {
-        obj.set(js_string!("body"), JsValue::undefined(), false, context)
-            .map_err(|e| anyhow!("Failed to set body: {e}"))?;
-    }
+    // Always a string, as in Mountebank: `""` for a request without a body (issue #1365), never
+    // `undefined`. Users call JSON.parse(request.body) themselves if they want parsed JSON.
+    obj.set(
+        js_string!("body"),
+        JsValue::from(js_string!(request.body.as_deref().unwrap_or(""))),
+        false,
+        context,
+    )
+    .map_err(|e| anyhow!("Failed to set body: {e}"))?;
 
     // Issue #636: `body` is base64 text for a binary request, not the raw bytes (JS strings
     // can't hold arbitrary bytes) — `isBinary` lets an inject function tell the two apart
@@ -3712,6 +3707,44 @@ function respond(ctx) {
             (1..=16).contains(&parses),
             "64 same-source runs must parse at most once per pool worker (≤16), got {parses}"
         );
+    }
+
+    // Issue #1365: a request without a body reaches every script as `""`, as in Mountebank, not
+    // `undefined`.
+    #[test]
+    fn inject_sees_empty_string_body_for_bodyless_request() {
+        let script = r#"function(config) { return { statusCode: 200, body: typeof config.request.body + ':' + JSON.stringify(config.request.body) }; }"#;
+        let resp = execute_mountebank_inject(script, &mb_req("GET", "/nobody"), test_port(), None)
+            .expect("inject runs");
+        assert_eq!(resp.body, r#"string:"""#);
+    }
+
+    #[test]
+    fn decorate_sees_empty_string_request_body() {
+        // Every decorate form builds the request through `create_mountebank_request_object`.
+        let script = r#"function(request, response) { response.body = typeof request.body + ':' + JSON.stringify(request.body); }"#;
+        let result = execute_mountebank_decorate(
+            script,
+            &mb_req("GET", "/nobody"),
+            "original",
+            200,
+            &HashMap::new(),
+            test_port(),
+            None,
+        )
+        .expect("decorate runs");
+        assert_eq!(result.body, r#"string:"""#);
+    }
+
+    #[test]
+    fn predicate_inject_sees_empty_string_body() {
+        let matched = execute_predicate_inject(
+            r#"function(config) { return config.request.body === ""; }"#,
+            &mb_req("GET", "/nobody"),
+            test_port(),
+        )
+        .expect("predicate inject runs");
+        assert!(matched);
     }
 
     // (b) legacy positional: function(request, state, logger) { ...request.path... }

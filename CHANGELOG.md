@@ -52,6 +52,12 @@ record.
 
 ### Fixed
 
+- **A request without a body is `""`, as in Mountebank** (#1365). It is now recorded with
+  `"body": ""` (the key was absent), and inject, decorate, predicate-inject and
+  predicateGenerator-inject scripts see `request.body === ""` (was `undefined`); `shellTransform`'s
+  `MB_REQUEST` carries `"body": ""` (was `null`). **A script that tested `request.body ===
+  undefined` must test for `""`, or `!request.body`.** Declarative `exists` on `body` is unchanged.
+
 - **`rift-lint` agrees with the engine on header values** (#1358). Number and boolean header values,
   and arrays mixing them with strings, are coerced by the engine as in Mountebank, and no longer
   lint as errors. A `null` or object value, which the engine refuses, is now an error (`E054`,
