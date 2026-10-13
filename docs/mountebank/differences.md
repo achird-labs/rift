@@ -84,6 +84,14 @@ The setting is described in [Predicates](predicates.md#keycasesensitive).
 and leaves recorded requests alone, and there is no `GET`. To clear saved proxy responses on Rift, use
 `savedProxyResponses`.
 
+## A proxy without generators records into a store, not a stub
+
+A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings. Mountebank records an empty-predicate stub there, which answers every later request with the
+first response, whatever its path or method. Rift replays per request instead (method, path, query
+string and body). To record exportable stubs, give the proxy `predicateGenerators`, for example
+`{"matches": {"method": true, "path": true, "query": true, "body": true}}`. See
+[Proxy](proxy.md).
+
 ## Elsewhere in these docs
 
 Each of these is described where the feature is:

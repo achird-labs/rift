@@ -199,6 +199,11 @@ record.
 
 ### Changed
 
+- **Docs: a proxy without `predicateGenerators` records into a store, not a stub** (#1363), so
+  printed and exported imposters do not show its recordings. Mountebank records an empty-predicate
+  stub that answers every later request with the first response. Documented as a deliberate
+  deviation (#1317, #1386). No behaviour change.
+
 - **Docs: `DELETE /imposters/:port/requests` clears recorded requests** (#1370), where Mountebank's
   deprecated alias clears saved proxy responses. Documented as a deliberate deviation; the rift-cluster
   console's "Clear requests" depends on it. No behaviour change.
