@@ -18,4 +18,14 @@ exclude_re = [
     # Equivalent mutant: `join` ORs a value shifted left 32 bits with a `u32`, so the bits never
     # overlap and `^` computes the same number as `|`.
     "behaviors/cycler.rs:.*replace \\| with \\^ in join",
+    # Equivalent: `mix64`/`combine` only feed the in-process body-hash index (#708), which
+    # over-approximates. Any deterministic mix keeps equal bodies hash-equal, and a changed collision
+    # set only widens the Stage-1 candidates that Stage 2 re-checks. Never persisted or exposed. The
+    # constant-return and `combine` `^`→`&` mutants degrade pruning visibly and are caught: keep them.
+    "predicates/json.rs:.*replace (\\^=|>>) with .* in mix64$",
+    "predicates/json.rs:.*replace \\^ with \\| in combine$",
+    # Equivalent: papaya's `Default` for `HashMap<K, V, S>` is `with_hasher(S::default())`, the body verbatim.
+    "predicates/regex_cache.rs:.*replace new_cache_map -> CacheMap with Default::default\\(\\)",
+    # Equivalent: each `visit_unit` returns `Ok(Vec::new())`, which is `Vec::default()`.
+    "behaviors/types.rs:.*::visit_unit -> Result<Self::Value, E> with Ok\\(Default::default\\(\\)\\)",
 ]

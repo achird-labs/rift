@@ -635,6 +635,40 @@ fn test_behaviors_array_malformed_earlier_list_item_is_refused() {
     assert_eq!(block, None);
 }
 
+/// Issue #1385: the refusal for a malformed list behavior names the shapes it accepts. That text
+/// is the serde visitor's `expecting`, and it reaches the user in the 400 body.
+#[test]
+fn test_malformed_list_behavior_refusal_names_the_accepted_shapes() {
+    for (key, block, expected) in [
+        (
+            "copy",
+            serde_json::json!({"copy": 42}),
+            "expected a copy behavior object or array of copy behaviors",
+        ),
+        (
+            "lookup",
+            serde_json::json!({"lookup": 7}),
+            "expected a lookup behavior object or array of lookup behaviors",
+        ),
+        (
+            "shellTransform",
+            serde_json::json!({"shellTransform": 5}),
+            "expected a shell command string or array of shell command strings",
+        ),
+    ] {
+        let err = serde_json::from_value::<StubResponse>(
+            serde_json::json!({"is": {}, "_behaviors": block}),
+        )
+        .expect_err("a malformed list behavior is refused")
+        .to_string();
+        assert!(
+            err.starts_with(&format!("`{key}` behavior is malformed")),
+            "{key}: {err}"
+        );
+        assert!(err.contains(expected), "{key}: {err}");
+    }
+}
+
 /// Issue #1099: an empty `behaviors` array is no block at all.
 #[test]
 fn test_empty_behaviors_array_is_no_block() {
