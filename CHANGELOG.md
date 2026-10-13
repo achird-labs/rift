@@ -199,6 +199,10 @@ record.
 
 ### Changed
 
+- **Docs: `DELETE /imposters/:port/requests` clears recorded requests** (#1370), where Mountebank's
+  deprecated alias clears saved proxy responses. Documented as a deliberate deviation; the rift-cluster
+  console's "Clear requests" depends on it. No behaviour change.
+
 - **Docs: `keyCaseSensitive` is a documented deviation from Mountebank** (#1367). Rift honours
   `keyCaseSensitive: true` on its own and under `matches`; Mountebank applies the setting only to turn
   key matching off under `caseSensitive: true`. No behaviour change.
