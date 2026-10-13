@@ -2820,13 +2820,13 @@ fn e045_covers_fault_error_headers_too() {
 
 #[test]
 fn e045_does_not_touch_is_headers() {
-    // `is.headers` is multi-valued: a number there is E019 and a string array is legal (#238).
-    // Reusing E045 for it would contradict both.
+    // `is.headers` is multi-valued: a null array element there is E018 and a string array is legal
+    // (#238). Reusing E045 for it would contradict both.
     let numeric = make_imposter(json!([{
-        "responses": [{ "is": { "statusCode": 200, "headers": { "Content-Length": 256 } } }]
+        "responses": [{ "is": { "statusCode": 200, "headers": { "X-Fix": ["a", null] } } }]
     }]));
     let r = lint_value(&numeric, "<test>", &opts());
-    assert!(has_code(&r, "E019"), "got {:?}", codes(&r));
+    assert!(has_code(&r, "E018"), "got {:?}", codes(&r));
     assert!(!has_code(&r, "E045"), "got {:?}", codes(&r));
 
     let array = make_imposter(json!([{
@@ -2920,7 +2920,7 @@ const YAML_SEQUENCE: &str = "\
         - is:
             statusCode: 200
             headers:
-              Content-Length: 256
+              X-Fix: [a, ~]
 ";
 
 /// A YAML imposter sequence is linted like any other document: ordinary rules fire. Before this,
@@ -2929,8 +2929,8 @@ const YAML_SEQUENCE: &str = "\
 fn a_yaml_sequence_is_linted_like_json() {
     let r = rift_lint::lint_yaml(YAML_SEQUENCE, "<test>.yaml", &opts());
     assert!(
-        has_code(&r, "E019"),
-        "the numeric header is reported in YAML too, got {:?}",
+        has_code(&r, "E018"),
+        "the bad header array is reported in YAML too, got {:?}",
         codes(&r)
     );
 }
@@ -3090,9 +3090,9 @@ fn lint_directory_reads_yaml_and_yml_too() {
         "the two YAML files and the JSON one, not the .txt"
     );
     // Counting is not linting: a `.yml` routed through the JSON parser would fail with E001 and
-    // still be counted. The E019s are what prove both YAML files were read as YAML.
+    // still be counted. The E018s are what prove both YAML files were read as YAML.
     assert_eq!(
-        result.issues.iter().filter(|i| i.code == "E019").count(),
+        result.issues.iter().filter(|i| i.code == "E018").count(),
         2,
         "one from the .yaml and one from the .yml, got {:?}",
         codes(&result)
