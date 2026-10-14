@@ -17,65 +17,116 @@ pub(crate) fn json_value_to_string(val: &serde_json::Value) -> String {
     }
 }
 
-/// Recursively check field existence within a JSON object.
-/// When the exists value is an object, parse the actual string as JSON
-/// and check each field's existence recursively (Mountebank compatible).
-fn check_exists_json_recursive(expected: &serde_json::Value, actual_str: &str) -> bool {
-    match expected {
-        serde_json::Value::Bool(should_exist) => {
-            let exists = !actual_str.is_empty();
-            exists == *should_exist
-        }
-        serde_json::Value::Object(expected_obj) => {
-            let actual_json: serde_json::Value = match serde_json::from_str(actual_str) {
-                Ok(v) => v,
-                Err(_) => {
-                    // If we can't parse as JSON, check if any field expects non-existence
-                    return expected_obj
-                        .values()
-                        .all(|v| v == &serde_json::Value::Bool(false));
-                }
-            };
-
-            for (key, expected_val) in expected_obj {
-                match expected_val {
-                    serde_json::Value::Bool(should_exist) => {
-                        let exists = actual_json.get(key).is_some();
-                        if exists != *should_exist {
-                            return false;
-                        }
-                    }
-                    serde_json::Value::Object(_) => {
-                        // Recurse into nested object
-                        let nested_str = match actual_json.get(key) {
-                            Some(v) => json_value_to_string(v),
-                            None => return false,
-                        };
-                        if !check_exists_json_recursive(expected_val, &nested_str) {
-                            return false;
-                        }
-                    }
-                    _ => {
-                        // Non-boolean, non-object values are treated as true (field should exist)
-                        if actual_json.get(key).is_none() {
-                            return false;
-                        }
-                    }
-                }
-            }
-            true
-        }
-        _ => {
-            // Non-boolean, non-object exists values: treat as "should exist" = true
-            !actual_str.is_empty()
-        }
+/// JavaScript truthiness, which is how Mountebank reads an `exists` expectation and decides
+/// whether a container can hold fields at all: `false`, `null`, `0`, `""` are falsy; non-empty
+/// strings, non-zero numbers, objects and arrays are truthy.
+fn truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        serde_json::Value::String(s) => !s.is_empty(),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => true,
     }
 }
 
-/// Check exists predicate - verifies field presence or absence
+/// Mountebank's `exists` leaf (predicates.js): only a missing value or the empty string is absent.
+fn present(value: Option<&str>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
+}
+
+/// Mountebank's `exists` over a field holding several values (`onlyActualIsArray`): a truthy
+/// expectation holds outright; a falsy one holds when some value is absent (`""`).
+fn exists_holds_for_values(expected: &serde_json::Value, values: &[&str]) -> bool {
+    match values {
+        [] => !truthy(expected),
+        [one] => present(Some(one)) == truthy(expected),
+        many => truthy(expected) || many.iter().any(|v| v.is_empty()),
+    }
+}
+
+/// Look up `key` in a JSON object, honouring `keyCaseSensitive` (Mountebank lowercases body keys
+/// unless it is set, `tryJSON`).
+fn json_field<'a>(
+    actual: &'a serde_json::Value,
+    key: &str,
+    key_case_sensitive: bool,
+) -> Option<&'a serde_json::Value> {
+    let obj = actual.as_object()?;
+    if key_case_sensitive {
+        obj.get(key)
+    } else {
+        obj.get(key).or_else(|| {
+            obj.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                .map(|(_, v)| v)
+        })
+    }
+}
+
+/// Mountebank's `predicateSatisfied` for `exists`: an object expectation against `actual`.
+///
+/// A falsy `actual` (empty body, missing or `""`/`null`/`0`/`false` parent) fails whatever it
+/// expects. A string is read as JSON when it parses; otherwise it has no fields, so every field in
+/// it is absent. An array is tested element by element.
+fn exists_satisfied(
+    expected: &serde_json::Map<String, serde_json::Value>,
+    actual: &serde_json::Value,
+    key_case_sensitive: bool,
+) -> bool {
+    if !truthy(actual) {
+        return false;
+    }
+    if let serde_json::Value::String(text) = actual
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text)
+    {
+        return exists_fields(expected, &parsed, key_case_sensitive);
+    }
+    exists_fields(expected, actual, key_case_sensitive)
+}
+
+fn exists_fields(
+    expected: &serde_json::Map<String, serde_json::Value>,
+    actual: &serde_json::Value,
+    key_case_sensitive: bool,
+) -> bool {
+    if let serde_json::Value::Array(elements) = actual {
+        return elements
+            .iter()
+            .any(|element| exists_satisfied(expected, element, key_case_sensitive));
+    }
+    expected.iter().all(|(key, expected_val)| {
+        let field = json_field(actual, key, key_case_sensitive);
+        match (expected_val, field) {
+            // Deviation from Mountebank, which holds any truthy expectation over an array without
+            // looking at it: an object expectation holds when some element satisfies it.
+            (serde_json::Value::Object(nested), Some(serde_json::Value::Array(elements))) => {
+                elements
+                    .iter()
+                    .any(|element| exists_satisfied(nested, element, key_case_sensitive))
+            }
+            (serde_json::Value::Object(nested), Some(value)) => {
+                exists_satisfied(nested, value, key_case_sensitive)
+            }
+            (serde_json::Value::Object(_), None) => false,
+            (_, Some(serde_json::Value::Array(elements))) => {
+                truthy(expected_val)
+                    || elements
+                        .iter()
+                        .any(|e| matches!(e, serde_json::Value::String(s) if s.is_empty()))
+            }
+            (_, Some(serde_json::Value::String(text))) => {
+                present(Some(text)) == truthy(expected_val)
+            }
+            (_, field) => field.is_some() == truthy(expected_val),
+        }
+    })
+}
+
+/// Check exists predicate - verifies field presence or absence, as Mountebank's `exists` does:
+/// an empty value is absent, a missing container (empty body, no form) fails any object
+/// expectation, and the expectation is read for JavaScript truthiness.
 /// Supports: method, path, body, query, headers, form, requestFrom, ip
-/// When a field's value is an object (not a boolean), parse the actual value as JSON
-/// and recursively check field existence within it (Mountebank compatible).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_exists_predicate<H>(
     obj: &HashMap<String, serde_json::Value>,
@@ -90,6 +141,8 @@ pub(crate) fn check_exists_predicate<H>(
     // Concretely `FastMap` — see `check_predicate_fields`.
     form: Option<&FastMap<String, String>>,
     key_case_sensitive: bool,
+    // `body` parsed once per request, when it is the compared body (no selector) and is JSON.
+    body_json: Option<&serde_json::Value>,
 ) -> bool
 where
     H: RequestHeaders,
@@ -103,78 +156,88 @@ where
         }
     };
 
-    // Check method exists (always present in HTTP requests)
-    if let Some(expected) = obj.get("method") {
-        let should_exist = expected.as_bool().unwrap_or(true);
-        let exists = !method.is_empty();
-        if exists != should_exist {
+    for (field, value) in [
+        ("method", Some(method)),
+        ("path", Some(path)),
+        ("requestFrom", request_from),
+        ("ip", client_ip),
+    ] {
+        if let Some(expected) = obj.get(field)
+            && present(value) != truthy(expected)
+        {
             return false;
         }
     }
 
-    // Check path exists (always present in HTTP requests)
-    if let Some(expected) = obj.get("path") {
-        let should_exist = expected.as_bool().unwrap_or(true);
-        let exists = !path.is_empty();
-        if exists != should_exist {
+    if let Some(expected) = obj.get("body") {
+        let holds = match expected {
+            // An empty body is the falsy container; a non-empty one is truthy whatever it parses to.
+            serde_json::Value::Object(_) if body.is_empty() => false,
+            serde_json::Value::Object(fields) => match body_json {
+                Some(parsed) => exists_fields(fields, parsed, key_case_sensitive),
+                None => exists_satisfied(
+                    fields,
+                    &serde_json::Value::String(body.to_owned()),
+                    key_case_sensitive,
+                ),
+            },
+            _ => present(Some(body)) == truthy(expected),
+        };
+        if !holds {
             return false;
         }
     }
 
-    // Check requestFrom exists
-    if let Some(expected) = obj.get("requestFrom") {
-        let should_exist = expected.as_bool().unwrap_or(true);
-        let exists = request_from.is_some_and(|v| !v.is_empty());
-        if exists != should_exist {
-            return false;
-        }
-    }
-
-    // Check ip exists
-    if let Some(expected) = obj.get("ip") {
-        let should_exist = expected.as_bool().unwrap_or(true);
-        let exists = client_ip.is_some_and(|v| !v.is_empty());
-        if exists != should_exist {
-            return false;
-        }
-    }
-
-    // Check body exists - supports both boolean and object values
-    if let Some(expected) = obj.get("body")
-        && !check_exists_json_recursive(expected, body)
-    {
-        return false;
-    }
-
-    // Check query parameters exist
+    // Rift comma-joins a repeated query or form key (`?q=&q=` is `","`), so it reads as one
+    // present value where Mountebank sees an array.
     if let Some(expected_query) = obj.get("query").and_then(|v| v.as_object()) {
-        for (key, should_exist_val) in expected_query {
-            let should_exist = should_exist_val.as_bool().unwrap_or(true);
-            let exists = query.iter().any(|(k, _)| key_matches(key, k));
-            if exists != should_exist {
+        for (key, expected) in expected_query {
+            let values: Vec<&str> = query
+                .iter()
+                .filter(|(k, _)| key_matches(key, k))
+                .map(|(_, v)| v.as_str())
+                .collect();
+            if !exists_holds_for_values(expected, &values) {
                 return false;
             }
         }
     }
 
-    // Check headers exist
     if let Some(expected_headers) = obj.get("headers").and_then(|v| v.as_object()) {
-        for (key, should_exist_val) in expected_headers {
-            let should_exist = should_exist_val.as_bool().unwrap_or(true);
-            let exists = headers.entries().any(|(k, _)| key_matches(key, k));
-            if exists != should_exist {
+        for (key, expected) in expected_headers {
+            // Mountebank folds a repeated header into an array (`headersMap` `arrayifyIfExists`),
+            // except that a value replaces an empty first one rather than joining it.
+            let mut values: Vec<&str> = Vec::new();
+            for value in headers
+                .entries()
+                .filter(|(k, _)| key_matches(key, k))
+                .flat_map(|(_, values)| values.iter().map(String::as_str))
+            {
+                match values.as_mut_slice() {
+                    [first] if first.is_empty() => *first = value,
+                    _ => values.push(value),
+                }
+            }
+            if !exists_holds_for_values(expected, &values) {
                 return false;
             }
         }
     }
 
-    // Check form fields exist
+    // Mountebank has a `form` only for a non-empty urlencoded body; without one any `form`
+    // expectation fails, `false` included (`predicateSatisfied`: `if (!actual) return false`).
+    // The serve path parses an empty urlencoded body to an empty form, which is the same absence.
     if let Some(expected_form) = obj.get("form").and_then(|v| v.as_object()) {
-        let actual_form = form.cloned().unwrap_or_default();
-        for (key, should_exist_val) in expected_form {
-            let should_exist = should_exist_val.as_bool().unwrap_or(true);
-            let exists = actual_form.iter().any(|(k, _)| key_matches(key, k));
-            if exists != should_exist {
+        let Some(actual_form) = form.filter(|f| !(f.is_empty() && body.is_empty())) else {
+            return false;
+        };
+        for (key, expected) in expected_form {
+            let values: Vec<&str> = actual_form
+                .iter()
+                .filter(|(k, _)| key_matches(key, k))
+                .map(|(_, v)| v.as_str())
+                .collect();
+            if !exists_holds_for_values(expected, &values) {
                 return false;
             }
         }

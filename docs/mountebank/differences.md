@@ -77,6 +77,15 @@ the regex against JavaScript's `undefined` coerced to a string, so `.*` copies t
 group that did not take part in the match is replaced with an empty string (Mountebank inserts a
 comma), and inserted text is never re-scanned for tokens — see [Behaviors](behaviors.md#copy).
 
+## `exists` with an object over an array
+
+`{"exists": {"body": {"items": {"id": true}}}}` against `{"items": [...]}` holds in Mountebank for
+any array, whatever its elements and whatever the expectation asks: its array shortcut fires before
+the elements are looked at. Rift holds it when some element satisfies the object, so
+`{"items": [{"sku": 1}]}` does not satisfy `{"id": true}`. A repeated query or form key is one
+comma-joined value in Rift, so `?q=&q=` is `","`, which exists, where Mountebank sees an array of
+two empty values. See [Predicates](predicates.md#exists).
+
 ## keyCaseSensitive is honoured as written
 
 Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`. Three consequences:

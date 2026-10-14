@@ -537,6 +537,7 @@ where
                 client_ip,
                 form,
                 key_case_sensitive,
+                field_body_json,
             ),
         }
     };
@@ -869,14 +870,14 @@ mod tests {
         .unwrap();
 
         assert!(
-            result,
-            "exists predicate should match bare query param '?flag'"
+            !result,
+            "a bare '?flag' is the empty string, which Mountebank's exists reads as absent (#1403)"
         );
     }
 
     // =========================================================================
     // Mutation-survivor pins (#1382). Every expected value below is one Mountebank 2.9.1
-    // agrees with; the `exists` empty-value divergences (#1403) are deliberately avoided.
+    // agrees with.
     // =========================================================================
 
     fn fields_of(key: &str, value: serde_json::Value) -> HashMap<String, serde_json::Value> {
@@ -954,6 +955,272 @@ mod tests {
         assert!(!exists_body(json!("yes"), None));
         assert!(exists_body(json!({"a": "yes"}), Some(r#"{"a":1}"#)));
         assert!(!exists_body(json!({"a": "yes"}), Some(r#"{"b":1}"#)));
+    }
+
+    // =========================================================================
+    // `exists` follows Mountebank's rule (#1403): only the empty string is absent
+    // (predicates.js `exists`), a missing container fails any object expectation
+    // (`predicateSatisfied`: `if (!actual) return false`), and the expectation is read for
+    // JavaScript truthiness.
+    // =========================================================================
+
+    #[allow(clippy::too_many_arguments)]
+    fn exists_on<H: RequestHeaders>(
+        field: &str,
+        expected: serde_json::Value,
+        query: Option<&str>,
+        headers: &H,
+        body: Option<&str>,
+        form: Option<&HashMap<String, String>>,
+        key_case_sensitive: Option<bool>,
+    ) -> bool {
+        let params = PredicateParameters {
+            key_case_sensitive,
+            ..Default::default()
+        };
+        predicate_matches(
+            &make_predicate_with_params(
+                PredicateOperation::Exists(fields_of(field, expected)),
+                params,
+            ),
+            "POST",
+            "/test",
+            query,
+            headers,
+            body,
+            None,
+            None,
+            form,
+            0,
+        )
+        .unwrap()
+    }
+
+    fn exists_query(expected: serde_json::Value, query: &str) -> bool {
+        exists_on(
+            "query",
+            expected,
+            Some(query),
+            &empty_headers(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn exists_json(expected: serde_json::Value, body: &str) -> bool {
+        exists_on(
+            "body",
+            expected,
+            None,
+            &empty_headers(),
+            Some(body),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn exists_reads_an_empty_query_value_as_absent() {
+        assert!(!exists_query(json!({"flag": true}), "flag"), "?flag");
+        assert!(exists_query(json!({"flag": false}), "flag"), "?flag");
+        assert!(!exists_query(json!({"q": true}), "q="), "?q=");
+        assert!(exists_query(json!({"q": false}), "q="), "?q=");
+        assert!(exists_query(json!({"q": true}), "q=1"), "?q=1");
+        assert!(!exists_query(json!({"q": false}), "q=1"), "?q=1");
+        assert!(exists_query(json!({"q": false}), "other=1"), "absent");
+    }
+
+    #[test]
+    fn exists_reads_the_expectation_for_truthiness() {
+        for absent in [json!(0), json!(""), json!(null)] {
+            assert!(
+                !exists_query(json!({"q": absent}), "q=1"),
+                "{absent} means absent"
+            );
+            assert!(
+                exists_query(json!({"q": absent}), "other=1"),
+                "{absent} means absent"
+            );
+        }
+        for present in [json!(1), json!("yes"), json!([]), json!({})] {
+            assert!(
+                exists_query(json!({"q": present}), "q=1"),
+                "{present} means present"
+            );
+        }
+    }
+
+    #[test]
+    fn exists_reads_an_empty_header_as_absent() {
+        let empty: HashMap<String, String> = [("X-E".to_string(), String::new())].into();
+        let one = |expected| exists_on("headers", expected, None, &empty, None, None, None);
+        assert!(!one(json!({"X-E": true})));
+        assert!(one(json!({"X-E": false})));
+
+        // A repeated header is an array in Mountebank: a truthy expectation holds outright, a
+        // falsy one holds when some value is empty.
+        let repeated = |values: &[&str], expected| {
+            let headers: HashMap<String, Vec<String>> = [(
+                "X-E".to_string(),
+                values.iter().map(|v| v.to_string()).collect(),
+            )]
+            .into();
+            exists_on("headers", expected, None, &headers, None, None, None)
+        };
+        assert!(repeated(&["a", ""], json!({"X-E": true})));
+        assert!(repeated(&["a", ""], json!({"X-E": false})));
+        assert!(!repeated(&["a", "b"], json!({"X-E": false})));
+        // A value replaces an empty first one instead of joining it.
+        assert!(!repeated(&["", "v"], json!({"X-E": false})));
+        assert!(repeated(&["", "v"], json!({"X-E": true})));
+        assert!(repeated(&["", ""], json!({"X-E": false})));
+    }
+
+    #[test]
+    fn exists_reads_an_empty_form_field_as_absent() {
+        let form: HashMap<String, String> = [("a".to_string(), String::new())].into();
+        let on = |expected, form: Option<&HashMap<String, String>>, body: &str| {
+            exists_on(
+                "form",
+                expected,
+                None,
+                &empty_headers(),
+                Some(body),
+                form,
+                None,
+            )
+        };
+        assert!(!on(json!({"a": true}), Some(&form), "a="));
+        assert!(on(json!({"a": false}), Some(&form), "a="));
+    }
+
+    /// Mountebank has a `form` only for a non-empty urlencoded body; without one, any `form`
+    /// expectation fails, `false` included.
+    #[test]
+    fn exists_on_a_missing_form_fails_whatever_it_expects() {
+        let on = |form: Option<&HashMap<String, String>>, body: Option<&str>| {
+            exists_on(
+                "form",
+                json!({"a": false}),
+                None,
+                &empty_headers(),
+                body,
+                form,
+                None,
+            )
+        };
+        assert!(!on(None, None), "no body");
+        assert!(
+            !on(Some(&HashMap::new()), Some("")),
+            "empty urlencoded body"
+        );
+        assert!(!on(None, Some(r#"{"a":1}"#)), "not urlencoded");
+    }
+
+    #[test]
+    fn exists_reads_an_empty_json_leaf_as_absent() {
+        assert!(!exists_json(json!({"a": true}), r#"{"a":""}"#));
+        assert!(exists_json(json!({"a": false}), r#"{"a":""}"#));
+        assert!(!exists_json(json!({"a": {"b": true}}), r#"{"a":{"b":""}}"#));
+        assert!(exists_json(json!({"a": {"b": false}}), r#"{"a":{"b":""}}"#));
+        for present in ["0", "false", "null", "{}", "[]"] {
+            let body = format!(r#"{{"a":{present}}}"#);
+            assert!(exists_json(json!({"a": true}), &body), "{body}: present");
+            assert!(!exists_json(json!({"a": false}), &body), "{body}: present");
+        }
+    }
+
+    #[test]
+    fn exists_on_an_empty_body_fails_whatever_it_expects() {
+        assert!(!exists_json(json!({"a": false}), ""));
+        assert!(!exists_json(json!({"a": true}), ""));
+        assert!(!exists_on(
+            "body",
+            json!({"a": false}),
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None
+        ));
+    }
+
+    /// A falsy nested parent (`""`, `null`, `0`, `false`, missing) fails its object expectation.
+    #[test]
+    fn exists_under_a_falsy_parent_fails_whatever_it_expects() {
+        for parent in [r#""""#, "null", "0", "false"] {
+            let body = format!(r#"{{"a":{parent}}}"#);
+            assert!(!exists_json(json!({"a": {"b": false}}), &body), "{body}");
+            assert!(!exists_json(json!({"a": {"b": true}}), &body), "{body}");
+        }
+        assert!(
+            !exists_json(json!({"a": {"b": false}}), r#"{"x":1}"#),
+            "missing"
+        );
+    }
+
+    /// A non-JSON body, or one that parses to a scalar, has no keys: everything in it is absent.
+    #[test]
+    fn exists_on_a_body_without_keys_finds_everything_absent() {
+        assert!(exists_json(json!({"a": false}), "plain text"));
+        assert!(exists_json(json!({"a": 0}), "plain text"));
+        assert!(!exists_json(json!({"a": true}), "plain text"));
+        assert!(
+            exists_json(json!({"a": false}), "0"),
+            "a non-empty string is not falsy"
+        );
+    }
+
+    #[test]
+    fn exists_over_a_json_array_leaf() {
+        assert!(exists_json(json!({"a": true}), r#"{"a":[]}"#));
+        assert!(exists_json(json!({"a": true}), r#"{"a":[""]}"#));
+        assert!(exists_json(json!({"a": false}), r#"{"a":["x",""]}"#));
+        assert!(!exists_json(json!({"a": false}), r#"{"a":["x"]}"#));
+        assert!(!exists_json(json!({"a": false}), r#"{"a":[]}"#));
+    }
+
+    /// Deviation (documented): Mountebank holds a truthy object expectation over an array without
+    /// looking at it. Rift holds it when some element satisfies it.
+    #[test]
+    fn exists_object_over_an_array_needs_some_element_to_satisfy_it() {
+        assert!(exists_json(json!({"a": {"b": true}}), r#"{"a":[{"b":1}]}"#));
+        assert!(!exists_json(
+            json!({"a": {"b": true}}),
+            r#"{"a":[{"c":1}]}"#
+        ));
+        assert!(!exists_json(
+            json!({"a": {"b": false}}),
+            r#"{"a":[{"b":1}]}"#
+        ));
+        assert!(exists_json(
+            json!({"a": {"b": false}}),
+            r#"{"a":[{"b":1},{"c":1}]}"#
+        ));
+    }
+
+    /// A body that is itself an array: Mountebank tests the expectation against each element.
+    #[test]
+    fn exists_on_a_top_level_array_body_tests_each_element() {
+        assert!(exists_json(json!({"a": true}), r#"[{"b":1},{"a":1}]"#));
+        assert!(!exists_json(json!({"a": true}), r#"[{"b":1}]"#));
+    }
+
+    /// Mountebank lowercases body keys unless `keyCaseSensitive` is set (`tryJSON`).
+    #[test]
+    fn exists_compares_body_keys_by_key_case_sensitivity() {
+        assert!(exists_json(json!({"A": true}), r#"{"a":1}"#));
+        assert!(exists_json(json!({"A": {"B": true}}), r#"{"a":{"b":1}}"#));
+        assert!(!exists_on(
+            "body",
+            json!({"A": true}),
+            None,
+            &empty_headers(),
+            Some(r#"{"a":1}"#),
+            None,
+            Some(true)
+        ));
     }
 
     #[test]

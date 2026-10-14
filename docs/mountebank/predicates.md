@@ -209,8 +209,25 @@ Check field existence:
 }
 ```
 
-- `true` - Field must exist
-- `false` - Field must not exist
+- `true` - Field must exist and not be empty
+- `false` - Field must be absent or empty
+
+As in Mountebank, an empty value counts as absent: `?flag`, `?q=`, an empty header, an empty form
+field and a `""` JSON value all fail `true` and satisfy `false`. Any other JSON value is present,
+including `0`, `false`, `null`, `{}` and `[]`. The expectation is read for JavaScript truthiness,
+so `0`, `""` and `null` mean "absent" and any other value means "present".
+
+Object expectations reach into JSON (`"body": {"user": {"id": true}}`). Each one needs a container:
+an empty body, a request without a form (`form` exists only for a non-empty urlencoded body) or a
+parent that is `""`, `null`, `0` or `false` fails it, whether it expects `true` or `false`. A body
+that is not JSON has no fields, so everything in it is absent.
+
+A repeated header or a JSON array exists for `true`; for `false` it holds when one of the values is
+empty (a header value after an empty first one replaces it, as in Mountebank). A repeated query or
+form key is one comma-joined value in Rift, so it is present unless every value is missing. A JSON array tested against an object expectation holds when
+some element satisfies it, which differs from Mountebank — see
+[Differences from Mountebank](differences.md#exists-with-an-object-over-an-array). Body keys are
+compared ignoring case unless `keyCaseSensitive` is set.
 
 ### inject
 
