@@ -86,6 +86,13 @@ the elements are looked at. Rift holds it when some element satisfies the object
 comma-joined value in Rift, so `?q=&q=` is `","`, which exists, where Mountebank sees an array of
 two empty values. See [Predicates](predicates.md#exists).
 
+## `except` on a JSON body
+
+Rift applies `except` to each value of a JSON body after parsing it. Mountebank also applies it to
+the raw body text before parsing, so a pattern that matches JSON punctuation (a quote, a brace) can
+make the body unparseable there, so every field in it reads as missing. A repeated query
+key is one comma-joined value in Rift, so `except` strips the joined text rather than each value.
+
 ## keyCaseSensitive is honoured as written
 
 Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`. Three consequences:

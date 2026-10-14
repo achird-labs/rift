@@ -2661,6 +2661,428 @@
           "body": "{\"a\":[{\"c\":1}]}"
         }
       ]
+    },
+    {
+      "name": "targeted: except before exists, query true (#1408)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "query": {
+                        "q": true
+                      }
+                    },
+                    "except": "^x+$"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?q=xxx"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?q=xxy"
+        }
+      ]
+    },
+    {
+      "name": "targeted: except before exists, query false (#1408)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "query": {
+                        "q": false
+                      }
+                    },
+                    "except": "^x+$"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?q=xxx"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?q=xxy"
+        }
+      ]
+    },
+    {
+      "name": "targeted: except before exists, query ignores case (#1408)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "query": {
+                        "q": true
+                      }
+                    },
+                    "except": "x+"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?q=XXX"
+        }
+      ]
+    },
+    {
+      "name": "targeted: except before exists, header true (#1408)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "headers": {
+                        "X-T": true
+                      }
+                    },
+                    "except": "x+"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/",
+          "headers": [
+            [
+              "X-T",
+              "xxx"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/",
+          "headers": [
+            [
+              "X-T",
+              "xy"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "targeted: except before exists, header false (#1408)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "headers": {
+                        "X-T": false
+                      }
+                    },
+                    "except": "x+"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/",
+          "headers": [
+            [
+              "X-T",
+              "xxx"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/",
+          "headers": [
+            [
+              "X-T",
+              "xy"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "targeted: except before exists, form (#1408)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "form": {
+                        "a": true
+                      }
+                    },
+                    "except": "x+"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "a=xxx"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "a=xy"
+        }
+      ]
+    },
+    {
+      "name": "targeted: except before exists, body leaf (#1408)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "body": {
+                        "a": true
+                      }
+                    },
+                    "except": "x+"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\":\"xxx\"}"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\":\"xy\"}"
+        }
+      ]
+    },
+    {
+      "name": "targeted: except before exists, body leaf false (#1408)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "body": {
+                        "a": false
+                      }
+                    },
+                    "except": "x+"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\":\"xxx\"}"
+        }
+      ]
     }
   ]
 }

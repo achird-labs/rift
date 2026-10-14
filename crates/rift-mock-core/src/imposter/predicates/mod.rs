@@ -538,6 +538,7 @@ where
                 form,
                 key_case_sensitive,
                 field_body_json,
+                &apply_except,
             ),
         }
     };
@@ -1221,6 +1222,180 @@ mod tests {
             None,
             Some(true)
         ));
+    }
+
+    // =========================================================================
+    // `except` strips before `exists` tests for empty (#1408): Mountebank's `normalize` runs
+    // `exceptTransform` for every operator, so a value stripped to "" is absent.
+    // =========================================================================
+
+    #[allow(clippy::too_many_arguments)]
+    fn exists_except<H: RequestHeaders>(
+        field: &str,
+        expected: serde_json::Value,
+        except: &str,
+        case_sensitive: Option<bool>,
+        query: Option<&str>,
+        headers: &H,
+        body: Option<&str>,
+        form: Option<&HashMap<String, String>>,
+    ) -> bool {
+        let params = PredicateParameters {
+            except: except.to_string(),
+            case_sensitive,
+            ..Default::default()
+        };
+        predicate_matches(
+            &make_predicate_with_params(
+                PredicateOperation::Exists(fields_of(field, expected)),
+                params,
+            ),
+            "POST",
+            "/test",
+            query,
+            headers,
+            body,
+            None,
+            None,
+            form,
+            0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn except_strips_a_query_value_to_absent() {
+        let on = |expected| {
+            exists_except(
+                "query",
+                expected,
+                "^x+$",
+                None,
+                Some("q=xxx"),
+                &empty_headers(),
+                None,
+                None,
+            )
+        };
+        assert!(!on(json!({"q": true})));
+        assert!(on(json!({"q": false})));
+        let partly = exists_except(
+            "query",
+            json!({"q": true}),
+            "^x+$",
+            None,
+            Some("q=xxy"),
+            &empty_headers(),
+            None,
+            None,
+        );
+        assert!(partly, "a value the pattern leaves non-empty is present");
+    }
+
+    #[test]
+    fn except_strips_a_header_value_to_absent() {
+        let headers: HashMap<String, String> = [("X-T".to_string(), "xxx".to_string())].into();
+        let on =
+            |expected| exists_except("headers", expected, "x+", None, None, &headers, None, None);
+        assert!(!on(json!({"X-T": true})));
+        assert!(on(json!({"X-T": false})));
+    }
+
+    #[test]
+    fn except_strips_a_form_field_to_absent() {
+        let form: HashMap<String, String> = [("a".to_string(), "xxx".to_string())].into();
+        let on = |expected| {
+            exists_except(
+                "form",
+                expected,
+                "x+",
+                None,
+                None,
+                &empty_headers(),
+                Some("a=xxx"),
+                Some(&form),
+            )
+        };
+        assert!(!on(json!({"a": true})));
+        assert!(on(json!({"a": false})));
+    }
+
+    #[test]
+    fn except_strips_a_json_leaf_to_absent() {
+        let on = |expected, body: &str| {
+            exists_except(
+                "body",
+                expected,
+                "x+",
+                None,
+                None,
+                &empty_headers(),
+                Some(body),
+                None,
+            )
+        };
+        assert!(!on(json!({"a": true}), r#"{"a":"xxx"}"#));
+        assert!(on(json!({"a": false}), r#"{"a":"xxx"}"#));
+        assert!(on(json!({"a": true}), r#"{"a":"xy"}"#));
+        // A falsy array check strips each string element.
+        assert!(on(json!({"a": false}), r#"{"a":["y","xx"]}"#));
+        // A parent stripped to "" is a falsy container.
+        assert!(!on(json!({"a": {"b": false}}), r#"{"a":"xxx"}"#));
+    }
+
+    #[test]
+    fn except_strips_a_whole_body_and_the_path() {
+        assert!(!exists_except(
+            "body",
+            json!(true),
+            "x+",
+            None,
+            None,
+            &empty_headers(),
+            Some("xxx"),
+            None
+        ));
+        assert!(!exists_except(
+            "path",
+            json!(true),
+            ".*",
+            None,
+            None,
+            &empty_headers(),
+            None,
+            None
+        ));
+        assert!(
+            !exists_except(
+                "body",
+                json!({"a": false}),
+                "x+",
+                None,
+                None,
+                &empty_headers(),
+                Some("xxx"),
+                None
+            ),
+            "a body stripped to empty is the falsy container"
+        );
+    }
+
+    #[test]
+    fn except_on_exists_ignores_case_unless_case_sensitive() {
+        let on = |case_sensitive| {
+            exists_except(
+                "query",
+                json!({"q": true}),
+                "x+",
+                case_sensitive,
+                Some("q=XXX"),
+                &empty_headers(),
+                None,
+                None,
+            )
+        };
+        assert!(!on(None), "stripped by default");
+        assert!(on(Some(true)), "kept under caseSensitive");
     }
 
     #[test]
