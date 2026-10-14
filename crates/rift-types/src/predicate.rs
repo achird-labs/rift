@@ -89,6 +89,65 @@ pub const GENERATOR_OPERATORS: [&str; 7] = [
     "exists",
 ];
 
+/// The request fields a `predicateGenerators` entry's `matches` may name: Mountebank's request
+/// fields (issue #1413). Any other key records a match-all predicate in Mountebank.
+pub const GENERATOR_MATCH_FIELDS: [&str; 8] = [
+    "method",
+    "path",
+    "query",
+    "headers",
+    "body",
+    "requestFrom",
+    "ip",
+    "form",
+];
+
+/// Why a `predicateGenerators` entry cannot be read, worded for a config door; `None` for a
+/// readable entry (issue #1413). Shared by admission, the recorder and `rift-lint`, so a replayed
+/// config that skipped admission fails its recording instead of recording fewer predicates — a
+/// recording wider than asked for, or a match-all stub. `predicateOperator` is checked separately
+/// (#1353). A `null` optional key counts as absent; `matches`, `caseSensitive` and `except` are
+/// not read when `inject` is set, as in Mountebank.
+#[must_use]
+pub fn generator_shape_error(i: usize, generator: &serde_json::Value) -> Option<String> {
+    let at = format!("predicateGenerators[{i}]");
+    let Some(generator) = generator.as_object() else {
+        return Some(format!("{at} must be an object"));
+    };
+    let set = |key: &str| generator.get(key).filter(|v| !v.is_null());
+    match set("inject") {
+        Some(inject) if !inject.is_string() => {
+            return Some(format!("{at}.inject must be a function string"));
+        }
+        // An `inject` generator reads neither `matches` nor the matcher parameters.
+        Some(_) => return None,
+        None => match set("matches") {
+            None => return Some(format!("{at} needs `matches` or `inject`")),
+            Some(matches) => {
+                let Some(fields) = matches.as_object() else {
+                    return Some(format!("{at}.matches must be an object of request fields"));
+                };
+                if let Some(field) = fields
+                    .keys()
+                    .find(|k| !GENERATOR_MATCH_FIELDS.contains(&k.as_str()))
+                {
+                    return Some(format!(
+                        "{at}.matches field `{field}` is not a request field; expected {}",
+                        GENERATOR_MATCH_FIELDS.join(", ")
+                    ));
+                }
+            }
+        },
+    }
+    if set("caseSensitive").is_some_and(|v| !v.is_boolean()) {
+        return Some(format!("{at}.caseSensitive must be a boolean"));
+    }
+    if set("except").is_some_and(|v| !v.is_string()) {
+        return Some(format!("{at}.except must be a string"));
+    }
+    None
+}
+
 /// Matcher parameters shared across operations (case sensitivity, selectors, etc.).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -180,6 +239,75 @@ mod schema {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_readable_generator_has_no_shape_error() {
+        for generator in [
+            serde_json::json!({"matches": {"path": true}}),
+            serde_json::json!({"matches": {"requestFrom": true, "form": {"a": true}}}),
+            serde_json::json!({"inject": "function () { return []; }"}),
+            serde_json::json!({"inject": "f", "matches": 5}),
+            serde_json::json!({"inject": "f", "caseSensitive": "yes", "except": 5}),
+            serde_json::json!({"matches": {}, "caseSensitive": null, "except": null}),
+            serde_json::json!({"matches": {"path": true}, "caseSensitive": true, "except": "x"}),
+        ] {
+            assert_eq!(generator_shape_error(0, &generator), None, "{generator}");
+        }
+    }
+
+    #[test]
+    fn each_unreadable_generator_shape_is_named() {
+        let cases = [
+            (
+                serde_json::json!("x"),
+                "predicateGenerators[2] must be an object",
+            ),
+            (
+                serde_json::json!(null),
+                "predicateGenerators[2] must be an object",
+            ),
+            (
+                serde_json::json!({}),
+                "predicateGenerators[2] needs `matches` or `inject`",
+            ),
+            (
+                serde_json::json!({"caseSensitive": true}),
+                "predicateGenerators[2] needs `matches` or `inject`",
+            ),
+            (
+                serde_json::json!({"inject": 42}),
+                "predicateGenerators[2].inject must be a function string",
+            ),
+            (
+                serde_json::json!({"matches": true}),
+                "predicateGenerators[2].matches must be an object of request fields",
+            ),
+            (
+                serde_json::json!({"matches": ["path"]}),
+                "predicateGenerators[2].matches must be an object of request fields",
+            ),
+            (
+                serde_json::json!({"matches": {"path": true}, "caseSensitive": "yes"}),
+                "predicateGenerators[2].caseSensitive must be a boolean",
+            ),
+            (
+                serde_json::json!({"matches": {"path": true}, "except": 5}),
+                "predicateGenerators[2].except must be a string",
+            ),
+            (
+                serde_json::json!({"matches": {"pathh": true}}),
+                "predicateGenerators[2].matches field `pathh` is not a request field; expected \
+                 method, path, query, headers, body, requestFrom, ip, form",
+            ),
+        ];
+        for (generator, message) in cases {
+            assert_eq!(
+                generator_shape_error(2, &generator).as_deref(),
+                Some(message),
+                "{generator}"
+            );
+        }
+    }
+
     use super::*;
     use serde_json::json;
 

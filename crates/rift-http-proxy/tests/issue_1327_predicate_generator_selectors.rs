@@ -199,7 +199,8 @@ async fn an_unread_generator_key_is_reported_and_the_imposter_loads() {
         .create(
             json!({"port": port, "protocol": "http", "stubs": [{"responses": [{"proxy": {
                 "to": "http://127.0.0.1:9",
-                "predicateGenerators": [{"matchs": {"path": true}}]
+                // A real `matches` too: an entry with neither is refused (#1413).
+                "predicateGenerators": [{"matches": {"method": true}, "matchs": {"path": true}}]
             }}]}]}),
         )
         .await;

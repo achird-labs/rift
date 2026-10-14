@@ -35,6 +35,17 @@ const BAD_GENERATOR_OPERATOR: &str = r#"{
         "predicateGenerators": [{ "matches": { "path": true }, "predicateOperator": "bogus" }] } }]
 }"#;
 
+/// An unreadable generator entry (#1413): older engines skipped it, so it is an admission check.
+const BAD_GENERATOR_SHAPE: &str = r#"{
+    "responses": [{ "proxy": { "to": "http://localhost:1",
+        "predicateGenerators": [{ "matches": { "path": true } }, { "caseSensitive": true }] } }]
+}"#;
+
+const BAD_GENERATOR_MATCH_FIELD: &str = r#"{
+    "responses": [{ "proxy": { "to": "http://localhost:1",
+        "predicateGenerators": [{ "matches": { "pathh": true } }] } }]
+}"#;
+
 /// A stub with no responses (issue #1372): engines up to v0.21.0 admitted it on every door and
 /// served the imposter's `defaultResponse`, so it is an admission check, never a decode refusal.
 const NO_RESPONSES: &str = r#"{ "predicates": [] }"#;
@@ -143,6 +154,14 @@ fn each_admission_refusal_is_skipped_on_replay_and_reported_by_admission_check()
         (
             BAD_GENERATOR_OPERATOR,
             "predicateGenerators[0].predicateOperator `bogus` is not a predicate operator",
+        ),
+        (
+            BAD_GENERATOR_SHAPE,
+            "predicateGenerators[1] needs `matches` or `inject`",
+        ),
+        (
+            BAD_GENERATOR_MATCH_FIELD,
+            "predicateGenerators[0].matches field `pathh` is not a request field",
         ),
         (
             BAD_COPY_NS,

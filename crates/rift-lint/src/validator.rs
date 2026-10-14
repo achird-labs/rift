@@ -2207,12 +2207,53 @@ pub fn validate_proxy_response(
                     ScriptSite::Inject,
                 );
             }
+            // The engine refuses an entry its recorder cannot read (issue #1413): skipped, it
+            // recorded fewer predicates than asked for, down to a match-all stub.
+            if let Some(refusal) = rift_types::generator_shape_error(idx, generator) {
+                result.add_issue(
+                    LintIssue::error(
+                        "E055",
+                        format!("{refusal} (Rift refuses the imposter)"),
+                        file.to_path_buf(),
+                    )
+                    .with_location(format!("{location}.predicateGenerators[{idx}]"))
+                    .with_suggestion(
+                        "Give each generator an object with `matches` (an object of request \
+                         fields) or an `inject` function string; `caseSensitive` is a boolean and \
+                         `except` a string",
+                    ),
+                );
+            }
             validate_predicate_generator_keys(
                 file,
                 generator,
                 &format!("{location}.predicateGenerators[{idx}]"),
                 result,
             );
+            // Admitted, as in Mountebank, but not captured by the recorder yet: every recording
+            // that asks for one fails with `invalid-predicate` (issue #1413).
+            if generator.get("inject").is_none_or(Value::is_null)
+                && let Some(matches) = generator.get("matches").and_then(Value::as_object)
+            {
+                for field in ["requestFrom", "ip", "form"] {
+                    if matches.get(field).is_some_and(|m| m != &Value::Bool(false)) {
+                        result.add_issue(
+                            LintIssue::warning(
+                                "W022",
+                                format!(
+                                    "predicateGenerator `matches.{field}` is not recorded by Rift \
+                                     yet; every recording fails with invalid-predicate"
+                                ),
+                                file.to_path_buf(),
+                            )
+                            .with_location(format!(
+                                "{location}.predicateGenerators[{idx}].matches.{field}"
+                            ))
+                            .with_suggestion(format!("Remove `{field}` or set it to false")),
+                        );
+                    }
+                }
+            }
         }
     }
 

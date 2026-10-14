@@ -290,6 +290,10 @@ fn remove_ignored(
 /// proxyAlways merge compares them.
 const RECORDED_FIELDS: [&str; 5] = ["method", "path", "query", "headers", "body"];
 
+/// The request fields a generator's `matches` may name that the recorder does not capture yet: the
+/// rest of [`rift_types::GENERATOR_MATCH_FIELDS`].
+const UNCAPTURED_FIELDS: [&str; 3] = ["requestFrom", "ip", "form"];
+
 /// The request a predicate generator captures from.
 struct GeneratorRequest<'a, SH> {
     method: &'a str,
@@ -418,10 +422,23 @@ fn capture<SH: BuildHasher>(
 /// recorded with `equals`, since Mountebank does not persist `ignore` and its `deepEquals` recording
 /// could never match a request carrying the ignored key.
 fn predicates_for_matcher<SH: BuildHasher>(
+    i: usize,
     generator: &serde_json::Map<String, serde_json::Value>,
     matches: &serde_json::Map<String, serde_json::Value>,
     request: &GeneratorRequest<'_, SH>,
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
+    // Mountebank records these request fields, so a config door admits them, but the recorder does
+    // not capture them yet: recording the other fields alone would be wider than asked (#1413).
+    if let Some(field) = UNCAPTURED_FIELDS.into_iter().find(|field| {
+        matches
+            .get(*field)
+            .is_some_and(|m| m != &serde_json::Value::Bool(false))
+    }) {
+        return Err(crate::scripting::PredicateGeneratorError::Invalid(format!(
+            "predicateGenerators[{i}].matches field `{field}` is not recorded by Rift yet"
+        )));
+    }
+    // Checked by `generator_operator_error` before this runs: a string, or absent or `null`.
     let operator = generator.get("predicateOperator").and_then(|p| p.as_str());
     let selector = generator_selector(generator);
     // Copied onto every predicate only when present: an absent `caseSensitive` leaves the
@@ -488,7 +505,7 @@ fn predicates_for_matcher<SH: BuildHasher>(
         predicate.extend(parameters.clone());
         predicates.push(serde_json::Value::Object(predicate));
     }
-    predicates
+    Ok(predicates)
 }
 
 /// A generator pass's predicates, as written and as decoded (issue #1353).
@@ -532,10 +549,21 @@ impl Imposter {
         query: Option<&str>,
     ) -> Result<GeneratedPredicates, crate::scripting::PredicateGeneratorError> {
         let mut predicates = Vec::new();
+        let invalid = crate::scripting::PredicateGeneratorError::Invalid;
 
-        for r#gen in generators {
+        for (i, r#gen) in generators.iter().enumerate() {
+            // A replayed config skipped the config doors' check of the same shapes (#1413): an
+            // entry the recorder cannot read fails the generation instead of being skipped, which
+            // recorded fewer predicates than asked for, down to a match-all stub.
+            if let Some(refusal) = rift_types::generator_shape_error(i, r#gen)
+                .or_else(|| crate::imposter::types::generator_operator_error(i, r#gen))
+            {
+                return Err(invalid(refusal));
+            }
             let Some(gen_obj) = r#gen.as_object() else {
-                continue;
+                return Err(invalid(format!(
+                    "predicateGenerators[{i}] must be an object"
+                )));
             };
 
             // Handle inject predicateGenerator — calls a JS function with the request and
@@ -581,7 +609,9 @@ impl Imposter {
             }
 
             let Some(matches) = gen_obj.get("matches").and_then(|m| m.as_object()) else {
-                continue;
+                return Err(invalid(format!(
+                    "predicateGenerators[{i}] needs `matches` or `inject`"
+                )));
             };
             let request = GeneratorRequest {
                 method,
@@ -590,13 +620,12 @@ impl Imposter {
                 body,
                 query,
             };
-            predicates.extend(predicates_for_matcher(gen_obj, matches, &request));
+            predicates.extend(predicates_for_matcher(i, gen_obj, matches, &request)?);
         }
 
         // Every generator kind ends here, so an inject typo, an operator that cannot hold a field
         // map, or a `matches` value that is no regex fails the generation (#498) instead of being
         // dropped from the stub or recorded as a stub no config door admits (issue #1353).
-        let invalid = crate::scripting::PredicateGeneratorError::Invalid;
         let typed = predicates
             .iter()
             .map(|value| {
@@ -1518,6 +1547,80 @@ mod predicate_generator_shape_tests {
         Imposter::generate_predicates_impl(&[generator], "POST", "/orders", &headers, body, query)
             .expect("predicate generation succeeds")
             .raw
+    }
+
+    /// What a replayed config's generators fail with: the config doors refuse these shapes, but a
+    /// replay skips them, so the recorder must fail rather than record fewer predicates (#1413).
+    fn generation_error(generators: serde_json::Value) -> String {
+        let generators = generators.as_array().expect("a generator list").clone();
+        match Imposter::generate_predicates_impl(
+            &generators,
+            "POST",
+            "/orders",
+            &HashMap::<String, Vec<String>>::new(),
+            None,
+            None,
+        ) {
+            Err(crate::scripting::PredicateGeneratorError::Invalid(message)) => message,
+            other => panic!("expected an invalid-predicate failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_generator_fails_the_generation_instead_of_being_skipped() {
+        let cases = [
+            (json!(["x"]), "predicateGenerators[0] must be an object"),
+            (
+                json!([{"matches": {"path": true}}, {}]),
+                "predicateGenerators[1] needs `matches` or `inject`",
+            ),
+            (
+                json!([{"inject": 42}]),
+                "predicateGenerators[0].inject must be a function string",
+            ),
+            (
+                json!([{"matches": true}]),
+                "predicateGenerators[0].matches must be an object of request fields",
+            ),
+            (
+                json!([{"matches": {"path": true}, "caseSensitive": "yes"}]),
+                "predicateGenerators[0].caseSensitive must be a boolean",
+            ),
+            (
+                json!([{"matches": {"path": true}, "except": 5}]),
+                "predicateGenerators[0].except must be a string",
+            ),
+            (
+                json!([{"matches": {"pathh": true}}]),
+                "predicateGenerators[0].matches field `pathh` is not a request field",
+            ),
+            (
+                json!([{"matches": {"path": true}, "predicateOperator": 5}]),
+                "predicateGenerators[0].predicateOperator `5` is not a predicate operator",
+            ),
+            (
+                json!([{"matches": {"path": true, "ip": true}}]),
+                "predicateGenerators[0].matches field `ip` is not recorded by Rift yet",
+            ),
+        ];
+        for (generators, message) in cases {
+            let error = generation_error(generators.clone());
+            assert!(error.starts_with(message), "{generators}: {error}");
+        }
+    }
+
+    /// `false` opts a field out, so naming an uncaptured field that way records the rest.
+    #[test]
+    fn an_uncaptured_field_opted_out_with_false_records_the_rest() {
+        assert_eq!(
+            generate(
+                json!({"matches": {"path": true, "ip": false}}),
+                None,
+                None,
+                &[]
+            ),
+            vec![json!({ "deepEquals": { "path": "/orders" } })]
+        );
     }
 
     #[test]

@@ -234,6 +234,15 @@ record.
 
 ### Changed
 
+- **An unreadable `predicateGenerators` entry is refused at create** (#1413). An entry that is not
+  an object, has neither `matches` nor `inject`, has a non-string `inject`, a `matches` that is not
+  an object of request fields, a non-boolean `caseSensitive` or a non-string `except` is refused
+  with 400 by every config door (`rift-lint` `E055`). It used to be skipped, so the recording was
+  wider than asked for, or matched every request. A replayed config that skipped the check fails
+  the recording with `x-rift-generator-error: invalid-predicate`, as does a `matches` asking for
+  `requestFrom`, `ip` or `form`, which Rift does not capture yet (`rift-lint` `W022`, #1446).
+  `caseSensitive` and `except` are not checked on an `inject` generator, which does not read them.
+
 - **`except` applies before `exists`** (#1408). A value that `except` strips to empty is absent,
   as in Mountebank: `{"exists": {"query": {"q": true}}, "except": "^x+$"}` no longer matches
   `?q=xxx`, and the same holds for headers, form fields, JSON values, the path and the body.

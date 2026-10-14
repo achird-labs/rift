@@ -139,6 +139,46 @@ async fn an_unknown_predicate_operator_is_refused_at_create() {
     );
 }
 
+/// Issue #1413: a generator entry the recorder cannot read used to be skipped, so a generator list
+/// nobody could read recorded a match-all stub. Each shape is refused at create, as Mountebank's
+/// dry run refuses most of them.
+#[tokio::test]
+async fn an_unreadable_generator_entry_is_refused_at_create() {
+    let admin = Admin::start().await;
+    let cases = [
+        (json!(["x"]), "predicateGenerators[0] must be an object"),
+        (
+            json!([{"matches": {"path": true}}, {}]),
+            "predicateGenerators[1] needs `matches` or `inject`",
+        ),
+        (
+            json!([{"inject": 42}]),
+            "predicateGenerators[0].inject must be a function string",
+        ),
+        (
+            json!([{"matches": true}]),
+            "predicateGenerators[0].matches must be an object of request fields",
+        ),
+        (
+            json!([{"matches": {"path": true}, "caseSensitive": "yes"}]),
+            "predicateGenerators[0].caseSensitive must be a boolean",
+        ),
+        (
+            json!([{"matches": {"path": true}, "except": 5}]),
+            "predicateGenerators[0].except must be a string",
+        ),
+        (
+            json!([{"matches": {"pathh": true}}]),
+            "predicateGenerators[0].matches field `pathh` is not a request field",
+        ),
+    ];
+    for (generators, message) in cases {
+        let (status, body) = admin.post(&proxy(free_port(), 1, generators.clone())).await;
+        assert_eq!(status, 400, "{generators}: {body}");
+        assert!(body.contains(message), "{generators}: {body}");
+    }
+}
+
 #[tokio::test]
 async fn an_inject_generator_returning_a_non_predicate_records_nothing() {
     let admin = Admin::start().await;
