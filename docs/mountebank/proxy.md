@@ -158,7 +158,7 @@ Control how requests are matched when generating stubs:
 
 | Key | Description |
 |:----|:------------|
-| `matches` | Which request fields the generated predicate captures (table above). An object whose keys are request fields: `method`, `path`, `query`, `headers`, `body`, `requestFrom`, `ip`, `form`. `requestFrom`, `ip` and `form` are admitted, as in Mountebank, but not captured yet: a recording that asks for one fails with `invalid-predicate` (set it to `false`, or leave it out; `rift-lint` W022) |
+| `matches` | Which request fields the generated predicate captures (table above). An object whose keys are request fields: `method`, `path`, `query`, `headers`, `body`, `requestFrom`, `ip`, `form`. `requestFrom` is the client's `address:port` and `ip` its address, as the matcher reads them; a recorded `requestFrom` includes the client's port, so it matches that connection only, as in Mountebank. Mountebank's dual-stack listener reports an IPv4 client as `::ffff:127.0.0.1` and records that; Rift records `127.0.0.1`. `form` is the urlencoded body, recorded like `query`; a request without a non-empty urlencoded body records no `form` predicate (Mountebank records `deepEquals: {}`, which also constrains nothing). An IPv6 client's `requestFrom` is written `[::1]:50000` in Rift and `::1:50000` in Mountebank, and under `"predicateOperator": "matches"` the brackets read as a character class, so such a recording does not match its own client |
 | `predicateOperator` | The operator of every generated predicate: `equals`, `deepEquals`, `contains`, `startsWith`, `endsWith`, `matches` or `exists`; omitted, see [What Gets Recorded](#what-gets-recorded). Any other value is refused (400, or a startup error; `rift-lint` E053). Mountebank admits it and then answers `500` to every request after the first recording |
 | `caseSensitive` | A boolean, copied onto each generated predicate when set (see [Case Sensitivity](#case-sensitivity)) |
 | `except` | A string, copied onto each generated predicate; the recorded values stay whole and the matcher strips the regex from both sides (see [`except`](predicates.md#except)) |
@@ -170,7 +170,7 @@ Control how requests are matched when generating stubs:
 With `jsonpath` or `xpath`, the captured `body` is the selected value: one match is a string, several
 are an array (the recorded stub then matches a request that selects all of them), and nothing
 selected is `""`. A selector that does not compile is not carried and the whole body is captured, as
-without one. `ignore` applies to the object-valued fields (`query`, `headers`); it has no effect on
+without one. `ignore` applies to the object-valued fields (`query`, `headers`, `form`); it has no effect on
 a string body. A key not in this table is accepted,
 ignored when recording, and reported as [`config_key_ignored`](../features/stub-analysis.md#config_key_ignored)
 and by `rift-lint` `W020`.
@@ -208,7 +208,7 @@ HTTP/1 upstream. A name a proxy behavior wrote with an upper-case letter is kept
 are case-insensitive, and Rift serves every name lower-case on the wire either way.
 
 A generator records **one predicate per field** in `matches`, as Mountebank does, in the fixed order
-`method`, `path`, `query`, `headers`, `body` (Mountebank's order differs; see below), each carrying the generator's `caseSensitive` and
+`method`, `path`, `query`, `headers`, `body`, `requestFrom`, `ip`, `form` (Mountebank's order differs; see below), each carrying the generator's `caseSensitive` and
 `except` when they are set (and the body's carrying its `jsonpath` or `xpath`). The values are the
 request's, unmodified. A request `GET /users/123?page=2` through
 
@@ -306,8 +306,7 @@ an `inject` that returns a misspelled operator (`{"equal": …}`), or a `"predic
 "matches"` over a value that is not a regular expression (a path such as `/a(b`). Rift used to drop
 such a predicate and record the rest; when it dropped all of them, the recording matched every
 later request. It also covers an unreadable generator entry in a config that reached the engine
-without the create-time check (a replayed rift-cluster config, for one), and a `matches` that asks
-for `requestFrom`, `ip` or `form`.
+without the create-time check (a replayed rift-cluster config, for one).
 
 A generator that legitimately returns an empty array (`[]`) is **not** a failure — it records a
 match-all stub as before. Only genuine generation failures skip recording and set the header.

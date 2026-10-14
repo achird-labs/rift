@@ -285,14 +285,10 @@ fn remove_ignored(
     }
 }
 
-/// The request fields a predicate generator records, in the order it records them. Fixed, not the
-/// generator's own key order, so two recordings of one request build equal predicate lists — the
-/// proxyAlways merge compares them.
-const RECORDED_FIELDS: [&str; 5] = ["method", "path", "query", "headers", "body"];
-
-/// The request fields a generator's `matches` may name that the recorder does not capture yet: the
-/// rest of [`rift_types::GENERATOR_MATCH_FIELDS`].
-const UNCAPTURED_FIELDS: [&str; 3] = ["requestFrom", "ip", "form"];
+/// The client a test recording is made from.
+#[cfg(test)]
+const TEST_PEER: std::net::SocketAddr =
+    std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 50000);
 
 /// The request a predicate generator captures from.
 struct GeneratorRequest<'a, SH> {
@@ -301,6 +297,8 @@ struct GeneratorRequest<'a, SH> {
     headers: &'a HashMap<String, Vec<String>, SH>,
     body: Option<&'a str>,
     query: Option<&'a str>,
+    /// The client's socket, as the matcher reads `requestFrom` and `ip` from it (issue #1446).
+    client_addr: std::net::SocketAddr,
 }
 
 impl<SH: BuildHasher> GeneratorRequest<'_, SH> {
@@ -323,6 +321,19 @@ impl<SH: BuildHasher> GeneratorRequest<'_, SH> {
             .collect()
     }
 
+    /// The urlencoded form, parsed as the matcher parses it. `None` when the request has none:
+    /// Mountebank builds `request.form` only for a non-empty urlencoded body (`httpRequest.js`).
+    fn form(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
+        if self.body.is_none_or(str::is_empty) {
+            return None;
+        }
+        crate::imposter::Imposter::parse_form_data(self.headers, self.body).map(|form| {
+            form.into_iter()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect()
+        })
+    }
+
     fn headers(&self) -> serde_json::Map<String, serde_json::Value> {
         self.headers
             .iter()
@@ -337,9 +348,9 @@ impl<SH: BuildHasher> GeneratorRequest<'_, SH> {
 
 /// What a generator's `matches` captured for one field.
 enum Captured {
-    /// A scalar field (`method`, `path`, `body`) matched with `true`.
+    /// A scalar field (`method`, `path`, `body`, `requestFrom`, `ip`) matched with `true`.
     Scalar(serde_json::Value),
-    /// An object field (`query`, `headers`) matched whole with `true`; `filtered` when the
+    /// An object field (`query`, `headers`, `form`) matched whole with `true`; `filtered` when the
     /// generator's `ignore` names this field.
     Whole {
         fields: serde_json::Map<String, serde_json::Value>,
@@ -373,22 +384,42 @@ fn capture<SH: BuildHasher>(
             };
             Some(Captured::Scalar(value))
         }
-        "query" | "headers" => {
+        // The strings the matcher compares (`handler.rs`), so a recording replays to the same
+        // client. `requestFrom` carries the client's port, so it matches that connection only, as
+        // in Mountebank.
+        "requestFrom" if whole => Some(Captured::Scalar(serde_json::Value::String(
+            request.client_addr.to_string(),
+        ))),
+        "ip" if whole => Some(Captured::Scalar(serde_json::Value::String(
+            request.client_addr.ip().to_string(),
+        ))),
+        "query" | "headers" | "form" => {
+            // A request without a form records no form predicate: Mountebank records
+            // `deepEquals: {form: undefined}`, stored as `deepEquals: {}`, which constrains nothing.
+            let form = if field == "form" {
+                Some(request.form()?)
+            } else {
+                None
+            };
             let mut fields = if whole {
-                if field == "query" {
-                    request.query()
-                } else {
-                    request.headers()
+                match field {
+                    "query" => request.query(),
+                    "form" => form.unwrap_or_default(),
+                    _ => request.headers(),
                 }
             } else {
                 let listed = matcher.as_object()?;
-                let request_query = (field == "query").then(|| request.query());
+                let keyed = match field {
+                    "query" => Some(request.query()),
+                    "form" => form,
+                    _ => None,
+                };
                 listed
                     .iter()
                     .filter(|(_, wanted)| wanted.as_bool() == Some(true))
                     .filter_map(|(key, _)| {
-                        let value = match &request_query {
-                            Some(query) => query.get(key).cloned(),
+                        let value = match &keyed {
+                            Some(map) => map.get(key).cloned(),
                             None => request
                                 .header(key)
                                 .map(|v| serde_json::Value::String(v.to_string())),
@@ -422,22 +453,10 @@ fn capture<SH: BuildHasher>(
 /// recorded with `equals`, since Mountebank does not persist `ignore` and its `deepEquals` recording
 /// could never match a request carrying the ignored key.
 fn predicates_for_matcher<SH: BuildHasher>(
-    i: usize,
     generator: &serde_json::Map<String, serde_json::Value>,
     matches: &serde_json::Map<String, serde_json::Value>,
     request: &GeneratorRequest<'_, SH>,
-) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
-    // Mountebank records these request fields, so a config door admits them, but the recorder does
-    // not capture them yet: recording the other fields alone would be wider than asked (#1413).
-    if let Some(field) = UNCAPTURED_FIELDS.into_iter().find(|field| {
-        matches
-            .get(*field)
-            .is_some_and(|m| m != &serde_json::Value::Bool(false))
-    }) {
-        return Err(crate::scripting::PredicateGeneratorError::Invalid(format!(
-            "predicateGenerators[{i}].matches field `{field}` is not recorded by Rift yet"
-        )));
-    }
+) -> Vec<serde_json::Value> {
     // Checked by `generator_operator_error` before this runs: a string, or absent or `null`.
     let operator = generator.get("predicateOperator").and_then(|p| p.as_str());
     let selector = generator_selector(generator);
@@ -452,7 +471,9 @@ fn predicates_for_matcher<SH: BuildHasher>(
     }
 
     let mut predicates = Vec::new();
-    for field in RECORDED_FIELDS {
+    // Fixed, not the generator's own key order, so two recordings of one request build equal
+    // predicate lists — the proxyAlways merge compares them.
+    for field in rift_types::GENERATOR_MATCH_FIELDS {
         let Some(matcher) = matches.get(field) else {
             continue;
         };
@@ -505,7 +526,7 @@ fn predicates_for_matcher<SH: BuildHasher>(
         predicate.extend(parameters.clone());
         predicates.push(serde_json::Value::Object(predicate));
     }
-    Ok(predicates)
+    predicates
 }
 
 /// A generator pass's predicates, as written and as decoded (issue #1353).
@@ -533,7 +554,7 @@ impl Imposter {
         body: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
-        Self::generate_predicates_impl(generators, method, path, headers, body, query)
+        Self::generate_predicates_impl(generators, method, path, headers, body, query, TEST_PEER)
             .map(|generated| generated.raw)
     }
 
@@ -547,6 +568,7 @@ impl Imposter {
         headers: &HashMap<String, Vec<String>, SH>,
         body: Option<&str>,
         query: Option<&str>,
+        client_addr: std::net::SocketAddr,
     ) -> Result<GeneratedPredicates, crate::scripting::PredicateGeneratorError> {
         let mut predicates = Vec::new();
         let invalid = crate::scripting::PredicateGeneratorError::Invalid;
@@ -619,8 +641,9 @@ impl Imposter {
                 headers,
                 body,
                 query,
+                client_addr,
             };
-            predicates.extend(predicates_for_matcher(i, gen_obj, matches, &request)?);
+            predicates.extend(predicates_for_matcher(gen_obj, matches, &request));
         }
 
         // Every generator kind ends here, so an inject typo, an operator that cannot hold a field
@@ -745,6 +768,7 @@ impl Imposter {
         uri: &hyper::Uri,
         headers: &HashMap<String, Vec<String>, SH>,
         body: Option<ProxyBody<'_>>,
+        client_addr: std::net::SocketAddr,
     ) -> Result<GeneratedPredicates, (&'static str, String)>
     where
         SH: BuildHasher + Clone + Send + 'static,
@@ -764,6 +788,7 @@ impl Imposter {
                 headers,
                 body.map(|b| b.text),
                 uri.query(),
+                client_addr,
             )
             .map_err(|e| (e.kind(), e.to_string()));
         }
@@ -787,6 +812,7 @@ impl Imposter {
                 &headers,
                 body.as_deref(),
                 query.as_deref(),
+                client_addr,
             )
         });
         match tokio::time::timeout(timeout, handle).await {
@@ -821,6 +847,8 @@ impl Imposter {
         body: Option<ProxyBody<'_>>,
         behaviors: Option<&BehaviorRun<'_, SH>>,
         answering: Option<u64>,
+        // The client, for a generator that records `requestFrom` or `ip` (issue #1446).
+        client_addr: std::net::SocketAddr,
     ) -> anyhow::Result<ProxyOutcome>
     where
         // `Clone + Send + 'static`: an inject predicateGenerator clones `headers` into a
@@ -882,8 +910,15 @@ impl Imposter {
             Some(Ok(GeneratedPredicates::default()))
         } else {
             Some(
-                self.generate_stub_predicates(proxy_config, method, uri, headers, body)
-                    .await,
+                self.generate_stub_predicates(
+                    proxy_config,
+                    method,
+                    uri,
+                    headers,
+                    body,
+                    client_addr,
+                )
+                .await,
             )
         };
 
@@ -1350,9 +1385,17 @@ mod predicate_generator_selector_tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), vec![(*v).to_string()]))
             .collect();
-        Imposter::generate_predicates_impl(&[generator], "POST", "/orders", &headers, body, query)
-            .expect("predicate generation succeeds")
-            .raw
+        Imposter::generate_predicates_impl(
+            &[generator],
+            "POST",
+            "/orders",
+            &headers,
+            body,
+            query,
+            TEST_PEER,
+        )
+        .expect("predicate generation succeeds")
+        .raw
     }
 
     #[test]
@@ -1544,9 +1587,17 @@ mod predicate_generator_shape_tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), vec![(*v).to_string()]))
             .collect();
-        Imposter::generate_predicates_impl(&[generator], "POST", "/orders", &headers, body, query)
-            .expect("predicate generation succeeds")
-            .raw
+        Imposter::generate_predicates_impl(
+            &[generator],
+            "POST",
+            "/orders",
+            &headers,
+            body,
+            query,
+            TEST_PEER,
+        )
+        .expect("predicate generation succeeds")
+        .raw
     }
 
     /// What a replayed config's generators fail with: the config doors refuse these shapes, but a
@@ -1560,6 +1611,7 @@ mod predicate_generator_shape_tests {
             &HashMap::<String, Vec<String>>::new(),
             None,
             None,
+            TEST_PEER,
         ) {
             Err(crate::scripting::PredicateGeneratorError::Invalid(message)) => message,
             other => panic!("expected an invalid-predicate failure, got {other:?}"),
@@ -1598,15 +1650,126 @@ mod predicate_generator_shape_tests {
                 json!([{"matches": {"path": true}, "predicateOperator": 5}]),
                 "predicateGenerators[0].predicateOperator `5` is not a predicate operator",
             ),
-            (
-                json!([{"matches": {"path": true, "ip": true}}]),
-                "predicateGenerators[0].matches field `ip` is not recorded by Rift yet",
-            ),
         ];
         for (generators, message) in cases {
             let error = generation_error(generators.clone());
             assert!(error.starts_with(message), "{generators}: {error}");
         }
+    }
+
+    /// Issue #1446: Mountebank records `requestFrom` and `ip` from the client socket. Rift records
+    /// the strings its matcher compares (`handler.rs`: `client_addr` and `client_addr.ip()`).
+    #[test]
+    fn requestfrom_and_ip_are_recorded_from_the_client_address() {
+        assert_eq!(
+            generate(json!({"matches": {"ip": true}}), None, None, &[]),
+            vec![json!({ "deepEquals": { "ip": "127.0.0.1" } })]
+        );
+        assert_eq!(
+            generate(json!({"matches": {"requestFrom": true}}), None, None, &[]),
+            vec![json!({ "deepEquals": { "requestFrom": "127.0.0.1:50000" } })]
+        );
+        assert_eq!(
+            generate(
+                json!({"matches": {"ip": true}, "predicateOperator": "exists"}),
+                None,
+                None,
+                &[]
+            ),
+            vec![json!({ "exists": { "ip": true } })]
+        );
+    }
+
+    const FORM: (&str, &str) = ("Content-Type", "application/x-www-form-urlencoded");
+
+    #[test]
+    fn a_form_is_recorded_whole_or_by_listed_keys() {
+        assert_eq!(
+            generate(
+                json!({"matches": {"form": true}}),
+                Some("a=1&b=2"),
+                None,
+                &[FORM]
+            ),
+            vec![json!({ "deepEquals": { "form": { "a": "1", "b": "2" } } })]
+        );
+        assert_eq!(
+            generate(
+                json!({"matches": {"form": {"a": true, "missing": true}}}),
+                Some("a=1&b=2"),
+                None,
+                &[FORM]
+            ),
+            vec![json!({ "equals": { "form": { "a": "1" } } })]
+        );
+        assert_eq!(
+            generate(
+                json!({"matches": {"form": true}, "ignore": {"form": "b"}}),
+                Some("a=1&b=2"),
+                None,
+                &[FORM]
+            ),
+            vec![json!({ "equals": { "form": { "a": "1" } } })]
+        );
+    }
+
+    /// Mountebank has no `form` for a body that is not a non-empty urlencoded one, and records
+    /// `deepEquals: {}`, which constrains nothing; Rift records no form predicate.
+    #[test]
+    fn a_request_without_a_form_records_no_form_predicate() {
+        assert_eq!(
+            generate(
+                json!({"matches": {"form": true, "path": true}}),
+                Some(r#"{"a":1}"#),
+                None,
+                &[("Content-Type", "application/json")]
+            ),
+            vec![json!({ "deepEquals": { "path": "/orders" } })]
+        );
+        assert_eq!(
+            generate(
+                json!({"matches": {"form": {"a": true}}}),
+                Some(""),
+                None,
+                &[FORM]
+            ),
+            Vec::<serde_json::Value>::new(),
+            "an empty urlencoded body has no form either"
+        );
+    }
+
+    #[test]
+    fn every_request_field_is_recorded_in_a_fixed_order() {
+        let fields: Vec<String> = generate(
+            json!({"matches": {
+                "form": true, "ip": true, "requestFrom": true, "body": true,
+                "headers": true, "query": true, "path": true, "method": true
+            }}),
+            Some("a=1"),
+            Some("q=1"),
+            &[FORM],
+        )
+        .iter()
+        .map(|p| {
+            p["deepEquals"]
+                .as_object()
+                .and_then(|o| o.keys().next().cloned())
+                .expect("one field per predicate")
+        })
+        .collect();
+        assert_eq!(
+            fields,
+            [
+                "method",
+                "path",
+                "query",
+                "headers",
+                "body",
+                "requestFrom",
+                "ip",
+                "form"
+            ]
+        );
     }
 
     /// `false` opts a field out, so naming an uncaptured field that way records the rest.
@@ -1811,6 +1974,7 @@ mod predicate_generator_shape_tests {
                 &headers,
                 None,
                 None,
+                TEST_PEER,
             )
             .expect("generates")
             .raw;
