@@ -108,7 +108,7 @@ rift_free(result);
 ```
 
 - **Options JSON** (pass `NULL` or `{}` for all defaults; every field optional):
-  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"noParse":false,"config":null,"allowInjection":false,"requireAdminAuth":false,"upstreamCaFile":null,"upstreamCaPem":null,"upstreamTlsSkipVerify":false}`.
+  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"noParse":false,"config":null,"allowInjection":false,"requireAdminAuth":false,"upstreamCaFile":null,"upstreamCaPem":null,"upstreamTlsSkipVerify":false,"maxBodySize":null,"bodyMemoryBudget":null}`.
   `port: 0` binds an ephemeral port; `host` must be an IP literal — IPv4, or IPv6 bare (`::1`) or
   bracketed (`[::1]`), a numeric scope id (`fe80::1%2`) kept — and a DNS name such as `localhost` is
   refused (#1137; before that fix a bare IPv6 host could never bind). The metrics server, if asked
@@ -161,6 +161,12 @@ rift_free(result);
   later as a per-request proxy error.
 - **`upstreamTlsSkipVerify`** (default `false`): accept any upstream certificate. Development only;
   it logs a warning whenever a client is built with it.
+- **`maxBodySize`** (default `536870912`, 512 MiB) and **`bodyMemoryBudget`** (default
+  `1073741824`, 1 GiB; `0` = unbounded): the per-body ceiling (`413`) and the in-flight memory
+  budget shared by every body (`503` + `Retry-After`) — see
+  [Body size limits]({{ site.baseurl }}/configuration/cli/#body-size-limits). The budget must be at
+  least the ceiling, or this call fails. Set them before creating imposters: an imposter keeps the
+  limits current when it was created.
 
   The relay reads the trust when the listener **binds**, so start the intercept listener after the
   `rift_serve_admin` that sets it.
@@ -212,7 +218,7 @@ check before sending one:
 {"version":"…","commit":"…","builtAt":"…","features":["javascript"],
  "serveOptions":["host","port","apiKey","metricsPort","configFile","noParse","config",
                  "allowInjection","requireAdminAuth","upstreamCaFile","upstreamCaPem",
-                 "upstreamTlsSkipVerify"]}
+                 "upstreamTlsSkipVerify","maxBodySize","bodyMemoryBudget"]}
 ```
 
 0.17.0 published the first eight keys without `noParse`; `noParse` and the three `upstream*` keys

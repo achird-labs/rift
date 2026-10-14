@@ -349,6 +349,32 @@ pub struct Cli {
     )]
     pub upstream_tls_skip_verify: bool,
 
+    /// Largest request body, admin body or proxied upstream response accepted, in bytes (issue
+    /// #1439). Over it the request gets 413. The default is Mountebank's own breaking point (about
+    /// 512 MiB, past which it crashes), so nothing Mountebank serves is refused.
+    #[arg(
+        long,
+        value_name = "BYTES",
+        env = "RIFT_MAX_BODY_SIZE",
+        default_value_t = rift_mock_core::imposter::body_limits::DEFAULT_MAX_BODY_BYTES,
+        global = true,
+        help_heading = "Server options"
+    )]
+    pub max_body_size: usize,
+
+    /// Memory, in bytes, shared by every body being buffered at once (issue #1439). When it is
+    /// used up a request gets 503 with `Retry-After` instead of the process running out of memory.
+    /// Must be at least `--max-body-size`; `0` means unbounded.
+    #[arg(
+        long,
+        value_name = "BYTES",
+        env = "RIFT_BODY_MEMORY_BUDGET",
+        default_value_t = rift_mock_core::imposter::body_limits::DEFAULT_BODY_MEMORY_BUDGET,
+        global = true,
+        help_heading = "Server options"
+    )]
+    pub body_memory_budget: usize,
+
     /// Start a TLS-MITM intercept/redirect proxy listener on this port (epic #394). Off when
     /// unset. Configure rules and export the CA via the admin API's `/intercept/*` routes.
     #[arg(
@@ -463,6 +489,8 @@ impl std::fmt::Debug for Cli {
             no_self_signed_tls,
             upstream_ca_file,
             upstream_tls_skip_verify,
+            max_body_size,
+            body_memory_budget,
             intercept_port,
             intercept_auth,
             intercept_ca_cert,
@@ -503,6 +531,8 @@ impl std::fmt::Debug for Cli {
             .field("no_self_signed_tls", no_self_signed_tls)
             .field("upstream_ca_file", upstream_ca_file)
             .field("upstream_tls_skip_verify", upstream_tls_skip_verify)
+            .field("max_body_size", max_body_size)
+            .field("body_memory_budget", body_memory_budget)
             .field("intercept_port", intercept_port)
             .field("intercept_auth", &intercept_auth.as_ref().map(|_| REDACTED))
             .field("intercept_ca_cert", intercept_ca_cert)
@@ -514,6 +544,19 @@ impl std::fmt::Debug for Cli {
             )
             .finish()
     }
+}
+
+/// The body limits `--max-body-size` and `--body-memory-budget` ask for (issue #1439); a budget of
+/// `0` is unbounded. A budget below the ceiling is refused: no body under it could be admitted.
+pub fn body_limits_from(
+    max_body_size: usize,
+    body_memory_budget: usize,
+) -> anyhow::Result<rift_mock_core::imposter::body_limits::BodyLimits> {
+    rift_mock_core::imposter::body_limits::BodyLimits::new(
+        max_body_size,
+        (body_memory_budget != 0).then_some(body_memory_budget),
+    )
+    .context("--max-body-size / --body-memory-budget")
 }
 
 /// The file `rift replay` loads: the one global `--configfile`. clap cannot require a global flag
@@ -891,6 +934,8 @@ impl ServerBuilder {
             None
         };
 
+        // Validated here so a budget below the ceiling is a startup error (issue #1439).
+        let body_limits = body_limits_from(cli.max_body_size, cli.body_memory_budget)?;
         let manager = match self.manager {
             Some(manager) => manager,
             None => {
@@ -915,7 +960,8 @@ impl ServerBuilder {
                 let mut built = ImposterManager::with_datadir(cli.datadir.clone())
                     .with_tls_defaults(tls_defaults)
                     .with_accept_runtimes(self.accept_runtimes)
-                    .with_flow_store_backends(crate::default_flow_store_backends());
+                    .with_flow_store_backends(crate::default_flow_store_backends())
+                    .with_body_limits(body_limits);
                 if let Some(client) = &upstream_client {
                     built = built.with_upstream_client(Arc::clone(client));
                 }

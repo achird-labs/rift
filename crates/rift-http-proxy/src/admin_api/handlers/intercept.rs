@@ -17,6 +17,7 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
+use rift_mock_core::imposter::body_limits::BodyGuard;
 use rift_mock_core::proxy::truststore::{TrustStorePassword, ca_pem, export_jks, export_pkcs12};
 use serde::Serialize;
 
@@ -32,22 +33,23 @@ pub async fn route(
     req: Request<Incoming>,
     control: &InterceptControl,
     allow_injection: bool,
+    guard: &BodyGuard,
 ) -> Option<Response<Full<Bytes>>> {
     let rest = path.strip_prefix("/intercept")?;
     let resp = match (method, rest) {
         // Runtime lifecycle (issue #493) — operate on the shared slot, listener or not.
-        (&Method::POST, "") => handle_start(req, control, allow_injection).await,
+        (&Method::POST, "") => handle_start(req, control, allow_injection, guard).await,
         (&Method::GET, "") => handle_status(control),
         (&Method::DELETE, "") => handle_stop(control).await,
         // Rule CRUD + CA/truststore — need a running listener's state. When none is running these
         // are a known route with an actionable body ("not running"), not the generic 404 an unknown
         // sub-path gets below — mirroring `GET /intercept`.
         (&Method::POST, "/rules") => match control.state() {
-            Some(state) => handle_add_rules(req, &state, allow_injection).await,
+            Some(state) => handle_add_rules(req, &state, allow_injection, guard).await,
             None => not_running(),
         },
         (&Method::PUT, "/rules") => match control.state() {
-            Some(state) => handle_replace_rules(req, &state, allow_injection).await,
+            Some(state) => handle_replace_rules(req, &state, allow_injection, guard).await,
             None => not_running(),
         },
         (&Method::GET, "/rules") => match control.state() {
@@ -89,10 +91,11 @@ async fn handle_start(
     req: Request<Incoming>,
     control: &InterceptControl,
     allow_injection: bool,
+    guard: &BodyGuard,
 ) -> Response<Full<Bytes>> {
-    let body = match collect_body(req).await {
+    let body = match collect_body(req, guard).await {
         Ok(b) => b,
-        Err(e) => return error_response(e.status_code(), &e.to_string()),
+        Err(e) => return e.into_response(),
     };
     start_from_bytes(&body, control, allow_injection).await
 }
@@ -215,10 +218,11 @@ async fn handle_add_rules(
     req: Request<Incoming>,
     state: &InterceptState,
     allow_injection: bool,
+    guard: &BodyGuard,
 ) -> Response<Full<Bytes>> {
-    let body = match collect_body(req).await {
+    let body = match collect_body(req, guard).await {
         Ok(b) => b,
-        Err(e) => return error_response(e.status_code(), &e.to_string()),
+        Err(e) => return e.into_response(),
     };
     add_rules_from_bytes(&body, state, allow_injection)
 }
@@ -272,10 +276,11 @@ async fn handle_replace_rules(
     req: Request<Incoming>,
     state: &InterceptState,
     allow_injection: bool,
+    guard: &BodyGuard,
 ) -> Response<Full<Bytes>> {
-    let body = match collect_body(req).await {
+    let body = match collect_body(req, guard).await {
         Ok(b) => b,
-        Err(e) => return error_response(e.status_code(), &e.to_string()),
+        Err(e) => return e.into_response(),
     };
     replace_rules_from_bytes(&body, state, allow_injection)
 }

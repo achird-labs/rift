@@ -13,7 +13,12 @@ use std::hash::BuildHasher;
 
 /// Parts read from a successful upstream proxy response, before recording:
 /// `(status, headers, body, latency_ms)`.
-type ForwardedResponse = (u16, Vec<(String, String)>, bytes::Bytes, u64);
+type ForwardedResponse = (
+    u16,
+    Vec<(String, String)>,
+    crate::imposter::body_limits::CollectedBody,
+    u64,
+);
 
 /// The request body as the handler already holds it (issue #1321). `raw` is what the client sent:
 /// it is forwarded and keyed on, and is a `Bytes` handle so forwarding it is a refcount bump.
@@ -1046,41 +1051,41 @@ impl Imposter {
             // This one list feeds three destinations — the client response, the
             // `RecordedResponse`, and the stub `proxyOnce`/`proxyAlways` generates — so a value
             // mangled here is mangled in all three, and the stub persists it (issue #1041).
-            let response_headers = crate::imposter::headers::collect_response_headers(
-                response.headers(),
-            );
-            // Check Content-Length before reading the full body to reject obviously oversized responses
-            if let Some(content_length) = response.content_length()
-                && content_length as usize > MAX_PROXY_RESPONSE_BODY_SIZE
-            {
-                anyhow::bail!(
-                    "Proxy response body from {target_url} exceeds maximum size ({content_length} > {MAX_PROXY_RESPONSE_BODY_SIZE} bytes)"
-                );
-            }
-
-            let body_bytes = response
-                .bytes()
+            let response_headers =
+                crate::imposter::headers::collect_response_headers(response.headers());
+            // Read under the shared body limits (issue #1439): a known length over the ceiling is
+            // refused before a byte is read, and the body holds its share of the in-flight budget
+            // until this request's response is built. It never waits for the budget: the request's
+            // own body already holds a share, and proxied requests waiting on each other would all
+            // time out. Either refusal fails the proxy as a 502, like any upstream failure.
+            let mut response = response;
+            let mut collector = self
+                .body_guard
+                .start_without_waiting(response.content_length())
                 .await
-                .with_context(|| format!("Failed to read response body from {target_url}"))?;
-
-            if body_bytes.len() > MAX_PROXY_RESPONSE_BODY_SIZE {
-                anyhow::bail!(
-                    "Proxy response body from {} exceeds maximum size ({} > {} bytes)",
-                    target_url,
-                    body_bytes.len(),
-                    MAX_PROXY_RESPONSE_BODY_SIZE
-                );
+                .map_err(|e| anyhow::anyhow!("Proxy response body from {target_url}: {e}"))?;
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .with_context(|| format!("Failed to read response body from {target_url}"))?
+            {
+                collector
+                    .push(&chunk)
+                    .map_err(|e| anyhow::anyhow!("Proxy response body from {target_url}: {e}"))?;
             }
+            let body_bytes = collector.finish();
 
             Ok((status, response_headers, body_bytes, latency_ms))
         }
         .await;
 
-        let (status, response_headers, body_bytes, latency_ms) = match forwarded {
+        let (status, response_headers, upstream_body, latency_ms) = match forwarded {
             Ok(parts) => parts,
             // Returning drops `claim`, which releases it: the signature stays retryable (#315).
             Err(e) => return Err(e),
         };
+        // `upstream_body` keeps its share of the body budget until this returns (issue #1439).
+        let body_bytes = upstream_body.bytes().clone();
         let recorded_latency = proxy_config.add_wait_behavior.then_some(latency_ms);
 
         // After the forward, so a `wait` never counts toward the latency `addWaitBehavior` records;

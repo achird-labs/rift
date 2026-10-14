@@ -109,9 +109,9 @@ pub async fn handle_create(
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
-    let body = match collect_body(req).await {
+    let body = match collect_body(req, &manager.body_guard()).await {
         Ok(b) => b,
-        Err(e) => return error_response(e.status_code(), &e.to_string()),
+        Err(e) => return e.into_response(),
     };
 
     let mut config: ImposterConfig = match serde_json::from_slice(&body) {
@@ -255,9 +255,9 @@ pub async fn handle_replace_all(
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
-    let body = match collect_body(req).await {
+    let body = match collect_body(req, &manager.body_guard()).await {
         Ok(b) => b,
-        Err(e) => return error_response(e.status_code(), &e.to_string()),
+        Err(e) => return e.into_response(),
     };
     replace_all_from_bytes(&body, base_url, manager, allow_injection, scripts_dir).await
 }
@@ -719,9 +719,9 @@ pub async fn handle_verify(
     manager: Arc<ImposterManager>,
     allow_injection: bool,
 ) -> Response<Full<Bytes>> {
-    let body = match collect_body(req).await {
+    let body = match collect_body(req, &manager.body_guard()).await {
         Ok(b) => b,
-        Err(e) => return error_response(e.status_code(), &e.to_string()),
+        Err(e) => return e.into_response(),
     };
     // An `inject` predicate evaluates synchronous Boa JavaScript that can run away (issue #476);
     // evaluate the whole verify on the blocking pool so it never head-of-line-blocks a tokio

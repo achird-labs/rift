@@ -62,4 +62,6 @@ pub const SERVE_OPTION_KEYS: &[&str] = &[
     "upstreamCaFile",
     "upstreamCaPem",
     "upstreamTlsSkipVerify",
+    "maxBodySize",
+    "bodyMemoryBudget",
 ];

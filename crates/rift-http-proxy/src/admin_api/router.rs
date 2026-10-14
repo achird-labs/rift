@@ -104,6 +104,7 @@ pub async fn route_request(
                 req,
                 control,
                 allow_injection,
+                &manager.body_guard(),
             )
             .await
             .unwrap_or_else(not_found),

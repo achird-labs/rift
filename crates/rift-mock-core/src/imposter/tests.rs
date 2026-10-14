@@ -5170,15 +5170,21 @@ mod proxy_generator_failure_tests {
         let _ = manager.delete_imposter(up).await;
     }
 
-    /// Kills `>` -> `>=` / `==` on the Content-Length pre-check and `>` -> `>=` on the post-read
-    /// check of the proxy body limit: a body of exactly the limit is served.
+    /// Kills `>` -> `>=` / `==` on the Content-Length pre-check and the per-chunk check of the
+    /// proxy body ceiling: a body of exactly the limit is served, one byte more is refused (#1439).
     #[tokio::test]
     async fn a_proxy_response_of_exactly_the_size_limit_is_served() {
-        // `MAX_PROXY_RESPONSE_BODY_SIZE` (core/mod.rs) is private to `imposter::core`.
-        const LIMIT: usize = 10 * 1024 * 1024;
-        let manager = ImposterManager::new();
+        const LIMIT: usize = 64 * 1024;
+        let manager = ImposterManager::new().with_body_limits(
+            crate::imposter::body_limits::BodyLimits::new(LIMIT, None).expect("valid limits"),
+        );
         let up =
             upstream_answering(&manager, serde_json::json!({ "body": "a".repeat(LIMIT) })).await;
+        let over = upstream_answering(
+            &manager,
+            serde_json::json!({ "body": "a".repeat(LIMIT + 1) }),
+        )
+        .await;
         let port = create(
             &manager,
             serde_json::json!({
@@ -5200,8 +5206,28 @@ mod proxy_generator_failure_tests {
         assert_eq!(resp.status(), 200);
         assert_eq!(resp.bytes().await.unwrap().len(), LIMIT);
 
+        let over_port = create(
+            &manager,
+            serde_json::json!({
+                "port": 0, "protocol": "http",
+                "stubs": [{ "responses": [{ "proxy": {
+                    "to": format!("http://127.0.0.1:{over}"),
+                    "mode": "proxyTransparent"
+                }}]}]
+            }),
+        )
+        .await;
+        let refused = get(over_port, "/big").await;
+        assert!(
+            refused.headers().get("x-rift-proxy-error").is_some(),
+            "one byte past the limit must be refused: {:?}",
+            refused.headers()
+        );
+
         let _ = manager.delete_imposter(port).await;
         let _ = manager.delete_imposter(up).await;
+        let _ = manager.delete_imposter(over_port).await;
+        let _ = manager.delete_imposter(over).await;
     }
 }
 

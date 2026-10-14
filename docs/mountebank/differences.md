@@ -93,6 +93,14 @@ the raw body text before parsing, so a pattern that matches JSON punctuation (a 
 make the body unparseable there, so every field in it reads as missing. A repeated query
 key is one comma-joined value in Rift, so `except` strips the joined text rather than each value.
 
+## Body size
+
+Mountebank has no body limit and crashes past about 512 MiB, where a body no longer fits a V8
+string. Rift refuses a body over `--max-body-size` (default 512 MiB) with `413`, and answers `503`
+with `Retry-After` when the bodies buffered at once would exceed `--body-memory-budget` (default
+1 GiB), where Mountebank would run out of heap. Below those limits the two serve the same bodies.
+See [Body size limits]({{ site.baseurl }}/configuration/cli/#body-size-limits).
+
 ## keyCaseSensitive is honoured as written
 
 Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`. Three consequences:

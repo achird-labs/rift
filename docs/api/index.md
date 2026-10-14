@@ -874,7 +874,7 @@ Get current configuration.
   "serveOptions": [
     "host", "port", "apiKey", "metricsPort", "configFile", "noParse", "config",
     "allowInjection", "requireAdminAuth", "upstreamCaFile", "upstreamCaPem",
-    "upstreamTlsSkipVerify"
+    "upstreamTlsSkipVerify", "maxBodySize", "bodyMemoryBudget"
   ],
   "process": {
     "nodeVersion": "N/A (Rust)", "architecture": "aarch64", "platform": "macos",
@@ -1066,9 +1066,10 @@ request describes an imposter that cannot be created:
 
 ### 413 Payload Too Large
 
-The request body exceeds the admin API's size limit (64 MiB). The limit bounds
-how much of a single request Rift buffers into memory, since the admin plane
-binds `0.0.0.0` and `--api-key` is optional.
+The request body exceeds `--max-body-size` (default 512 MiB, Mountebank's own breaking point). The
+same limit applies to imposter requests; a proxied upstream response over it, or one that does not
+fit the memory budget, fails the proxy with `502` like any other upstream failure. See
+[Body size limits]({{ site.baseurl }}/configuration/cli/#body-size-limits).
 
 ```json
 {
@@ -1076,7 +1077,25 @@ binds `0.0.0.0` and `--api-key` is optional.
     {
       "code": "413",
       "type": "request too large",
-      "message": "Request body exceeds the 67108864-byte admin API limit"
+      "message": "Request body exceeds the 536870912-byte body limit"
+    }
+  ]
+}
+```
+
+### 503 Service Unavailable (body memory)
+
+Every body being buffered at once shares `--body-memory-budget` (default 1 GiB). When it is used
+up, the request gets `503` with `Retry-After: 1` rather than the process running out of memory.
+Retrying after a moment succeeds once in-flight bodies finish.
+
+```json
+{
+  "errors": [
+    {
+      "code": "503",
+      "type": "unavailable",
+      "message": "Not enough body memory is free to accept this request; retry shortly"
     }
   ]
 }

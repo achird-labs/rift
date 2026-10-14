@@ -34,7 +34,7 @@ use crate::scripting::{MountebankRequest, execute_mountebank_inject_bounded};
 use crate::util::build_response_with_headers;
 use base64::Engine;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 
@@ -47,21 +47,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, trace, warn};
 
-/// Maximum allowed request body size (10 MB)
-const MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
-
-/// Why a request body could not be collected (issue #694). `Limited::collect` funnels both the
-/// size-cap breach and a genuine transport failure (connection reset, truncated stream) through one
-/// `Err`; conflating them reported every network failure to the client as `413` "body too large"
-/// and logged nothing. Splitting the two lets the handler answer the right status and log the cause.
-#[derive(Debug)]
-enum BodyReadError {
-    /// The body exceeded the size cap — a real `413`.
-    TooLarge,
-    /// The body could not be read to completion — a client transmission failure (`400`). The cause
-    /// is kept boxed, not stringified (the #688 lesson), so the log site renders it in full.
-    Read(Box<dyn std::error::Error + Send + Sync>),
-}
+use super::body_limits::{BodyReadError, CollectedBody};
 
 /// Pair the request's bytes with their string form for the proxy (issue #1321). Both are `Some`
 /// together by construction in `handle_request_inner`.
@@ -69,27 +55,34 @@ fn proxy_body<'a>(raw: Option<&'a Bytes>, text: Option<&'a str>) -> Option<Proxy
     raw.zip(text).map(|(raw, text)| ProxyBody { raw, text })
 }
 
-/// Collect a request body under a size cap, distinguishing the cap breach from a read failure.
-/// Body-generic so the classification is unit-testable against a synthetic body without a live
-/// listener (mirrors `admin_api::collect_limited`, issue #546 — but kept here, not shared, because
-/// `rift-http-proxy` depends on this crate, not the reverse).
-async fn collect_body_limited<B>(body: B, limit: usize) -> Result<Bytes, BodyReadError>
-where
-    B: hyper::body::Body<Data = Bytes>,
-    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    match Limited::new(body, limit).collect().await {
-        Ok(collected) => Ok(collected.to_bytes()),
-        // `Limited` boxes the error; a cap breach is specifically `LengthLimitError`, anything else
-        // is the underlying body failing to produce its bytes.
-        Err(e)
-            if e.downcast_ref::<http_body_util::LengthLimitError>()
-                .is_some() =>
-        {
-            Err(BodyReadError::TooLarge)
+/// The `413` and `503` doors for a body the limits refuse (issue #1439). Both close the
+/// connection: the client may still be writing a body this listener will not read, and leaving it
+/// unread on a kept-alive connection would be parsed as the next request.
+fn body_refused_response(e: &BodyReadError) -> Response<Full<Bytes>> {
+    let (status, retry_after) = match e {
+        BodyReadError::BudgetExhausted => {
+            // An expected overload state, not a server fault: a warning, not an error.
+            warn!("refused a request body: {e}");
+            (StatusCode::SERVICE_UNAVAILABLE, true)
         }
-        Err(e) => Err(BodyReadError::Read(e)),
+        _ => (StatusCode::PAYLOAD_TOO_LARGE, false),
+    };
+    let mut response = build_response_with_headers(
+        status,
+        [
+            ("x-rift-imposter", "true"),
+            ("content-type", "application/json"),
+            ("connection", "close"),
+        ],
+        crate::response::error_body(status, &e.to_string()),
+    );
+    if retry_after {
+        response.headers_mut().insert(
+            hyper::header::RETRY_AFTER,
+            hyper::header::HeaderValue::from_static("1"),
+        );
     }
+    response
 }
 
 /// The `400` door for a request body that could not be read (issue #694). Logs the real cause —
@@ -828,34 +821,19 @@ async fn handle_request_inner(
         ));
     }
 
-    // Collect request body with size limit to prevent memory exhaustion. A cap breach stays a 413;
-    // a transport failure mid-read (connection reset, truncated stream) is the client's problem — a
-    // 400 — not the size error it was previously mislabeled as (issue #694).
-    let body_bytes = match collect_body_limited(body, MAX_REQUEST_BODY_SIZE).await {
-        Ok(bytes) => {
-            if bytes.is_empty() {
-                None
-            } else {
-                Some(bytes)
-            }
-        }
-        Err(BodyReadError::TooLarge) => {
-            return Ok(build_response_with_headers(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                [
-                    ("x-rift-imposter", "true"),
-                    ("content-type", "application/json"),
-                ],
-                crate::response::error_body(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    &format!("Request body exceeds maximum size of {MAX_REQUEST_BODY_SIZE} bytes"),
-                ),
-            ));
-        }
+    // Collect the body under the shared limits (issue #1439): over the ceiling is a 413, the
+    // in-flight budget exhausted a 503. A transport failure mid-read (connection reset, truncated
+    // stream) is the client's problem — a 400 — not a size error (issue #694). `_body_reservation`
+    // holds this body's share of the budget until the response is built: the bytes stay in memory
+    // throughout matching.
+    let _body_reservation: CollectedBody = match imposter.body_guard.collect(body).await {
+        Ok(collected) => collected,
         Err(BodyReadError::Read(e)) => {
             return Ok(body_read_error_response(e.as_ref()));
         }
+        Err(e) => return Ok(body_refused_response(&e)),
     };
+    let body_bytes = Some(_body_reservation.bytes().clone()).filter(|bytes| !bytes.is_empty());
     // Borrow the body as UTF-8 without forcing an allocation for the common valid-UTF-8 case
     // (issue #561): valid UTF-8 stays `Cow::Borrowed`, so only genuinely invalid UTF-8 pays a
     // copy here. `body_bytes` stays alive for the rest of the function so this borrow remains
@@ -2654,9 +2632,8 @@ mod state_ops_error_tests {
 
 #[cfg(test)]
 mod body_collect_tests {
-    use super::{
-        BodyReadError, MAX_REQUEST_BODY_SIZE, body_read_error_response, collect_body_limited,
-    };
+    use super::super::body_limits::{BodyGuard, BodyLimits};
+    use super::{BodyReadError, body_read_error_response, body_refused_response};
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
     use hyper::StatusCode;
@@ -2681,31 +2658,16 @@ mod body_collect_tests {
         }
     }
 
-    #[tokio::test]
-    async fn under_limit_returns_the_bytes() {
-        let got = collect_body_limited(Full::new(Bytes::from_static(b"hello")), 4096)
-            .await
-            .expect("under limit");
-        assert_eq!(got, Bytes::from_static(b"hello"));
-    }
-
-    #[tokio::test]
-    async fn at_the_cap_boundary_is_accepted() {
-        // Exactly at the limit is not over it — guards the `>` vs `>=` off-by-one in the cap check.
-        let got = collect_body_limited(Full::new(Bytes::from(vec![b'x'; 4096])), 4096)
-            .await
-            .expect("a body exactly at the cap must be accepted");
-        assert_eq!(got.len(), 4096);
+    fn guard() -> BodyGuard {
+        BodyGuard::new(BodyLimits::new(4096, None).expect("valid limits"))
     }
 
     #[tokio::test]
     async fn oversize_is_flagged_too_large_not_read() {
         let body = Full::new(Bytes::from(vec![b'x'; 4097]));
-        let err = collect_body_limited(body, 4096)
-            .await
-            .expect_err("over limit");
+        let err = guard().collect(body).await.expect_err("over limit");
         assert!(
-            matches!(err, BodyReadError::TooLarge),
+            matches!(err, BodyReadError::TooLarge { limit: 4096 }),
             "a size-cap hit must be TooLarge, not a Read"
         );
     }
@@ -2714,7 +2676,8 @@ mod body_collect_tests {
     // cap door — and the boxed cause preserved (not stringified) so the log can name it.
     #[tokio::test]
     async fn transport_failure_is_flagged_read_with_cause_preserved() {
-        let err = collect_body_limited(FailingBody, MAX_REQUEST_BODY_SIZE)
+        let err = guard()
+            .collect(FailingBody)
             .await
             .expect_err("transport failure");
         match err {
@@ -2722,8 +2685,32 @@ mod body_collect_tests {
                 e.to_string().contains("connection reset"),
                 "the underlying cause must survive to the sink, got: {e}"
             ),
-            BodyReadError::TooLarge => panic!("a transport failure is not a size-cap hit"),
+            other => panic!("a transport failure is not a limit refusal: {other:?}"),
         }
+    }
+
+    // Issue #1439: the ceiling is a 413 and the exhausted budget a 503 with `Retry-After`; both
+    // close the connection, since the client may still be writing a body nobody will read.
+    #[tokio::test]
+    async fn the_limit_doors_are_413_and_503_and_close_the_connection() {
+        let too_large = body_refused_response(&BodyReadError::TooLarge { limit: 4096 });
+        assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(too_large.headers()["connection"], "close");
+        assert!(!too_large.headers().contains_key("retry-after"));
+
+        let exhausted = body_refused_response(&BodyReadError::BudgetExhausted);
+        assert_eq!(exhausted.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(exhausted.headers()["connection"], "close");
+        assert_eq!(exhausted.headers()["retry-after"], "1");
+        let body = exhausted
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json envelope");
+        assert_eq!(json["errors"][0]["code"], "503", "{json}");
+        assert_eq!(json["errors"][0]["type"], "unavailable", "{json}");
     }
 
     #[traced_test]

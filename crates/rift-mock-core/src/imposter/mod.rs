@@ -17,6 +17,7 @@
 //! - `core`: Core Imposter struct and implementation
 
 mod behavior_pipeline;
+pub mod body_limits;
 mod conditional;
 mod core;
 mod datadir_file;

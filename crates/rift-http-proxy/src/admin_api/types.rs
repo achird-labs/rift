@@ -5,7 +5,9 @@ use crate::imposter::{IsResponse, RecordedRequest, Stub};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
+use hyper::header::HeaderValue;
 use hyper::{Request, Response, StatusCode};
+use rift_mock_core::imposter::body_limits::{BodyGuard, BodyReadError, CollectedBody};
 use serde::{Deserialize, Serialize};
 
 /// HATEOAS link structure for Mountebank compatibility
@@ -287,16 +289,6 @@ pub fn not_found() -> Response<Full<Bytes>> {
     error_response(StatusCode::NOT_FOUND, "Not Found")
 }
 
-/// Maximum admin-API request body accepted before responding `413 Payload Too
-/// Large` (issue #546). The admin plane binds `0.0.0.0` and `--api-key` is
-/// optional, so an unbounded body is a trivial memory-exhaustion vector. The
-/// cap is deliberately generous — legitimate imposter/stub batches are well
-/// under it — while bounding a single request's buffered size. Runtime
-/// configurability was left out on purpose: it would mean threading a limit
-/// through the whole handler dispatch for a value that never needs per-deploy
-/// tuning; adjust this constant if that ever changes.
-pub const MAX_ADMIN_BODY_BYTES: usize = 64 * 1024 * 1024;
-
 /// Error reading a request body into bytes. Its `Display` is surfaced as the
 /// response body, so the wording is part of the admin API contract; the status
 /// code comes from [`BodyError::status_code`].
@@ -304,8 +296,11 @@ pub const MAX_ADMIN_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub enum BodyError {
     #[error("Failed to read request body: {0}")]
     Read(String),
-    #[error("Request body exceeds the {limit}-byte admin API limit")]
+    #[error("Request body exceeds the {limit}-byte body limit")]
     TooLarge { limit: usize },
+    /// The shared in-flight body budget cannot hold this body now (issue #1439).
+    #[error("Not enough body memory is free to accept this request; retry shortly")]
+    BudgetExhausted,
 }
 
 impl BodyError {
@@ -314,35 +309,59 @@ impl BodyError {
         match self {
             BodyError::Read(_) => StatusCode::BAD_REQUEST,
             BodyError::TooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            BodyError::BudgetExhausted => StatusCode::SERVICE_UNAVAILABLE,
         }
+    }
+
+    /// The error door for this failure. A limit refusal closes the connection, since the client
+    /// may still be writing a body nobody will read, and the exhausted budget says when to retry.
+    pub fn into_response(&self) -> Response<Full<Bytes>> {
+        let mut response = match self {
+            // An expected overload state, not a server fault: kept off `error_response`'s
+            // error-level 5xx log, which would fire on every refused request under pressure.
+            BodyError::BudgetExhausted => {
+                tracing::warn!("admin API refused a request body: {self}");
+                rift_mock_core::response::error_response(self.status_code(), &self.to_string())
+            }
+            _ => error_response(self.status_code(), &self.to_string()),
+        };
+        let headers = response.headers_mut();
+        match self {
+            BodyError::Read(_) => {}
+            BodyError::TooLarge { .. } => {
+                headers.insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
+            }
+            BodyError::BudgetExhausted => {
+                headers.insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
+                headers.insert(hyper::header::RETRY_AFTER, HeaderValue::from_static("1"));
+            }
+        }
+        response
     }
 }
 
-/// Collect a request body into bytes, rejecting anything past
-/// [`MAX_ADMIN_BODY_BYTES`] with [`BodyError::TooLarge`] instead of buffering
-/// it all into memory (issue #546).
-pub async fn collect_body(req: Request<Incoming>) -> Result<Bytes, BodyError> {
-    collect_limited(req.into_body(), MAX_ADMIN_BODY_BYTES).await
+/// Collect an admin request body under the manager's body limits and shared budget (issues #546,
+/// #1439). The returned body holds its share of the budget until it is dropped, so keep it alive
+/// until the response is built.
+pub async fn collect_body(
+    req: Request<Incoming>,
+    guard: &BodyGuard,
+) -> Result<CollectedBody, BodyError> {
+    collect_limited(req.into_body(), guard).await
 }
 
-/// Body-generic core of [`collect_body`], factored out so the size cap can be
-/// unit-tested against a synthetic body without a live server.
-async fn collect_limited<B>(body: B, limit: usize) -> Result<Bytes, BodyError>
+/// Body-generic core of [`collect_body`], factored out so the limits can be unit-tested against a
+/// synthetic body without a live server.
+async fn collect_limited<B>(body: B, guard: &BodyGuard) -> Result<CollectedBody, BodyError>
 where
     B: hyper::body::Body<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    use http_body_util::{BodyExt, Limited};
-    match Limited::new(body, limit).collect().await {
-        Ok(collected) => Ok(collected.to_bytes()),
-        Err(e)
-            if e.downcast_ref::<http_body_util::LengthLimitError>()
-                .is_some() =>
-        {
-            Err(BodyError::TooLarge { limit })
-        }
-        Err(e) => Err(BodyError::Read(e.to_string())),
-    }
+    guard.collect(body).await.map_err(|e| match e {
+        BodyReadError::TooLarge { limit } => BodyError::TooLarge { limit },
+        BodyReadError::BudgetExhausted => BodyError::BudgetExhausted,
+        BodyReadError::Read(e) => BodyError::Read(e.to_string()),
+    })
 }
 
 #[cfg(test)]
@@ -431,27 +450,48 @@ mod tests {
         assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    #[tokio::test]
-    async fn collect_body_under_limit_returns_bytes() {
-        let payload = Bytes::from(vec![b'a'; 1024]);
-        let body = Full::new(payload.clone());
-        let got = collect_limited(body, 4096).await.expect("under limit");
-        assert_eq!(got, payload);
+    fn guard(budget: Option<usize>) -> BodyGuard {
+        BodyGuard::new(
+            rift_mock_core::imposter::body_limits::BodyLimits::new(4096, budget)
+                .expect("valid limits"),
+        )
     }
 
     #[tokio::test]
     async fn collect_body_at_limit_is_accepted() {
         let payload = Bytes::from(vec![b'a'; 4096]);
-        let body = Full::new(payload.clone());
-        let got = collect_limited(body, 4096).await.expect("exactly at limit");
-        assert_eq!(got, payload);
+        let got = collect_limited(Full::new(payload.clone()), &guard(None))
+            .await
+            .expect("exactly at limit");
+        assert_eq!(*got.bytes(), payload);
     }
 
     #[tokio::test]
     async fn collect_body_over_limit_returns_too_large() {
         let body = Full::new(Bytes::from(vec![b'a'; 4097]));
-        let err = collect_limited(body, 4096).await.expect_err("over limit");
+        let err = collect_limited(body, &guard(None))
+            .await
+            .expect_err("over limit");
         assert!(matches!(err, BodyError::TooLarge { limit: 4096 }));
+    }
+
+    /// Issue #1439: the admin API shares the manager's budget; while it is held, a further body is
+    /// a `503` that says when to retry.
+    #[tokio::test]
+    async fn collect_body_over_the_budget_is_a_503_with_retry_after() {
+        let guard = guard(Some(4096));
+        let _held = collect_limited(Full::new(Bytes::from(vec![b'a'; 4096])), &guard)
+            .await
+            .expect("fits");
+        let err = guard.start(Some(1)).await.expect_err("the budget is held");
+        assert!(matches!(
+            err,
+            rift_mock_core::imposter::body_limits::BodyReadError::BudgetExhausted
+        ));
+        let response = BodyError::BudgetExhausted.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "1");
+        assert_eq!(response.headers()["connection"], "close");
     }
 
     #[test]
@@ -463,6 +503,10 @@ mod tests {
         assert_eq!(
             BodyError::TooLarge { limit: 64 }.status_code(),
             StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            BodyError::BudgetExhausted.status_code(),
+            StatusCode::SERVICE_UNAVAILABLE
         );
     }
 

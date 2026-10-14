@@ -31,9 +31,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
-/// Maximum allowed proxy response body size (10 MB)
-const MAX_PROXY_RESPONSE_BODY_SIZE: usize = 10 * 1024 * 1024;
-
 /// Request timeout for the shared proxy HTTP client.
 const PROXY_HTTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -357,6 +354,9 @@ pub struct Imposter {
     /// still less when the operator supplied a working `--upstream-ca-file` that the manager is
     /// about to inject over the top of it.
     pub(crate) upstream_client: Option<Arc<reqwest::Client>>,
+    /// The body limits and in-flight budget this imposter's requests and proxied responses draw on
+    /// (issue #1439). The manager injects its shared guard; a standalone imposter has its own.
+    pub(crate) body_guard: Arc<super::body_limits::BodyGuard>,
     /// Admin SSE event bus (issue #461), shared from the manager so recorded requests fan out to
     /// streaming clients. `None` for a standalone imposter (no manager) — then nothing is published.
     pub(crate) event_bus: Option<Arc<super::events::AdminEventBus>>,
@@ -527,6 +527,7 @@ impl Imposter {
             // Each request claims with its own proxy response's mode (issue #1387).
             proxy_store: Arc::new(LocalProxyStore::new(ProxyMode::ProxyOnce)),
             upstream_client: None,
+            body_guard: Arc::default(),
             event_bus: None,
             no_match_interceptor: None,
             exchange_inspector: None,

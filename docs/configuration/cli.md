@@ -196,6 +196,8 @@ Server options:
       --no-self-signed-tls         Disable the self-signed fallback; an HTTPS imposter with no cert is an error
       --upstream-ca-file <FILE>    Extra CA certificate(s) (PEM) trusted for outbound TLS (proxy stubs, --configfile URLs); appended to the OS trust store
       --upstream-tls-skip-verify   Accept any certificate on outbound TLS (development only; prefer --upstream-ca-file)
+      --max-body-size <BYTES>      Largest request, admin or proxied-response body accepted; over it is a 413 (default 536870912, 512 MiB)
+      --body-memory-budget <BYTES>  Memory shared by every body buffered at once; used up, a request gets 503 + Retry-After (default 1073741824, 1 GiB; 0 = unbounded)
       --intercept-port <PORT>      Start the TLS-MITM intercept/redirect proxy on this port (epic #394); off when unset
       --intercept-auth <USER:PASS>  Require Proxy-Authorization: Basic on every CONNECT to the intercept proxy; open when unset
       --intercept-ca-cert <FILE>   PEM CA certificate for interception (with --intercept-ca-key); a CA is generated if omitted
@@ -463,6 +465,31 @@ imposter that does not, so an auto-assigned port can never take a port another i
 
 ---
 
+## Body size limits
+
+Rift buffers every request body, admin body and proxied upstream response in memory, because
+predicates, scripts and the request journal all need the whole body. Two limits bound that
+(issue #1439):
+
+- **`--max-body-size`** (default 512 MiB) refuses one body over it with `413 Payload Too Large`.
+  Mountebank has no limit of its own, but it crashes past about 512 MiB (V8's string limit), so
+  the default refuses nothing Mountebank can serve. A request that declares its length is refused
+  before the body is read: a client sending `Expect: 100-continue` is never told to send it.
+- **`--body-memory-budget`** (default 1 GiB) is shared by every body being buffered at once, across
+  all imposters, the proxy and the admin API. When it is used up, a request gets
+  `503 Service Unavailable` with `Retry-After: 1` instead of the process running out of memory. A
+  request that declares its length waits up to 2 s for room first; a chunked one is refused at once.
+  It must be at least `--max-body-size`, or no body under the ceiling could be admitted, and Rift
+  refuses that configuration at startup, so raising `--max-body-size` past 1 GiB also needs a
+  larger budget. `0` makes it unbounded.
+
+A proxied upstream response is held to the same limits, but never waits for the budget, and a
+refusal there fails the proxy with `502` like any other upstream failure. The `413` and `503`
+responses close the connection. A client still writing a large body when the refusal arrives
+may see a reset instead of the status. Embedders set the same limits with
+`ImposterManager::with_body_limits`, or `maxBodySize` / `bodyMemoryBudget` in the C-ABI
+`ServeOptions`. The intercept listener keeps its own 1 MiB cap.
+
 ## Environment Variables
 
 A flag given on the command line wins over its environment variable, and the environment variable
@@ -491,6 +518,8 @@ wins over the built-in default (and over an `--rcfile` value — see [RC file](#
 | `RIFT_NO_SELF_SIGNED_TLS` | Disable self-signed TLS fallback (`true`/`false`) | `false` |
 | `RIFT_UPSTREAM_CA_FILE` | Extra CA certificate(s) (PEM **file**) trusted for outbound TLS — `proxy` stubs and `--configfile` URLs. **Appended** to the OS trust store | |
 | `RIFT_UPSTREAM_TLS_SKIP_VERIFY` | Accept any certificate on outbound TLS (`true`/`false`); development only | `false` |
+| `RIFT_MAX_BODY_SIZE` | Largest request, admin or proxied-response body accepted, in bytes (env alias of `--max-body-size`); over it is a `413` | `536870912` |
+| `RIFT_BODY_MEMORY_BUDGET` | Memory, in bytes, shared by every body buffered at once (env alias of `--body-memory-budget`); used up, a request gets `503` + `Retry-After`. At least `RIFT_MAX_BODY_SIZE`; `0` = unbounded | `1073741824` |
 | `RIFT_INTERCEPT_PORT` | Start the intercept/TLS-MITM proxy on this port (epic #394) | |
 | `RIFT_INTERCEPT_AUTH` | `user:pass` required in `Proxy-Authorization` on every `CONNECT` to the intercept proxy (env alias of `--intercept-auth`); open when unset | |
 | `RIFT_INTERCEPT_CA_CERT` | PEM CA certificate **file** for interception (with `RIFT_INTERCEPT_CA_KEY`) | |
