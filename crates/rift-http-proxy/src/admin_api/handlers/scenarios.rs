@@ -244,7 +244,8 @@ pub async fn handle_delete_flow_state(
 /// names anyway. The cost is that a new stub field must be added here too — which is why the
 /// message this list produces names the fields, so a client hitting it can see immediately whether
 /// the list is stale rather than being told only that their body was rejected.
-const STUB_FIELD_NAMES: [&str; 12] = [
+const STUB_FIELD_NAMES: [&str; 13] = [
+    "name",
     "scenarioName",
     "requiredScenarioState",
     "newScenarioState",

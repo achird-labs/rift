@@ -254,6 +254,7 @@ mod tests {
 
     fn make_rift_script_stub(engine: &str, code: &str) -> Stub {
         Stub {
+            name: None,
             id: Some("test-stub".to_string()),
             route_pattern: None,
             predicates: vec![],
@@ -287,6 +288,7 @@ mod tests {
     #[cfg(feature = "javascript")]
     fn make_inject_stub(code: &str) -> Stub {
         Stub {
+            name: None,
             id: Some("inject-stub".to_string()),
             route_pattern: None,
             predicates: vec![],
@@ -419,6 +421,7 @@ mod tests {
         // Create stubs without ids so they get indexed names
         let stubs = vec![
             Stub {
+                name: None,
                 id: None, // No id, will use stub[0]
                 route_pattern: None,
                 predicates: vec![],
@@ -446,6 +449,7 @@ mod tests {
                 verify: None,
             },
             Stub {
+                name: None,
                 id: None, // No id, will use stub[1]
                 route_pattern: None,
                 predicates: vec![],

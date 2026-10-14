@@ -52,6 +52,13 @@ record.
 
 ### Fixed
 
+- **A stub's `name` is kept and printed** (#1362), as Mountebank does. It was dropped on decode, so
+  it was missing from every printed form (`GET /imposters`, `?replayable=true`, `GET …/stubs/:index`,
+  the `POST` reply) and erased from `--datadir` files on persist. It is a label only and is never
+  matched on. **An id-less stub that has a `name` gets a new `stub_key`**; unnamed stubs keep
+  theirs. An empty `behaviors` and `proxy: null` are still accepted and not printed back; see
+  [Differences from Mountebank](docs/mountebank/differences.md#printed-imposters-are-normalized).
+
 - **`lookup` serves the first CSV row whose `keyColumn` matches, in file order, as Mountebank
   does** (#1384). Before, a repeated first-column key served the last such row, and a repeated key
   in any other column served an arbitrary one that could change between process starts. This

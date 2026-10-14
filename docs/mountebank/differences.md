@@ -120,6 +120,7 @@ the same imposter.
   `predicateGenerators`, `addWaitBehavior` and `injectHeaders`. Each reads back to the same value.
   A `headers: {}` written in a stub's `is` is still printed, because it replaces the
   `defaultResponse` headers with none.
+- Empty `behaviors` and a `null` response variant such as `proxy: null` are accepted and not printed back. Each means nothing, so it reads back the same. Mountebank echoes both as posted, and its `removeProxies` export then drops every response written with a `proxy` key, `proxy: null` included.
 - The imposter list carries `recordRequests` for each imposter, next to Rift's `stubCount` and `enabled`. Mountebank prints `recordRequests` only in an imposter's detail.
 - The `?replayable=true` export keeps the imposter's `host`, so a re-posted export binds where the original did. Mountebank 2.9.1's export leaves `host` out.
 

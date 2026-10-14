@@ -505,6 +505,19 @@ mod tests {
         assert_eq!(stub_key(&one_resp("a"), 0), "~e2d14a5a1776f053#0");
     }
 
+    /// Issue #1362: a stub's `name` is kept and hashed like any other field. An unnamed stub's key
+    /// does not move; naming a stub is a content edit, so its key does.
+    #[test]
+    fn stub_key_ignores_absent_name() {
+        let unnamed = one_resp("a");
+        assert_eq!(stub_key(&unnamed, 0), "~e2d14a5a1776f053#0");
+
+        let mut named = serde_json::to_value(&unnamed).expect("print");
+        named["name"] = json!("s1");
+        let named = stub(named);
+        assert_ne!(stub_key(&named, 0), stub_key(&unnamed, 0));
+    }
+
     /// Issue #1361: the printed form omits empty and default fields. Re-loading what was printed
     /// must give stubs with the same key, so the omission loses nothing on decode.
     #[test]
