@@ -215,7 +215,8 @@ Check field existence:
 As in Mountebank, an empty value counts as absent: `?flag`, `?q=`, an empty header, an empty form
 field and a `""` JSON value all fail `true` and satisfy `false`. Any other JSON value is present,
 including `0`, `false`, `null`, `{}` and `[]`. The expectation is read for JavaScript truthiness,
-so `0`, `""` and `null` mean "absent" and any other value means "present".
+so `0`, `""` and `null` mean "absent" and any other value means "present". [`except`](#except)
+applies first: a value it strips to empty is absent.
 
 Object expectations reach into JSON (`"body": {"user": {"id": true}}`). Each one needs a container:
 an empty body, a request without a form (`form` exists only for a non-empty urlencoded body) or a
@@ -484,6 +485,11 @@ This matches `/orders/123` and `/orders/456`: both sides become `/orders/`. Unde
 [`matches`](#matches) only the request's value is stripped; the predicate's value is a pattern. The
 expression ignores case unless the predicate sets `"caseSensitive": true` — except under
 `matches`, where it always compares case, as in Mountebank.
+
+`except` applies to [`exists`](#exists) too: a value it strips to empty counts as absent, so
+`{"exists": {"query": {"q": true}}, "except": "^x+$"}` does not match `?q=xxx`. In a JSON body the
+values are stripped after the body is parsed; Mountebank also strips the raw body text before
+parsing it — see [Differences from Mountebank](differences.md#except-on-a-json-body).
 
 ---
 

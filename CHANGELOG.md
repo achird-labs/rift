@@ -234,6 +234,11 @@ record.
 
 ### Changed
 
+- **`except` applies before `exists`** (#1408). A value that `except` strips to empty is absent,
+  as in Mountebank: `{"exists": {"query": {"q": true}}, "except": "^x+$"}` no longer matches
+  `?q=xxx`, and the same holds for headers, form fields, JSON values, the path and the body.
+  `except` was ignored by `exists`.
+
 - **`exists` reads an empty value as absent, as Mountebank does** (#1403). `?flag`, `?q=`, an empty
   header, an empty form field and a `""` JSON value now fail `exists: true` and satisfy
   `exists: false`; they used to count as present. An object expectation fails when its container
