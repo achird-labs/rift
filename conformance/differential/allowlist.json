@@ -943,6 +943,28 @@
     "rift": "\"19.99\""
   },
   {
+    "case": "targeted: a copy index of a non-participating regex group (#1407)",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "is replaced with an empty string, where Mountebank inserts a comma",
+    "reason": "copy indexed token for a regex group that did not participate: Mountebank splits on the token and joins with undefined (a comma), Rift inserts \"\"",
+    "id": "copy-non-participating-group/step[1].body",
+    "location": "step[1].body",
+    "mountebank": "[,][b]",
+    "rift": "[][b]"
+  },
+  {
+    "case": "targeted: a copy index of a non-participating regex group (#1407)",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "is replaced with an empty string, where Mountebank inserts a comma",
+    "reason": "copy indexed token for a regex group that did not participate: Mountebank splits on the token and joins with undefined (a comma), Rift inserts \"\"",
+    "id": "copy-non-participating-group/step[1].header.x-c",
+    "location": "step[1].header.x-c",
+    "mountebank": "[,][b]",
+    "rift": "[][b]"
+  },
+  {
     "id": "ascii-folding",
     "case": "targeted: string operators fold ASCII case only, matches folds Unicode",
     "location": "step[1].body",

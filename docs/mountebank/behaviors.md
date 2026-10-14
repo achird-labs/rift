@@ -359,6 +359,16 @@ not compile is not treated as "nothing extracted": the imposter is refused when 
 Rift returns the first capture group where Mountebank returns the whole regex match, so a pattern
 like `/users/(\d+)` yields just the id.
 
+**Indexed tokens.** As in Mountebank, `<into>[n]` takes the n-th extracted value: for a `regex`,
+`[0]` is the whole match and `[n]` is capture group n; for `jsonpath` and `xpath`, `[n]` is the n-th
+selected node, in document order. With `"into": "$C"` and `(\w+)-(\w+)` on `ab-cd`, `$C[1]-$C[2]`
+serves `ab-cd` and `$C[0]` serves `ab-cd`. An index with no value, or one not written as Mountebank
+writes it (`$C[5]` past the end, `$C[01]`), is not an indexed token, so the bare `$C` inside it is
+replaced as usual (`ab[5]`), as in Mountebank. A capture group that did not take part in the match
+is replaced with an empty string, where Mountebank inserts a comma. Text a copy inserts is never
+scanned for tokens again, so a request value that spells `$C[1]` is served as sent; an authored
+`$C[${I}]` whose index an earlier copy inserted is still expanded.
+
 When a `copy` token sits in a **header** value, the substituted text comes from the request, so
 Rift removes any character a header value cannot carry (CR, LF, NUL and the other ASCII controls)
 and logs a `rift::template` warning naming what it removed, with `port`, `stub` and `stub_id` identifying the stub. A tab and any non-ASCII character are
