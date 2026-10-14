@@ -330,14 +330,16 @@ async fn put_imposters_success_carries_the_apply_report() {
     manager.delete_all().await;
 }
 
-// Issue #546: a request body past MAX_ADMIN_BODY_BYTES is rejected with 413 by
-// the live admin route, proving the cap is wired into the real request path (not
-// just the collect_body unit) — the size check fires before JSON parsing.
+// Issue #546: a request body past the body ceiling is rejected with 413 by the live admin route,
+// proving the limit is wired into the real request path (not just the collect_body unit) — the
+// size check fires before JSON parsing. Since #1439 the ceiling is the manager's configurable
+// limit, so a small one keeps the test cheap; one byte over keeps the 413 from becoming a reset.
 #[tokio::test]
 async fn oversized_admin_body_is_rejected_with_413() {
-    use rift_http_proxy::admin_api::types::MAX_ADMIN_BODY_BYTES;
-
-    let manager = std::sync::Arc::new(ImposterManager::new());
+    const LIMIT: usize = 64 * 1024;
+    let manager = std::sync::Arc::new(ImposterManager::new().with_body_limits(
+        rift_http_proxy::imposter::body_limits::BodyLimits::new(LIMIT, None).expect("valid"),
+    ));
     let server = rift_http_proxy::admin_api::AdminApiServer::new(
         "127.0.0.1:0".parse().unwrap(),
         manager.clone(),
@@ -346,18 +348,17 @@ async fn oversized_admin_body_is_rejected_with_413() {
     let admin = bind_admin(server).await;
 
     let c = reqwest::Client::new();
-    let oversized = vec![b'a'; MAX_ADMIN_BODY_BYTES + 4096];
     let r = c
         .post(format!("{admin}/imposters"))
         .header("content-type", "application/json")
-        .body(oversized)
+        .body(vec![b'a'; LIMIT + 1])
         .send()
         .await
         .expect("post");
     assert_eq!(
         r.status(),
         413,
-        "body over MAX_ADMIN_BODY_BYTES must be rejected with 413 Payload Too Large"
+        "a body over the ceiling must be rejected with 413 Payload Too Large"
     );
 }
 

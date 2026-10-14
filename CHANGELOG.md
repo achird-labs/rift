@@ -247,6 +247,16 @@ record.
 
 ### Changed
 
+- **Body limits rise to Mountebank's ceiling, behind a shared memory budget** (#1439). The largest
+  imposter request, proxied upstream response and admin body accepted goes from 10 MiB (64 MiB for
+  admin) to 512 MiB, the point past which Mountebank crashes; over it is still `413`. A new
+  in-flight budget (default 1 GiB) is shared by every body buffered at once; when it is used up a
+  request gets `503` with `Retry-After: 1` instead of exhausting memory. Both are configurable:
+  `--max-body-size` / `RIFT_MAX_BODY_SIZE` and `--body-memory-budget` / `RIFT_BODY_MEMORY_BUDGET`,
+  `maxBodySize` / `bodyMemoryBudget` in `ServeOptions`, `ImposterManager::with_body_limits` for
+  embedders. The 413 and 503 responses close the connection. **Embedders that relied on the old
+  10 MiB cap (rift-cluster) should set limits for their memory.**
+
 - **An unreadable `predicateGenerators` entry is refused at create** (#1413). An entry that is not
   an object, has neither `matches` nor `inject`, has a non-string `inject`, a `matches` that is not
   an object of request fields, a non-boolean `caseSensitive` or a non-string `except` is refused

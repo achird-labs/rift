@@ -274,6 +274,13 @@ struct ServeOptions {
     upstream_ca_pem: Option<String>,
     /// Accept any certificate on outbound TLS. Development only.
     upstream_tls_skip_verify: Option<bool>,
+    /// Largest request, admin or proxied-response body, in bytes (issue #1439); over it is a 413.
+    /// Default 536870912 (512 MiB, Mountebank's own breaking point).
+    max_body_size: Option<usize>,
+    /// Memory, in bytes, shared by every body being buffered at once (issue #1439); used up, a
+    /// request gets 503 with `Retry-After`. At least `maxBodySize`; `0` is unbounded. Default
+    /// 1073741824 (1 GiB).
+    body_memory_budget: Option<usize>,
 }
 
 /// Parse `{"imposters":[...]}` or a bare `[...]` into imposter configs (the reload input shape).
@@ -2072,6 +2079,22 @@ async fn build_admin_plane_inner(
         "an intercept listener started earlier is exposed under the requested requireAdminAuth",
     )?;
 
+    // Body limits (issue #1439), before any imposter exists: imposters take the guard current at
+    // their creation. Only when the embedder set one, so the manager's own defaults stand otherwise.
+    if opts.max_body_size.is_some() || opts.body_memory_budget.is_some() {
+        use rift_mock_core::imposter::body_limits::{
+            BodyLimits, DEFAULT_BODY_MEMORY_BUDGET, DEFAULT_MAX_BODY_BYTES,
+        };
+        let budget = opts
+            .body_memory_budget
+            .unwrap_or(DEFAULT_BODY_MEMORY_BUDGET);
+        let limits = BodyLimits::new(
+            opts.max_body_size.unwrap_or(DEFAULT_MAX_BODY_BYTES),
+            (budget != 0).then_some(budget),
+        )
+        .context("maxBodySize / bodyMemoryBudget")?;
+        handle.manager.set_body_limits(limits);
+    }
     // Outbound TLS trust policy (issue #974), before any imposter exists: imposters read the
     // client when they are created, and a bad anchor must fail this call rather than surface later
     // as a per-request proxy error. Both spellings of the anchor are accepted, but not together —
@@ -2396,6 +2419,8 @@ mod build_admin_plane_chain_tests {
             upstream_ca_file: None,
             upstream_ca_pem: None,
             upstream_tls_skip_verify: None,
+            max_body_size: None,
+            body_memory_budget: None,
         };
         let Err(err) = handle.runtime.block_on(build_admin_plane(&handle, &opts)) else {
             panic!("a missing configFile must fail the admin build");
@@ -2689,6 +2714,8 @@ mod serve_option_capability_tests {
             "upstreamCaFile": "/tmp/ca.pem",
             "upstreamCaPem": "-----BEGIN CERTIFICATE-----",
             "upstreamTlsSkipVerify": false,
+            "maxBodySize": 1048576,
+            "bodyMemoryBudget": 2097152,
         });
         assert_eq!(
             full.as_object().expect("object").len(),

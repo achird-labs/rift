@@ -51,9 +51,9 @@ pub async fn handle_add(
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
-    let body = match collect_body(req).await {
+    let body = match collect_body(req, &manager.body_guard()).await {
         Ok(b) => b,
-        Err(e) => return error_response(e.status_code(), &e.to_string()),
+        Err(e) => return e.into_response(),
     };
 
     let mut add_req: AddStubRequest = match serde_json::from_slice(&body) {
@@ -144,9 +144,9 @@ pub async fn handle_replace_all(
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
-    let body = match collect_body(req).await {
+    let body = match collect_body(req, &manager.body_guard()).await {
         Ok(b) => b,
-        Err(e) => return error_response(e.status_code(), &e.to_string()),
+        Err(e) => return e.into_response(),
     };
 
     let mut replace_req: ReplaceStubsRequest = match serde_json::from_slice(&body) {
@@ -246,9 +246,9 @@ pub async fn handle_replace(
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
-    let body = match collect_body(req).await {
+    let body = match collect_body(req, &manager.body_guard()).await {
         Ok(b) => b,
-        Err(e) => return error_response(e.status_code(), &e.to_string()),
+        Err(e) => return e.into_response(),
     };
 
     let mut stub: Stub = match serde_json::from_slice(&body) {
@@ -330,9 +330,9 @@ pub async fn handle_replace_by_id(
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
-    let body = match collect_body(req).await {
+    let body = match collect_body(req, &manager.body_guard()).await {
         Ok(b) => b,
-        Err(e) => return error_response(e.status_code(), &e.to_string()),
+        Err(e) => return e.into_response(),
     };
     let mut stub: Stub = match serde_json::from_slice(&body) {
         Ok(s) => s,

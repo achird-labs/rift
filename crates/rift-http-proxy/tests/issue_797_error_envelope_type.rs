@@ -123,7 +123,11 @@ async fn script_error_door() {
 // change was needed for it, which is the property that keeps ~85 call sites untouched.
 #[tokio::test]
 async fn oversize_body_door_uses_the_default_table() {
-    let manager = ImposterManager::new();
+    // A small configured ceiling (issue #1439): the default is 512 MiB.
+    let manager = ImposterManager::new().with_body_limits(
+        rift_http_proxy::imposter::body_limits::BodyLimits::new(1024 * 1024, None)
+            .expect("valid limits"),
+    );
     let config = serde_json::from_value(serde_json::json!({
         "port": 19925, "protocol": "http",
         "stubs": [{ "responses": [{ "is": { "statusCode": 200 } }] }]
@@ -132,10 +136,9 @@ async fn oversize_body_door_uses_the_default_table() {
     manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    // One byte past MAX_REQUEST_BODY_SIZE (10 MiB): the client finishes writing before the 413,
-    // so the server's close is clean. Far past the cap, hyper closes with unread bytes and the
-    // client sees a reset instead of the envelope (#1420).
-    let huge = "x".repeat(10 * 1024 * 1024 + 1);
+    // One byte past the ceiling, with a known length: the refusal comes before the body is read,
+    // so the 413 arrives rather than a reset (#1420, #1439).
+    let huge = "x".repeat(1024 * 1024 + 1);
     let resp = reqwest::Client::new()
         .post("http://127.0.0.1:19925/x")
         .body(huge)

@@ -22,7 +22,7 @@ use crate::proxy::network::{
     AcceptBackoff, AcceptErrorClass, AcceptErrorEvent, AcceptErrorLog, classify_accept_error,
 };
 use crate::recording::ProxyRecordingStore;
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::path::PathBuf;
@@ -351,6 +351,10 @@ pub struct ImposterManager {
     /// policy — a consuming builder cannot reach it by then. Imposters read this at creation, so a
     /// store before the first `create_imposter` is what every caller needs.
     upstream_client: ArcSwapOption<reqwest::Client>,
+    /// Body limits and the in-flight budget every imposter, proxy read and admin body shares (issue
+    /// #1439). An `ArcSwap` for the same reason as `upstream_client`: the C-ABI sets it after the
+    /// manager exists. Imposters take the guard current at their creation.
+    body_guard: ArcSwap<super::body_limits::BodyGuard>,
     /// Last-chance no-match hook (issue #819); None = no interceptor, unchanged fallthrough.
     no_match_interceptor: Option<Arc<dyn NoMatchInterceptor>>,
     /// Provider consulted per imposter for a synchronous exchange inspector (issue #966); None =
@@ -404,6 +408,7 @@ impl ImposterManager {
             request_journal: None,
             proxy_store: None,
             upstream_client: ArcSwapOption::empty(),
+            body_guard: ArcSwap::from_pointee(super::body_limits::BodyGuard::default()),
             no_match_interceptor: None,
             exchange_inspector_provider: None,
             accept_runtimes: None,
@@ -600,6 +605,36 @@ impl ImposterManager {
             );
         }
         self.upstream_client.store(Some(client));
+    }
+
+    /// Set the body limits and in-flight memory budget (issue #1439). Builder form of
+    /// [`Self::set_body_limits`].
+    #[must_use]
+    pub fn with_body_limits(self, limits: super::body_limits::BodyLimits) -> Self {
+        self.set_body_limits(limits);
+        self
+    }
+
+    /// Set the body limits and in-flight memory budget on an already-constructed manager (issue
+    /// #1439). Imposters read the guard when they are created, so set it before creating any;
+    /// those that already exist keep the limits and budget they were created with.
+    pub fn set_body_limits(&self, limits: super::body_limits::BodyLimits) {
+        let existing = self.count();
+        if existing > 0 {
+            warn!(
+                existing,
+                "body limits set after {existing} imposter(s) were created; those keep the \
+                 previous limits. Set them before creating imposters."
+            );
+        }
+        self.body_guard
+            .store(Arc::new(super::body_limits::BodyGuard::new(limits)));
+    }
+
+    /// The body guard the admin API and new imposters share (issue #1439).
+    #[must_use]
+    pub fn body_guard(&self) -> Arc<super::body_limits::BodyGuard> {
+        self.body_guard.load_full()
     }
 
     /// Register a last-chance no-match interceptor (issue #819), consulted for every imposter
@@ -899,6 +934,9 @@ impl ImposterManager {
         if let Some(client) = self.upstream_client.load_full() {
             imposter.upstream_client = Some(client);
         }
+
+        // One budget across every imposter, the proxy reads and the admin API (issue #1439).
+        imposter.body_guard = self.body_guard.load_full();
 
         // Share the admin event bus so recorded requests fan out to the SSE stream (issue #461).
         imposter.event_bus = Some(Arc::clone(&self.event_bus));

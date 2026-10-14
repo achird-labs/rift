@@ -15,6 +15,7 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
+use rift_mock_core::imposter::body_limits::BodyGuard;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,10 +31,11 @@ fn default_flow_id(imposter: &Imposter) -> String {
 #[allow(clippy::result_large_err)]
 async fn parse_json_body(
     req: Request<Incoming>,
+    guard: &BodyGuard,
 ) -> Result<serde_json::Value, Response<Full<Bytes>>> {
-    let body = collect_body(req)
+    let body = collect_body(req, guard)
         .await
-        .map_err(|e| error_response(e.status_code(), &e.to_string()))?;
+        .map_err(|e| e.into_response())?;
     serde_json::from_slice(&body)
         .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {e}")))
 }
@@ -86,7 +88,7 @@ pub async fn handle_set_scenario_state(
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
-    let payload = match parse_json_body(req).await {
+    let payload = match parse_json_body(req, &manager.body_guard()).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -118,9 +120,9 @@ pub async fn handle_reset_scenarios(
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
-    let body = match collect_body(req).await {
+    let body = match collect_body(req, &manager.body_guard()).await {
         Ok(b) => b,
-        Err(e) => return error_response(e.status_code(), &e.to_string()),
+        Err(e) => return e.into_response(),
     };
     let flow_id_opt = if body.is_empty() {
         None
@@ -177,7 +179,7 @@ pub async fn handle_put_flow_state(
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
-    let payload = match parse_json_body(req).await {
+    let payload = match parse_json_body(req, &manager.body_guard()).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -337,7 +339,7 @@ pub async fn handle_add_space_stub(
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
-    let payload = match parse_json_body(req).await {
+    let payload = match parse_json_body(req, &manager.body_guard()).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };

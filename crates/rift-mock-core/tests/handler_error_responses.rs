@@ -533,11 +533,15 @@ async fn strict_decorate_timeout_envelope_code_follows_the_504() {
 // (`handler::template_error_tests`).
 // ---------------------------------------------------------------------------
 
-// The over-size door is reached before any stub matching, by exceeding the handler's 10 MiB
-// `MAX_REQUEST_BODY_SIZE`.
+// The over-size door is reached before any stub matching, by exceeding the configured body
+// ceiling (issue #1439). One byte over, with a known length: the refusal precedes the body, so the
+// 413 arrives instead of a reset.
 #[tokio::test]
 async fn oversize_request_body_door_declares_json() {
-    let manager = ImposterManager::new();
+    let manager = ImposterManager::new().with_body_limits(
+        rift_mock_core::imposter::body_limits::BodyLimits::new(1024 * 1024, None)
+            .expect("valid limits"),
+    );
     create(
         &manager,
         serde_json::json!({
@@ -550,7 +554,7 @@ async fn oversize_request_body_door_declares_json() {
 
     let resp = reqwest::Client::new()
         .post("http://127.0.0.1:22634/x")
-        .body(vec![b'x'; 11 * 1024 * 1024])
+        .body(vec![b'x'; 1024 * 1024 + 1])
         .send()
         .await
         .expect("send");
