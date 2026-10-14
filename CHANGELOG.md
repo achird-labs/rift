@@ -57,6 +57,12 @@ record.
   in any other column served an arbitrary one that could change between process starts. This
   includes a `_rift.dataset` binding, which runs the same lookup.
 
+- **Proxy-recorded header names are Title-Cased** (`Content-Type`, not hyper's `content-type`), as
+  Mountebank records a typical upstream's (#1366). A name a proxy behavior wrote with an upper-case
+  letter is kept, and spellings that differ only in case share one entry. Saved recordings diff once
+  on re-save; replay is unaffected, since Rift serves every header name lower-case on the wire.
+  (Recordings already carry `_mode: "text"` since #1369.)
+
 - **`DELETE /imposters/:port` answers the imposter as it was, as `GET` prints it** (#1399). It
   printed `name: null`, omitted `defaultResponse`, and reported `numberOfRequests: 0` and no
   recorded requests whatever the imposter had served. `ImposterManager::delete_imposter_returning`

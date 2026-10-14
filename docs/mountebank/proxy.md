@@ -190,6 +190,13 @@ query matches apart from `ts`.
 
 ### What Gets Recorded
 
+The recorded response is an `is` with the upstream's status, headers and body, and `_mode: "text"`
+(or `"binary"` for a body that is not UTF-8), as Mountebank records it. Header names are recorded
+Title-Cased (`Content-Type`): Rift's HTTP client sees every upstream name lower-cased, so the
+upstream's own spelling is not available, and Title-Case is what Mountebank records from a typical
+HTTP/1 upstream. A name a proxy behavior wrote with an upper-case letter is kept as written. Names
+are case-insensitive, and Rift serves every name lower-case on the wire either way.
+
 A generator records **one predicate per field** in `matches`, as Mountebank does, in the fixed order
 `method`, `path`, `query`, `headers`, `body` (Mountebank's order differs; see below), each carrying the generator's `caseSensitive` and
 `except` when they are set (and the body's carrying its `jsonpath` or `xpath`). The values are the

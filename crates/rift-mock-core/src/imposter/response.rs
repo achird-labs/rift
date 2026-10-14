@@ -435,12 +435,29 @@ pub fn create_stub_from_proxy_response(
     recorded_from: Option<String>,
 ) -> super::types::Stub {
     // Group values per key so multiple values for one header (e.g. Set-Cookie) survive replay.
+    //
+    // Names are recorded Title-Cased (issue #1366). hyper only ever yields lower-case names, so the
+    // upstream's wire spelling is lost; Title-Case is what Mountebank records from a typical HTTP/1
+    // upstream. A name holding an upper-case letter can only come from a proxy behavior and is
+    // kept as written. Spellings that differ only in case share one entry, values in input order.
     let response_headers: HashMap<String, Vec<String>> = {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         for (k, v) in headers {
-            if !crate::util::is_hop_by_hop_header(k) {
-                map.entry(k.clone()).or_default().push(v.clone());
+            if crate::util::is_hop_by_hop_header(k) {
+                continue;
             }
+            let existing = map
+                .keys()
+                .find(|name| name.eq_ignore_ascii_case(k))
+                .cloned();
+            let name = existing.unwrap_or_else(|| {
+                if k.bytes().any(|b| b.is_ascii_uppercase()) {
+                    k.clone()
+                } else {
+                    crate::behaviors::header_to_title_case(k)
+                }
+            });
+            map.entry(name).or_default().push(v.clone());
         }
         map
     };
@@ -941,6 +958,40 @@ mod tests {
             }
             _ => panic!("Expected StubResponse::Is"),
         }
+    }
+
+    fn recorded_headers(headers: &[(&str, &str)]) -> HashMap<String, Vec<String>> {
+        let headers: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let stub = create_stub_from_proxy_response(vec![], 200, &headers, b"OK", None, None, None);
+        match &stub.responses[0] {
+            StubResponse::Is { is, .. } => is.headers.clone(),
+            _ => panic!("Expected StubResponse::Is"),
+        }
+    }
+
+    // Issue #1366: hyper hands the recorder lower-case names; Mountebank records the upstream's
+    // spelling, which an HTTP/1 server commonly sends Title-Cased. A name with an upper-case letter
+    // can only come from a proxy behavior and is kept as written.
+    #[test]
+    fn recorded_stub_title_cases_upstream_header_names() {
+        let headers = recorded_headers(&[
+            ("content-type", "application/json"),
+            ("x-request-id", "7"),
+            ("X-DECORATED", "d"),
+        ]);
+        let mut names: Vec<&str> = headers.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["Content-Type", "X-DECORATED", "X-Request-Id"]);
+    }
+
+    #[test]
+    fn recorded_stub_merges_case_variants_upstream_first() {
+        let headers = recorded_headers(&[("set-cookie", "a"), ("Set-Cookie", "b")]);
+        assert_eq!(headers.len(), 1, "{headers:?}");
+        assert_eq!(headers["Set-Cookie"], ["a", "b"]);
     }
 
     #[test]
