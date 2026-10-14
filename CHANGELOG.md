@@ -199,6 +199,11 @@ record.
 
 ### Changed
 
+- **`DELETE /imposters/:port` for a port with no imposter answers `200` with `{}`** (#1371), Mountebank's
+  idempotent teardown, instead of `404`. Clients that treated the 404 as "already gone" keep working;
+  clients that relied on it to detect absence should use `GET /imposters/:port`. The C-ABI
+  `rift_delete_imposter` still returns `-1` for a missing port.
+
 - **Docs: how Rift's generated predicates differ from Mountebank 2.9.1's** (#1364): order, selector
   scope, selected-value type and header-name lookup, and the claim that the order is Mountebank's is
   corrected. A test pins that Rift replays Mountebank's typed recordings. No behaviour change.

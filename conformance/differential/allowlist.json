@@ -1093,24 +1093,6 @@
     "rift": "copied=${row}[name]"
   },
   {
-    "case": "admin_api: Delete non-existent imposter",
-    "kind": "known-bug",
-    "reason": "DELETE /imposters/:port of a port with no imposter answers 404; Mountebank answers 200 with an empty body (#1371)",
-    "id": "delete-missing-imposter-404#0",
-    "location": "step[0].admin.status",
-    "mountebank": "200",
-    "rift": "404"
-  },
-  {
-    "case": "admin_api: Delete non-existent imposter",
-    "kind": "known-bug",
-    "reason": "DELETE /imposters/:port of a port with no imposter answers 404; Mountebank answers 200 with an empty body (#1371)",
-    "id": "delete-missing-imposter-404#1",
-    "location": "step[0].admin.body/errors",
-    "mountebank": "(absent)",
-    "riftMatches": "\\[\\{\"code\":\"404\",\"message\":\"No imposter exists on port \\d{4,5}\",\"type\":\"no such resource\"\\}\\]"
-  },
-  {
     "case": "admin_api: DELETE requests path is alias for savedRequests",
     "kind": "documented",
     "reason": "Rift's `/requests` alias means recorded requests (documented deviation)",
