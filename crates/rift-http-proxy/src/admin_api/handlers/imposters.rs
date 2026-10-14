@@ -534,10 +534,9 @@ pub async fn handle_delete(
             });
             json_response(StatusCode::OK, &response)
         }
-        Err(ImposterError::NotFound(_)) => error_response(
-            StatusCode::NOT_FOUND,
-            &format!("No imposter exists on port {port}"),
-        ),
+        // Mountebank's teardown is idempotent: a port with no imposter answers `200` with `{}`
+        // (issue #1371). The C-ABI `rift_delete_imposter` keeps its documented `-1`.
+        Err(ImposterError::NotFound(_)) => json_response(StatusCode::OK, &serde_json::json!({})),
         Err(e) => e.into(),
     }
 }
@@ -2493,6 +2492,49 @@ mod delete_persistence_tests {
     async fn body_json(resp: Response<Full<Bytes>>) -> serde_json::Value {
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// Issue #1371: Mountebank's teardown is idempotent: deleting a port with no imposter answers
+    /// `200` with `{}`, not `404`.
+    #[tokio::test]
+    async fn delete_of_a_missing_imposter_answers_200_with_an_empty_object() {
+        let manager = Arc::new(ImposterManager::new());
+        let resp = handle_delete(23794, "http://localhost:2525", manager).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        assert_eq!(body_json(resp).await, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn delete_of_a_missing_imposter_touches_no_datadir_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = Arc::new(ImposterManager::with_datadir(Some(
+            dir.path().to_path_buf(),
+        )));
+        manager
+            .create_imposter(
+                serde_json::from_value(
+                    serde_json::json!({"port": 23791, "protocol": "http", "stubs": []}),
+                )
+                .expect("config"),
+            )
+            .await
+            .expect("create");
+        assert!(dir.path().join("23791.json").exists());
+
+        let resp = handle_delete(23797, "http://localhost:2525", Arc::clone(&manager)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await, serde_json::json!({}));
+        assert!(
+            dir.path().join("23791.json").exists(),
+            "another imposter's file is untouched"
+        );
+        manager.delete_all().await;
     }
 
     #[tokio::test]
