@@ -3488,7 +3488,8 @@ fn ffi_imposter_views_print_default_response_and_tls() {
         let https_port = rift_create_imposter(h, https.as_ptr());
         assert_ne!(https_port, 0, "{}", take_last_error());
 
-        let expected = serde_json::json!({ "statusCode": 400, "headers": {}, "body": "nope" });
+        // Printed as written (issue #1369): the omitted `headers` is not invented as `{}`.
+        let expected = serde_json::json!({ "statusCode": 400, "body": "nope" });
         let det: serde_json::Value =
             serde_json::from_str(&take_json(rift_get_imposter(h, port, std::ptr::null()))).unwrap();
         assert_eq!(det["defaultResponse"], expected, "detail: {det}");

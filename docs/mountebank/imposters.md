@@ -63,7 +63,7 @@ and the related fields are covered in [TLS/HTTPS](../features/tls.md).
 | `protocol` | string | No | `http` or `https` (default: `http`) |
 | `name` | string | No | Human-readable name |
 | `stubs` | array | No | Request/response mappings |
-| `defaultResponse` | object | No | Response when no stub matches |
+| `defaultResponse` | object | No | Response when no stub matches. It also supplies the `statusCode`, `headers`, `body` and `_mode` that an `is` or `inject` response omits |
 | `defaultForward` | string | No | Rift extension: forward an unmatched request to this base URL (takes precedence over `defaultResponse`) |
 | `recordRequests` | boolean | No | Store requests for verification (default `false`) |
 | `recordMatches` | boolean | No | **Accepted, no effect**: per-stub `matches` are not recorded. `true` is reported as [`config_key_ignored`](../features/stub-analysis.md#config_key_ignored) in `_rift.warnings` and by `rift-lint` `W017`. Use `recordRequests`: each recorded request carries `matchOutcome` |
@@ -227,6 +227,15 @@ Configure a fallback response when no stub matches:
   "stubs": [...]
 }
 ```
+
+`defaultResponse` also completes every `is` and `inject` response that does not write all of
+`statusCode`, `headers`, `body` and `_mode`: a field the response omits is taken from it, as in
+Mountebank. `headers` is replaced whole, not merged key by key, so `"headers": {}` is a written
+value and keeps the response header-less. A `proxy` response is never completed. It is merged before
+behaviors and templating run. A `proxy` key inside `defaultResponse` has no effect (Mountebank does
+not proxy from it either): it is kept as written and reported as `config_key_ignored`; use
+`defaultForward` to forward unmatched requests. See
+[Differences](differences.md#defaultresponse-completes-a-response-by-the-fields-it-omits).
 
 `defaultResponse` honours `"_mode": "binary"`, with the same contract as a stub's `is` body: a
 base64 `body` is decoded and served as bytes. If it does not decode, the raw text is served with

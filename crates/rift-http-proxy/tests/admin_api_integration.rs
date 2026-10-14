@@ -851,8 +851,9 @@ async fn default_response_printed_in_every_imposter_form() {
         .expect("POST /imposters");
     assert_eq!(created.status(), 201);
     let created: serde_json::Value = created.json().await.expect("201 json");
-    // `headers: {}` is how `IsResponse` serializes everywhere, `?replayable=true` included.
-    let expected = serde_json::json!({ "statusCode": 400, "headers": {}, "body": "nope" });
+    // Printed as written (issue #1369): the omitted `headers` is not invented as `{}`, in every
+    // form, `?replayable=true` included.
+    let expected = serde_json::json!({ "statusCode": 400, "body": "nope" });
     assert_eq!(created["defaultResponse"], expected, "201 body: {created}");
     let port = created["port"].as_u64().expect("assigned port");
 

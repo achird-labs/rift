@@ -57,6 +57,10 @@ record.
   recorded requests whatever the imposter had served. `ImposterManager::delete_imposter_returning`
   is the additive core method behind it; `delete_imposter` is unchanged.
 
+- **`defaultResponse.proxy` is kept in printed and persisted imposters** (it was erased, and a
+  `--datadir` file lost the key) and is reported as ignored in `_rift.warnings`. Neither Mountebank
+  nor Rift proxies from `defaultResponse`; use `defaultForward` (#1369).
+
 - **`inject`, `decorate` and predicate scripts find a request header under any spelling** (#1368).
   `request.headers` stays Title-Cased when enumerated, but `headers['content-type']` now finds
   `Content-Type`. Mountebank passes names as the client sent them, which Rift's HTTP stack cannot
@@ -212,6 +216,24 @@ record.
   idempotent teardown, instead of `404`. Clients that treated the 404 as "already gone" keep working;
   clients that relied on it to detect absence should use `GET /imposters/:port`. The C-ABI
   `rift_delete_imposter` still returns `-1` for a missing port.
+
+- **`defaultResponse` now supplies the `statusCode`, `headers`, `body` and `_mode` that an `is` or
+  `inject` response omits**, as in Mountebank (#1369). An imposter with a `defaultResponse` whose
+  stubs omit those fields answers differently. `headers` is replaced whole, a `proxy` response is
+  never completed, and it is merged before behaviors run. A field that is written, including
+  `"body": ""` and `"headers": {}`, is served as written (Mountebank replaces a falsy body; listed
+  in `docs/mountebank/differences.md`). Printed and persisted imposters no longer invent an omitted
+  `statusCode`, `headers` or `_mode` on an `is` or `defaultResponse`: they read as written.
+  `--datadir` stores that re-serialized form, so a restart keeps what was written. rift-cluster
+  replays stored config bytes, which may hold a field omitted from the original request, so such
+  stubs change behaviour on upgrade, and the content hash behind an id-less stub's `stub_key` moves
+  for them (response cursors restart once). A mixed-version cluster answers differently per node
+  during a rolling upgrade.
+  Embedders: `IsResponse` now has `pub(crate)` fields, so build it with `IsResponse::new`;
+  `IsResponse::default()` has status `200` (it was `0`); `MountebankInjectResponse`'s
+  `status_code`, `headers` and `body` are now `Option`. A recorded empty upstream body prints
+  `"body": ""` and a recording prints `"_mode": "text"`, as Mountebank's recorder does; both move
+  `stub_key` for recordings.
 
 - **Docs: how Rift's generated predicates differ from Mountebank 2.9.1's** (#1364): order, selector
   scope, selected-value type and header-name lookup, and the claim that the order is Mountebank's is

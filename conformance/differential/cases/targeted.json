@@ -811,6 +811,288 @@
           "path": "/?key=v"
         }
       ]
+    },
+    {
+      "name": "targeted: defaultResponse completes the fields a stub's response omits (#1369)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 418,
+              "headers": {
+                "X-Default": "yes"
+              },
+              "body": "dflt"
+            },
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/empty"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {}
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/status"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/headers"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "A": "b"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/no-headers"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {}
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/complete"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "A": "b"
+                      },
+                      "body": "mine"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/inject"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "inject": "function (config) { return { body: 'i' }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/empty"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/status"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/headers"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/no-headers"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/complete"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/inject"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/unmatched"
+        }
+      ]
+    },
+    {
+      "name": "targeted: defaultResponse replaces an explicit empty body in Mountebank and not in Rift (#1369)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 418,
+              "headers": {
+                "X-Default": "yes"
+              },
+              "body": "dflt"
+            },
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/empty-body"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": ""
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/empty-body"
+        }
+      ]
+    },
+    {
+      "name": "targeted: defaultResponse replaces a proxied empty body in Mountebank and not in Rift (#1369)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/up"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 418,
+              "headers": {
+                "X-Default": "yes"
+              },
+              "body": "dflt"
+            },
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/up"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyTransparent"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/up"
+        }
+      ]
     }
   ]
 }

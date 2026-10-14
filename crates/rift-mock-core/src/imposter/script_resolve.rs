@@ -651,12 +651,12 @@ mod tests {
             route_pattern: None,
             predicates: vec![],
             responses: vec![StubResponse::new_is(
-                crate::imposter::types::IsResponse {
-                    status_code: 200,
-                    headers: Default::default(),
-                    body: None,
-                    mode: Default::default(),
-                },
+                crate::imposter::types::IsResponse::new(
+                    200,
+                    Default::default(),
+                    None,
+                    Default::default(),
+                ),
                 None,
                 Some(Box::new(RiftResponseExtension {
                     dataset: None,

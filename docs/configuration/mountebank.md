@@ -47,7 +47,7 @@ No field is strictly required.
 |:------|:-----|:------------|
 | `name` | string | Human-readable identifier |
 | `stubs` | array | Request/response mappings |
-| `defaultResponse` | object | Response when no stub matches |
+| `defaultResponse` | object | Response when no stub matches; also supplies the `statusCode`, `headers`, `body` and `_mode` that an `is` or `inject` response omits (`headers` is replaced whole; a `proxy` key in it is ignored, use `defaultForward`) |
 | `recordRequests` | boolean | Store requests for verification |
 | `recordMatches` | boolean | **Accepted, no effect**: per-stub `matches` are not recorded. `true` is reported as `config_key_ignored` in `_rift.warnings` and by `rift-lint` `W017`; use `recordRequests` |
 | `allowCORS` | boolean | Add CORS headers to responses |

@@ -2131,6 +2131,98 @@ fn read_and_gate_datadir(
 mod tests {
     use super::*;
 
+    /// Issue #1369: a persisted `is: {}` must not come back as an explicit `statusCode`/`headers`,
+    /// or a `--datadir` restart would silently lose the `defaultResponse` merge.
+    #[tokio::test]
+    async fn omitted_fields_survive_datadir_round_trip() {
+        let port = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            probe.local_addr().expect("addr").port()
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+            "port": port, "protocol": "http",
+            "defaultResponse": { "statusCode": 418, "headers": { "X-Default": "yes" }, "body": "dflt" },
+            "stubs": [{ "responses": [{ "is": {} }] }]
+        }))
+        .expect("config");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        manager.create_imposter(config).await.expect("create");
+
+        let persisted: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join(format!("{port}.json"))).expect("persisted"),
+        )
+        .expect("json");
+        let is = &persisted["stubs"][0]["responses"][0]["is"];
+        assert!(is.get("statusCode").is_none(), "persisted: {persisted}");
+        assert!(is.get("headers").is_none(), "persisted: {persisted}");
+
+        let base = ScriptBaseDir::DatadirRelative(dir.path().to_path_buf());
+        let (parsed, skipped) = read_and_parse_datadir(dir.path(), &base).expect("read");
+        assert!(skipped.is_empty(), "{} file(s) skipped", skipped.len());
+        let (_, mut reloaded) = parsed.into_iter().next().expect("one imposter");
+
+        // The first imposter still holds `port`; the replay binds its own.
+        let replay_port = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            probe.local_addr().expect("addr").port()
+        };
+        reloaded.port = Some(replay_port);
+        let second = ImposterManager::new();
+        second.create_imposter(reloaded).await.expect("recreate");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let resp = reqwest::get(format!("http://127.0.0.1:{replay_port}/x"))
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), 418);
+        assert_eq!(resp.text().await.expect("body"), "dflt");
+        let _ = second.delete_imposter(replay_port).await;
+        let _ = manager.delete_imposter(port).await;
+    }
+
+    /// Issue #1369: a written `_mode: "text"` is not an omitted one, so after a `--datadir` restart
+    /// the stub is still served as text under a binary `defaultResponse`.
+    #[tokio::test]
+    async fn a_written_text_mode_survives_datadir_round_trip() {
+        let free = || {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            probe.local_addr().expect("addr").port()
+        };
+        let (port, replay_port) = (free(), free());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+            "port": port, "protocol": "http",
+            "defaultResponse": { "statusCode": 200, "body": "aGVsbG8=", "_mode": "binary" },
+            "stubs": [{ "responses": [{ "is": { "body": "plain text", "_mode": "text" } }] }]
+        }))
+        .expect("config");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        manager.create_imposter(config).await.expect("create");
+
+        let persisted: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join(format!("{port}.json"))).expect("persisted"),
+        )
+        .expect("json");
+        assert_eq!(
+            persisted["stubs"][0]["responses"][0]["is"]["_mode"], "text",
+            "persisted: {persisted}"
+        );
+
+        let base = ScriptBaseDir::DatadirRelative(dir.path().to_path_buf());
+        let (parsed, _) = read_and_parse_datadir(dir.path(), &base).expect("read");
+        let (_, mut reloaded) = parsed.into_iter().next().expect("one imposter");
+        reloaded.port = Some(replay_port);
+        let second = ImposterManager::new();
+        second.create_imposter(reloaded).await.expect("recreate");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let resp = reqwest::get(format!("http://127.0.0.1:{replay_port}/x"))
+            .await
+            .expect("send");
+        assert_eq!(resp.text().await.expect("body"), "plain text");
+        let _ = second.delete_imposter(replay_port).await;
+        let _ = manager.delete_imposter(port).await;
+    }
+
     /// Issue #1166: a `Cli` never renders a credential it carries, and still renders the flags
     /// that are not secret — including the paths to key files, which are not keys. The credentials
     /// are assigned rather than parsed so a developer's own `MB_APIKEY` or `RIFT_INTERCEPT_*`

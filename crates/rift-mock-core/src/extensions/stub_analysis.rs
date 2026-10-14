@@ -193,6 +193,17 @@ pub fn ignored_config_keys(config: &ImposterConfig, stubs: &[Stub]) -> Vec<StubW
              `recordRequests` and GET /imposters/:port to see the requests",
         ));
     }
+    if config
+        .default_response
+        .as_ref()
+        .is_some_and(|d| d.proxy.is_some())
+    {
+        warnings.push(imposter_level(
+            "`defaultResponse.proxy` has no effect: an unmatched request is answered from \
+             `defaultResponse`'s statusCode/headers/body (Mountebank does not proxy from it either); \
+             use `defaultForward` to forward unmatched requests",
+        ));
+    }
     // One entry per shape, however many stubs carry it: a generated imposter can put `_rift` on
     // every response, and one entry per response would undo the MAX_STUB_WARNINGS bound (#423).
     let per_shape = |first: usize, message: String| StubWarning {
@@ -1184,12 +1195,7 @@ mod tests {
         }))
         .expect("parses");
         let is_response = crate::imposter::StubResponse::new_is(
-            crate::imposter::IsResponse {
-                status_code: 200,
-                headers: Default::default(),
-                body: None,
-                mode: Default::default(),
-            },
+            crate::imposter::IsResponse::new(200, Default::default(), None, Default::default()),
             None,
             Some(Box::new(rift)),
         );
@@ -1232,12 +1238,7 @@ mod tests {
             }
         } else {
             crate::imposter::StubResponse::new_is(
-                crate::imposter::IsResponse {
-                    status_code: 200,
-                    headers: Default::default(),
-                    body: None,
-                    mode: Default::default(),
-                },
+                crate::imposter::IsResponse::new(200, Default::default(), None, Default::default()),
                 None,
                 Some(Box::new(rift)),
             )
