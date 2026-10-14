@@ -418,6 +418,80 @@ pub async fn handle_delete_all(
     )
 }
 
+/// The document `GET /imposters/:port` prints for an imposter. `DELETE /imposters/:port` answers
+/// with the same one (issue #1399), so the two cannot drift apart.
+fn imposter_detail(
+    imposter: &Imposter,
+    port: u16,
+    base_url: &str,
+    remove_proxies: bool,
+) -> ImposterDetail {
+    let mut stubs = imposter.get_stubs();
+
+    if remove_proxies {
+        stubs = filter_proxy_stubs(stubs);
+    }
+
+    // Cached stub-overlap analysis (issue #423): computed once in core on stub mutation,
+    // not recomputed here on every read. Reflects the imposter's real stubs regardless of
+    // the `removeProxies` view (the warnings are advisory).
+    let warnings = imposter.stub_warnings();
+    if !warnings.is_empty() {
+        // Ignored config keys were logged once, when the imposter loaded (issue #1152);
+        // re-logging them on every read would repeat them for as long as it exists.
+        for warning in warnings.iter().filter(|w| {
+            w.warning_type != crate::extensions::stub_analysis::WarningType::ConfigKeyIgnored
+        }) {
+            warn!(
+                port = port,
+                warning_type = ?warning.warning_type,
+                "Stub analysis warning: {}",
+                warning.message
+            );
+        }
+    }
+    // Expose the imposter's flow-state config (issue #260) so tools can read the
+    // correlated-isolation `flowIdSource`.
+    let flow_state = imposter
+        .config
+        .rift
+        .as_ref()
+        .and_then(|r| r.flow_state.as_ref())
+        .map(expose_flow_state);
+    let rift_extensions = if !warnings.is_empty() || flow_state.is_some() {
+        Some(RiftImposterExtensions {
+            warnings: (*warnings).clone(),
+            flow_state,
+        })
+    } else {
+        None
+    };
+
+    let stubs_with_links: Vec<StubWithLinks> = stubs
+        .into_iter()
+        .enumerate()
+        .map(|(index, stub)| StubWithLinks {
+            stub,
+            links: make_stub_links(base_url, port, index),
+        })
+        .collect();
+
+    ImposterDetail {
+        protocol: imposter.config.protocol.clone(),
+        port: imposter.config.port.unwrap_or(port),
+        name: imposter.config.name.clone(),
+        default_response: imposter.config.default_response.clone(),
+        number_of_requests: imposter.get_request_count(),
+        enabled: imposter.is_enabled(),
+        record_requests: imposter.config.record_requests,
+        tls: tls_header(&imposter.config),
+        requests: imposter.get_recorded_requests(),
+        stubs: stubs_with_links,
+        links: make_imposter_links(base_url, port),
+        rift: rift_extensions,
+    }
+}
+
 /// GET /imposters/:port - Get a specific imposter
 pub async fn handle_get(
     port: u16,
@@ -433,74 +507,10 @@ pub async fn handle_get(
             StatusCode::OK,
             &replayable_config(&imposter, params.remove_proxies),
         ),
-        Ok(imposter) => {
-            let mut stubs = imposter.get_stubs();
-
-            if params.remove_proxies {
-                stubs = filter_proxy_stubs(stubs);
-            }
-
-            // Cached stub-overlap analysis (issue #423): computed once in core on stub mutation,
-            // not recomputed here on every read. Reflects the imposter's real stubs regardless of
-            // the `removeProxies` view (the warnings are advisory).
-            let warnings = imposter.stub_warnings();
-            if !warnings.is_empty() {
-                // Ignored config keys were logged once, when the imposter loaded (issue #1152);
-                // re-logging them on every read would repeat them for as long as it exists.
-                for warning in warnings.iter().filter(|w| {
-                    w.warning_type
-                        != crate::extensions::stub_analysis::WarningType::ConfigKeyIgnored
-                }) {
-                    warn!(
-                        port = port,
-                        warning_type = ?warning.warning_type,
-                        "Stub analysis warning: {}",
-                        warning.message
-                    );
-                }
-            }
-            // Expose the imposter's flow-state config (issue #260) so tools can read the
-            // correlated-isolation `flowIdSource`.
-            let flow_state = imposter
-                .config
-                .rift
-                .as_ref()
-                .and_then(|r| r.flow_state.as_ref())
-                .map(expose_flow_state);
-            let rift_extensions = if !warnings.is_empty() || flow_state.is_some() {
-                Some(RiftImposterExtensions {
-                    warnings: (*warnings).clone(),
-                    flow_state,
-                })
-            } else {
-                None
-            };
-
-            let stubs_with_links: Vec<StubWithLinks> = stubs
-                .into_iter()
-                .enumerate()
-                .map(|(index, stub)| StubWithLinks {
-                    stub,
-                    links: make_stub_links(base_url, port, index),
-                })
-                .collect();
-
-            let detail = ImposterDetail {
-                protocol: imposter.config.protocol.clone(),
-                port: imposter.config.port.unwrap_or(port),
-                name: imposter.config.name.clone(),
-                default_response: imposter.config.default_response.clone(),
-                number_of_requests: imposter.get_request_count(),
-                enabled: imposter.is_enabled(),
-                record_requests: imposter.config.record_requests,
-                tls: tls_header(&imposter.config),
-                requests: imposter.get_recorded_requests(),
-                stubs: stubs_with_links,
-                links: make_imposter_links(base_url, port),
-                rift: rift_extensions,
-            };
-            json_response(StatusCode::OK, &detail)
-        }
+        Ok(imposter) => json_response(
+            StatusCode::OK,
+            &imposter_detail(&imposter, port, base_url, params.remove_proxies),
+        ),
         Err(e) => e.into(),
     }
 }
@@ -511,29 +521,14 @@ pub async fn handle_delete(
     base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
-    match manager.delete_imposter(port).await {
-        Ok(config) => {
+    match manager.delete_imposter_returning(port).await {
+        // The imposter as it was, as GET prints it, with the counters it ended on (issue #1399).
+        Ok(imposter) => {
             info!("Deleted imposter on port {}", port);
-            let stubs_with_links: Vec<StubWithLinks> = config
-                .stubs
-                .iter()
-                .enumerate()
-                .map(|(index, stub)| StubWithLinks {
-                    stub: stub.clone(),
-                    links: make_stub_links(base_url, port, index),
-                })
-                .collect();
-            let response = serde_json::json!({
-                "protocol": config.protocol,
-                "port": config.port,
-                "name": config.name,
-                "numberOfRequests": 0,
-                "recordRequests": config.record_requests,
-                "requests": [],
-                "stubs": stubs_with_links,
-                "_links": make_imposter_links(base_url, port)
-            });
-            json_response(StatusCode::OK, &response)
+            json_response(
+                StatusCode::OK,
+                &imposter_detail(&imposter, port, base_url, false),
+            )
         }
         // Mountebank's teardown is idempotent: a port with no imposter answers `200` with `{}`
         // (issue #1371). The C-ABI `rift_delete_imposter` keeps its documented `-1`.

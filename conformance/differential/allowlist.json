@@ -410,15 +410,6 @@
     "riftMatches": "true|false"
   },
   {
-    "id": "deleted-imposter-name-null",
-    "case": "*",
-    "location": "step*.body/name",
-    "kind": "known-bug",
-    "reason": "DELETE /imposters/:port of an unnamed imposter prints `name: null`; Mountebank omits it (#1361)",
-    "mountebank": "(absent)",
-    "rift": "null"
-  },
-  {
     "id": "replayable-allowCORS",
     "case": "*",
     "location": "replayable[*]/allowCORS",
@@ -1242,24 +1233,6 @@
     "location": "replayable[4545]/stubs/1",
     "mountebank": "(absent)",
     "riftMatches": "\\{\"id\":\"[0-9a-f-]{36}\",\"predicates\":\\[\\],\"responses\":\\[\\]\\}"
-  },
-  {
-    "case": "complex_scenarios: Create, modify, and delete imposter workflow",
-    "kind": "known-bug",
-    "reason": "the DELETE /imposters/:port response omits defaultResponse and reports numberOfRequests 0; Mountebank answers the imposter as it was (#1361)",
-    "id": "delete-response-not-final-state#0",
-    "location": "step[6].admin.body/defaultResponse",
-    "mountebank": "{\"body\":\"not found\",\"statusCode\":404}",
-    "rift": "(absent)"
-  },
-  {
-    "case": "complex_scenarios: Create, modify, and delete imposter workflow",
-    "kind": "known-bug",
-    "reason": "the DELETE /imposters/:port response omits defaultResponse and reports numberOfRequests 0; Mountebank answers the imposter as it was (#1361)",
-    "id": "delete-response-not-final-state#1",
-    "location": "step[6].admin.body/numberOfRequests",
-    "mountebank": "3",
-    "rift": "0"
   },
   {
     "case": "complex_scenarios: Proxy mode forwards unmatched requests",

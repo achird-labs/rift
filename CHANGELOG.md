@@ -52,6 +52,11 @@ record.
 
 ### Fixed
 
+- **`DELETE /imposters/:port` answers the imposter as it was, as `GET` prints it** (#1399). It
+  printed `name: null`, omitted `defaultResponse`, and reported `numberOfRequests: 0` and no
+  recorded requests whatever the imposter had served. `ImposterManager::delete_imposter_returning`
+  is the additive core method behind it; `delete_imposter` is unchanged.
+
 - **`inject`, `decorate` and predicate scripts find a request header under any spelling** (#1368).
   `request.headers` stays Title-Cased when enumerated, but `headers['content-type']` now finds
   `Content-Type`. Mountebank passes names as the client sent them, which Rift's HTTP stack cannot

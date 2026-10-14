@@ -278,15 +278,19 @@ With `--datadir`, the imposter's `<datadir>/<port>.json` is removed first. If th
 returns `503` naming the file and the imposter is **not** deleted: it keeps serving, and deleting it
 anyway would bring it back on the next restart.
 
-**Response:** `200 OK` with a snapshot of the deleted imposter (`numberOfRequests` `0`, `requests`
-empty) whose `stubs` are the ones it served at delete time, including any added or replaced through
-the stub routes or recorded by a proxy. If no imposter is on that port, `200 OK` with `{}`: teardown
+**Response:** `200 OK` with the imposter as it was, the document `GET /imposters/{port}` prints:
+`defaultResponse`, the final `numberOfRequests`, and `requests` when `recordRequests` is on. Its
+`stubs` are the ones it served at delete time, including any added or replaced through the stub
+routes or recorded by a proxy. If no imposter is on that port, `200 OK` with `{}`: teardown
 is idempotent, as in Mountebank. The C-ABI `rift_delete_imposter` still returns `-1` for a missing
 port.
 ```json
 {
   "port": 4545,
   "protocol": "http",
+  "numberOfRequests": 2,
+  "recordRequests": false,
+  "requests": [],
   "stubs": [...]
 }
 ```
