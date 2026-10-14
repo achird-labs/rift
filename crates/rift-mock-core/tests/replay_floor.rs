@@ -121,12 +121,14 @@ const LEDGER: &[(&str, &str, usize)] = &[
         "decode fn `?`",
         // #1353 `refuse_unknown_generator_operator`: an admission check (Admission::Checked only, re-run
         // in admission_check_stub, fixture in issue_1267_replay_decode.rs).
-        20,
+        // #1372 `refuse_empty_responses`: an admission check, the same three ways.
+        21,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",
         "decode fn `Err(`",
-        18,
+        // #1372 `refuse_empty_responses` (see above).
+        19,
     ),
     ("crates/rift-types/src/wire.rs", "::custom", 4),
     ("crates/rift-types/src/wire.rs", "serde error helper", 0),

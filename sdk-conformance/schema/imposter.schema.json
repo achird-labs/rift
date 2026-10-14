@@ -1460,10 +1460,10 @@
           ]
         },
         "responses": {
-          "default": [],
           "items": {
             "$ref": "#/$defs/StubResponse"
           },
+          "minItems": 1,
           "type": "array"
         },
         "routePattern": {
@@ -1496,6 +1496,9 @@
           ]
         }
       },
+      "required": [
+        "responses"
+      ],
       "type": "object"
     },
     "StubResponse": {

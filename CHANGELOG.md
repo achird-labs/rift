@@ -226,6 +226,18 @@ record.
 
 ### Changed
 
+- **A stub must have at least one response** (#1372, **breaking**). A stub whose `responses` is
+  absent or `[]` is refused with `400 'responses' must be a non-empty array` on every admin door
+  (`POST`/`PUT /imposters`, the stub routes, the space-stub route), by `--configfile` and
+  `POST /admin/reload`, and by the FFI create/replace calls (`-1`); `--datadir` skips the file at
+  startup and names it in the error summary. Mountebank refuses both the same way. Such a stub used
+  to match and serve the imposter's `defaultResponse`; write `"responses": [{"is": {}}]` to keep
+  that (an empty `is` inherits `defaultResponse` since #1369). Configs replayed through
+  `deserialize_replayed` still decode; `admission_check` reports them. An explicit
+  `"responses": null` was already refused and still is. `rift-lint`'s `W002` (an empty
+  `responses`) is folded into `E006`, and the JSON Schema marks a stub's `responses` required with
+  `minItems: 1`.
+
 - **Printed imposters are normalized** (#1361). `is.statusCode` prints as a JSON number; it printed
   as a string, while `defaultResponse.statusCode` already printed a number. Empty `predicates`, an
   empty `defaultResponse.headers` and a proxy's default options (`mode`, `predicateGenerators`,

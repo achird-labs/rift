@@ -133,7 +133,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E010 | Unbalanced brackets in JSONPath | `$.user[0` missing `]` |
 | E013 | Invalid regex | `[invalid(` |
 | E018 | A header array (`is.headers`, `defaultResponse.headers`) contains a `null`, object or array element; the engine refuses the document. Strings, numbers and booleans are legal, and the engine coerces them, as Mountebank does | `"Accept": ["text/html", null]` |
-| E006 | Stub missing `responses` field | A stub with `predicates` but no `responses` |
+| E006 | Stub `responses` must be a non-empty array — the engine refuses a stub without a response, as Mountebank does. Formerly `W002` for an empty list | `{"predicates": [...]}` or `"responses": []` |
 | E007 | Predicate is not an object | `"predicates": ["equals"]` |
 | E008 | Predicate has no operator | `{"caseSensitive": true}` on its own |
 | E009 | Unknown predicate operator | `{"equalz": {"path": "/a"}}` |
@@ -183,7 +183,6 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | Code | Description | Example |
 |:-----|:------------|:--------|
 | W001 | Privileged port | Port 80 requires root access |
-| W002 | Stub has no responses defined | `{"predicates": [...], "responses": []}` |
 | W003 | Response has both `is` and `proxy` defined | `{"is": {...}, "proxy": {...}}` |
 | W004 | Invalid JSON body | Body isn't JSON but Content-Type is application/json. Not reported when `_rift.templated` or a `copy`/`lookup`/`decorate`/`shellTransform` behavior rewrites the body before it is served |
 | W006 | `Content-Length` header is a numeric string below 10 | `"Content-Length": "5"` |
@@ -222,7 +221,8 @@ to `W014` in #1156 — it had always been reported as a warning, and a consumer 
 prefix saw a different rule set from one filtering on severity. A rule's letter now always matches
 its severity. `E019`/`E020` were retired in #1358: the engine coerces number and boolean header
 values, as Mountebank does, so they are not findings. `W005` became `E054`, because the engine
-refuses a `null` header value.
+refuses a `null` header value. `W002` (an empty `responses`) was folded into `E006` in #1372, when the engine
+began refusing an empty `responses` as it does an absent one.
 
 ## Auto-Fix
 

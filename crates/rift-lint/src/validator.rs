@@ -1209,30 +1209,36 @@ pub fn validate_stub(
         }
     }
 
-    if let Some(responses) = stub.get("responses").and_then(|v| v.as_array()) {
-        if responses.is_empty() {
-            result.add_issue(
-                LintIssue::warning("W002", "Stub has no responses defined", file.to_path_buf())
-                    .with_location(&location)
-                    .with_suggestion("Add at least one response"),
-            );
+    // The engine refuses an absent and an empty `responses` alike, as Mountebank does (#1372), so
+    // both are E006. An empty list used to be the warning W002, which is retired.
+    match stub
+        .get("responses")
+        .and_then(Value::as_array)
+        .filter(|responses| !responses.is_empty())
+    {
+        Some(responses) => {
+            for (resp_idx, response) in responses.iter().enumerate() {
+                validate_response(
+                    file,
+                    response,
+                    &format!("{location}.responses[{resp_idx}]"),
+                    result,
+                    options,
+                    registry,
+                );
+            }
         }
-
-        for (resp_idx, response) in responses.iter().enumerate() {
-            validate_response(
-                file,
-                response,
-                &format!("{location}.responses[{resp_idx}]"),
-                result,
-                options,
-                registry,
-            );
-        }
-    } else {
-        result.add_issue(
-            LintIssue::error("E006", "Stub missing 'responses' field", file.to_path_buf())
-                .with_location(location),
-        );
+        None => result.add_issue(
+            LintIssue::error(
+                "E006",
+                "Stub 'responses' must be a non-empty array",
+                file.to_path_buf(),
+            )
+            .with_location(location)
+            .with_suggestion(
+                "Add at least one response; `{\"is\": {}}` serves the imposter's defaultResponse",
+            ),
+        ),
     }
 }
 

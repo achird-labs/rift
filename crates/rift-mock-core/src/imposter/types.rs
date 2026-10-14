@@ -370,7 +370,8 @@ impl Gate<'_> {
     feature = "schema",
     derive(schemars::JsonSchema),
     schemars(
-        description = "A stub: the predicates a request must match and the responses it then cycles through."
+        description = "A stub: the predicates a request must match and the responses it then cycles through.",
+        transform = crate::schema::stub_requires_responses
     )
 )]
 #[serde(rename_all = "camelCase")]
@@ -483,6 +484,7 @@ impl TryFrom<StubRaw> for Stub {
             raw.rules
         };
         if admission() == Admission::Checked {
+            refuse_empty_responses(&raw.responses)?;
             validate_predicates(&predicates)?;
         }
 
@@ -553,9 +555,9 @@ impl Drop for ReplayGuard {
 
 /// Deserialize with the engine's admission checks switched off, for an embedder replaying configs an
 /// engine already admitted, from its own log or tables or from a peer (issue #1267). The skipped
-/// checks are exactly those [`admission_check`] runs on the decoded value: predicate
-/// `jsonpath`/`xpath` selectors and `matches` patterns, behaviors blocks that do not parse, and
-/// `copy`/`lookup` selectors. Normalisation (aliases such as `rules`, `delayRange` → `wait`,
+/// checks are exactly those [`admission_check`] runs on the decoded value: a stub with no responses,
+/// predicate `jsonpath`/`xpath` selectors and `matches` patterns, behaviors blocks that do not parse,
+/// and `copy`/`lookup` selectors. Normalisation (aliases such as `rules`, `delayRange` → `wait`,
 /// defaults) is unchanged.
 ///
 /// Every other decode-time refusal still applies and is part of the stored format (issue #1268):
@@ -582,8 +584,8 @@ where
 }
 
 /// The admission checks a config door runs while decoding an imposter, as a function (issue #1267):
-/// every predicate `jsonpath`/`xpath` selector and `matches` pattern, every behaviors block parses,
-/// and every `copy`/`lookup` selector. Always checks, including when called from inside
+/// every stub has at least one response (#1372), every predicate `jsonpath`/`xpath` selector and
+/// `matches` pattern, every behaviors block parses, and every `copy`/`lookup` selector. Always checks, including when called from inside
 /// [`deserialize_replayed`].
 ///
 /// Its contract with the doors (issue #1268): a config a door admits passes; otherwise `Err` carries
@@ -597,7 +599,7 @@ pub fn admission_check(config: &ImposterConfig) -> Result<(), String> {
 }
 
 /// [`admission_check`] for one stub. Responses first: they decode before `TryFrom<StubRaw>` checks
-/// the stub's predicates, so this is the order a door reports in.
+/// that there is at least one and then the stub's predicates, so this is the order a door reports in.
 pub fn admission_check_stub(stub: &Stub) -> Result<(), String> {
     stub.responses.iter().try_for_each(|response| {
         refuse_unparseable_behaviors(response.behaviors_block(), Admission::Checked)?;
@@ -610,7 +612,19 @@ pub fn admission_check_stub(stub: &Stub) -> Result<(), String> {
             _ => Ok(()),
         }
     })?;
+    refuse_empty_responses(&stub.responses)?;
     validate_predicates(&stub.predicates)
+}
+
+/// A stub must carry at least one response, worded as Mountebank's `errorsForStub` words it (issue
+/// #1372). An admission check, not a decode refusal: engines up to v0.21.0 admitted an absent or
+/// empty `responses` on every door and served the imposter's `defaultResponse` when it matched.
+/// An explicit `"responses": null` is a different, structural refusal that serde makes on its own.
+fn refuse_empty_responses(responses: &[StubResponse]) -> Result<(), String> {
+    if responses.is_empty() {
+        return Err("'responses' must be a non-empty array".to_string());
+    }
+    Ok(())
 }
 
 /// Refuse a predicate the matcher could never evaluate as written, at parse, on every config door
@@ -4285,17 +4299,19 @@ mod tests {
 
     #[test]
     fn test_stub_deserialize_without_responses_field() {
-        let stub_json = json!({
-            "predicates": [{ "equals": { "path": "/test" } }]
-        });
-
-        let result: Result<Stub, _> = serde_json::from_value(stub_json);
-
-        assert!(
-            result.is_ok(),
-            "Stub without responses field should deserialize with empty responses vec"
-        );
-        assert!(result.unwrap().responses.is_empty());
+        // Issue #1372: Mountebank refuses an absent and an empty `responses` alike.
+        for stub_json in [
+            json!({ "predicates": [{ "equals": { "path": "/test" } }] }),
+            json!({ "predicates": [{ "equals": { "path": "/test" } }], "responses": [] }),
+        ] {
+            let err = serde_json::from_value::<Stub>(stub_json)
+                .expect_err("a stub without responses is refused at admission")
+                .to_string();
+            assert!(
+                err.contains("'responses' must be a non-empty array"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -4328,7 +4344,7 @@ mod tests {
         let stub_json = json!({
             "predicates": [{ "equals": { "path": "/a" } }],
             "rules": [{ "equals": { "path": "/b" } }, { "equals": { "path": "/c" } }],
-            "responses": []
+            "responses": [{ "is": {} }]
         });
         let stub: Stub = serde_json::from_value(stub_json).unwrap();
         assert_eq!(stub.predicates.len(), 1);
@@ -4673,7 +4689,7 @@ mod tests {
     fn test_stub_recorded_from_roundtrip() {
         let stub_json = json!({
             "predicates": [],
-            "responses": [],
+            "responses": [{ "is": {} }],
             "recordedFrom": "http://upstream:8080"
         });
         let stub: Stub = serde_json::from_value(stub_json).unwrap();
@@ -5428,7 +5444,7 @@ mod mountebank_output_tests {
     #[test]
     fn gate_covers_truth_table() {
         let stub = |space: Option<&str>, scenario: Option<(&str, &str)>| -> Stub {
-            let mut v = json!({ "predicates": [] });
+            let mut v = json!({ "predicates": [], "responses": [{ "is": {} }] });
             if let Some(space) = space {
                 v["space"] = json!(space);
             }
@@ -5467,8 +5483,10 @@ mod mountebank_output_tests {
         assert!(!a_started.gate().covers(&a.gate()));
         assert!(!a.gate().covers(&started.gate()));
         // a scenario name alone gates nothing
-        let name_only: Stub =
-            serde_json::from_value(json!({ "scenarioName": "s", "predicates": [] })).expect("stub");
+        let name_only: Stub = serde_json::from_value(
+            json!({ "scenarioName": "s", "predicates": [], "responses": [{ "is": {} }] }),
+        )
+        .expect("stub");
         assert_eq!(name_only.gate(), open.gate());
     }
 }

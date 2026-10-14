@@ -3525,7 +3525,7 @@ mod templated_offload_tests {
     fn stub_ref_reads_the_port_index_and_id_from_the_right_places() {
         let imp = imposter_with(Arc::new(ThreadProbeStore::new(false)), None);
         let stub: crate::imposter::types::Stub =
-            serde_json::from_value(json!({ "id": "checkout", "responses": [] }))
+            serde_json::from_value(json!({ "id": "checkout", "responses": [{ "is": {} }] }))
                 .expect("valid stub");
 
         let r = stub_ref(&imp, 7, &stub);
@@ -3539,7 +3539,7 @@ mod templated_offload_tests {
         assert_eq!(r.id, Some("checkout"), "id is the matched stub's id");
 
         let anonymous: crate::imposter::types::Stub =
-            serde_json::from_value(json!({ "responses": [] })).expect("valid stub");
+            serde_json::from_value(json!({ "responses": [{ "is": {} }] })).expect("valid stub");
         assert_eq!(stub_ref(&imp, 0, &anonymous).id, None);
     }
 

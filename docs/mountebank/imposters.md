@@ -159,7 +159,7 @@ Each stub contains predicates (matching rules) and responses:
 | `name` | string | No | A label for the reader, printed back and never matched on |
 | `id` | string | No | Unique identifier (Rift extension) |
 | `predicates` | array | No | Conditions to match requests (`rules` is accepted as an alias) |
-| `responses` | array | Yes | Responses to return |
+| `responses` | array | Yes, non-empty | Responses to return. A stub without one is refused with `'responses' must be a non-empty array`, as in Mountebank; `[{"is": {}}]` serves the imposter's `defaultResponse` |
 | `scenarioName` | string | No | Identifier for test scenarios |
 | `requiredScenarioState` / `newScenarioState` | string | No | Rift extension: scenario state gate and transition (see [Scenarios](../features/scenarios.md)) |
 | `space` | string | No | Rift extension: only eligible for requests whose flow id equals this (see [Spaces](../features/spaces.md)) |
