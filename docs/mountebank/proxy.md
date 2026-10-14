@@ -164,7 +164,7 @@ Control how requests are matched when generating stubs:
 | `except` | Copied onto each generated predicate; the recorded values stay whole and the matcher strips the regex from both sides (see [`except`](predicates.md#except)) |
 | `jsonpath` | `{"selector": "$.id"}`: capture only what the selector selects from the body, and scope the generated predicate with the same selector |
 | `xpath` | `{"selector": "//a:id", "ns": {"a": "urn:a"}}`: as `jsonpath`, for an XML body |
-| `ignore` | Keys to leave out of a captured object field: `{"query": "ts"}`, `{"query": ["ts", "nonce"]}`, `{"headers": "X-Request-Id"}` |
+| `ignore` | Keys to leave out of a captured object field: `{"query": "ts"}`, `{"query": ["ts", "nonce"]}`, `{"headers": "X-Request-Id"}`. An object form (`{"query": {"a": …}}`) has no effect, since captured values are strings, as in Mountebank for scalar values |
 | `inject` | A JavaScript function that returns the predicates (see [Generation Failures](#generation-failures)) |
 
 With `jsonpath` or `xpath`, the captured `body` is the selected value: one match is a string, several

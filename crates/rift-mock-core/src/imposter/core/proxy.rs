@@ -265,8 +265,9 @@ fn selected_body(selector: &crate::imposter::PredicateSelector, body: &str) -> s
     }
 }
 
-/// Mountebank's `objFilter`: a string removes that key, an array removes each named key, an object
-/// recurses into the object-valued fields it names.
+/// Mountebank's `objFilter`: a string removes that key, an array removes each named key. An object
+/// filter removes nothing: Mountebank recurses it into the object-valued fields it names, but every
+/// captured value here is a string, so there is nothing to recurse into.
 fn remove_ignored(
     captured: &mut serde_json::Map<String, serde_json::Value>,
     filter: &serde_json::Value,
@@ -278,13 +279,6 @@ fn remove_ignored(
         serde_json::Value::Array(keys) => {
             for key in keys.iter().filter_map(serde_json::Value::as_str) {
                 captured.remove(key);
-            }
-        }
-        serde_json::Value::Object(nested) => {
-            for (key, filter) in nested {
-                if let Some(serde_json::Value::Object(inner)) = captured.get_mut(key) {
-                    remove_ignored(inner, filter);
-                }
             }
         }
         _ => {}
@@ -1470,8 +1464,8 @@ mod predicate_generator_selector_tests {
         );
     }
 
-    /// Mountebank recurses an object filter into object-valued fields; Rift's captured fields hold
-    /// strings below the first level, so a nested filter has nothing to remove there.
+    /// Mountebank recurses an object filter into object-valued fields; Rift's captured values are
+    /// all strings, so an object-form filter removes nothing.
     #[test]
     fn ignore_object_form_recurses_only_into_objects() {
         let predicates = generate(
