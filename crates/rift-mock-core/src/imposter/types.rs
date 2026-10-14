@@ -607,7 +607,7 @@ pub fn admission_check_stub(stub: &Stub) -> Result<(), String> {
         match response {
             StubResponse::Proxy { proxy, .. } => {
                 refuse_unknown_proxy_mode(Some(proxy), Admission::Checked)?;
-                refuse_unknown_generator_operator(Some(proxy), Admission::Checked)
+                refuse_unreadable_generators(Some(proxy), Admission::Checked)
             }
             _ => Ok(()),
         }
@@ -1538,7 +1538,7 @@ impl TryFrom<StubResponseRaw> for StubResponse {
         // Only when the response really is a proxy (`is` wins the priority below).
         if raw.is.is_none() {
             refuse_unknown_proxy_mode(raw.proxy.as_ref(), admission())?;
-            refuse_unknown_generator_operator(raw.proxy.as_ref(), admission())?;
+            refuse_unreadable_generators(raw.proxy.as_ref(), admission())?;
         }
         // Priority: is > proxy > inject > fault > rift-script-only
         Ok(if let Some(is_raw) = raw.is {
@@ -2105,12 +2105,13 @@ fn refuse_unknown_proxy_mode(
     proxy.map_or(Ok(()), |proxy| proxy.mode().map(|_| ()))
 }
 
-/// Refuse a `predicateGenerators` entry whose `predicateOperator` is not a field operator (issue
-/// #1353), at a config door only, like [`refuse_unknown_proxy_mode`]: Mountebank and older engines
-/// admitted it. Such a generator wraps every field in an operator that never decodes, so each
-/// recording used to drop all its predicates and match every later request. Absent or `null` keeps
-/// the default, `deepEquals`.
-fn refuse_unknown_generator_operator(
+/// Refuse a `predicateGenerators` entry the recorder cannot read, at a config door only, like
+/// [`refuse_unknown_proxy_mode`]: Mountebank and older engines admitted these, so this is never a
+/// decode refusal. Each entry is checked in order: its shape ([`rift_types::generator_shape_error`],
+/// issue #1413), then its `predicateOperator`, which must be a field operator (issue #1353) —
+/// absent or `null` keeps the default, `deepEquals`. Either used to record fewer predicates than
+/// the generator asked for, down to a match-all stub that answered every later request.
+fn refuse_unreadable_generators(
     proxy: Option<&ProxyResponse>,
     admission: Admission,
 ) -> Result<(), String> {
@@ -2121,28 +2122,36 @@ fn refuse_unknown_generator_operator(
         return Ok(());
     };
     for (i, generator) in proxy.predicate_generators.iter().enumerate() {
-        let Some(operator) = generator.get("predicateOperator") else {
-            continue;
-        };
-        if operator.is_null() {
-            continue;
+        if let Some(refusal) = rift_types::generator_shape_error(i, generator) {
+            return Err(refusal);
         }
-        if operator
-            .as_str()
-            .is_some_and(|op| rift_types::GENERATOR_OPERATORS.contains(&op))
-        {
-            continue;
+        if let Some(refusal) = generator_operator_error(i, generator) {
+            return Err(refusal);
         }
-        let shown = operator
-            .as_str()
-            .map_or_else(|| operator.to_string(), str::to_string);
-        return Err(format!(
-            "predicateGenerators[{i}].predicateOperator `{shown}` is not a predicate operator; \
-             expected one of {}",
-            rift_types::GENERATOR_OPERATORS.join(", ")
-        ));
     }
     Ok(())
+}
+
+/// Why entry `i`'s `predicateOperator` is not a field operator (issue #1353); `None` when it is
+/// one, or absent or `null`.
+pub(crate) fn generator_operator_error(i: usize, generator: &serde_json::Value) -> Option<String> {
+    let operator = generator
+        .get("predicateOperator")
+        .filter(|v| !v.is_null())?;
+    if operator
+        .as_str()
+        .is_some_and(|op| rift_types::GENERATOR_OPERATORS.contains(&op))
+    {
+        return None;
+    }
+    let shown = operator
+        .as_str()
+        .map_or_else(|| operator.to_string(), str::to_string);
+    Some(format!(
+        "predicateGenerators[{i}].predicateOperator `{shown}` is not a predicate operator; \
+         expected one of {}",
+        rift_types::GENERATOR_OPERATORS.join(", ")
+    ))
 }
 
 // ============================================================================

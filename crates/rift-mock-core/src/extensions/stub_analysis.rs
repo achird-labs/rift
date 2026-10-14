@@ -1495,9 +1495,10 @@ mod tests {
             proxy(
                 json!([{ "matches": { "body": true }, "jsonpath": { "selector": "$.id" }, "ignore": { "query": "ts" } }]),
             ),
-            proxy(json!([{ "matchs": { "path": true } }])),
+            // Each with a real `matches`: an entry with neither is refused (#1413).
+            proxy(json!([{ "matches": { "method": true }, "matchs": { "path": true } }])),
             proxy(
-                json!([{ "matches": { "path": true }, "keyCaseSensitive": true }, { "matchs": {} }]),
+                json!([{ "matches": { "path": true }, "keyCaseSensitive": true }, { "matches": {}, "matchs": {} }]),
             ),
         ];
         let config: ImposterConfig =

@@ -852,6 +852,93 @@ fn e052_unknown_proxy_mode() {
     assert!(!has_code(&r, "W007"));
 }
 
+/// The engine refuses a generator entry its recorder cannot read (issue #1413), so lint reports it
+/// as an error, with the engine's own wording.
+#[test]
+fn e055_unreadable_generator_entry() {
+    let lint = |generators: serde_json::Value| {
+        let mut r = LintResult::new();
+        validate_proxy_response(
+            path(),
+            &json!({ "to": "http://example.com", "predicateGenerators": generators }),
+            "loc",
+            &mut r,
+        );
+        r
+    };
+    for (generators, message) in [
+        (json!(["x"]), "predicateGenerators[0] must be an object"),
+        (
+            json!([{ "matches": { "path": true } }, {}]),
+            "predicateGenerators[1] needs `matches` or `inject`",
+        ),
+        (
+            json!([{ "inject": 42 }]),
+            "predicateGenerators[0].inject must be a function string",
+        ),
+        (
+            json!([{ "matches": true }]),
+            "predicateGenerators[0].matches must be an object of request fields",
+        ),
+        (
+            json!([{ "matches": { "path": true }, "caseSensitive": "yes" }]),
+            "predicateGenerators[0].caseSensitive must be a boolean",
+        ),
+        (
+            json!([{ "matches": { "path": true }, "except": 5 }]),
+            "predicateGenerators[0].except must be a string",
+        ),
+        (
+            json!([{ "matches": { "pathh": true } }]),
+            "predicateGenerators[0].matches field `pathh` is not a request field",
+        ),
+    ] {
+        let r = lint(generators.clone());
+        let issue = r
+            .issues
+            .iter()
+            .find(|i| i.code == "E055")
+            .unwrap_or_else(|| panic!("no E055 for {generators}: {:?}", codes(&r)));
+        assert!(issue.message.starts_with(message), "{}", issue.message);
+    }
+    for generators in [
+        json!([{ "matches": { "path": true, "ip": true } }]),
+        json!([{ "inject": "function () { return []; }" }]),
+        json!([{ "inject": "function () { return []; }", "caseSensitive": "yes" }]),
+    ] {
+        assert!(
+            !has_code(&lint(generators.clone()), "E055"),
+            "E055 fired for {generators}"
+        );
+    }
+}
+
+/// The engine admits `requestFrom`, `ip` and `form` in `matches`, as Mountebank does, but does not
+/// capture them yet, so every recording that asks for one fails (issue #1413): a warning.
+#[test]
+fn w022_uncaptured_generator_field() {
+    let lint = |matches: serde_json::Value| {
+        let mut r = LintResult::new();
+        validate_proxy_response(
+            path(),
+            &json!({ "to": "http://example.com", "predicateGenerators": [{ "matches": matches }] }),
+            "loc",
+            &mut r,
+        );
+        r
+    };
+    for field in ["requestFrom", "ip", "form"] {
+        let r = lint(json!({ "path": true, field: true }));
+        let issue = r.issues.iter().find(|i| i.code == "W022").expect("W022");
+        assert!(issue.message.contains(field), "{}", issue.message);
+        assert!(!has_code(
+            &lint(json!({ "path": true, field: false })),
+            "W022"
+        ));
+    }
+    assert!(!has_code(&lint(json!({ "path": true })), "W022"));
+}
+
 /// The engine refuses an unknown generator `predicateOperator` (issue #1353), so lint reports it as
 /// an error; the seven field operators and an absent or `null` key pass.
 #[test]
@@ -4000,16 +4087,16 @@ fn w020_w021_predicate_generator_keys() {
         .is_empty()
     );
 
+    // With `matches` misspelled the entry has neither `matches` nor `inject`, which the engine
+    // refuses (E055, issue #1413); W020 still names the unread keys.
     let typo = lint(json!({ "matchs": { "path": true }, "keyCaseSensitive": true }));
-    assert_eq!(codes(&typo), vec!["W020"]);
+    assert_eq!(codes(&typo), vec!["E055", "W020"]);
+    let w020 = typo.issues.iter().find(|i| i.code == "W020").expect("W020");
     assert_eq!(
-        typo.issues[0].message,
+        w020.message,
         "predicateGenerator key(s) `keyCaseSensitive`, `matchs` are not read by the engine"
     );
-    assert_eq!(
-        typo.issues[0].location.as_deref(),
-        Some("loc.predicateGenerators[0]")
-    );
+    assert_eq!(w020.location.as_deref(), Some("loc.predicateGenerators[0]"));
 
     for (generator, key) in [
         (

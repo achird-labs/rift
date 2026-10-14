@@ -158,10 +158,10 @@ Control how requests are matched when generating stubs:
 
 | Key | Description |
 |:----|:------------|
-| `matches` | Which request fields the generated predicate captures (table above) |
+| `matches` | Which request fields the generated predicate captures (table above). An object whose keys are request fields: `method`, `path`, `query`, `headers`, `body`, `requestFrom`, `ip`, `form`. `requestFrom`, `ip` and `form` are admitted, as in Mountebank, but not captured yet: a recording that asks for one fails with `invalid-predicate` (set it to `false`, or leave it out; `rift-lint` W022) |
 | `predicateOperator` | The operator of every generated predicate: `equals`, `deepEquals`, `contains`, `startsWith`, `endsWith`, `matches` or `exists`; omitted, see [What Gets Recorded](#what-gets-recorded). Any other value is refused (400, or a startup error; `rift-lint` E053). Mountebank admits it and then answers `500` to every request after the first recording |
-| `caseSensitive` | Copied onto each generated predicate when set (see [Case Sensitivity](#case-sensitivity)) |
-| `except` | Copied onto each generated predicate; the recorded values stay whole and the matcher strips the regex from both sides (see [`except`](predicates.md#except)) |
+| `caseSensitive` | A boolean, copied onto each generated predicate when set (see [Case Sensitivity](#case-sensitivity)) |
+| `except` | A string, copied onto each generated predicate; the recorded values stay whole and the matcher strips the regex from both sides (see [`except`](predicates.md#except)) |
 | `jsonpath` | `{"selector": "$.id"}`: capture only what the selector selects from the body, and scope the generated predicate with the same selector |
 | `xpath` | `{"selector": "//a:id", "ns": {"a": "urn:a"}}`: as `jsonpath`, for an XML body |
 | `ignore` | Keys to leave out of a captured object field: `{"query": "ts"}`, `{"query": ["ts", "nonce"]}`, `{"headers": "X-Request-Id"}`. An object form (`{"query": {"a": …}}`) has no effect, since captured values are strings, as in Mountebank for scalar values |
@@ -174,6 +174,16 @@ without one. `ignore` applies to the object-valued fields (`query`, `headers`); 
 a string body. A key not in this table is accepted,
 ignored when recording, and reported as [`config_key_ignored`](../features/stub-analysis.md#config_key_ignored)
 and by `rift-lint` `W020`.
+
+An entry the recorder cannot read is refused (400, or a startup error; `rift-lint` E055): one that
+is not an object, has neither `matches` nor `inject`, has a non-string `inject`, a `matches` that is
+not an object or names a key that is not a request field, a non-boolean `caseSensitive` or a
+non-string `except`. Rift used to skip such an entry and record the rest, which was wider than the
+generators asked for, or a stub matching every request when no entry could be read. Mountebank
+refuses the first three when the imposter is created. It admits the rest: a `matches` that is not
+an object, or names a key that is not a request field, records a stub that matches every request,
+and a non-boolean `caseSensitive` or non-string `except` is copied onto the recorded predicates.
+`caseSensitive` and `except` are not checked on an `inject` generator, which does not read them.
 
 ```json
 {
@@ -295,7 +305,9 @@ match-all stub that shadows every future request, so the failure is surfaced ins
 an `inject` that returns a misspelled operator (`{"equal": …}`), or a `"predicateOperator":
 "matches"` over a value that is not a regular expression (a path such as `/a(b`). Rift used to drop
 such a predicate and record the rest; when it dropped all of them, the recording matched every
-later request.
+later request. It also covers an unreadable generator entry in a config that reached the engine
+without the create-time check (a replayed rift-cluster config, for one), and a `matches` that asks
+for `requestFrom`, `ip` or `form`.
 
 A generator that legitimately returns an empty array (`[]`) is **not** a failure — it records a
 match-all stub as before. Only genuine generation failures skip recording and set the header.

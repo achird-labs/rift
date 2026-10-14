@@ -119,8 +119,8 @@ const LEDGER: &[(&str, &str, usize)] = &[
     (
         "crates/rift-mock-core/src/imposter/types.rs",
         "decode fn `?`",
-        // #1353 `refuse_unknown_generator_operator`: an admission check (Admission::Checked only, re-run
-        // in admission_check_stub, fixture in issue_1267_replay_decode.rs).
+        // #1353/#1413 `refuse_unreadable_generators`: an admission check (Admission::Checked only,
+        // re-run in admission_check_stub, fixtures in issue_1267_replay_decode.rs).
         // #1372 `refuse_empty_responses`: an admission check, the same three ways.
         21,
     ),
@@ -128,7 +128,9 @@ const LEDGER: &[(&str, &str, usize)] = &[
         "crates/rift-mock-core/src/imposter/types.rs",
         "decode fn `Err(`",
         // #1372 `refuse_empty_responses` (see above).
-        19,
+        // #1413 `refuse_unreadable_generators`: the shape refusal beside #1353's operator one, an
+        // admission check (Admission::Checked only, re-run in admission_check_stub).
+        20,
     ),
     ("crates/rift-types/src/wire.rs", "::custom", 4),
     ("crates/rift-types/src/wire.rs", "serde error helper", 0),
