@@ -1017,16 +1017,19 @@ pub(crate) struct StubResponseRaw {
         schemars(with = "Option<rift_types::schema::StatusCode>")
     )]
     pub status_code: Option<u16>,
-    #[serde(default, deserialize_with = "multi_value_headers::deserialize")]
+    #[serde(default, deserialize_with = "present_headers")]
     #[cfg_attr(
         feature = "schema",
         schemars(with = "rift_types::schema::MultiValueHeaders")
     )]
-    pub headers: HashMap<String, Vec<String>>,
+    #[cfg_attr(feature = "schema", schemars(default = "schema_default_headers"))]
+    pub headers: Option<HashMap<String, Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
-    #[serde(rename = "_mode", default)]
-    pub mode: ResponseMode,
+    #[serde(rename = "_mode", default, deserialize_with = "present_mode")]
+    #[cfg_attr(feature = "schema", schemars(with = "ResponseMode"))]
+    #[cfg_attr(feature = "schema", schemars(default = "schema_default_mode"))]
+    pub mode: Option<ResponseMode>,
     /// Mountebank's canonical `repeat` (issue #1188): it lifts `_behaviors.repeat` to the response,
     /// so this is the form `mb save` writes. Merged into the behaviors block at parse, where it
     /// wins over a `repeat` inside the block, as it does in Mountebank. `null` is absent.
@@ -1065,6 +1068,54 @@ pub(crate) struct StubResponseOut {
     pub rift: Option<RiftResponseExtension>,
 }
 
+/// What a response's author left unwritten. Set only where JSON is decoded, and so
+/// `Omitted::default()` ("nothing omitted") is what every response built in code carries: a
+/// recorded stub is complete as it stands and must never pick up a default (issue #1369).
+///
+/// This is the one presence representation: the decoders record it, the printers honour it, and
+/// [`IsResponse::completed_by`] reads it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Omitted {
+    pub status_code: bool,
+    pub headers: bool,
+    pub mode: bool,
+    pub body: bool,
+}
+
+/// `Some(..)` for a field that is present. Serde calls a `deserialize_with` function only for a
+/// present field, so an absent one stays `None` through `#[serde(default)]`, and a present `null`
+/// is judged by the inner decoder exactly as it was before presence was recorded.
+fn present_status_code<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u16>, D::Error> {
+    deserialize_status_code(d).map(Some)
+}
+
+fn present_headers<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<HashMap<String, Vec<String>>>, D::Error> {
+    multi_value_headers::deserialize(d).map(Some)
+}
+
+fn present_mode<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ResponseMode>, D::Error> {
+    ResponseMode::deserialize(d).map(Some)
+}
+
+// The published schema documents what an omitted field means. These are read only by
+// `schemars(default = ...)`: at runtime an omitted field stays `None` and is recorded (#1369).
+#[cfg(feature = "schema")]
+fn schema_default_status_code() -> Option<u16> {
+    Some(default_status_code())
+}
+
+#[cfg(feature = "schema")]
+fn schema_default_headers() -> Option<HashMap<String, Vec<String>>> {
+    Some(HashMap::new())
+}
+
+#[cfg(feature = "schema")]
+fn schema_default_mode() -> Option<ResponseMode> {
+    Some(ResponseMode::Text)
+}
+
 /// Raw IsResponse that handles statusCode as string or number (for deserialization)
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(
@@ -1074,48 +1125,92 @@ pub(crate) struct StubResponseOut {
 )]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IsResponseRaw {
-    #[serde(
-        default = "default_status_code",
-        deserialize_with = "deserialize_status_code"
-    )]
+    #[serde(default, deserialize_with = "present_status_code")]
     #[cfg_attr(feature = "schema", schemars(with = "rift_types::schema::StatusCode"))]
-    pub status_code: u16,
-    #[serde(default, deserialize_with = "multi_value_headers::deserialize")]
+    #[cfg_attr(feature = "schema", schemars(default = "schema_default_status_code"))]
+    pub status_code: Option<u16>,
+    #[serde(default, deserialize_with = "present_headers")]
     #[cfg_attr(
         feature = "schema",
         schemars(with = "rift_types::schema::MultiValueHeaders")
     )]
-    pub headers: HashMap<String, Vec<String>>,
+    #[cfg_attr(feature = "schema", schemars(default = "schema_default_headers"))]
+    pub headers: Option<HashMap<String, Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
     /// Response mode: "text" (default) or "binary" (body is base64-encoded)
-    #[serde(rename = "_mode", default)]
-    pub mode: ResponseMode,
+    #[serde(rename = "_mode", default, deserialize_with = "present_mode")]
+    #[cfg_attr(feature = "schema", schemars(with = "ResponseMode"))]
+    #[cfg_attr(feature = "schema", schemars(default = "schema_default_mode"))]
+    pub mode: Option<ResponseMode>,
 }
 
-/// IsResponse for serialization - outputs statusCode as string (Mountebank format)
+impl From<IsResponseRaw> for IsResponse {
+    fn from(raw: IsResponseRaw) -> Self {
+        IsResponse::decoded(raw.status_code, raw.headers, raw.body, raw.mode)
+    }
+}
+
+/// IsResponse for serialization - outputs statusCode as string (Mountebank format). A field the
+/// author omitted is `None` and not written, so the printed form reads as it was written.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IsResponseOut {
     /// Status code serialized as string for Mountebank compatibility
-    #[serde(serialize_with = "serialize_status_code_as_string")]
-    pub status_code: u16,
-    #[serde(default, serialize_with = "multi_value_headers::serialize")]
-    pub headers: HashMap<String, Vec<String>>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_status_code_as_string"
+    )]
+    pub status_code: Option<u16>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_present_headers"
+    )]
+    pub headers: Option<HashMap<String, Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
     /// Response mode: "text" (default) or "binary" (body is base64-encoded)
-    /// Skipped when text (default) as Mountebank doesn't output it for text mode
-    #[serde(rename = "_mode", default, skip_serializing_if = "is_text_mode")]
-    pub mode: ResponseMode,
+    /// Written whenever the response wrote it or was built in code (a recording prints
+    /// `"_mode": "text"`, as Mountebank's recorder does); an omitted one stays omitted so a
+    /// `defaultResponse` can still supply it.
+    #[serde(rename = "_mode", skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ResponseMode>,
+}
+
+impl From<IsResponse> for IsResponseOut {
+    fn from(is: IsResponse) -> Self {
+        IsResponseOut {
+            status_code: (!is.omitted.status_code).then_some(is.status_code),
+            headers: (!is.omitted.headers).then_some(is.headers),
+            body: is.body,
+            mode: (!is.omitted.mode).then_some(is.mode),
+        }
+    }
+}
+
+fn serialize_present_headers<H, S>(headers: &Option<H>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    H: std::borrow::Borrow<HashMap<String, Vec<String>>>,
+    S: serde::Serializer,
+{
+    match headers {
+        Some(headers) => multi_value_headers::serialize(headers.borrow(), serializer),
+        None => serializer.serialize_none(),
+    }
 }
 
 /// Serialize statusCode as a string for Mountebank compatibility
-fn serialize_status_code_as_string<S>(status_code: &u16, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_status_code_as_string<S>(
+    status_code: &Option<u16>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    serializer.serialize_str(&status_code.to_string())
+    match status_code {
+        Some(status_code) => serializer.serialize_str(&status_code.to_string()),
+        None => serializer.serialize_none(),
+    }
 }
 
 pub(crate) fn default_status_code() -> u16 {
@@ -1439,16 +1534,7 @@ impl TryFrom<StubResponseRaw> for StubResponse {
         }
         // Priority: is > proxy > inject > fault > rift-script-only
         Ok(if let Some(is_raw) = raw.is {
-            StubResponse::new_is(
-                IsResponse {
-                    status_code: is_raw.status_code,
-                    headers: is_raw.headers,
-                    body: is_raw.body,
-                    mode: is_raw.mode,
-                },
-                behaviors,
-                raw.rift.map(Box::new),
-            )
+            StubResponse::new_is(IsResponse::from(is_raw), behaviors, raw.rift.map(Box::new))
         } else if let Some(proxy) = raw.proxy {
             StubResponse::new_proxy(
                 proxy,
@@ -1473,28 +1559,18 @@ impl TryFrom<StubResponseRaw> for StubResponse {
                 rift: Box::new(rift),
                 ignored_behaviors: non_empty_behaviors(behaviors),
             }
-        } else if raw.status_code.is_some() || raw.body.is_some() || !raw.headers.is_empty() {
+        } else if raw.status_code.is_some() || raw.body.is_some() || raw.headers.is_some() {
             // Flat / recorded response form (issue #304): top-level statusCode/headers/body with
             // no `is` wrapper is rendered exactly like `is: { … }`. statusCode defaults to 200.
             StubResponse::new_is(
-                IsResponse {
-                    status_code: raw.status_code.unwrap_or_else(default_status_code),
-                    headers: raw.headers,
-                    body: raw.body,
-                    mode: raw.mode,
-                },
+                IsResponse::decoded(raw.status_code, raw.headers, raw.body, raw.mode),
                 behaviors,
                 None,
             )
         } else {
-            // Default to empty Is response
+            // Default to empty Is response: every field is the author's to omit.
             StubResponse::new_is(
-                IsResponse {
-                    status_code: 200,
-                    headers: HashMap::new(),
-                    body: None,
-                    mode: ResponseMode::Text,
-                },
+                IsResponse::empty(),
                 // An empty block would only cost this response the #703 prepared fast path.
                 non_empty_behaviors(behaviors),
                 None,
@@ -1513,12 +1589,7 @@ impl From<StubResponse> for StubResponseOut {
                 ..
             } => (
                 StubResponseOut {
-                    is: Some(IsResponseOut {
-                        status_code: is.status_code,
-                        headers: is.headers,
-                        body: is.body,
-                        mode: is.mode,
-                    }),
+                    is: Some(IsResponseOut::from(is)),
                     rift: rift.map(|rift| *rift),
                     ..StubResponseOut::default()
                 },
@@ -1716,7 +1787,84 @@ pub enum ResponseMode {
     Binary,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// A canned response: a stub's `is`, and the imposter's `defaultResponse`.
+///
+/// What the author left unwritten is recorded in `omitted` (issue #1369), so a response can be
+/// completed by the imposter's `defaultResponse` ([`IsResponse::completed_by`]) and printed as it
+/// was written. A response built in code carries `Omitted::default()` and is complete.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(
+    feature = "schema",
+    derive(schemars::JsonSchema),
+    schemars(
+        rename = "DefaultResponse",
+        description = "The response served when no stub matches (`defaultResponse`)."
+    )
+)]
+#[serde(rename_all = "camelCase", from = "DefaultResponseRaw")]
+pub struct IsResponse {
+    #[serde(default = "default_status_code")]
+    #[cfg_attr(feature = "schema", schemars(with = "rift_types::schema::StatusCode"))]
+    pub status_code: u16,
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "rift_types::schema::MultiValueHeaders")
+    )]
+    pub headers: HashMap<String, Vec<String>>,
+    pub body: Option<serde_json::Value>,
+    /// Response mode: "text" (default) or "binary" (body is base64-encoded)
+    #[serde(rename = "_mode", default)]
+    pub mode: ResponseMode,
+    /// Which of `status_code`/`headers`/`mode` the author did not write; their fields above then
+    /// hold the defaults.
+    #[serde(skip)]
+    pub(crate) omitted: Omitted,
+    /// A `proxy` written in `defaultResponse`. Mountebank does not proxy from it and neither does
+    /// this engine (`defaultForward` is the feature); it is kept so the printed and persisted
+    /// config says what was written, and reported by `ignored_config_keys`. Boxed: it is `None`
+    /// on every stub's `is`.
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub(crate) proxy: Option<Box<serde_json::Value>>,
+}
+
+/// The printed form of [`IsResponse`]: a field the author omitted is not written.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DefaultResponseOut<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_code: Option<u16>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_present_headers"
+    )]
+    headers: Option<&'a HashMap<String, Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<&'a serde_json::Value>,
+    #[serde(rename = "_mode", skip_serializing_if = "Option::is_none")]
+    mode: Option<&'a ResponseMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proxy: Option<&'a serde_json::Value>,
+}
+
+impl Serialize for IsResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        DefaultResponseOut {
+            status_code: (!self.omitted.status_code).then_some(self.status_code),
+            headers: (!self.omitted.headers).then_some(&self.headers),
+            body: self.body.as_ref(),
+            mode: (!self.omitted.mode).then_some(&self.mode),
+            proxy: self.proxy.as_deref(),
+        }
+        .serialize(serializer)
+    }
+}
+
+/// The decode form of [`IsResponse`]: every field optional, so presence survives. It is also what
+/// the published JSON Schema describes (`serde(from)` makes `IsResponse` delegate here), so the
+/// schema attributes live on this type.
+#[derive(Debug, Deserialize)]
 #[cfg_attr(
     feature = "schema",
     derive(schemars::JsonSchema),
@@ -1726,24 +1874,140 @@ pub enum ResponseMode {
     )
 )]
 #[serde(rename_all = "camelCase")]
-pub struct IsResponse {
-    #[serde(
-        default = "default_status_code",
-        deserialize_with = "deserialize_status_code"
-    )]
+struct DefaultResponseRaw {
+    #[serde(default, deserialize_with = "present_status_code")]
     #[cfg_attr(feature = "schema", schemars(with = "rift_types::schema::StatusCode"))]
-    pub status_code: u16,
-    #[serde(default, with = "multi_value_headers")]
+    #[cfg_attr(feature = "schema", schemars(default = "schema_default_status_code"))]
+    status_code: Option<u16>,
+    #[serde(default, deserialize_with = "present_headers")]
     #[cfg_attr(
         feature = "schema",
         schemars(with = "rift_types::schema::MultiValueHeaders")
     )]
-    pub headers: HashMap<String, Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<serde_json::Value>,
+    #[cfg_attr(feature = "schema", schemars(default = "schema_default_headers"))]
+    headers: Option<HashMap<String, Vec<String>>>,
+    body: Option<serde_json::Value>,
     /// Response mode: "text" (default) or "binary" (body is base64-encoded)
-    #[serde(rename = "_mode", default, skip_serializing_if = "is_text_mode")]
-    pub mode: ResponseMode,
+    // `skip_serializing_if` is inert for a decode-only type; schemars reads it as "no default".
+    #[serde(
+        rename = "_mode",
+        default,
+        deserialize_with = "present_mode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[cfg_attr(feature = "schema", schemars(with = "ResponseMode"))]
+    mode: Option<ResponseMode>,
+    /// See [`IsResponse::proxy`]: kept and reported, not part of the published grammar.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    proxy: Option<Box<serde_json::Value>>,
+}
+
+impl From<DefaultResponseRaw> for IsResponse {
+    fn from(raw: DefaultResponseRaw) -> Self {
+        IsResponse {
+            proxy: raw.proxy,
+            ..IsResponse::decoded(raw.status_code, raw.headers, raw.body, raw.mode)
+        }
+    }
+}
+
+impl Default for IsResponse {
+    /// The complete `200` with no headers and no body.
+    fn default() -> Self {
+        IsResponse::new(
+            default_status_code(),
+            HashMap::new(),
+            None,
+            ResponseMode::Text,
+        )
+    }
+}
+
+impl IsResponse {
+    /// A complete response: nothing is omitted, so no `defaultResponse` completes it.
+    #[must_use]
+    pub fn new(
+        status_code: u16,
+        headers: HashMap<String, Vec<String>>,
+        body: Option<serde_json::Value>,
+        mode: ResponseMode,
+    ) -> Self {
+        IsResponse {
+            status_code,
+            headers,
+            body,
+            mode,
+            omitted: Omitted::default(),
+            proxy: None,
+        }
+    }
+
+    /// A response that writes nothing, as `{}` does: `200`, no headers, text, and every field
+    /// open to a `defaultResponse`.
+    pub(crate) fn empty() -> Self {
+        IsResponse::decoded(None, None, None, None)
+    }
+
+    /// A response as decoded from JSON: a field that was not written takes today's default and is
+    /// recorded as omitted.
+    pub(crate) fn decoded(
+        status_code: Option<u16>,
+        headers: Option<HashMap<String, Vec<String>>>,
+        body: Option<serde_json::Value>,
+        mode: Option<ResponseMode>,
+    ) -> Self {
+        IsResponse {
+            omitted: Omitted {
+                status_code: status_code.is_none(),
+                headers: headers.is_none(),
+                mode: mode.is_none(),
+                body: body.is_none(),
+            },
+            status_code: status_code.unwrap_or_else(default_status_code),
+            headers: headers.unwrap_or_default(),
+            body,
+            mode: mode.unwrap_or_default(),
+            proxy: None,
+        }
+    }
+
+    /// Whether `default` has anything to add: a field was omitted (an omitted `_mode` only counts
+    /// when the default's differs, since it would change nothing) or there is no body.
+    pub(crate) fn needs_default(&self, default: &IsResponse) -> bool {
+        self.omitted.status_code
+            || self.omitted.headers
+            || self.omitted.body
+            || (self.omitted.mode && default.mode != self.mode)
+    }
+
+    /// Mountebank's `postProcess`, by presence: a field this response omits takes the default's.
+    ///
+    /// `headers` is taken whole, never merged key by key. `body` is taken when there is none,
+    /// `_mode` independently of both. A default that itself omits `statusCode` gives `200`. The
+    /// result is complete, so it is not completed again.
+    ///
+    /// Mountebank decides by falsiness, so it also replaces an explicit `"body": ""`; this goes
+    /// by what the response does not specify.
+    pub(crate) fn completed_by(&self, default: &IsResponse) -> std::borrow::Cow<'_, IsResponse> {
+        if !self.needs_default(default) {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut merged = self.clone();
+        if self.omitted.status_code {
+            merged.status_code = default.status_code;
+        }
+        if self.omitted.headers {
+            merged.headers.clone_from(&default.headers);
+        }
+        if self.omitted.body {
+            merged.body.clone_from(&default.body);
+        }
+        if self.omitted.mode {
+            merged.mode = default.mode.clone();
+        }
+        merged.omitted = Omitted::default();
+        std::borrow::Cow::Owned(merged)
+    }
 }
 
 fn is_text_mode(mode: &ResponseMode) -> bool {
@@ -2890,6 +3154,208 @@ mod tests {
         assert_eq!(printed["statusCode"], serde_json::json!(404));
     }
 
+    // ===== Issue #1369: `defaultResponse` completes what a response omits =====
+
+    fn decoded(value: serde_json::Value) -> super::IsResponse {
+        serde_json::from_value(value).expect("decodes")
+    }
+
+    fn default_418() -> super::IsResponse {
+        decoded(serde_json::json!({
+            "statusCode": 418, "headers": {"X-Default": "yes"}, "body": "dflt", "_mode": "binary"
+        }))
+    }
+
+    #[test]
+    fn completed_by_takes_every_omitted_field() {
+        let merged = decoded(serde_json::json!({}))
+            .completed_by(&default_418())
+            .into_owned();
+        assert_eq!(merged.status_code, 418);
+        assert_eq!(merged.headers["X-Default"], vec!["yes".to_string()]);
+        assert_eq!(merged.body, Some(serde_json::json!("dflt")));
+        assert_eq!(merged.mode, super::ResponseMode::Binary);
+    }
+
+    #[test]
+    fn completed_by_keeps_what_was_written() {
+        let own = decoded(serde_json::json!({
+            "statusCode": 201, "headers": {"A": "b"}, "body": "mine", "_mode": "text"
+        }));
+        assert!(matches!(
+            own.completed_by(&default_418()),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn completed_by_takes_headers_whole() {
+        let merged = decoded(serde_json::json!({"headers": {"A": "b"}}))
+            .completed_by(&default_418())
+            .into_owned();
+        assert_eq!(merged.headers.len(), 1, "never merged key by key");
+        assert!(merged.headers.contains_key("A"));
+        assert_eq!(merged.status_code, 418);
+    }
+
+    #[test]
+    fn completed_by_treats_written_empty_values_as_written() {
+        let merged = decoded(serde_json::json!({"headers": {}, "body": "", "statusCode": 200}))
+            .completed_by(&default_418())
+            .into_owned();
+        assert!(merged.headers.is_empty(), "an explicit `{{}}` is a value");
+        assert_eq!(merged.body, Some(serde_json::json!("")));
+        assert_eq!(merged.status_code, 200);
+    }
+
+    #[test]
+    fn completed_by_falls_back_on_mode_independently() {
+        let merged = decoded(serde_json::json!({"statusCode": 201, "headers": {}, "body": "x"}))
+            .completed_by(&default_418())
+            .into_owned();
+        assert_eq!(merged.status_code, 201);
+        assert_eq!(merged.mode, super::ResponseMode::Binary);
+        let written = decoded(serde_json::json!({"body": "x", "_mode": "text"}))
+            .completed_by(&default_418())
+            .into_owned();
+        assert_eq!(written.mode, super::super::ResponseMode::Text);
+        assert_eq!(written.status_code, 418);
+    }
+
+    #[test]
+    fn completed_by_a_default_that_omits_status_code_gives_200() {
+        let default = decoded(serde_json::json!({"body": "d"}));
+        let merged = decoded(serde_json::json!({}))
+            .completed_by(&default)
+            .into_owned();
+        assert_eq!(merged.status_code, 200);
+        assert_eq!(merged.body, Some(serde_json::json!("d")));
+    }
+
+    #[test]
+    fn a_response_built_in_code_is_complete() {
+        let recorded = super::IsResponse::new(
+            200,
+            std::collections::HashMap::new(),
+            None,
+            super::ResponseMode::Text,
+        );
+        let merged = recorded.completed_by(&default_418()).into_owned();
+        assert_eq!(
+            merged.status_code, 200,
+            "no field is omitted, so the status stays"
+        );
+        assert!(merged.headers.is_empty(), "and so do the headers");
+        assert_eq!(merged.body, None, "nor does a body that is `None`");
+        assert!(matches!(
+            recorded.completed_by(&default_418()),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn needs_default_ignores_an_omitted_mode_the_default_shares() {
+        let written = decoded(serde_json::json!({"statusCode": 200, "headers": {}, "body": "b"}));
+        let text_default = decoded(serde_json::json!({"statusCode": 418}));
+        assert!(!written.needs_default(&text_default), "nothing to add");
+        assert!(
+            written.needs_default(&default_418()),
+            "the default is binary"
+        );
+    }
+
+    #[test]
+    fn a_written_mode_prints_even_when_text() {
+        let stub: super::StubResponse =
+            serde_json::from_value(serde_json::json!({"is": {"_mode": "text"}})).expect("decodes");
+        assert_eq!(
+            serde_json::to_value(&stub).expect("prints"),
+            serde_json::json!({"is": {"_mode": "text"}})
+        );
+        let recorded = super::StubResponse::new_is(
+            super::IsResponse::new(
+                200,
+                std::collections::HashMap::new(),
+                None,
+                super::ResponseMode::Text,
+            ),
+            None,
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(&recorded).expect("prints")["is"]["_mode"],
+            serde_json::json!("text"),
+            "a recording prints `_mode`, as Mountebank's recorder does"
+        );
+    }
+
+    #[test]
+    fn omitted_fields_are_not_printed() {
+        let printed =
+            serde_json::to_value(decoded(serde_json::json!({"body": "b"}))).expect("prints");
+        assert_eq!(printed, serde_json::json!({"body": "b"}));
+        let stub: super::StubResponse =
+            serde_json::from_value(serde_json::json!({"is": {}})).expect("decodes");
+        let printed = serde_json::to_value(&stub).expect("prints");
+        assert_eq!(printed, serde_json::json!({"is": {}}));
+        let stub: super::StubResponse =
+            serde_json::from_value(serde_json::json!({"is": {"statusCode": "200", "headers": {}}}))
+                .expect("decodes");
+        let printed = serde_json::to_value(&stub).expect("prints");
+        assert_eq!(
+            printed,
+            serde_json::json!({"is": {"statusCode": "200", "headers": {}}})
+        );
+    }
+
+    #[test]
+    fn bytes_written_by_earlier_releases_decode_and_read_as_written() {
+        let stub: super::StubResponse =
+            serde_json::from_value(serde_json::json!({"is": {"statusCode": "200", "headers": {}}}))
+                .expect("decodes");
+        let super::StubResponse::Is { is, .. } = stub else {
+            panic!("an `is` response");
+        };
+        assert!(
+            !is.omitted.status_code && !is.omitted.headers,
+            "written, so as written"
+        );
+    }
+
+    #[test]
+    fn flat_form_records_presence_too() {
+        let stub: super::StubResponse =
+            serde_json::from_value(serde_json::json!({"statusCode": 204})).expect("decodes");
+        let super::StubResponse::Is { is, .. } = stub else {
+            panic!("the flat form is an `is` response");
+        };
+        assert!(!is.omitted.status_code);
+        assert!(is.omitted.headers);
+        assert!(is.omitted.mode);
+    }
+
+    #[test]
+    fn default_response_proxy_is_kept_and_printed() {
+        let default = decoded(serde_json::json!({"proxy": {"to": "http://127.0.0.1:1"}}));
+        assert_eq!(
+            serde_json::to_value(&default).expect("prints"),
+            serde_json::json!({"proxy": {"to": "http://127.0.0.1:1"}})
+        );
+    }
+
+    #[test]
+    fn a_null_in_a_response_is_still_refused_where_it_was() {
+        for bad in [
+            serde_json::json!({"statusCode": null}),
+            serde_json::json!({"_mode": null}),
+        ] {
+            assert!(
+                serde_json::from_value::<super::IsResponse>(bad.clone()).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
     // ===== Issue #1314: one parse for a proxy's `mode` =====
 
     #[test]
@@ -2957,12 +3423,7 @@ mod tests {
     #[tracing_test::traced_test]
     fn unparseable_behaviors_are_dropped_loudly() {
         let resp = StubResponse::new_is(
-            IsResponse {
-                status_code: 200,
-                headers: HashMap::new(),
-                body: None,
-                mode: ResponseMode::default(),
-            },
+            IsResponse::new(200, HashMap::new(), None, ResponseMode::default()),
             Some(json!({ "wait": { "bogus": true } })),
             None,
         );
@@ -3092,12 +3553,7 @@ mod tests {
     #[tracing_test::traced_test]
     fn new_is_never_parses_a_non_object_block_positionally() {
         let resp = StubResponse::new_is(
-            IsResponse {
-                status_code: 200,
-                headers: HashMap::new(),
-                body: None,
-                mode: ResponseMode::default(),
-            },
+            IsResponse::new(200, HashMap::new(), None, ResponseMode::default()),
             Some(json!([null, null, null, null, "echo pwned"])),
             None,
         );
@@ -3714,12 +4170,7 @@ mod tests {
             "Set-Cookie".to_string(),
             vec!["a".to_string(), "b".to_string()],
         );
-        let out = IsResponseOut {
-            status_code: 200,
-            headers,
-            body: None,
-            mode: ResponseMode::Text,
-        };
+        let out = IsResponseOut::from(IsResponse::new(200, headers, None, ResponseMode::Text));
         let v = serde_json::to_value(&out).unwrap();
         assert_eq!(
             v["headers"]["X-One"],

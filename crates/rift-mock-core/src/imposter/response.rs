@@ -127,6 +127,49 @@ fn has_content_type(headers: &HashMap<String, Vec<String>>) -> bool {
         .any(|k| k.eq_ignore_ascii_case("content-type"))
 }
 
+/// A response body as the text served: a string as it is, any other JSON value serialized. The one
+/// rendering for a stub's body and for a `defaultResponse` body (issue #1369), so the two cannot
+/// drift.
+pub(super) fn body_text(body: Option<&serde_json::Value>) -> String {
+    body.map(|b| match b.as_str() {
+        Some(text) => text.to_string(),
+        // Serializing a `serde_json::Value` is infallible by construction (map keys are strings,
+        // numbers are finite), so this never defaults (issue #611).
+        None => serde_json::to_string(b).unwrap_or_default(),
+    })
+    .unwrap_or_default()
+}
+
+/// Complete an executed `is` response with the imposter's `defaultResponse` (issue #1369): the
+/// fields `is` omits are replaced by the default's, before templating and behaviors run. A no-op
+/// when `is` omits nothing.
+pub(super) fn complete_from_default(
+    is: &IsResponse,
+    default: &IsResponse,
+    status: &mut u16,
+    headers: &mut HashMap<String, Vec<String>>,
+    body: &mut String,
+    mode: &mut ResponseMode,
+) {
+    let merged = is.completed_by(default);
+    *status = merged.status_code;
+    if is.omitted.headers {
+        // Omitted headers are empty, so the only header here is the `Content-Type` that this
+        // response's own non-string body earned; it is kept unless the default sets one.
+        let earned = headers.remove("Content-Type");
+        *headers = merged.headers.clone();
+        if let Some(values) = earned
+            && !has_content_type(headers)
+        {
+            headers.insert("Content-Type".to_string(), values);
+        }
+    }
+    if is.omitted.body {
+        *body = body_text(merged.body.as_ref());
+    }
+    *mode = merged.mode.clone();
+}
+
 /// Execute a stub response with Rift extensions
 /// Returns (status, headers, body, behaviors, rift_extension, response_mode, is_fault)
 #[allow(clippy::type_complexity)]
@@ -403,18 +446,16 @@ pub fn create_stub_from_proxy_response(
     };
 
     let (body_value, is_binary) = crate::util::encode_body_for_stub(body);
+    // An empty upstream body is a body that was written (`"body": ""`, as Mountebank records it),
+    // not an omitted one: `None` would let the imposter's `defaultResponse` fill it on replay.
+    let body_value = body_value.or_else(|| Some(serde_json::Value::String(String::new())));
     let mode = if is_binary {
         ResponseMode::Binary
     } else {
         ResponseMode::Text
     };
 
-    let is_response = IsResponse {
-        status_code: status,
-        headers: response_headers,
-        body: body_value,
-        mode,
-    };
+    let is_response = IsResponse::new(status, response_headers, body_value, mode);
 
     // Build behaviors object if needed
     let behaviors = if latency_ms.is_some() || decorate_fn.is_some() {
@@ -1011,7 +1052,11 @@ mod tests {
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => {
                 assert_eq!(is.mode, ResponseMode::Text);
-                assert!(is.body.is_none(), "Empty body should be None");
+                assert_eq!(
+                    is.body,
+                    Some(serde_json::json!("")),
+                    "an empty body is a written body, so a defaultResponse never fills it (#1369)"
+                );
             }
             _ => panic!("Expected StubResponse::Is"),
         }
@@ -1194,12 +1239,7 @@ mod prepared_response_tests {
                 .or_default()
                 .push((*v).to_string());
         }
-        IsResponse {
-            status_code: status,
-            headers: map,
-            body,
-            mode: ResponseMode::Text,
-        }
+        IsResponse::new(status, map, body, ResponseMode::Text)
     }
 
     fn prepared_of(resp: &StubResponse) -> Option<&PreparedResponse> {

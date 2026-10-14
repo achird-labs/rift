@@ -9,10 +9,12 @@ use super::core::Imposter;
 use super::core::{ProxiedResponse, ProxyBody, ProxyOutcome};
 use super::headers::sanitize_header_value;
 use super::predicates::parse_query_string;
-use super::response::{execute_stub_response_with_rift, get_rift_script_config};
+use super::response::{
+    body_text, complete_from_default, execute_stub_response_with_rift, get_rift_script_config,
+};
 use super::types::{
-    DebugMatchResult, DebugRequest, DebugResponse, ProxyResponse, RecordedRequest, ResponseMode,
-    StubResponse,
+    DebugMatchResult, DebugRequest, DebugResponse, IsResponse, ProxyResponse, RecordedRequest,
+    ResponseMode, StubResponse,
 };
 use crate::behaviors::{
     CsvCache, Spliced, SplicedHeaders, authored_headers, header_to_title_case, plain_headers,
@@ -1278,15 +1280,43 @@ async fn handle_request_inner(
             .await
             {
                 Ok(inject_response) => {
-                    // An inject's output is the author's text, like a decorate's (issue #1203).
+                    // An inject's output is the author's text, like a decorate's (issue #1203). What
+                    // the function did not return is completed from `defaultResponse` (issue #1369),
+                    // or is `200`, no headers and an empty body when there is none.
+                    let authored = IsResponse::decoded(
+                        inject_response.status_code,
+                        inject_response.headers.map(|headers| {
+                            headers.into_iter().map(|(k, v)| (k, vec![v])).collect()
+                        }),
+                        inject_response.body.map(serde_json::Value::String),
+                        None,
+                    );
+                    let fallback = IsResponse::default();
+                    let completed = authored.completed_by(
+                        imposter
+                            .config
+                            .default_response
+                            .as_ref()
+                            .unwrap_or(&fallback),
+                    );
                     let mut parts = ServedParts {
-                        status: inject_response.status_code,
-                        headers: inject_response
+                        status: completed.status_code,
+                        headers: completed
                             .headers
-                            .into_iter()
-                            .map(|(k, v)| (k, vec![crate::behaviors::Spliced::authored(v)]))
+                            .iter()
+                            .map(|(k, values)| {
+                                (
+                                    k.clone(),
+                                    values
+                                        .iter()
+                                        .map(|v| crate::behaviors::Spliced::authored(v.clone()))
+                                        .collect(),
+                                )
+                            })
                             .collect(),
-                        body: crate::behaviors::Spliced::authored(inject_response.body),
+                        body: crate::behaviors::Spliced::authored(body_text(
+                            completed.body.as_ref(),
+                        )),
                     };
                     // Mountebank runs a response's behaviors on the injected response too
                     // (issue #1188). A failed inject never gets here, so it runs none of them —
@@ -1703,10 +1733,20 @@ async fn handle_request_inner(
         // below. `prepared` is `Some` only when nothing about the response depends on the request
         // (see `PreparedResponse::try_build`); request recording and the scenario FSM already ran
         // above, so nothing request-visible is skipped.
+        //
+        // A `defaultResponse` (issue #1369) completes whatever the response omits, and `prepared` is
+        // built per stub without it: such a response is served from the slow path below. Without a
+        // default, or with nothing to complete, the fast path is untouched.
         if let Some(StubResponse::Is {
+            is,
             prepared: Some(prepared),
             ..
         }) = response
+            && imposter
+                .config
+                .default_response
+                .as_ref()
+                .is_none_or(|default| !is.needs_default(default))
         {
             return Ok(prepared
                 .serve_request(&method, &request_headers, || {
@@ -1723,10 +1763,25 @@ async fn handle_request_inner(
             mut body,
             behaviors,
             rift_ext,
-            response_mode,
+            mut response_mode,
             is_fault,
         )) = response.and_then(execute_stub_response_with_rift)
         {
+            // Issue #1369: complete the authored response from `defaultResponse` before templating
+            // and behaviors run, so a default body expands like a stub body.
+            if let (Some(StubResponse::Is { is, .. }), Some(default)) =
+                (response, imposter.config.default_response.as_ref())
+                && is.needs_default(default)
+            {
+                complete_from_default(
+                    is,
+                    default,
+                    &mut status,
+                    &mut headers,
+                    &mut body,
+                    &mut response_mode,
+                );
+            }
             // Handle faults - simulate connection errors
             if is_fault {
                 return handle_fault_response(&body);
@@ -2078,19 +2133,11 @@ async fn handle_request_inner(
     // with an empty body below (Mountebank parity — Rift never returns 404 for an unmatched
     // request). A `defaultForward` upstream, if configured, was already handled above.
     if let Some(ref default) = imposter.config.default_response {
-        let body_str = default
-            .body
-            .as_ref()
-            .map(|b| {
-                if b.is_string() {
-                    b.as_str().unwrap_or("").to_string()
-                } else {
-                    // Serializing a `serde_json::Value` is infallible by construction (map keys
-                    // are strings, numbers are finite), so this never defaults (issue #611).
-                    serde_json::to_string(b).unwrap_or_default()
-                }
-            })
-            .unwrap_or_default();
+        // The same completion a stub's `is` gets, applied to a response that writes nothing, so
+        // the two paths cannot drift (issue #1369).
+        let empty = IsResponse::empty();
+        let default = empty.completed_by(default);
+        let body_str = body_text(default.body.as_ref());
 
         // The same decode — and so the same contract — as a stub's `is` body (issue #1151). This
         // site used to re-implement it inline, without the #323 header and without #375's strict

@@ -540,8 +540,8 @@ mod tests {
             )
             .await
             .expect("fast inject");
-            assert_eq!(resp.status_code, 201);
-            assert_eq!(resp.body, "from-inject");
+            assert_eq!(resp.status_code, Some(201));
+            assert_eq!(resp.body_text(), "from-inject");
         }
 
         // AC1: a runaway inject yields a timeout error near the deadline instead of blocking
@@ -597,9 +597,10 @@ mod tests {
             )
             .await
             .expect("second run");
-            assert_eq!(first.body, "1");
+            assert_eq!(first.body_text(), "1");
             assert_eq!(
-                second.body, "2",
+                second.body_text(),
+                "2",
                 "imposter state must persist across pool-thread runs"
             );
         }

@@ -26,12 +26,7 @@ fn fixture() -> (IsResponse, Arc<str>) {
     headers.insert("Cache-Control".to_string(), vec!["no-store".to_string()]);
     let body = serde_json::json!({"id": 42, "name": "resource", "items": [1, 2, 3]});
     let rendered: Arc<str> = Arc::from(serde_json::to_string(&body).unwrap().as_str());
-    let is = IsResponse {
-        status_code: 200,
-        headers,
-        body: Some(body),
-        mode: ResponseMode::Text,
-    };
+    let is = IsResponse::new(200, headers, Some(body), ResponseMode::Text);
     (is, rendered)
 }
 

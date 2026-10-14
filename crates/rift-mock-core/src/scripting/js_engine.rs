@@ -1648,12 +1648,22 @@ fn js_to_json(context: &mut Context, value: &JsValue) -> JsResult<Value> {
 // Mountebank-style inject response support
 // =============================================================================
 
-/// Response from a Mountebank inject function
+/// Response from a Mountebank inject function. A field the function did not return is `None`
+/// (issue #1369): the caller completes it from the imposter's `defaultResponse`, or from `200`/no
+/// headers/empty when there is none.
 #[derive(Debug, Clone)]
 pub struct MountebankInjectResponse {
-    pub status_code: u16,
-    pub headers: std::collections::HashMap<String, String>,
-    pub body: String,
+    pub status_code: Option<u16>,
+    pub headers: Option<std::collections::HashMap<String, String>>,
+    pub body: Option<String>,
+}
+
+impl MountebankInjectResponse {
+    /// The body text, empty when none was returned.
+    #[cfg(test)]
+    pub(crate) fn body_text(&self) -> &str {
+        self.body.as_deref().unwrap_or_default()
+    }
 }
 
 /// Per-imposter script state for Mountebank inject/decorate functions, shared across a port's
@@ -2325,20 +2335,22 @@ fn parse_mountebank_response(
         .as_object()
         .ok_or_else(|| anyhow!("Inject function must return an object"))?;
 
-    // Get statusCode (required)
+    // statusCode, headers and body are each optional: an absent one is completed by the caller.
     let status_code = obj
         .get(js_string!("statusCode"), context)
         .ok()
-        .and_then(|v| v.as_number())
-        .map(|n| n as u16)
-        .unwrap_or(200);
+        .and_then(|v| match v.as_string() {
+            // A numeric string reads like every other `statusCode` (`deserialize_status_code`).
+            Some(text) => text.to_std_string_escaped().parse::<u16>().ok(),
+            None => v.as_number().map(|n| n as u16),
+        });
 
-    // Get headers (optional)
-    let mut headers = std::collections::HashMap::new();
+    let mut headers = None;
     if let Ok(headers_val) = obj.get(js_string!("headers"), context)
         && let Some(headers_obj) = headers_val.as_object()
         && let Ok(keys) = headers_obj.own_property_keys(context)
     {
+        let mut map = std::collections::HashMap::new();
         for key in keys {
             let key_str = match &key {
                 PropertyKey::String(s) => s.to_std_string_escaped(),
@@ -2348,29 +2360,25 @@ fn parse_mountebank_response(
             if let Ok(val) = headers_obj.get(key.clone(), context)
                 && let Some(s) = val.as_string()
             {
-                headers.insert(key_str, s.to_std_string_escaped());
+                map.insert(key_str, s.to_std_string_escaped());
             }
         }
+        headers = Some(map);
     }
 
-    // Get body (optional)
-    let body = obj
-        .get(js_string!("body"), context)
-        .ok()
-        .map(|v| {
-            if let Some(s) = v.as_string() {
-                s.to_std_string_escaped()
-            } else if v.is_object() {
-                // Convert object to JSON string
-                let json = js_to_json(context, &v).unwrap_or(Value::Null);
-                serde_json::to_string(&json).unwrap_or_default()
-            } else if v.is_null() || v.is_undefined() {
-                String::new()
-            } else {
-                v.display().to_string()
-            }
-        })
-        .unwrap_or_default();
+    let body = obj.get(js_string!("body"), context).ok().and_then(|v| {
+        if let Some(s) = v.as_string() {
+            Some(s.to_std_string_escaped())
+        } else if v.is_object() {
+            // Convert object to JSON string
+            let json = js_to_json(context, &v).unwrap_or(Value::Null);
+            Some(serde_json::to_string(&json).unwrap_or_default())
+        } else if v.is_null() || v.is_undefined() {
+            None
+        } else {
+            Some(v.display().to_string())
+        }
+    });
 
     Ok(MountebankInjectResponse {
         status_code,
@@ -3792,6 +3800,20 @@ function respond(ctx) {
         }
     }
 
+    // Issue #1369: a numeric-string statusCode reads like every other `statusCode`; an absent or
+    // unreadable one is `None`, left to the imposter's `defaultResponse`.
+    #[test]
+    fn inject_status_code_accepts_a_numeric_string() {
+        let script = r#"function(config) { return { statusCode: "201", body: "b" }; }"#;
+        let resp = execute_mountebank_inject(script, &mb_req("GET", "/s"), test_port(), None)
+            .expect("inject should run");
+        assert_eq!(resp.status_code, Some(201));
+        let script = r#"function(config) { return { body: "b" }; }"#;
+        let resp = execute_mountebank_inject(script, &mb_req("GET", "/s"), test_port(), None)
+            .expect("inject should run");
+        assert_eq!(resp.status_code, None);
+    }
+
     // (a) v2 config convention: function(config) { ...config.request.path... }
     #[test]
     fn inject_v2_config_request_path() {
@@ -3799,7 +3821,7 @@ function respond(ctx) {
             r#"function(config) { return { statusCode: 200, body: config.request.path }; }"#;
         let resp = execute_mountebank_inject(script, &mb_req("GET", "/a-path"), test_port(), None)
             .expect("v2 config convention should run");
-        assert_eq!(resp.body, "/a-path");
+        assert_eq!(resp.body_text(), "/a-path");
     }
 
     // Issue #476 AC5: the MB wrapper script is parsed at most once per pool worker per source —
@@ -3815,7 +3837,7 @@ function respond(ctx) {
         for _ in 0..64 {
             let resp = execute_mountebank_inject(&script, &mb_req("GET", "/c"), port, None)
                 .expect("inject run");
-            assert_eq!(resp.body, marker);
+            assert_eq!(resp.body_text(), marker);
         }
         let parses = mb_script_parse_count_containing(&marker);
         assert!(
@@ -3831,7 +3853,7 @@ function respond(ctx) {
         let script = r#"function(config) { return { statusCode: 200, body: typeof config.request.body + ':' + JSON.stringify(config.request.body) }; }"#;
         let resp = execute_mountebank_inject(script, &mb_req("GET", "/nobody"), test_port(), None)
             .expect("inject runs");
-        assert_eq!(resp.body, r#"string:"""#);
+        assert_eq!(resp.body_text(), r#"string:"""#);
     }
 
     #[test]
@@ -3878,7 +3900,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
             .expect("inject runs");
         assert_eq!(
-            resp.body,
+            resp.body_text(),
             "application/json|application/json|application/json|undefined"
         );
     }
@@ -3888,7 +3910,7 @@ function respond(ctx) {
         let script = r#"function(config) { var h = config.request.headers; return { body: ('x-id' in h) + ',' + h.hasOwnProperty('x-id') + ',' + Object.prototype.hasOwnProperty.call(h, 'X-ID') + ',' + ('nope' in h) }; }"#;
         let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
             .expect("inject runs");
-        assert_eq!(resp.body, "true,true,true,false");
+        assert_eq!(resp.body_text(), "true,true,true,false");
     }
 
     #[test]
@@ -3898,9 +3920,9 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
             .expect("inject runs");
         assert!(
-            resp.body.starts_with(r#"["Content-Type","X-Id"] "#),
+            resp.body_text().starts_with(r#"["Content-Type","X-Id"] "#),
             "{}",
-            resp.body
+            resp.body_text()
         );
     }
 
@@ -3918,7 +3940,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
             .expect("inject runs");
         assert_eq!(
-            resp.body,
+            resp.body_text(),
             r#"text/csv|undefined|false|["Content-Type","x-new"]"#
         );
     }
@@ -3933,7 +3955,7 @@ function respond(ctx) {
         }"#;
         let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
             .expect("inject runs");
-        assert_eq!(resp.body, "7|true|false");
+        assert_eq!(resp.body_text(), "7|true|false");
     }
 
     #[test]
@@ -3964,7 +3986,7 @@ function respond(ctx) {
         let script = r#"function(request, state, logger) { return { statusCode: 200, body: request.path }; }"#;
         let resp = execute_mountebank_inject(script, &mb_req("GET", "/legacy"), test_port(), None)
             .expect("legacy positional convention should run");
-        assert_eq!(resp.body, "/legacy");
+        assert_eq!(resp.body_text(), "/legacy");
     }
 
     // (c) flattened: function(config) { ...config.path... } (no config.request access)
@@ -3973,7 +3995,7 @@ function respond(ctx) {
         let script = r#"function(config) { return { statusCode: 200, body: config.path + " " + config.method }; }"#;
         let resp = execute_mountebank_inject(script, &mb_req("POST", "/flat"), test_port(), None)
             .expect("flattened config fields should be readable");
-        assert_eq!(resp.body, "/flat POST");
+        assert_eq!(resp.body_text(), "/flat POST");
     }
 
     // (d) the `var req = config.request || config;` shim used by scripts written to run under
@@ -3986,7 +4008,7 @@ function respond(ctx) {
         }"#;
         let resp = execute_mountebank_inject(script, &mb_req("GET", "/shim"), test_port(), None)
             .expect("request-or-config shim should run");
-        assert_eq!(resp.body, "/shim");
+        assert_eq!(resp.body_text(), "/shim");
     }
 
     // (e) hybrid: function(config, state) { ... } — a script naming the 2nd positional param
@@ -3999,7 +4021,7 @@ function respond(ctx) {
         }"#;
         let resp = execute_mountebank_inject(script, &mb_req("GET", "/hybrid"), test_port(), None)
             .expect("hybrid config+state signature should run");
-        assert_eq!(resp.body, "hits:1");
+        assert_eq!(resp.body_text(), "hits:1");
     }
 
     // The async-callback convention: `done` (arg 4) is called instead of returning a value;
@@ -4011,7 +4033,7 @@ function respond(ctx) {
         }"#;
         let resp = execute_mountebank_inject(script, &mb_req("GET", "/cb"), test_port(), None)
             .expect("callback-style inject should run");
-        assert_eq!(resp.body, "via-done");
+        assert_eq!(resp.body_text(), "via-done");
     }
 
     #[test]
@@ -4021,7 +4043,7 @@ function respond(ctx) {
         }"#;
         let resp = execute_mountebank_inject(script, &mb_req("GET", "/cb2"), test_port(), None)
             .expect("config.callback alias should run");
-        assert_eq!(resp.body, "via-config-callback");
+        assert_eq!(resp.body_text(), "via-config-callback");
     }
 
     // Predicate inject: same five conventions, adapted to a boolean-returning function.
@@ -4163,7 +4185,8 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(inject_script, &mb_req("GET", "/shared"), port, None)
             .expect("response inject should run");
         assert_eq!(
-            resp.body, "from-predicate",
+            resp.body_text(),
+            "from-predicate",
             "state written by a predicate inject must be visible to a later response inject \
              on the same imposter port"
         );
@@ -4191,14 +4214,15 @@ function respond(ctx) {
         let resp_b = execute_mountebank_inject(reader, &mb_req("GET", "/iso"), port_b, None)
             .expect("response inject should run");
         assert_eq!(
-            resp_b.body, "isolated",
+            resp_b.body_text(),
+            "isolated",
             "state written under imposter A's key must be invisible to imposter B (issue #439)"
         );
 
         // Sanity: A still sees its own state — isolation didn't wipe it.
         let resp_a = execute_mountebank_inject(reader, &mb_req("GET", "/iso"), port_a, None)
             .expect("response inject should run");
-        assert_eq!(resp_a.body, "from-A");
+        assert_eq!(resp_a.body_text(), "from-A");
         // (Decorate keys the SAME `IMPOSTER_STATE` map via the identical `imposter_port`, so its
         // isolation follows from the same mechanism proven here.)
     }
@@ -4241,7 +4265,7 @@ function respond(ctx) {
         let final_resp = execute_mountebank_inject(read, &mb_req("GET", "/count"), port, None)
             .expect("read inject should run");
         assert_eq!(
-            final_resp.body,
+            final_resp.body_text(),
             n.to_string(),
             "every concurrent increment must persist (no lost updates)"
         );
@@ -4277,7 +4301,7 @@ function respond(ctx) {
         let before = execute_mountebank_inject(read, &mb_req("GET", "/gen"), port, None)
             .expect("read inject should run");
         assert_eq!(
-            before.body,
+            before.body_text(),
             n.to_string(),
             "precondition: increments from every worker persisted into the shared cell"
         );
@@ -4295,7 +4319,8 @@ function respond(ctx) {
                     let resp = execute_mountebank_inject(read, &mb_req("GET", "/gen"), port, None)
                         .expect("read inject should run");
                     assert_eq!(
-                        resp.body, "0",
+                        resp.body_text(),
+                        "0",
                         "post-delete reads must see fresh state on every worker"
                     );
                 });

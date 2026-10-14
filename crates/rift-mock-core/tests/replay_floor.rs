@@ -93,7 +93,10 @@ const LEDGER: &[(&str, &str, usize)] = &[
         "deserialize_with attr",
         // #1377 widened `defaultResponse.statusCode` from `u16` (refused every string) to
         // `deserialize_status_code` (accepts numeric strings): fewer refusals, none new.
-        13,
+        // #1369 wraps the same decoders to record presence (`present_status_code`, `present_headers`,
+        // `present_mode` call the decoder they replace and add `Some`): `statusCode: null` and
+        // `_mode: null` are refused exactly as before, so four more attributes, no new refusal.
+        17,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",

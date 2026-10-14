@@ -206,33 +206,6 @@
     "relation": "rift-quotes-mountebank"
   },
   {
-    "id": "status-code-default-printed",
-    "case": "*",
-    "location": "*/is/statusCode",
-    "kind": "known-bug",
-    "reason": "an `is` without statusCode is printed with the default \"200\"; Mountebank prints only what was posted (#1361)",
-    "mountebank": "(absent)",
-    "rift": "\"200\""
-  },
-  {
-    "id": "is-headers-default-printed",
-    "case": "*",
-    "location": "*/is/headers",
-    "kind": "known-bug",
-    "reason": "an `is` without headers is printed with `headers: {}`; Mountebank omits it (#1361)",
-    "mountebank": "(absent)",
-    "rift": "{}"
-  },
-  {
-    "id": "default-response-headers-default-printed",
-    "case": "*",
-    "location": "*/defaultResponse/headers",
-    "kind": "known-bug",
-    "reason": "a defaultResponse without headers is printed with `headers: {}` (#1361)",
-    "mountebank": "(absent)",
-    "rift": "{}"
-  },
-  {
     "id": "stub-predicates-default-printed",
     "case": "*",
     "location": "*/stubs/*/predicates",
@@ -276,15 +249,6 @@
     "reason": "a proxy response is printed with its default `mode: \"\"`; Mountebank prints only what was posted (and the omitted mode prints as an empty string, though it behaves as proxyOnce) (#1361)",
     "mountebank": "(absent)",
     "rift": "\"\""
-  },
-  {
-    "id": "recorded-response-text-mode",
-    "case": "*",
-    "location": "*/is/_mode",
-    "kind": "known-bug",
-    "reason": "a proxy-recorded response omits `_mode: text`, which Mountebank records (#1366)",
-    "mountebank": "\"text\"",
-    "rift": "(absent)"
   },
   {
     "id": "stub-name-dropped",
@@ -1214,7 +1178,7 @@
     "id": "stub-without-responses-accepted#7",
     "location": "step[1].admin.body/stubs",
     "mountebank": "(absent)",
-    "riftMatches": "\\[\\{\"predicates\":\\[\\],\"responses\":\\[\\{\"is\":\\{\"body\":\"original\",\"headers\":\\{\\},\"statusCode\":\"200\"\\}\\}\\]\\},\\{\"id\":\"[0-9a-f-]{36}\",\"predicates\":\\[\\],\"responses\":\\[\\]\\}\\]"
+    "riftMatches": "\\[\\{\"predicates\":\\[\\],\"responses\":\\[\\{\"is\":\\{\"body\":\"original\",\"statusCode\":\"200\"\\}\\}\\]\\},\\{\"id\":\"[0-9a-f-]{36}\",\"predicates\":\\[\\],\"responses\":\\[\\]\\}\\]"
   },
   {
     "case": "complex_scenarios: Recover from invalid stub addition",
@@ -1233,60 +1197,6 @@
     "location": "replayable[4545]/stubs/1",
     "mountebank": "(absent)",
     "riftMatches": "\\{\"id\":\"[0-9a-f-]{36}\",\"predicates\":\\[\\],\"responses\":\\[\\]\\}"
-  },
-  {
-    "case": "complex_scenarios: Proxy mode forwards unmatched requests",
-    "kind": "known-bug",
-    "reason": "a defaultResponse holding a proxy loses it (printed as statusCode 200); Mountebank keeps it (#1369)",
-    "id": "default-response-proxy-dropped/step#0",
-    "location": "step[0].admin.body/defaultResponse/proxy",
-    "mountebank": "{\"to\":\"http://httpbin.org\"}",
-    "rift": "(absent)"
-  },
-  {
-    "case": "complex_scenarios: Proxy mode forwards unmatched requests",
-    "kind": "known-bug",
-    "reason": "a defaultResponse holding a proxy loses it (printed as statusCode 200); Mountebank keeps it (#1369)",
-    "id": "default-response-proxy-dropped/step#1",
-    "location": "step[0].admin.body/defaultResponse/statusCode",
-    "mountebank": "(absent)",
-    "rift": "200"
-  },
-  {
-    "case": "complex_scenarios: Proxy mode forwards unmatched requests",
-    "kind": "known-bug",
-    "reason": "a defaultResponse holding a proxy loses it (printed as statusCode 200); Mountebank keeps it (#1369)",
-    "id": "default-response-proxy-dropped/stored#0",
-    "location": "stored[4545]/defaultResponse/proxy",
-    "mountebank": "{\"to\":\"http://httpbin.org\"}",
-    "rift": "(absent)"
-  },
-  {
-    "case": "complex_scenarios: Proxy mode forwards unmatched requests",
-    "kind": "known-bug",
-    "reason": "a defaultResponse holding a proxy loses it (printed as statusCode 200); Mountebank keeps it (#1369)",
-    "id": "default-response-proxy-dropped/stored#1",
-    "location": "stored[4545]/defaultResponse/statusCode",
-    "mountebank": "(absent)",
-    "rift": "200"
-  },
-  {
-    "case": "complex_scenarios: Proxy mode forwards unmatched requests",
-    "kind": "known-bug",
-    "reason": "a defaultResponse holding a proxy loses it (printed as statusCode 200); Mountebank keeps it (#1369)",
-    "id": "default-response-proxy-dropped/replayable#0",
-    "location": "replayable[4545]/defaultResponse/proxy",
-    "mountebank": "{\"to\":\"http://httpbin.org\"}",
-    "rift": "(absent)"
-  },
-  {
-    "case": "complex_scenarios: Proxy mode forwards unmatched requests",
-    "kind": "known-bug",
-    "reason": "a defaultResponse holding a proxy loses it (printed as statusCode 200); Mountebank keeps it (#1369)",
-    "id": "default-response-proxy-dropped/replayable#1",
-    "location": "replayable[4545]/defaultResponse/statusCode",
-    "mountebank": "(absent)",
-    "rift": "200"
   },
   {
     "case": "predicates: Inject predicate accessing multiple request fields",
@@ -2323,15 +2233,6 @@
     "quote": "Under an explicit `predicateOperator` other than `exists`, Mountebank stores the **whole request**"
   },
   {
-    "id": "default-response-not-merged",
-    "case": "targeted: defaultResponse is served and printed in every imposter form (#1334)",
-    "location": "step[1].header.x-default",
-    "kind": "known-bug",
-    "reason": "Mountebank's defaultResponse also supplies the defaults of every stub response (its X-Default header reaches the matched stub's answer); Rift uses it only when no stub matches (#1369)",
-    "mountebank": "yes",
-    "rift": "(absent)"
-  },
-  {
     "case": "sdk-corpus: 13-js-config-decorate.json",
     "kind": "documented",
     "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500)",
@@ -2430,5 +2331,27 @@
     "reason": "the replayable form prints the imposter's host; Mountebank 2.9.1's does not (arguably its export is the lossy one — decide whether to document instead) (#1361)",
     "mountebank": "(absent)",
     "rift": "\"127.0.0.1\""
+  },
+  {
+    "id": "default-response-explicit-empty-body",
+    "case": "targeted: defaultResponse replaces an explicit empty body in Mountebank and not in Rift (#1369)",
+    "location": "step[1].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "`defaultResponse` completes a response by the fields it omits: an explicit `\"body\": \"\"` is served empty, and a proxied empty body is served as the upstream sent it; Mountebank replaces both with the `defaultResponse` body.",
+    "reason": "Mountebank replaces a falsy body with the defaultResponse body; Rift completes only a body the response did not write",
+    "mountebank": "dflt",
+    "rift": ""
+  },
+  {
+    "id": "default-response-proxied-empty-body",
+    "case": "targeted: defaultResponse replaces a proxied empty body in Mountebank and not in Rift (#1369)",
+    "location": "step[2].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "`defaultResponse` completes a response by the fields it omits: an explicit `\"body\": \"\"` is served empty, and a proxied empty body is served as the upstream sent it; Mountebank replaces both with the `defaultResponse` body.",
+    "reason": "Mountebank replaces a falsy body with the defaultResponse body; Rift completes only a body the response did not write",
+    "mountebank": "dflt",
+    "rift": ""
   }
 ]

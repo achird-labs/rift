@@ -493,9 +493,13 @@ mod tests {
 
     // The key is process-independent (rift-cluster shares response cursors across nodes by it), so
     // its exact value is pinned: any change to the hashed form moves every id-less stub's key.
+    // Issue #1369: the hashed form now omits a `statusCode`/`headers` the author did not write
+    // (it used to print `"200"` and `{}`), because a stub that omits them behaves differently from
+    // one that writes them once an imposter has a `defaultResponse`. `one_resp` omits `headers`, so
+    // its key moved from `~d760f3e4c82afe1f#0`; a stub that writes both prints as before.
     #[test]
     fn stub_key_value_is_pinned() {
-        assert_eq!(stub_key(&one_resp("a"), 0), "~d760f3e4c82afe1f#0");
+        assert_eq!(stub_key(&one_resp("a"), 0), "~f57bb8b520808243#0");
     }
 
     #[test]

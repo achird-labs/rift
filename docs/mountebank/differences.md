@@ -98,6 +98,16 @@ A proxy's `predicateGenerators` record predicates whose order, selector scope, s
 and header-name lookup differ from Mountebank 2.9.1's; each difference, and why Rift's recording is
 the one that replays, is listed under [Proxy: What Gets Recorded](proxy.md#what-gets-recorded).
 
+## `defaultResponse` completes a response by the fields it omits
+
+An imposter's `defaultResponse` is served when no stub matches, and it also supplies the `statusCode`, `headers`, `body` and `_mode` that an `is` or `inject` response omits, as in Mountebank. `headers` is taken whole, never merged key by key; a `proxy` response is never completed. Mountebank decides by falsiness and Rift by whether the field was written, which differs in two places:
+
+`defaultResponse` completes a response by the fields it omits: an explicit `"body": ""` is served empty, and a proxied empty body is served as the upstream sent it; Mountebank replaces both with the `defaultResponse` body.
+
+`defaultResponse` is merged before behaviors run. Mountebank merges after them, so there a `decorate` reading `config.response.statusCode` on a response that omits it sees `undefined`; in Rift the decorate sees the completed response, and a default body is expanded like a stub body.
+
+A `proxy` inside `defaultResponse` is kept in the printed and persisted imposter and reported as ignored in `_rift.warnings`: neither engine proxies from it. Use `defaultForward` to forward unmatched requests.
+
 ## Elsewhere in these docs
 
 Each of these is described where the feature is:
