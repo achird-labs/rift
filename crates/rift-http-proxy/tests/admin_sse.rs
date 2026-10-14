@@ -627,7 +627,11 @@ async fn refusals_answer_the_errors_envelope() {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        assert_eq!(content_type, "application/json", "{path}: content-type");
+        // Every admin JSON door names the charset, as Mountebank's does (#1400).
+        assert_eq!(
+            content_type, "application/json; charset=utf-8",
+            "{path}: content-type"
+        );
         let body: serde_json::Value = resp.json().await.expect("JSON body");
         assert!(body.get("error").is_none(), "{path}: legacy key: {body}");
         let error = &body["errors"][0];

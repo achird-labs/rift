@@ -263,11 +263,15 @@ pub(crate) fn serialize_or_500<T: Serialize>(
     })
 }
 
+/// The `Content-Type` of every admin JSON body: Mountebank's admin API (Express `res.json`) sends
+/// the charset, so Rift's does too (issue #1400). Imposter-served responses keep their own.
+pub(crate) const ADMIN_JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
+
 /// Create a JSON response
 pub fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Full<Bytes>> {
     match serialize_or_500(body) {
         Ok(json) => {
-            build_response_with_headers(status, [("Content-Type", "application/json")], json)
+            build_response_with_headers(status, [("Content-Type", ADMIN_JSON_CONTENT_TYPE)], json)
         }
         Err(resp) => *resp,
     }
@@ -397,7 +401,7 @@ mod tests {
             resp.headers()
                 .get("Content-Type")
                 .and_then(|v| v.to_str().ok()),
-            Some("application/json")
+            Some("application/json; charset=utf-8")
         );
         assert_eq!(
             body_string(resp).await,
@@ -562,7 +566,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             resp.headers().get("Content-Type").unwrap(),
-            "application/json"
+            "application/json; charset=utf-8"
         );
     }
 

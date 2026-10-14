@@ -198,33 +198,6 @@
     "rift": "(absent)"
   },
   {
-    "id": "admin-json-no-charset/steps",
-    "case": "*",
-    "location": "step*.admin*.header.content-type",
-    "kind": "known-bug",
-    "reason": "admin JSON responses say `application/json`; Mountebank says `application/json; charset=utf-8` (#1361)",
-    "mountebank": "application/json; charset=utf-8",
-    "rift": "application/json"
-  },
-  {
-    "id": "admin-json-no-charset/stored",
-    "case": "*",
-    "location": "stored[*].header.content-type",
-    "kind": "known-bug",
-    "reason": "admin JSON responses say `application/json`; Mountebank says `application/json; charset=utf-8` (#1361)",
-    "mountebank": "application/json; charset=utf-8",
-    "rift": "application/json"
-  },
-  {
-    "id": "admin-json-no-charset/replayable",
-    "case": "*",
-    "location": "replayable[*].header.content-type",
-    "kind": "known-bug",
-    "reason": "admin JSON responses say `application/json`; Mountebank says `application/json; charset=utf-8` (#1361)",
-    "mountebank": "application/json; charset=utf-8",
-    "rift": "application/json"
-  },
-  {
     "id": "status-code-printed-as-string",
     "case": "*",
     "location": "*/is/statusCode",

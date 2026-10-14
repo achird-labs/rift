@@ -199,6 +199,10 @@ record.
 
 ### Changed
 
+- **Admin API JSON responses carry `Content-Type: application/json; charset=utf-8`** (#1400), as
+  Mountebank's do, on success and error alike (including the `401`/`403` refusals). Responses an
+  imposter serves, directly or through the `/__rift/` gateway, are unchanged.
+
 - **`DELETE /imposters/:port` for a port with no imposter answers `200` with `{}`** (#1371), Mountebank's
   idempotent teardown, instead of `404`. Clients that treated the 404 as "already gone" keep working;
   clients that relied on it to detect absence should use `GET /imposters/:port`. The C-ABI
