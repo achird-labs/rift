@@ -1195,6 +1195,7 @@ async fn handle_request_inner(
                     proxy_body(body_bytes.as_ref(), body_string.as_deref()),
                     run.as_ref(),
                     Some(stub_state.slot),
+                    client_addr,
                 )
                 .await
             {
@@ -2092,6 +2093,7 @@ async fn handle_request_inner(
                 proxy_body(body_bytes.as_ref(), body_string.as_deref()),
                 None,
                 None,
+                client_addr,
             )
             .await
         {

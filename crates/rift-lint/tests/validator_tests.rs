@@ -913,32 +913,6 @@ fn e055_unreadable_generator_entry() {
     }
 }
 
-/// The engine admits `requestFrom`, `ip` and `form` in `matches`, as Mountebank does, but does not
-/// capture them yet, so every recording that asks for one fails (issue #1413): a warning.
-#[test]
-fn w022_uncaptured_generator_field() {
-    let lint = |matches: serde_json::Value| {
-        let mut r = LintResult::new();
-        validate_proxy_response(
-            path(),
-            &json!({ "to": "http://example.com", "predicateGenerators": [{ "matches": matches }] }),
-            "loc",
-            &mut r,
-        );
-        r
-    };
-    for field in ["requestFrom", "ip", "form"] {
-        let r = lint(json!({ "path": true, field: true }));
-        let issue = r.issues.iter().find(|i| i.code == "W022").expect("W022");
-        assert!(issue.message.contains(field), "{}", issue.message);
-        assert!(!has_code(
-            &lint(json!({ "path": true, field: false })),
-            "W022"
-        ));
-    }
-    assert!(!has_code(&lint(json!({ "path": true })), "W022"));
-}
-
 /// The engine refuses an unknown generator `predicateOperator` (issue #1353), so lint reports it as
 /// an error; the seven field operators and an absent or `null` key pass.
 #[test]

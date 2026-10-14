@@ -2230,30 +2230,6 @@ pub fn validate_proxy_response(
                 &format!("{location}.predicateGenerators[{idx}]"),
                 result,
             );
-            // Admitted, as in Mountebank, but not captured by the recorder yet: every recording
-            // that asks for one fails with `invalid-predicate` (issue #1413).
-            if generator.get("inject").is_none_or(Value::is_null)
-                && let Some(matches) = generator.get("matches").and_then(Value::as_object)
-            {
-                for field in ["requestFrom", "ip", "form"] {
-                    if matches.get(field).is_some_and(|m| m != &Value::Bool(false)) {
-                        result.add_issue(
-                            LintIssue::warning(
-                                "W022",
-                                format!(
-                                    "predicateGenerator `matches.{field}` is not recorded by Rift \
-                                     yet; every recording fails with invalid-predicate"
-                                ),
-                                file.to_path_buf(),
-                            )
-                            .with_location(format!(
-                                "{location}.predicateGenerators[{idx}].matches.{field}"
-                            ))
-                            .with_suggestion(format!("Remove `{field}` or set it to false")),
-                        );
-                    }
-                }
-            }
         }
     }
 

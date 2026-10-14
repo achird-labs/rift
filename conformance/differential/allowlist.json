@@ -2217,5 +2217,49 @@
     "case": "targeted: exists object over an array (Rift needs a satisfying element) (#1403)",
     "id": "exists-object-over-array/nested-true-step[1].body",
     "location": "step[1].body"
+  },
+  {
+    "case": "targeted: proxyOnce with an ip predicateGenerator replays to the same client (#1446)",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank's dual-stack listener reports an IPv4 client as `::ffff:127.0.0.1` and records that",
+    "reason": "a recorded `ip` is the client address as each engine's listener reports it",
+    "id": "generator-ip-form/stored",
+    "location": "stored[4545]/stubs/0/predicates/0/deepEquals/ip",
+    "mountebankMatches": "\"(?:::ffff:)?127\\.0\\.0\\.1\"",
+    "rift": "\"127.0.0.1\""
+  },
+  {
+    "case": "targeted: proxyOnce with an ip predicateGenerator replays to the same client (#1446)",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank's dual-stack listener reports an IPv4 client as `::ffff:127.0.0.1` and records that",
+    "reason": "a recorded `ip` is the client address as each engine's listener reports it",
+    "id": "generator-ip-form/replayable",
+    "location": "replayable[4545]/stubs/0/predicates/0/deepEquals/ip",
+    "mountebankMatches": "\"(?:::ffff:)?127\\.0\\.0\\.1\"",
+    "rift": "\"127.0.0.1\""
+  },
+  {
+    "case": "targeted: proxyOnce with a form predicateGenerator and a formless first request (#1446)",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank records `deepEquals: {}`, which also constrains nothing",
+    "reason": "a request without a form: Mountebank stores a match-all `deepEquals: {}`, Rift no predicate; both replay to every request",
+    "id": "generator-formless/stored",
+    "location": "stored[4545]/stubs/0/predicates",
+    "mountebank": "[{\"deepEquals\":{}}]",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a form predicateGenerator and a formless first request (#1446)",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank records `deepEquals: {}`, which also constrains nothing",
+    "reason": "a request without a form: Mountebank stores a match-all `deepEquals: {}`, Rift no predicate; both replay to every request",
+    "id": "generator-formless/replayable",
+    "location": "replayable[4545]/stubs/0/predicates",
+    "mountebank": "[{\"deepEquals\":{}}]",
+    "rift": "(absent)"
   }
 ]

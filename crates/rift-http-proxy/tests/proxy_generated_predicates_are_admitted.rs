@@ -278,3 +278,60 @@ async fn every_valid_operator_still_records() {
     }
     admin.drop_all(&[upstream]).await;
 }
+
+/// Issue #1446: `ip` and `form` are recorded from the request, so a recording replays to the
+/// same client and form instead of failing the generation.
+#[tokio::test]
+async fn an_ip_and_form_generator_records_a_stub_that_replays() {
+    let admin = Admin::start().await;
+    let upstream = admin.upstream().await;
+    let port = free_port();
+    let (status, body) = admin
+        .post(&proxy(
+            port,
+            upstream,
+            json!([{"matches": {"ip": true, "form": true}}]),
+        ))
+        .await;
+    assert_eq!(status, 201, "{body}");
+
+    let send = |form: &'static str| {
+        admin
+            .client
+            .post(format!("http://127.0.0.1:{port}/submit"))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(form)
+            .send()
+    };
+    for form in ["a=1", "a=1", "a=2", "a=2"] {
+        let response = send(form).await.expect("request");
+        assert!(
+            response.headers().get("x-rift-generator-error").is_none(),
+            "{form}: the generation must succeed"
+        );
+    }
+    assert_eq!(
+        admin.upstream_hits(upstream).await,
+        2,
+        "each form reaches the upstream once, then replays"
+    );
+    let stubs = admin.stubs(port).await;
+    let recorded: Vec<&Value> = stubs
+        .iter()
+        .filter_map(|stub| stub["predicates"].as_array())
+        .flatten()
+        .collect();
+    assert!(
+        recorded
+            .iter()
+            .any(|p| p["deepEquals"]["form"] == json!({"a": "2"})),
+        "{stubs:?}"
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|p| p["deepEquals"]["ip"] == json!("127.0.0.1")),
+        "{stubs:?}"
+    );
+    admin.drop_all(&[port, upstream]).await;
+}

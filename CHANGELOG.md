@@ -13,6 +13,13 @@ record.
 
 ### Added
 
+- **Predicate generators record `requestFrom`, `ip` and `form`** (#1446), as Mountebank's
+  `predicatesFor` does. `requestFrom` and `ip` come from the client's socket, as the matcher reads
+  them; a recorded `requestFrom` includes the client's port, so it matches that connection only.
+  `form` is recorded like `query`, whole or by listed keys, with `ignore`; a request without a
+  non-empty urlencoded body records no `form` predicate, as Mountebank's `deepEquals: {}`
+  constrains nothing. Asking for any of them used to fail the recording.
+
 - **`copy` indexed tokens** (#1407). `<into>[n]` is replaced with the n-th extracted value, as in
   Mountebank: for a regex, `[0]` is the whole match and `[n]` is capture group n; for JSONPath and
   XPath, the n-th selected node. A group that did not take part in the match is `""`
@@ -245,9 +252,8 @@ record.
   an object of request fields, a non-boolean `caseSensitive` or a non-string `except` is refused
   with 400 by every config door (`rift-lint` `E055`). It used to be skipped, so the recording was
   wider than asked for, or matched every request. A replayed config that skipped the check fails
-  the recording with `x-rift-generator-error: invalid-predicate`, as does a `matches` asking for
-  `requestFrom`, `ip` or `form`, which Rift does not capture yet (`rift-lint` `W022`, #1446).
-  `caseSensitive` and `except` are not checked on an `inject` generator, which does not read them.
+  the recording with `x-rift-generator-error: invalid-predicate`. `caseSensitive` and `except` are
+  not checked on an `inject` generator, which does not read them.
 
 - **`except` applies before `exists`** (#1408). A value that `except` strips to empty is absent,
   as in Mountebank: `{"exists": {"query": {"q": true}}, "except": "^x+$"}` no longer matches
