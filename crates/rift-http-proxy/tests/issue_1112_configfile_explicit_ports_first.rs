@@ -10,8 +10,33 @@ use rift_http_proxy::imposter::{ImposterConfig, ImposterManager};
 use rift_http_proxy::server::{Cli, ServerBuilder};
 use std::sync::Arc;
 
+/// What one attempt found on the learned port.
+enum Attempt {
+    /// The explicit imposter holds it and both were created: the property holds.
+    Held,
+    /// The explicit imposter is missing. Another process held the port as the file loaded, so the
+    /// explicit create failed to bind, and the port-less imposter may have taken it once it was
+    /// free again (#1420). The regression this test exists for looks the same, but it is the
+    /// engine's own ordering and recurs on every attempt.
+    Missing,
+}
+
+/// Retried on [`Attempt::Missing`]: an outside collision is chance, the regression is not, so it
+/// fails all five attempts. A process-wide lock cannot help, because the colliding auto-assign
+/// runs in another test binary, and the bind error only reaches the log.
 #[tokio::test]
 async fn configfile_startup_creates_explicit_ports_before_auto_assigning() {
+    for _ in 0..5 {
+        if let Attempt::Held = attempt().await {
+            return;
+        }
+    }
+    panic!(
+        "the explicit imposter was missing five times in a row: the port-less one took its port"
+    );
+}
+
+async fn attempt() -> Attempt {
     let manager = Arc::new(ImposterManager::new());
     let learn: ImposterConfig =
         serde_json::from_value(serde_json::json!({"protocol": "http", "stubs": []}))
@@ -52,17 +77,18 @@ async fn configfile_startup_creates_explicit_ports_before_auto_assigning() {
         .await
         .expect("the config file loads");
 
-    assert_eq!(manager.count(), 2, "both imposters are created");
-    assert_eq!(
-        manager
-            .get_imposter(taken)
-            .expect("the explicit port is served")
-            .config
-            .name
-            .as_deref(),
-        Some("explicit")
-    );
+    let on_taken = manager
+        .get_imposter(taken)
+        .ok()
+        .map(|imposter| imposter.config.name.clone());
+    let outcome = if on_taken != Some(Some("explicit".to_string())) {
+        Attempt::Missing
+    } else {
+        assert_eq!(manager.count(), 2, "both imposters are created");
+        Attempt::Held
+    };
 
     running.shutdown().await;
     manager.delete_all().await;
+    outcome
 }
