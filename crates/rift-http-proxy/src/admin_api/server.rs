@@ -3,6 +3,7 @@
 use crate::admin_api::authz;
 use crate::admin_api::handlers::events::{self, box_full};
 use crate::admin_api::router::route_request;
+use crate::admin_api::types::ADMIN_JSON_CONTENT_TYPE;
 use crate::config_loader::ConfigSource;
 use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
 use crate::front_door::FrontDoorRoutes;
@@ -658,6 +659,7 @@ async fn accept_loop(
                     // Read before the request is consumed: an HTTP/2 carrier resets its stream
                     // instead of arming the connection-wide fault (`apply_tcp_fault`).
                     let version = req.version();
+                    let is_gateway = req.uri().path().starts_with("/__rift/");
                     // Per-request annotation scope + response decorator (issue #318):
                     // every response through this listener — including the `/__rift/`
                     // gateway — is decorated with phase `Admin`.
@@ -668,7 +670,6 @@ async fn accept_loop(
                         // per-imposter-port access and so is NOT gated by the admin `--apikey`
                         // (which would otherwise force app-under-test traffic to carry the admin
                         // key and would leak that Authorization header into imposter predicates).
-                        let is_gateway = req.uri().path().starts_with("/__rift/");
                         if let Some(ref key) = api_key
                             && !is_gateway
                         {
@@ -774,6 +775,9 @@ async fn accept_loop(
                             &annotations,
                             response.headers_mut(),
                         );
+                    }
+                    if !is_gateway {
+                        label_admin_json_utf8(response.headers_mut());
                     }
                     Ok::<_, AdminServiceError>(response)
                 }
@@ -1032,11 +1036,28 @@ fn judge_exposure(
     }
 }
 
+/// Mountebank's admin API (Express `res.json`) labels every JSON body
+/// `application/json; charset=utf-8` (issue #1400). The admin handlers already say so; this catches
+/// the bodies built by the engine's shared builders (`rift_mock_core::response::error_response`,
+/// `ImposterError` conversions), which the `/__rift/` gateway's imposter traffic also uses and so
+/// must keep the bare value. Callers skip it for gateway requests.
+fn label_admin_json_utf8(headers: &mut hyper::HeaderMap) {
+    if headers
+        .get(hyper::header::CONTENT_TYPE)
+        .is_some_and(|v| v == "application/json")
+    {
+        headers.insert(
+            hyper::header::CONTENT_TYPE,
+            hyper::header::HeaderValue::from_static(ADMIN_JSON_CONTENT_TYPE),
+        );
+    }
+}
+
 fn unauthorized_response() -> Response<Full<Bytes>> {
     let body = r#"{"errors":[{"code":"unauthorized","type":"unauthorized","message":"Invalid authorization token"}]}"#;
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
-        .header("Content-Type", "application/json")
+        .header("Content-Type", ADMIN_JSON_CONTENT_TYPE)
         .body(Full::new(Bytes::from(body)))
         .expect("infallible")
 }

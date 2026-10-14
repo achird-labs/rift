@@ -2,9 +2,10 @@
 
 use crate::admin_api::request_filter::{parse_match_clauses, parse_since, request_matches};
 use crate::admin_api::types::{
-    ImposterDetail, ImposterListEntry, ImposterQueryParams, ImposterSummary, ListImpostersResponse,
-    RiftImposterExtensions, StubWithLinks, TlsHeader, build_response_with_headers, collect_body,
-    error_response, json_response, make_imposter_links, make_stub_links, serialize_or_500,
+    ADMIN_JSON_CONTENT_TYPE, ImposterDetail, ImposterListEntry, ImposterQueryParams,
+    ImposterSummary, ListImpostersResponse, RiftImposterExtensions, StubWithLinks, TlsHeader,
+    build_response_with_headers, collect_body, error_response, json_response, make_imposter_links,
+    make_stub_links, serialize_or_500,
 };
 use crate::extensions::decorate::backend_error_response;
 use crate::imposter::RecordedRequest;
@@ -86,7 +87,7 @@ pub(crate) fn injection_disallowed_response() -> Response<Full<Bytes>> {
     .to_string();
     build_response_with_headers(
         StatusCode::BAD_REQUEST,
-        [("Content-Type", "application/json")],
+        [("Content-Type", ADMIN_JSON_CONTENT_TYPE)],
         body,
     )
 }
@@ -672,7 +673,10 @@ fn build_cursor_response(
         Err(resp) => return *resp,
     };
     let mut headers = vec![
-        ("Content-Type".to_string(), "application/json".to_string()),
+        (
+            "Content-Type".to_string(),
+            ADMIN_JSON_CONTENT_TYPE.to_string(),
+        ),
         ("x-rift-next-index".to_string(), next.to_string()),
     ];
     if truncated {
@@ -2505,7 +2509,7 @@ mod delete_persistence_tests {
             resp.headers()
                 .get(hyper::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok()),
-            Some("application/json")
+            Some("application/json; charset=utf-8")
         );
         assert_eq!(body_json(resp).await, serde_json::json!({}));
     }
