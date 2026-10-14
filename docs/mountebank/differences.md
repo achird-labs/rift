@@ -62,6 +62,15 @@ JavaScript stack trace in the body (its error handler fails while logging the re
 the undecorated response with `x-rift-decorate-error: true` instead, and `500` only under
 `strictBehaviors` — see [Behaviors](behaviors.md).
 
+## `copy` from an absent source
+
+A `copy` whose source is absent (a query parameter or header the request does not carry) leaves its
+token in place. A request without a body is not an absent source: its body is `""`, as in
+Mountebank. So does Mountebank, unless the regex matches the text `undefined`: Mountebank runs
+the regex against JavaScript's `undefined` coerced to a string, so `.*` copies the literal word
+`undefined` into the response. Rift does not reproduce that coercion — see
+[Behaviors](behaviors.md#copy).
+
 ## keyCaseSensitive is honoured as written
 
 Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`. Three consequences:

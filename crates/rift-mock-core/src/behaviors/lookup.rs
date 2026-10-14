@@ -304,35 +304,54 @@ pub(crate) fn apply_lookup_spliced(
                 // Lookup row
                 let replacements = csv_data.lookup(&key, &behavior.from_data_source.csv.key_column);
 
-                // Apply replacements
-                for (token, value) in replacements {
-                    let full_token = format!("{}{}", behavior.into, token);
-                    body.replace_token(&full_token, &value);
-                    // Per value, so multi-value headers keep their multiplicity (RFC 7230 §3.2.2
-                    // forbids folding Set-Cookie).
-                    //
-                    // Which CSV cell lands here is chosen by a client-controlled key, so a cell
-                    // holding a byte a header value cannot carry is a client-selectable 500;
-                    // repair it like the templating passes do (issue #1067). Only the substituted
-                    // cell is repaired, so a control character the author typed into the header
-                    // itself still reaches the builder and fails the response.
-                    //
-                    // Skipped outright when no header uses this token — otherwise every CSV column
-                    // of the matched row would run the repair, and warn, on every request even for
-                    // a body-only stub.
-                    if headers
-                        .values()
-                        .flatten()
-                        .any(|v| v.contains_authored(&full_token))
-                    {
-                        let repaired =
-                            crate::imposter::headers::sanitize_header_value(&value, stub);
-                        for header_value in headers.values_mut().flatten() {
-                            header_value.replace_token(&full_token, &repaired);
-                        }
+                // Mountebank (behaviors.js replaceObjectValuesIn) accepts the column as
+                // `["col"]`, `['col']` or `[col]`; `lookup` keys each cell by the unquoted form.
+                for (column_token, value) in replacements {
+                    let column = column_token
+                        .strip_prefix('[')
+                        .and_then(|c| c.strip_suffix(']'))
+                        .unwrap_or(&column_token);
+                    let into = &behavior.into;
+                    for full_token in [
+                        format!("{into}[\"{column}\"]"),
+                        format!("{into}['{column}']"),
+                        format!("{into}[{column}]"),
+                    ] {
+                        replace_lookup_token(body, headers, &full_token, &value, stub);
                     }
                 }
             }
+        }
+    }
+}
+
+/// Replace one lookup token with a CSV cell in the body and every header value.
+fn replace_lookup_token(
+    body: &mut Spliced,
+    headers: &mut SplicedHeaders,
+    full_token: &str,
+    value: &str,
+    stub: crate::imposter::headers::StubRef<'_>,
+) {
+    body.replace_token(full_token, value);
+    // Per value, so multi-value headers keep their multiplicity (RFC 7230 §3.2.2 forbids folding
+    // Set-Cookie).
+    //
+    // Which CSV cell lands here is chosen by a client-controlled key, so a cell holding a byte a
+    // header value cannot carry is a client-selectable 500; repair it like the templating passes
+    // do (issue #1067). Only the substituted cell is repaired, so a control character the author
+    // typed into the header itself still reaches the builder and fails the response.
+    //
+    // Skipped outright when no header uses this token — otherwise every CSV column of the matched
+    // row would run the repair, and warn, on every request even for a body-only stub.
+    if headers
+        .values()
+        .flatten()
+        .any(|v| v.contains_authored(full_token))
+    {
+        let repaired = crate::imposter::headers::sanitize_header_value(value, stub);
+        for header_value in headers.values_mut().flatten() {
+            header_value.replace_token(full_token, &repaired);
         }
     }
 }
@@ -942,5 +961,68 @@ mod tests {
         cache.clear();
         assert_eq!(name(&cache), "new", "clear forces a reload");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Serves `template` in both the body and an `X-Row` header for a lookup keyed by the path
+    /// `/ab-cd` (first group `ab` → row `first`).
+    fn lookup_quoted(tag: &str, template: &str) -> (String, Vec<String>) {
+        let csv =
+            std::env::temp_dir().join(format!("rift_lookup_1402_{tag}_{}.csv", std::process::id()));
+        std::fs::write(&csv, "id,name\nab,first\n").expect("write csv");
+        let behavior: LookupBehavior = serde_json::from_value(serde_json::json!({
+            "key": regex_key(None),
+            "fromDataSource": {"csv": {"path": csv.to_string_lossy(), "keyColumn": "id"}},
+            "into": "${row}"
+        }))
+        .expect("the lookup parses");
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/ab-cd".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+        };
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert("X-Row".to_string(), vec![template.to_string()]);
+        let served = apply_lookup_behaviors(
+            template,
+            &mut headers,
+            &[behavior],
+            &request,
+            &CsvCache::default(),
+            FIXTURE_STUB,
+        );
+        let _ = std::fs::remove_file(&csv);
+        (served, headers.remove("X-Row").expect("header kept"))
+    }
+
+    /// Issue #1402: Mountebank's `replaceObjectValuesIn` replaces `${row}["col"]`,
+    /// `${row}['col']` and `${row}[col]`; Rift used to replace only the unquoted form.
+    #[test]
+    fn a_double_quoted_column_token_is_replaced_in_body_and_header() {
+        let (body, header) = lookup_quoted("dq", r#"<${row}["name"]>"#);
+        assert_eq!(body, "<first>");
+        assert_eq!(header, vec!["<first>".to_string()]);
+    }
+
+    #[test]
+    fn a_single_quoted_column_token_is_replaced_in_body_and_header() {
+        let (body, header) = lookup_quoted("sq", "<${row}['name']>");
+        assert_eq!(body, "<first>");
+        assert_eq!(header, vec!["<first>".to_string()]);
+    }
+
+    #[test]
+    fn an_unquoted_column_token_is_still_replaced_in_body_and_header() {
+        let (body, header) = lookup_quoted("uq", "<${row}[name]>");
+        assert_eq!(body, "<first>");
+        assert_eq!(header, vec!["<first>".to_string()]);
+    }
+
+    #[test]
+    fn all_three_spellings_in_one_template_are_replaced() {
+        let (body, header) = lookup_quoted("all", r#"${row}["id"]|${row}['name']|${row}[name]"#);
+        assert_eq!(body, "ab|first|first");
+        assert_eq!(header, vec!["ab|first|first".to_string()]);
     }
 }

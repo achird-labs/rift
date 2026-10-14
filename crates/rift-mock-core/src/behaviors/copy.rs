@@ -37,7 +37,9 @@ impl CopySource {
             CopySource::Simple(field) => match field.as_str() {
                 "path" => Some(request.path.clone()),
                 "method" => Some(request.method.clone()),
-                "body" => request.body.clone(),
+                // A request without a body has the body `""` in Mountebank (issue #1365), so a
+                // selector that matches nothing still runs against it.
+                "body" => Some(request.body.clone().unwrap_or_default()),
                 _ => None,
             },
             CopySource::Nested(map) => {
@@ -92,41 +94,37 @@ pub(crate) fn apply_copy_spliced(
     stub: crate::imposter::headers::StubRef<'_>,
 ) {
     for behavior in behaviors {
-        // Extract value from request
-        if let Some(source_value) = behavior.from.extract(request) {
-            // Apply extraction method
-            let extracted = behavior.extraction.extract(&source_value);
-            let replacement = extracted.unwrap_or_default();
+        // Mountebank (behaviors.js replaceArrayValuesIn) only replaces a token it has a value
+        // for: an absent source or a selector that extracts nothing leaves the token as authored.
+        let Some(replacement) = behavior
+            .from
+            .extract(request)
+            .and_then(|source| behavior.extraction.extract(&source))
+        else {
+            continue;
+        };
 
-            // Replace token in body
-            body.replace_token(&behavior.into, &replacement);
+        body.replace_token(&behavior.into, &replacement);
 
-            // Also replace in headers — per value, so multi-value headers (e.g. multiple
-            // Set-Cookie) keep their multiplicity (RFC 7230 §3.2.2 forbids folding Set-Cookie).
-            //
-            // `replacement` is request-derived, so it can carry a byte a header value cannot
-            // hold; repair it like the templating passes do (issue #1067). Only the substituted
-            // text is repaired — a control character the author typed into the header itself is
-            // an authoring bug that must still reach the builder and fail the response.
-            //
-            // Skipped outright when no header uses this token: the repair warns when it removes
-            // something, so running it for a body-only stub would log a header warning, once per
-            // request, about a header that does not exist.
-            if headers
-                .values()
-                .flatten()
-                .any(|v| v.contains_authored(&behavior.into))
-            {
-                let repaired = crate::imposter::headers::sanitize_header_value(&replacement, stub);
-                for value in headers.values_mut().flatten() {
-                    value.replace_token(&behavior.into, &repaired);
-                }
-            }
-        } else {
-            // Source not found, replace with empty string
-            body.replace_token(&behavior.into, "");
+        // Also replace in headers — per value, so multi-value headers (e.g. multiple
+        // Set-Cookie) keep their multiplicity (RFC 7230 §3.2.2 forbids folding Set-Cookie).
+        //
+        // `replacement` is request-derived, so it can carry a byte a header value cannot
+        // hold; repair it like the templating passes do (issue #1067). Only the substituted
+        // text is repaired — a control character the author typed into the header itself is
+        // an authoring bug that must still reach the builder and fail the response.
+        //
+        // Skipped outright when no header uses this token: the repair warns when it removes
+        // something, so running it for a body-only stub would log a header warning, once per
+        // request, about a header that does not exist.
+        if headers
+            .values()
+            .flatten()
+            .any(|v| v.contains_authored(&behavior.into))
+        {
+            let repaired = crate::imposter::headers::sanitize_header_value(&replacement, stub);
             for value in headers.values_mut().flatten() {
-                value.replace_token(&behavior.into, "");
+                value.replace_token(&behavior.into, &repaired);
             }
         }
     }
@@ -522,8 +520,8 @@ mod tests {
         );
     }
 
-    /// Same boundary on the source-missing branch, which substitutes the empty string. That can
-    /// only remove characters, never introduce one, so it must not repair either.
+    /// Same boundary on the source-missing path, which leaves the token as authored (issue
+    /// #1402). Nothing is substituted, so nothing is repaired.
     #[test]
     fn copy_with_a_missing_source_does_not_repair_a_literal_config_value() {
         let request = RequestContext {
@@ -554,8 +552,8 @@ mod tests {
 
         assert_eq!(
             headers["X-Echo"],
-            vec!["bad\nvalue=".to_string()],
-            "the token is cleared; the literal newline beside it is left to fail loudly"
+            vec!["bad\nvalue=${q}".to_string()],
+            "the token is kept; the literal newline beside it is left to fail loudly"
         );
     }
 
@@ -600,9 +598,9 @@ mod tests {
     }
 
     #[test]
-    fn copy_missing_source_clears_token_per_value_without_folding() {
-        // No `q` query param → the source is absent, so the token is replaced with "" in each
-        // value; the untouched value and the multiplicity both survive.
+    fn copy_missing_source_keeps_token_per_value_without_folding() {
+        // No `q` query param → the source is absent, so the token is left as authored in each
+        // value (Mountebank parity, issue #1402); the multiplicity survives.
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
@@ -634,7 +632,145 @@ mod tests {
 
         assert_eq!(
             headers["Set-Cookie"],
-            vec!["a=1".to_string(), "b=".to_string()]
+            vec!["a=1".to_string(), "b=${q}".to_string()]
         );
+    }
+
+    /// Runs one copy from `from` into `$C` over `body` and an `X-C: <$C>` header, returning both.
+    fn copy_once(
+        from: &str,
+        extraction: serde_json::Value,
+        request: &RequestContext,
+        body: &str,
+    ) -> (String, Vec<String>) {
+        let behavior: CopyBehavior = serde_json::from_value(serde_json::json!({
+            "from": serde_json::from_str::<serde_json::Value>(from).expect("from is JSON"),
+            "into": "$C",
+            "using": extraction,
+        }))
+        .expect("the copy parses");
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert("X-C".to_string(), vec!["<$C>".to_string()]);
+        let served = apply_copy_behaviors(body, &mut headers, &[behavior], request, FIXTURE_STUB);
+        (served, headers.remove("X-C").expect("header kept"))
+    }
+
+    fn request_with_body(body: &str) -> RequestContext {
+        RequestContext {
+            method: "POST".to_string(),
+            path: "/abc".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Some(body.to_string()),
+        }
+    }
+
+    /// Issue #1402: Mountebank's `replaceArrayValuesIn` replaces a token only when it has a
+    /// value for it, so a regex that does not match leaves `$C` as authored.
+    #[test]
+    fn a_regex_that_does_not_match_leaves_the_token_in_body_and_header() {
+        let (body, header) = copy_once(
+            r#""path""#,
+            serde_json::json!({"method": "regex", "selector": "\\d+"}),
+            &request_with_body(""),
+            "[abc][$C]",
+        );
+        assert_eq!(body, "[abc][$C]");
+        assert_eq!(header, vec!["<$C>".to_string()]);
+    }
+
+    /// `ABC` matches the path `/abc` only under `ignoreCase`: without it nothing is extracted
+    /// and the token stays; with it the match is copied.
+    #[test]
+    fn a_regex_that_matches_only_under_ignore_case_leaves_the_token_without_it() {
+        let using = |ignore_case: bool| {
+            serde_json::json!({
+                "method": "regex",
+                "selector": "ABC",
+                "options": {"ignoreCase": ignore_case}
+            })
+        };
+        let (body, header) = copy_once(r#""path""#, using(false), &request_with_body(""), "[$C]");
+        assert_eq!(body, "[$C]");
+        assert_eq!(header, vec!["<$C>".to_string()]);
+
+        let (body, header) = copy_once(r#""path""#, using(true), &request_with_body(""), "[$C]");
+        assert_eq!(body, "[abc]");
+        assert_eq!(header, vec!["<abc>".to_string()]);
+    }
+
+    #[test]
+    fn a_jsonpath_that_selects_nothing_leaves_the_token() {
+        let (body, header) = copy_once(
+            r#""body""#,
+            serde_json::json!({"method": "jsonpath", "selector": "$.missing"}),
+            &request_with_body(r#"{"present": 1}"#),
+            "[$C]",
+        );
+        assert_eq!(body, "[$C]");
+        assert_eq!(header, vec!["<$C>".to_string()]);
+    }
+
+    #[test]
+    fn an_xpath_that_selects_nothing_leaves_the_token() {
+        let (body, header) = copy_once(
+            r#""body""#,
+            serde_json::json!({"method": "xpath", "selector": "//missing"}),
+            &request_with_body("<doc><present>1</present></doc>"),
+            "[$C]",
+        );
+        assert_eq!(body, "[$C]");
+        assert_eq!(header, vec!["<$C>".to_string()]);
+    }
+
+    #[test]
+    fn an_absent_query_source_leaves_the_token() {
+        let (body, header) = copy_once(
+            r#"{"query": "id"}"#,
+            serde_json::json!({"method": "regex", "selector": "(\\d+)"}),
+            &request_with_body(""),
+            "[$C]",
+        );
+        assert_eq!(body, "[$C]");
+        assert_eq!(header, vec!["<$C>".to_string()]);
+    }
+
+    /// A request without a body copies from `""`, as in Mountebank, so `.*` empties the token
+    /// rather than leaving it as an absent source would.
+    #[test]
+    fn a_request_without_a_body_copies_from_the_empty_body() {
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+        };
+        let (body, header) = copy_once(
+            r#""body""#,
+            serde_json::json!({"method": "regex", "selector": ".*"}),
+            &request,
+            "[$C]",
+        );
+        assert_eq!(body, "[]");
+        assert_eq!(header, vec!["<>".to_string()]);
+    }
+
+    /// The no-match `continue` must not stop later copies from running.
+    #[test]
+    fn a_copy_that_extracts_nothing_does_not_stop_the_next_copy() {
+        let behaviors: Vec<CopyBehavior> = serde_json::from_value(serde_json::json!([
+            {"from": "path", "into": "$A", "using": {"method": "regex", "selector": "\\d+"}},
+            {"from": "path", "into": "$B", "using": {"method": "regex", "selector": "abc"}}
+        ]))
+        .expect("the copies parse");
+        let served = apply_copy_behaviors(
+            "$A/$B",
+            &mut HashMap::new(),
+            &behaviors,
+            &request_with_body(""),
+            FIXTURE_STUB,
+        );
+        assert_eq!(served, "$A/abc");
     }
 }

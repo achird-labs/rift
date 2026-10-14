@@ -80,7 +80,8 @@ async fn copy_xpath_without_ns_selects_nothing_prefixed() {
         json!({ "method": "xpath", "selector": "//mb:name" }),
     ))
     .await;
-    assert_eq!(body, "hello ");
+    // Nothing selected leaves the token as authored, as Mountebank does (issue #1402).
+    assert_eq!(body, "hello ${NAME}");
 }
 
 #[tokio::test]

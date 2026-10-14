@@ -352,7 +352,8 @@ An XPath selector that evaluates to a string, number or boolean (`string(//a)`, 
 boolean, and fails the request for `string()`.
 
 Every occurrence of the `into` token in the body and header values is replaced. If the source is
-absent, or nothing is extracted, the token is replaced with an empty string. A selector that does
+absent, or nothing is extracted, the token is left in place, as in Mountebank. Releases up to
+0.21.0 replaced it with an empty string. A selector that does
 not compile is not treated as "nothing extracted": the imposter is refused when it is loaded.
 
 Rift returns the first capture group where Mountebank returns the whole regex match, so a pattern
@@ -465,7 +466,8 @@ Request to `/users/123` returns `{ "id": "123" }`.
 
 Look up a row in a CSV file, keyed by a value extracted from the request. `key` takes the same
 `from` and `using` as [`copy`](#copy). Each column of the matched row replaces the token
-`<into>[<column>]`, so with `"into": "${row}"` the `email` column fills `${row}[email]`.
+`<into>[<column>]`, so with `"into": "${row}"` the `email` column fills `${row}[email]`. As in
+Mountebank, the column may also be quoted: `${row}["email"]` and `${row}['email']` are replaced too.
 
 `key.index` picks which match keys the row, as in Mountebank. For a `regex`, `0` is the whole
 match and `n` is the `n`th capture group; for `jsonpath` and `xpath`, `n` is the `n`th selected
