@@ -220,20 +220,13 @@
     "rift": "(absent)"
   },
   {
-    "id": "stub-name-dropped",
-    "case": "*",
-    "location": "*/stubs/*/name",
-    "kind": "known-bug",
-    "reason": "a stub's `name` is accepted and dropped from every printed form; Mountebank keeps it (#1362)",
-    "mountebankMatches": "\".*\"",
-    "rift": "(absent)"
-  },
-  {
     "id": "empty-behaviors-dropped",
     "case": "*",
     "location": "*/responses/*/behaviors",
-    "kind": "known-bug",
-    "reason": "an empty `behaviors: []` is dropped from the printed response; Mountebank echoes it (#1362)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Empty `behaviors` and a `null` response variant such as `proxy: null` are accepted and not printed back.",
+    "reason": "an empty `behaviors: []` is not printed back; Mountebank echoes it (#1362)",
     "mountebank": "[]",
     "rift": "(absent)"
   },
@@ -241,8 +234,10 @@
     "id": "null-proxy-dropped",
     "case": "*",
     "location": "*/responses/*/proxy",
-    "kind": "known-bug",
-    "reason": "`proxy: null` next to `is` is dropped from the printed response; Mountebank echoes it (#1362)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Empty `behaviors` and a `null` response variant such as `proxy: null` are accepted and not printed back.",
+    "reason": "`proxy: null` next to `is` is not printed back; Mountebank echoes it (#1362)",
     "mountebank": "null",
     "rift": "(absent)"
   },

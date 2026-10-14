@@ -845,6 +845,7 @@ mod tests {
     fn stub_with_predicates(predicates: Vec<serde_json::Value>) -> Stub {
         let predicates = predicates_from_jsons(predicates);
         Stub {
+            name: None,
             id: None,
             route_pattern: None,
             predicates,
@@ -861,6 +862,7 @@ mod tests {
     fn stub_with_id_and_predicates(id: &str, predicates: Vec<serde_json::Value>) -> Stub {
         let predicates = predicates_from_jsons(predicates);
         Stub {
+            name: None,
             id: Some(id.to_string()),
             route_pattern: None,
             predicates,
@@ -1126,6 +1128,7 @@ mod tests {
         }))
         .expect("parses");
         let stub = Stub {
+            name: None,
             id: None,
             route_pattern: None,
             predicates: vec![],
@@ -1161,6 +1164,7 @@ mod tests {
         }))
         .expect("parses");
         let stub = Stub {
+            name: None,
             id: None,
             route_pattern: None,
             predicates: vec![],
@@ -1200,6 +1204,7 @@ mod tests {
             Some(Box::new(rift)),
         );
         let stub = Stub {
+            name: None,
             id: None,
             route_pattern: None,
             predicates: vec![],
@@ -1244,6 +1249,7 @@ mod tests {
             )
         };
         Stub {
+            name: None,
             id: None,
             route_pattern: None,
             predicates: serde_json::from_value(predicates).expect("predicates parse"),

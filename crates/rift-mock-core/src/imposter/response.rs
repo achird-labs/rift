@@ -472,6 +472,7 @@ pub fn create_stub_from_proxy_response(
     };
 
     super::types::Stub {
+        name: None,
         id: None,
         route_pattern: None,
         predicates,

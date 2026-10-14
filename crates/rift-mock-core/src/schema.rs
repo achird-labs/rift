@@ -280,6 +280,7 @@ mod tests {
         }
         let stub = &defs(&schema)["Stub"]["properties"];
         for key in [
+            "name",
             "predicates",
             "rules",
             "responses",

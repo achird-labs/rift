@@ -39,6 +39,7 @@ fn test_imposter_config_no_port() {
 #[test]
 fn test_predicate_matching() {
     let stub = Stub {
+        name: None,
         id: None,
         route_pattern: None,
         predicates: predicates_from_jsons(vec![serde_json::json!({
@@ -150,6 +151,7 @@ fn test_execute_stub() {
     let imposter = Imposter::new(config).expect("test imposter");
 
     let stub = Stub {
+        name: None,
         id: None,
         route_pattern: None,
         predicates: vec![],
@@ -2976,6 +2978,7 @@ async fn test_cors_options_preflight() {
 async fn test_cors_headers_on_stub_response() {
     let manager = ImposterManager::new();
     let stub = Stub {
+        name: None,
         id: None,
         route_pattern: None,
         predicates: predicates_from_jsons(vec![serde_json::json!({

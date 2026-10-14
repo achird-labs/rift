@@ -68,11 +68,9 @@ const RIFT_RESPONSE_KEYS: [&str; 6] = [
 /// Unread keys the gate accepts, as `(pattern, why)`. A pattern matches the trailing segments of
 /// a reported path, `*` standing for any one segment. Every entry needs a reason a reader can
 /// check, and a follow-up issue when the key is a defect rather than a choice.
-const ALLOWED: &[(&str, &str)] = &[(
-    "stubs.*.name",
-    "a label for the reader, written throughout the corpus and the demos; the engine has no stub \
-     name to honour, so dropping it changes nothing a request can observe",
-)];
+// Empty since #1362 made the engine keep a stub's `name`. The mechanism stays for the next key the
+// gate has a reason to accept.
+const ALLOWED: &[(&str, &str)] = &[];
 
 /// Lint errors the gate accepts on a docs example, as `(file, code, why)`: the file the example is
 /// in, so the entry survives edits that move it.
@@ -81,15 +79,20 @@ const ALLOWED: &[(&str, &str)] = &[(
 const LINT_ALLOWED: &[(&str, &str, &str)] = &[];
 
 fn allowed(path: &str) -> bool {
+    ALLOWED
+        .iter()
+        .any(|(pattern, _)| pattern_matches(pattern, path))
+}
+
+/// `pattern` matches the trailing segments of `path`, `*` standing for any one segment.
+fn pattern_matches(pattern: &str, path: &str) -> bool {
     let segments: Vec<&str> = path.split('.').collect();
-    ALLOWED.iter().any(|(pattern, _)| {
-        let pattern: Vec<&str> = pattern.split('.').collect();
-        segments.len() >= pattern.len()
-            && segments[segments.len() - pattern.len()..]
-                .iter()
-                .zip(&pattern)
-                .all(|(segment, want)| *want == "*" || segment == want)
-    })
+    let pattern: Vec<&str> = pattern.split('.').collect();
+    segments.len() >= pattern.len()
+        && segments[segments.len() - pattern.len()..]
+            .iter()
+            .zip(&pattern)
+            .all(|(segment, want)| *want == "*" || segment == want)
 }
 
 fn repo_root() -> PathBuf {
@@ -793,11 +796,11 @@ fn docs_examples_validate_against_the_schema() {
 }
 
 /// The schema refuses what this gate reports, at the same path: an unread key is a validation
-/// error naming it, and an allowed one is stripped rather than refused.
+/// error naming it, and a key the engine reads (a stub's `name`, since #1362) is not refused.
 #[test]
-fn the_schema_refuses_an_unread_key_and_excuses_an_allowed_one() {
+fn the_schema_refuses_an_unread_key_and_accepts_a_read_one() {
     let misspelled = json!({ "protocol": "http", "stubs": [{
-        "name": "excused",
+        "name": "s1",
         "predicates": [{ "equals": { "path": "/x" }, "casesensitive": true }],
         "responses": [{ "is": { "statusCode": 200 }, "_behaviors": { "waitt": 5 } }]
     }] });
@@ -1136,11 +1139,20 @@ fn a_clean_document_reports_nothing() {
 
 #[test]
 fn an_allowed_pattern_matches_trailing_segments_only() {
-    assert!(allowed("stubs.3.name"));
-    assert!(allowed("imposters.0.stubs.12.name"));
-    assert!(!allowed("stubs.3.names"));
-    assert!(!allowed("stubs.3.responses.0.name"));
-    assert!(!allowed("name"));
+    let matches = |path| pattern_matches("stubs.*.label", path);
+    assert!(matches("stubs.3.label"));
+    assert!(matches("imposters.0.stubs.12.label"));
+    assert!(!matches("stubs.3.labels"));
+    assert!(!matches("stubs.3.responses.0.label"));
+    assert!(!matches("label"));
+}
+
+/// Issue #1362: a stub's `name` is read, so it is neither reported nor allow-listed.
+#[test]
+fn a_stub_name_is_read() {
+    assert!(!allowed("stubs.0.name"));
+    let document = imposter_of(json!({ "name": "s1", "responses": [{ "is": {} }] }));
+    assert_eq!(unread(document), Vec::<String>::new());
 }
 
 #[test]
@@ -1158,7 +1170,7 @@ fn a_failure_names_the_origin_and_the_path() {
         },
         Example {
             origin: "fixture.json".to_owned(),
-            document: imposter_of(json!({ "name": "allowed", "responses": [{ "is": {} }] })),
+            document: imposter_of(json!({ "name": "read", "responses": [{ "is": {} }] })),
         },
     ];
     let failures = failures(&examples);

@@ -156,6 +156,7 @@ Each stub contains predicates (matching rules) and responses:
 
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
+| `name` | string | No | A label for the reader, printed back and never matched on |
 | `id` | string | No | Unique identifier (Rift extension) |
 | `predicates` | array | No | Conditions to match requests (`rules` is accepted as an alias) |
 | `responses` | array | Yes | Responses to return |

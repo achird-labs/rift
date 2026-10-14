@@ -846,16 +846,8 @@ pub fn filter_proxy_stubs(stubs: Vec<crate::imposter::Stub>) -> Vec<crate::impos
                 None
             } else {
                 Some(crate::imposter::Stub {
-                    scenario_name: stub.scenario_name,
-                    required_scenario_state: stub.required_scenario_state,
-                    new_scenario_state: stub.new_scenario_state,
-                    space: stub.space,
-                    id: stub.id,
-                    route_pattern: stub.route_pattern,
-                    predicates: stub.predicates,
                     responses: non_proxy_responses,
-                    recorded_from: stub.recorded_from,
-                    verify: stub.verify,
+                    ..stub
                 })
             }
         })

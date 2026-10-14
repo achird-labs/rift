@@ -1423,6 +1423,14 @@
             "null"
           ]
         },
+        "name": {
+          "default": null,
+          "description": "A label for the reader, printed back and never matched on.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "newScenarioState": {
           "default": null,
           "type": [

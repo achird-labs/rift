@@ -273,12 +273,17 @@ pub struct DebugStubInfo {
 // ============================================================================
 
 /// Stub definition (Mountebank-compatible with Rift extensions)
-/// Field ordering matches Mountebank output: scenarioName, predicates, responses, _links
+/// Field ordering matches Mountebank output: name, scenarioName, predicates, responses, _links
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", try_from = "StubRaw")]
 pub struct Stub {
+    /// A label for the reader (Mountebank compatible, issue #1362), kept and printed back. Never
+    /// matched on: the matcher, the scenario gate and stub analysis do not read it. Printed first,
+    /// where a label reads. Hashed into `stub_key` like any other field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Optional scenario name for documentation/organization (Mountebank compatible)
-    /// Placed first to match Mountebank output ordering
+    /// Placed after `name` to match Mountebank output ordering
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scenario_name: Option<String>,
     /// Scenario FSM gate (WireMock `whenScenarioStateIs`): the stub is eligible only when the
@@ -370,6 +375,9 @@ impl Gate<'_> {
 )]
 #[serde(rename_all = "camelCase")]
 struct StubRaw {
+    /// A label for the reader, printed back and never matched on.
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     scenario_name: Option<String>,
     #[serde(default)]
@@ -490,6 +498,7 @@ impl TryFrom<StubRaw> for Stub {
         };
 
         Ok(Stub {
+            name: raw.name,
             scenario_name: raw.scenario_name,
             required_scenario_state: raw.required_scenario_state,
             new_scenario_state: raw.new_scenario_state,
@@ -3108,6 +3117,23 @@ mod imposter_error_chain_tests {
 
 #[cfg(test)]
 mod tests {
+
+    // ===== Issue #1362: a stub's `name` is kept and printed first =====
+
+    #[test]
+    fn stub_name_round_trips() {
+        let stub: super::Stub =
+            serde_json::from_str(r#"{"name":"s1","responses":[{"is":{}}]}"#).expect("named stub");
+        assert_eq!(
+            serde_json::to_value(&stub).expect("print")["name"],
+            serde_json::json!("s1")
+        );
+        let printed = serde_json::to_string(&stub).expect("print");
+        assert!(
+            printed.starts_with(r#"{"name":"s1","#),
+            "name prints first: {printed}"
+        );
+    }
 
     // ===== Issue #1377: `defaultResponse.statusCode` reads like every other `statusCode` =====
 

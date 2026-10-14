@@ -315,6 +315,7 @@ mod tests {
 
     fn stub_with_script(script_config: RiftScriptConfig) -> Stub {
         Stub {
+            name: None,
             id: None,
             route_pattern: None,
             predicates: vec![],
@@ -647,6 +648,7 @@ mod tests {
             script(Some("fn respond() {}"), None, None),
         );
         let is_with_script = Stub {
+            name: None,
             id: None,
             route_pattern: None,
             predicates: vec![],
