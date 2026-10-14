@@ -817,13 +817,14 @@ mod tests {
         // Let the worker disarm and return to the recv loop.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        // Task B on the same worker: enough ops to be progress-checked several times over, but
-        // trivially inside a fresh 500 ms budget. If A's expired deadline lingered in the slot,
-        // B's first progress check would terminate it.
+        // Task B on the same worker: enough ops to be progress-checked several times over (about
+        // 30 checks at 64 ops each), but small enough to fit a fresh 500 ms budget that also
+        // covers queue wait on a starved CPU (#1420). If A's expired deadline lingered in the
+        // slot, B's first progress check would terminate it.
         let after = pool
             .execute(
                 CompiledScript::Rhai {
-                    ast: compile("let i = 0; while i < 50000 { i += 1; }"),
+                    ast: compile("let i = 0; while i < 2000 { i += 1; }"),
                     rule_id: "leak-victim".to_string(),
                 },
                 make_request(),

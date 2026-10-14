@@ -132,8 +132,10 @@ async fn oversize_body_door_uses_the_default_table() {
     manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    // Comfortably past MAX_REQUEST_BODY_SIZE.
-    let huge = "x".repeat(11 * 1024 * 1024);
+    // One byte past MAX_REQUEST_BODY_SIZE (10 MiB): the client finishes writing before the 413,
+    // so the server's close is clean. Far past the cap, hyper closes with unread bytes and the
+    // client sees a reset instead of the envelope (#1420).
+    let huge = "x".repeat(10 * 1024 * 1024 + 1);
     let resp = reqwest::Client::new()
         .post("http://127.0.0.1:19925/x")
         .body(huge)

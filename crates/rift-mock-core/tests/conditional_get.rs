@@ -889,12 +889,20 @@ async fn an_identical_replace_does_not_advance_the_clock() {
         .replace_stub(port, 0, stub(one_stub("s", "b")))
         .await
         .expect("identical");
+    // `max(now, floor + 1s)`: bracket the replace with the engine's clock, so a loaded machine
+    // passing `b + 1` before it runs is not read as the identical replace advancing it (#1420).
+    let floor = secs(&stamp_b) + 1;
+    let before = chrono::Utc::now().timestamp();
     manager
         .replace_stub(port, 0, stub(one_stub("s", "c")))
         .await
         .expect("replace");
+    let after = chrono::Utc::now().timestamp();
     let (stamp_c, _) = last_modified_and_body(port).await;
-    assert_eq!(secs(&stamp_c), secs(&stamp_b) + 1, "{stamp_b} -> {stamp_c}");
+    assert!(
+        (floor.max(before)..=floor.max(after)).contains(&secs(&stamp_c)),
+        "{stamp_b} -> {stamp_c} (replace between {before} and {after})"
+    );
     manager.delete_all().await;
 }
 
@@ -1481,15 +1489,20 @@ async fn a_scenario_gating_nothing_ahead_of_a_conditional_stub_takes_no_stamp() 
             .set_scenario_state("s1", "busy", state)
             .expect("transition");
     }
-    // A content change now is stamped from the wall clock, not pushed out by the transitions.
+    // A content change now is stamped from the wall clock, not pushed out by the transitions:
+    // `LoadClock::next` is `max(now, floor + 1s)`, so bracket the replace with the clock the engine
+    // reads. `t` was stamped at create, so wall time under load can legitimately pass it (#1420).
+    let floor = secs(&t) + 1;
+    let before = chrono::Utc::now().timestamp();
     manager
         .replace_stub(port, 0, stub(one_stub("v1", "v1b")))
         .await
         .expect("replace");
+    let after = chrono::Utc::now().timestamp();
     let (_, t2, _) = session_get(port, None).await;
     assert!(
-        secs(&t2) <= secs(&t) + 1,
-        "{t} -> {t2}: transitions ran the clock ahead"
+        (floor.max(before)..=floor.max(after)).contains(&secs(&t2)),
+        "{t} -> {t2}: transitions ran the clock ahead (replace between {before} and {after})"
     );
     manager.delete_all().await;
 }
