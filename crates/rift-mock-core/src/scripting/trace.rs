@@ -95,10 +95,65 @@ pub fn render_decision(decision: &FaultDecision) -> String {
     }
 }
 
+/// Keep a thread-scoped capture from losing events to `tracing`'s callsite-interest cache (issue
+/// #1447). Call it on the capturing thread, before installing the capture.
+///
+/// While at most one dispatcher is registered, `tracing-core` computes a callsite's interest from
+/// the *registering thread's* default only (`Rebuilder::JustOne`) and caches it for every thread.
+/// When nothing else is registered, a scoped capture is that one dispatcher, so a callsite first
+/// reached on another thread caches `Interest::never` and the capture never sees its events. A
+/// second, process-lifetime dispatcher makes every registration ask all of them instead.
+///
+/// Only when this thread has no subscriber at all: any other subscriber in force here (a global
+/// default, or an embedder's own scoped one) is already a second registered dispatcher, and
+/// pinning beside a global would turn its cached `always` into a per-event `enabled` check.
+pub(crate) fn keep_scoped_captures_visible() {
+    static SECOND_DISPATCHER: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+    let unsubscribed =
+        tracing::dispatcher::get_default(|d| d.is::<tracing::subscriber::NoSubscriber>());
+    if unsubscribed {
+        SECOND_DISPATCHER.get_or_init(|| tracing::Dispatch::new(SilentDispatcher));
+    }
+}
+
+/// Registered only to keep a second dispatcher alive (see [`keep_scoped_captures_visible`]): it
+/// wants nothing, and says so through `max_level_hint` too, so it does not lift the global level
+/// filter to `TRACE` the way `NoSubscriber` (no hint) would.
+struct SilentDispatcher;
+
+impl Subscriber for SilentDispatcher {
+    fn register_callsite(&self, _: &'static Metadata<'static>) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::never()
+    }
+
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::OFF)
+    }
+
+    fn enabled(&self, _: &Metadata<'_>) -> bool {
+        false
+    }
+
+    fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+        span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+
+    fn event(&self, _: &Event<'_>) {}
+
+    fn enter(&self, _: &span::Id) {}
+
+    fn exit(&self, _: &span::Id) {}
+}
+
 /// Run `f` with a subscriber that captures every `"rift::script"` event into an in-memory
 /// buffer, returning `f`'s result alongside the captured log lines in call order.
 /// Thread-scoped: doesn't touch or require any process-wide default subscriber.
 pub fn capture_script_logs<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    keep_scoped_captures_visible();
     let logs = Arc::new(Mutex::new(Vec::new()));
     let capture = ScriptLogCapture {
         logs: Arc::clone(&logs),

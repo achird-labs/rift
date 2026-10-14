@@ -29,6 +29,8 @@ impl CapturedEvent {
 /// `rift::template` target, so a `logs_contain` assertion there would pass against an
 /// implementation that logs nothing at all.
 pub(crate) fn captured_logs(f: impl FnOnce()) -> Vec<CapturedEvent> {
+    // Without it a callsite first reached on another thread hides this capture's events (#1447).
+    crate::scripting::keep_scoped_captures_visible();
     let events = Arc::new(Mutex::new(Vec::new()));
     let capture = TemplateLogCapture {
         events: Arc::clone(&events),
@@ -79,5 +81,30 @@ impl Visit for CapturedEvent {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         self.fields
             .push((field.name().to_string(), format!("{value:?}")));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn template_warning(value: &str) {
+        tracing::warn!(target: "rift::template", value, "probe");
+    }
+
+    /// Issue #1447: another thread reaching the callsite first, while this capture is the only
+    /// registered dispatcher, cached `Interest::never` and hid the capturing thread's own event.
+    /// The dispatcher count is process-wide, so this is red without the fix only when run alone
+    /// (`--exact`); `tests/issue_1447_scoped_capture.rs` pins it in a process of its own.
+    #[test]
+    fn a_callsite_another_thread_registered_first_is_still_captured() {
+        let events = captured_logs(|| {
+            std::thread::spawn(|| template_warning("elsewhere"))
+                .join()
+                .expect("thread");
+            template_warning("here");
+        });
+        assert_eq!(events.len(), 1, "only the capturing thread's event");
+        assert_eq!(events[0].field("value"), Some("here"));
     }
 }
