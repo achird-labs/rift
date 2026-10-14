@@ -1433,9 +1433,19 @@ impl ImposterManager {
 
     /// Delete an imposter, returning its config with the stubs it served at delete time (#1229).
     pub async fn delete_imposter(&self, port: u16) -> Result<ImposterConfig, ImposterError> {
-        let config = self.delete_imposter_inner(port, true).await?;
+        Ok(self.delete_imposter_returning(port).await?.current_config())
+    }
+
+    /// Delete an imposter, returning the removed [`Imposter`] itself (issue #1399). It is already torn
+    /// down, so its request counters and recordings are final: the state `DELETE /imposters/:port`
+    /// reports. Emits `ImposterEvent::Deleted` exactly once, like [`Self::delete_imposter`].
+    pub async fn delete_imposter_returning(
+        &self,
+        port: u16,
+    ) -> Result<Arc<Imposter>, ImposterError> {
+        let imposter = self.delete_imposter_inner(port, true).await?;
         self.emit(ImposterEvent::Deleted(port));
-        Ok(config)
+        Ok(imposter)
     }
 
     /// Delete without emitting an event, so a wholesale replace in `apply_config` reports one
@@ -1456,7 +1466,7 @@ impl ImposterManager {
         &self,
         port: u16,
         unlink_file: bool,
-    ) -> Result<ImposterConfig, ImposterError> {
+    ) -> Result<Arc<Imposter>, ImposterError> {
         // The file goes first (issue #1124): a delete that cannot remove it fails with the imposter
         // still registered and serving, so `Err` keeps meaning "not deleted". Removing the imposter
         // first would leave nothing to fall back to, and the file would bring it back on restart.
@@ -1533,9 +1543,9 @@ impl ImposterManager {
         }
 
         info!("Imposter on port {} deleted", port);
-        // The imposter as it was at delete time, not as created (issue #1229): `DELETE /imposters`
-        // is Mountebank's save-before-reset export.
-        Ok(imposter.current_config())
+        // Handed back whole, so callers read the config as it was at delete time (issue #1229:
+        // `DELETE /imposters` is Mountebank's save-before-reset export) and the final counters (#1399).
+        Ok(imposter)
     }
 
     /// Get an imposter by port
@@ -1557,7 +1567,7 @@ impl ImposterManager {
         let mut report = DeleteAllReport::default();
         for port in self.imposters.ports() {
             match self.delete_imposter_inner(port, true).await {
-                Ok(config) => report.deleted.push(config),
+                Ok(imposter) => report.deleted.push(imposter.current_config()),
                 // A concurrent delete got there first: already gone, which is what was asked.
                 Err(ImposterError::NotFound(_)) => {
                     debug!("delete_all: imposter on port {port} was already gone");
@@ -4345,6 +4355,51 @@ mod tests {
                 ImposterEvent::Replaced(19431),     // apply_config imposter-level change
                 ImposterEvent::Deleted(19431),      // delete_imposter
                 ImposterEvent::AllDeleted,          // delete_all
+            ]
+        );
+    }
+
+    // Issue #1399: the removed imposter comes back, and the event fires once per delete.
+    #[tokio::test]
+    async fn delete_imposter_returning_hands_back_the_imposter_and_emits_once() {
+        let listener = Arc::new(RecordingListener::default());
+        let manager = ImposterManager::new().with_event_listener(listener.clone());
+
+        assert!(matches!(
+            manager.delete_imposter_returning(19440).await,
+            Err(ImposterError::NotFound(19440))
+        ));
+        assert!(listener.0.lock().is_empty(), "a missing port emits nothing");
+
+        manager
+            .create_imposter(imposter_cfg(json!({
+                "protocol": "http", "port": 19440, "name": "gone", "stubs": []
+            })))
+            .await
+            .expect("create");
+        let removed = manager
+            .delete_imposter_returning(19440)
+            .await
+            .expect("delete");
+        assert_eq!(removed.config.port, Some(19440));
+        assert!(manager.get_imposter(19440).is_err());
+
+        manager
+            .create_imposter(imposter_cfg(json!({
+                "protocol": "http", "port": 19441, "stubs": []
+            })))
+            .await
+            .expect("create");
+        let config = manager.delete_imposter(19441).await.expect("delete");
+        assert_eq!(config.port, Some(19441));
+
+        assert_eq!(
+            listener.0.lock().clone(),
+            vec![
+                ImposterEvent::Created(19440),
+                ImposterEvent::Deleted(19440),
+                ImposterEvent::Created(19441),
+                ImposterEvent::Deleted(19441),
             ]
         );
     }
