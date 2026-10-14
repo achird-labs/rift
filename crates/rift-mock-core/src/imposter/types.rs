@@ -304,7 +304,8 @@ pub struct Stub {
     /// params (unchanged default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_pattern: Option<String>,
-    #[serde(default)]
+    /// Not printed when empty (issue #1361): an absent `predicates` decodes to the same `[]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub predicates: Vec<Predicate>,
     #[serde(default)]
     pub responses: Vec<StubResponse>,
@@ -1151,16 +1152,14 @@ impl From<IsResponseRaw> for IsResponse {
     }
 }
 
-/// IsResponse for serialization - outputs statusCode as string (Mountebank format). A field the
-/// author omitted is `None` and not written, so the printed form reads as it was written.
+/// IsResponse for serialization. A field the author omitted is `None` and not written, so the
+/// printed form reads as it was written.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IsResponseOut {
-    /// Status code serialized as string for Mountebank compatibility
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_status_code_as_string"
-    )]
+    /// A JSON number (issue #1361), as `defaultResponse.statusCode` and Mountebank's own
+    /// recordings print it; a posted `"202"` therefore prints as `202`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status_code: Option<u16>,
     #[serde(
         skip_serializing_if = "Option::is_none",
@@ -1195,20 +1194,6 @@ where
 {
     match headers {
         Some(headers) => multi_value_headers::serialize(headers.borrow(), serializer),
-        None => serializer.serialize_none(),
-    }
-}
-
-/// Serialize statusCode as a string for Mountebank compatibility
-fn serialize_status_code_as_string<S>(
-    status_code: &Option<u16>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    match status_code {
-        Some(status_code) => serializer.serialize_str(&status_code.to_string()),
         None => serializer.serialize_none(),
     }
 }
@@ -1852,7 +1837,9 @@ impl Serialize for IsResponse {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         DefaultResponseOut {
             status_code: (!self.omitted.status_code).then_some(self.status_code),
-            headers: (!self.omitted.headers).then_some(&self.headers),
+            // As a default, `{}` and no headers both supply none, so `{}` is not printed (#1361).
+            // A stub's `is` keeps a written `{}`: it replaces the default's headers (#1369).
+            headers: (!self.omitted.headers && !self.headers.is_empty()).then_some(&self.headers),
             body: self.body.as_ref(),
             mode: (!self.omitted.mode).then_some(&self.mode),
             proxy: self.proxy.as_deref(),
@@ -2029,24 +2016,37 @@ pub struct PathRewrite {
 #[serde(rename_all = "camelCase")]
 pub struct ProxyResponse {
     pub to: String,
-    #[serde(default)]
+    // The options below are not printed at their default (issue #1361); each decodes back to it.
+    // schemars reads `skip_serializing_if` as "no default", so the schema states each one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     #[cfg_attr(
         feature = "schema",
-        schemars(schema_with = "crate::schema::proxy_mode")
+        schemars(schema_with = "crate::schema::proxy_mode", extend("default" = ""))
     )]
     pub mode: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(
         feature = "schema",
-        schemars(schema_with = "crate::schema::predicate_generators")
+        schemars(
+            schema_with = "crate::schema::predicate_generators",
+            extend("default" = [])
+        )
     )]
     pub predicate_generators: Vec<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub add_wait_behavior: bool,
-    #[serde(default, deserialize_with = "single_value_headers::deserialize")]
+    #[serde(
+        default,
+        deserialize_with = "single_value_headers::deserialize",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
     #[cfg_attr(
         feature = "schema",
-        schemars(with = "rift_types::schema::SingleValueHeaders")
+        schemars(
+            with = "rift_types::schema::SingleValueHeaders",
+            extend("default" = {})
+        )
     )]
     pub inject_headers: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3302,9 +3302,10 @@ mod tests {
             serde_json::from_value(serde_json::json!({"is": {"statusCode": "200", "headers": {}}}))
                 .expect("decodes");
         let printed = serde_json::to_value(&stub).expect("prints");
+        // A written `statusCode` prints as a number (issue #1361); a written `headers: {}` stays.
         assert_eq!(
             printed,
-            serde_json::json!({"is": {"statusCode": "200", "headers": {}}})
+            serde_json::json!({"is": {"statusCode": 200, "headers": {}}})
         );
     }
 
@@ -5443,5 +5444,107 @@ mod mountebank_output_tests {
         let name_only: Stub =
             serde_json::from_value(json!({ "scenarioName": "s", "predicates": [] })).expect("stub");
         assert_eq!(name_only.gate(), open.gate());
+    }
+}
+
+/// Issue #1361: the printed imposter is a normalized form. `is.statusCode` prints as a number,
+/// like `defaultResponse.statusCode` and Mountebank's own recordings, and fields left at their
+/// empty or default value are not printed. Decoding is unchanged, so nothing is lost.
+#[cfg(test)]
+mod normalized_print_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn printed_stub(stub: Value) -> Value {
+        let parsed: Stub = serde_json::from_value(stub).expect("stub");
+        serde_json::to_value(&parsed).expect("json")
+    }
+
+    #[test]
+    fn is_status_code_prints_as_number() {
+        for written in [json!("202"), json!(202)] {
+            let printed = printed_stub(json!({"responses": [{"is": {"statusCode": written}}]}));
+            assert_eq!(
+                printed["responses"][0]["is"]["statusCode"],
+                json!(202),
+                "{printed}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_fields_are_not_printed() {
+        let printed = printed_stub(json!({"responses": [{"proxy": {"to": "http://x"}}]}));
+        assert!(printed.get("predicates").is_none(), "{printed}");
+        let proxy = &printed["responses"][0]["proxy"];
+        assert_eq!(proxy, &json!({"to": "http://x"}));
+
+        let printed = printed_stub(json!({
+            "predicates": [{"equals": {"path": "/p"}}],
+            "responses": [{"proxy": {
+                "to": "http://x",
+                "mode": "proxyAlways",
+                "addWaitBehavior": true,
+                "predicateGenerators": [{"matches": {"path": true}}],
+                "injectHeaders": {"X-Via": "rift"}
+            }}]
+        }));
+        assert_eq!(printed["predicates"], json!([{"equals": {"path": "/p"}}]));
+        let proxy = &printed["responses"][0]["proxy"];
+        assert_eq!(proxy["mode"], json!("proxyAlways"), "{proxy}");
+        assert_eq!(proxy["addWaitBehavior"], json!(true), "{proxy}");
+        assert_eq!(
+            proxy["predicateGenerators"],
+            json!([{"matches": {"path": true}}]),
+            "{proxy}"
+        );
+        assert_eq!(proxy["injectHeaders"], json!({"X-Via": "rift"}), "{proxy}");
+    }
+
+    #[test]
+    fn default_response_empty_headers_not_printed() {
+        for default_response in [
+            json!({"statusCode": 404}),
+            json!({"statusCode": 404, "headers": {}}),
+        ] {
+            let config: ImposterConfig = serde_json::from_value(json!({
+                "protocol": "http",
+                "defaultResponse": default_response
+            }))
+            .expect("config");
+            let printed = serde_json::to_value(&config).expect("json");
+            assert_eq!(
+                printed["defaultResponse"],
+                json!({"statusCode": 404}),
+                "{printed}"
+            );
+        }
+    }
+
+    /// A stub's written `headers: {}` replaces the default's headers with none (#1369), so unlike
+    /// `defaultResponse.headers` it is printed, and survives the print → re-load round trip that
+    /// `--datadir` and `rift save` make.
+    #[test]
+    fn stub_is_empty_headers_survive_a_round_trip() {
+        let config: ImposterConfig = serde_json::from_value(json!({
+            "protocol": "http",
+            "defaultResponse": {"statusCode": 418, "headers": {"X-Default": "yes"}},
+            "stubs": [{"responses": [{"is": {"headers": {}}}]}]
+        }))
+        .expect("config");
+        let printed = serde_json::to_value(&config).expect("json");
+        assert_eq!(
+            printed["stubs"][0]["responses"][0]["is"],
+            json!({"headers": {}})
+        );
+
+        let reloaded: ImposterConfig = serde_json::from_value(printed).expect("re-load");
+        let default = reloaded.default_response.as_ref().expect("defaultResponse");
+        let Some(StubResponse::Is { is, .. }) = reloaded.stubs[0].responses.first() else {
+            panic!("an is response");
+        };
+        let served = is.completed_by(default);
+        assert!(served.headers.is_empty(), "{:?}", served.headers);
+        assert_eq!(served.status_code, 418);
     }
 }

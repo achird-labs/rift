@@ -73,10 +73,12 @@ fn stub(value: Value) -> Stub {
 /// mode, else its response bodies, scenario fields, and `recordedFrom`.
 fn fingerprint(stub: &Stub) -> String {
     let v = serde_json::to_value(stub).expect("stub serializes");
+    // Empty `predicates` are not printed (issue #1361); they read as `[]`.
+    let predicates = v.get("predicates").cloned().unwrap_or_else(|| json!([]));
     let responses = v["responses"].as_array().expect("responses").clone();
     if let Some(proxy) = responses.iter().find_map(|r| r.get("proxy")) {
         let mode = proxy["mode"].as_str().expect("a proxy mode");
-        return format!("proxy:{mode} {}", v["predicates"]);
+        return format!("proxy:{mode} {predicates}");
     }
     let bodies: Vec<String> = responses
         .iter()
@@ -98,7 +100,7 @@ fn fingerprint(stub: &Stub) -> String {
         ),
         None => String::new(),
     };
-    format!("is[{}]{gate} {}", bodies.join(","), v["predicates"])
+    format!("is[{}]{gate} {predicates}", bodies.join(","))
 }
 
 impl Sut {

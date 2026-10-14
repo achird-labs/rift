@@ -497,9 +497,42 @@ mod tests {
     // (it used to print `"200"` and `{}`), because a stub that omits them behaves differently from
     // one that writes them once an imposter has a `defaultResponse`. `one_resp` omits `headers`, so
     // its key moved from `~d760f3e4c82afe1f#0`; a stub that writes both prints as before.
+    // Issues #1361/#1362 move it again, in the same release as #1369, as one deliberate move:
+    // `is.statusCode` prints as a number (`one_resp` writes `200`) and empty/default fields are no
+    // longer printed, so the key moved from `~f57bb8b520808243#0`.
     #[test]
     fn stub_key_value_is_pinned() {
-        assert_eq!(stub_key(&one_resp("a"), 0), "~f57bb8b520808243#0");
+        assert_eq!(stub_key(&one_resp("a"), 0), "~e2d14a5a1776f053#0");
+    }
+
+    /// Issue #1361: the printed form omits empty and default fields. Re-loading what was printed
+    /// must give stubs with the same key, so the omission loses nothing on decode.
+    #[test]
+    fn corpus_stubs_keep_their_key_through_a_print_round_trip() {
+        use crate::imposter::types::ImposterConfig;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sdk-conformance/corpus/imposters");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).expect("read the corpus") {
+            let path = entry.expect("corpus entry").path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read corpus file");
+            let loaded: ImposterConfig = serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("{}: decode: {e}", path.display()));
+            let printed = serde_json::to_value(&loaded).expect("print");
+            let reloaded: ImposterConfig = serde_json::from_value(printed)
+                .unwrap_or_else(|e| panic!("{}: re-load: {e}", path.display()));
+            assert_eq!(
+                stub_keys(&loaded.stubs),
+                stub_keys(&reloaded.stubs),
+                "{}",
+                path.display()
+            );
+            seen += 1;
+        }
+        assert!(seen > 0, "no corpus fixtures under {}", dir.display());
     }
 
     #[test]
