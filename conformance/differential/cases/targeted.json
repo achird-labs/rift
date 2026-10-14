@@ -1506,6 +1506,290 @@
           "path": "/"
         }
       ]
+    },
+    {
+      "name": "targeted: copy indexed tokens take each regex capture group (#1407)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-C": "$C[1]-$C[2]|$C[0]"
+                      },
+                      "body": "$C[1]-$C[2]|$C[0]"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$C",
+                          "using": {
+                            "method": "regex",
+                            "selector": "(\\w+)-(\\w+)"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "ab-cd"
+        }
+      ]
+    },
+    {
+      "name": "targeted: copy index 0 is the whole regex match (#1407)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-C": "$C[0]|$C"
+                      },
+                      "body": "$C[0]|$C"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "$C",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\d+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x42"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a copy jsonpath index selects that node (#1407)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-C": "$C[0],$C[1]|$C"
+                      },
+                      "body": "$C[0],$C[1]|$C"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$C",
+                          "using": {
+                            "method": "jsonpath",
+                            "selector": "$..id"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[{\"id\":1},{\"id\":2}]"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a copy xpath index selects that node in document order (#1407)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-C": "$C[2]$C[1]$C[0]|$C"
+                      },
+                      "body": "$C[2]$C[1]$C[0]|$C"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$C",
+                          "using": {
+                            "method": "xpath",
+                            "selector": "//n"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<d><n>a</n><n>b</n><n>c</n></d>"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a copy index past the values has its prefix rewritten (#1407)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-C": "$C[5]|$C[01]"
+                      },
+                      "body": "$C[5]|$C[01]"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "$C",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\d+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x42"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a copy index of a non-participating regex group (#1407)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-C": "[$C[1]][$C[2]]"
+                      },
+                      "body": "[$C[1]][$C[2]]"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$C",
+                          "using": {
+                            "method": "regex",
+                            "selector": "(a)?(b)"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "b"
+        }
+      ]
     }
   ]
 }

@@ -4,7 +4,7 @@ use super::extraction::ExtractionMethod;
 use super::request::RequestContext;
 use super::spliced::{Spliced, SplicedHeaders, authored_headers, plain_headers};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// Copy behavior - copy request fields into response
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -96,36 +96,102 @@ pub(crate) fn apply_copy_spliced(
     for behavior in behaviors {
         // Mountebank (behaviors.js replaceArrayValuesIn) only replaces a token it has a value
         // for: an absent source or a selector that extracts nothing leaves the token as authored.
-        let Some(replacement) = behavior
-            .from
-            .extract(request)
-            .and_then(|source| behavior.extraction.extract(&source))
-        else {
+        let Some(source) = behavior.from.extract(request) else {
             continue;
         };
 
-        body.replace_token(&behavior.into, &replacement);
+        // Only the indices the response actually spells are extracted and scanned for, so a
+        // multi-node selector over a large request costs no more than the tokens written.
+        let indices = written_indices(&behavior.into, body, headers);
+        if indices.is_empty() {
+            let Some(bare) = behavior.extraction.extract(&source) else {
+                continue;
+            };
+            replace_copy_token(body, headers, &behavior.into, &bare, stub);
+            continue;
+        }
 
-        // Also replace in headers — per value, so multi-value headers (e.g. multiple
-        // Set-Cookie) keep their multiplicity (RFC 7230 §3.2.2 forbids folding Set-Cookie).
-        //
-        // `replacement` is request-derived, so it can carry a byte a header value cannot
-        // hold; repair it like the templating passes do (issue #1067). Only the substituted
-        // text is repaired — a control character the author typed into the header itself is
-        // an authoring bug that must still reach the builder and fail the response.
-        //
-        // Skipped outright when no header uses this token: the repair warns when it removes
-        // something, so running it for a body-only stub would log a header warning, once per
-        // request, about a header that does not exist.
-        if headers
-            .values()
-            .flatten()
-            .any(|v| v.contains_authored(&behavior.into))
-        {
-            let repaired = crate::imposter::headers::sanitize_header_value(&replacement, stub);
-            for value in headers.values_mut().flatten() {
-                value.replace_token(&behavior.into, &repaired);
+        let values = behavior.extraction.matches(&source);
+        let Some(bare) = bare_value(&behavior.extraction, &values) else {
+            continue;
+        };
+
+        // `${into}[i]` first, so the bare pass below cannot rewrite an indexed token's prefix. A
+        // group that did not take part in the match is "" (Mountebank emits `,` from
+        // `join(undefined)`). An index with no value is left to the bare pass, as in Mountebank.
+        for i in indices {
+            let Some(value) = values.get(i) else {
+                continue;
+            };
+            let token = format!("{}[{i}]", behavior.into);
+            replace_copy_token(body, headers, &token, value.as_deref().unwrap_or(""), stub);
+        }
+        replace_copy_token(body, headers, &behavior.into, bare, stub);
+    }
+}
+
+/// The indices of every `${into}[n]` the body and header values spell, `n` written as Mountebank
+/// writes an array index (no sign, no leading zero): Mountebank replaces `${into}[${i}]` for each
+/// value literally, so `$C[01]` is never an indexed token.
+fn written_indices(into: &str, body: &Spliced, headers: &SplicedHeaders) -> BTreeSet<usize> {
+    let prefix = format!("{into}[");
+    let mut indices = BTreeSet::new();
+    for text in std::iter::once(body).chain(headers.values().flatten()) {
+        for (at, _) in text.as_str().match_indices(&prefix) {
+            let rest = &text.as_str()[at + prefix.len()..];
+            let len = rest.bytes().take_while(u8::is_ascii_digit).count();
+            let digits = &rest[..len];
+            let canonical = len > 0 && (digits == "0" || !digits.starts_with('0'));
+            if canonical
+                && rest[len..].starts_with(']')
+                && let Ok(i) = digits.parse()
+            {
+                indices.insert(i);
             }
+        }
+    }
+    indices
+}
+
+/// The value of the bare `${into}` token — Rift's documented choice: a regex's first capture
+/// group, else its whole match; the first JSONPath or XPath node. `None` when nothing matched.
+fn bare_value<'a>(method: &ExtractionMethod, values: &'a [Option<String>]) -> Option<&'a str> {
+    let whole = values.first().and_then(Option::as_deref);
+    match method {
+        ExtractionMethod::Regex { .. } => values.get(1).and_then(Option::as_deref).or(whole),
+        ExtractionMethod::JsonPath { .. } | ExtractionMethod::XPath { .. } => whole,
+    }
+}
+
+/// Replace one copy token in the body and in every header value.
+fn replace_copy_token(
+    body: &mut Spliced,
+    headers: &mut SplicedHeaders,
+    token: &str,
+    replacement: &str,
+    stub: crate::imposter::headers::StubRef<'_>,
+) {
+    body.replace_token(token, replacement);
+
+    // Also replace in headers — per value, so multi-value headers (e.g. multiple Set-Cookie)
+    // keep their multiplicity (RFC 7230 §3.2.2 forbids folding Set-Cookie).
+    //
+    // `replacement` is request-derived, so it can carry a byte a header value cannot hold; repair
+    // it like the templating passes do (issue #1067). Only the substituted text is repaired — a
+    // control character the author typed into the header itself is an authoring bug that must
+    // still reach the builder and fail the response.
+    //
+    // Skipped outright when no header uses this token: the repair warns when it removes
+    // something, so running it for a body-only stub would log a header warning, once per
+    // request, about a header that does not exist.
+    if headers
+        .values()
+        .flatten()
+        .any(|v| v.contains_authored(token))
+    {
+        let repaired = crate::imposter::headers::sanitize_header_value(replacement, stub);
+        for value in headers.values_mut().flatten() {
+            value.replace_token(token, &repaired);
         }
     }
 }
@@ -772,5 +838,160 @@ mod tests {
             FIXTURE_STUB,
         );
         assert_eq!(served, "$A/abc");
+    }
+
+    fn regex(selector: &str) -> serde_json::Value {
+        serde_json::json!({"method": "regex", "selector": selector})
+    }
+
+    /// Issue #1407: Mountebank's `replaceArrayValuesIn` replaces `${into}[i]` with the i-th value
+    /// of the regex's `exec` array — the whole match at 0, then each group.
+    #[test]
+    fn indexed_tokens_take_each_capture_group() {
+        let (body, header) = copy_once(
+            r#""body""#,
+            regex(r"(\w+)-(\w+)"),
+            &request_with_body("ab-cd"),
+            "$C[1]-$C[2]|$C[0]|$C",
+        );
+        assert_eq!(body, "ab-cd|ab-cd|ab");
+        assert_eq!(header, vec!["<ab>".to_string()]);
+    }
+
+    #[test]
+    fn index_zero_is_the_whole_match() {
+        let (body, _) = copy_once(
+            r#""body""#,
+            regex(r"\d+"),
+            &request_with_body("x42"),
+            "$C[0]",
+        );
+        assert_eq!(body, "42");
+    }
+
+    #[test]
+    fn a_jsonpath_index_selects_that_node() {
+        let (body, _) = copy_once(
+            r#""body""#,
+            serde_json::json!({"method": "jsonpath", "selector": "$..id"}),
+            &request_with_body(r#"[{"id":1},{"id":2}]"#),
+            "$C[0],$C[1]|$C",
+        );
+        assert_eq!(body, "1,2|1");
+    }
+
+    #[test]
+    fn an_xpath_index_selects_that_node_in_document_order() {
+        let (body, _) = copy_once(
+            r#""body""#,
+            serde_json::json!({"method": "xpath", "selector": "//n"}),
+            &request_with_body("<d><n>a</n><n>b</n><n>c</n></d>"),
+            "$C[2]$C[1]$C[0]|$C",
+        );
+        assert_eq!(body, "cba|a");
+    }
+
+    /// Mountebank has no index parser: an index past the values, or one it never spells
+    /// (`[01]`), is not an indexed token, so the bare pass rewrites its prefix.
+    #[test]
+    fn an_out_of_range_or_non_canonical_index_has_its_prefix_rewritten() {
+        let (body, _) = copy_once(
+            r#""body""#,
+            regex(r"(\w+)-(\w+)"),
+            &request_with_body("ab-cd"),
+            "$C[5]|$C[01]",
+        );
+        assert_eq!(body, "ab[5]|ab[01]");
+    }
+
+    /// A group that did not take part in the match is `""` (Mountebank emits `,` through
+    /// `join(undefined)`; documented deviation).
+    #[test]
+    fn a_non_participating_group_is_empty() {
+        let (body, _) = copy_once(
+            r#""body""#,
+            regex("(a)?(b)"),
+            &request_with_body("b"),
+            "[$C[1]][$C[2]][$C]",
+        );
+        assert_eq!(body, "[][b][b]");
+    }
+
+    #[test]
+    fn indexed_tokens_are_replaced_in_each_value_of_a_multi_value_header() {
+        let behavior: CopyBehavior = serde_json::from_value(serde_json::json!({
+            "from": "body", "into": "$C", "using": regex(r"(\w+)-(\w+)")
+        }))
+        .expect("the copy parses");
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert(
+            "Set-Cookie".to_string(),
+            vec![
+                "a=$C[1]".to_string(),
+                "b=$C[2]".to_string(),
+                "c=1".to_string(),
+            ],
+        );
+        apply_copy_behaviors(
+            "",
+            &mut headers,
+            &[behavior],
+            &request_with_body("ab-cd"),
+            FIXTURE_STUB,
+        );
+        assert_eq!(
+            headers["Set-Cookie"],
+            vec!["a=ab".to_string(), "b=cd".to_string(), "c=1".to_string()]
+        );
+    }
+
+    /// Issue #1203: what a copy inserts is never re-scanned, so a request value that spells an
+    /// indexed token is served as sent.
+    #[test]
+    fn a_request_value_spelling_an_indexed_token_is_not_expanded() {
+        let (body, _) = copy_once(
+            r#""body""#,
+            regex("(.*)"),
+            &request_with_body("$C[1]$C"),
+            "$C[0]",
+        );
+        assert_eq!(body, "$C[1]$C");
+    }
+
+    /// An authored `$C[${I}]` whose index an earlier copy inserted expands: its first and last
+    /// bytes are authored, as with lookup's `${R}[${COL}]`.
+    #[test]
+    fn an_index_inserted_by_an_earlier_copy_composes() {
+        let behaviors: Vec<CopyBehavior> = serde_json::from_value(serde_json::json!([
+            {"from": {"query": "i"}, "into": "${I}", "using": regex(r"\d")},
+            {"from": "body", "into": "$C", "using": regex(r"(\w+)-(\w+)")}
+        ]))
+        .expect("the copies parse");
+        let mut request = request_with_body("ab-cd");
+        request.query.insert("i".to_string(), "2".to_string());
+        let served = apply_copy_behaviors(
+            "$C[${I}]",
+            &mut HashMap::new(),
+            &behaviors,
+            &request,
+            FIXTURE_STUB,
+        );
+        assert_eq!(served, "cd");
+    }
+
+    /// Only a canonical index closed by `]` is an indexed token; the scan reads headers too.
+    #[test]
+    fn written_indices_finds_only_canonical_indexed_tokens() {
+        let body = Spliced::authored(
+            "$C[0] $C[12] $C[01] $C[] $C[x] $C[3 $D[4] $C[18446744073709551616]".to_string(),
+        );
+        let headers = authored_headers(HashMap::from([(
+            "X-C".to_string(),
+            vec!["$C[7]".to_string()],
+        )]));
+        assert_eq!(
+            written_indices("$C", &body, &headers),
+            BTreeSet::from([0, 7, 12])
+        );
     }
 }

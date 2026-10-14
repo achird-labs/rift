@@ -13,6 +13,11 @@ record.
 
 ### Added
 
+- **`copy` indexed tokens** (#1407). `<into>[n]` is replaced with the n-th extracted value, as in
+  Mountebank: for a regex, `[0]` is the whole match and `[n]` is capture group n; for JSONPath and
+  XPath, the n-th selected node. A group that did not take part in the match is `""`
+  ([differences](docs/mountebank/differences.md#copy-indexed-tokens)).
+
 - **A model-based state-machine test of the stateful core** (#1344). Random sequences of stub
   edits, scenario and flow-state writes, reloads, re-created imposters and proxied requests run
   against a live engine and a reference model that follows Mountebank, compared after every step
@@ -228,6 +233,9 @@ record.
   gates nothing, still does not. A positive TTL running out on a scenario's key is not seen.
 
 ### Changed
+
+- **A stub that wrote `$C[1]` after a `copy` into `$C` now receives the indexed value** (#1407).
+  It used to receive the bare value followed by `[1]` (`ab[1]`).
 
 - **A `copy` that extracts nothing leaves its token in the response** (#1402). A regex that does
   not match, a JSONPath or XPath selector that selects nothing, or an absent source now leaves the

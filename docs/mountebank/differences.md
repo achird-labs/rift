@@ -71,6 +71,12 @@ the regex against JavaScript's `undefined` coerced to a string, so `.*` copies t
 `undefined` into the response. Rift does not reproduce that coercion — see
 [Behaviors](behaviors.md#copy).
 
+## `copy` indexed tokens
+
+`<into>[n]` takes the n-th extracted value, as in Mountebank. Two cases differ: a regex capture
+group that did not take part in the match is replaced with an empty string (Mountebank inserts a
+comma), and inserted text is never re-scanned for tokens — see [Behaviors](behaviors.md#copy).
+
 ## keyCaseSensitive is honoured as written
 
 Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`. Three consequences:
