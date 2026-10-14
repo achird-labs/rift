@@ -79,7 +79,7 @@
   {
     "id": "recorded-marker-x-rift-imposter",
     "case": "*",
-    "location": "*/stubs/*/responses/*/is/headers/x-rift-imposter",
+    "location": "*/stubs/*/responses/*/is/headers/X-Rift-Imposter",
     "kind": "documented",
     "doc": "docs/mountebank/differences.md",
     "quote": "A proxy whose upstream is itself a Rift imposter therefore records that imposter's markers in the saved response's `headers`, like any other upstream header.",
@@ -90,7 +90,7 @@
   {
     "id": "recorded-marker-x-rift-inject",
     "case": "*",
-    "location": "*/stubs/*/responses/*/is/headers/x-rift-inject",
+    "location": "*/stubs/*/responses/*/is/headers/X-Rift-Inject",
     "kind": "documented",
     "doc": "docs/mountebank/differences.md",
     "quote": "A proxy whose upstream is itself a Rift imposter therefore records that imposter's markers in the saved response's `headers`, like any other upstream header.",
@@ -2235,42 +2235,6 @@
     "rift": "1",
     "doc": "docs/mountebank/differences.md",
     "quote": "`decorate` always receives a `headers` object on the response, empty when the response has none; in Mountebank `response.headers` is `undefined` there, so a decorate that writes a header fails."
-  },
-  {
-    "case": "sdk-corpus: 07-proxy-record.json",
-    "kind": "known-bug",
-    "reason": "a proxy records upstream header names lower-cased (content-type); Mountebank records them as the upstream sent them (Content-Type) (#1366)",
-    "id": "recorded-header-names-lowercased/stored#0",
-    "location": "stored[4507]/stubs/0/responses/0/is/headers/Content-Type",
-    "mountebank": "\"application/json\"",
-    "rift": "(absent)"
-  },
-  {
-    "case": "sdk-corpus: 07-proxy-record.json",
-    "kind": "known-bug",
-    "reason": "a proxy records upstream header names lower-cased (content-type); Mountebank records them as the upstream sent them (Content-Type) (#1366)",
-    "id": "recorded-header-names-lowercased/stored#1",
-    "location": "stored[4507]/stubs/0/responses/0/is/headers/content-type",
-    "mountebank": "(absent)",
-    "rift": "\"application/json\""
-  },
-  {
-    "case": "sdk-corpus: 07-proxy-record.json",
-    "kind": "known-bug",
-    "reason": "a proxy records upstream header names lower-cased (content-type); Mountebank records them as the upstream sent them (Content-Type) (#1366)",
-    "id": "recorded-header-names-lowercased/replayable#0",
-    "location": "replayable[4507]/stubs/0/responses/0/is/headers/Content-Type",
-    "mountebank": "\"application/json\"",
-    "rift": "(absent)"
-  },
-  {
-    "case": "sdk-corpus: 07-proxy-record.json",
-    "kind": "known-bug",
-    "reason": "a proxy records upstream header names lower-cased (content-type); Mountebank records them as the upstream sent them (Content-Type) (#1366)",
-    "id": "recorded-header-names-lowercased/replayable#1",
-    "location": "replayable[4507]/stubs/0/responses/0/is/headers/content-type",
-    "mountebank": "(absent)",
-    "rift": "\"application/json\""
   },
   {
     "id": "replayable-prints-host",

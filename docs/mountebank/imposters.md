@@ -311,8 +311,9 @@ it depends on how the document reached Rift, and one `--configfile` document can
 depending only on whether it uses the `{"imposters": [...]}` wrapper or a bare array. Write the name
 once and the question never arises; that is the supported shape, and it is what every document that
 has ever been valid already does. A document that spells each name once is unaffected in every
-respect, and the spelling you wrote is the spelling Rift serves — nothing is lowercased or
-title-cased.
+respect, and the spelling you wrote is the spelling Rift keeps: `GET /imposters` and every export
+print it as written. On the wire, Rift's HTTP/1 server writes every response header name
+lower-case, as HTTP allows (names are case-insensitive).
 
 The check is UTF-8 **validity**, not ASCII (#1048): a header carrying non-ASCII UTF-8 is recorded
 byte-exact, on both the request and the response side.
