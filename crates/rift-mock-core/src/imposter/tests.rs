@@ -2819,8 +2819,9 @@ fn test_bare_query_param_exists_predicate() {
 
     let empty_headers: HashMap<String, String> = HashMap::new();
 
+    // A bare `?flag` is the empty string, which Mountebank's `exists` reads as absent (#1403).
     assert!(
-        stub_matches(
+        !stub_matches(
             &predicates,
             "GET",
             "/test",

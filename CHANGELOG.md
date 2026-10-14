@@ -234,6 +234,15 @@ record.
 
 ### Changed
 
+- **`exists` reads an empty value as absent, as Mountebank does** (#1403). `?flag`, `?q=`, an empty
+  header, an empty form field and a `""` JSON value now fail `exists: true` and satisfy
+  `exists: false`; they used to count as present. An object expectation fails when its container
+  is missing: an empty body, a request without a form, or a `""`/`null`/`0`/`false` parent. The
+  expectation is read for truthiness, so `0` and `""` mean absent. Body keys compare ignoring case
+  by default. An object expectation over a JSON array holds when some element satisfies it (a
+  documented deviation; Mountebank holds it for any array). Stubs matched on a bare `?flag` with
+  `exists: true` no longer match; use `equals: {"query": {"flag": ""}}`.
+
 - **A stub that wrote `$C[1]` after a `copy` into `$C` now receives the indexed value** (#1407).
   It used to receive the bare value followed by `[1]` (`ab[1]`).
 

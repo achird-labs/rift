@@ -1445,16 +1445,16 @@ fn parse_predicates(
         if let Some(exists) = predicate.get("exists") {
             if let Some(hdrs) = exists.get("headers").and_then(|v| v.as_object()) {
                 for (name, should_exist) in hdrs {
-                    if should_exist.as_bool().unwrap_or(true) {
+                    if exists_expects_present(should_exist) {
                         headers.insert(name.clone(), "test-value".to_string());
                     }
                 }
             }
-            // Synthesize the query param so the request matches (issue #273); `exists` matches on
-            // presence regardless of value.
+            // Synthesize the query param so the request matches (issue #273). The value is
+            // non-empty because `exists` reads an empty value as absent (#1403).
             if let Some(q) = exists.get("query").and_then(|v| v.as_object()) {
                 for (name, should_exist) in q {
-                    if should_exist.as_bool().unwrap_or(true) {
+                    if exists_expects_present(should_exist) {
                         query_params.insert(name.clone(), "exists".to_string());
                     }
                 }
@@ -1558,6 +1558,18 @@ fn parse_predicates(
 /// constrains to a guaranteed-different value. Path and method cover the predicates the verifier
 /// generates requests from; an inner constraint on body/headers/query is already violated by the
 /// default empty request.
+/// Whether an `exists` expectation asks for the field, read for JavaScript truthiness as the
+/// engine does (#1403): `false`, `null`, `0` and `""` mean absent.
+fn exists_expects_present(expected: &serde_json::Value) -> bool {
+    match expected {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        serde_json::Value::String(s) => !s.is_empty(),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => true,
+    }
+}
+
 fn apply_not_predicate(inner: &serde_json::Value, method: &mut String, path: &mut String) {
     let (inner_method, _inner_path, _h, _q, _b) = parse_predicates(std::slice::from_ref(inner));
     if predicate_mentions_field(inner, "path") {

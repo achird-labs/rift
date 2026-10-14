@@ -602,6 +602,9 @@ async fn test_query_bare_param_no_equals() {
         "stubs": [{
             "predicates": [{"exists": {"query": {"flag": true}}}],
             "responses": [{"is": {"statusCode": 200, "body": "flag exists"}}]
+        }, {
+            "predicates": [{"equals": {"query": {"flag": ""}}}],
+            "responses": [{"is": {"statusCode": 200, "body": "flag is empty"}}]
         }]
     });
 
@@ -613,10 +616,11 @@ async fn test_query_bare_param_no_equals() {
         .await
         .unwrap();
 
+    // `?flag` parses to flag='' (#84), and Mountebank's `exists` reads '' as absent (#1403).
     assert_eq!(
-        resp.status(),
-        200,
-        "Bare query param '?flag' should be treated as flag='' and exist"
+        resp.text().await.unwrap(),
+        "flag is empty",
+        "Bare query param '?flag' should be treated as flag='', which exists reads as absent"
     );
 
     clear_imposters(&client, admin_port).await;
@@ -639,6 +643,11 @@ async fn test_query_mixed_bare_and_valued() {
             }, {
                 "exists": {"query": {"flag": true}}
             }],
+            "responses": [{"is": {"statusCode": 200, "body": "flag exists"}}]
+        }, {
+            "predicates": [{
+                "equals": {"query": {"a": "1", "flag": "", "b": "2"}},
+            }],
             "responses": [{"is": {"statusCode": 200, "body": "mixed match"}}]
         }]
     });
@@ -653,9 +662,9 @@ async fn test_query_mixed_bare_and_valued() {
         .unwrap();
 
     assert_eq!(
-        resp.status(),
-        200,
-        "Bug 2: Mixed query string with bare param should work"
+        resp.text().await.unwrap(),
+        "mixed match",
+        "Bug 2: the bare param survives parsing as flag='' (and exists reads it as absent, #1403)"
     );
 
     clear_imposters(&client, admin_port).await;

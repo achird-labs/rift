@@ -2195,5 +2195,27 @@
     "reason": "Mountebank replaces a falsy body with the defaultResponse body; Rift completes only a body the response did not write",
     "mountebank": "dflt",
     "rift": ""
+  },
+  {
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift holds it when some element satisfies the object",
+    "reason": "exists with an object expectation over a JSON array: Mountebank's onlyActualIsArray shortcut holds any truthy expectation without looking at the elements; Rift needs some element to satisfy it",
+    "mountebank": "matched",
+    "rift": "",
+    "case": "targeted: exists nested false fails under a falsy parent (#1403)",
+    "id": "exists-object-over-array/nested-false-step[5].body",
+    "location": "step[5].body"
+  },
+  {
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift holds it when some element satisfies the object",
+    "reason": "exists with an object expectation over a JSON array: Mountebank's onlyActualIsArray shortcut holds any truthy expectation without looking at the elements; Rift needs some element to satisfy it",
+    "mountebank": "matched",
+    "rift": "",
+    "case": "targeted: exists object over an array (Rift needs a satisfying element) (#1403)",
+    "id": "exists-object-over-array/nested-true-step[1].body",
+    "location": "step[1].body"
   }
 ]
