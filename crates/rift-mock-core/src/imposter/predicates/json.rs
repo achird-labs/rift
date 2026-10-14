@@ -11,9 +11,8 @@ use std::hash::BuildHasher;
 pub(crate) fn json_value_to_string(val: &serde_json::Value) -> String {
     match val {
         serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Null => String::new(),
+        // Numbers and booleans fall through to `Display`, which is Mountebank's `toString`.
         _ => val.to_string(),
     }
 }
