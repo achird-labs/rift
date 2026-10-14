@@ -231,15 +231,14 @@ impl WaitBehavior {
     }
 }
 
-/// Extract function body from JavaScript function string
+/// Extract function body from JavaScript function string: the text between the first `{` and the
+/// last `}`, or `None` when either is missing or the `}` comes first.
 fn extract_function_body(js_func: &str) -> Option<String> {
     let start = js_func.find('{')?;
     let end = js_func.rfind('}')?;
-    if start < end {
-        Some(js_func[start + 1..end].trim().to_string())
-    } else {
-        None
-    }
+    js_func
+        .get(start + 1..end)
+        .map(|body| body.trim().to_string())
 }
 
 #[cfg(test)]
@@ -485,5 +484,78 @@ mod tests {
             WaitBehavior::execute_js_wait_function_regex("function() { return -5; }"),
             Some(0)
         );
+    }
+
+    // Issue #1384: a body the regex fallback cannot parse (it would answer the 100ms fallback), so
+    // only a real Boa evaluation yields 42.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn a_wait_function_only_boa_can_evaluate_runs_on_boa() {
+        let wait = WaitBehavior::Function("function() { return 2 * 21; }".to_string());
+        assert_eq!(wait.get_duration_ms(), 42);
+    }
+
+    // Issue #1384: a non-finite result is unusable, so it takes the loud 100ms fallback rather than
+    // saturating to the 60s cap (`Infinity`) or flooring to 0 (`NaN`).
+    #[test]
+    fn a_non_finite_wait_falls_back_to_100ms() {
+        for body in ["Infinity", "NaN"] {
+            let wait = WaitBehavior::Function(format!("function() {{ return {body}; }}"));
+            assert_eq!(wait.get_duration_ms(), 100, "return {body}");
+        }
+    }
+
+    // Issue #1384: the solo pattern needs both `var min` and `var max`; `min` alone is not it.
+    #[test]
+    fn regex_fallback_needs_both_min_and_max_for_the_solo_pattern() {
+        assert_eq!(
+            WaitBehavior::execute_js_wait_function_regex(
+                "function() { var min = Math.ceil(5); return 7; }"
+            ),
+            None
+        );
+    }
+
+    // Issue #1384: an inverted solo pattern answers `min` instead of drawing from an empty range,
+    // which `random_range` panics on.
+    #[test]
+    fn an_inverted_solo_pattern_returns_min() {
+        assert_eq!(
+            WaitBehavior::parse_solo_wait_pattern(
+                "var min = Math.ceil(20); var max = Math.floor(10);"
+            ),
+            Some(20)
+        );
+    }
+
+    // Issue #1384: the clamp of an inverted range is the documented loud fallback, so it warns.
+    #[tracing_test::traced_test]
+    #[test]
+    fn an_inverted_range_warns() {
+        let wait = WaitBehavior::Range {
+            min_ms: 5,
+            max_ms: 3,
+        };
+        assert_eq!(wait.get_duration_ms(), 5);
+        assert!(logs_contain("clamping to min"));
+    }
+
+    // Issue #1384: an equal-bound range is a valid config, so it answers its value silently.
+    #[tracing_test::traced_test]
+    #[test]
+    fn an_equal_range_does_not_warn() {
+        let wait = WaitBehavior::Range {
+            min_ms: 5,
+            max_ms: 5,
+        };
+        assert_eq!(wait.get_duration_ms(), 5);
+        assert!(!logs_contain("clamping to min"));
+    }
+
+    // Issue #1384: a `}` before the first `{` leaves no body to extract.
+    #[test]
+    fn a_closing_brace_before_the_opening_one_has_no_body() {
+        assert_eq!(extract_function_body("function() } 5 {"), None);
+        assert_eq!(extract_function_body("function() {}").as_deref(), Some(""));
     }
 }

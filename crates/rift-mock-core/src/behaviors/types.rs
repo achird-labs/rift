@@ -425,4 +425,25 @@ decorate: "response.body = 'decorated';"
             Some("response.body = 'decorated';".to_string())
         );
     }
+
+    /// Issue #1384: `repeat` alone runs nothing on the response; any real step does.
+    #[test]
+    fn transforms_response_is_false_for_repeat_alone() {
+        let program = |elements: &[serde_json::Value]| {
+            BehaviorProgram::from_elements(elements).expect("valid behaviors")
+        };
+        assert!(!program(&[serde_json::json!({"repeat": 2})]).transforms_response());
+        assert!(program(&[serde_json::json!({"wait": 5})]).transforms_response());
+        assert!(!program(&[]).transforms_response());
+    }
+
+    /// Issue #1384: an owned `serde_json::Value` hands the visitor an owned `String`
+    /// (`visit_string`, not `visit_str`), and the command must survive that path too.
+    #[test]
+    fn shell_transform_string_decodes_from_an_owned_value() {
+        let behaviors: ResponseBehaviors =
+            serde_json::from_value(serde_json::json!({"shellTransform": "echo hi"}))
+                .expect("valid behaviors");
+        assert_eq!(behaviors.shell_transform, vec!["echo hi".to_string()]);
+    }
 }

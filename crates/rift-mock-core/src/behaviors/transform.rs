@@ -87,7 +87,8 @@ pub fn rewrite_js_config_to_rhai(script: &str) -> String {
     // Strip a `config =>` / `function(config)` wrapper down to the function body.
     let body = if script.contains("=>") || script.trim_start().starts_with("function") {
         match (script.find('{'), script.rfind('}')) {
-            (Some(open), Some(close)) if close > open => &script[open + 1..close],
+            // `get` is `None` when the `}` precedes the `{`: no body to strip.
+            (Some(open), Some(close)) => script.get(open + 1..close).unwrap_or(script),
             _ => script,
         }
     } else {
@@ -420,6 +421,37 @@ mod tests {
             )
             .trim(),
             "response.body = request.body;"
+        );
+    }
+
+    // Issue #1384: each spelling is detected on its own. The bodies deliberately avoid
+    // `config.response.`, which would otherwise satisfy the check whatever the prefix tests do.
+    #[test]
+    fn every_config_spelling_is_detected_on_its_own() {
+        for script in [
+            "config => {}",
+            "config=>{}",
+            "(config) => {}",
+            "(config)=>{}",
+            "function(config) {}",
+            "function (config) {}",
+            "var p = config.request.path;",
+            "config.response.body = 1;",
+        ] {
+            assert!(is_js_config_decorate(script), "{script}");
+        }
+        for script in ["response.body = 1;", "function(request, response) {}"] {
+            assert!(!is_js_config_decorate(script), "{script}");
+        }
+    }
+
+    // Issue #1384: a `}` before the first `{` leaves no wrapper body to strip, so the whole
+    // script is rewritten as-is instead of slicing a reversed range.
+    #[test]
+    fn a_script_whose_closing_brace_precedes_its_opening_one_is_not_stripped() {
+        assert_eq!(
+            rewrite_js_config_to_rhai("config => config.response.body = '}{';").trim(),
+            r#"config => response.body = "}{";"#
         );
     }
 }

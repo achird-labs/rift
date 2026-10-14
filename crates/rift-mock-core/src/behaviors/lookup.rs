@@ -183,8 +183,12 @@ impl CsvCache {
 pub struct CsvData {
     /// Column headers
     headers: Vec<String>,
-    /// Rows indexed by first column for fast lookup
-    rows: HashMap<String, Vec<String>>,
+    /// Data rows in file order: a lookup serves the first matching row, as Mountebank's
+    /// `selectRowFromCSV` does (issue #1384).
+    rows: Vec<Vec<String>>,
+    /// First-column value → index of the first row holding it, so the common first-column
+    /// lookup stays O(1).
+    first_column: HashMap<String, usize>,
 }
 
 impl CsvData {
@@ -204,50 +208,48 @@ impl CsvData {
             .collect();
 
         // Parse data rows
-        let mut rows = HashMap::new();
+        let mut rows = Vec::new();
+        let mut first_column = HashMap::new();
         for line in lines {
             let line = line?;
             let values: Vec<String> = line
                 .split(delimiter)
                 .map(|s| s.trim().to_string())
                 .collect();
-            if !values.is_empty() {
-                rows.insert(values[0].clone(), values);
-            }
+            // `split` always yields at least one item, so every line is a row.
+            first_column.entry(values[0].clone()).or_insert(rows.len());
+            rows.push(values);
         }
 
-        Ok(Self { headers, rows })
+        Ok(Self {
+            headers,
+            rows,
+            first_column,
+        })
     }
 
-    /// Lookup a row by key and return column values as token replacements
+    /// Look up the first row, in file order, whose `key_column` cell equals `key`, and return its
+    /// cells as `[column_name]` token replacements. Empty when no row matches or `key_column` is
+    /// not a header.
     pub fn lookup(&self, key: &str, key_column: &str) -> HashMap<String, String> {
-        let mut result = HashMap::new();
-
-        // Find key column index
-        let key_col_idx = self.headers.iter().position(|h| h == key_column);
-
-        if let Some(key_idx) = key_col_idx {
-            // Find row where key column matches
-            for (row_key, values) in &self.rows {
-                let matches = if key_idx == 0 {
-                    row_key == key
-                } else {
-                    values.get(key_idx).map(|v| v == key).unwrap_or(false)
-                };
-
-                if matches {
-                    // Return all columns as [column_name] tokens
-                    for (i, header) in self.headers.iter().enumerate() {
-                        if let Some(value) = values.get(i) {
-                            result.insert(format!("[{header}]"), value.clone());
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-
-        result
+        let Some(key_idx) = self.headers.iter().position(|h| h == key_column) else {
+            return HashMap::new();
+        };
+        let row = if key_idx == 0 {
+            self.first_column.get(key).map(|&i| &self.rows[i])
+        } else {
+            self.rows
+                .iter()
+                .find(|values| values.get(key_idx).is_some_and(|v| v == key))
+        };
+        let Some(values) = row else {
+            return HashMap::new();
+        };
+        self.headers
+            .iter()
+            .zip(values)
+            .map(|(header, value)| (format!("[{header}]"), value.clone()))
+            .collect()
     }
 }
 
@@ -877,5 +879,68 @@ mod tests {
             out["key"].get("index").is_none(),
             "absent stays absent: {out}"
         );
+    }
+
+    /// Writes `contents` to a per-process temp CSV named after `tag` and loads it.
+    fn csv_data(tag: &str, contents: &str) -> CsvData {
+        let path =
+            std::env::temp_dir().join(format!("rift_lookup_1384_{tag}_{}.csv", std::process::id()));
+        std::fs::write(&path, contents).expect("write csv");
+        let data = CsvData::load(&path, ',').expect("load csv");
+        let _ = std::fs::remove_file(&path);
+        data
+    }
+
+    /// Issue #1384: Mountebank's `selectRowFromCSV` resolves with the first row whose key
+    /// column matches, in file order. Rift used to key rows by first cell in a map, so a
+    /// repeated key served the last row.
+    #[test]
+    fn a_repeated_key_serves_the_first_row_in_file_order() {
+        let data = csv_data("repeat", "id,name\n1,alice\n1,carol\n");
+        assert_eq!(data.lookup("1", "id")["[name]"], "alice");
+    }
+
+    /// Issue #1384: a key column other than the first scans rows in file order and serves the
+    /// first match, not whichever row a randomly seeded map yields first.
+    #[test]
+    fn a_non_first_key_column_serves_the_first_matching_row() {
+        let data = csv_data(
+            "column",
+            "id,name,city\n1,alice,paris\n2,bob,rome\n3,dave,rome\n",
+        );
+        let rome = data.lookup("rome", "city");
+        assert_eq!(rome["[name]"], "bob");
+        assert_eq!(rome["[id]"], "2");
+        assert_eq!(data.lookup("bob", "name")["[city]"], "rome");
+        assert!(data.lookup("oslo", "city").is_empty());
+    }
+
+    /// `clear` drops cached files, so the next `get_or_load` reads the file again.
+    #[test]
+    fn clear_drops_the_cached_file() {
+        let path =
+            std::env::temp_dir().join(format!("rift_lookup_1384_clear_{}.csv", std::process::id()));
+        let path_str = path.to_string_lossy().into_owned();
+        std::fs::write(&path, "id,name\n1,old\n").expect("write csv");
+        let cache = CsvCache::default();
+        let name = |cache: &CsvCache| {
+            cache
+                .get_or_load(&path_str, ',')
+                .expect("loads")
+                .lookup("1", "id")["[name]"]
+                .clone()
+        };
+        assert_eq!(name(&cache), "old");
+
+        std::fs::write(&path, "id,name\n1,new\n").expect("rewrite csv");
+        assert_eq!(
+            name(&cache),
+            "old",
+            "the cached file is served until cleared"
+        );
+
+        cache.clear();
+        assert_eq!(name(&cache), "new", "clear forces a reload");
+        let _ = std::fs::remove_file(&path);
     }
 }

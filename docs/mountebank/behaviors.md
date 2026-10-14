@@ -347,6 +347,10 @@ xpath`; anything else is refused when the imposter is loaded (`rift-lint` `E051`
 0.21.0 accepted `ns` and ignored it, so a prefixed selector extracted nothing — and an unbound
 prefix failed the request without a response.
 
+An XPath selector that evaluates to a string, number or boolean (`string(//a)`, `count(//a)`,
+`boolean(//a)`) substitutes that value. Mountebank leaves the token in place for a number or
+boolean, and fails the request for `string()`.
+
 Every occurrence of the `into` token in the body and header values is replaced. If the source is
 absent, or nothing is extracted, the token is replaced with an empty string. A selector that does
 not compile is not treated as "nothing extracted": the imposter is refused when it is loaded.
@@ -511,6 +515,10 @@ id,name,email
 ```
 
 Request to `/users/1` returns `{ "name": "Alice", "email": "alice@example.com" }`.
+
+When several rows match, the first one in the file is used, as in Mountebank. Releases up to
+0.21.0 served the last row for a repeated value in the first column, and an arbitrary one for a
+repeated value in any other column.
 
 `csv.delimiter` sets a single-character separator (default `,`). The file is read once and cached;
 its path is resolved relative to the server's working directory. Cells are split on the delimiter
