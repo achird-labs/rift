@@ -28,4 +28,10 @@ exclude_re = [
     "predicates/regex_cache.rs:.*replace new_cache_map -> CacheMap with Default::default\\(\\)",
     # Equivalent: each `visit_unit` returns `Ok(Vec::new())`, which is `Vec::default()`.
     "behaviors/types.rs:.*::visit_unit -> Result<Self::Value, E> with Ok\\(Default::default\\(\\)\\)",
+    # Equivalent (#1383): an empty carried range (`start == stop`) always ends where the range
+    # pushed just before it ends, so `push_merged` absorbs it.
+    "behaviors/spliced.rs:.*replace < with <= in Rebuild::copy_untouched",
+    # Equivalent (#1383): breaking on `r.end == segment.end` only defers advancing past that range
+    # by one call; the next call pushes nothing for it and then advances.
+    "behaviors/spliced.rs:.*replace > with >= in Rebuild::copy_untouched",
 ]
