@@ -875,6 +875,162 @@ mod tests {
     }
 
     // =========================================================================
+    // Mutation-survivor pins (#1382). Every expected value below is one Mountebank 2.9.1
+    // agrees with; the `exists` empty-value divergences (#1403) are deliberately avoided.
+    // =========================================================================
+
+    fn fields_of(key: &str, value: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        [(key.to_string(), value)].into_iter().collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn holds(
+        op: PredicateOperation,
+        body: Option<&str>,
+        request_from: Option<&str>,
+        client_ip: Option<&str>,
+        form: Option<&HashMap<String, String>>,
+    ) -> bool {
+        predicate_matches(
+            &make_predicate(op),
+            "GET",
+            "/test",
+            None,
+            &empty_headers(),
+            body,
+            request_from,
+            client_ip,
+            form,
+            0,
+        )
+        .unwrap()
+    }
+
+    fn exists_body(expected: serde_json::Value, body: Option<&str>) -> bool {
+        holds(
+            PredicateOperation::Exists(fields_of("body", expected)),
+            body,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn exists_request_from_and_ip_follow_presence() {
+        for (key, value) in [("requestFrom", "127.0.0.1:5000"), ("ip", "127.0.0.1")] {
+            let on = |expected: bool, v: Option<&str>| {
+                let (rf, ip) = if key == "ip" { (None, v) } else { (v, None) };
+                holds(
+                    PredicateOperation::Exists(fields_of(key, json!(expected))),
+                    None,
+                    rf,
+                    ip,
+                    None,
+                )
+            };
+            assert!(on(true, Some(value)), "{key}: exists true, present");
+            assert!(!on(true, None), "{key}: exists true, absent");
+            assert!(!on(true, Some("")), "{key}: exists true, empty");
+            assert!(!on(false, Some(value)), "{key}: exists false, present");
+            assert!(on(false, None), "{key}: exists false, absent");
+        }
+    }
+
+    #[test]
+    fn exists_reaches_into_a_nested_json_object() {
+        let nested_true = json!({"a": {"b": true}});
+        assert!(exists_body(nested_true.clone(), Some(r#"{"a":{"b":1}}"#)));
+        assert!(!exists_body(nested_true.clone(), Some(r#"{"a":{"c":1}}"#)));
+        assert!(!exists_body(nested_true, Some(r#"{"x":1}"#)));
+        let nested_false = json!({"a": {"b": false}});
+        assert!(exists_body(nested_false.clone(), Some(r#"{"a":{"c":1}}"#)));
+        assert!(!exists_body(nested_false, Some(r#"{"a":{"b":1}}"#)));
+    }
+
+    #[test]
+    fn exists_with_a_non_boolean_value_means_present() {
+        assert!(exists_body(json!("yes"), Some("x")));
+        assert!(!exists_body(json!("yes"), None));
+        assert!(exists_body(json!({"a": "yes"}), Some(r#"{"a":1}"#)));
+        assert!(!exists_body(json!({"a": "yes"}), Some(r#"{"b":1}"#)));
+    }
+
+    #[test]
+    fn equals_and_matches_compare_request_from_and_ip() {
+        let ip = Some("127.0.0.1");
+        let rf = Some("127.0.0.1:5000");
+        let equals = |key: &str, v: &str| {
+            holds(
+                PredicateOperation::Equals(fields_of(key, json!(v))),
+                None,
+                rf,
+                ip,
+                None,
+            )
+        };
+        let matches = |key: &str, v: &str| {
+            holds(
+                PredicateOperation::Matches(fields_of(key, json!(v))),
+                None,
+                rf,
+                ip,
+                None,
+            )
+        };
+        assert!(equals("ip", "127.0.0.1"));
+        assert!(!equals("ip", "10.0.0.1"));
+        assert!(equals("requestFrom", "127.0.0.1:5000"));
+        assert!(!equals("requestFrom", "10.0.0.1:1"));
+        assert!(matches("requestFrom", r"^127\.0\.0\.1:\d+$"));
+        assert!(!matches("requestFrom", r"^10\."));
+        assert!(matches("ip", r"^127\.0\.0\.1$"));
+        assert!(!matches("ip", r"^10\."));
+    }
+
+    #[test]
+    fn deep_equals_on_form_requires_the_same_field_set() {
+        let form: HashMap<String, String> = [("a", "1"), ("b", "2")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let deep = |expected: serde_json::Value| {
+            holds(
+                PredicateOperation::DeepEquals(fields_of("form", expected)),
+                Some("a=1&b=2"),
+                None,
+                None,
+                Some(&form),
+            )
+        };
+        assert!(!deep(json!({"a": "1"})));
+        assert!(deep(json!({"a": "1", "b": "2"})));
+    }
+
+    #[test]
+    fn request_headers_len_and_is_empty_count_only_names_with_values() {
+        let multi: HashMap<String, Vec<String>> = [
+            ("a".to_string(), vec!["1".to_string()]),
+            ("b".to_string(), vec!["2".to_string()]),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(RequestHeaders::len(&multi), 2);
+        assert!(!RequestHeaders::is_empty(&multi));
+
+        let valueless: HashMap<String, Vec<String>> =
+            [("a".to_string(), Vec::new())].into_iter().collect();
+        assert_eq!(RequestHeaders::len(&valueless), 0);
+        assert!(RequestHeaders::is_empty(&valueless));
+
+        let single_empty: HashMap<String, String> = HashMap::new();
+        assert!(RequestHeaders::is_empty(&single_empty));
+        let single: HashMap<String, String> =
+            [("a".to_string(), "1".to_string())].into_iter().collect();
+        assert!(!RequestHeaders::is_empty(&single));
+    }
+
+    // =========================================================================
     // deepEquals body structural comparison (Issue #85 - fixed)
     // JSON objects are compared structurally, not by string representation
     // =========================================================================
@@ -1104,6 +1260,30 @@ mod tests {
             result,
             "exists with keyCaseSensitive=true should match exact case header key"
         );
+    }
+
+    // The `matches` key comparison under keyCaseSensitive: true is exact (#1382; Rift honours the
+    // setting on its own, a documented deviation from Mountebank, #1367).
+    #[test]
+    fn matches_with_key_case_sensitive_finds_only_the_exact_key() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("headers".to_string(), json!({"X-Key": "^v"}))]
+                .into_iter()
+                .collect();
+        let params = PredicateParameters {
+            key_case_sensitive: Some(true),
+            ..Default::default()
+        };
+        let pred = make_predicate_with_params(PredicateOperation::Matches(fields), params);
+        let matches_with = |name: &str| {
+            let headers: HashMap<String, String> = [(name.to_string(), "value".to_string())].into();
+            predicate_matches(
+                &pred, "GET", "/test", None, &headers, None, None, None, None, 0,
+            )
+            .unwrap()
+        };
+        assert!(matches_with("X-Key"), "the exact key is found");
+        assert!(!matches_with("x-key"), "another spelling is not");
     }
 
     #[test]

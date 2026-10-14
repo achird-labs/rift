@@ -101,12 +101,15 @@ job writes the merged counts, survivors and timeouts to the run summary, and eac
 
 A surviving mutant (a line of `mutants.out/missed.txt`) is one of three things:
 
-- **A test gap.** Write the test that fails on that mutant. In matching, behavior or proxy code,
-  prefer a case in `conformance/differential/cases/`: the mutant says *where* a test is missing and
-  Mountebank says what the right answer is, so one case kills the mutant and pins parity. Group a
-  cluster of survivors in one function into one test, not one per mutant.
+- **A test gap.** Write the test that fails on that mutant. The kill must be a test in the mutated
+  crate (`cargo mutants -p <crate>` runs only that package's tests), so a case in
+  `conformance/differential/cases/` cannot kill it: it runs in `rift-differential` against a prebuilt
+  binary. Add a differential case on top as the parity pin when Mountebank's answer is the point.
+  Group a cluster of survivors in one function into one test, not one per mutant.
 - **An equivalent mutant**, which changes no observable behaviour (`>=` against `>` where equality
-  cannot happen). Mark the function `#[mutants::skip]` with a comment saying why.
+  cannot happen). Delete the redundant code when it is simply dead (for example a match arm the
+  fallback already covers); otherwise add an `exclude_re` entry to `.cargo/mutants.toml` with a
+  one-line reason (`#[mutants::skip]` needs the `mutants` crate, which is not a dependency).
 - **Unobservable by design.** Add an `exclude_re` entry to `.cargo/mutants.toml` with a reason.
 
 A survivor that replaces a value with `Default::default()` on a data path deserves a look first: it
