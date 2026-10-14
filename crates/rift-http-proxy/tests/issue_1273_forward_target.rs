@@ -33,10 +33,20 @@ async fn start(extra: &[&str]) -> RunningServer {
 /// test can see both that the request arrived and what it carried. `tls` makes it an HTTPS origin
 /// whose certificate chains to that CA only.
 async fn spawn_upstream(tls: Option<Arc<CertificateAuthority>>) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind upstream");
-    let port = listener.local_addr().expect("addr").port();
+    // The rules forward to `localhost`, which may resolve to `::1` first, and the IPv6 test below
+    // binds `[::1]:0` concurrently: IPv4 and IPv6 ports are separate, so it can be handed this same
+    // number and answer for us. Own the port on both loopbacks (where the host has `::1`).
+    let (listeners, port) = loop {
+        let v4 = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let port = v4.local_addr().expect("addr").port();
+        match TcpListener::bind(("::1", port)).await {
+            Ok(v6) => break (vec![v4, v6], port),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(_) => break (vec![v4], port),
+        }
+    };
     let acceptor = tls.map(|ca| {
         let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
@@ -48,27 +58,30 @@ async fn spawn_upstream(tls: Option<Arc<CertificateAuthority>>) -> u16 {
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         TlsAcceptor::from(Arc::new(config))
     });
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                return;
-            };
-            let acceptor = acceptor.clone();
-            tokio::spawn(async move {
-                match acceptor {
-                    Some(acceptor) => {
-                        if let Ok(mut s) = acceptor.accept(stream).await {
-                            answer(&mut s, "https").await;
+    for listener in listeners {
+        let acceptor = acceptor.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    match acceptor {
+                        Some(acceptor) => {
+                            if let Ok(mut s) = acceptor.accept(stream).await {
+                                answer(&mut s, "https").await;
+                            }
+                        }
+                        None => {
+                            let mut s = stream;
+                            answer(&mut s, "http").await;
                         }
                     }
-                    None => {
-                        let mut s = stream;
-                        answer(&mut s, "http").await;
-                    }
-                }
-            });
-        }
-    });
+                });
+            }
+        });
+    }
     port
 }
 

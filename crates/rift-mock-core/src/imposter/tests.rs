@@ -5007,6 +5007,198 @@ mod proxy_generator_failure_tests {
         let _ = manager.delete_imposter(22642).await;
         let _ = manager.delete_imposter(19823).await;
     }
+
+    // ---- Mutation-gap tests (issue #1381). Auto-assigned ports throughout. ----
+
+    /// Create an imposter on an auto-assigned port and return that port.
+    async fn create(manager: &ImposterManager, config: serde_json::Value) -> u16 {
+        manager
+            .create_imposter(serde_json::from_value(config).unwrap())
+            .await
+            .expect("create imposter")
+    }
+
+    /// Upstream whose every request is answered by `response` (an `is` response).
+    async fn upstream_answering(manager: &ImposterManager, response: serde_json::Value) -> u16 {
+        create(
+            manager,
+            serde_json::json!({
+                "port": 0, "protocol": "http",
+                "stubs": [{ "responses": [{ "is": response }] }]
+            }),
+        )
+        .await
+    }
+
+    /// Kills the `delete !` mutant on the `content-length` filter in `transform_upstream`: the
+    /// recording keeps the upstream's own headers and drops only the stale `content-length`.
+    #[tokio::test]
+    async fn proxy_behaviors_keep_upstream_headers_and_drop_content_length() {
+        let manager = ImposterManager::new();
+        let up = upstream_answering(
+            &manager,
+            serde_json::json!({ "headers": { "x-up": "1" }, "body": "up" }),
+        )
+        .await;
+        let port = create(
+            &manager,
+            serde_json::json!({
+                "port": 0, "protocol": "http",
+                "stubs": [{ "responses": [{
+                    "proxy": {
+                        "to": format!("http://127.0.0.1:{up}"),
+                        "mode": "proxyOnce",
+                        "predicateGenerators": [{ "matches": { "path": true } }]
+                    },
+                    "_behaviors": { "decorate": "function(req, res) { res.body = 'longer body'; }" }
+                }]}]
+            }),
+        )
+        .await;
+
+        let resp = get(port, "/a").await;
+        assert_eq!(resp.headers()["x-up"], "1");
+        assert_eq!(resp.text().await.unwrap(), "longer body");
+
+        let stubs = manager.get_imposter(port).unwrap().get_stubs();
+        assert_eq!(stubs.len(), 2, "one recording plus the proxy stub");
+        let recorded = serde_json::to_value(&stubs[0]).unwrap();
+        let headers = recorded["responses"][0]["is"]["headers"]
+            .as_object()
+            .unwrap_or_else(|| panic!("recorded stub has no headers: {recorded}"));
+        let named = |want: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(want));
+        assert_eq!(
+            named("x-up").map(|(_, v)| v),
+            Some(&serde_json::json!("1")),
+            "upstream header must survive into the recording: {recorded}"
+        );
+        assert!(
+            named("content-length").is_none(),
+            "the upstream content-length is stale after a behavior and must not be recorded: {recorded}"
+        );
+
+        let _ = manager.delete_imposter(port).await;
+        let _ = manager.delete_imposter(up).await;
+    }
+
+    /// Kills `+` -> `*` in `.skip(proxy_stub_index + 1)` of `insert_or_append_proxy_stub`: a
+    /// `proxyAlways` recording whose predicates equal the proxy stub's own must not merge into the
+    /// proxy stub; the search for a stub to merge into starts after it.
+    #[tokio::test]
+    async fn proxy_always_never_merges_a_recording_into_the_proxy_stub_itself() {
+        let manager = ImposterManager::new();
+        let up = upstream_answering(&manager, serde_json::json!({ "body": "OK" })).await;
+        let port = create(
+            &manager,
+            serde_json::json!({
+                "port": 0, "protocol": "http",
+                "stubs": [{
+                    "predicates": [{ "deepEquals": { "path": "/a" } }],
+                    "responses": [{ "proxy": {
+                        "to": format!("http://127.0.0.1:{up}"),
+                        "mode": "proxyAlways",
+                        "predicateGenerators": [{ "matches": { "path": true } }]
+                    }}]
+                }]
+            }),
+        )
+        .await;
+
+        let resp = get(port, "/a").await;
+        assert_eq!(resp.text().await.unwrap(), "OK");
+
+        let stubs = manager.get_imposter(port).unwrap().get_stubs();
+        assert_eq!(stubs.len(), 2, "the recording is its own stub: {stubs:?}");
+        assert_eq!(stubs[0].responses.len(), 1);
+        assert!(
+            matches!(stubs[0].responses[0], StubResponse::Proxy { .. }),
+            "the proxy stub must stay a lone proxy response"
+        );
+        assert_eq!(stubs[1].responses.len(), 1);
+        let recorded = serde_json::to_value(&stubs[1]).unwrap();
+        assert_eq!(recorded["responses"][0]["is"]["body"], "OK", "{recorded}");
+
+        let _ = manager.delete_imposter(port).await;
+        let _ = manager.delete_imposter(up).await;
+    }
+
+    /// Kills `delete !` on `has_inject_generator`: an `inject` generator runs under the script
+    /// deadline. The loop is bounded (well under the engine's loop-iteration limit): after the
+    /// timeout its blocking thread keeps running until the loop ends.
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn inject_generator_runs_under_the_script_deadline() {
+        let manager = ImposterManager::new();
+        let up = upstream_answering(&manager, serde_json::json!({ "body": "OK" })).await;
+        let slow = "function(config){ var x = 0; for (var i = 0; i < 3000000; i++) { x += i; } \
+                    return [{ equals: { path: config.request.path } }]; }";
+        let port = create(
+            &manager,
+            serde_json::json!({
+                "port": 0, "protocol": "http",
+                "_rift": { "scriptEngine": { "timeoutMs": 20 } },
+                "stubs": [{ "responses": [{ "proxy": {
+                    "to": format!("http://127.0.0.1:{up}"),
+                    "mode": "proxyOnce",
+                    "predicateGenerators": [{ "inject": slow }]
+                }}]}]
+            }),
+        )
+        .await;
+
+        let resp = get(port, "/a").await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("x-rift-generator-error")
+                .and_then(|v| v.to_str().ok()),
+            Some("timeout"),
+            "a generator over the script deadline must time out, not run inline"
+        );
+        assert_eq!(resp.text().await.unwrap(), "OK");
+        assert_eq!(
+            manager.get_imposter(port).unwrap().get_stubs().len(),
+            1,
+            "nothing is recorded when generation times out (issue #498)"
+        );
+
+        let _ = manager.delete_imposter(port).await;
+        let _ = manager.delete_imposter(up).await;
+    }
+
+    /// Kills `>` -> `>=` / `==` on the Content-Length pre-check and `>` -> `>=` on the post-read
+    /// check of the proxy body limit: a body of exactly the limit is served.
+    #[tokio::test]
+    async fn a_proxy_response_of_exactly_the_size_limit_is_served() {
+        // `MAX_PROXY_RESPONSE_BODY_SIZE` (core/mod.rs) is private to `imposter::core`.
+        const LIMIT: usize = 10 * 1024 * 1024;
+        let manager = ImposterManager::new();
+        let up =
+            upstream_answering(&manager, serde_json::json!({ "body": "a".repeat(LIMIT) })).await;
+        let port = create(
+            &manager,
+            serde_json::json!({
+                "port": 0, "protocol": "http",
+                "stubs": [{ "responses": [{ "proxy": {
+                    "to": format!("http://127.0.0.1:{up}"),
+                    "mode": "proxyTransparent"
+                }}]}]
+            }),
+        )
+        .await;
+
+        let resp = get(port, "/big").await;
+        assert!(
+            resp.headers().get("x-rift-proxy-error").is_none(),
+            "a body of exactly the limit must not be rejected: {:?}",
+            resp.headers()
+        );
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.bytes().await.unwrap().len(), LIMIT);
+
+        let _ = manager.delete_imposter(port).await;
+        let _ = manager.delete_imposter(up).await;
+    }
 }
 
 // =========================================================================
