@@ -1165,6 +1165,347 @@
           "path": "/?id=1&city=rome"
         }
       ]
+    },
+    {
+      "name": "targeted: a copy whose regex does not match leaves its token in body and header (#1402)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-C": "<$C>"
+                      },
+                      "body": "[abc][$C]"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "$C",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\d+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/abc"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a copy whose jsonpath selects nothing leaves its token (#1402)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-C": "<$C>"
+                      },
+                      "body": "[$C]"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$C",
+                          "using": {
+                            "method": "jsonpath",
+                            "selector": "$.missing"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"present\": 1}"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a copy whose xpath selects nothing leaves its token (#1402)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-C": "<$C>"
+                      },
+                      "body": "[$C]"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$C",
+                          "using": {
+                            "method": "xpath",
+                            "selector": "//missing"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<doc><present>1</present></doc>"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a copy from an absent query parameter leaves its token (#1402)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-C": "<$C>"
+                      },
+                      "body": "[$C]"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "id"
+                          },
+                          "into": "$C",
+                          "using": {
+                            "method": "regex",
+                            "selector": "(\\d+)"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a lookup replaces a double-quoted column token (#1402)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "name=${row}[\"name\"]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": {
+                              "query": "k"
+                            },
+                            "using": {
+                              "method": "regex",
+                              "selector": ".*"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "data/products.csv",
+                              "keyColumn": "id"
+                            }
+                          },
+                          "into": "${row}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?k=123"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a lookup replaces a single-quoted column token (#1402)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "name=${row}['name']"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": {
+                              "query": "k"
+                            },
+                            "using": {
+                              "method": "regex",
+                              "selector": ".*"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "data/products.csv",
+                              "keyColumn": "id"
+                            }
+                          },
+                          "into": "${row}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?k=123"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a copy from the body of a request without one reads the empty body (#1402)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-C": "<$C>"
+                      },
+                      "body": "[$C]"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$C",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
     }
   ]
 }

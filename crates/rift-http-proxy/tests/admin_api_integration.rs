@@ -1993,16 +1993,16 @@ mod repeated_request_headers_reach_matching {
              inject; before #1040 it took the last (`b`). got: {body}"
         );
         // Deliberately NOT asserted here: that the undecodable `X-Bin` is *absent* rather than
-        // present-as-empty. `copy` maps both to the same output by design — its `else` branch
-        // substitutes `""` for a source it cannot find (copy.rs), and a present-but-empty value
-        // fails the `.+` selector and substitutes `""` too. Template substitution collapses them
+        // present-as-empty. `copy` maps both to the same output by design — a source it cannot
+        // find and a present-but-empty value that fails the `.+` selector both leave the token as
+        // authored, as in Mountebank (issue #1402). Template substitution collapses them
         // the same way (`get` returns `None`, then `unwrap_or_default`). The absence is real and is
         // pinned where it is observable: `from_request_omits_a_header_whose_only_value_was_
         // undecodable` at the map level, and `a_header_whose_only_value_is_non_utf8_does_not_exist_
         // for_predicates` above at the `exists` level. Asserting it here would only have looked
         // like coverage.
         assert!(
-            body.contains("bin=[]"),
+            body.contains("bin=[${BIN}]"),
             "sanity: the undecodable header contributes nothing, however it is represented. \
              got: {body}"
         );

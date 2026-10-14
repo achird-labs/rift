@@ -52,6 +52,9 @@ record.
 
 ### Fixed
 
+- **`lookup` replaces quoted column tokens** (#1402). `${row}["name"]` and `${row}['name']` are
+  replaced like `${row}[name]`, as in Mountebank; they were served verbatim.
+
 - **A stub's `name` is kept and printed** (#1362), as Mountebank does. It was dropped on decode, so
   it was missing from every printed form (`GET /imposters`, `?replayable=true`, `GET …/stubs/:index`,
   the `POST` reply) and erased from `--datadir` files on persist. It is a label only and is never
@@ -225,6 +228,14 @@ record.
   gates nothing, still does not. A positive TTL running out on a scenario's key is not seen.
 
 ### Changed
+
+- **A `copy` that extracts nothing leaves its token in the response** (#1402). A regex that does
+  not match, a JSONPath or XPath selector that selects nothing, or an absent source now leaves the
+  `into` token as authored in the body and headers, as Mountebank does; it was replaced with an
+  empty string. Clients see the change: `[abc][$C]` is served where `[abc][]` was. This includes
+  an unbound XPath `ns` prefix (#1326 above). An absent source with a regex such as `.*` is a
+  documented deviation: Mountebank copies the word `undefined`
+  ([differences](docs/mountebank/differences.md#copy-from-an-absent-source)).
 
 - **A stub must have at least one response** (#1372, **breaking**). A stub whose `responses` is
   absent or `[]` is refused with `400 'responses' must be a non-empty array` on every admin door
