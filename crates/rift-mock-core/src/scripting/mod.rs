@@ -70,6 +70,8 @@ pub use entrypoint_check::{EntrypointCheckError, EntrypointMatch, check_entrypoi
 // Script decision/log tracing, for `rift script run` and the debug-mode per-request trace
 // (issue #360)
 mod trace;
+#[cfg(test)]
+pub(crate) use trace::keep_scoped_captures_visible;
 pub use trace::{ScriptTraceEntry, cap_trace_logs, capture_script_logs, render_decision};
 
 /// Failure of a `predicateGenerators.inject` pass during proxy recording (issue #498).

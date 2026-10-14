@@ -57,6 +57,12 @@ record.
 
 ### Fixed
 
+- **Script log capture no longer drops lines in an embedder without a `tracing` subscriber**
+  (#1447). The debug-mode `x-rift-script-trace` captures `ctx.logger` with a thread-scoped
+  subscriber. With no other subscriber installed, a logger line first reached on another thread
+  made `tracing` cache "nobody listens" for it, and the capture missed it from then on. The `rift`
+  binary always installs a global subscriber first, so `rift script run` was not affected.
+
 - **`lookup` replaces quoted column tokens** (#1402). `${row}["name"]` and `${row}['name']` are
   replaced like `${row}[name]`, as in Mountebank; they were served verbatim.
 
