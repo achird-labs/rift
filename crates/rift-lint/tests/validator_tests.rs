@@ -279,20 +279,23 @@ fn e006_stub_missing_responses() {
     assert!(has_code(&r, "E006"));
 }
 
+/// #1372: the engine refuses an empty `responses` as it does an absent one, so W002 (a warning
+/// for `[]`) is folded into E006.
 #[test]
-fn w002_stub_empty_responses() {
+fn e006_stub_empty_responses() {
     let stub = json!({ "responses": [] });
     let mut r = LintResult::new();
     validate_stub(path(), &stub, 0, &mut r, &opts(), &serde_json::Value::Null);
-    assert!(has_code(&r, "W002"));
+    assert!(has_code(&r, "E006"));
+    assert!(!has_code(&r, "W002"), "W002 is retired");
 }
 
 #[test]
-fn w002_not_fired_with_response() {
+fn e006_not_fired_with_response() {
     let stub = minimal_stub();
     let mut r = LintResult::new();
     validate_stub(path(), &stub, 0, &mut r, &opts(), &serde_json::Value::Null);
-    assert!(!has_code(&r, "W002"));
+    assert!(!has_code(&r, "E006"));
 }
 
 // ─── Predicate rules ─────────────────────────────────────────────────────────

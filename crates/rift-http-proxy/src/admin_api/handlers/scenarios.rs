@@ -277,8 +277,10 @@ const STUB_FIELD_NAMES: [&str; 13] = [
 /// The rule is deliberately about **shape, not emptiness**: it asks the raw JSON whether any
 /// recognised field name is present, before serde erases the distinction. After deserialization
 /// `{}` and an explicit `{"predicates": []}` are indistinguishable, so a post-hoc emptiness check
-/// would also reject the legitimate, explicitly-authored space-wide default. This does not change
-/// what a legal `Stub` is; it only refuses bodies that are not stubs at all.
+/// would also reject the legitimate, explicitly-authored space-wide default (no predicates, some
+/// responses). This does not change what a legal `Stub` is; it only refuses bodies that are not
+/// stubs at all. A stub-shaped body with no responses passes here and is refused by the decode, as
+/// on every other door (issue #1372).
 ///
 /// Scoped to this route on purpose. The space surface is a Rift extension (issue #223), not a
 /// Mountebank-parity one, so tightening it breaks no compatibility contract — the imposter-level

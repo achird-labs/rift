@@ -678,7 +678,7 @@ fn corpus_examples() -> Vec<Example> {
 fn failures(examples: &[Example]) -> Vec<String> {
     let mut failures = Vec::new();
     for example in examples {
-        match unread_keys(&example.document) {
+        match unread_keys(&with_elided_responses(&example.document)) {
             Ok(unread) => failures.extend(
                 unread
                     .into_iter()
@@ -748,7 +748,8 @@ fn schema_failures(examples: &[Example]) -> Vec<String> {
     let validator = schema_validator();
     let mut failures = Vec::new();
     for example in examples {
-        for (i, imposter) in imposters_of(&example.document).iter().enumerate() {
+        let document = with_elided_responses(&example.document);
+        for (i, imposter) in imposters_of(&document).iter().enumerate() {
             failures.extend(validator.iter_errors(imposter).map(|error| {
                 format!(
                     "{}: imposter {i} at {}: {error}",
@@ -917,28 +918,45 @@ fn docs_examples_have_no_unread_keys() {
     );
 }
 
+/// `document` with each imposter passed through `fill`.
+fn each_imposter(document: &Value, fill: fn(&mut serde_json::Map<String, Value>)) -> Value {
+    let mut document = document.clone();
+    let fill_one = |imposter: &mut Value| {
+        if let Some(object) = imposter.as_object_mut() {
+            fill(object);
+        }
+    };
+    match document.get_mut("imposters").and_then(Value::as_array_mut) {
+        Some(imposters) => imposters.iter_mut().for_each(fill_one),
+        None => fill_one(&mut document),
+    }
+    document
+}
+
+/// A stub's `responses`, which a docs fragment about predicates leaves out, filled in with a
+/// response that has no keys of its own. The engine refuses a stub without one (issue #1372), so
+/// without it a predicate example would not decode at all.
+fn fill_responses(imposter: &mut serde_json::Map<String, Value>) {
+    if let Some(stubs) = imposter.get_mut("stubs").and_then(Value::as_array_mut) {
+        for stub in stubs.iter_mut().filter_map(Value::as_object_mut) {
+            stub.entry("responses").or_insert(json!([{ "is": {} }]));
+        }
+    }
+}
+
+fn with_elided_responses(document: &Value) -> Value {
+    each_imposter(document, fill_responses)
+}
+
 /// `document` with what a docs fragment leaves out to keep the example short filled in, so the
 /// linter judges what the example says rather than what it elides: an imposter's `port` and
 /// `protocol`, and a stub's `responses`.
 fn lintable(document: &Value) -> Value {
-    fn fill(imposter: &mut Value) {
-        let Some(object) = imposter.as_object_mut() else {
-            return;
-        };
-        object.entry("port").or_insert(json!(4545));
-        object.entry("protocol").or_insert(json!("http"));
-        if let Some(stubs) = object.get_mut("stubs").and_then(Value::as_array_mut) {
-            for stub in stubs.iter_mut().filter_map(Value::as_object_mut) {
-                stub.entry("responses").or_insert(json!([{ "is": {} }]));
-            }
-        }
-    }
-    let mut document = document.clone();
-    match document.get_mut("imposters").and_then(Value::as_array_mut) {
-        Some(imposters) => imposters.iter_mut().for_each(fill),
-        None => fill(&mut document),
-    }
-    document
+    each_imposter(document, |imposter| {
+        imposter.entry("port").or_insert(json!(4545));
+        imposter.entry("protocol").or_insert(json!("http"));
+        fill_responses(imposter);
+    })
 }
 
 /// The lint errors `example` raises that no rule here excuses, one line each.
@@ -992,7 +1010,7 @@ fn docs_examples_lint_clean() {
 // ---------------------------------------------------------------------------------------------
 
 fn unread(document: Value) -> Vec<String> {
-    unread_keys(&document).expect("document decodes")
+    unread_keys(&with_elided_responses(&document)).expect("document decodes")
 }
 
 #[test]

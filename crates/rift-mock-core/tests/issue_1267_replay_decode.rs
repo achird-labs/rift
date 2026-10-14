@@ -35,6 +35,13 @@ const BAD_GENERATOR_OPERATOR: &str = r#"{
         "predicateGenerators": [{ "matches": { "path": true }, "predicateOperator": "bogus" }] } }]
 }"#;
 
+/// A stub with no responses (issue #1372): engines up to v0.21.0 admitted it on every door and
+/// served the imposter's `defaultResponse`, so it is an admission check, never a decode refusal.
+const NO_RESPONSES: &str = r#"{ "predicates": [] }"#;
+
+const EMPTY_RESPONSES: &str =
+    r#"{ "predicates": [{ "equals": { "path": "/a" } }], "responses": [] }"#;
+
 const GOOD: &str = r#"{
     "predicates": [{ "equals": { "path": "/ok" } }],
     "responses": [{ "is": { "statusCode": 200, "body": "ok" } }]
@@ -141,6 +148,8 @@ fn each_admission_refusal_is_skipped_on_replay_and_reported_by_admission_check()
             BAD_COPY_NS,
             "`copy` behavior `xpath` `using.ns` must be an object mapping each prefix to a namespace URI string",
         ),
+        (NO_RESPONSES, "'responses' must be a non-empty array"),
+        (EMPTY_RESPONSES, "'responses' must be a non-empty array"),
     ];
     for (stub, refusal) in cases {
         let door = serde_json::from_str::<Stub>(stub)
@@ -311,4 +320,28 @@ fn a_structural_refusal_holds_in_both_modes() {
         .expect_err("replayed refuses too")
         .to_string();
     assert!(replay.contains(message), "{replay}");
+}
+
+/// Issue #1372: an absent or empty `responses` is the new admission check; an explicit
+/// `"responses": null` was always a structural refusal and stays one under both modes.
+#[test]
+fn null_responses_stays_a_structural_refusal_on_replay() {
+    let stub = r#"{ "predicates": [], "responses": null }"#;
+    assert!(serde_json::from_str::<Stub>(stub).is_err(), "validating");
+    assert!(replayed::<Stub>(stub).is_err(), "replayed refuses too");
+}
+
+/// Issue #1372: a stub an older engine admitted without responses still decodes on replay, and
+/// `admission_check` names the rule.
+#[test]
+fn a_replayed_stub_without_responses_still_decodes() {
+    for stub in [NO_RESPONSES, EMPTY_RESPONSES] {
+        let decoded: Stub = replayed(stub).expect("replay admits");
+        assert!(decoded.responses.is_empty());
+        let config: ImposterConfig = replayed(&imposter_with(stub)).expect("replay admits");
+        assert_eq!(
+            admission_check(&config),
+            Err("'responses' must be a non-empty array".to_string())
+        );
+    }
 }

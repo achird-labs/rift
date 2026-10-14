@@ -160,7 +160,7 @@ fn ffi_null_and_error_paths() {
         assert_eq!(rift_create_imposter(h, bad.as_ptr()), 0);
         assert_eq!(rift_replace_stubs(h, 12345, bad.as_ptr()), -1);
         // valid stubs but an unknown port exercises the manager's own NotFound error path
-        let valid = cstr(r#"[{ "predicates": [], "responses": [] }]"#);
+        let valid = cstr(r#"[{ "predicates": [], "responses": [{ "is": {} }] }]"#);
         assert_eq!(
             rift_replace_stubs(h, 12345, valid.as_ptr()),
             -1,

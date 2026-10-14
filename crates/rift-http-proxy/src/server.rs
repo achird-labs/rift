@@ -2508,6 +2508,48 @@ mod tests {
         );
     }
 
+    // Issue #1372: a stub without responses is refused at admission, so at startup its file is
+    // skipped and named in the summary (#532) while the other imposters load.
+    #[test]
+    fn datadir_startup_skips_and_reports_a_stub_without_responses() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("4501.json"),
+            r#"{"port": 4501, "protocol": "http", "stubs": [{"responses": [{"is": {}}]}]}"#,
+        )
+        .expect("write valid");
+        std::fs::write(
+            dir.path().join("4502.json"),
+            r#"{"port": 4502, "protocol": "http", "stubs": [{"predicates": []}]}"#,
+        )
+        .expect("write absent responses");
+        std::fs::write(
+            dir.path().join("4503.json"),
+            r#"{"port": 4503, "protocol": "http", "stubs": [{"responses": []}]}"#,
+        )
+        .expect("write empty responses");
+
+        let base = ScriptBaseDir::DatadirRelative(dir.path().to_path_buf());
+        let (parsed, skipped) =
+            read_and_parse_datadir(dir.path(), &base).expect("read_and_parse must not abort");
+
+        assert_eq!(parsed.len(), 1, "the valid imposter still loads");
+        assert_eq!(parsed[0].1.port, Some(4501));
+        assert_eq!(skipped.len(), 2);
+        for entry in &skipped {
+            assert!(
+                entry
+                    .reason
+                    .contains("'responses' must be a non-empty array"),
+                "{}",
+                entry.reason
+            );
+        }
+        let summary = format_skipped_summary(&skipped).expect("a summary");
+        assert!(summary.contains("4502.json"), "{summary}");
+        assert!(summary.contains("4503.json"), "{summary}");
+    }
+
     #[test]
     fn read_and_parse_datadir_collects_unresolvable_script() {
         let dir = tempfile::tempdir().expect("tempdir");

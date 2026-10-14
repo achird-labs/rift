@@ -120,6 +120,27 @@ pub(crate) fn alias_properties(schema: &mut Schema) {
     }
 }
 
+/// `schemars` transform for `StubRaw`: `responses` is required and non-empty (issue #1372). The
+/// field keeps `#[serde(default)]`, because the refusal is an admission check rather than a decode
+/// one (a replayed stub without responses still decodes), so `schemars` would otherwise call it
+/// optional with a `[]` default — exactly what every config door refuses.
+pub(crate) fn stub_requires_responses(schema: &mut Schema) {
+    let object = schema.ensure_object();
+    let responses = object
+        .get_mut("properties")
+        .and_then(|properties| properties.get_mut("responses"))
+        .and_then(Value::as_object_mut)
+        .expect("StubRaw is an object schema with a `responses` property");
+    responses.remove("default");
+    responses.insert("minItems".to_owned(), json!(1));
+    let required = object
+        .entry("required")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .expect("`required` is an array");
+    required.push(json!("responses"));
+}
+
 fn alias_description(property: &str) -> String {
     format!("Alias of `{property}`, read the same way.")
 }
@@ -391,7 +412,7 @@ mod tests {
         let schema = imposter_schema();
         let validator = jsonschema::validator_for(&schema).expect("compiles");
         let imposter = |response: Value| json!({ "port": 4545, "protocol": "http", "stubs": [{ "responses": [response] }] });
-        let predicate = |predicate: Value| json!({ "port": 4545, "protocol": "http", "stubs": [{ "predicates": [predicate] }] });
+        let predicate = |predicate: Value| json!({ "port": 4545, "protocol": "http", "stubs": [{ "predicates": [predicate], "responses": [{ "is": {} }] }] });
         let errors = |document: &Value| -> Vec<String> {
             validator
                 .iter_errors(document)
@@ -492,6 +513,16 @@ mod tests {
         refused(imposter(
             json!({ "is": {}, "_behaviors": { "repeat": 5_000_000_000u64 } }),
         ));
+        // A stub must have a response (#1372), like every config door says; no stubs at all is fine.
+        for stub in [json!({ "predicates": [] }), json!({ "responses": [] })] {
+            let document = json!({ "port": 4545, "protocol": "http", "stubs": [stub] });
+            refused(document.clone());
+            assert!(
+                serde_json::from_value::<ImposterConfig>(document).is_err(),
+                "the engine refuses it too"
+            );
+        }
+        valid(json!({ "port": 4545, "protocol": "http", "stubs": [] }));
         // An unread key anywhere is refused.
         refused(json!({ "port": 1, "protocol": "http", "stubs": [], "name2": "x" }));
         refused(imposter(
