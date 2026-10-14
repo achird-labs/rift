@@ -200,12 +200,16 @@ pub(crate) fn plain_headers(headers: SplicedHeaders) -> HashMap<String, Vec<Stri
         .collect()
 }
 
+// Test-only: production compares a `Spliced` by text *and* ranges (the derived `PartialEq`), never
+// by text alone (#1383).
+#[cfg(test)]
 impl PartialEq<&str> for Spliced {
     fn eq(&self, other: &&str) -> bool {
         self.text == *other
     }
 }
 
+#[cfg(test)]
 impl PartialEq<str> for Spliced {
     fn eq(&self, other: &str) -> bool {
         self.text == other
@@ -413,6 +417,81 @@ mod tests {
                     s.as_str().contains(inserted.as_str()),
                     "{text:?} {span:?} {token:?} -> {s:?}"
                 );
+            }
+        }
+    }
+
+    // Issue #1383: every older test held at most one inserted range per untouched segment, so a
+    // carry loop that stopped after the first range in a segment went unnoticed. A dropped range
+    // reads as authored, which is the #1203 attack.
+    #[test]
+    fn two_inserted_ranges_in_one_segment_both_survive_a_later_pass() {
+        let mut s = with_inserted("aXbYc!", &[1..2, 3..4]);
+        assert_eq!(s.replace_token("!", "??"), 1);
+        assert_eq!(s.as_str(), "aXbYc??");
+        assert_eq!(s.inserted(), &[1..2, 3..4, 5..7]);
+
+        let mut s = with_inserted("!aXbYc", &[2..3, 4..5]);
+        assert_eq!(s.replace_token("!", ""), 1);
+        assert_eq!(s.inserted(), &[1..2, 3..4]);
+    }
+
+    // `splice`'s own contract, independent of the token rule its callers apply: a span that starts
+    // inside an inserted range clips it, and the range's tail past the span is still carried.
+    #[test]
+    fn a_splice_inside_an_inserted_range_clips_it_and_carries_the_rest() {
+        let mut s = with_inserted("abcdefghij", &[2..8]);
+        assert_eq!(s.splice(vec![(3..5, "Z".to_string())]), 1);
+        assert_eq!(s.as_str(), "abcZfghij");
+        assert_eq!(s.inserted(), &[2..7]);
+    }
+
+    /// The tracked ranges agree with a naive per-byte model across any sequence of passes.
+    #[test]
+    fn tracked_ranges_match_a_byte_model() {
+        /// Maximal runs of inserted bytes.
+        fn runs(flags: &[bool]) -> Vec<Range<usize>> {
+            let mut out: Vec<Range<usize>> = Vec::new();
+            for (i, &inserted) in flags.iter().enumerate() {
+                match out.last_mut() {
+                    Some(last) if inserted && last.end == i => last.end = i + 1,
+                    _ if inserted => out.push(i..i + 1),
+                    _ => {}
+                }
+            }
+            out
+        }
+
+        let mut g = Gen(0x1383);
+        for _ in 0..3000 {
+            let mut s = Spliced::authored(g.string(TEXT, 0, 24));
+            let mut text = s.as_str().to_string();
+            let mut flags = vec![false; text.len()];
+            for _ in 0..g.below(6) {
+                let token = g.string(TEXT, 1, 3);
+                let replacement = g.string(&["a", "c", "ü", "$"], 0, 4);
+                let before = s.clone();
+                s.replace_token(&token, &replacement);
+
+                let (mut next_text, mut next_flags, mut pos) = (String::new(), Vec::new(), 0);
+                for (at, _) in text.match_indices(&token) {
+                    let end = at + token.len();
+                    if flags[at] || flags[end - 1] {
+                        continue;
+                    }
+                    next_text.push_str(&text[pos..at]);
+                    next_flags.extend_from_slice(&flags[pos..at]);
+                    next_text.push_str(&replacement);
+                    next_flags.extend(std::iter::repeat_n(true, replacement.len()));
+                    pos = end;
+                }
+                next_text.push_str(&text[pos..]);
+                next_flags.extend_from_slice(&flags[pos..]);
+                (text, flags) = (next_text, next_flags);
+
+                let context = format!("{before:?} {token:?}->{replacement:?}");
+                assert_eq!(s.as_str(), text, "{context}");
+                assert_eq!(s.inserted(), runs(&flags).as_slice(), "{context}");
             }
         }
     }
