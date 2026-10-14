@@ -198,57 +198,26 @@
     "rift": "(absent)"
   },
   {
-    "id": "status-code-printed-as-string",
+    "id": "status-code-printed-as-number",
     "case": "*",
     "location": "*/is/statusCode",
-    "kind": "known-bug",
-    "reason": "IsResponseOut serialises statusCode as a string (types.rs serialize_status_code_as_string); Mountebank echoes the number it was given (#1361)",
-    "relation": "rift-quotes-mountebank"
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A status posted as a string prints as a number (`\"202\"` prints as `202`).",
+    "reason": "Rift prints the parsed statusCode as a number; Mountebank echoes a status posted as a string (#1361)",
+    "mountebankMatches": "\"[0-9]+\"",
+    "riftMatches": "[0-9]+"
   },
   {
-    "id": "stub-predicates-default-printed",
+    "id": "stub-empty-predicates-not-printed",
     "case": "*",
     "location": "*/stubs/*/predicates",
-    "kind": "known-bug",
-    "reason": "a stub without predicates is printed with `predicates: []`; Mountebank omits it (#1361)",
-    "mountebank": "(absent)",
-    "rift": "[]"
-  },
-  {
-    "id": "proxy-default-addWaitBehavior",
-    "case": "*",
-    "location": "*/proxy/addWaitBehavior",
-    "kind": "known-bug",
-    "reason": "a proxy response is printed with its default `addWaitBehavior: false`; Mountebank prints only what was posted (#1361)",
-    "mountebank": "(absent)",
-    "rift": "false"
-  },
-  {
-    "id": "proxy-default-injectHeaders",
-    "case": "*",
-    "location": "*/proxy/injectHeaders",
-    "kind": "known-bug",
-    "reason": "a proxy response is printed with its default `injectHeaders: {}`; Mountebank prints only what was posted (#1361)",
-    "mountebank": "(absent)",
-    "rift": "{}"
-  },
-  {
-    "id": "proxy-default-predicateGenerators",
-    "case": "*",
-    "location": "*/proxy/predicateGenerators",
-    "kind": "known-bug",
-    "reason": "a proxy response is printed with its default `predicateGenerators: []`; Mountebank prints only what was posted (#1361)",
-    "mountebank": "(absent)",
-    "rift": "[]"
-  },
-  {
-    "id": "proxy-default-mode",
-    "case": "*",
-    "location": "*/proxy/mode",
-    "kind": "known-bug",
-    "reason": "a proxy response is printed with its default `mode: \"\"`; Mountebank prints only what was posted (and the omitted mode prints as an empty string, though it behaves as proxyOnce) (#1361)",
-    "mountebank": "(absent)",
-    "rift": "\"\""
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "This covers a stub's empty `predicates`, whether written or omitted",
+    "reason": "Rift does not print an empty predicates array; Mountebank echoes a posted `predicates: []` (#1361)",
+    "mountebank": "[]",
+    "rift": "(absent)"
   },
   {
     "id": "stub-name-dropped",
@@ -368,8 +337,10 @@
     "id": "list-prints-record-requests",
     "case": "*",
     "location": "*.body/imposters/*/recordRequests",
-    "kind": "known-bug",
-    "reason": "the imposter list (GET /imposters, PUT /imposters) prints recordRequests, which Mountebank prints only in the detail (#1361)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "The imposter list carries `recordRequests` for each imposter, next to Rift's `stubCount` and `enabled`.",
+    "reason": "the imposter list (GET /imposters, PUT /imposters) prints recordRequests, which Mountebank prints only in the detail; the TUI and rift-conformance read it (#584, #1361)",
     "mountebank": "(absent)",
     "riftMatches": "true|false"
   },
@@ -1178,7 +1149,7 @@
     "id": "stub-without-responses-accepted#7",
     "location": "step[1].admin.body/stubs",
     "mountebank": "(absent)",
-    "riftMatches": "\\[\\{\"predicates\":\\[\\],\"responses\":\\[\\{\"is\":\\{\"body\":\"original\",\"statusCode\":\"200\"\\}\\}\\]\\},\\{\"id\":\"[0-9a-f-]{36}\",\"predicates\":\\[\\],\"responses\":\\[\\]\\}\\]"
+    "riftMatches": "\\[\\{\"responses\":\\[\\{\"is\":\\{\"body\":\"original\",\"statusCode\":200\\}\\}\\]\\},\\{\"id\":\"[0-9a-f-]{36}\",\"responses\":\\[\\]\\}\\]"
   },
   {
     "case": "complex_scenarios: Recover from invalid stub addition",
@@ -1187,7 +1158,7 @@
     "id": "stub-without-responses-accepted/stored#0",
     "location": "stored[4545]/stubs/1",
     "mountebank": "(absent)",
-    "riftMatches": "\\{\"id\":\"[0-9a-f-]{36}\",\"predicates\":\\[\\],\"responses\":\\[\\]\\}"
+    "riftMatches": "\\{\"id\":\"[0-9a-f-]{36}\",\"responses\":\\[\\]\\}"
   },
   {
     "case": "complex_scenarios: Recover from invalid stub addition",
@@ -1196,7 +1167,7 @@
     "id": "stub-without-responses-accepted/replayable#0",
     "location": "replayable[4545]/stubs/1",
     "mountebank": "(absent)",
-    "riftMatches": "\\{\"id\":\"[0-9a-f-]{36}\",\"predicates\":\\[\\],\"responses\":\\[\\]\\}"
+    "riftMatches": "\\{\"id\":\"[0-9a-f-]{36}\",\"responses\":\\[\\]\\}"
   },
   {
     "case": "predicates: Inject predicate accessing multiple request fields",
@@ -1304,7 +1275,7 @@
     "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/stored#1",
     "location": "stored[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "rift": "{\"to\":\"http://localhost:4546\"}",
     "doc": "docs/mountebank/differences.md",
     "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
@@ -1337,7 +1308,7 @@
     "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/replayable#1",
     "location": "replayable[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "rift": "{\"to\":\"http://localhost:4546\"}",
     "doc": "docs/mountebank/differences.md",
     "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
@@ -1370,7 +1341,7 @@
     "id": "proxy-recording-not-a-stub/proxy-records-requests-w/stored#1",
     "location": "stored[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "rift": "{\"to\":\"http://localhost:4546\"}",
     "doc": "docs/mountebank/differences.md",
     "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
@@ -1403,7 +1374,7 @@
     "id": "proxy-recording-not-a-stub/proxy-records-requests-w/replayable#1",
     "location": "replayable[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "rift": "{\"to\":\"http://localhost:4546\"}",
     "doc": "docs/mountebank/differences.md",
     "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
@@ -1436,7 +1407,7 @@
     "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/stored#1",
     "location": "stored[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "rift": "{\"mode\":\"proxyOnce\",\"to\":\"http://localhost:4546\"}",
     "doc": "docs/mountebank/differences.md",
     "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
@@ -1469,7 +1440,7 @@
     "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/replayable#1",
     "location": "replayable[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "rift": "{\"mode\":\"proxyOnce\",\"to\":\"http://localhost:4546\"}",
     "doc": "docs/mountebank/differences.md",
     "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
@@ -1502,7 +1473,7 @@
     "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/stored#1",
     "location": "stored[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "rift": "{\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"to\":\"http://localhost:4546\"}",
     "doc": "docs/mountebank/differences.md",
     "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
@@ -1535,7 +1506,7 @@
     "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/replayable#1",
     "location": "replayable[4545]/stubs/0/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "rift": "{\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"to\":\"http://localhost:4546\"}",
     "doc": "docs/mountebank/differences.md",
     "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
@@ -1590,7 +1561,7 @@
     "id": "proxy-recording-not-a-stub/stubs-take-priority-over/stored#1",
     "location": "stored[4545]/stubs/1/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "rift": "{\"to\":\"http://localhost:4546\"}",
     "doc": "docs/mountebank/differences.md",
     "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
@@ -1623,7 +1594,7 @@
     "id": "proxy-recording-not-a-stub/stubs-take-priority-over/replayable#1",
     "location": "replayable[4545]/stubs/1/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}",
+    "rift": "{\"to\":\"http://localhost:4546\"}",
     "doc": "docs/mountebank/differences.md",
     "quote": "A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings."
   },
@@ -1764,19 +1735,8 @@
     "kind": "documented",
     "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#10",
-    "location": "stored[4545]/stubs/2/predicates/0",
-    "mountebank": "{\"deepEquals\":{\"body\":1},\"jsonpath\":{\"selector\":\"$.id\"}}",
-    "rift": "(absent)",
-    "doc": "docs/mountebank/proxy.md",
-    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
-  },
-  {
-    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "documented",
-    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
-    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#11",
-    "location": "stored[4545]/stubs/2/predicates/1",
-    "mountebank": "{\"deepEquals\":{\"path\":\"\"},\"jsonpath\":{\"selector\":\"$.id\"}}",
+    "location": "stored[4545]/stubs/2/predicates",
+    "mountebank": "[{\"deepEquals\":{\"body\":1},\"jsonpath\":{\"selector\":\"$.id\"}},{\"deepEquals\":{\"path\":\"\"},\"jsonpath\":{\"selector\":\"$.id\"}}]",
     "rift": "(absent)",
     "doc": "docs/mountebank/proxy.md",
     "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
@@ -1799,7 +1759,7 @@
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#13",
     "location": "stored[4545]/stubs/2/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}",
+    "rift": "{\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}",
     "doc": "docs/mountebank/proxy.md",
     "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
@@ -1929,19 +1889,8 @@
     "kind": "documented",
     "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#10",
-    "location": "replayable[4545]/stubs/2/predicates/0",
-    "mountebank": "{\"deepEquals\":{\"body\":1},\"jsonpath\":{\"selector\":\"$.id\"}}",
-    "rift": "(absent)",
-    "doc": "docs/mountebank/proxy.md",
-    "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
-  },
-  {
-    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
-    "kind": "documented",
-    "reason": "Mountebank copies the jsonpath selector onto every generated predicate, so its recordings never match and it forwards again; Rift scopes it to the body",
-    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#11",
-    "location": "replayable[4545]/stubs/2/predicates/1",
-    "mountebank": "{\"deepEquals\":{\"path\":\"\"},\"jsonpath\":{\"selector\":\"$.id\"}}",
+    "location": "replayable[4545]/stubs/2/predicates",
+    "mountebank": "[{\"deepEquals\":{\"body\":1},\"jsonpath\":{\"selector\":\"$.id\"}},{\"deepEquals\":{\"path\":\"\"},\"jsonpath\":{\"selector\":\"$.id\"}}]",
     "rift": "(absent)",
     "doc": "docs/mountebank/proxy.md",
     "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
@@ -1964,7 +1913,7 @@
     "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#13",
     "location": "replayable[4545]/stubs/2/responses/0/proxy",
     "mountebank": "(absent)",
-    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}",
+    "rift": "{\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}",
     "doc": "docs/mountebank/proxy.md",
     "quote": "Mountebank copies `jsonpath`/`xpath` onto every generated predicate, where it selects from the path or method and records `\"\"`, so its recording never matches again and it forwards every request; Rift scopes the selector to the body predicate only."
   },
@@ -2327,8 +2276,10 @@
     "id": "replayable-prints-host",
     "case": "targeted: an imposter with host 127.0.0.1 binds and serves",
     "location": "replayable[4545]/host",
-    "kind": "known-bug",
-    "reason": "the replayable form prints the imposter's host; Mountebank 2.9.1's does not (arguably its export is the lossy one — decide whether to document instead) (#1361)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "The `?replayable=true` export keeps the imposter's `host`, so a re-posted export binds where the original did.",
+    "reason": "the replayable form prints the imposter's host; Mountebank 2.9.1's export leaves it out, so its round trip re-binds on all interfaces (#1361)",
     "mountebank": "(absent)",
     "rift": "\"127.0.0.1\""
   },

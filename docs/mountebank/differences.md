@@ -108,6 +108,21 @@ An imposter's `defaultResponse` is served when no stub matches, and it also supp
 
 A `proxy` inside `defaultResponse` is kept in the printed and persisted imposter and reported as ignored in `_rift.warnings`: neither engine proxies from it. Use `defaultForward` to forward unmatched requests.
 
+## Printed imposters are normalized
+
+Mountebank prints a stub exactly as it was posted. Rift prints what it parsed, so its output can be
+spelled differently from the input while meaning the same thing. Re-posting what Rift prints gives
+the same imposter.
+
+- `statusCode` prints as a JSON number in a stub's `is`, as it already did in `defaultResponse`. A status posted as a string prints as a number (`"202"` prints as `202`).
+- A field left empty or at its default is not printed. This covers a stub's empty `predicates`,
+  whether written or omitted, an empty `defaultResponse.headers`, and a proxy's default `mode`,
+  `predicateGenerators`, `addWaitBehavior` and `injectHeaders`. Each reads back to the same value.
+  A `headers: {}` written in a stub's `is` is still printed, because it replaces the
+  `defaultResponse` headers with none.
+- The imposter list carries `recordRequests` for each imposter, next to Rift's `stubCount` and `enabled`. Mountebank prints `recordRequests` only in an imposter's detail.
+- The `?replayable=true` export keeps the imposter's `host`, so a re-posted export binds where the original did. Mountebank 2.9.1's export leaves `host` out.
+
 ## Elsewhere in these docs
 
 Each of these is described where the feature is:

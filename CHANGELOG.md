@@ -213,6 +213,18 @@ record.
 
 ### Changed
 
+- **Printed imposters are normalized** (#1361). `is.statusCode` prints as a JSON number; it printed
+  as a string, while `defaultResponse.statusCode` already printed a number. Empty `predicates`, an
+  empty `defaultResponse.headers` and a proxy's default options (`mode`, `predicateGenerators`,
+  `addWaitBehavior`, `injectHeaders`) are no longer printed; each reads back to the same value, so
+  stored configs decode unchanged on old and new engines. A `headers: {}` written in a stub's `is`
+  is still printed. This applies to `GET /imposters`, `?replayable=true`, `rift save` and
+  `--datadir` files; see
+  [Differences from Mountebank](docs/mountebank/differences.md#printed-imposters-are-normalized).
+  **The `stub_key` of an id-less stub changes once** (with #1362) when it has an `is` that writes
+  `statusCode`, empty `predicates` or a `proxy` response, since the key hashes the printed form:
+  rift-cluster's response cursors for those stubs restart.
+
 - **Admin API JSON responses carry `Content-Type: application/json; charset=utf-8`** (#1400), as
   Mountebank's do, on success and error alike (including the `401`/`403` refusals). Responses an
   imposter serves, directly or through the `/__rift/` gateway, are unchanged.
