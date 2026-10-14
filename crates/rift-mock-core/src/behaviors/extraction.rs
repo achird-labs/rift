@@ -516,7 +516,7 @@ pub fn extract_xpath_with_ns(
     eval_xpath_on(&document, path, ns)
 }
 
-// Thread-local cache of compiled XPath selectors, keyed by `(selector, namespace-map key)`.
+// Thread-local cache of compiled XPath selectors, keyed by selector text.
 //
 // `sxd_xpath::XPath` is `!Send`/`!Sync` (its internal AST holds `Rc`s), so it cannot live in a
 // process-global cache the way the JSONPath cache above does — every thread must compile and keep
@@ -524,7 +524,7 @@ pub fn extract_xpath_with_ns(
 // so a per-thread cache amortizes the compile across every request that thread ever handles, not
 // just within one request. `Rc` (not `Arc`) mirrors the type's own `!Send` bound.
 thread_local! {
-    static XPATH_CACHE: RefCell<HashMap<(String, String), Rc<CompiledXPath>>> =
+    static XPATH_CACHE: RefCell<HashMap<String, Rc<CompiledXPath>>> =
         RefCell::new(HashMap::new());
 }
 
@@ -589,37 +589,16 @@ fn xpath_context(
 /// regex cache's bound — imposter churn with ever-distinct selectors must not grow this forever.
 const MAX_CACHED_XPATHS: usize = 1024;
 
-/// Deterministic key for a namespace prefix→URI map: sorted `(prefix, uri)` pairs joined, so two
-/// equal maps (in any iteration order) always produce the same string, and an absent/empty map
-/// always produces the same fixed empty key. Part of the cache key alongside the selector string —
-/// the same selector text resolves differently under different namespace bindings.
-fn ns_key(ns: Option<&HashMap<String, String>>) -> String {
-    let Some(ns) = ns else {
-        return String::new();
-    };
-    let mut pairs: Vec<(&str, &str)> = ns.iter().map(|(p, u)| (p.as_str(), u.as_str())).collect();
-    pairs.sort_unstable();
-    pairs
-        .into_iter()
-        .map(|(p, u)| format!("{p}={u}"))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-/// Return the compiled XPath for `(selector, ns)`, compiling and caching it in this thread's cache
-/// on first use. Returns `None` when `selector` fails to compile (callers treat this as "no
+/// Return the compiled XPath for `selector`, compiling and caching it in this thread's cache on
+/// first use. Returns `None` when `selector` fails to compile (callers treat this as "no
 /// extraction"), preserving today's behavior on a bad selector.
 ///
-/// `ns` is part of the key defensively, not because compilation depends on it: `sxd_xpath` compiles
-/// a namespace-independent `XPath` and the real prefix→URI bindings are applied at *evaluation* time
-/// in [`eval_xpath_on`]. So the key's `ns_key` component can at worst duplicate an entry (or, on the
-/// theoretical `ns_key` collision where a URI contains the `,`/`=` delimiters, share one) — either
-/// way the compiled selector returned is correct, because it carries no namespace state.
-fn cached_xpath(selector: &str, ns: Option<&HashMap<String, String>>) -> Option<Rc<CompiledXPath>> {
-    let key = (selector.to_string(), ns_key(ns));
+/// The key is the selector alone: `sxd_xpath` compiles a namespace-independent `XPath`, and the
+/// prefix→URI bindings are applied at *evaluation* time by [`xpath_context`] (issue #1384).
+fn cached_xpath(selector: &str) -> Option<Rc<CompiledXPath>> {
     XPATH_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if let Some(xpath) = cache.get(&key) {
+        if let Some(xpath) = cache.get(selector) {
             return Some(Rc::clone(xpath));
         }
         #[cfg(test)]
@@ -631,7 +610,7 @@ fn cached_xpath(selector: &str, ns: Option<&HashMap<String, String>>) -> Option<
         if cache.len() >= MAX_CACHED_XPATHS {
             cache.clear();
         }
-        cache.insert(key, Rc::clone(&xpath));
+        cache.insert(selector.to_string(), Rc::clone(&xpath));
         Some(xpath)
     })
 }
@@ -666,7 +645,7 @@ pub(crate) fn eval_xpath_on(
 ) -> Option<String> {
     use sxd_xpath::Value;
 
-    let xpath = cached_xpath(selector, ns)?;
+    let xpath = cached_xpath(selector)?;
     let context = xpath_context(&xpath, ns);
     match xpath.xpath.evaluate(&context, document.root()) {
         Ok(Value::String(s)) => Some(s),
@@ -688,7 +667,7 @@ fn eval_xpath_all_on(
 ) -> Option<Vec<String>> {
     use sxd_xpath::Value;
 
-    let xpath = cached_xpath(selector, ns)?;
+    let xpath = cached_xpath(selector)?;
     let context = xpath_context(&xpath, ns);
     match xpath.xpath.evaluate(&context, document.root()) {
         Ok(Value::String(s)) => Some(vec![s]),
@@ -1347,6 +1326,60 @@ mod tests {
         assert!(
             matches!(&selection, Some(Selection::One(s)) if s.is_empty()),
             "nothing selected reads as the empty string: {selection:?}"
+        );
+    }
+
+    /// Issue #1384: a selector that evaluates to a string, number or boolean substitutes that
+    /// scalar. (Mountebank leaves the token in place, or errors on `string()`: a documented
+    /// superset.)
+    #[test]
+    fn scalar_xpath_results_are_substituted() {
+        let package = sxd_document::parser::parse("<r><a>x</a><a>y</a></r>").unwrap();
+        let doc = package.as_document();
+        assert_eq!(
+            eval_xpath_on(&doc, "string(//a)", None).as_deref(),
+            Some("x")
+        );
+        assert_eq!(
+            eval_xpath_on(&doc, "boolean(//a)", None).as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            eval_xpath_on(&doc, "boolean(//zz)", None).as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            eval_xpath_on(&doc, "count(//a)", None).as_deref(),
+            Some("2")
+        );
+    }
+
+    /// The cache holds many selectors at once: it is only emptied when full, so a second selector
+    /// does not evict the first.
+    #[test]
+    fn distinct_cached_selectors_do_not_evict_each_other() {
+        let package = sxd_document::parser::parse("<r><a>x</a></r>").unwrap();
+        let doc = package.as_document();
+        counters::reset();
+        for selector in ["//a[1384]", "//b[1384]", "//a[1384]", "//b[1384]"] {
+            let _ = eval_xpath_on(&doc, selector, None);
+        }
+        assert_eq!(counters::xpath_compiles(), 2, "each selector compiles once");
+    }
+
+    /// Issue #1384: the compiled-selector cache is keyed on the selector alone, so one selector
+    /// evaluated under two namespace maps must still resolve each against its own bindings.
+    #[test]
+    fn one_cached_selector_honours_each_namespace_map() {
+        let xml = r#"<r xmlns:a="urn:a" xmlns:b="urn:b"><a:n>from-a</a:n><b:n>from-b</b:n></r>"#;
+        let bind = |uri: &str| HashMap::from([("p".to_string(), uri.to_string())]);
+        assert_eq!(
+            extract_xpath_with_ns(xml, "//p:n", Some(&bind("urn:a"))).as_deref(),
+            Some("from-a")
+        );
+        assert_eq!(
+            extract_xpath_with_ns(xml, "//p:n", Some(&bind("urn:b"))).as_deref(),
+            Some("from-b")
         );
     }
 }

@@ -1093,6 +1093,78 @@
           "path": "/up"
         }
       ]
+    },
+    {
+      "name": "targeted: a lookup serves the first CSV row whose key column matches, in file order (#1384)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "id=${ID}[name] city=${CITY}[name]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": {
+                              "query": "id"
+                            },
+                            "using": {
+                              "method": "regex",
+                              "selector": ".*"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "../../conformance/differential/data/duplicate-keys.csv",
+                              "keyColumn": "id"
+                            }
+                          },
+                          "into": "${ID}"
+                        }
+                      },
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": {
+                              "query": "city"
+                            },
+                            "using": {
+                              "method": "regex",
+                              "selector": ".*"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "../../conformance/differential/data/duplicate-keys.csv",
+                              "keyColumn": "city"
+                            }
+                          },
+                          "into": "${CITY}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?id=1&city=rome"
+        }
+      ]
     }
   ]
 }

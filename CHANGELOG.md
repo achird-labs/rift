@@ -52,6 +52,11 @@ record.
 
 ### Fixed
 
+- **`lookup` serves the first CSV row whose `keyColumn` matches, in file order, as Mountebank
+  does** (#1384). Before, a repeated first-column key served the last such row, and a repeated key
+  in any other column served an arbitrary one that could change between process starts. This
+  includes a `_rift.dataset` binding, which runs the same lookup.
+
 - **`DELETE /imposters/:port` answers the imposter as it was, as `GET` prints it** (#1399). It
   printed `name: null`, omitted `defaultResponse`, and reported `numberOfRequests: 0` and no
   recorded requests whatever the imposter had served. `ImposterManager::delete_imposter_returning`
