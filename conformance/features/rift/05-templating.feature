@@ -163,10 +163,10 @@ Feature: Response templating — request variables and date tokens
     Then the response body is "<body>"
 
     Examples:
-      | filter       | path         | body   |
-      | last_segment | /seg/a/b/    | b      |
-      | regex        | /u/42        | 42     |
-      | json         | /json-filter | a\\\"b |
+      | filter       | path         | body      |
+      | last_segment | /seg/a/b/    | b         |
+      | regex        | /u/42        | 42        |
+      | json         | /json-filter | a\\\\\\"b |
 
   Scenario: a template renders into a response header value
     Given a fresh imposter from fixture "templating/functions"

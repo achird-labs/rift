@@ -120,3 +120,10 @@ ported feature, a step the Rust runner does not know yet is added to
 it needs a runner change in rift-conformance first. `RUNNER_REF` names
 the runner revision the PR-time job (#1340) checks out; it tracks `main` today, so a new step is
 usable once merged there, and pinning it to a commit is how to hold the runner still.
+
+Every feature must parse with the Rust runner's parser (gherkin-rs), ported or not:
+`cargo test -p rift-conformance-runner --test features_parse` checks all of them (#1466). It is
+stricter than official Gherkin in one place: a table cell accepts only the escapes `\n`, `\|` and
+`\\`, and any other backslash fails the whole file. Write a literal backslash in a cell as `\\`
+(`{\\"a\\":7}` is the cell `{\"a\":7}`). gherkin-rs and zio-bdd agree on `\\"`, but not on every
+sequence (zio-bdd turns `\\n` into a newline), so check a new escape against both runners.

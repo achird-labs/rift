@@ -14,8 +14,9 @@
 //! Step text is byte-identical to the Scala runner's (`RiftConformanceSupport.scala`), so a feature
 //! file means the same thing to both while features move from one runner to the other.
 
+mod common;
+
 use anyhow::{Context as _, anyhow, bail};
-use cucumber::feature::Ext as _;
 use cucumber::parser::{self, Parser};
 use cucumber::tag::Ext as _;
 use cucumber::writer::Stats as _;
@@ -845,9 +846,8 @@ async fn cleanup(world: Option<&mut PlaneA>) {
     );
 }
 
-/// Parses exactly the ported feature files. cucumber's own parser walks a whole directory, and a
-/// feature this runner has not ported yet is not its business: gherkin-rs not parsing one
-/// (today 04 and 05) must not fail this run. A ported file that does not parse still fails it.
+/// Parses exactly the ported feature files, so a run covers only what this runner has ported.
+/// Whether every feature parses at all is `features_parse.rs`'s gate, not this run's.
 struct Ported;
 
 impl Parser<Vec<PathBuf>> for Ported {
@@ -858,11 +858,7 @@ impl Parser<Vec<PathBuf>> for Ported {
     fn parse(self, input: Vec<PathBuf>, _: cli::Empty) -> Self::Output {
         let features: Vec<_> = input
             .into_iter()
-            .map(|path| {
-                gherkin::Feature::parse_path(path, gherkin::GherkinEnv::default())
-                    .map_err(parser::Error::from)
-                    .and_then(|f| f.expand_examples().map_err(parser::Error::from))
-            })
+            .map(|path| common::parse_feature(&path))
             .collect();
         futures::stream::iter(features)
     }

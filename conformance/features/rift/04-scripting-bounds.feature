@@ -225,9 +225,9 @@ Feature: Scripting engines and runaway bounds
     Then the response body is "<result>"
 
     Examples:
-      | case     | body      | result |
-      | JSON     | {\"a\":7} | 7      |
-      | not JSON | not json  | unit   |
+      | case     | body        | result |
+      | JSON     | {\\"a\\":7} | 7      |
+      | not JSON | not json    | unit   |
 
   Scenario: ctx.request.header(name) is case-insensitive
     Given a fresh imposter from fixture "scripting/ctx-surface"
