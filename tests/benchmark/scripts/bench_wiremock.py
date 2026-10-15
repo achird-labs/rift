@@ -997,7 +997,7 @@ if __name__ == "__main__":
     ap.add_argument("--wiremock-jar", default=DEFAULT_JAR)
     ap.add_argument("--wiremock-version", default=DEFAULT_WIREMOCK_VERSION)
     ap.add_argument("--rift-version", default="local")
-    ap.add_argument("--mb-version", default="2.9.1")
+    ap.add_argument("--mb-version", default="2.9.5")
     ap.add_argument("--java-version", default=None,
                     help="override the JVM string recorded in the report (default: probed)")
     ap.add_argument("--container-threads", type=int, default=None, metavar="N",

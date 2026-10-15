@@ -8,8 +8,8 @@ body only, never headers and never the stored imposter, and so could not see #13
 ## Running it
 
 ```bash
-npm install --prefix ~/bench-mb mountebank@2.9.1   # once; the oracle
-cargo build -p rift-http-proxy                     # the server binary the harness spawns
+npm install --prefix ~/bench-mb @mbtest/mountebank@2.9.5   # once; the oracle
+cargo build -p rift-http-proxy                             # the server binary the harness spawns
 cargo test -p rift-differential -- --nocapture
 ```
 
@@ -24,8 +24,10 @@ cargo test -p rift-differential -- --nocapture
 | `RIFT_DIFFERENTIAL_FILTER` | Run only the cases whose name contains this text (the stale-entry check is then off) |
 | `RIFT_DIFFERENTIAL_DUMP` | Write every difference found, explained or not, to this file as JSON — the raw material for a precise allow-list entry |
 
-Mountebank is pinned to 2.9.1, the version the published benchmark uses (`benchmark-publish.yml`).
-2.9.2 exists only as a Docker image, not on npm.
+Mountebank is pinned to 2.9.5 (`MB_VERSION` in `ci.yml`), the newest stable release on npm and the
+version the published benchmark uses (`benchmark-publish.yml`). Since 2.9.2 Mountebank publishes as
+`@mbtest/mountebank`; the old `mountebank` package stops at 2.9.1. Betas are not tracked.
+`.github/workflows/mountebank-release-watch.yml` opens an issue when a newer stable release ships.
 
 ## What is compared
 

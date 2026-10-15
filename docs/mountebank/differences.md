@@ -7,7 +7,7 @@ nav_order: 6
 
 # Differences from Mountebank
 
-Rift answers the Mountebank API the way Mountebank 2.9.1 does, with the deliberate exceptions on
+Rift answers the Mountebank API the way Mountebank 2.9.5 does, with the deliberate exceptions on
 this page. Every one of them is pinned by the
 [differential harness](https://github.com/achird-labs/rift/tree/master/conformance/differential): it
 runs each test case on a real Mountebank and on Rift, and fails on any difference that its allow-list

@@ -610,9 +610,11 @@ jobs:
     if: github.event_name == 'pull_request'
     env:
       # One Mountebank version for the oracle and the published benchmark
-      # (benchmark-publish.yml's mb_version default). 2.9.2 exists only as a Docker image; npm's
-      # latest release is 2.9.1.
-      MB_VERSION: "2.9.1"
+      # (benchmark-publish.yml's mb_version default). Mountebank publishes as @mbtest/mountebank
+      # since 2.9.2 (the old `mountebank` package stops at 2.9.1); this is npm's newest stable
+      # release, pinned exactly so CI stays reproducible. mountebank-release-watch.yml opens an
+      # issue when a newer one ships; moving this pin is a reviewed change.
+      MB_VERSION: "2.9.5"
     steps:
       - uses: actions/checkout@v7
 
@@ -643,7 +645,7 @@ jobs:
 
       - name: Install Mountebank ${{ env.MB_VERSION }}
         run: |
-          npm install --prefix "$HOME/bench-mb" "mountebank@$MB_VERSION"
+          npm install --prefix "$HOME/bench-mb" "@mbtest/mountebank@$MB_VERSION"
           "$HOME/bench-mb/node_modules/.bin/mb" --version
 
       - name: Build the Rift server under test

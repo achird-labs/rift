@@ -1279,7 +1279,7 @@ def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, r
             stop(proc, ports)
     rift_ver = subprocess.run([rift_bin, "--version"], capture_output=True, text=True).stdout.strip() or "local"
     if "rift" in engines and "mb" in engines:
-        mb_ver = subprocess.run([node, mb_bin, "--version"], capture_output=True, text=True).stdout.strip() or "2.9.1"
+        mb_ver = subprocess.run([node, mb_bin, "--version"], capture_output=True, text=True).stdout.strip() or "2.9.5"
         report(rift_ver, mb_ver, duration, conn_list[0], csv_suffix)
     elif engines == ["rift"]:
         rift_only_report(rift_ver, duration, conn_list, rate, recording,
@@ -1608,7 +1608,7 @@ def run_rounds(arms, mb_bin, engines, rounds, duration, warmup, conn_list, rate=
     write_round_csvs(rows, csv_suffix)
     versions = {label: _version([path], "local") for label, path in rift_arms}
     if "mb" in engines:
-        versions["mb"] = _version([node, mb_bin], "2.9.1")
+        versions["mb"] = _version([node, mb_bin], "2.9.5")
     write_round_reports([label for label, _ in rift_arms], "mb" in engines, csv_suffix, rounds,
                         versions, duration, warmup, conn_list, rate, [s[0] for s in scenarios])
 
@@ -1731,9 +1731,9 @@ if __name__ == "__main__":
                          "target/alloc-<name>/release/rift-http-proxy when --allocator is set). "
                          "Repeat as LABEL=PATH, with --rounds, for an interleaved A/B of builds "
                          "(#1211); the first arm is the baseline")
-    ap.add_argument("--mb-bin", default=os.path.expanduser("~/bench-mb/node_modules/mountebank/bin/mb"))
+    ap.add_argument("--mb-bin", default=os.path.expanduser("~/bench-mb/node_modules/.bin/mb"))
     ap.add_argument("--rift-version", default="local")
-    ap.add_argument("--mb-version", default="2.9.1")
+    ap.add_argument("--mb-version", default="2.9.5")
     ap.add_argument("--allocator", choices=list(ALLOCATORS),
                     help="build+bench one allocator variant (Rift-only; #717 bake-off). Builds "
                          "into target/alloc-<name>/ unless --rift-bin is given.")

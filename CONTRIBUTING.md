@@ -188,7 +188,7 @@ your build, and fails on any difference in a response or a stored imposter. If y
 Mountebank-visible behaviour, run it:
 
 ```sh
-npm install --prefix ~/bench-mb mountebank@2.9.1   # once
+npm install --prefix ~/bench-mb @mbtest/mountebank@2.9.5   # once
 cargo test -p rift-differential -- --nocapture
 ```
 

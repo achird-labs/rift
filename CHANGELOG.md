@@ -270,6 +270,14 @@ record.
 
 ### Changed
 
+- **The Mountebank compatibility target and the differential oracle are now
+  `@mbtest/mountebank@2.9.5`** (#1454), npm's newest stable release; they were `mountebank@2.9.1`,
+  the last release under the old package name. CI's `differential` job, the published benchmark's
+  default and every install line use the new package. The full differential corpus passes against
+  2.9.5, and the three allow-list entries for `allowCORS` printing are gone because Mountebank now
+  prints it too. A weekly `mountebank-release-watch` workflow opens an issue when a newer stable
+  Mountebank ships; it never moves the pin itself.
+
 - **`allowCORS` is printed in every imposter view, and any truthy value is accepted** (#1453), as
   Mountebank 2.9.2+ does. `allowCORS` takes any JSON value, read by JavaScript truthiness (`"yes"`
   and `1` turn CORS on, `0` and `""` leave it off; a non-boolean used to be a `400`), and when truthy
