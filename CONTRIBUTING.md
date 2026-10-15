@@ -163,11 +163,23 @@ separator, `20_000`, which the guard skips.
 
 ## The Plane A specification
 
-[`conformance/features/`](conformance/features/) holds the scenarios Rift must satisfy, executed
-by the [rift-conformance](https://github.com/EtaCassiopeia/rift-conformance) runner. If you change
-behaviour a scenario asserts, change the scenario in the same pull request; a new feature file also
-needs its entry in `conformance/manifest.json`. How to run it is in
-[`conformance/README.md`](conformance/README.md).
+[`conformance/features/`](conformance/features/) holds the scenarios Rift must satisfy. Two runners
+execute them while the features move between them (#1346): the Rust runner in
+[`conformance/runner/`](conformance/runner/) (cucumber-rs) runs the features listed in its
+`spec::PORTED_FEATURES`, and the Scala
+[rift-conformance](https://github.com/EtaCassiopeia/rift-conformance) runner runs the rest. If you
+change behaviour a scenario asserts, change the scenario in the same pull request; a new feature
+file also needs its entry in `conformance/manifest.json`. A ported feature needs only Rust to run
+locally, against a staged build:
+
+```bash
+RIFT_BUILD_DIR=/path/to/staged/build RIFT_MAX_BODY_SIZE=10485760 \
+  cargo test -p rift-conformance-runner --test plane_a
+```
+
+Staging the build, the modes and the other variables are in
+[`conformance/README.md`](conformance/README.md). A step the Rust runner does not know yet goes in
+`conformance/runner/tests/plane_a.rs`, with the same step text the Scala runner uses.
 
 ## Mountebank is the oracle
 

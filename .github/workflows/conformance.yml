@@ -28,6 +28,77 @@ permissions:
   contents: read
 
 jobs:
+  # Issue #1346: the Rust Plane A runner (conformance/runner, cucumber-rs) runs the features it has
+  # ported (rift_conformance_runner::spec::PORTED_FEATURES) against this PR's binaries, in external
+  # mode (the staged `rift`) and embedded mode (rift-ffi in-process). The Scala job below keeps
+  # running every feature not yet ported; the two lists become disjoint once
+  # EtaCassiopeia/rift-conformance#237 lands, and until then 00/01/02/09 run under both runners.
+  # RIFT_CONFORMANCE_REQUIRE turns a missing RIFT_BUILD_DIR into a failure rather than the skip a
+  # plain `cargo test --workspace` gets.
+  runner-rust:
+    name: conformance-plane-a (rust runner)
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'conformance-exempt') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RIFT_MAX_BODY_SIZE: "10485760"
+      RIFT_CONFORMANCE_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v6
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-conformance-rust-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build rift, rift-lint and rift-verify
+        run: cargo build --release -p rift-http-proxy -p rift-lint --bins
+
+      # Same staging as the Scala job: the three binaries plus BUILD_INFO (feature 01).
+      - name: Stage binaries and BUILD_INFO
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/rift-build"
+          mkdir -p "$dir"
+          cp target/release/rift-http-proxy "$dir/rift"
+          cp target/release/rift-lint target/release/rift-verify "$dir/"
+          binaries='{}'
+          versions='{}'
+          for name in rift rift-lint rift-verify; do
+            sha="$(sha256sum "$dir/$name" | cut -d' ' -f1)"
+            ver="$("$dir/$name" --version | head -1)"
+            binaries="$(jq --arg n "$name" --arg s "$sha" '. + {($n): $s}' <<<"$binaries")"
+            versions="$(jq --arg n "$name" --arg v "$ver" '. + {($n): $v}' <<<"$versions")"
+          done
+          jq -n --arg commit "$GITHUB_SHA" --arg branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
+            --arg builtAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson binaries "$binaries" --argjson versions "$versions" \
+            '{commit: $commit, branch: $branch, builtAt: $builtAt, binaries: $binaries, versions: $versions}' \
+            > "$dir/BUILD_INFO"
+          cat "$dir/BUILD_INFO"
+          echo "RIFT_BUILD_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: Run the ported features (external mode)
+        run: cargo test -p rift-conformance-runner --test plane_a
+        env:
+          RIFT_MODE: external
+
+      # Same test binary, the engine linked in-process through rift-ffi instead of spawned.
+      - name: Run the ported features (embedded mode)
+        run: cargo test -p rift-conformance-runner --test plane_a
+        env:
+          RIFT_MODE: embedded
+
   conformance-plane-a:
     name: conformance-plane-a
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'conformance-exempt') }}
