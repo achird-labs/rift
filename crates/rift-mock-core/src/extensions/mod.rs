@@ -41,10 +41,7 @@ pub use exchange_inspector::{
     ExchangeInspector, ExchangeInspectorProvider, InspectRequest, InspectResponse, InspectVerdict,
 };
 #[allow(unused_imports)]
-pub use flow_state::{
-    CasOutcome, FlowStore, FlowStoreBackendFactory, FlowStoreBackends, FlowStoreProvider,
-    NoOpFlowStore, create_flow_store,
-};
+pub use flow_state::{CasOutcome, FlowStore, FlowStoreProvider, NoOpFlowStore};
 #[allow(unused_imports)]
 pub use metrics::{AcceptErrorCounters, AcceptOutageGuard, collect_metrics, record_request};
 #[allow(unused_imports)]

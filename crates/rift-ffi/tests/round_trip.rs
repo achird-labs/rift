@@ -1263,7 +1263,7 @@ fn ffi_admin_plane_round_trip() {
         assert!(!h.is_null());
         let config = cstr(&format!(
             r#"{{ "port": {imposter_port}, "protocol": "http", "recordRequests": true,
-                 "_rift": {{ "flowState": {{ "backend": "inmemory" }} }}, "stubs": [] }}"#
+                 "_rift": {{ "flowState": {{}} }}, "stubs": [] }}"#
         ));
         let port = rift_create_imposter(h, config.as_ptr());
         assert_eq!(port, imposter_port);
@@ -1434,7 +1434,7 @@ fn ffi_flow_state_get_absent_vs_error() {
         assert!(!h.is_null());
         let config = cstr(&format!(
             r#"{{ "port": {imposter_port}, "protocol": "http",
-                 "_rift": {{ "flowState": {{ "backend": "inmemory" }} }}, "stubs": [] }}"#
+                 "_rift": {{ "flowState": {{}} }}, "stubs": [] }}"#
         ));
         let port = rift_create_imposter(h, config.as_ptr());
         assert_eq!(port, imposter_port);
@@ -1519,7 +1519,7 @@ fn ffi_flow_state_clear() {
         assert!(!h.is_null());
         let config = cstr(
             r#"{ "port": 0, "protocol": "http",
-                 "_rift": { "flowState": { "backend": "inmemory" } }, "stubs": [] }"#,
+                 "_rift": { "flowState": {} }, "stubs": [] }"#,
         );
         let port = rift_create_imposter(h, config.as_ptr());
         assert!(port > 0);
@@ -3009,11 +3009,10 @@ fn ffi_serve_admin_still_enforces_a_real_api_key() {
     }
 }
 
-// Issue #1337: the Redis flow-state backend is gone, so the C-ABI door refuses it at admission
-// with the pointer to rift-cluster — a creation failure (sentinel 0) whose `rift_last_error` names
-// the removal, not a silent downgrade to NoOp.
+// Issue #1463: `flowState.backend` is gone, so the C-ABI door no longer refuses a leftover
+// `"redis"`: the key lands in `extra` and the imposter is created with the in-memory store.
 #[test]
-fn ffi_create_imposter_refuses_the_removed_redis_backend() {
+fn ffi_create_imposter_accepts_a_leftover_backend_key() {
     let imposter_port = free_port();
     unsafe {
         let h = rift_start();
@@ -3024,18 +3023,10 @@ fn ffi_create_imposter_refuses_the_removed_redis_backend() {
                 "_rift": {{"flowState": {{"backend": "redis",
                                         "redis": {{"url": "redis://127.0.0.1:1"}}}}}}}}"#
         ));
-        assert_eq!(
+        assert_ne!(
             rift_create_imposter(h, config.as_ptr()),
             0,
-            "a removed backend must fail imposter creation, not downgrade to NoOp"
-        );
-
-        let err = rift_last_error();
-        assert!(!err.is_null(), "a failed creation must record last_error");
-        let err = take_json(err);
-        assert!(
-            err.contains("removed in 0.22.0") && err.contains("rift-cluster"),
-            "the refusal must name the removal and point at rift-cluster — got {err:?}"
+            "a leftover flowState.backend must not fail imposter creation (#1463)"
         );
 
         rift_stop(h);

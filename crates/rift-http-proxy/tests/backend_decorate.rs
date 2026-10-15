@@ -2,15 +2,19 @@
 //! admin), the ResponseDecorator hook fires on both phases, and no-decorator responses are
 //! byte-identical to before.
 //!
-//! The failing backend comes from rift-mock-core's `test-backend` feature (dev-dependency):
-//! `_rift.flowState.backend = "failing"` installs a store whose ops annotate then fail
-//! with `BackendUnavailable`.
+//! The failing store is a test `FlowStoreProvider` (`failing_flow_store.rs`) injected through
+//! `ImposterManager::with_flow_store_provider`: its ops annotate then fail with
+//! `BackendUnavailable`.
 
 use parking_lot::Mutex;
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::extensions::decorate::{ResponseDecorator, ResponsePhase};
 use rift_http_proxy::imposter::{ImposterConfig, ImposterManager};
 use std::sync::Arc;
+
+#[path = "support/failing_flow_store.rs"]
+mod failing_flow_store;
+use failing_flow_store::failing_manager;
 
 fn imposter_cfg(v: serde_json::Value) -> ImposterConfig {
     serde_json::from_value(v).expect("test imposter config")
@@ -19,7 +23,6 @@ fn imposter_cfg(v: serde_json::Value) -> ImposterConfig {
 fn failing_backend_cfg() -> ImposterConfig {
     imposter_cfg(serde_json::json!({
         "protocol": "http",
-        "_rift": {"flowState": {"backend": "failing"}},
         "stubs": [{
             "scenarioName": "order",
             "requiredScenarioState": "Started",
@@ -93,7 +96,7 @@ async fn admin_responses_are_decorated() {
 // request is a structured 503 — never a silent wrong match.
 #[tokio::test]
 async fn data_plane_scenario_gate_returns_structured_503() {
-    let manager = Arc::new(ImposterManager::new());
+    let manager = Arc::new(failing_manager());
     let port = manager
         .create_imposter(failing_backend_cfg())
         .await
@@ -114,7 +117,7 @@ async fn data_plane_scenario_gate_returns_structured_503() {
 // structured 503, not an opaque 500.
 #[tokio::test]
 async fn flow_state_admin_endpoint_returns_structured_503() {
-    let manager = Arc::new(ImposterManager::new());
+    let manager = Arc::new(failing_manager());
     let port = manager
         .create_imposter(failing_backend_cfg())
         .await
@@ -138,7 +141,7 @@ async fn flow_state_admin_endpoint_returns_structured_503() {
 // AC3 (admin half): the scenario inspection endpoint maps the store error too.
 #[tokio::test]
 async fn scenario_list_maps_backend_error_to_503() {
-    let manager = Arc::new(ImposterManager::new());
+    let manager = Arc::new(failing_manager());
     let port = manager
         .create_imposter(failing_backend_cfg())
         .await
@@ -195,12 +198,11 @@ async fn no_decorator_response_headers_unchanged() {
 // FSM transition" the issue exists to prevent.
 #[tokio::test]
 async fn transition_write_failure_returns_structured_503() {
-    let manager = Arc::new(ImposterManager::new());
+    let manager = Arc::new(failing_manager());
     let port = manager
         .create_imposter(imposter_cfg(serde_json::json!({
             "protocol": "http",
-            "_rift": {"flowState": {"backend": "failing"}},
-            "stubs": [{
+                "stubs": [{
                 "scenarioName": "order",
                 "newScenarioState": "paid",
                 "predicates": [{"equals": {"path": "/transition"}}],
@@ -226,8 +228,7 @@ async fn transition_write_failure_returns_structured_503() {
 async fn admin_decorator_receives_backend_annotations() {
     let recorder = Arc::new(RecordingDecorator::default());
     let manager = Arc::new(
-        ImposterManager::new()
-            .with_response_decorator(recorder.clone() as Arc<dyn ResponseDecorator>),
+        failing_manager().with_response_decorator(recorder.clone() as Arc<dyn ResponseDecorator>),
     );
     let port = manager
         .create_imposter(failing_backend_cfg())
@@ -259,8 +260,7 @@ async fn admin_decorator_receives_backend_annotations() {
 async fn gateway_503_is_decorated_with_admin_phase() {
     let recorder = Arc::new(RecordingDecorator::default());
     let manager = Arc::new(
-        ImposterManager::new()
-            .with_response_decorator(recorder.clone() as Arc<dyn ResponseDecorator>),
+        failing_manager().with_response_decorator(recorder.clone() as Arc<dyn ResponseDecorator>),
     );
     let port = manager
         .create_imposter(failing_backend_cfg())
@@ -340,7 +340,7 @@ async fn unauthorized_response_is_decorated() {
 // all map a failing backend to the structured 503 — they switched from opaque 500s.
 #[tokio::test]
 async fn flow_state_write_endpoints_map_backend_error_to_503() {
-    let manager = Arc::new(ImposterManager::new());
+    let manager = Arc::new(failing_manager());
     let port = manager
         .create_imposter(failing_backend_cfg())
         .await

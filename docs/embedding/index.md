@@ -44,7 +44,7 @@ the source, the source wins — please file an issue.
 
 | Crate | Role | Exposes |
 |:------|:-----|:--------|
-| `rift-mock-core` | The engine library — no CLI, no HTTP server wiring. | `ImposterManager` and the SPI traits (`FlowStore`, `FlowStoreProvider`, `FlowStoreBackendFactory`, `ResponseSequencer`, `RequestJournal`, `ProxyRecordingStore`, `ImposterEventListener`, `ResponseDecorator`, `NoMatchInterceptor`, `ExchangeInspector`, `AdminAuthorizer`), `tcp_fault_carrier`, behaviors, predicates, scripting. |
+| `rift-mock-core` | The engine library — no CLI, no HTTP server wiring. | `ImposterManager` and the SPI traits (`FlowStore`, `FlowStoreProvider`, `ResponseSequencer`, `RequestJournal`, `ProxyRecordingStore`, `ImposterEventListener`, `ResponseDecorator`, `NoMatchInterceptor`, `ExchangeInspector`, `AdminAuthorizer`), `tcp_fault_carrier`, behaviors, predicates, scripting. |
 | `rift-http-proxy` | The server crate — builds the `rift` binary and hosts the admin/metrics HTTP layer. `server::{ServerBuilder, RunningServer, bind_metrics_server, admin_bind_addr}`, `admin_api::AdminApiServer`, `bootstrap` helpers, the single-port gateway, the front door (`RouteObserver`), the intercept proxy, `install_default_crypto_provider()`. |
 | `rift-ffi` | The C-ABI shared library (`cdylib`) plus an `rlib` for in-crate tests. | The `extern "C"` functions (`rift_start`, `rift_serve_admin`, …) and the cbindgen header. |
 

@@ -4884,7 +4884,6 @@ function respond(ctx) {
         }
 
         // Issue #358 B3 (AC4): a backend failure on any atomic op must propagate as a script error.
-        #[cfg(feature = "test-backend")]
         #[test]
         fn atomic_ops_propagate_store_errors_fail_loud() {
             use crate::extensions::flow_state::FailingFlowStore;
@@ -4924,7 +4923,6 @@ function respond(ctx) {
         }
 
         // Issue #358 B1 / #322: the ctx.state ops (get/incr) are unconditionally fail-loud.
-        #[cfg(feature = "test-backend")]
         #[test]
         fn state_ops_fail_loud_on_backend_failure() {
             use crate::extensions::flow_state::FailingFlowStore;

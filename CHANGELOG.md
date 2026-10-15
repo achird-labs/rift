@@ -432,6 +432,15 @@ record.
   `FlowStateConfig`), the `redis` capability from the SDK-conformance `requires` set, and the Redis
   CI job, compose service and docs. `FlowStore`, `FlowStoreProvider` and `FlowStoreBackendFactory`
   stay: an embedder can still bring any store.
+- **`_rift.flowState.backend` and the named-backend registry** (#1463). `inmemory` was the only
+  value left, and it was the default. A config that still carries `backend` is not refused: the key
+  is ignored and lands in the `flowState` `extra` passthrough, so stored configs keep decoding. The
+  Rust APIs `FlowStoreBackendFactory`, `FlowStoreBackends`, `ImposterManager::with_flow_store_backends`,
+  `Imposter::new_with_hooks_journal_and_backends`, `rift_http_proxy::default_flow_store_backends`,
+  `extensions::flow_state::create_flow_store` and the server-level `config::FlowStateConfig` are gone.
+  Embedders install a store through `FlowStoreProvider` (`with_flow_store_provider`), which is the
+  only flow-store seam. `GET /imposters` no longer reports `flowState.backend`, and the `test-backend`
+  cargo feature of `rift-mock-core` is removed.
 
 ## [0.21.0] - 2026-10-07
 

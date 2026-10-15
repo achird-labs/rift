@@ -48,56 +48,14 @@ pub trait FlowStoreProvider: Send + Sync {
 
 Inject with `.with_flow_store_provider(Arc<dyn FlowStoreProvider>)`.
 
-A provider **overrides** the imposter's own `_rift.flowState` selection, and it cannot report a
-failure — `provide` returns `Option`, so declining falls through to the built-ins. When you want a
-store the *config* selects by name, and misconfiguration to fail loudly, use
-`FlowStoreBackendFactory` below instead.
-
----
-
-## `FlowStoreBackendFactory` — a named flow-state backend
-
-Adds a `_rift.flowState.backend` name the config can select, with an error channel. The engine ships
-only the built-in `"inmemory"` backend (the Redis backend was removed in 0.22.0), so a store that
-lives outside `rift-mock-core` attaches here.
-
-```rust
-pub trait FlowStoreBackendFactory: Send + Sync {
-    /// The `_rift.flowState.backend` string this factory serves, e.g. "mystore".
-    fn name(&self) -> &'static str;
-
-    /// Build a store for this imposter's flowState block. An `Err` fails imposter creation.
-    fn build(&self, config: &RiftFlowStateConfig) -> anyhow::Result<Arc<dyn FlowStore>>;
-}
-```
-
-Register with `.with_flow_store_backends(FlowStoreBackends)`:
-
-```rust
-use rift_mock_core::extensions::flow_state::FlowStoreBackends;
-
-let backends = FlowStoreBackends::new().with(Arc::new(MyBackend));
-let manager = ImposterManager::new().with_flow_store_backends(backends);
-```
-
-The `rift` binary and the C-ABI register their shipped backends automatically — currently none
-beyond the built-in `"inmemory"`. `rift_http_proxy::default_flow_store_backends()` returns that set
-if you are assembling a manager yourself and want the same vocabulary.
-
-Choosing between the two seams:
-
-| | `FlowStoreProvider` | `FlowStoreBackendFactory` |
-|---|---|---|
-| Selected by | the embedder, for every imposter | the imposter's `flowState.backend` name |
-| Precedence | overrides `_rift.flowState` | only consulted when the config names it |
-| On failure | can only decline (`None`) → falls through | returns `Err` → imposter creation fails with `400` |
-
-A backend name that nothing registered is a config error, never a silent downgrade to a no-op store:
-creation fails with an error listing the names this build does serve.
+A provider **overrides** the imposter's own `_rift.flowState`: when it returns a store, that store is
+used. It cannot report a failure — `provide` returns `Option`, so declining falls through to the
+built-in in-memory store. It is the only flow-store seam; `_rift.flowState` has no `backend` name to
+select a store by.
 
 ### Implementing `FlowStore`
 
-Either seam hands back an `Arc<dyn FlowStore>` (`rift_mock_core::flow_state::FlowStore`). Required:
+A provider hands back an `Arc<dyn FlowStore>` (`rift_mock_core::flow_state::FlowStore`). Required:
 `get`, `set`, `exists`, `delete`, `increment`, `set_ttl`. Defaulted, so an older
 implementation keeps compiling: `is_blocking`, `increment_by`, `set_key_ttl`, `clear_flow`, `compare_and_set` (a non-atomic get-then-set; a real backend should override it),
 `flow_ids`, `entry_count`.

@@ -39,7 +39,7 @@ way you can count attempts, fail the first N and then succeed, or gate on a stor
 attempt 1 → 503   attempt 2 → 503   attempt 3 → 200
 ```
 
-The only built-in backend is `inmemory`; an embedder can register its own, and state shared across
+The built-in store is in-memory; an embedder can supply its own through `FlowStoreProvider`, and state shared across
 processes is a [rift-cluster]({{ site.baseurl }}/deployment/kubernetes/#shared-state-across-pods) deployment. Values expire after `ttlSeconds`. You can also inspect and seed flow-state directly over the admin API.
 
 ## Scenarios — declarative state machines

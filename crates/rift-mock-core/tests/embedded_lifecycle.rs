@@ -10,7 +10,7 @@ async fn engine_serves_matches_and_records_without_admin_server_or_cli() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
         "protocol": "http", "recordRequests": true,
-        "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300 } },
+        "_rift": { "flowState": { "ttlSeconds": 300 } },
         "stubs": [
             { "predicates": [{ "equals": { "path": "/hello" } }],
               "responses": [{ "is": { "statusCode": 200, "body": "world" } }] }

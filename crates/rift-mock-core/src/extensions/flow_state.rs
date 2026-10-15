@@ -154,126 +154,11 @@ pub trait FlowStore: Send + Sync {
 /// custom persistence or a test fake, without forking `rift-mock-core`. Register one on the
 /// manager with
 /// [`ImposterManager::with_flow_store_provider`](crate::imposter::ImposterManager::with_flow_store_provider).
-/// It is consulted when an imposter's flow store is constructed, before the built-in
-/// `_rift.flowState` selection.
+/// It is consulted when an imposter's flow store is constructed, before the built-in in-memory
+/// store. It is the only way to put a store other than the in-memory one behind an imposter.
 pub trait FlowStoreProvider: Send + Sync {
-    /// Return a store for this imposter, or `None` to defer to the built-ins.
+    /// Return a store for this imposter, or `None` to defer to the built-in selection.
     fn provide(&self, config: &crate::imposter::ImposterConfig) -> Option<Arc<dyn FlowStore>>;
-}
-
-/// A backend selectable by name through `_rift.flowState.backend` (issue #853).
-///
-/// This is how a store lives outside `rift-mock-core` while still being chosen by config: the
-/// engine ships only `"inmemory"`; an embedder registers any other store here, so the
-/// core engine carries no store dependency. Distinct from [`FlowStoreProvider`] in two ways that
-/// matter:
-///
-/// - **It has an error channel.** `provide` returns `Option`, so a provider can only *decline* —
-///   a misconfigured backend would silently fall through to a built-in. A factory returns
-///   `Result`, so a bad URL or missing config block fails imposter creation loudly (issue #325).
-/// - **It is selected by the config, not imposed on it.** A provider overrides any
-///   `_rift.flowState`; a factory is only consulted when the config names it.
-pub trait FlowStoreBackendFactory: Send + Sync {
-    /// The `_rift.flowState.backend` string this factory serves, e.g. `"fake"`.
-    fn name(&self) -> &'static str;
-
-    /// Build a store for this imposter's `flowState` block. An `Err` fails imposter creation
-    /// (fail-loud, #325) — never a silent downgrade to [`NoOpFlowStore`].
-    fn build(&self, config: &crate::imposter::RiftFlowStateConfig) -> Result<Arc<dyn FlowStore>>;
-}
-
-/// The named flow-store backends a build can serve, beyond the always-present `"inmemory"`
-/// (issue #853). Register with
-/// [`ImposterManager::with_flow_store_backends`](crate::imposter::ImposterManager::with_flow_store_backends).
-///
-/// Empty by default: `rift-mock-core` alone serves only `"inmemory"`, and any other name fails
-/// construction with an error listing what *is* available. The `rift` binary and the C-ABI
-/// register nothing beyond that (`default_flow_store_backends()` is empty).
-#[derive(Clone, Default)]
-pub struct FlowStoreBackends {
-    factories: Vec<Arc<dyn FlowStoreBackendFactory>>,
-}
-
-impl FlowStoreBackends {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Register `factory` under its own [`FlowStoreBackendFactory::name`].
-    ///
-    /// Lookup scans in registration order, so the **first** registration of a name wins and a
-    /// second one is unreachable rather than an override. That is a caller mistake with a
-    /// well-defined outcome, so it warns rather than panicking — a builder in a library has no
-    /// business aborting the host process over it, but it should not be silent either.
-    ///
-    /// Built-in names also take precedence over the registry: both selection sites match
-    /// `"inmemory"` (and the `test-backend` `"failing"` store) before consulting it, so registering
-    /// a factory under one of those names has no effect.
-    #[must_use]
-    pub fn with(mut self, factory: Arc<dyn FlowStoreBackendFactory>) -> Self {
-        if self.get(factory.name()).is_some() {
-            tracing::warn!(
-                backend = factory.name(),
-                "flow-state backend registered twice; the first registration wins and this one is unreachable"
-            );
-        }
-        self.factories.push(factory);
-        self
-    }
-
-    #[must_use]
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn FlowStoreBackendFactory>> {
-        self.factories.iter().find(|f| f.name() == name)
-    }
-
-    /// Registered backend names, for the fail-loud "available:" list.
-    #[must_use]
-    pub fn names(&self) -> Vec<&'static str> {
-        self.factories.iter().map(|f| f.name()).collect()
-    }
-}
-
-impl std::fmt::Debug for FlowStoreBackends {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FlowStoreBackends")
-            .field("backends", &self.names())
-            .finish()
-    }
-}
-
-/// The fail-loud error for a `flowState.backend` this build cannot serve (issues #325/#377/#853).
-///
-/// Names the requested backend *and* everything selectable, so an operator whose binary was built
-/// without a feature learns what to rebuild with — instead of a silent `NoOpFlowStore` downgrade
-/// that only shows up later as state that never persists. The `test-backend` `"failing"` store is
-/// deliberately not advertised: it is a test fixture, not an operator choice.
-pub(crate) fn unknown_backend_error(backend: &str, backends: &FlowStoreBackends) -> anyhow::Error {
-    let mut available = vec!["inmemory"];
-    for name in backends.names() {
-        // A name can legitimately appear twice in the registry (first registration wins), but
-        // showing an operator `available: "inmemory", "fake", "fake"` would just look broken.
-        if !available.contains(&name) {
-            available.push(name);
-        }
-    }
-    let list = available
-        .iter()
-        .map(|n| format!("\"{n}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    // Only reached when `backend` resolved to no factory, so a removed backend needs no second
-    // lookup to confirm it. Raised at admission only — never from a deserializer, because
-    // rift-cluster replays stored configs that may still name it.
-    if backend == "redis" {
-        return anyhow!(
-            "flowState backend \"redis\" was removed in 0.22.0; state shared across processes is a \
-             rift-cluster deployment — see docs/deployment/kubernetes.md"
-        );
-    }
-    anyhow!(
-        "flowState.backend is \"{backend}\" but no such backend is registered (available: {list})"
-    )
 }
 
 /// No-op flow store that does nothing
@@ -327,9 +212,8 @@ impl FlowStore for NoOpFlowStore {
 /// Counts every flow-store operation into `rift_flow_state_ops_total` (issue #999), by delegating
 /// to an inner store.
 ///
-/// Wrapped once around the store `create_flow_store` returns, so the provider path, `inmemory`,
-/// the `failing` test backend, every registered backend and the NoOp fallback are all
-/// covered without touching a single call site.
+/// Wrapped once around the store `Imposter::create_flow_store` returns, so the provider path,
+/// `inmemory` and the NoOp fallback are all covered without touching a single call site.
 ///
 /// **Every trait method is forwarded, including the ones with default bodies — that is a
 /// correctness requirement, not tidiness.** `is_blocking` defaults to `false`, so failing to
@@ -421,18 +305,11 @@ impl FlowStore for MeteredFlowStore {
     }
 }
 
-/// Create a server-level FlowStore from the `flowState` block of a proxy config file.
+/// Reject a non-positive flow-state TTL at construction (issue #530).
 ///
-/// `"inmemory"` is built in; every other name is resolved through `backends` (issue #853), so a
-/// backend living outside this crate is selectable without `rift-mock-core` depending on it. An unregistered name is an error listing what is available,
-/// never a silent downgrade to [`NoOpFlowStore`] (issues #325/#377).
-/// Reject a non-positive flow-state TTL at construction (issue #530, extended to the server-level
-/// path by #860).
-///
-/// A non-positive TTL fails late and differently per backend — in-memory expires every write
-/// immediately, a networked store may error on the first `SETEX` — so a static config error would otherwise
-/// surface as a runtime mystery. Shared by both the per-imposter and server-level factories so the
-/// two paths cannot drift on the rule or the wording.
+/// A non-positive TTL fails late and differently per store — in-memory expires every write
+/// immediately, a networked store may error on the first `SETEX` — so a static config error would
+/// otherwise surface as a runtime mystery.
 pub(crate) fn validate_ttl_seconds(ttl_seconds: i64) -> Result<()> {
     if ttl_seconds < 1 {
         anyhow::bail!(
@@ -441,42 +318,6 @@ pub(crate) fn validate_ttl_seconds(ttl_seconds: i64) -> Result<()> {
         );
     }
     Ok(())
-}
-
-pub fn create_flow_store(
-    config: &crate::config::FlowStateConfig,
-    backends: &FlowStoreBackends,
-) -> Result<Arc<dyn FlowStore>> {
-    // Before the backend match, not after: the per-imposter path validates the TTL ahead of its
-    // own dispatch, so `{backend: "nope", ttlSeconds: 0}` must report the TTL error on both paths
-    // rather than whichever error the dispatch happens to reach first.
-    validate_ttl_seconds(config.ttl_seconds)?;
-    match config.backend.as_str() {
-        "inmemory" => {
-            use crate::backends::InMemoryFlowStore;
-            tracing::info!("Using InMemory FlowStore (ttl={}s)", config.ttl_seconds);
-            Ok(Arc::new(InMemoryFlowStore::new(config.ttl_seconds as u64)))
-        }
-        other => match backends.get(other) {
-            Some(factory) => factory.build(&server_flow_state_config(config)),
-            None => Err(unknown_backend_error(other, backends)),
-        },
-    }
-}
-
-/// Adapt the server-level `flowState` block to the per-imposter shape a
-/// [`FlowStoreBackendFactory`] takes, so both config surfaces reach one factory implementation
-/// rather than each backend having to understand two config types (issue #853). `flow_id_source`
-/// and `extra` have no server-level equivalent.
-fn server_flow_state_config(
-    config: &crate::config::FlowStateConfig,
-) -> crate::imposter::RiftFlowStateConfig {
-    crate::imposter::RiftFlowStateConfig {
-        backend: config.backend.clone(),
-        ttl_seconds: config.ttl_seconds,
-        flow_id_source: None,
-        extra: serde_json::Map::new(),
-    }
 }
 
 #[cfg(test)]
@@ -587,87 +428,9 @@ mod tests {
         assert!(debug_str.contains("NoOpFlowStore"));
     }
 
-    // ============================================
-    // Tests for create_flow_store factory
-    // ============================================
-
+    /// The guard's boundary and wording: `1` is accepted, `0` is refused with the documented text.
     #[test]
-    fn test_create_flow_store_inmemory() {
-        use crate::config::FlowStateConfig;
-        let config = FlowStateConfig {
-            backend: "inmemory".to_string(),
-            ttl_seconds: 300,
-        };
-        let store = create_flow_store(&config, &FlowStoreBackends::new());
-        assert!(store.is_ok());
-    }
-
-    #[test]
-    fn test_create_flow_store_inmemory_custom_ttl() {
-        use crate::config::FlowStateConfig;
-        let config = FlowStateConfig {
-            backend: "inmemory".to_string(),
-            ttl_seconds: 7200,
-        };
-        let store = create_flow_store(&config, &FlowStoreBackends::new());
-        assert!(store.is_ok());
-    }
-
-    /// Issue #860: the server-level path had no TTL guard, so `ttlSeconds: 0` was accepted and
-    /// then misbehaved late and backend-dependently — the exact failure #530 removed from the
-    /// per-imposter path.
-    #[test]
-    fn server_level_rejects_a_non_positive_ttl() {
-        use crate::config::FlowStateConfig;
-        for ttl in [0, -1, -3600] {
-            let config = FlowStateConfig {
-                backend: "inmemory".to_string(),
-                ttl_seconds: ttl,
-            };
-            let err = build_error(
-                create_flow_store(&config, &FlowStoreBackends::new()),
-                &format!("ttlSeconds {ttl} must be rejected, not accepted and expired instantly"),
-            );
-            assert!(
-                err.contains("flowState.ttlSeconds must be >= 1"),
-                "ttl={ttl} gave: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn ttl_one_is_the_boundary_and_is_accepted() {
-        use crate::config::FlowStateConfig;
-        let config = FlowStateConfig {
-            backend: "inmemory".to_string(),
-            ttl_seconds: 1,
-        };
-        assert!(create_flow_store(&config, &FlowStoreBackends::new()).is_ok());
-    }
-
-    /// The guard runs *before* the backend match, matching the per-imposter path's ordering. If it
-    /// ran after, `{backend: "nope", ttlSeconds: 0}` would report an unknown-backend error on one
-    /// path and a TTL error on the other for the same config.
-    #[test]
-    fn a_bad_ttl_is_reported_before_an_unknown_backend() {
-        use crate::config::FlowStateConfig;
-        let config = FlowStateConfig {
-            backend: "definitely-not-a-backend".to_string(),
-            ttl_seconds: 0,
-        };
-        let err = build_error(
-            create_flow_store(&config, &FlowStoreBackends::new()),
-            "a config wrong in two ways must still fail",
-        );
-        assert!(
-            err.contains("flowState.ttlSeconds must be >= 1"),
-            "TTL must be reported first, got: {err}"
-        );
-    }
-
-    /// Both entry points share one guard, so they cannot drift on the rule or the wording.
-    #[test]
-    fn both_paths_report_the_same_ttl_error() {
+    fn ttl_guard_boundary_and_wording() {
         assert!(
             validate_ttl_seconds(0)
                 .unwrap_err()
@@ -675,200 +438,6 @@ mod tests {
                 .contains("flowState.ttlSeconds must be >= 1")
         );
         assert!(validate_ttl_seconds(1).is_ok());
-    }
-
-    /// `Arc<dyn FlowStore>` is not `Debug`, so `expect_err` is unavailable — unwrap the error
-    /// message explicitly instead.
-    fn build_error(result: Result<Arc<dyn FlowStore>>, what: &str) -> String {
-        match result {
-            Ok(_) => panic!("{what}"),
-            Err(e) => e.to_string(),
-        }
-    }
-
-    /// A fake out-of-crate backend: proves the registry seam works with NO store dependency in
-    /// `rift-mock-core`, which is the whole point of issue #853.
-    struct FakeBackend;
-
-    impl FlowStoreBackendFactory for FakeBackend {
-        fn name(&self) -> &'static str {
-            "fake"
-        }
-        fn build(
-            &self,
-            _config: &crate::imposter::RiftFlowStateConfig,
-        ) -> Result<Arc<dyn FlowStore>> {
-            Ok(Arc::new(NoOpFlowStore))
-        }
-    }
-
-    /// A backend whose construction fails — the error channel `FlowStoreProvider` lacks (#853).
-    struct BrokenBackend;
-
-    impl FlowStoreBackendFactory for BrokenBackend {
-        fn name(&self) -> &'static str {
-            "broken"
-        }
-        fn build(
-            &self,
-            _config: &crate::imposter::RiftFlowStateConfig,
-        ) -> Result<Arc<dyn FlowStore>> {
-            Err(anyhow!("cannot reach the thing"))
-        }
-    }
-
-    // Issue #853 AC3: an explicitly-named backend that nothing registered must fail with an error
-    // naming it AND listing what IS selectable — never a silent NoOp downgrade (#325/#377). This
-    // uses names that were never built in, since core registers nothing itself.
-    #[test]
-    fn create_flow_store_unregistered_backend_names_the_available_ones() {
-        use crate::config::FlowStateConfig;
-        for backend in ["postgres", "unknown"] {
-            let config = FlowStateConfig {
-                backend: backend.to_string(),
-                ttl_seconds: 300,
-            };
-            let err = build_error(
-                create_flow_store(&config, &FlowStoreBackends::new()),
-                "an unregistered backend must fail, not downgrade to NoOp",
-            );
-            assert!(
-                err.contains(backend) && err.contains("no such backend is registered"),
-                "the error must name the requested backend, got: {err}"
-            );
-            assert!(
-                err.contains("available: \"inmemory\""),
-                "the error must list what IS selectable, got: {err}"
-            );
-        }
-    }
-
-    // Issue #1337: "redis" is a removed backend, not a typo or a missing feature — the refusal says
-    // so, and points at the supported way to share state across processes.
-    #[test]
-    fn create_flow_store_redis_is_refused_with_the_removal_text() {
-        use crate::config::FlowStateConfig;
-        let config = FlowStateConfig {
-            backend: "redis".to_string(),
-            ttl_seconds: 300,
-        };
-        let err = build_error(
-            create_flow_store(&config, &FlowStoreBackends::new()),
-            "the removed redis backend must be refused",
-        );
-        assert_eq!(
-            err,
-            "flowState backend \"redis\" was removed in 0.22.0; state shared across processes is a \
-             rift-cluster deployment — see docs/deployment/kubernetes.md"
-        );
-    }
-
-    // Issue #853: a registered factory is consulted for its own name, and its registered name
-    // shows up in the fail-loud list for other names.
-    #[test]
-    fn create_flow_store_consults_a_registered_backend() {
-        use crate::config::FlowStateConfig;
-        let backends = FlowStoreBackends::new().with(Arc::new(FakeBackend));
-        let config = FlowStateConfig {
-            backend: "fake".to_string(),
-            ttl_seconds: 300,
-        };
-        assert!(
-            create_flow_store(&config, &backends).is_ok(),
-            "a registered backend must be built through its factory"
-        );
-
-        let missing = FlowStateConfig {
-            backend: "nope".to_string(),
-            ttl_seconds: 300,
-        };
-        let err = build_error(create_flow_store(&missing, &backends), "unregistered");
-        assert!(
-            err.contains("\"inmemory\", \"fake\""),
-            "the available list must include registered backends, got: {err}"
-        );
-    }
-
-    // Issue #853: a factory's build error propagates — this is the error channel that made a
-    // factory the right seam instead of `FlowStoreProvider` (whose `provide` returns Option).
-    #[test]
-    fn create_flow_store_propagates_a_factory_build_failure() {
-        use crate::config::FlowStateConfig;
-        let backends = FlowStoreBackends::new().with(Arc::new(BrokenBackend));
-        let config = FlowStateConfig {
-            backend: "broken".to_string(),
-            ttl_seconds: 300,
-        };
-        let err = build_error(
-            create_flow_store(&config, &backends),
-            "a failing factory must fail the build",
-        );
-        assert!(
-            err.contains("cannot reach the thing"),
-            "the factory's own error must survive, got: {err}"
-        );
-    }
-
-    // Issue #853: registration order is the contract — the FIRST factory for a name wins, so a
-    // duplicate cannot silently displace a backend that is already installed.
-    #[test]
-    fn the_first_registration_of_a_name_wins() {
-        struct Named(&'static str, &'static str);
-        impl FlowStoreBackendFactory for Named {
-            fn name(&self) -> &'static str {
-                self.0
-            }
-            fn build(
-                &self,
-                _config: &crate::imposter::RiftFlowStateConfig,
-            ) -> Result<Arc<dyn FlowStore>> {
-                Err(anyhow!("built by {}", self.1))
-            }
-        }
-
-        let backends = FlowStoreBackends::new()
-            .with(Arc::new(Named("dup", "first")))
-            .with(Arc::new(Named("dup", "second")));
-        assert_eq!(backends.names(), vec!["dup", "dup"]);
-
-        let config = crate::config::FlowStateConfig {
-            backend: "dup".to_string(),
-            ttl_seconds: 300,
-        };
-        let err = build_error(create_flow_store(&config, &backends), "always errors");
-        assert!(
-            err.contains("built by first"),
-            "the first registration must be the one consulted, got: {err}"
-        );
-    }
-
-    // Issue #853: built-ins are matched before the registry is consulted, so a factory claiming a
-    // built-in name is inert. Pinned so a future reorder of the match cannot silently start letting
-    // an embedder replace `"inmemory"`.
-    #[test]
-    fn a_factory_cannot_shadow_the_builtin_inmemory_backend() {
-        struct Hijack;
-        impl FlowStoreBackendFactory for Hijack {
-            fn name(&self) -> &'static str {
-                "inmemory"
-            }
-            fn build(
-                &self,
-                _config: &crate::imposter::RiftFlowStateConfig,
-            ) -> Result<Arc<dyn FlowStore>> {
-                Err(anyhow!("the hijacking factory must never be consulted"))
-            }
-        }
-
-        let backends = FlowStoreBackends::new().with(Arc::new(Hijack));
-        let config = crate::config::FlowStateConfig {
-            backend: "inmemory".to_string(),
-            ttl_seconds: 300,
-        };
-        assert!(
-            create_flow_store(&config, &backends).is_ok(),
-            "the built-in inmemory backend must win over a registered factory of the same name"
-        );
     }
 
     // ============================================
@@ -1028,15 +597,15 @@ pub fn log_flow_err<T>(op: &str, fallback: T, result: Result<T>) -> T {
     flow_result(op, result).unwrap_or(fallback)
 }
 
-/// A deliberately failing flow store (feature `test-backend`): every operation annotates
-/// the op via `decorate::annotate`, then fails with a `BackendUnavailable` source —
-/// selected with `_rift.flowState.backend = "failing"` to exercise backend-outage paths
-/// (issue #318) without a real unreachable backend.
-#[cfg(feature = "test-backend")]
+/// A deliberately failing flow store for the scripting engines' unit tests: every operation
+/// annotates the op via `decorate::annotate`, then fails with a `BackendUnavailable` source, to
+/// exercise backend-outage paths (issue #318) without a real unreachable backend. Integration
+/// tests install an equivalent store through a `FlowStoreProvider` (issue #1463).
+#[cfg(test)]
 #[derive(Debug)]
-pub struct FailingFlowStore;
+pub(crate) struct FailingFlowStore;
 
-#[cfg(feature = "test-backend")]
+#[cfg(test)]
 impl FailingFlowStore {
     fn fail<T>(&self, op: &'static str, flow_id: &str, key: &str) -> Result<T> {
         crate::extensions::decorate::annotate(op, format!("{flow_id}/{key}"));
@@ -1049,7 +618,7 @@ impl FailingFlowStore {
     }
 }
 
-#[cfg(feature = "test-backend")]
+#[cfg(test)]
 impl FlowStore for FailingFlowStore {
     fn get(&self, flow_id: &str, key: &str) -> Result<Option<Value>> {
         self.fail("flowStore.get", flow_id, key)

@@ -122,7 +122,7 @@ Rhai is a lightweight embedded scripting language optimized for Rust. Scripts de
   "port": 4545,
   "protocol": "http",
   "_rift": {
-    "flowState": {"backend": "inmemory", "ttlSeconds": 600}
+    "flowState": {"ttlSeconds": 600}
   },
   "stubs": [{
     "responses": [{
@@ -215,7 +215,7 @@ delay(500)
 ```json
 {
   "_rift": {
-    "flowState": {"backend": "inmemory", "ttlSeconds": 60}
+    "flowState": {"ttlSeconds": 60}
   },
   "stubs": [{
     "responses": [{
@@ -235,7 +235,7 @@ delay(500)
 ```json
 {
   "_rift": {
-    "flowState": {"backend": "inmemory", "ttlSeconds": 300, "flowIdSource": "header:X-Flow-Id"}
+    "flowState": {"ttlSeconds": 300, "flowIdSource": "header:X-Flow-Id"}
   },
   "stubs": [{
     "responses": [{
@@ -265,7 +265,7 @@ it — the linter reads YAML as well as JSON, and reports any other root shape a
 - port: 4545
   protocol: http
   _rift:
-    flowState: { backend: inmemory, ttlSeconds: 300, flowIdSource: "header:X-Flow-Id" }
+    flowState: { ttlSeconds: 300, flowIdSource: "header:X-Flow-Id" }
   stubs:
     - responses:
         - _rift:
@@ -292,7 +292,7 @@ directory (`--datadir` files resolve the same way; admin-API-created imposters r
 - port: 4545
   protocol: http
   _rift:
-    flowState: { backend: inmemory, ttlSeconds: 300 }
+    flowState: { ttlSeconds: 300 }
     # Named registry: give a script a name once, `ref:` it from any response.
     scripts:
       failTwice:
@@ -314,7 +314,7 @@ unknown `ref:` or a `file:` that can't be read is a config-time validation error
 ```json
 {
   "_rift": {
-    "flowState": {"backend": "inmemory", "ttlSeconds": 600}
+    "flowState": {"ttlSeconds": 600}
   },
   "stubs": [
     {

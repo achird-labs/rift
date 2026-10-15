@@ -6,7 +6,6 @@
       "name": "HTTPS Demo",
       "_rift": {
         "flowState": {
-          "backend": "inmemory",
           "ttlSeconds": 300
         }
       },

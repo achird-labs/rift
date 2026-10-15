@@ -99,11 +99,11 @@ async fn server_builder_with_injected_manager_serves_admin_api() {
     manager.delete_all().await;
 }
 
-// Issue #1337: the Redis backend is gone, so the server `ServerBuilder` starts refuses
-// `backend: "redis"` at admission with the removal text and the rift-cluster pointer — a 400, not a
-// silent NoOp downgrade.
+// Issue #1463: `flowState.backend` is gone, so the server `ServerBuilder` starts no longer refuses
+// a leftover `backend: "redis"`: the key lands in `extra`, selects nothing, and the imposter is
+// created with the in-memory store.
 #[tokio::test]
-async fn server_builder_refuses_the_removed_redis_backend() {
+async fn server_builder_accepts_a_leftover_backend_key() {
     let cli = Cli::try_parse_from([
         "rift",
         "--host",
@@ -138,11 +138,10 @@ async fn server_builder_refuses_the_removed_redis_backend() {
         .await
         .expect("post imposter");
 
-    assert_eq!(response.status(), 400, "backend \"redis\" must be refused");
-    let body = response.text().await.expect("body");
-    assert!(
-        body.contains("removed in 0.22.0") && body.contains("rift-cluster"),
-        "the refusal must say the backend was removed and point at rift-cluster, got: {body}"
+    assert_eq!(
+        response.status(),
+        201,
+        "a leftover flowState.backend must not be refused"
     );
 }
 

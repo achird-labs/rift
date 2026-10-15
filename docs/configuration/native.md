@@ -30,7 +30,6 @@ Enable stateful testing scenarios with flow state:
   "protocol": "http",
   "_rift": {
     "flowState": {
-      "backend": "inmemory",
       "ttlSeconds": 300
     }
   },
@@ -42,27 +41,19 @@ Enable stateful testing scenarios with flow state:
 }
 ```
 
-### Flow State Backends
-
-| Backend | Description | Use Case |
-|:--------|:------------|:---------|
-| `inmemory` | In-process storage (default) | Single instance, testing |
-
 ### Configuration Options
 
 | Option | Type | Default | Description |
 |:-------|:-----|:--------|:------------|
-| `backend` | string | `"inmemory"` | Storage backend: `inmemory` (the only built-in; `redis` was removed in 0.22.0 and is refused) |
 | `ttlSeconds` | integer | `300` | Time-to-live for state entries (5 minutes); must be at least `1` |
 | `flowIdSource` | string | `"imposter_port"` | Where the flow id comes from: `"imposter_port"`, or `"header:<Name>"` to key state by a request header |
 
 Other keys under `flowState` are kept and passed to an embedder-supplied store; the built-in
-backends ignore them.
+in-memory store ignores them. That includes a leftover `backend` key: the `backend` option was
+removed, so it selects nothing.
 
-**Fail-loud backend errors**: an unknown `backend` string, or the removed `"redis"` backend (whose
-error points at rift-cluster for state shared across processes), fails imposter creation with `400 Bad Request` rather than silently
-degrading to a no-op store. See
-[Flow State → Backend configuration is fail-loud]({{ site.baseurl }}/features/flow-state/#backend-configuration-is-fail-loud)
+**Fail-loud errors**: a non-positive `ttlSeconds` fails imposter creation with `400 Bad Request`. See
+[Flow State → Invalid flowState is fail-loud]({{ site.baseurl }}/features/flow-state/#invalid-flowstate-is-fail-loud)
 for details. With no `flowState` block, an imposter that has a script, scenario or `stateOps` stub
 gets an in-memory store auto-provisioned (with a warning); only an imposter with no state surface at
 all uses a no-op store.
@@ -318,7 +309,7 @@ already scoped to the request's resolved flow id — no explicit flow id argumen
 ```json
 {
   "_rift": {
-    "flowState": { "backend": "inmemory", "ttlSeconds": 300 }
+    "flowState": { "ttlSeconds": 300 }
   },
   "stubs": [{
     "responses": [{
@@ -355,7 +346,6 @@ the state model.
   "protocol": "http",
   "_rift": {
     "flowState": {
-      "backend": "inmemory",
       "ttlSeconds": 300
     }
   },

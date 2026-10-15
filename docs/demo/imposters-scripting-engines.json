@@ -6,7 +6,6 @@
       "name": "Scripting Engines Demo",
       "_rift": {
         "flowState": {
-          "backend": "inmemory",
           "ttlSeconds": 600
         }
       },

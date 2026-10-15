@@ -427,7 +427,7 @@ Example imposter with `_rift` extensions:
   "port": 4545,
   "protocol": "http",
   "_rift": {
-    "flowState": {"backend": "inmemory", "ttlSeconds": 300}
+    "flowState": {"ttlSeconds": 300}
   },
   "stubs": [{
     "predicates": [{"equals": {"path": "/api/test"}}],

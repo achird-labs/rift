@@ -4,7 +4,7 @@
   "name": "06 · Stateful Retry Simulation (flow state)",
   "recordRequests": true,
   "_rift": {
-    "flowState": { "backend": "inmemory", "ttlSeconds": 300, "flowIdSource": "header:X-Flow-Id" }
+    "flowState": { "ttlSeconds": 300, "flowIdSource": "header:X-Flow-Id" }
   },
   "stubs": [
     {

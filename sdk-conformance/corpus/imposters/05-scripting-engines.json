@@ -4,7 +4,7 @@
   "name": "05 · Scripting Engines (rhai, javascript)",
   "recordRequests": true,
   "_rift": {
-    "flowState": { "backend": "inmemory", "ttlSeconds": 600 }
+    "flowState": { "ttlSeconds": 600 }
   },
   "stubs": [
     {

@@ -570,10 +570,10 @@ async fn handle_set_enabled(
 /// Build the public projection of a `flowState` for `GET /imposters` (issue #260). Fail-closed
 /// allowlist: only the non-sensitive fields tools need are exposed, so a credential-bearing field
 /// added to the config later (or carried in the flattened `extra` map, e.g. a leftover `redis` block
-/// from a config written before the backend was removed) is excluded by default rather than leaked.
+/// or `backend` key from a config written before they were removed) is excluded by default rather
+/// than leaked.
 fn expose_flow_state(fs: &rift_mock_core::imposter::RiftFlowStateConfig) -> serde_json::Value {
     let mut out = serde_json::Map::new();
-    out.insert("backend".to_string(), serde_json::json!(fs.backend));
     out.insert("ttlSeconds".to_string(), serde_json::json!(fs.ttl_seconds));
     if let Some(source) = &fs.flow_id_source {
         out.insert("flowIdSource".to_string(), serde_json::json!(source));
@@ -1232,7 +1232,21 @@ mod redact_tests {
             out.get("flowIdSource").and_then(|v| v.as_str()),
             Some("header:X-Mock-Space")
         );
-        assert_eq!(out.get("backend").and_then(|v| v.as_str()), Some("redis"));
+        assert_eq!(out.get("ttlSeconds").and_then(|v| v.as_i64()), Some(300));
+        // A leftover `backend` key sits in `extra` and is not part of the allowlist (#1463).
+        assert!(out.get("backend").is_none(), "backend is no longer exposed");
+        let mut keys: Vec<&str> = out
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["flowIdSource", "ttlSeconds"],
+            "only the allowlist is exposed"
+        );
         // The credential string must not survive anywhere in the exposed value.
         assert!(!out.to_string().contains("secret"));
     }
