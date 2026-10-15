@@ -302,7 +302,7 @@ for full details.
 ```bash
 cargo build --release -p rift-http-proxy          # build Rift from source
 cargo install oha                                 # load generator
-npm install --prefix ~/bench-mb mountebank@2.9.1  # reference engine
+npm install --prefix ~/bench-mb @mbtest/mountebank@2.9.5  # reference engine
 ```
 
 ### Run the suite
@@ -314,13 +314,13 @@ cd tests/benchmark
 python3 scripts/bench_direct.py --run-all \
     --duration 20s --warmup 3s --connections 50 \
     --rift-bin ../../target/release/rift-http-proxy \
-    --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
+    --mb-bin ~/bench-mb/node_modules/.bin/mb
 cat results/DIRECT_BENCHMARK_REPORT.md
 
 # Admin create/read (imposter creation + overlap analysis), median of 9 rounds
 python3 scripts/bench_admin.py --run-all --rep 9 --tag m4 \
     --rift-bin ../../target/release/rift-http-proxy \
-    --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
+    --mb-bin ~/bench-mb/node_modules/.bin/mb
 cat results/ADMIN_BENCHMARK_REPORT_m4.md
 
 # Serving A/B of two Rift builds, interleaved in one run

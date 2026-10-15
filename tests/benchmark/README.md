@@ -13,7 +13,7 @@ configs. Two harnesses, both native processes (no Docker):
 ```bash
 cargo build --release -p rift-http-proxy          # build Rift from this repo
 cargo install oha                                 # load generator
-npm install --prefix ~/bench-mb mountebank@2.9.1  # reference engine
+npm install --prefix ~/bench-mb @mbtest/mountebank@2.9.5  # reference engine
 # python3 is used to orchestrate the runs
 ```
 
@@ -40,13 +40,13 @@ cd tests/benchmark
 python3 scripts/bench_direct.py --run-all \
     --duration 20s --warmup 3s --connections 50 \
     --rift-bin ../../target/release/rift-http-proxy \
-    --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
+    --mb-bin ~/bench-mb/node_modules/.bin/mb
 cat results/DIRECT_BENCHMARK_REPORT.md
 
 # Admin create/read (median of --rep rounds; each run writes under its own --tag)
 python3 scripts/bench_admin.py --run-all --rep 5 --tag m4 \
     --rift-bin ../../target/release/rift-http-proxy \
-    --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
+    --mb-bin ~/bench-mb/node_modules/.bin/mb
 cat results/ADMIN_BENCHMARK_REPORT_m4.md
 
 # Admin A/B of two Rift builds, Mountebank left out

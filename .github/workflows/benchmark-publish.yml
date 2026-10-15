@@ -38,7 +38,7 @@ on:
         default: "10s"
       mb_version:
         description: "Mountebank version (pinned so the comparison is reproducible)"
-        default: "2.9.1"
+        default: "2.9.5"
       wiremock_version:
         description: "WireMock version (pinned, same reason as Mountebank)"
         default: "3.9.1"
@@ -105,8 +105,8 @@ jobs:
             https://github.com/hatoo/oha/releases/download/v1.12.0/oha-linux-amd64 \
             && chmod +x /usr/local/bin/oha && oha --version \
             || cargo install oha --locked
-          npm install --prefix "$HOME/bench-mb" "mountebank@$BENCH_MB_VERSION"
-          "$HOME/bench-mb/node_modules/mountebank/bin/mb" --version
+          npm install --prefix "$HOME/bench-mb" "@mbtest/mountebank@$BENCH_MB_VERSION"
+          "$HOME/bench-mb/node_modules/.bin/mb" --version
           mkdir -p "$HOME/bench-wiremock"
           curl -sfL -o "$HOME/bench-wiremock/wiremock-standalone.jar" \
             "https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/$BENCH_WIREMOCK_VERSION/wiremock-standalone-$BENCH_WIREMOCK_VERSION.jar"
@@ -160,7 +160,7 @@ jobs:
               --connections "$BENCH_CONNECTIONS" --duration "$BENCH_DURATION" \
               --warmup "$BENCH_WARMUP" \
               --rift-bin ../../target/release/rift-http-proxy \
-              --mb-bin "$HOME/bench-mb/node_modules/mountebank/bin/mb"
+              --mb-bin "$HOME/bench-mb/node_modules/.bin/mb"
           done
           python3 -u scripts/bench_direct.py --aggregate-comparison "" \
             --connections "$BENCH_CONNECTIONS" \

@@ -1,0 +1,59 @@
+name: Mountebank release watch
+
+# Issue #1454: Mountebank 2.9.2 to 2.9.5 shipped unnoticed for a year while the differential oracle
+# stayed on 2.9.1. Weekly, compare npm's latest @mbtest/mountebank with MB_VERSION in ci.yml and,
+# when they differ, open one issue titled "Mountebank <version> released" (never a duplicate of an
+# open one). It never edits the pin: moving the oracle is a reviewed change, because a new
+# Mountebank can change what Rift must do. Nothing requires this job, so it never blocks a PR.
+# The comparison lives in scripts/mountebank-release-watch.py, which can be run locally with
+# --dry-run. Modelled on rift-conformance's rift-release-watch.yml.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      pinned:
+        description: "Compare against this version instead of ci.yml's MB_VERSION (to test the watch)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+# A scheduled run and a manual one could both find no open issue and both create one.
+concurrency:
+  group: mountebank-release-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: Compare MB_VERSION with npm's latest Mountebank
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Self-test the comparison
+        run: python3 scripts/mountebank-release-watch.py --self-test
+
+      # PINNED arrives via env, never interpolated into the command line: a workflow_dispatch
+      # input substituted by `${{ }}` inside `run:` is a command-injection vector. The script exits
+      # non-zero when either version cannot be read, so the job fails instead of opening an issue
+      # for an empty version.
+      - name: Open an issue if a newer Mountebank is out
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PINNED: ${{ inputs.pinned }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PINNED:-}" ]; then
+            python3 scripts/mountebank-release-watch.py --repo "$GITHUB_REPOSITORY" --pinned "$PINNED"
+          else
+            python3 scripts/mountebank-release-watch.py --repo "$GITHUB_REPOSITORY"
+          fi

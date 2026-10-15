@@ -340,39 +340,6 @@
     "riftMatches": "true|false"
   },
   {
-    "id": "replayable-allowCORS",
-    "case": "*",
-    "location": "replayable[*]/allowCORS",
-    "kind": "documented",
-    "doc": "docs/api/index.md",
-    "quote": "`allowCORS` is a Mountebank key, printed in every view when truthy",
-    "reason": "Rift follows Mountebank 2.9.2+, which prints a truthy allowCORS in every imposter view; the oracle is 2.9.1, which never prints it. #1454 (oracle bump to 2.9.5) deletes this entry along with allowCORS-printed-mb-2.9.2-plus/create and /stored",
-    "mountebank": "(absent)",
-    "rift": "true"
-  },
-  {
-    "id": "allowCORS-printed-mb-2.9.2-plus/create",
-    "case": "*",
-    "location": "step*.admin.body/allowCORS",
-    "kind": "documented",
-    "doc": "docs/api/index.md",
-    "quote": "`allowCORS` is a Mountebank key, printed in every view when truthy",
-    "reason": "Rift follows Mountebank 2.9.2+, which prints a truthy allowCORS in every imposter view; the oracle is 2.9.1, which never prints it. #1454 (oracle bump to 2.9.5) deletes this entry along with replayable-allowCORS",
-    "mountebank": "(absent)",
-    "rift": "true"
-  },
-  {
-    "id": "allowCORS-printed-mb-2.9.2-plus/stored",
-    "case": "*",
-    "location": "stored[*]/allowCORS",
-    "kind": "documented",
-    "doc": "docs/api/index.md",
-    "quote": "`allowCORS` is a Mountebank key, printed in every view when truthy",
-    "reason": "Rift follows Mountebank 2.9.2+, which prints a truthy allowCORS in every imposter view; the oracle is 2.9.1, which never prints it. #1454 (oracle bump to 2.9.5) deletes this entry along with replayable-allowCORS",
-    "mountebank": "(absent)",
-    "rift": "true"
-  },
-  {
     "case": "alternative_formats: Service name and info fields are accepted",
     "kind": "documented",
     "doc": "docs/api/index.md",

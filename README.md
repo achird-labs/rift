@@ -555,7 +555,7 @@ RUST_LOG=debug ./target/release/rift-http-proxy
 # Run benchmarks (Rift vs Mountebank; see tests/benchmark/README.md)
 cd tests/benchmark && python3 scripts/bench_direct.py --run-all \
   --rift-bin ../../target/release/rift-http-proxy \
-  --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
+  --mb-bin ~/bench-mb/node_modules/.bin/mb
 ```
 
 ---

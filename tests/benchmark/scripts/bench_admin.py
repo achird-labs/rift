@@ -33,7 +33,7 @@ first: `results/ADMIN_BENCHMARK_REPORT_<tag>.md`, the raw samples in
 Usage:
   python3 bench_admin.py --run-all --rep 5 \
       --rift-bin ../../../target/release/rift-http-proxy \
-      --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
+      --mb-bin ~/bench-mb/node_modules/.bin/mb
 
   # A/B of two Rift builds, Mountebank left out
   python3 bench_admin.py --run-all --rep 9 --engines rift \
@@ -393,7 +393,7 @@ if __name__ == "__main__":
     ap.add_argument("--rift-bin", action="append",
                     help="PATH or LABEL=PATH; repeat for an A/B (default: "
                          "target/release/rift-http-proxy, labelled rift)")
-    ap.add_argument("--mb-bin", default=os.path.expanduser("~/bench-mb/node_modules/mountebank/bin/mb"))
+    ap.add_argument("--mb-bin", default=os.path.expanduser("~/bench-mb/node_modules/.bin/mb"))
     ap.add_argument("--engines", default="rift,mb", help="comma list of rift, mb (default: both)")
     ap.add_argument("--rep", type=positive_int, default=DEFAULT_REP,
                     help=f"measured rounds per point, after one discarded warm-up (default {DEFAULT_REP})")

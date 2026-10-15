@@ -5,7 +5,7 @@ Two trees, with opposite questions:
 | Tree | Question it answers | Who runs it |
 |---|---|---|
 | [`features/`](features/) + fixtures | **What Rift must do.** The Plane A specification: Gherkin scenarios driving a real `rift`, `rift-lint` and `rift-verify` binary. | The Rust runner in [`runner/`](runner/) for the features it has ported; the [rift-conformance](https://github.com/EtaCassiopeia/rift-conformance) runner, with `RIFT_FEATURES_DIR` pointed here, for the rest |
-| [`differential/`](differential/) | **What Mountebank does.** Every case is replayed on Mountebank 2.9.1 and on this build, and any difference not on its documented allow-list fails. | `cargo test -p rift-differential` (see its README) |
+| [`differential/`](differential/) | **What Mountebank does.** Every case is replayed on Mountebank 2.9.5 and on this build, and any difference not on its documented allow-list fails. | `cargo test -p rift-differential` (see its README) |
 
 The specification lives in this repository so a behaviour change and the scenario that pins it land
 in one pull request. Two runners read this tree while the features move from one to the other
