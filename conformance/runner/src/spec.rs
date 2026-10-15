@@ -2,9 +2,9 @@
 
 use std::path::PathBuf;
 
-/// The feature files this runner runs. Each one ported here is meant to leave the Scala runner's
-/// suite list, so every feature has exactly one runner during the move; for this first batch that
-/// holds once EtaCassiopeia/rift-conformance#237 lands, and until then 00/01/02/09 run under both.
+/// The feature files this runner runs. Each one ported here is also listed in the Scala runner's
+/// `conformance/ported.txt` (EtaCassiopeia/rift-conformance#244), which drops it from that runner's
+/// external, embedded and lint legs, so every feature has exactly one runner during the move.
 /// Later batches: #1347, #1348, #1349, #1350.
 pub const PORTED_FEATURES: &[&str] = &[
     "00-smoke.feature",

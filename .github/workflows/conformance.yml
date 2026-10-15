@@ -6,18 +6,15 @@ name: Conformance
 # release later. A behaviour change now has to change its scenario in the same diff, or this job
 # fails — that is the point.
 #
-# A separate workflow rather than a ci.yml job because `paths` filters are per-workflow: a docs-only
-# PR should not spend the build. Exempt one PR deliberately with the `conformance-exempt` label.
+# `conformance-plane-a` is a required check in the protect-master ruleset, so the workflow runs on
+# every pull request: a `paths` filter would leave a docs-only PR waiting forever on a check that
+# never reports. The `changes` job decides instead, and a PR that touches nothing the spec covers
+# gets the conformance jobs *skipped*, which a required check counts as passing. Exempt one PR
+# deliberately with the `conformance-exempt` label (also a skip).
 on:
   pull_request:
-    branches: [master]
+    branches: [master, "releases/**"]
     types: [opened, synchronize, reopened, labeled, unlabeled]
-    paths:
-      - "crates/**"
-      - "conformance/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/conformance.yml"
   workflow_dispatch:
 
 concurrency:
@@ -28,16 +25,48 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: conformance-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.diff.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # What the spec covers: the engine and tools (crates/), the spec itself (conformance/), the
+      # dependency set and this workflow. A manual run always runs.
+      - name: Did this PR touch anything the spec covers?
+        id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only "$BASE...$HEAD")"
+          echo "$changed"
+          if grep -qE '^(crates/|conformance/|Cargo\.toml$|Cargo\.lock$|\.github/workflows/conformance\.yml$)' <<<"$changed"; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # Issue #1346: the Rust Plane A runner (conformance/runner, cucumber-rs) runs the features it has
   # ported (rift_conformance_runner::spec::PORTED_FEATURES) against this PR's binaries, in external
   # mode (the staged `rift`) and embedded mode (rift-ffi in-process). The Scala job below keeps
-  # running every feature not yet ported; the two lists become disjoint once
-  # EtaCassiopeia/rift-conformance#237 lands, and until then 00/01/02/09 run under both runners.
+  # running every feature not yet ported; the two lists are disjoint (EtaCassiopeia/rift-conformance
+  # conformance/ported.txt, #244), so each feature runs under exactly one runner per mode.
   # RIFT_CONFORMANCE_REQUIRE turns a missing RIFT_BUILD_DIR into a failure rather than the skip a
   # plain `cargo test --workspace` gets.
   runner-rust:
     name: conformance-plane-a (rust runner)
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'conformance-exempt') }}
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' && !contains(github.event.pull_request.labels.*.name, 'conformance-exempt') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -101,7 +130,8 @@ jobs:
 
   conformance-plane-a:
     name: conformance-plane-a
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'conformance-exempt') }}
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' && !contains(github.event.pull_request.labels.*.name, 'conformance-exempt') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
