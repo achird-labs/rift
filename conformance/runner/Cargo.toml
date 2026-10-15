@@ -1,0 +1,39 @@
+[package]
+name = "rift-conformance-runner"
+description = "Plane A conformance runner: drives conformance/features/rift against real rift, rift-lint and rift-verify binaries (cucumber-rs)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time", "net", "fs", "io-util"] }
+# Every request goes through reqwest. `rustls-no-provider` keeps ring as the only crypto provider,
+# as everywhere else in the workspace; the runner installs it itself (`http::install_crypto_provider`).
+# The platform verifier it brings is the "cert-verifying client" of feature 09.
+reqwest = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+regex = "1.11"
+tempfile = "3.8"
+# Embedded mode (RIFT_MODE=embedded): the engine runs in this process through the same C-ABI
+# rift-java/rift-go/rift-node load (`rift_start` + `rift_serve_admin`), and every step drives its
+# admin API over HTTP exactly as external mode does.
+rift-ffi = { path = "../../crates/rift-ffi" }
+
+[dev-dependencies]
+cucumber = "0.23"
+futures = { workspace = true }
+
+# The Plane A suite: features + fixtures in conformance/, engine from RIFT_BUILD_DIR. Without
+# RIFT_BUILD_DIR it prints why and passes, unless RIFT_CONFORMANCE_REQUIRE is set (CI sets it).
+[[test]]
+name = "plane_a"
+harness = false

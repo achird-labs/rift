@@ -9,6 +9,7 @@ members = [
     "crates/rift-lint",
     "crates/rift-tui",
     "conformance/differential",
+    "conformance/runner",
 ]
 exclude = [
     "examples/apps/*",

@@ -13,6 +13,15 @@ record.
 
 ### Added
 
+- **A Rust Plane A runner** (#1346). `conformance/runner/` (`rift-conformance-runner`, cucumber-rs)
+  runs the Plane A features against real binaries with nothing but Rust:
+  `RIFT_BUILD_DIR=<staged build> cargo test -p rift-conformance-runner --test plane_a`. It runs
+  features 00 (smoke), 01 (consistency gate), 02 (core serving) and 09 (gateway, HTTPS, mTLS,
+  metrics) today, with the Scala runner's step text, in `external` mode (spawn the staged `rift`)
+  or `embedded` mode (rift-ffi in-process); the Scala runner keeps the other features until they
+  are ported. CI runs both modes on every pull request. Feature 01's corpus defaults to
+  `sdk-conformance/corpus`, which has 15 imposters where the Scala runner's vendored corpus has 16
+  (`21-behaviors-array-copy.json` is not in it). See `conformance/README.md`.
 - **The Plane A conformance specification lives in this repository** (#1339). The Gherkin
   features, fixtures, rift-lint fixtures and scripts the rift-conformance runner executes moved
   from that repository to `conformance/`, so a behaviour change and the scenario pinning it land in

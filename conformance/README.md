@@ -4,12 +4,15 @@ Two trees, with opposite questions:
 
 | Tree | Question it answers | Who runs it |
 |---|---|---|
-| [`features/`](features/) + fixtures | **What Rift must do.** The Plane A specification: Gherkin scenarios driving a real `rift`, `rift-lint` and `rift-verify` binary. | The [rift-conformance](https://github.com/EtaCassiopeia/rift-conformance) runner, with `RIFT_FEATURES_DIR` pointed here |
+| [`features/`](features/) + fixtures | **What Rift must do.** The Plane A specification: Gherkin scenarios driving a real `rift`, `rift-lint` and `rift-verify` binary. | The Rust runner in [`runner/`](runner/) for the features it has ported; the [rift-conformance](https://github.com/EtaCassiopeia/rift-conformance) runner, with `RIFT_FEATURES_DIR` pointed here, for the rest |
 | [`differential/`](differential/) | **What Mountebank does.** Every case is replayed on Mountebank 2.9.1 and on this build, and any difference not on its documented allow-list fails. | `cargo test -p rift-differential` (see its README) |
 
 The specification lives in this repository so a behaviour change and the scenario that pins it land
-in one pull request. The runner (Scala, zio-bdd) stays in rift-conformance and reads this tree; it
-holds no copy of its own once this ships in a release.
+in one pull request. Two runners read this tree while the features move from one to the other
+(#1338, #1346): the Rust runner in [`runner/`](runner/) (cucumber-rs) runs the features in its
+`spec::PORTED_FEATURES` (today 00, 01, 02 and 09), and the Scala runner (zio-bdd) in rift-conformance
+runs every other one. Once EtaCassiopeia/rift-conformance#237 lands each feature has exactly one
+runner; until then 00, 01, 02 and 09 run under both.
 
 ## Layout (the contract a runner consumes)
 
@@ -22,6 +25,7 @@ conformance/
   rift-fixtures/**          imposter documents, configfiles, TLS/intercept PEMs the scenarios load
   rift-lint-fixtures/*.json rift-lint rule fixtures (one per rule exercised)
   rift-scripts/*            Rhai/JS scripts for the scripting scenarios
+  runner/                   the Rust Plane A runner (rift-conformance-runner) — not part of the contract
   differential/             the Mountebank oracle — not part of the Plane A contract
 ```
 
@@ -34,6 +38,50 @@ fails if the list and the disk disagree. `engineVersion` is `0.0.0-dev` here and
 real version when the tree is packaged.
 
 ## Running it locally
+
+### The Rust runner (the ported features)
+
+Build and stage the binaries the way CI does: `rift`, `rift-lint` and `rift-verify` in one
+directory, plus a `BUILD_INFO` recording each one's `--version` (the "Stage binaries and BUILD_INFO"
+step of [`.github/workflows/conformance.yml`](../.github/workflows/conformance.yml), runnable as is
+on Linux; on macOS use `shasum -a 256` for `sha256sum`). Then:
+
+```bash
+cargo build --release -p rift-http-proxy -p rift-lint --bins
+# ... stage target/release/{rift-http-proxy as rift, rift-lint, rift-verify} + BUILD_INFO ...
+RIFT_BUILD_DIR=/path/to/staged/build RIFT_MAX_BODY_SIZE=10485760 \
+  cargo test -p rift-conformance-runner --test plane_a
+```
+
+| Variable | Meaning |
+|---|---|
+| `RIFT_BUILD_DIR` | The staged build. Unset, the test prints why and passes with no scenario run, so a plain `cargo test --workspace` stays green. |
+| `RIFT_CONFORMANCE_REQUIRE` | Any value: a missing `RIFT_BUILD_DIR`, or a mode this runner cannot run, fails instead of skipping. CI sets it. |
+| `RIFT_MODE` | `external` (default): spawn the staged `rift`. `embedded`: link `rift-ffi` and serve the real admin API in the test process (`rift_start` + `rift_serve_admin`), as the SDKs embed it; the lint/verify tools and `BUILD_INFO` still come from `RIFT_BUILD_DIR`. `container`: not implemented yet, reported and skipped. |
+| `RIFT_CORPUS_ROOT` | The JSON corpus feature 01 lints, posts and verifies, and the spawned engine's working directory. Default: this repository's `sdk-conformance/corpus`, which has 15 imposters where the Scala runner's vendored `corpus/` has 16 (`21-behaviors-array-copy.json` is not in it), so the two runners' feature 01 do not cover exactly the same files. |
+| `RIFT_FEATURES_DIR` | This tree, by default; point it at an unpacked `rift-conformance-<version>` to run a release's specification. |
+| `RIFT_MAX_BODY_SIZE` | As below; the embedded engine gets it as `maxBodySize`. |
+
+cucumber's own flags narrow a run: `cargo test -p rift-conformance-runner --test plane_a -- --name
+'mutualAuth'` or `-- --tags '@core'`. They never reach past the ported features or what the mode
+can run. Each engine's output goes to a log directory printed at start; it is kept when the run
+fails.
+
+Ports: the engine's admin and metrics ports are chosen by the OS (bind `:0`, release, pass to the
+engine; a failed start retries on fresh ports). A "fresh imposter" is posted without a `port` and
+the runner reads the one the engine assigned back from the `201`, so there is no probe-then-bind
+race. Only fixtures that name a port (`a fresh verbatim imposter`, the corpus's 45xx imposters)
+bind a fixed one.
+
+In embedded mode, feature 09's `@upstream-trust` scenario does not run: it starts a second engine
+with `--upstream-ca-file`, and only external mode spawns engines. The run lists what it left out.
+
+Known limit of embedded mode: the engine is linked into the test binary, so under `cargo test` it
+runs at the debug profile, not the release build external mode spawns. Batch 1 has no timing
+assertions, but the timing-sensitive features of later batches (latency faults, timeouts, `wait`
+behaviours) may need `cargo test --release` or an exclusion in embedded mode.
+
+### The Scala runner (every other feature)
 
 ```bash
 git clone https://github.com/EtaCassiopeia/rift-conformance
@@ -66,7 +114,9 @@ release, for running the runner against a released engine.
 
 ## Changing a scenario
 
-Edit the feature or fixture in the same pull request as the engine change it describes. A step
-the runner does not know yet needs a runner change in rift-conformance first. `RUNNER_REF` names
+Edit the feature or fixture in the same pull request as the engine change it describes. In a
+ported feature, a step the Rust runner does not know yet is added to
+[`runner/tests/plane_a.rs`](runner/tests/plane_a.rs) in the same pull request; in any other feature
+it needs a runner change in rift-conformance first. `RUNNER_REF` names
 the runner revision the PR-time job (#1340) checks out; it tracks `main` today, so a new step is
 usable once merged there, and pinning it to a commit is how to hold the runner still.
