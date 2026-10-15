@@ -824,6 +824,19 @@ impl Imposter {
         }
         None
     }
+
+    /// `request.form` as Mountebank builds it: present only for a non-empty urlencoded body
+    /// (`httpRequest.js`), parsed as the matcher parses it. Shared by predicate generators and every
+    /// script surface (issue #1451), so recording, matching and scripts agree on what a form is.
+    pub(crate) fn request_form<H: RequestHeaders>(
+        headers: &H,
+        body: Option<&str>,
+    ) -> Option<FastMap<String, String>> {
+        if body.is_none_or(str::is_empty) {
+            return None;
+        }
+        Self::parse_form_data(headers, body)
+    }
 }
 
 // =============================================================================================
@@ -1070,6 +1083,41 @@ mod bounded_matching_tests {
                 .is_none()
         );
         assert!(Imposter::parse_form_data(&header("Content-Type", &[]), Some("a=1")).is_none());
+    }
+
+    // Issue #1451: `request.form` as Mountebank's `httpRequest.transform` builds it for scripts —
+    // present only for a non-empty urlencoded body.
+    #[test]
+    fn request_form_is_present_only_for_a_non_empty_urlencoded_body() {
+        let form_headers = HashMap::from([(
+            "Content-Type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )]);
+        let json_headers =
+            HashMap::from([("Content-Type".to_string(), "application/json".to_string())]);
+
+        assert_eq!(Imposter::request_form(&form_headers, Some("")), None);
+        assert_eq!(Imposter::request_form(&form_headers, None), None);
+        assert_eq!(Imposter::request_form(&json_headers, Some("a=1")), None);
+
+        let form = Imposter::request_form(&form_headers, Some("a=1&b=2")).expect("form");
+        let expected: crate::util::FastMap<String, String> = [
+            ("a".to_string(), "1".to_string()),
+            ("b".to_string(), "2".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(form, expected);
+
+        let charset = HashMap::from([(
+            "Content-Type".to_string(),
+            "application/x-www-form-urlencoded; charset=utf-8".to_string(),
+        )]);
+        let form = Imposter::request_form(&charset, Some("a=1")).expect("form with a charset");
+        assert_eq!(form.get("a").map(String::as_str), Some("1"));
+
+        let form = Imposter::request_form(&form_headers, Some("a%20b=1")).expect("form");
+        assert_eq!(form.get("a b").map(String::as_str), Some("1"), "{form:?}");
     }
 
     // Issue #475: run_flow_blocking must be transparent — on the default (non-blocking) backend it

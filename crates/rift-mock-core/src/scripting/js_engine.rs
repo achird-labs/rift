@@ -1367,7 +1367,8 @@ fn js_value_to_fault_decision(
 // =============================================================================
 
 /// Flatten every field of a Mountebank request object onto `config` itself
-/// (`config.method`, `config.path`, `config.query`, `config.headers`, `config.body`), mirroring
+/// (`config.method`, `config.path`, `config.query`, `config.headers`, `config.body`, and
+/// `requestFrom`/`ip`/`form` when present), mirroring
 /// Mountebank v2's `downcastInjectionConfig`. This is why `function(config){config.request.path}`,
 /// `function(request){request.path}` (with `config` passed positionally where `request` used to
 /// be), and `function(config){config.path}` all address the same data.
@@ -1386,6 +1387,18 @@ fn flatten_request_onto(
         config_obj
             .set(js_string!(key), val, false, context)
             .map_err(|e| anyhow!("Failed to flatten config.{key}: {e}"))?;
+    }
+    // Issue #1451: the client fields, flattened too, and absent from `config` when absent from
+    // the request rather than present as `undefined`.
+    for key in ["requestFrom", "ip", "form"] {
+        let val = req
+            .get(js_string!(key), context)
+            .map_err(|e| anyhow!("Failed to read request.{key} for config flattening: {e}"))?;
+        if !val.is_undefined() {
+            config_obj
+                .set(js_string!(key), val, false, context)
+                .map_err(|e| anyhow!("Failed to flatten config.{key}: {e}"))?;
+        }
     }
     Ok(())
 }
@@ -2111,7 +2124,7 @@ fn execute_predicate_generator_inject_in(
 }
 
 /// Request structure for Mountebank inject functions
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MountebankRequest {
     pub method: String,
     pub path: String,
@@ -2126,6 +2139,13 @@ pub struct MountebankRequest {
     /// `Text`, because a body that is base64 while the flag says "text" is worse than no flag: it
     /// invites `if (isBinary) … else JSON.parse(body)` and fails it silently.
     pub mode: Option<ResponseMode>,
+    /// `requestFrom` / `ip` / `form` as Mountebank's `httpRequest.transform` builds them (issue
+    /// #1451): the same strings the matcher and the journal use (`client_addr.to_string()`,
+    /// `client_addr.ip()`). `None` leaves the key absent — a caller with no socket, or a request
+    /// without a non-empty urlencoded body for `form`.
+    pub request_from: Option<String>,
+    pub ip: Option<String>,
+    pub form: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Create a Mountebank-style request object
@@ -2321,6 +2341,36 @@ fn create_mountebank_request_object(
             context,
         )
         .map_err(|e| anyhow!("Failed to set isBinary: {e}"))?;
+    }
+
+    // Issue #1451: absent rather than `undefined`-valued, as in Mountebank's request object.
+    for (key, value) in [("requestFrom", &request.request_from), ("ip", &request.ip)] {
+        if let Some(value) = value {
+            obj.set(
+                js_string!(key),
+                JsValue::from(js_string!(value.as_str())),
+                false,
+                context,
+            )
+            .map_err(|e| anyhow!("Failed to set {key}: {e}"))?;
+        }
+    }
+
+    // A plain object: only headers get the case-insensitive lookup, form keys are the client's own.
+    if let Some(form) = &request.form {
+        let form_obj = create_js_object(context);
+        for (k, v) in form {
+            form_obj
+                .set(
+                    js_string!(k.clone()),
+                    JsValue::from(js_string!(v.clone())),
+                    false,
+                    context,
+                )
+                .map_err(|e| anyhow!("Failed to set form field: {e}"))?;
+        }
+        obj.set(js_string!("form"), form_obj, false, context)
+            .map_err(|e| anyhow!("Failed to set form: {e}"))?;
     }
 
     Ok(obj.into())
@@ -3508,6 +3558,7 @@ function respond(ctx) {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
         let headers = HashMap::new();
 
@@ -3530,6 +3581,43 @@ function respond(ctx) {
         assert_eq!(result.unwrap().body, "logged");
     }
 
+    // Issue #1451: `requestFrom`, `ip` and `form` are absent keys when the caller has none, on
+    // `request` and on the flattened `config` alike — never present as `undefined` or `null`.
+    #[test]
+    fn absent_client_fields_are_absent_keys_in_the_script_request() {
+        let script = "function (config, response) { var r = config.request; response.body = \
+            [('requestFrom' in r), ('ip' in r), ('form' in r), \
+             ('requestFrom' in config), ('ip' in config), ('form' in config)].join('|'); }";
+        let run = |request: &MountebankRequest| {
+            execute_mountebank_decorate(
+                script,
+                request,
+                "orig",
+                200,
+                &HashMap::new(),
+                test_port(),
+                None,
+            )
+            .expect("decorate runs")
+            .body
+        };
+
+        let without = MountebankRequest {
+            method: "GET".to_string(),
+            path: "/p".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(run(&without), "false|false|false|false|false|false");
+
+        let with = MountebankRequest {
+            request_from: Some("127.0.0.1:50000".to_string()),
+            ip: Some("127.0.0.1".to_string()),
+            form: Some(HashMap::from([("a".to_string(), "1".to_string())])),
+            ..without
+        };
+        assert_eq!(run(&with), "true|true|true|true|true|true");
+    }
+
     // Issue #498: a `predicateGenerators.inject` script error must return `Err(Script)` — NOT a
     // silent empty Vec that the proxy path would turn into a match-all stub.
     #[test]
@@ -3541,6 +3629,7 @@ function respond(ctx) {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let throwing = r#"function(config, logger, predicates) { throw new Error("boom"); }"#;
@@ -3571,6 +3660,7 @@ function respond(ctx) {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         // Returns a number → JSON.stringify gives "5", which does not parse as a predicate array.
@@ -3602,6 +3692,7 @@ function respond(ctx) {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
         let headers = HashMap::new();
 
@@ -3633,6 +3724,7 @@ function respond(ctx) {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: Some("REQ-BODY".to_string()),
+            ..Default::default()
         }
     }
 
@@ -3797,6 +3889,7 @@ function respond(ctx) {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         }
     }
 

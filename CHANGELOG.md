@@ -34,6 +34,14 @@ record.
   `form` is recorded like `query`, whole or by listed keys, with `ignore`; a request without a
   non-empty urlencoded body records no `form` predicate, as Mountebank's `deepEquals: {}`
   constrains nothing. Asking for any of them used to fail the recording.
+- **Script request objects carry `requestFrom`, `ip` and `form`** (#1451), as Mountebank's
+  `httpRequest.transform` builds them, on every script surface: response `inject`, predicate
+  `inject`, a predicate generator's `inject`, `decorate` (both conventions) and `shellTransform`'s
+  `MB_REQUEST`. `requestFrom` is the client's `address:port` and `ip` its address, the values the
+  `requestFrom` and `ip` predicates match; `form` is the parsed urlencoded body, present only for a
+  non-empty `application/x-www-form-urlencoded` body. A script reading them used to get
+  `undefined`. On the default bind address an IPv4 client is `127.0.0.1`, not Mountebank's
+  `::ffff:127.0.0.1` ([differences](docs/mountebank/differences.md#client-address)).
 
 - **`copy` indexed tokens** (#1407). `<into>[n]` is replaced with the n-th extracted value, as in
   Mountebank: for a regex, `[0]` is the whole match and `[n]` is capture group n; for JSONPath and
@@ -261,6 +269,12 @@ record.
   gates nothing, still does not. A positive TTL running out on a scenario's key is not seen.
 
 ### Changed
+
+- **Script request types carry the client fields** (#1451). For embedders of `rift-mock-core`:
+  `RequestContext::from_request` takes a `client_addr: Option<SocketAddr>` parameter, and
+  `MountebankRequest` and `RequestContext` gain the public fields `request_from`, `ip` and `form`
+  (source-breaking for struct literals, which need the new fields or `..Default::default()`;
+  `MountebankRequest` now derives `Default`).
 
 - **The request journal is bounded by bytes, not 10,000 entries** (#1441). Each imposter keeps up
   to `--journal-max-bytes` / `RIFT_JOURNAL_MAX_BYTES` / `journalMaxBytes` (default 768 MiB) of

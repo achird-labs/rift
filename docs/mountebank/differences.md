@@ -54,6 +54,21 @@ shows in two places that are not scripts: a header-name predicate with `caseSens
 `keyCaseSensitive: true`) compares against the Title-Cased name, and `savedRequests` record the
 Title-Cased name.
 
+## Client address
+
+With the default bind address (`0.0.0.0`), Rift reports an IPv4 client as `127.0.0.1`.
+Mountebank's dual-stack listener reports it as `::ffff:127.0.0.1`, and `requestFrom` as
+`::ffff:127.0.0.1:<port>`. An imposter bound to `"host": "::"` listens on a dual-stack socket too,
+so Rift then reports an IPv4 client as `::ffff:127.0.0.1` as Mountebank does, with `requestFrom`
+written `[::ffff:127.0.0.1]:<port>`.
+
+Each engine uses its own value everywhere: the `ip` and `requestFrom` predicates, recorded
+requests, generated predicates ([Proxy](proxy.md#predicate-generators)) and the `request.ip` /
+`request.requestFrom` that `inject`, `decorate` and `shellTransform`'s `MB_REQUEST` see. Rift does
+not rewrite an address into the `::ffff:` form, because a script would then see a value its own
+`ip` predicate never matches. An IPv6 client's `requestFrom` is written `[::1]:50000` in Rift and
+`::1:50000` in Mountebank.
+
 ## `decorate` and a response without headers
 
 `decorate` always receives a `headers` object on the response, empty when the response has none; in Mountebank `response.headers` is `undefined` there, so a decorate that writes a header fails. Rift accepts that script, so `config.response.headers['X-D'] = 'y'` on an `is` with no headers

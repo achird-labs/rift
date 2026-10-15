@@ -53,6 +53,9 @@ pub(crate) struct BehaviorRun<'a, SH> {
     pub uri: &'a hyper::Uri,
     pub request_headers: &'a HashMap<String, Vec<String>, SH>,
     pub request_body: Option<&'a str>,
+    /// The client's socket, for `requestFrom` / `ip` in `decorate` and `MB_REQUEST` (issue #1451).
+    /// `None` only for a caller with no socket.
+    pub client_addr: Option<std::net::SocketAddr>,
     pub script_state_key: u16,
     pub stub: StubRef<'a>,
     pub csv_cache: &'a CsvCache,
@@ -88,6 +91,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                 self.uri,
                 self.request_headers,
                 self.request_body,
+                self.client_addr,
             )
         };
 
@@ -343,6 +347,7 @@ mod tests {
             uri: &uri,
             request_headers: &request_headers,
             request_body: None,
+            client_addr: None,
             script_state_key: 4545,
             stub: STUB,
             csv_cache: &csv_cache,

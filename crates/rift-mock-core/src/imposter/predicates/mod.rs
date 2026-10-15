@@ -662,6 +662,13 @@ where
                     // sees the correct (base64) string, it just can't ask `isBinary`.
                     body: body.map(|b| b.to_string()),
                     mode: None,
+                    request_from: request_from.map(str::to_string),
+                    ip: client_ip.map(str::to_string),
+                    // The matcher's form is parsed for any urlencoded body; a script sees one only
+                    // for a non-empty body, as Mountebank builds `request.form`.
+                    form: form
+                        .filter(|_| body.is_some_and(|b| !b.is_empty()))
+                        .map(|f| f.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
                 };
                 execute_predicate_inject(inject_fn, &mb_request, imposter_port)
             }

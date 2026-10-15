@@ -217,6 +217,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: Some("test body".to_string()),
+            ..Default::default()
         };
 
         let source = CopySource::Simple("path".to_string());
@@ -243,6 +244,7 @@ mod tests {
             query,
             headers,
             body: None,
+            ..Default::default()
         };
 
         let mut map = HashMap::new();
@@ -270,6 +272,7 @@ mod tests {
             query,
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![
@@ -314,6 +317,7 @@ mod tests {
             query,
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![CopyBehavior {
@@ -352,6 +356,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: Some("one\r\ntwo".to_string()),
+            ..Default::default()
         };
 
         let behaviors = vec![CopyBehavior {
@@ -402,6 +407,7 @@ mod tests {
             query,
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![CopyBehavior {
@@ -464,6 +470,7 @@ mod tests {
             query,
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![CopyBehavior {
@@ -519,6 +526,7 @@ mod tests {
             query,
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![CopyBehavior {
@@ -559,6 +567,7 @@ mod tests {
             query,
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![CopyBehavior {
@@ -596,6 +605,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![CopyBehavior {
@@ -633,6 +643,7 @@ mod tests {
             query,
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![CopyBehavior {
@@ -673,6 +684,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![CopyBehavior {
@@ -728,6 +740,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: Some(body.to_string()),
+            ..Default::default()
         }
     }
 
@@ -811,6 +824,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
         let (body, header) = copy_once(
             r#""body""#,

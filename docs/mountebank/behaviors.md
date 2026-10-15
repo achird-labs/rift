@@ -210,6 +210,15 @@ Transform responses using JavaScript. The function receives request and response
 before changing fields. If the function sets `response.body` to an object, Rift serializes it back
 to JSON. `response.headers` holds one string per header name.
 
+`request` is the same object an `inject` function gets ([Request Object](responses.md#request-object)):
+`method`, `path`, `query`, `headers` and `body`, plus `requestFrom` (the client's `address:port`),
+`ip` (its address) and `form` (the parsed body, present only for a non-empty
+`application/x-www-form-urlencoded` body). On the default bind address an IPv4 client is
+`127.0.0.1` in Rift and `::ffff:127.0.0.1` in Mountebank — see
+[Client address](differences.md#client-address). A query or form key the client repeated is one
+comma-joined string (`"1,2"`), where Mountebank gives an array, as for predicates
+([differences](differences.md#exists-with-an-object-over-an-array)); the same holds in `MB_REQUEST`.
+
 ### Basic Transformation
 
 ```json
@@ -307,14 +316,17 @@ Each command runs via `sh -c "<command>"` and receives two environment variables
 
 | Variable | JSON shape |
 |:---------|:-----------|
-| `MB_REQUEST` | `{ "method", "path", "query", "headers", "body" }` |
+| `MB_REQUEST` | `{ "requestFrom", "method", "path", "query", "headers", "body", "ip", "form" }` |
 | `MB_RESPONSE` | `{ "statusCode", "body" }` |
 
 `MB_REQUEST.headers` holds one string per header name: a header the client sent more than once
 contributes its **first** value, and a header whose value was not valid UTF-8 is absent from the
 object entirely rather than present as `""` (#1040). That is the same view `copy`, `lookup`,
 `decorate` and `${request.headers.*}` read, and the same one predicates match on — see
-[predicates](predicates.md).
+[predicates](predicates.md). `requestFrom` and `ip` are the client's `address:port` and address
+(on the default bind address an IPv4 client is `127.0.0.1`, where Mountebank says
+`::ffff:127.0.0.1` — see [Client address](differences.md#client-address)). `form` is present only for a non-empty
+`application/x-www-form-urlencoded` body, as `JSON.stringify` leaves out Mountebank's undefined one.
 
 The command's **stdout becomes the new response body**, as text and as written. Rift does not read it
 as a response object, so a command that prints `{"statusCode": 201, "body": "z"}` serves that text

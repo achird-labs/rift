@@ -329,10 +329,7 @@ impl<SH: BuildHasher> GeneratorRequest<'_, SH> {
     /// The urlencoded form, parsed as the matcher parses it. `None` when the request has none:
     /// Mountebank builds `request.form` only for a non-empty urlencoded body (`httpRequest.js`).
     fn form(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
-        if self.body.is_none_or(str::is_empty) {
-            return None;
-        }
-        crate::imposter::Imposter::parse_form_data(self.headers, self.body).map(|form| {
+        crate::imposter::Imposter::request_form(self.headers, self.body).map(|form| {
             form.into_iter()
                 .map(|(k, v)| (k, serde_json::Value::String(v)))
                 .collect()
@@ -618,6 +615,10 @@ impl Imposter {
                         // flag through separately, so default to `Text`.
                         body: body.map(|b| b.to_string()),
                         mode: None,
+                        request_from: Some(client_addr.to_string()),
+                        ip: Some(client_addr.ip().to_string()),
+                        form: crate::imposter::Imposter::request_form(headers, body)
+                            .map(|form| form.into_iter().collect()),
                     };
                     let inject_preds =
                         execute_predicate_generator_inject(inject_fn, &mb_request, &predicates)?;
