@@ -63,10 +63,6 @@
       "name": "Behaviors and repeat on inject, proxy and fault responses (rift#1184)"
     },
     {
-      "file": "features/rift/15-flow-store-redis.feature",
-      "name": "Flow-store backend parity — the in-memory and Redis stores give identical results"
-    },
-    {
       "file": "features/rift/16-front-door.feature",
       "name": "Front door routing and single-port gateway dispatch (rift docs/features/front-door.md, gateway.md)"
     },

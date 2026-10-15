@@ -1,6 +1,0 @@
-{
-  "protocol": "http",
-  "name": "stateops · a rediss url is refused",
-  "_rift": { "flowState": { "backend": "redis", "redis": { "url": "rediss://x" } } },
-  "stubs": []
-}

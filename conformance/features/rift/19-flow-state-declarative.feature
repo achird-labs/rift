@@ -115,10 +115,7 @@ Feature: Declarative flow state — _rift.stateOps, fail-loud flowState config, 
       | ttlSeconds 0                            | config-ttl-zero        | flowState.ttlSeconds must be >= 1 (got 0) |
       | a negative ttlSeconds                   | config-ttl-negative    | flowState.ttlSeconds must be >= 1 (got -5) |
       | an unregistered backend                 | config-unknown-backend | no such backend is registered            |
-      | redis backend without a redis block     | config-redis-no-block  | no redis config block was provided       |
-      | redis backend with a flat url           | config-redis-flat-url  | no redis config block was provided       |
-      | a rediss:// url                         | config-rediss-url      | Failed to parse Redis URL                |
-      | a redis+sentinel:// url                 | config-sentinel-url    | Failed to parse Redis URL                |
+      | the removed redis backend               | config-redis-removed   | was removed in 0.22.0                    |
 
   Scenario: DELETE /admin/imposters/{port}/flow-state/{flowId} clears the flow and is idempotent
     When the client sends "GET" "/inc"

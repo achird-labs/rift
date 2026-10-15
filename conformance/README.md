@@ -43,7 +43,8 @@ RIFT_FEATURES_DIR=/path/to/rift/conformance sbt lintFeatures engineConformance
 ```
 
 `RIFT_FEATURES_DIR` is read when sbt loads the build: `reload` after changing it inside a session.
-Feature 15 (Redis flow store) runs only under `RIFT_IT=1 sbt engineRedis`, with Docker.
+There is no feature 15: it specified the Redis flow store, which the engine removed in 0.22.0
+(#1336), so the runner's Redis suite does not apply to this tree.
 
 ## Releases
 
