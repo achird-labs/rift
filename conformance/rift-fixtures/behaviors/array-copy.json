@@ -1,0 +1,23 @@
+{
+  "port": 4521,
+  "protocol": "http",
+  "name": "21 · behaviors array runs every copy element in order (rift#1195)",
+  "stubs": [
+    {
+      "name": "two copy elements in one behaviors array — both apply, as in Mountebank 2.9.1",
+      "predicates": [{ "equals": { "path": "/copy" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "body": "A=${A} B=${B}" },
+        "behaviors": [
+          { "copy": { "from": "path", "into": "${A}", "using": { "method": "regex", "selector": "c.p" } } },
+          { "copy": { "from": "method", "into": "${B}", "using": { "method": "regex", "selector": ".+" } } }
+        ]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "method": "GET", "path": "/copy" }, "expect": { "status": 200, "bodyContains": "A=cop B=GET" } }
+        ]
+      }
+    }
+  ]
+}
