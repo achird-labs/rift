@@ -1,9 +1,11 @@
-//! The engine under test (port of `RiftHarness.scala` / `RiftHarnessEmbedded.scala`).
+//! The engine under test (port of `RiftHarness.scala` / `RiftHarnessEmbedded.scala` /
+//! `RiftHarnessContainer.scala`).
 //!
 //! One [`Harness`] per run owns the shared engine every scenario drives over HTTP. Its admin and
 //! metrics URLs are fixed for the run. Scenarios that need an engine started with different flags
 //! (feature 09 `@upstream-trust`) spawn a [`SpawnedEngine`] of their own beside it, and feature 11's
-//! reload scenarios start a [`ReloadEngine`] serving a config file of their own.
+//! reload scenarios start a [`ReloadEngine`] serving a config file of their own. Container mode
+//! starts neither: [`Mode::excludes`] leaves those scenarios out.
 
 use crate::HarnessError;
 use crate::build_info::BuildInfo;
@@ -13,6 +15,7 @@ use std::fmt;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 
@@ -23,6 +26,22 @@ const READINESS_SPACING: Duration = Duration::from_millis(100);
 /// between our probe and the engine's bind costs one retry, not the run.
 const SPAWN_ATTEMPTS: usize = 5;
 
+/// Container mode's fixed ports inside the container. Admin and metrics are published on free host
+/// ports (a developer machine often has Mountebank on 2525); the imposter ranges 1:1.
+const CONTAINER_ADMIN_PORT: u16 = 2525;
+const CONTAINER_METRICS_PORT: u16 = 4790;
+/// Published 1:1 because fixtures and the corpus name ports in them and the engine reports the port
+/// it bound: 4500-4599 the corpus (4501-4521), 4800-4899 the fixtures' fixed ports (4800-4829,
+/// 4870-4879) and the pool.
+const CONTAINER_IMPOSTER_RANGES: [(u16, u16); 2] = [(4500, 4599), (4800, 4899)];
+/// The fresh-imposter pool: the top of the published ranges, clear of every fixture's fixed port.
+const CONTAINER_POOL: (u16, u16) = (4880, 4899);
+/// The image's WORKDIR, where the corpus's `data/` is mounted so `data/...` paths resolve as they do
+/// against the spawned engine's cwd.
+const IMAGE_WORKDIR: &str = "/data";
+/// Every container this runner starts carries it, so one leaked by an interrupted run is findable.
+const CONTAINER_LABEL: &str = "rift-conformance=1";
+
 /// How the engine is delivered. `RIFT_MODE`, default `external`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -30,7 +49,7 @@ pub enum Mode {
     External,
     /// Link `rift-ffi` and serve the real admin API in this process (`rift_serve_admin`).
     Embedded,
-    /// Run the published image. Not implemented by this runner yet.
+    /// Run the engine image `RIFT_IMAGE` with Docker, imposter ports published 1:1.
     Container,
 }
 
@@ -69,6 +88,30 @@ impl Mode {
             (Self::Embedded, "front-door") => Some(
                 "drives the front door of `rift --front-door`, which rift_serve_admin has no option for",
             ),
+            (Self::Container, "upstream-trust") => Some(
+                "starts a second engine with --upstream-ca-file, which this harness only spawns in external mode",
+            ),
+            (Self::Container, "front-door") => Some(
+                "starts its own `rift --front-door` engine, which this harness only spawns in external mode",
+            ),
+            (Self::Container, "full-corpus-verify") => Some(
+                "rift-verify --verify-dynamic has the engine bind imposters on dynamic ports, which the container does not publish",
+            ),
+            (Self::Container, "loopback-client") => Some(
+                "Docker's port forwarding rewrites the client address, so the engine never sees a loopback peer",
+            ),
+            (Self::Container, "connect-refused") => Some(
+                "a published port always accepts on the host, so a connection is never refused",
+            ),
+            (Self::Container, "host-port") => Some(
+                "an engine-assigned port lands outside the published ranges, unreachable from the host",
+            ),
+            (Self::Container, "tcp-rst") => {
+                Some("Docker's port forwarder turns the engine's RST into an orderly EOF")
+            }
+            (Self::Container, "reload-engine") => Some(
+                "starts an engine of its own serving a config file, which this harness doesn't start in a container",
+            ),
             _ => None,
         }
     }
@@ -93,22 +136,32 @@ pub struct Config {
     pub max_body_size: Option<usize>,
     /// Where engine logs go for this run.
     pub log_dir: PathBuf,
+    /// `RIFT_IMAGE`: the engine image container mode runs. Required there, unused elsewhere.
+    pub image: Option<String>,
 }
 
 impl Config {
     /// `None` when `RIFT_BUILD_DIR` is unset: the caller decides whether that is a skip or a
     /// failure.
     pub fn from_env(log_dir: PathBuf) -> Result<Option<Self>, HarnessError> {
-        let Some(build_dir) = env_nonempty("RIFT_BUILD_DIR") else {
+        Self::from_vars(env_nonempty, log_dir)
+    }
+
+    /// [`Config::from_env`] over `var`, which returns a variable's trimmed, non-empty value.
+    pub fn from_vars(
+        var: impl Fn(&str) -> Option<String>,
+        log_dir: PathBuf,
+    ) -> Result<Option<Self>, HarnessError> {
+        let Some(build_dir) = var("RIFT_BUILD_DIR") else {
             return Ok(None);
         };
-        let mode = match env_nonempty("RIFT_MODE") {
+        let mode = match var("RIFT_MODE") {
             Some(m) => Mode::parse(&m)?,
             None => Mode::External,
         };
-        let corpus_root = env_nonempty("RIFT_CORPUS_ROOT")
-            .map_or_else(crate::spec::default_corpus_root, PathBuf::from);
-        let max_body_size = match env_nonempty("RIFT_MAX_BODY_SIZE") {
+        let corpus_root =
+            var("RIFT_CORPUS_ROOT").map_or_else(crate::spec::default_corpus_root, PathBuf::from);
+        let max_body_size = match var("RIFT_MAX_BODY_SIZE") {
             None => None,
             Some(v) => Some(v.parse::<usize>().map_err(|e| HarnessError::InvalidEnv {
                 name: "RIFT_MAX_BODY_SIZE",
@@ -116,13 +169,42 @@ impl Config {
                 why: e.to_string(),
             })?),
         };
+        let corpus_root = absolute(corpus_root)?;
+        let image = match mode {
+            Mode::Container => {
+                let image = var("RIFT_IMAGE").ok_or_else(missing_image)?;
+                // Docker would bind-mount a missing source as a new, empty, root-owned directory.
+                let data = corpus_root.join("data");
+                if !data.is_dir() {
+                    return Err(HarnessError::InvalidEnv {
+                        name: "RIFT_CORPUS_ROOT",
+                        value: corpus_root.display().to_string(),
+                        why: format!(
+                            "container mode mounts {} into the image, and it is not a directory",
+                            data.display()
+                        ),
+                    });
+                }
+                Some(image)
+            }
+            Mode::External | Mode::Embedded => None,
+        };
         Ok(Some(Self {
             mode,
             build_dir: absolute(PathBuf::from(build_dir))?,
-            corpus_root: absolute(corpus_root)?,
+            corpus_root,
             max_body_size,
             log_dir,
+            image,
         }))
+    }
+}
+
+/// Never a default image: silently testing an older engine is exactly what container mode guards.
+fn missing_image() -> HarnessError {
+    HarnessError::MissingEnv {
+        name: "RIFT_IMAGE",
+        why: "RIFT_MODE=container runs that image; build it from this tree (see conformance/README.md)",
     }
 }
 
@@ -159,16 +241,17 @@ pub struct Harness {
     pub tools: Tools,
     pub build_info: BuildInfo,
     engine: tokio::sync::Mutex<Option<Engine>>,
+    port_pool: Option<PortPool>,
 }
 
 enum Engine {
     External(SpawnedEngine),
     Embedded(EmbeddedEngine),
+    Container(ContainerEngine),
 }
 
 impl Harness {
-    /// Start the shared engine for `config.mode`. Container mode is refused here: the caller
-    /// reports it as not implemented before getting this far.
+    /// Start the shared engine for `config.mode`.
     pub async fn start(config: Config) -> Result<Self, HarnessError> {
         let build_info = BuildInfo::load(&config.build_dir)?;
         let tools = Tools::from_build_dir(&config.build_dir);
@@ -176,15 +259,18 @@ impl Harness {
             Mode::External => Engine::External(spawn_with_retry(&config, &[], false).await?),
             Mode::Embedded => Engine::Embedded(EmbeddedEngine::start(&config, None).await?),
             Mode::Container => {
-                return Err(HarnessError::Unsupported {
-                    what: "the shared engine",
-                    mode: "container",
-                });
+                let image = config.image.as_deref().ok_or_else(missing_image)?;
+                Engine::Container(ContainerEngine::start(&config, image).await?)
             }
         };
         let (admin_url, metrics_url) = match &engine {
             Engine::External(e) => (e.admin_url.clone(), e.metrics_url.clone()),
             Engine::Embedded(e) => (e.admin_url.clone(), e.metrics_url.clone()),
+            Engine::Container(e) => (e.admin_url.clone(), e.metrics_url.clone()),
+        };
+        let port_pool = match config.mode {
+            Mode::Container => Some(PortPool::new(CONTAINER_POOL.0, CONTAINER_POOL.1)),
+            Mode::External | Mode::Embedded => None,
         };
         Ok(Self {
             config,
@@ -193,10 +279,20 @@ impl Harness {
             tools,
             build_info,
             engine: tokio::sync::Mutex::new(Some(engine)),
+            port_pool,
         })
     }
 
-    /// The host imposters are reached on. Imposters bind real host ports in both modes.
+    /// Where a fresh imposter's port comes from: `None` lets the engine assign one (external,
+    /// embedded); in container mode an engine-assigned port would land outside the published ranges,
+    /// so the port is taken from this pool instead.
+    #[must_use]
+    pub fn imposter_port_pool(&self) -> Option<&PortPool> {
+        self.port_pool.as_ref()
+    }
+
+    /// The host imposters are reached on: the engine's own host in external and embedded mode, and
+    /// the container's ports published 1:1 on the host's loopback in container mode.
     #[must_use]
     pub fn imposter_host(&self) -> &'static str {
         "localhost"
@@ -310,6 +406,7 @@ impl Harness {
                     eprintln!("plane_a: rift_stop panicked while tearing the embedded engine down");
                 }
             }
+            Some(Engine::Container(e)) => e.kill_now(),
             None => {}
         }
     }
@@ -320,6 +417,7 @@ impl Harness {
         match engine {
             Some(Engine::External(e)) => e.stop().await,
             Some(Engine::Embedded(e)) => e.stop().await,
+            Some(Engine::Container(e)) => e.stop().await,
             None => Ok(()),
         }
     }
@@ -413,6 +511,7 @@ impl SpawnedEngine {
         match engine.await_ready().await {
             Ok(()) => Ok(engine),
             Err(e) => {
+                let e = with_log(e, &engine.log);
                 // A never-ready engine must not keep its ports for the rest of the run.
                 match engine.stop().await {
                     Ok(()) => Err(e),
@@ -424,45 +523,17 @@ impl SpawnedEngine {
         }
     }
 
+    /// Admin and metrics listeners answer, and the front door accepts. A not-ready error leaves the
+    /// log out: the caller adds it once the engine is stopped.
     async fn await_ready(&mut self) -> Result<(), HarnessError> {
-        let probe = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .map_err(HarnessError::Client)?;
-        let urls = [
-            format!("{}/imposters", self.admin_url),
-            format!("{}/metrics", self.metrics_url),
-        ];
         let deadline = Instant::now() + READINESS_BUDGET;
-        for url in &urls {
-            loop {
-                if let Some(status) = self.child.try_wait().map_err(|source| HarnessError::Io {
-                    action: "waiting on",
-                    path: self.log.clone(),
-                    source,
-                })? {
-                    return Err(HarnessError::NotReady(format!(
-                        "rift exited ({status}) before {url} answered; log {}:\n{}",
-                        self.log.display(),
-                        log_tail(&self.log)
-                    )));
-                }
-                let last = match probe.get(url).send().await {
-                    Ok(r) if r.status().is_success() => break,
-                    Ok(r) => format!("HTTP {}", r.status()),
-                    Err(e) => e.to_string(),
-                };
-                if Instant::now() >= deadline {
-                    return Err(HarnessError::NotReady(format!(
-                        "{url} did not answer 200 within {READINESS_BUDGET:?} (last: {last}); log {}:\n{}",
-                        self.log.display(),
-                        log_tail(&self.log)
-                    )));
-                }
-                tokio::time::sleep(READINESS_SPACING).await;
-            }
-        }
+        await_listeners(
+            &self.admin_url,
+            &self.metrics_url,
+            &mut Liveness::Child(&mut self.child, &self.log),
+            deadline,
+        )
+        .await?;
         if let Some(port) = self.front_door_port {
             loop {
                 let last = match tokio::net::TcpStream::connect(("localhost", port)).await {
@@ -471,9 +542,7 @@ impl SpawnedEngine {
                 };
                 if Instant::now() >= deadline {
                     return Err(HarnessError::NotReady(format!(
-                        "the front door on {port} did not accept within {READINESS_BUDGET:?} (last: {last}); log {}:\n{}",
-                        self.log.display(),
-                        log_tail(&self.log)
+                        "the front door on {port} did not accept within {READINESS_BUDGET:?} (last: {last})"
                     )));
                 }
                 tokio::time::sleep(READINESS_SPACING).await;
@@ -508,6 +577,418 @@ impl SpawnedEngine {
             }),
         }
     }
+}
+
+/// Whether the engine being probed for readiness still runs.
+enum Liveness<'a> {
+    Child(&'a mut Child, &'a Path),
+    /// The container's name.
+    Container(&'a str),
+}
+
+impl Liveness<'_> {
+    /// `Some(why)` once the engine has stopped.
+    async fn stopped(&mut self) -> Result<Option<String>, HarnessError> {
+        match self {
+            Self::Child(child, log) => match child.try_wait() {
+                Ok(status) => Ok(status.map(|s| format!("rift exited ({s})"))),
+                Err(source) => Err(HarnessError::Io {
+                    action: "waiting on the engine logging to",
+                    path: log.to_path_buf(),
+                    source,
+                }),
+            },
+            // An inspect that fails (the container is gone, the daemon is down) also means the
+            // engine cannot answer, so it ends the wait with that error as the reason.
+            Self::Container(name) => {
+                let format = "{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}";
+                match docker(&["inspect", "-f", format, name], "inspect").await {
+                    Ok(state) => {
+                        let mut fields = state.split_whitespace();
+                        match (fields.next(), fields.next(), fields.next()) {
+                            (Some("true"), _, _) => Ok(None),
+                            (_, code, oom) => Ok(Some(format!(
+                                "container {name} exited (exit code {}, OOM-killed {})",
+                                code.unwrap_or("?"),
+                                oom.unwrap_or("?")
+                            ))),
+                        }
+                    }
+                    Err(e) => Err(HarnessError::NotReady(format!(
+                        "could not inspect container {name}: {e}"
+                    ))),
+                }
+            }
+        }
+    }
+}
+
+/// Poll the admin `/imposters` and then `/metrics` until each answers 200, failing fast once the
+/// engine has stopped.
+async fn await_listeners(
+    admin_url: &str,
+    metrics_url: &str,
+    engine: &mut Liveness<'_>,
+    deadline: Instant,
+) -> Result<(), HarnessError> {
+    let probe = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(HarnessError::Client)?;
+    let urls = [
+        format!("{admin_url}/imposters"),
+        format!("{metrics_url}/metrics"),
+    ];
+    for url in &urls {
+        loop {
+            if let Some(why) = engine.stopped().await? {
+                return Err(HarnessError::NotReady(format!(
+                    "{why} before {url} answered"
+                )));
+            }
+            let last = match probe.get(url).send().await {
+                Ok(r) if r.status().is_success() => break,
+                Ok(r) => format!("HTTP {}", r.status()),
+                Err(e) => e.to_string(),
+            };
+            if Instant::now() >= deadline {
+                return Err(HarnessError::NotReady(format!(
+                    "{url} did not answer 200 within {READINESS_BUDGET:?} (last: {last})"
+                )));
+            }
+            tokio::time::sleep(READINESS_SPACING).await;
+        }
+    }
+    Ok(())
+}
+
+/// A not-ready error with the engine log's tail appended.
+fn with_log(e: HarnessError, log: &Path) -> HarnessError {
+    match e {
+        HarnessError::NotReady(why) => {
+            HarnessError::NotReady(format!("{why}; log {}:\n{}", log.display(), log_tail(log)))
+        }
+        other => other,
+    }
+}
+
+/// Run `docker <args>`, returning its trimmed stdout, or its stderr as the error.
+async fn docker(args: &[&str], action: &'static str) -> Result<String, HarnessError> {
+    let out = Command::new("docker")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|source| HarnessError::Io {
+            action: "running",
+            path: PathBuf::from("docker"),
+            source,
+        })?;
+    if !out.status.success() {
+        return Err(HarnessError::Docker {
+            action,
+            detail: format!(
+                "{}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// A `docker run` that lost a published port, most likely to a container an interrupted run leaked.
+fn with_port_hint(e: HarnessError) -> HarnessError {
+    match e {
+        HarnessError::Docker { action, detail } if detail.contains("port is already allocated") => {
+            HarnessError::Docker {
+                action,
+                detail: format!(
+                    "{detail}\nhint: a container leaked by an interrupted run may hold it; \
+                     look for one with `docker ps --filter label=rift-conformance`"
+                ),
+            }
+        }
+        other => other,
+    }
+}
+
+/// `docker rm -f`'s complaint when the container is already gone, which is the goal state.
+fn already_gone(e: &HarnessError) -> bool {
+    matches!(e, HarnessError::Docker { detail, .. } if detail.contains("No such container"))
+}
+
+static CONTAINER_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// The engine image run with Docker (port of `RiftHarnessContainer.scala`).
+#[derive(Debug)]
+struct ContainerEngine {
+    name: String,
+    admin_url: String,
+    metrics_url: String,
+    log: PathBuf,
+}
+
+impl ContainerEngine {
+    /// `docker run` the image with admin and metrics on free host ports, the imposter ranges
+    /// published 1:1 and the corpus's `data/` mounted read-only, then wait until it answers. No
+    /// `--rm`: an engine that exits early must keep its logs for the failure message, so every path
+    /// out removes the container itself.
+    async fn start(config: &Config, image: &str) -> Result<Self, HarnessError> {
+        let admin_port = free_port()?;
+        let metrics_port = free_port()?;
+        let name = format!(
+            "rift-conf-{}-{}",
+            std::process::id(),
+            CONTAINER_SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let log = config.log_dir.join(format!("engine-{admin_port}.log"));
+        let mut args: Vec<String> = [
+            "run",
+            "-d",
+            "--init",
+            "--name",
+            &name,
+            "--label",
+            CONTAINER_LABEL,
+            // Loopback only: the admin API runs with --allow-injection.
+            "-p",
+            &format!("127.0.0.1:{admin_port}:{CONTAINER_ADMIN_PORT}"),
+            "-p",
+            &format!("127.0.0.1:{metrics_port}:{CONTAINER_METRICS_PORT}"),
+        ]
+        .map(String::from)
+        .to_vec();
+        for (lo, hi) in CONTAINER_IMPOSTER_RANGES {
+            args.push("-p".to_string());
+            args.push(format!("127.0.0.1:{lo}-{hi}:{lo}-{hi}"));
+        }
+        args.push("-v".to_string());
+        args.push(format!(
+            "{}:{IMAGE_WORKDIR}/data:ro",
+            config.corpus_root.join("data").display()
+        ));
+        args.push(image.to_string());
+        args.extend(
+            [
+                "--port",
+                &CONTAINER_ADMIN_PORT.to_string(),
+                "--allow-injection",
+                "--metrics-port",
+                &CONTAINER_METRICS_PORT.to_string(),
+            ]
+            .map(String::from),
+        );
+        // A spawned engine reads RIFT_MAX_BODY_SIZE from the environment it inherits; the
+        // container's environment is the image's, so the limit goes in as the flag.
+        if let Some(max) = config.max_body_size {
+            args.push("--max-body-size".to_string());
+            args.push(max.to_string());
+        }
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let engine = Self {
+            admin_url: format!("http://localhost:{admin_port}"),
+            metrics_url: format!("http://localhost:{metrics_port}"),
+            name,
+            log,
+        };
+        if let Err(e) = docker(&refs, "run").await {
+            // docker itself did not run (missing, or no daemon): nothing was created to remove.
+            if matches!(e, HarnessError::Io { .. }) {
+                return Err(e);
+            }
+            let e = with_port_hint(e);
+            // A failed run can still have created the container (a port bind fails after create);
+            // its stderr, in `e`, says more than its logs would.
+            return Err(match engine.remove().await {
+                Ok(()) => e,
+                Err(stop) => HarnessError::NotReady(format!(
+                    "{e}\nand removing that container then failed too: {stop}"
+                )),
+            });
+        }
+        let ready = await_listeners(
+            &engine.admin_url,
+            &engine.metrics_url,
+            &mut Liveness::Container(&engine.name),
+            Instant::now() + READINESS_BUDGET,
+        )
+        .await;
+        match ready {
+            Ok(()) => Ok(engine),
+            Err(e) => {
+                // Stopping writes the log the message quotes.
+                let log = engine.log.clone();
+                match engine.stop().await {
+                    Ok(()) => Err(with_log(e, &log)),
+                    Err(stop) => Err(HarnessError::NotReady(format!(
+                        "{}\nand stopping that container then failed too: {stop}",
+                        with_log(e, &log)
+                    ))),
+                }
+            }
+        }
+    }
+
+    /// `docker logs <name>` with stdout and stderr going to `log`.
+    fn logs_command(&self) -> Result<std::process::Command, HarnessError> {
+        let out = std::fs::File::create(&self.log).map_err(|source| HarnessError::Io {
+            action: "creating",
+            path: self.log.clone(),
+            source,
+        })?;
+        let err = out.try_clone().map_err(|source| HarnessError::Io {
+            action: "duplicating",
+            path: self.log.clone(),
+            source,
+        })?;
+        let mut cmd = std::process::Command::new("docker");
+        cmd.args(["logs", &self.name])
+            .stdin(Stdio::null())
+            .stdout(out)
+            .stderr(err);
+        Ok(cmd)
+    }
+
+    fn logs_written(
+        &self,
+        status: std::io::Result<std::process::ExitStatus>,
+    ) -> Result<(), HarnessError> {
+        let status = status.map_err(|source| HarnessError::Io {
+            action: "running docker logs into",
+            path: self.log.clone(),
+            source,
+        })?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(HarnessError::Docker {
+                action: "logs",
+                detail: format!("{status}; its error is in {}", self.log.display()),
+            })
+        }
+    }
+
+    /// Remove the container, its logs written first. Both are attempted; a container that is
+    /// already gone is the goal state.
+    async fn stop(self) -> Result<(), HarnessError> {
+        let logged = match self.logs_command() {
+            Ok(cmd) => self.logs_written(Command::from(cmd).status().await),
+            Err(e) => Err(e),
+        };
+        let removed = self.remove().await;
+        match (logged, removed) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+            (Err(logs), Err(rm)) => Err(HarnessError::Docker {
+                action: "rm -f",
+                detail: format!("{rm}\nand writing its logs failed too: {logs}"),
+            }),
+        }
+    }
+
+    async fn remove(&self) -> Result<(), HarnessError> {
+        match docker(&["rm", "-f", &self.name], "rm -f").await {
+            Err(e) if !already_gone(&e) => Err(e),
+            _ => Ok(()),
+        }
+    }
+
+    /// The panic-path teardown: logs, then `docker rm -f`, both blocking.
+    fn kill_now(self) {
+        let logged = self
+            .logs_command()
+            .and_then(|mut cmd| self.logs_written(cmd.status()));
+        if let Err(e) = logged {
+            eprintln!("plane_a: writing container {} logs: {e}", self.name);
+        }
+        match std::process::Command::new("docker")
+            .args(["rm", "-f", &self.name])
+            .stdin(Stdio::null())
+            .output()
+        {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => eprintln!(
+                "plane_a: docker rm -f {} ({}): {}",
+                self.name,
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(e) => eprintln!("plane_a: running docker rm -f {}: {e}", self.name),
+        }
+    }
+}
+
+/// Container mode's fresh-imposter ports: a round-robin cursor over an inclusive range. Probing the
+/// host cannot find a free one there (Docker's forwarder holds every published port), so a taken
+/// port shows up as a refused POST and [`PortPool::claim`] moves on to the next.
+#[derive(Debug)]
+pub struct PortPool {
+    lo: u16,
+    /// `hi - lo`: the pool is `lo..=lo + span`.
+    span: u16,
+    cursor: AtomicUsize,
+}
+
+impl PortPool {
+    /// The pool `lo..=hi`; just `lo` when `hi < lo`.
+    #[must_use]
+    pub fn new(lo: u16, hi: u16) -> Self {
+        Self {
+            lo,
+            span: hi.saturating_sub(lo),
+            cursor: AtomicUsize::new(0),
+        }
+    }
+
+    #[must_use]
+    pub fn size(&self) -> usize {
+        usize::from(self.span) + 1
+    }
+
+    /// The next port, wrapping from the top of the range back to its bottom.
+    pub fn next_port(&self) -> u16 {
+        let offset = self.cursor.fetch_add(1, Ordering::Relaxed) % self.size();
+        self.lo + u16::try_from(offset).unwrap_or(self.span)
+    }
+
+    /// Offer `post` successive pool ports until one is answered 201, at most once round the pool.
+    /// `post` returns the status and body. Only a port the engine reports taken ([`port_taken`])
+    /// moves on to the next; any other answer, and `post`'s own errors, end the walk at once.
+    /// Returns the port and the 201's body.
+    pub async fn claim<F, Fut>(&self, mut post: F) -> anyhow::Result<(u16, String)>
+    where
+        F: FnMut(u16) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<(u16, String)>>,
+    {
+        let mut first: Option<String> = None;
+        for _ in 0..self.size() {
+            let port = self.next_port();
+            let (status, body) = post(port).await?;
+            if status == 201 {
+                return Ok((port, body));
+            }
+            if !port_taken(status, &body) {
+                anyhow::bail!("port {port}: {status}, expected 201: {body}");
+            }
+            first.get_or_insert_with(|| format!("port {port}: {status}: {body}"));
+        }
+        anyhow::bail!(
+            "all {} ports of the pool {}..={} were already in use; first refusal {}",
+            self.size(),
+            self.lo,
+            self.lo + self.span,
+            first.unwrap_or_default()
+        )
+    }
+}
+
+/// The engine refused an imposter because its port is taken: `PortInUse` ("Port N is already in
+/// use") or a failed bind ("address already in use"), both a 400.
+#[must_use]
+pub fn port_taken(status: u16, body: &str) -> bool {
+    status == 400 && body.contains("already in use")
 }
 
 /// Feature 11's per-scenario engine and the config file it reloads from.
@@ -719,6 +1200,174 @@ mod tests {
         assert!(Mode::Embedded.excludes("full-corpus-verify").is_none());
         assert!(Mode::Embedded.excludes("metrics-port").is_none());
         assert!(Mode::Embedded.excludes("no-config-source").is_none());
+    }
+
+    const CONTAINER_TAGS: [&str; 8] = [
+        "reload-engine",
+        "upstream-trust",
+        "front-door",
+        "full-corpus-verify",
+        "loopback-client",
+        "connect-refused",
+        "host-port",
+        "tcp-rst",
+    ];
+
+    #[test]
+    fn container_excludes_its_tags_and_the_other_modes_keep_theirs() {
+        for tag in CONTAINER_TAGS {
+            assert!(Mode::Container.excludes(tag).is_some(), "{tag}");
+            assert!(Mode::External.excludes(tag).is_none(), "{tag}");
+        }
+        for tag in [
+            "full-corpus-verify",
+            "loopback-client",
+            "connect-refused",
+            "host-port",
+            "tcp-rst",
+        ] {
+            assert!(Mode::Embedded.excludes(tag).is_none(), "{tag}");
+        }
+        for tag in ["full-corpus", "metrics-port", "no-config-source", "rift"] {
+            assert!(Mode::Container.excludes(tag).is_none(), "{tag}");
+        }
+    }
+
+    #[test]
+    fn only_container_excludes_the_reload_engine_scenarios() {
+        assert!(Mode::Container.excludes("reload-engine").is_some());
+        assert!(Mode::External.excludes("reload-engine").is_none());
+        assert!(Mode::Embedded.excludes("reload-engine").is_none());
+    }
+
+    #[test]
+    fn the_port_pool_wraps_from_its_top_to_its_bottom() {
+        let pool = PortPool::new(CONTAINER_POOL.0, CONTAINER_POOL.1);
+        assert_eq!(pool.size(), 20);
+        let ports: Vec<u16> = (0..22).map(|_| pool.next_port()).collect();
+        assert_eq!(ports[0], 4880);
+        assert_eq!(ports[19], 4899);
+        assert_eq!(ports[20], 4880);
+        assert_eq!(ports[21], 4881);
+    }
+
+    fn block_on<T>(f: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime")
+            .block_on(f)
+    }
+
+    #[test]
+    fn claim_walks_past_refused_ports() {
+        let pool = PortPool::new(4898, 4899);
+        let _ = pool.next_port(); // the cursor now points at 4899, so the walk wraps.
+        let mut offered = Vec::new();
+        let claimed = block_on(pool.claim(|port| {
+            offered.push(port);
+            let reply = if port == 4898 {
+                (201, "created".to_string())
+            } else {
+                (400, format!("Port {port} is already in use"))
+            };
+            async move { Ok(reply) }
+        }))
+        .expect("4898 is accepted");
+        assert_eq!(claimed, (4898, "created".to_string()));
+        assert_eq!(offered, [4899, 4898]);
+    }
+
+    #[test]
+    fn claim_gives_up_after_one_round_with_the_first_refusal() {
+        let pool = PortPool::new(4880, 4882);
+        let mut tries = 0;
+        let err = block_on(pool.claim(|port| {
+            tries += 1;
+            async move { Ok((400, format!("address already in use (port {port})"))) }
+        }))
+        .expect_err("every port refused");
+        assert_eq!(tries, 3);
+        let err = err.to_string();
+        assert!(err.contains("all 3 ports"), "{err}");
+        assert!(err.contains("(port 4880)"), "{err}");
+    }
+
+    #[test]
+    fn claim_stops_at_a_refusal_that_is_not_a_taken_port() {
+        let pool = PortPool::new(4880, 4899);
+        let mut tries = 0;
+        let err = block_on(pool.claim(|_| {
+            tries += 1;
+            async { Ok((400, "predicates must be an array".to_string())) }
+        }))
+        .expect_err("a validation error is final");
+        assert_eq!(tries, 1);
+        assert!(
+            err.to_string().contains("predicates must be an array"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn only_a_400_naming_a_taken_port_is_retried() {
+        assert!(port_taken(400, "Port 4880 is already in use"));
+        assert!(port_taken(
+            400,
+            "bind: address already in use (os error 48)"
+        ));
+        assert!(!port_taken(500, "Port 4880 is already in use"));
+        assert!(!port_taken(400, "invalid imposter"));
+    }
+
+    fn vars(pairs: &[(&str, String)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect();
+        move |name| map.get(name).cloned()
+    }
+
+    #[test]
+    fn container_mode_without_rift_image_is_a_configuration_error() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().display().to_string();
+        let base = [
+            ("RIFT_BUILD_DIR", path.clone()),
+            ("RIFT_CORPUS_ROOT", path.clone()),
+        ];
+        let mut container = base.to_vec();
+        container.push(("RIFT_MODE", "container".to_string()));
+        std::fs::create_dir(dir.path().join("data")).expect("a data dir");
+        match Config::from_vars(vars(&container), dir.path().to_path_buf()) {
+            Err(HarnessError::MissingEnv { name, .. }) => assert_eq!(name, "RIFT_IMAGE"),
+            other => panic!("expected MissingEnv RIFT_IMAGE, got {other:?}"),
+        }
+        container.push(("RIFT_IMAGE", "rift-proxy:local".to_string()));
+        let config = Config::from_vars(vars(&container), dir.path().to_path_buf())
+            .expect("valid")
+            .expect("RIFT_BUILD_DIR is set");
+        assert_eq!(config.image.as_deref(), Some("rift-proxy:local"));
+        let external = Config::from_vars(vars(&base), dir.path().to_path_buf())
+            .expect("valid")
+            .expect("RIFT_BUILD_DIR is set");
+        assert_eq!(external.mode, Mode::External);
+        assert_eq!(external.image, None);
+    }
+
+    #[test]
+    fn container_mode_without_a_corpus_data_dir_is_a_configuration_error() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().display().to_string();
+        let container = [
+            ("RIFT_BUILD_DIR", path.clone()),
+            ("RIFT_CORPUS_ROOT", path),
+            ("RIFT_MODE", "container".to_string()),
+            ("RIFT_IMAGE", "rift-proxy:local".to_string()),
+        ];
+        match Config::from_vars(vars(&container), dir.path().to_path_buf()) {
+            Err(HarnessError::InvalidEnv { name, .. }) => assert_eq!(name, "RIFT_CORPUS_ROOT"),
+            other => panic!("expected InvalidEnv RIFT_CORPUS_ROOT, got {other:?}"),
+        }
     }
 
     #[test]

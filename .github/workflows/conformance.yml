@@ -58,7 +58,8 @@ jobs:
 
   # Issue #1346: the Rust Plane A runner (conformance/runner, cucumber-rs) runs the features it has
   # ported (rift_conformance_runner::spec::PORTED_FEATURES) against this PR's binaries, in external
-  # mode (the staged `rift`) and embedded mode (rift-ffi in-process). The Scala job below keeps
+  # mode (the staged `rift`), embedded mode (rift-ffi in-process) and container mode (an image built
+  # from the staged `rift` with Dockerfile.prebuilt). The Scala job below keeps
   # running every feature not yet ported; the two lists are disjoint (EtaCassiopeia/rift-conformance
   # conformance/ported.txt, #244), so each feature runs under exactly one runner per mode.
   # RIFT_CONFORMANCE_REQUIRE turns a missing RIFT_BUILD_DIR into a failure rather than the skip a
@@ -67,7 +68,9 @@ jobs:
     name: conformance-plane-a (rust runner)
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' && !contains(github.event.pull_request.labels.*.name, 'conformance-exempt') }}
-    runs-on: ubuntu-latest
+    # 22.04 (glibc 2.35), as release.yml builds: the container step runs this job's binary in the
+    # debian bookworm image (glibc 2.36), which a build on ubuntu-latest (2.39) cannot start in.
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     env:
       RIFT_MAX_BODY_SIZE: "10485760"
@@ -88,7 +91,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: target
-          key: ${{ runner.os }}-cargo-build-conformance-rust-${{ hashFiles('**/Cargo.lock') }}
+          # The runner image is in the key: a target dir built against another glibc must not be
+          # restored here.
+          key: ${{ runner.os }}-ubuntu-22.04-cargo-build-conformance-rust-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build rift, rift-lint and rift-verify
         run: cargo build --release -p rift-http-proxy -p rift-lint --bins
@@ -127,6 +132,23 @@ jobs:
         run: cargo test -p rift-conformance-runner --test plane_a
         env:
           RIFT_MODE: embedded
+
+      # The image this PR would publish, from the binary staged above: Dockerfile.prebuilt COPYs
+      # `rift-http-proxy` out of its build context.
+      - name: Build the engine image
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/rift-image"
+          mkdir -p "$ctx"
+          cp target/release/rift-http-proxy "$ctx/rift-http-proxy"
+          docker build -f crates/rift-http-proxy/Dockerfile.prebuilt -t rift-proxy:pr "$ctx"
+
+      # Same test binary, the engine in that image with the imposter ranges published 1:1.
+      - name: Run the ported features (container mode)
+        run: cargo test -p rift-conformance-runner --test plane_a
+        env:
+          RIFT_MODE: container
+          RIFT_IMAGE: rift-proxy:pr
 
   conformance-plane-a:
     name: conformance-plane-a

@@ -47,6 +47,12 @@ pub enum HarnessError {
         mode: &'static str,
     },
 
+    #[error("docker {action}: {detail}")]
+    Docker {
+        action: &'static str,
+        detail: String,
+    },
+
     #[error("embedded engine: {0}")]
     Embedded(String),
 
