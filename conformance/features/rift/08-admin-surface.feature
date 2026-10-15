@@ -180,8 +180,9 @@ Feature: Admin surface — stub-by-id, enable/disable, savedRequests filtering, 
     When the client sends admin "GET" "/imposters/{port}/savedRequests?since=3" with payload "-"
     Then the response is a JSON array of 0 elements
 
-  # 0.18.0 (#364/#940): status and latencyMs are recorded together; `body` only when there was one.
-  Scenario: a recorded entry carries status and latencyMs, and body only when the request had one
+  # 0.18.0 (#364/#940): status and latencyMs are recorded together. A request without a body is
+  # recorded with `"body": ""`, as Mountebank records it (rift#1365).
+  Scenario: a recorded entry carries status and latencyMs, and a body-less request records an empty body
     Given a fresh imposter from fixture "admin/journal-flows"
     When the client sends "GET" "/a"
     And the request body is "hello"
@@ -191,7 +192,7 @@ Feature: Admin surface — stub-by-id, enable/disable, savedRequests filtering, 
     And every element of the response JSON array has a non-negative integer "status"
     And every element of the response JSON array has a non-negative integer "latencyMs"
     And the response JSON at "0.status" is the number 200
-    And the response JSON at "0.body" is absent
+    And the response JSON at "0.body" is the string ""
     And the response JSON at "1.body" is the string "hello"
     And the response JSON at "0.requestFrom" is a non-empty string
 

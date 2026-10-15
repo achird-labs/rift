@@ -38,9 +38,19 @@ real version when the tree is packaged.
 ```bash
 git clone https://github.com/EtaCassiopeia/rift-conformance
 cd rift-conformance
-export RIFT_BUILD_DIR=/path/to/rift/target/release     # rift, rift-lint, rift-verify
-RIFT_FEATURES_DIR=/path/to/rift/conformance sbt lintFeatures engineConformance
+export RIFT_BUILD_DIR=/path/to/staged/build    # rift, rift-lint, rift-verify + BUILD_INFO
+RIFT_FEATURES_DIR=/path/to/rift/conformance RIFT_MAX_BODY_SIZE=10485760 \
+  sbt lintFeatures engineConformance
 ```
+
+`RIFT_BUILD_DIR` holds the three binaries under those names (the engine builds as
+`rift-http-proxy`) plus a `BUILD_INFO` recording each one's `--version`; the "Stage binaries and
+BUILD_INFO" step of [`.github/workflows/conformance.yml`](../.github/workflows/conformance.yml)
+builds exactly that from `cargo build --release -p rift-http-proxy -p rift-lint`.
+
+`RIFT_MAX_BODY_SIZE=10485760` is part of the contract: the size-cap scenarios in features 13 and 21
+assert the `413` at a 10 MiB ceiling rather than sending bodies past the 512 MiB default. The
+spawned engine inherits it.
 
 `RIFT_FEATURES_DIR` is read when sbt loads the build: `reload` after changing it inside a session.
 There is no feature 15: it specified the Redis flow store, which the engine removed in 0.22.0

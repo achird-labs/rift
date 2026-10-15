@@ -59,13 +59,14 @@ Feature: Admin REST long tail — system routes, listing views, delete-all, tear
   # after the 200 is refused — no retry, no settle window.
   # @connect-refused: asserts a raw TCP connect is refused; a Docker-published port always accepts (container excludes it).
   @connect-refused
-  Scenario: DELETE /imposters/{port} returns a zero-count snapshot after the listener is gone
+  # rift#1399: the body is the imposter as it was, as GET prints it — its request count included.
+  Scenario: DELETE /imposters/{port} returns the final snapshot after the listener is gone
     Given a fresh imposter from fixture "admin-rest/two-stubs"
     When the client sends "GET" "/a"
     Then a TCP connect to the current imposter is accepted
     When the client sends admin "DELETE" "/imposters/{port}" with payload "-"
     Then the response status is 200
-    And the response JSON at "numberOfRequests" is the number 0
+    And the response JSON at "numberOfRequests" is the number 1
     And the response JSON at "requests" is an empty array
     And an immediate TCP connect to the current imposter is refused
 
@@ -122,6 +123,8 @@ Feature: Admin REST long tail — system routes, listing views, delete-all, tear
     And the response JSON has top-level field "numberOfRequests"
 
   # #932: a body that is not a stub is refused rather than becoming a match-everything stub.
+  # rift#1372: a stub needs a response, so the empty-predicates default carries `{"is": {}}`, which
+  # serves the imposter's defaultResponse (rift#1369).
   Scenario: a space refuses an enveloped or non-stub body but takes an empty-predicates default
     Given a fresh imposter from fixture "admin-rest/two-stubs"
     When the client sends admin "POST" "/imposters/{port}/spaces/s1/stubs" with payload "admin-rest/space-envelope"
@@ -158,14 +161,15 @@ Feature: Admin REST long tail — system routes, listing views, delete-all, tear
     And the error envelope message contains "state"
 
   # ── request-body cap (#567) ──────────────────────────────────────────────────────────────────
-  # The admin API caps bodies at 64 MiB: one byte over is a 413 before the JSON is parsed; exactly
-  # 64 MiB is read and rejected as bad JSON instead — the boundary is inclusive.
-  Scenario: an admin body one byte over 64 MiB is a 413; exactly 64 MiB is not
-    When the client posts 67108865 bytes to admin "/imposters"
+  # The admin API shares the request ceiling (rift#1439: Mountebank's 512 MiB by default; this tree
+  # runs with RIFT_MAX_BODY_SIZE=10485760): one byte over is a 413 before the JSON is parsed; exactly
+  # the ceiling is read and rejected as bad JSON instead — the boundary is inclusive.
+  Scenario: an admin body one byte over the ceiling is a 413; exactly the ceiling is not
+    When the client posts 10485761 bytes to admin "/imposters"
     Then the response status is 413
     And the response is a rift error envelope
     And the error envelope type is "request too large"
-    When the client posts 67108864 bytes to admin "/imposters"
+    When the client posts 10485760 bytes to admin "/imposters"
     Then the response status is 400
     And the error envelope type is "bad data"
 

@@ -120,7 +120,8 @@ Feature: Error-response envelope — the standard {"errors":[{code,message}]} co
     And the error envelope message contains "defaultForward"
 
   # The over-size door is enforced before any stub matching, so it needs no special imposter — only
-  # a body past the engine's 10 MiB request cap.
+  # a body past the request ceiling. The default ceiling is Mountebank's 512 MiB (rift#1439); this
+  # tree is run with RIFT_MAX_BODY_SIZE=10485760 (see conformance/README.md) so 11 MiB is over it.
   Scenario: a request body past the size cap serves a 413 envelope
     Given a fresh imposter from fixture "errors/oversize"
     When the request body is 11 MiB of "a"
@@ -129,7 +130,7 @@ Feature: Error-response envelope — the standard {"errors":[{code,message}]} co
     And the response is a rift error envelope
     And the error envelope code is "413"
     And the error envelope type is "request too large"
-    And the error envelope message contains "exceeds maximum size"
+    And the error envelope message contains "maximum size"
 
   # The disabled-imposter door. Feature 08 already asserts the 503 status; this pins its body shape.
   Scenario: a disabled imposter serves a 503 envelope
@@ -172,6 +173,14 @@ Feature: Error-response envelope — the standard {"errors":[{code,message}]} co
     And the response is not a JSON error envelope
     And the response has no header "content-type"
 
+  # rift#1371: deleting a port with no imposter is Mountebank's idempotent teardown — 200 with `{}`,
+  # not a refusal, so it left the sweep below.
+  Scenario: deleting an unknown imposter is an idempotent 200 with an empty object
+    Given a fresh imposter from fixture "admin/base"
+    When the client sends admin "DELETE" "/imposters/{unknownPort}" with payload "-"
+    Then the response status is 200
+    And the response body is "{}"
+
   # ── never-2xx-on-failure sweep (#173, umbrella #115) ─────────────────────────────────────────
   # Every admin door that refuses a request must SAY so: a non-2xx status plus the envelope. This
   # is the class behind rift#178/#181/#606/#611 — a failure answered 200/201 surfaces in the
@@ -189,7 +198,6 @@ Feature: Error-response envelope — the standard {"errors":[{code,message}]} co
 
     Examples:
       | door                                   | method | path                                      | payload                             | status | type             |
-      | delete an unknown imposter             | DELETE | /imposters/{unknownPort}                  | -                                   | 404    | no such resource |
       | get an unknown imposter                | GET    | /imposters/{unknownPort}                  | -                                   | 404    | no such resource |
       | create from non-JSON                   | POST   | /imposters                                | admin-doors/not-json                | 400    | bad data         |
       | create on a port already in use        | POST   | /imposters                                | admin-doors/duplicate-port          | 400    | bad data         |
