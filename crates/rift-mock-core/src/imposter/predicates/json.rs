@@ -21,7 +21,7 @@ pub(crate) fn json_value_to_string(val: &serde_json::Value) -> String {
 /// JavaScript truthiness, which is how Mountebank reads an `exists` expectation and decides
 /// whether a container can hold fields at all: `false`, `null`, `0`, `""` are falsy; non-empty
 /// strings, non-zero numbers, objects and arrays are truthy.
-fn truthy(value: &serde_json::Value) -> bool {
+pub(crate) fn truthy(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Null => false,
         serde_json::Value::Bool(b) => *b,

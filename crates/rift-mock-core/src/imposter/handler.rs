@@ -470,7 +470,7 @@ pub async fn handle_imposter_request(
     imposter: Arc<Imposter>,
     client_addr: SocketAddr,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    let allow_cors = imposter.config.allow_cors;
+    let allow_cors = imposter.config.allow_cors.enabled();
     // Capture the method before `req` is consumed so we can record the request metric (issue #269).
     let method = req.method().to_string();
     /*
@@ -813,7 +813,7 @@ async fn handle_request_inner(
     let path = uri.path().to_string();
     let query_str = uri.query().unwrap_or("").to_string();
 
-    if method.eq_ignore_ascii_case("OPTIONS") && imposter.config.allow_cors {
+    if method.eq_ignore_ascii_case("OPTIONS") && imposter.config.allow_cors.enabled() {
         return Ok(build_response_with_headers(
             StatusCode::OK,
             [("x-rift-imposter", "true")],

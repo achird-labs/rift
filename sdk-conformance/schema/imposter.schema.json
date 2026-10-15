@@ -1701,12 +1701,10 @@
       "description": "Rift extensions for advanced features (flow state, scripting, faults)"
     },
     "allowCORS": {
-      "description": "Allow CORS headers (Mountebank compatible). Written as Mountebank spells it, `allowCORS`;\n`allowCors` — what releases before #1341 wrote into replayable exports and `--datadir`\nfiles — still reads.",
-      "type": "boolean"
+      "description": "Allow CORS headers (Mountebank compatible): any JSON value, on when JavaScript-truthy, and\nprinted back verbatim when on. Written as Mountebank spells it, `allowCORS`; `allowCors` —\nwhat releases before #1341 wrote into replayable exports and `--datadir` files — still reads."
     },
     "allowCors": {
-      "description": "Alias of `allowCORS`, read the same way.",
-      "type": "boolean"
+      "description": "Alias of `allowCORS`, read the same way."
     },
     "ca": {
       "anyOf": [

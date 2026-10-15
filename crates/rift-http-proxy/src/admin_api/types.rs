@@ -45,6 +45,9 @@ pub struct ImposterSummary {
     pub stub_count: usize,
     pub enabled: bool,
     pub record_requests: bool,
+    /// Mountebank's `allowCORS`, exactly as configured, when it is truthy (issue #1453).
+    #[serde(rename = "allowCORS", skip_serializing_if = "Option::is_none")]
+    pub allow_cors: Option<serde_json::Value>,
     #[serde(rename = "_links")]
     pub links: ImposterLinks,
 }
@@ -77,6 +80,9 @@ pub struct ImposterDetail {
     pub number_of_requests: u64,
     pub enabled: bool,
     pub record_requests: bool,
+    /// Mountebank's `allowCORS`, exactly as configured, when it is truthy (issue #1453).
+    #[serde(rename = "allowCORS", skip_serializing_if = "Option::is_none")]
+    pub allow_cors: Option<serde_json::Value>,
     /// The https listener's TLS metadata; `None` (nothing printed) for every other protocol.
     #[serde(flatten)]
     pub tls: Option<TlsHeader>,
@@ -193,6 +199,9 @@ pub struct ImposterListEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_response: Option<IsResponse>,
     pub number_of_requests: u64,
+    /// Mountebank's `allowCORS`, exactly as configured, when it is truthy (issue #1453).
+    #[serde(rename = "allowCORS", skip_serializing_if = "Option::is_none")]
+    pub allow_cors: Option<serde_json::Value>,
     #[serde(rename = "_links")]
     pub links: ImposterLinks,
 }
@@ -547,6 +556,7 @@ mod tests {
             default_response: Some(
                 serde_json::from_value(serde_json::json!({"statusCode": 400})).unwrap(),
             ),
+            allow_cors: None,
             links: make_imposter_links("http://localhost:2525", 8080),
         };
         let json = serde_json::to_value(&entry).unwrap();

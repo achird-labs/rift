@@ -2251,6 +2251,39 @@ pub(crate) mod ca_pem_list {
     }
 }
 
+/// Mountebank's `allowCORS` as configured (issue #1453): any JSON value, read by JavaScript
+/// truthiness as Mountebank's `if (options.allowCORS)` reads it. Written back verbatim when
+/// enabled — Mountebank 2.9.2+ prints it in every imposter view — and omitted otherwise.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AllowCors(Option<serde_json::Value>);
+
+impl AllowCors {
+    /// Whether CORS is on: the configured value is JavaScript-truthy.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.value().is_some()
+    }
+
+    /// The configured value when it enables CORS — what an imposter view prints.
+    #[must_use]
+    pub fn value(&self) -> Option<&serde_json::Value> {
+        self.0
+            .as_ref()
+            .filter(|v| super::predicates::json::truthy(v))
+    }
+
+    fn is_disabled(&self) -> bool {
+        !self.enabled()
+    }
+}
+
+impl From<bool> for AllowCors {
+    fn from(enabled: bool) -> Self {
+        Self(Some(serde_json::Value::Bool(enabled)))
+    }
+}
+
 /// Configuration for creating an imposter
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
@@ -2336,16 +2369,17 @@ pub struct ImposterConfig {
     /// Takes precedence over `defaultResponse`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_forward: Option<String>,
-    /// Allow CORS headers (Mountebank compatible). Written as Mountebank spells it, `allowCORS`;
-    /// `allowCors` — what releases before #1341 wrote into replayable exports and `--datadir`
-    /// files — still reads.
+    /// Allow CORS headers (Mountebank compatible): any JSON value, on when JavaScript-truthy, and
+    /// printed back verbatim when on. Written as Mountebank spells it, `allowCORS`; `allowCors` —
+    /// what releases before #1341 wrote into replayable exports and `--datadir` files — still reads.
     #[serde(
         default,
         rename = "allowCORS",
-        skip_serializing_if = "std::ops::Not::not",
+        skip_serializing_if = "AllowCors::is_disabled",
         alias = "allowCors"
     )]
-    pub allow_cors: bool,
+    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+    pub allow_cors: AllowCors,
     /// Strict behavior mode (issue #375): when true, a requested response behavior that FAILS
     /// (decorate / shellTransform / binary base64 decode) returns a 500 — still carrying the #323
     /// `x-rift-<behavior>-error` header — instead of serving the fallback body. Default false keeps
@@ -2458,7 +2492,7 @@ impl Default for ImposterConfig {
             stubs: Vec::new(),
             default_response: None,
             default_forward: None,
-            allow_cors: false,
+            allow_cors: AllowCors::default(),
             strict_behaviors: false,
             service_name: None,
             service_info: None,
@@ -4339,11 +4373,63 @@ mod tests {
             let config: ImposterConfig =
                 serde_json::from_value(json!({"protocol": "http", spelling: true}))
                     .expect("imposter parses");
-            assert!(config.allow_cors, "{spelling} is read");
+            assert!(config.allow_cors.enabled(), "{spelling} is read");
             let written = serde_json::to_value(&config).expect("imposter serialises");
             assert_eq!(written.get("allowCORS"), Some(&json!(true)), "{spelling}");
             assert_eq!(written.get("allowCors"), None, "{spelling}");
         }
+    }
+
+    fn allow_cors_of(value: &serde_json::Value) -> ImposterConfig {
+        serde_json::from_value(json!({"protocol": "http", "allowCORS": value}))
+            .unwrap_or_else(|e| panic!("allowCORS {value} parses: {e}"))
+    }
+
+    /// #1453: Mountebank reads `allowCORS` by JavaScript truthiness (`if (options.allowCORS)`), so
+    /// any JSON value is accepted, and only `false`, `0`, `""` and `null` leave CORS off.
+    #[test]
+    fn allow_cors_is_enabled_by_javascript_truthiness() {
+        for value in [json!(true), json!("yes"), json!(1), json!({}), json!([])] {
+            assert!(
+                allow_cors_of(&value).allow_cors.enabled(),
+                "{value} enables"
+            );
+        }
+        for value in [json!(false), json!(0), json!(""), json!(null)] {
+            assert!(
+                !allow_cors_of(&value).allow_cors.enabled(),
+                "{value} does not"
+            );
+        }
+        let absent: ImposterConfig =
+            serde_json::from_value(json!({"protocol": "http"})).expect("parses");
+        assert!(!absent.allow_cors.enabled());
+    }
+
+    /// #1453: an enabled value is written back exactly as configured, as Mountebank 2.9.2+ prints
+    /// it; a falsy one is omitted. A stored `true` keeps its bytes, `"allowCORS": true`.
+    #[test]
+    fn allow_cors_round_trips_verbatim_when_enabled_and_is_omitted_otherwise() {
+        for value in [json!(true), json!("yes"), json!(1), json!({}), json!([])] {
+            let written = serde_json::to_value(allow_cors_of(&value)).expect("serialises");
+            assert_eq!(written.get("allowCORS"), Some(&value), "{value}");
+            let reread: ImposterConfig = serde_json::from_value(written).expect("re-reads");
+            assert!(reread.allow_cors.enabled(), "{value} re-reads enabled");
+        }
+        for value in [json!(false), json!(0), json!(""), json!(null)] {
+            let written = serde_json::to_value(allow_cors_of(&value)).expect("serialises");
+            assert_eq!(written.get("allowCORS"), None, "{value}");
+        }
+        let stored = serde_json::to_string(&allow_cors_of(&json!(true))).expect("serialises");
+        assert!(stored.contains(r#""allowCORS":true"#), "{stored}");
+    }
+
+    #[test]
+    fn allow_cors_alias_reads_any_value() {
+        let config: ImposterConfig =
+            serde_json::from_value(json!({"protocol": "http", "allowCors": "yes"}))
+                .expect("parses");
+        assert_eq!(config.allow_cors.value(), Some(&json!("yes")));
     }
 
     #[test]
