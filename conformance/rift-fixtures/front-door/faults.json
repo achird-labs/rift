@@ -1,0 +1,43 @@
+{
+  "imposters": [
+    {
+      "port": 4872,
+      "protocol": "http",
+      "stubs": [
+        {
+          "predicates": [{ "equals": { "path": "/reset" } }],
+          "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": "CONNECTION_RESET_BY_PEER" } } }]
+        },
+        {
+          "predicates": [{ "equals": { "path": "/topfault" } }],
+          "responses": [{ "fault": "CONNECTION_RESET_BY_PEER" }]
+        },
+        {
+          "predicates": [{ "equals": { "path": "/empty" } }],
+          "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": "empty" } } }]
+        },
+        {
+          "predicates": [{ "equals": { "path": "/garbage" } }],
+          "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": "garbage" } } }]
+        },
+        {
+          "predicates": [{ "equals": { "path": "/malformed" } }],
+          "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": "MALFORMED_RESPONSE_CHUNK" } } }]
+        },
+        {
+          "predicates": [{ "equals": { "path": "/script-reset" } }],
+          "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { reset() }" } } }]
+        },
+        {
+          "predicates": [{ "equals": { "path": "/ok" } }],
+          "responses": [{ "is": { "statusCode": 200, "body": "ok" } }]
+        }
+      ]
+    }
+  ],
+  "routes": {
+    "routes": [
+      { "id": "faults", "match": { "host": "fault.test" }, "target": { "port": 4872 } }
+    ]
+  }
+}

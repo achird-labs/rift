@@ -1,0 +1,16 @@
+{
+  "protocol": "http",
+  "name": "templating · route-pattern path-parameter extraction (rift#435)",
+  "stubs": [
+    {
+      "predicates": [{ "startsWith": { "path": "/users/" } }],
+      "routePattern": "/users/:id",
+      "responses": [{ "is": { "statusCode": 200, "body": "user=${request.pathParams.id}" } }]
+    },
+    {
+      "predicates": [{ "startsWith": { "path": "/s/" } }],
+      "routePattern": "/s/:id",
+      "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ http(200, `script=${ctx.request.pathParams.id}`) }" } } }]
+    }
+  ]
+}

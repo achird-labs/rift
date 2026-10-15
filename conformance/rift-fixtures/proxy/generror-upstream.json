@@ -1,0 +1,11 @@
+{
+  "port": 4818,
+  "protocol": "http",
+  "name": "proxy · generror upstream",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/svc" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "UP" } }]
+    }
+  ]
+}

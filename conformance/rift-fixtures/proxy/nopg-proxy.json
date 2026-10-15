@@ -1,0 +1,17 @@
+{
+  "port": 4816,
+  "protocol": "http",
+  "name": "proxy · no-predicateGenerators proxy",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:4815",
+            "mode": "proxyOnce"
+          }
+        }
+      ]
+    }
+  ]
+}

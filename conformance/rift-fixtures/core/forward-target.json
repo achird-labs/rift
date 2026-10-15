@@ -1,0 +1,11 @@
+{
+  "port": 4819,
+  "protocol": "http",
+  "name": "core · defaultForward target",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/fwd" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "forwarded" } }]
+    }
+  ]
+}

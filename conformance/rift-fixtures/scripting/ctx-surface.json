@@ -1,0 +1,16 @@
+{
+  "protocol": "http",
+  "name": "scripting · the Script API ctx / result surface",
+  "_rift": { "flowState": { "flowIdSource": "header:X-Flow" } },
+  "stubs": [
+    { "predicates": [{ "equals": { "path": "/http-map" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ http(201, #{a:1}).header(\"X-S\",\"v\") }" } } }] },
+    { "predicates": [{ "equals": { "path": "/delay" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ delay(50) }" } } }] },
+    { "predicates": [{ "equals": { "path": "/flow-id" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ http(200, ctx.flowId) }" } } }] },
+    { "id": "ctx-stub", "scenarioName": "checkout", "predicates": [{ "equals": { "path": "/stub" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ http(200, `${ctx.stub.id}|${ctx.stub.scenarioName}|${ctx.stub.scenarioState}`) }" } } }] },
+    { "predicates": [{ "equals": { "path": "/cross-set" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ ctx.store.flow(\"other\").set(\"shared\", \"99\"); http(200, \"set\") }" } } }] },
+    { "predicates": [{ "equals": { "path": "/cross-get" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ http(200, ctx.state.get_or(\"shared\", \"none\")) }" } } }] },
+    { "predicates": [{ "equals": { "path": "/json" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ let j = ctx.request.json; if j == () { http(200, \"unit\") } else { http(200, `${j.a}`) } }" } } }] },
+    { "predicates": [{ "equals": { "path": "/header" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ http(200, ctx.request.header(\"x-mixed\")) }" } } }] },
+    { "predicates": [{ "equals": { "path": "/js" } }], "responses": [{ "_rift": { "script": { "engine": "javascript", "code": "function respond(ctx){ return http(200, \"js\") }" } } }] }
+  ]
+}

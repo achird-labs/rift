@@ -161,6 +161,14 @@ Never learn the next auto-assigned port and then pass it explicitly: that reopen
 manager closes. A number in the block that is not a port (a duration, a size) is written with a
 separator, `20_000`, which the guard skips.
 
+## The Plane A specification
+
+[`conformance/features/`](conformance/features/) holds the scenarios Rift must satisfy, executed
+by the [rift-conformance](https://github.com/EtaCassiopeia/rift-conformance) runner. If you change
+behaviour a scenario asserts, change the scenario in the same pull request; a new feature file also
+needs its entry in `conformance/manifest.json`. How to run it is in
+[`conformance/README.md`](conformance/README.md).
+
 ## Mountebank is the oracle
 
 [`conformance/differential/`](conformance/differential/) runs every case on a real Mountebank and on

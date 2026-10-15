@@ -1,0 +1,24 @@
+{
+  "protocol": "http",
+  "name": "proxy options \u00b7 add-wait",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:UPSTREAM_PORT",
+            "mode": "proxyOnce",
+            "addWaitBehavior": true,
+            "predicateGenerators": [
+              {
+                "matches": {
+                  "path": true
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

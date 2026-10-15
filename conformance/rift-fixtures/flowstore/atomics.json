@@ -1,0 +1,14 @@
+{
+  "protocol": "http",
+  "name": "flowstore · ctx.state atomics",
+  "_rift": { "flowState": {} },
+  "stubs": [
+    { "predicates": [{ "equals": { "path": "/incr" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ http(200, `${ctx.state.incr_by(\"n\", 5)}`) }" } } }] },
+    { "predicates": [{ "equals": { "path": "/exists" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ http(200, `${ctx.state.exists(\"k\")}`) }" } } }] },
+    { "predicates": [{ "equals": { "path": "/set" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ ctx.state.set(\"k\", \"v1\"); http(200, \"ok\") }" } } }] },
+    { "predicates": [{ "equals": { "path": "/cas" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ let r = ctx.state.cas(\"k\", \"v1\", \"v2\"); http(200, `${r.applied}:${ctx.state.get(\"k\")}`) }" } } }] },
+    { "predicates": [{ "equals": { "path": "/cas-stale" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ let r = ctx.state.cas(\"k\", \"v1\", \"v9\"); http(200, `${r.applied}:${ctx.state.get(\"k\")}`) }" } } }] },
+    { "predicates": [{ "equals": { "path": "/ttl-kill" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ let had = ctx.state.ttl(\"k\", 0); http(200, `${had}:${ctx.state.exists(\"k\")}`) }" } } }] },
+    { "predicates": [{ "equals": { "path": "/ttl-absent" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ http(200, `${ctx.state.ttl(\"nope\", 30)}`) }" } } }] }
+  ]
+}

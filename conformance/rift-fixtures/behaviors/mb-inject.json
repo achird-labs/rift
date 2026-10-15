@@ -1,0 +1,18 @@
+{
+  "protocol": "http",
+  "name": "behaviors · Mountebank v2 inject parity — config-first request access + native logger (rift#438)",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/cfg" } }],
+      "responses": [{ "inject": "function (config) { return { statusCode: 200, body: config.method + \" \" + config.path }; }" }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/body" } }],
+      "responses": [{ "inject": "function (config) { return { statusCode: 200, body: \"got:\" + config.body }; }" }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/log" } }],
+      "responses": [{ "inject": "function (config) { config.logger.info(\"hello-from-inject\"); return { statusCode: 200, body: \"logged\" }; }" }]
+    }
+  ]
+}

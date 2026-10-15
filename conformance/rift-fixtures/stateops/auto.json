@@ -1,0 +1,7 @@
+{
+  "protocol": "http",
+  "name": "stateops · no flowState (auto-provisioned in-memory store)",
+  "stubs": [
+    { "predicates": [{ "equals": { "path": "/inc" } }], "responses": [{ "is": { "statusCode": 200, "body": "ok" }, "_rift": { "stateOps": [{ "op": "increment", "key": "z" }] } }] }
+  ]
+}

@@ -1,0 +1,87 @@
+{
+  "protocol": "http",
+  "name": "metrics \u00b7 scripts",
+  "_rift": {
+    "flowState": {
+      "backend": "inmemory"
+    }
+  },
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/pass"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "_rift": {
+            "script": {
+              "engine": "rhai",
+              "code": "fn respond(ctx) { pass() }"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/throw"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "_rift": {
+            "script": {
+              "engine": "rhai",
+              "code": "fn respond(ctx) { throw \"boom\"; }"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/reset"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "_rift": {
+            "script": {
+              "engine": "rhai",
+              "code": "fn respond(ctx) { reset() }"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/incr"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "_rift": {
+            "script": {
+              "engine": "rhai",
+              "code": "fn respond(ctx) { ctx.state.incr(\"n\"); pass() }"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

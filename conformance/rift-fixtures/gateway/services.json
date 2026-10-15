@@ -1,0 +1,21 @@
+{
+  "protocol": "http",
+  "name": "gateway · services",
+  "recordRequests": false,
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/g" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "gwbody" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/bin" } }],
+      "responses": [
+        { "is": { "statusCode": 200, "body": "aGVsbG8=", "_mode": "binary" } }
+      ]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/ping" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "pong" } }]
+    }
+  ]
+}

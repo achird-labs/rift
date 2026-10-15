@@ -1,0 +1,6 @@
+{
+  "protocol": "http",
+  "name": "behaviors-response-types · proxy upstream",
+  "recordRequests": true,
+  "stubs": [{ "responses": [{ "is": { "statusCode": 200, "body": "up" } }] }]
+}

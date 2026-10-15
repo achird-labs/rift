@@ -1,0 +1,27 @@
+{
+  "protocol": "https",
+  "name": "faults \u00b7 a tcp fault on an HTTPS imposter",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/reset"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200
+          },
+          "_rift": {
+            "fault": {
+              "tcp": "CONNECTION_RESET_BY_PEER"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

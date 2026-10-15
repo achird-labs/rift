@@ -1,0 +1,16 @@
+{
+  "protocol": "http",
+  "name": "flowstore · {{ state.* }} in a header",
+  "_rift": { "flowState": {} },
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/hit" } }],
+      "responses": [
+        {
+          "is": { "statusCode": 200, "headers": { "X-Hits": "{{ state.hits }}" }, "body": "hit" },
+          "_rift": { "templated": true, "stateOps": [{ "op": "increment", "key": "hits" }] }
+        }
+      ]
+    }
+  ]
+}

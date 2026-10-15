@@ -1,0 +1,10 @@
+{
+  "port": {newPort},
+  "protocol": "http",
+  "stubs": [
+    {
+      "predicates": [{ "and": [{ "matches": { "path": "([" } }] }],
+      "responses": [{ "is": { "statusCode": 200, "body": "MATCHED" } }]
+    }
+  ]
+}

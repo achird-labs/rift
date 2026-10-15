@@ -1,0 +1,282 @@
+{
+  "protocol": "http",
+  "name": "mbcompat · predicates",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/kcs",
+            "query": {
+              "Q": "v"
+            }
+          },
+          "keyCaseSensitive": true
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "kcs"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/kci",
+            "query": {
+              "Q": "v"
+            }
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "kci"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/form",
+            "form": {
+              "a": "1"
+            }
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "form"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/from"
+          }
+        },
+        {
+          "startsWith": {
+            "requestFrom": "127.0.0.1"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "from"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/ip",
+            "ip": "127.0.0.1"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "ip"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/xpath"
+          }
+        },
+        {
+          "equals": {
+            "body": "7"
+          },
+          "xpath": {
+            "selector": "//x:id",
+            "ns": {
+              "x": "urn:t"
+            }
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "xpath"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/jsonpath"
+          }
+        },
+        {
+          "equals": {
+            "body": "alice"
+          },
+          "jsonpath": {
+            "selector": "user.name"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "jsonpath"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "deepEquals": {
+            "path": "/deep",
+            "query": {
+              "a": "1"
+            }
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "deep"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/exists"
+          }
+        },
+        {
+          "exists": {
+            "headers": {
+              "X-Absent": false
+            }
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "exists-false"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "or": [
+            {
+              "equals": {
+                "path": "/or1"
+              }
+            },
+            {
+              "equals": {
+                "path": "/or2"
+              }
+            }
+          ]
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "or"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "and": [
+            {
+              "startsWith": {
+                "path": "/nested"
+              }
+            },
+            {
+              "or": [
+                {
+                  "equals": {
+                    "method": "PUT"
+                  }
+                },
+                {
+                  "not": {
+                    "equals": {
+                      "method": "GET"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "nested"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "inject": "function(request, logger){ return request.path === '/li' }"
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "legacy-inject"
+          }
+        }
+      ]
+    }
+  ]
+}

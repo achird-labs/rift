@@ -1,0 +1,6 @@
+{
+  "protocol": "http",
+  "name": "errors · defaultForward to a refused upstream (502 door)",
+  "defaultForward": "http://127.0.0.1:1/",
+  "stubs": []
+}

@@ -1,0 +1,16 @@
+{
+  "protocol": "http",
+  "name": "stateops · declarative flow-state writes",
+  "_rift": { "flowState": { "flowIdSource": "header:X-Flow" } },
+  "stubs": [
+    { "predicates": [{ "equals": { "path": "/inc" } }], "responses": [{ "is": { "statusCode": 200, "body": "n={{ state.n }}" }, "_rift": { "templated": true, "stateOps": [{ "op": "increment", "key": "n" }] } }] },
+    { "predicates": [{ "equals": { "path": "/inc5" } }], "responses": [{ "is": { "statusCode": 200, "body": "ok" }, "_rift": { "stateOps": [{ "op": "increment", "key": "m", "by": 5 }] } }] },
+    { "predicates": [{ "equals": { "path": "/set" } }], "responses": [{ "is": { "statusCode": 200, "body": "ok" }, "_rift": { "stateOps": [{ "op": "set", "key": "s", "value": "v{{ previousValue }}x" }] } }] },
+    { "predicates": [{ "equals": { "path": "/coerce" } }], "responses": [{ "is": { "statusCode": 200, "body": "ok" }, "_rift": { "stateOps": [{ "op": "set", "key": "a", "value": "42" }, { "op": "set", "key": "b", "value": "007" }, { "op": "set", "key": "c", "value": "4.5" }] } }] },
+    { "predicates": [{ "equals": { "path": "/del" } }], "responses": [{ "is": { "statusCode": 200, "body": "ok" }, "_rift": { "stateOps": [{ "op": "delete", "key": "n" }] } }] },
+    { "predicates": [{ "equals": { "path": "/clear" } }], "responses": [{ "is": { "statusCode": 200, "body": "ok" }, "_rift": { "stateOps": [{ "op": "clearFlow" }] } }] },
+    { "predicates": [{ "equals": { "path": "/fault" } }], "responses": [{ "is": { "statusCode": 200, "body": "ok" }, "_rift": { "fault": { "error": { "probability": 1.0, "status": 503 } }, "stateOps": [{ "op": "increment", "key": "f" }] } }] },
+    { "predicates": [{ "equals": { "path": "/wait" } }], "responses": [{ "is": { "statusCode": 200, "body": "ok" }, "_behaviors": { "wait": 200 }, "_rift": { "stateOps": [{ "op": "increment", "key": "w" }] } }] },
+    { "predicates": [{ "equals": { "path": "/bad" } }], "responses": [{ "is": { "statusCode": 200, "body": "ok" }, "_rift": { "stateOps": [{ "op": "increment", "key": "pre" }, { "op": "set", "key": "x", "value": "{{ nosuchfn 1 }}" }, { "op": "increment", "key": "post" }] } }] }
+  ]
+}

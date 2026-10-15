@@ -1,0 +1,12 @@
+{
+  "protocol": "http",
+  "name": "admin · verify flowId scoping",
+  "recordRequests": true,
+  "_rift": { "flowState": { "backend": "inmemory", "flowIdSource": "header:X-Space" } },
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/hi" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "hi" } }]
+    }
+  ]
+}

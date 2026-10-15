@@ -1,0 +1,11 @@
+{
+  "port": 4804,
+  "protocol": "http",
+  "name": "proxy · query-capture upstream",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/q" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "Q" } }]
+    }
+  ]
+}

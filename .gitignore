@@ -141,6 +141,11 @@ secrets.yaml
 *.key
 *.crt
 # Exception: test certificates for integration tests (self-signed, no security value)
+# Exception: the Plane A conformance fixtures' TLS/intercept certificates and keys (issue #1339) —
+# self-signed test material the scenarios load; without them the runner's TLS suites fail.
+!conformance/rift-fixtures/**/*.pem
+!conformance/rift-fixtures/**/*.key
+!conformance/rift-fixtures/**/*.crt
 !crates/rift-http-proxy/tests/it/configs/certs/*.pem
 
 # Temporary files

@@ -1,0 +1,25 @@
+{
+  "protocol": "http",
+  "name": "diagnostics · _rift on proxy",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/1"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:9"
+          },
+          "_rift": {
+            "stateOps": []
+          }
+        }
+      ]
+    }
+  ]
+}

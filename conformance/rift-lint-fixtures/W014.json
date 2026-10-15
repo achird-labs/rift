@@ -1,0 +1,22 @@
+{
+  "imposters": [
+    {
+      "port": 4990,
+      "protocol": "http",
+      "stubs": [
+        {
+          "responses": [
+            {
+              "_rift": {
+                "script": {
+                  "engine": "rhai",
+                  "code": "fn respond(ctx) { ctx.state.incr(\"n\"); http(200,#{}) }"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

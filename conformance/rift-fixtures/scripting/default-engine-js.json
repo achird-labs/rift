@@ -1,0 +1,8 @@
+{
+  "protocol": "http",
+  "name": "scripting · defaultEngine javascript resolves an engine-less script (rift#1159)",
+  "_rift": { "scriptEngine": { "defaultEngine": "javascript" } },
+  "stubs": [
+    { "predicates": [{ "equals": { "path": "/default-engine" } }], "responses": [{ "_rift": { "script": { "code": "function respond(ctx){ const x = [1, 2].map(v => v * 2); return http(200, `js${x[1]}`) }" } } }] }
+  ]
+}

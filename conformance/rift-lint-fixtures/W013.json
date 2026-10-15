@@ -1,0 +1,20 @@
+{
+  "imposters": [
+    {
+      "port": 4990,
+      "protocol": "http",
+      "stubs": [
+        {
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "<%= process.env.RIFT_LINT_T_204_UNSET %>"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

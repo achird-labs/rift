@@ -1,0 +1,18 @@
+{
+  "port": 4814,
+  "protocol": "http",
+  "name": "proxy · once proxy",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:4813",
+            "mode": "proxyOnce",
+            "predicateGenerators": [{ "matches": { "method": true, "path": true } }]
+          }
+        }
+      ]
+    }
+  ]
+}

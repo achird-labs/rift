@@ -1,0 +1,34 @@
+{
+  "protocol": "http",
+  "name": "mb-opts",
+  "serviceName": "svc",
+  "serviceInfo": {
+    "team": "t1",
+    "tier": 2
+  },
+  "allowCORS": true,
+  "recordRequests": false,
+  "defaultResponse": {
+    "statusCode": 404,
+    "body": "nf"
+  },
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/hit"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "hit"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "protocol": "http",
+  "name": "errors · script exec error whose message carries a double quote (rift#611)",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/boom" } }],
+      "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { throw \"expected \\\"ready\\\"\" }" } } }]
+    }
+  ]
+}

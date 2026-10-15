@@ -1,0 +1,38 @@
+{
+  "protocol": "http",
+  "name": "templating · request vars + date tokens",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/rmp" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "m=${request.method} p=${request.path}" } }]
+    },
+    {
+      "predicates": [{ "startsWith": { "path": "/rq" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "q=${request.query.name}" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/rh" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "h=${request.headers.X-Test}" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/now" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "{{NOW}}" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/d5" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "{{DAYS+5}}" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/dm5" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "{{DAYS-5}}" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/m1" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "{{MONTHS+1}}" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/mm1" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "{{MONTHS-1}}" } }]
+    }
+  ]
+}

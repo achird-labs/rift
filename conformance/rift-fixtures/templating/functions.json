@@ -1,0 +1,18 @@
+{
+  "protocol": "http",
+  "name": "templating · the _rift.templated function grammar",
+  "_rift": { "flowState": { "flowIdSource": "header:X-Flow" } },
+  "defaultResponse": { "statusCode": 200, "body": "{{NOW}}" },
+  "stubs": [
+    { "predicates": [{ "equals": { "path": "/uuid" } }], "responses": [{ "is": { "statusCode": 200, "body": "{{ uuid }}" }, "_rift": { "templated": true } }] },
+    { "predicates": [{ "equals": { "path": "/tomorrow" } }], "responses": [{ "is": { "statusCode": 200, "body": "{{ now offset='+1d' format='%Y-%m-%d' }}" }, "_rift": { "templated": true } }] },
+    { "predicates": [{ "equals": { "path": "/json" } }], "responses": [{ "is": { "statusCode": 200, "body": "{{ request.json '$.items[1].id' }}" }, "_rift": { "templated": true } }] },
+    { "predicates": [{ "equals": { "path": "/tags" } }], "responses": [{ "is": { "statusCode": 200, "body": "{{ request.query.tag }}" }, "_rift": { "templated": true } }] },
+    { "predicates": [{ "startsWith": { "path": "/seg/" } }], "responses": [{ "is": { "statusCode": 200, "body": "{{ request.path | last_segment }}" }, "_rift": { "templated": true } }] },
+    { "predicates": [{ "startsWith": { "path": "/u/" } }], "responses": [{ "is": { "statusCode": 200, "body": "{{ request.path | regex '/u/(\\d+)' 1 }}" }, "_rift": { "templated": true } }] },
+    { "predicates": [{ "equals": { "path": "/json-filter" } }], "responses": [{ "is": { "statusCode": 200, "body": "{{ request.header 'X-Q' | json }}" }, "_rift": { "templated": true } }] },
+    { "predicates": [{ "equals": { "path": "/header" } }], "responses": [{ "is": { "statusCode": 200, "headers": { "X-Req": "{{ request.method }}" }, "body": "h" }, "_rift": { "templated": true } }] },
+    { "predicates": [{ "equals": { "path": "/unknown-fn" } }], "responses": [{ "is": { "statusCode": 200, "body": "[{{ nosuchfn }}]" }, "_rift": { "templated": true } }] },
+    { "predicates": [{ "equals": { "path": "/state" } }], "responses": [{ "is": { "statusCode": 200, "body": "k={{ state.k }}" }, "_rift": { "templated": true } }] }
+  ]
+}

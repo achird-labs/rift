@@ -1,0 +1,10 @@
+{
+  "protocol": "http",
+  "name": "errors · plain imposter used to drive the over-size-body 413 door",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/echo" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "ok" } }]
+    }
+  ]
+}

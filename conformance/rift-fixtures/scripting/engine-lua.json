@@ -1,0 +1,7 @@
+{
+  "protocol": "http",
+  "name": "scripting · the removed lua engine is refused naming its replacement",
+  "stubs": [
+    { "predicates": [{ "equals": { "path": "/lua" } }], "responses": [{ "_rift": { "script": { "engine": "lua", "code": "return 1" } } }] }
+  ]
+}

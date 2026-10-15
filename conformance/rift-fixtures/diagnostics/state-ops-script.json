@@ -1,0 +1,32 @@
+{
+  "protocol": "http",
+  "name": "diagnostics · stateOps on a script response",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/1"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "_rift": {
+            "script": {
+              "engine": "rhai",
+              "code": "fn respond(ctx){ #{statusCode:200} }"
+            },
+            "stateOps": [
+              {
+                "op": "set",
+                "key": "k",
+                "value": "v"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

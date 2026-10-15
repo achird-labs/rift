@@ -1,0 +1,37 @@
+{
+  "protocol": "http",
+  "name": "proxy options \u00b7 recording upstream",
+  "recordRequests": true,
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/slow"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "slow"
+          },
+          "_behaviors": {
+            "wait": 300
+          }
+        }
+      ]
+    },
+    {
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "up"
+          }
+        }
+      ]
+    }
+  ]
+}

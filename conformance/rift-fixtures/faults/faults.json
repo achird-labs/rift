@@ -1,0 +1,87 @@
+{
+  "protocol": "http",
+  "name": "faults · transport",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/reset" } }],
+      "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": "CONNECTION_RESET_BY_PEER" } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/rand" } }],
+      "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": "RANDOM_DATA_THEN_CLOSE" } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/slow" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "slow" }, "_rift": { "fault": { "latency": { "probability": 1.0, "ms": 700 } } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/err" } }],
+      "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "error": { "probability": 1.0, "status": 503, "body": "DOWN", "headers": { "Retry-After": "30" } } } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/all" } }],
+      "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": "CONNECTION_RESET_BY_PEER", "error": { "probability": 1.0, "status": 503 }, "latency": { "probability": 1.0, "ms": 700 } } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/p0" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "ok" }, "_rift": { "fault": { "error": { "probability": 0.0, "status": 503 } } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/topfault" } }],
+      "responses": [{ "fault": "CONNECTION_RESET_BY_PEER" }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/empty" } }],
+      "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": "EMPTY_RESPONSE" } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/empty-alias" } }],
+      "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": "empty" } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/malformed" } }],
+      "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": "MALFORMED_RESPONSE_CHUNK" } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/malformed-alias" } }],
+      "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": "malformed" } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/reset-alias" } }],
+      "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": "reset" } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/garbage-alias" } }],
+      "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": "garbage" } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/tcp-p1" } }],
+      "responses": [{ "is": { "statusCode": 200 }, "_rift": { "fault": { "tcp": { "probability": 1.0, "type": "reset" } } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/tcp-p0" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "ok" }, "_rift": { "fault": { "tcp": { "probability": 0.0, "type": "reset" } } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/lat-ms" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "lat" }, "_rift": { "fault": { "latency": { "ms": 300, "minMs": 0, "maxMs": 0 } } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/wait-range" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "w" }, "_behaviors": { "wait": { "min": 200, "max": 250 } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/wait-inject" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "wi" }, "_behaviors": { "wait": { "inject": "function(){ return 150; }" } } }]
+    },
+    { "predicates": [{ "equals": { "path": "/delay-range" } }], "delayRange": [{ "min": 200, "max": 200 }], "responses": [{ "is": { "statusCode": 200, "body": "dr" } }] },
+    {
+      "predicates": [{ "equals": { "path": "/is-beats-fault" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "is-wins" }, "fault": "CONNECTION_RESET_BY_PEER" }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/topfault-alias" } }],
+      "responses": [{ "fault": "reset" }]
+    }
+  ]
+}

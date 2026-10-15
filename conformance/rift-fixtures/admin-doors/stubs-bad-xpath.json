@@ -1,0 +1,1 @@
+{ "stubs": [{ "predicates": [{ "equals": { "body": "" }, "xpath": { "selector": "//*[[" } }], "responses": [{ "is": { "statusCode": 200 } }] }] }

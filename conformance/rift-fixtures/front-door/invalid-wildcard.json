@@ -1,0 +1,51 @@
+{
+  "imposters": [
+    {
+      "port": 4872,
+      "protocol": "http",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "A"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "port": 4873,
+      "protocol": "http",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "B"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "routes": {
+    "routes": [
+      {
+        "id": "midwild",
+        "match": {
+          "host": "api.*.test"
+        },
+        "target": {
+          "port": 4872
+        }
+      }
+    ]
+  }
+}

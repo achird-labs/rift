@@ -1,0 +1,203 @@
+{
+  "protocol": "http",
+  "name": "mbcompat · behaviors",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/copy-xpath"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "v=$X"
+          },
+          "_behaviors": {
+            "copy": [
+              {
+                "from": "body",
+                "into": "$X",
+                "using": {
+                  "method": "xpath",
+                  "selector": "//id"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "startsWith": {
+            "path": "/copy-regex"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "v=$R"
+          },
+          "_behaviors": {
+            "copy": [
+              {
+                "from": "path",
+                "into": "$R",
+                "using": {
+                  "method": "regex",
+                  "selector": "/COPY-REGEX/(\\d+)",
+                  "options": {
+                    "ignoreCase": true
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "startsWith": {
+            "path": "/lookup/"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "n=${row}[name]"
+          },
+          "_behaviors": {
+            "lookup": [
+              {
+                "key": {
+                  "from": "path",
+                  "using": {
+                    "method": "regex",
+                    "selector": "/lookup/(.*)$"
+                  }
+                },
+                "fromDataSource": {
+                  "csv": {
+                    "path": "data/mbcompat-semicolon.csv",
+                    "keyColumn": "id",
+                    "delimiter": ";"
+                  }
+                },
+                "into": "${row}"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "startsWith": {
+            "path": "/lookup-index/"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "n=${row}[name]"
+          },
+          "_behaviors": {
+            "lookup": [
+              {
+                "key": {
+                  "from": "path",
+                  "using": {
+                    "method": "regex",
+                    "selector": "^/lookup-index/(ab|cd)-(ab|cd)$"
+                  },
+                  "index": 2
+                },
+                "fromDataSource": {
+                  "csv": {
+                    "path": "data/mbcompat-index.csv",
+                    "keyColumn": "id"
+                  }
+                },
+                "into": "${row}"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/shell-env"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "orig"
+          },
+          "_behaviors": {
+            "shellTransform": "echo \"$MB_REQUEST\" | grep -o '\"method\":\"[A-Z]*\"'"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/shell-fail"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "orig"
+          },
+          "_behaviors": {
+            "shellTransform": "exit 3"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/decorate"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "b"
+          },
+          "_behaviors": {
+            "decorate": "function(request, response){ response.body = 'type=' + (typeof response.body); }"
+          }
+        }
+      ]
+    }
+  ]
+}

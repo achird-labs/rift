@@ -1,0 +1,22 @@
+{
+  "protocol": "http",
+  "name": "faults \u00b7 a tcp object without probability is refused",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200
+          },
+          "_rift": {
+            "fault": {
+              "tcp": {
+                "type": "reset"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

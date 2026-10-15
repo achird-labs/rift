@@ -1,0 +1,15 @@
+{
+  "imposters": [
+    {
+      "port": 4809,
+      "protocol": "http",
+      "name": "admin · replace-batch (PUT /imposters swap target)",
+      "stubs": [
+        {
+          "predicates": [{ "equals": { "path": "/swapped" } }],
+          "responses": [{ "is": { "statusCode": 200, "body": "swapped" } }]
+        }
+      ]
+    }
+  ]
+}

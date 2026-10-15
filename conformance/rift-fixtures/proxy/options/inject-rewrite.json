@@ -1,0 +1,23 @@
+{
+  "protocol": "http",
+  "name": "proxy options \u00b7 inject-rewrite",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:UPSTREAM_PORT",
+            "mode": "proxyTransparent",
+            "injectHeaders": {
+              "X-Inj": "v"
+            },
+            "pathRewrite": {
+              "from": "/api",
+              "to": ""
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

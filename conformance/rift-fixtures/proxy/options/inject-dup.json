@@ -1,0 +1,19 @@
+{
+  "protocol": "http",
+  "name": "proxy options \u00b7 inject-dup",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:1",
+            "injectHeaders": {
+              "X-A": "1",
+              "x-a": "2"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

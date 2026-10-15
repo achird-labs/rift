@@ -1,0 +1,25 @@
+{
+  "protocol": "http",
+  "name": "templating · substituted request text is never re-expanded as a token (rift#1203)",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/lookup" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "q=${request.query.q} name=${R}[name]" }, "_behaviors": { "lookup": [{ "key": { "from": { "query": "id" }, "using": { "method": "regex", "selector": ".*" } }, "fromDataSource": { "csv": { "path": "data/products.csv", "keyColumn": "id" } }, "into": "${R}" }] } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/templated" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "q={{request.query.q}}" }, "_rift": { "templated": true } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/partial" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "{\"id\":{{request.query.id}}}" }, "_rift": { "templated": true } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/copy-lookup" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "q=${Q} name=${R}[name]" }, "behaviors": [
+        { "copy": { "from": { "headers": "X-Q" }, "into": "${Q}", "using": { "method": "regex", "selector": ".*" } } },
+        { "lookup": { "key": { "from": { "query": "id" }, "using": { "method": "regex", "selector": ".*" } }, "fromDataSource": { "csv": { "path": "data/products.csv", "keyColumn": "id" } }, "into": "${R}" } }
+      ] }]
+    }
+  ]
+}

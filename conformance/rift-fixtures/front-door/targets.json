@@ -1,0 +1,71 @@
+{
+  "imposters": [
+    {
+      "port": 4872,
+      "protocol": "http",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "A"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "port": 4873,
+      "protocol": "http",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "B"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "routes": {
+    "routes": [
+      {
+        "id": "strip",
+        "match": {
+          "path_prefix": "/svc"
+        },
+        "target": {
+          "port": 4872,
+          "strip_prefix": true
+        }
+      },
+      {
+        "id": "rehost",
+        "match": {
+          "host": "edge.test"
+        },
+        "target": {
+          "port": 4872,
+          "set_host": "svc.internal"
+        }
+      },
+      {
+        "id": "ghost",
+        "match": {
+          "host": "ghost.test"
+        },
+        "target": {
+          "port": 4879
+        }
+      }
+    ]
+  }
+}

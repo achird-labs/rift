@@ -1,0 +1,13 @@
+{
+  "protocol": "http",
+  "name": "core · repeat cycling",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/r" } }],
+      "responses": [
+        { "is": { "statusCode": 503 }, "_behaviors": { "repeat": 2 } },
+        { "is": { "statusCode": 200 } }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "protocol": "http",
+  "name": "smoke · health",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "method": "GET", "path": "/health" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "OK" } }]
+    }
+  ]
+}

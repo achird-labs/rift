@@ -1,0 +1,40 @@
+{
+  "protocol": "http",
+  "name": "diagnostics · exact duplicate",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/1"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "ok"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/1"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "ok"
+          }
+        }
+      ]
+    }
+  ]
+}

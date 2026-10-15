@@ -1,0 +1,23 @@
+{
+  "protocol": "http",
+  "name": "mbcompat · no defaultResponse",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/hit"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "hit"
+          }
+        }
+      ]
+    }
+  ]
+}

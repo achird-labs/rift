@@ -1,0 +1,11 @@
+{
+  "port": 4598,
+  "protocol": "http",
+  "recordRequests": true,
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/svc" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "upstream-ok" } }]
+    }
+  ]
+}

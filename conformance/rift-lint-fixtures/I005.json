@@ -1,0 +1,14 @@
+{
+  "imposters": [
+    {
+      "port": 4990,
+      "protocol": "http",
+      "_rift": {
+        "dataset": {
+          "x": 1
+        }
+      },
+      "stubs": []
+    }
+  ]
+}

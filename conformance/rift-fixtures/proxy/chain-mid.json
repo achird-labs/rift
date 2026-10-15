@@ -1,0 +1,17 @@
+{
+  "port": 4802,
+  "protocol": "http",
+  "name": "proxy · chain mid",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:4801",
+            "mode": "proxyAlways"
+          }
+        }
+      ]
+    }
+  ]
+}

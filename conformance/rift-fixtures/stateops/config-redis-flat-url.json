@@ -1,0 +1,6 @@
+{
+  "protocol": "http",
+  "name": "stateops · redis backend with a flat url is refused",
+  "_rift": { "flowState": { "backend": "redis", "url": "redis://localhost:6379" } },
+  "stubs": []
+}

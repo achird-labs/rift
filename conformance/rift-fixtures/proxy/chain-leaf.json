@@ -1,0 +1,11 @@
+{
+  "port": 4801,
+  "protocol": "http",
+  "name": "proxy · chain leaf",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/c" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "leaf" } }]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "port": 4541,
+  "protocol": "http",
+  "name": "behaviors-response-types · lint: a top-level repeat that does not fit a u32 (rift-lint E035)",
+  "stubs": [{ "responses": [{ "is": { "statusCode": 200 }, "repeat": 4294967296 }] }]
+}

@@ -1,0 +1,17 @@
+{
+  "port": 4803,
+  "protocol": "http",
+  "name": "proxy · chain top",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:4802",
+            "mode": "proxyAlways"
+          }
+        }
+      ]
+    }
+  ]
+}

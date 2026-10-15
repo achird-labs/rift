@@ -1,0 +1,6 @@
+{
+  "protocol": "http",
+  "name": "stateops · a redis+sentinel url is refused",
+  "_rift": { "flowState": { "backend": "redis", "redis": { "url": "redis+sentinel://x" } } },
+  "stubs": []
+}

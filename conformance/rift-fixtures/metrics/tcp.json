@@ -1,0 +1,21 @@
+{
+  "protocol": "http",
+  "name": "metrics \u00b7 tcp fault",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "ok"
+          },
+          "_rift": {
+            "fault": {
+              "tcp": "reset"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

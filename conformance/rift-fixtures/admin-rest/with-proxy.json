@@ -1,0 +1,14 @@
+{
+  "protocol": "http",
+  "name": "admin-rest · is + forwarder",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/a" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "a" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/p" } }],
+      "responses": [{ "proxy": { "to": "http://localhost:9" } }]
+    }
+  ]
+}

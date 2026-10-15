@@ -1,0 +1,139 @@
+{
+  "imposters": [
+    {
+      "port": 4874,
+      "protocol": "http",
+      "name": "reload · removed",
+      "stubs": [
+        {
+          "predicates": [
+            {
+              "equals": {
+                "path": "/x"
+              }
+            }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "removed"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "port": 4875,
+      "protocol": "http",
+      "name": "reload · old name",
+      "stubs": [
+        {
+          "predicates": [
+            {
+              "equals": {
+                "path": "/x"
+              }
+            }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "renamed"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "port": 4876,
+      "protocol": "http",
+      "name": "reload · patched",
+      "stubs": [
+        {
+          "predicates": [
+            {
+              "equals": {
+                "path": "/a"
+              }
+            }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "A"
+              }
+            }
+          ]
+        },
+        {
+          "predicates": [
+            {
+              "equals": {
+                "path": "/b"
+              }
+            }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "B"
+              }
+            }
+          ]
+        },
+        {
+          "predicates": [
+            {
+              "equals": {
+                "path": "/c"
+              }
+            }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "C"
+              }
+            }
+          ]
+        },
+        {
+          "predicates": [
+            {
+              "equals": {
+                "path": "/cycle"
+              }
+            }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "r1"
+              }
+            },
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "r2"
+              }
+            },
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "r3"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

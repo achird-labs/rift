@@ -1,0 +1,21 @@
+{
+  "protocol": "http",
+  "name": "faults \u00b7 an inverted wait range is refused",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200
+          },
+          "_behaviors": {
+            "wait": {
+              "min": 5,
+              "max": 1
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

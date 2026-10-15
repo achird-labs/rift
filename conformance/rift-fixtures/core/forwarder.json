@@ -1,0 +1,7 @@
+{
+  "port": 4818,
+  "protocol": "http",
+  "name": "core · defaultForward forwarder",
+  "defaultForward": "http://localhost:4819",
+  "stubs": []
+}

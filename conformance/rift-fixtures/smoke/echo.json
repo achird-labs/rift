@@ -1,0 +1,19 @@
+{
+  "protocol": "http",
+  "name": "smoke · echo",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "method": "POST",
+            "path": "/echo",
+            "headers": { "X-Rift-Test": "1" },
+            "body": "ping"
+          }
+        }
+      ],
+      "responses": [{ "is": { "statusCode": 200, "body": "staged request received" } }]
+    }
+  ]
+}

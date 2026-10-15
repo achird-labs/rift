@@ -1,0 +1,10 @@
+{
+  "protocol": "http",
+  "name": "errors · unrecognised fault name — the deliberate plain-text 500 door",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/unknown-fault" } }],
+      "responses": [{ "fault": "NOT_A_REAL_FAULT" }]
+    }
+  ]
+}

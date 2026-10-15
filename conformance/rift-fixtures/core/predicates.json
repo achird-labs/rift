@@ -1,0 +1,22 @@
+{
+  "protocol": "http",
+  "name": "core · predicates",
+  "stubs": [
+    {
+      "predicates": [{ "not": { "equals": { "path": "/blocked" } } }, { "startsWith": { "path": "/open" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "nsw" } }]
+    },
+    {
+      "predicates": [{ "matches": { "path": "^/id/[0-9]+$" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "re" } }]
+    },
+    {
+      "predicates": [{ "jsonpath": { "selector": "$.a" }, "equals": { "body": "x" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "jp" } }]
+    },
+    {
+      "predicates": [{ "xpath": { "selector": "//a" }, "equals": { "body": "v" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "xp" } }]
+    }
+  ]
+}

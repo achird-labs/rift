@@ -1,0 +1,16 @@
+{
+  "protocol": "http",
+  "name": "metrics \u00b7 plain",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "ok"
+          }
+        }
+      ]
+    }
+  ]
+}

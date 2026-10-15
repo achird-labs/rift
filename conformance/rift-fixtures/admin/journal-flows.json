@@ -1,0 +1,7 @@
+{
+  "protocol": "http",
+  "name": "admin · journal filters",
+  "recordRequests": true,
+  "_rift": { "flowState": { "backend": "inmemory", "flowIdSource": "header:X-Space" } },
+  "stubs": [{ "responses": [{ "is": { "statusCode": 200, "body": "ok" } }] }]
+}

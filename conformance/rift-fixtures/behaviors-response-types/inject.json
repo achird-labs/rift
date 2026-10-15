@@ -1,0 +1,27 @@
+{
+  "protocol": "http",
+  "name": "behaviors-response-types · behaviors on inject responses (rift#1192)",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/decorate" } }],
+      "responses": [{ "inject": "function (config) { return { statusCode: 200, body: 'fn' }; }",
+        "_behaviors": { "decorate": "config => { config.response.body += '+dec'; config.response.headers['X-Decorated'] = 'yes'; }" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/wait" } }],
+      "responses": [{ "inject": "function (config) { return { statusCode: 200, body: 'fn' }; }", "_behaviors": { "wait": 500 } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/throws" } }],
+      "responses": [{ "inject": "function (config) { throw new Error('boom'); }",
+        "_behaviors": { "decorate": "config => { config.response.headers['X-Decorated'] = 'yes'; }" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/repeat" } }],
+      "responses": [
+        { "inject": "function (config) { return { statusCode: 200, body: 'fn' }; }", "_behaviors": { "repeat": 2 } },
+        { "is": { "statusCode": 200, "body": "after" } }
+      ]
+    }
+  ]
+}

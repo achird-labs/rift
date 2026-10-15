@@ -1,0 +1,47 @@
+{
+  "imposters": [
+    {
+      "port": 4878,
+      "protocol": "http",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "id": "s1",
+          "predicates": [
+            {
+              "equals": {
+                "path": "/a"
+              }
+            }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "A"
+              }
+            }
+          ]
+        },
+        {
+          "id": "s2",
+          "predicates": [
+            {
+              "equals": {
+                "path": "/b"
+              }
+            }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "B"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

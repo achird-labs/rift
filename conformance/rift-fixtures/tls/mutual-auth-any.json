@@ -1,0 +1,24 @@
+{
+  "protocol": "https",
+  "name": "tls \u00b7 mutualAuth requiring any client cert (rift#977)",
+  "mutualAuth": true,
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/m"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "mtls-any"
+          }
+        }
+      ]
+    }
+  ]
+}

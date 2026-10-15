@@ -1,0 +1,37 @@
+{
+  "protocol": "http",
+  "name": "spaces · header-partitioned flows + FSM no-bleed",
+  "_rift": { "flowState": { "flowIdSource": "header:X-Mock-Space" } },
+  "stubs": [
+    {
+      "space": "alice",
+      "predicates": [{ "equals": { "path": "/data" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "owner=alice" } }]
+    },
+    {
+      "space": "bob",
+      "predicates": [{ "equals": { "path": "/data" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "owner=bob" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/health" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "OK" } }]
+    },
+    {
+      "space": "alice",
+      "predicates": [{ "equals": { "path": "/shared" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "alice-shared" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/shared" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "global-shared" } }]
+    },
+    {
+      "scenarioName": "step",
+      "requiredScenarioState": "Started",
+      "newScenarioState": "done",
+      "predicates": [{ "equals": { "path": "/step" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "stepped" } }]
+    }
+  ]
+}
