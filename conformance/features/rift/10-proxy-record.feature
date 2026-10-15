@@ -89,8 +89,9 @@ Feature: Proxy record/replay — proxyOnce, proxyTransparent, proxyAlways chains
   # Each scenario proxies to a recording upstream imposter on a fresh pool port (`UPSTREAM_PORT` in
   # the fixture), so the forwarded request can be read back from the upstream's journal.
 
-  # proxyAlways forwards every request and records one stub per unique request, inserted right after
-  # the proxy stub (so the newest sits first) and merging repeat responses into the existing stub.
+  # proxyAlways forwards every request and records one stub per unique request, appended to the end
+  # of the stub list in the order the requests were made, and merging repeat responses into the
+  # existing stub — Mountebank's recordProxyAlways (`stubs.add`), since rift#1389.
   Scenario: proxyAlways records one stub per unique request after the proxy, merging repeats
     Given an upstream imposter from fixture "proxy/options/upstream"
     And a fresh imposter from fixture "proxy/options/always" proxying to the upstream
@@ -104,10 +105,10 @@ Feature: Proxy record/replay — proxyOnce, proxyTransparent, proxyAlways chains
     When the client sends admin "GET" "/imposters/{port}" with payload "-"
     Then the response JSON at "stubs" has 3 elements
     And the response JSON at "stubs.0.responses.0.proxy.mode" is "\"proxyAlways\""
-    And the response JSON at "stubs.1.predicates.0.equals.path" is "\"/y\""
-    And the response JSON at "stubs.1.responses" has 1 elements
-    And the response JSON at "stubs.2.predicates.0.equals.path" is "\"/x\""
-    And the response JSON at "stubs.2.responses" has 2 elements
+    And the response JSON at "stubs.1.predicates.0.deepEquals.path" is "\"/x\""
+    And the response JSON at "stubs.1.responses" has 2 elements
+    And the response JSON at "stubs.2.predicates.0.deepEquals.path" is "\"/y\""
+    And the response JSON at "stubs.2.responses" has 1 elements
 
   # The upstream waits 300 ms; the live response reports the measured latency and the recorded stub
   # (proxyOnce records BEFORE the proxy, at index 0) carries it as a wait behavior.

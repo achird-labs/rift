@@ -1,0 +1,136 @@
+name: Conformance
+
+# Issue #1340: run the Plane A specification (conformance/features, #1339) against THIS pull
+# request's own binaries, with the rift-conformance runner. Before this, the runner only ever saw
+# released engines, so a PR that broke a specified behaviour went green here and red there a
+# release later. A behaviour change now has to change its scenario in the same diff, or this job
+# fails — that is the point.
+#
+# A separate workflow rather than a ci.yml job because `paths` filters are per-workflow: a docs-only
+# PR should not spend the build. Exempt one PR deliberately with the `conformance-exempt` label.
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - "crates/**"
+      - "conformance/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/conformance.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  conformance-plane-a:
+    name: conformance-plane-a
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'conformance-exempt') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v6
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-conformance-${{ hashFiles('**/Cargo.lock') }}
+
+      # Release profile: the runner's suites were written against released binaries, and several
+      # assert on timing (timeouts, `wait` behaviours) that a debug build can miss.
+      - name: Build rift, rift-lint and rift-verify
+        run: cargo build --release -p rift-http-proxy -p rift-lint --bins
+
+      # The runner needs `rift`, `rift-lint` and `rift-verify` in RIFT_BUILD_DIR, plus the BUILD_INFO
+      # a released build gets from its scripts/build-rift.sh: the consistency gate (feature 01)
+      # compares each binary's live `--version` with what BUILD_INFO recorded. Same shape, with
+      # this commit and branch in place of a release tag.
+      - name: Stage binaries and BUILD_INFO
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/rift-build"
+          mkdir -p "$dir"
+          cp target/release/rift-http-proxy "$dir/rift"
+          cp target/release/rift-lint target/release/rift-verify "$dir/"
+          binaries='{}'
+          versions='{}'
+          for name in rift rift-lint rift-verify; do
+            sha="$(sha256sum "$dir/$name" | cut -d' ' -f1)"
+            ver="$("$dir/$name" --version | head -1)"
+            binaries="$(jq --arg n "$name" --arg s "$sha" '. + {($n): $s}' <<<"$binaries")"
+            versions="$(jq --arg n "$name" --arg v "$ver" '. + {($n): $v}' <<<"$versions")"
+          done
+          jq -n --arg commit "$GITHUB_SHA" --arg branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
+            --arg builtAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson binaries "$binaries" --argjson versions "$versions" \
+            '{commit: $commit, branch: $branch, builtAt: $builtAt, binaries: $binaries, versions: $versions}' \
+            > "$dir/BUILD_INFO"
+          cat "$dir/BUILD_INFO"
+          echo "RIFT_BUILD_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: Read the runner ref
+        id: runner
+        run: echo "ref=$(tr -d '[:space:]' < conformance/RUNNER_REF)" >> "$GITHUB_OUTPUT"
+
+      # The runner repository is public, so the default token is enough.
+      - name: Check out the rift-conformance runner at ${{ steps.runner.outputs.ref }}
+        uses: actions/checkout@v7
+        with:
+          repository: EtaCassiopeia/rift-conformance
+          ref: ${{ steps.runner.outputs.ref }}
+          path: runner
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: sbt
+
+      - name: Set up sbt
+        uses: sbt/setup-sbt@v1
+
+      # Step matching first (no engine): a scenario using a step the runner does not know fails here
+      # with the step named, rather than as a confusing runtime failure.
+      - name: Lint features (dry-run step matching)
+        working-directory: runner
+        run: sbt -batch lintFeatures
+        env:
+          RIFT_FEATURES_DIR: ${{ github.workspace }}/conformance
+
+      # The features and fixtures come from this PR (RIFT_FEATURES_DIR replaces the runner's own
+      # copy); the JSON corpus stays the runner's vendored one, which these suites were written
+      # against.
+      - name: Run Plane A conformance
+        working-directory: runner
+        run: sbt -batch engineConformance
+        env:
+          RIFT_FEATURES_DIR: ${{ github.workspace }}/conformance
+          RIFT_MODE: external
+          RIFT_CORPUS_ROOT: ${{ github.workspace }}/runner/corpus
+          # The size-cap scenarios (features 13 and 21) test the 413 at a 10 MiB ceiling rather than
+          # sending bodies past the 512 MiB default; the spawned engine inherits this.
+          RIFT_MAX_BODY_SIZE: "10485760"
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-plane-a-reports
+          path: runner/target/test-reports/
+          if-no-files-found: ignore

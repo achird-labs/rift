@@ -144,12 +144,13 @@ Feature: Mountebank compatibility — predicates, imposter options and response 
     Then the response header "content-type" is "application/json"
     And the response body is "{\"a\":1}"
 
-  # rift#1085: numbers keep their digits (7e23, not 6.999999999999999e23).
+  # rift#1085: numbers keep their digits (7e+23, not 6.999999999999999e23). The exponent is written
+  # `7e+23` since 0.20.0 (rift#1312), as JSON.stringify writes it.
   Scenario: a JSON body keeps its number digits
     Given a fresh imposter from fixture "mbcompat/responses"
     When the client sends "GET" "/numbers"
     Then the response body contains "\"f\":0.1"
-    And the response body contains "\"big\":7e23"
+    And the response body contains "\"big\":7e+23"
 
   # DOCUMENTED DIVERGENCE (rift#1241, docs/mountebank/responses.md since 0.19.0): Mountebank serves
   # JSON.stringify(body), keeping the declared order ({"f":…,"big":…}); Rift key-sorts JSON values
@@ -158,7 +159,7 @@ Feature: Mountebank compatibility — predicates, imposter options and response 
   Scenario: an object body is served with its keys sorted — a documented divergence (rift#1241)
     Given a fresh imposter from fixture "mbcompat/responses"
     When the client sends "GET" "/numbers"
-    Then the response body is "{\"big\":7e23,\"f\":0.1}"
+    Then the response body is "{\"big\":7e+23,\"f\":0.1}"
 
   Scenario: ${request.body} interpolates the request body
     Given a fresh imposter from fixture "mbcompat/responses"
