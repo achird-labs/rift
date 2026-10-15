@@ -1,6 +1,0 @@
-{
-  "protocol": "http",
-  "name": "stateops · the removed redis backend is refused (#1337)",
-  "_rift": { "flowState": { "backend": "redis" } },
-  "stubs": []
-}

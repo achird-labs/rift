@@ -2,7 +2,7 @@
   "protocol": "http",
   "name": "admin · surface base",
   "recordRequests": true,
-  "_rift": { "flowState": { "backend": "inmemory" } },
+  "_rift": { "flowState": {} },
   "stubs": [
     {
       "id": "stub-hi",
