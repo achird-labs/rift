@@ -21,7 +21,6 @@ token (under `_rift.templated`) reads it back into a response body or header.
 {
   "_rift": {
     "flowState": {
-      "backend": "inmemory",
       "ttlSeconds": 300,
       "flowIdSource": "header:X-Flow-Id"
     }
@@ -31,12 +30,12 @@ token (under `_rift.templated`) reads it back into a response body or header.
 
 | Field | Default | Notes |
 |:------|:--------|:------|
-| `backend` | `inmemory` | `inmemory` (the only built-in backend). `redis` was removed in 0.22.0 and is refused — see [Scope](#scope). |
 | `ttlSeconds` | `300` | Default entry TTL, in seconds. Must be `>= 1` (see [TTL semantics](#ttl-semantics)). |
 | `flowIdSource` | `imposter_port` | How the flow id is derived (`imposter_port` or `header:<Name>`). |
 
 An unrecognised key directly under `flowState` is collected as an option for an embedder-supplied
-store and ignored by the built-in `inmemory` backend.
+store and ignored by the built-in in-memory store. That includes a leftover `backend` key: the
+`backend` option was removed, so it selects nothing.
 
 ### Scope
 
@@ -44,21 +43,14 @@ No external store sits on the request path. The engine ships the in-memory flow 
 deployment that needs scenario or flow state shared across processes is a
 [rift-cluster]({{ site.baseurl }}/deployment/kubernetes/#shared-state-across-pods) deployment, whose
 owner-replicated tier replaces this engine's former Redis backend (removed in 0.22.0). The
-`FlowStore` / `FlowStoreProvider` / `FlowStoreBackendFactory` seams stay, so an embedder can still
+`FlowStore` / `FlowStoreProvider` seams stay, so an embedder can still
 bring any store (see [SPI]({{ site.baseurl }}/embedding/spi/)).
 
-### Backend configuration is fail-loud
+### Invalid flowState is fail-loud
 
-An explicit `flowState` block that can't be honored now **fails imposter creation** with
-`400 Bad Request` rather than silently downgrading to a no-op store:
+An explicit `flowState` block that can't be honored **fails imposter creation** with
+`400 Bad Request` rather than silently misbehaving:
 
-- An **unregistered backend** string is rejected at construction. The error names the backend and
-  lists the ones this build can serve, e.g. `flowState.backend is "mystore" but no such backend is
-  registered (available: "inmemory")`.
-- **`backend: "redis"`** is refused at admission with its own message: `flowState backend "redis"
-  was removed in 0.22.0; state shared across processes is a rift-cluster deployment`. A stored
-  config that still names it keeps decoding (so a rift-cluster replay of old bytes does not break);
-  only creating or applying the imposter is refused.
 - A **non-positive `ttlSeconds`** (`< 1`) is rejected: a zero/negative default TTL would expire every
   write the instant it lands (or errors on the first write, on a networked store), so it's caught up front rather
   than misbehaving later.
@@ -136,7 +128,7 @@ Using the `ctx.state` API, `ctx.state.incr("attempts")` is already scoped to the
   "port": 4506,
   "protocol": "http",
   "_rift": {
-    "flowState": { "backend": "inmemory", "ttlSeconds": 300, "flowIdSource": "header:X-Flow-Id" }
+    "flowState": { "ttlSeconds": 300, "flowIdSource": "header:X-Flow-Id" }
   },
   "stubs": [{
     "predicates": [{ "equals": { "method": "GET", "path": "/api/resource" } }],

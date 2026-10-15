@@ -66,7 +66,7 @@ fn yaml_file_config_behaves_like_json_inline_config() {
         "port": 4545,
         "protocol": "http",
         "_rift": {
-            "flowState": {"backend": "inmemory", "ttlSeconds": 300}
+            "flowState": {"ttlSeconds": 300}
         },
         "stubs": [{
             "responses": [{
@@ -92,7 +92,6 @@ fn yaml_file_config_behaves_like_json_inline_config() {
   protocol: http
   _rift:
     flowState:
-      backend: inmemory
       ttlSeconds: 300
   stubs:
     - responses:

@@ -149,7 +149,5 @@ javascript = ["boa_engine"]
 # Quamina-backed body-field candidate dimension (issue #767). Off ⇒ the dimension
 # compiles to a no-op that never prunes; Stage-2 still evaluates every body predicate.
 quamina-matching = ["dep:quamina"]
-# Deliberately failing flow-store backend for backend-outage tests (issue #318)
-test-backend = []
 # The imposter JSON Schema generated from the config types (issue #1342).
 schema = ["dep:schemars", "rift-types/schema"]

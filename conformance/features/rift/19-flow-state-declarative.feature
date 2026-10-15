@@ -114,8 +114,6 @@ Feature: Declarative flow state — _rift.stateOps, fail-loud flowState config, 
       | case                                    | fixture                | message                                  |
       | ttlSeconds 0                            | config-ttl-zero        | flowState.ttlSeconds must be >= 1 (got 0) |
       | a negative ttlSeconds                   | config-ttl-negative    | flowState.ttlSeconds must be >= 1 (got -5) |
-      | an unregistered backend                 | config-unknown-backend | no such backend is registered            |
-      | the removed redis backend               | config-redis-removed   | was removed in 0.22.0                    |
 
   Scenario: DELETE /admin/imposters/{port}/flow-state/{flowId} clears the flow and is idempotent
     When the client sends "GET" "/inc"

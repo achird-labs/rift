@@ -138,7 +138,7 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
         &manager,
         serde_json::json!({
             "protocol": "http",
-            "_rift": { "flowState": { "backend": "inmemory" } },
+            "_rift": { "flowState": {} },
             "stubs": [{ "responses": [{
                 "_rift": { "script": { "engine": "rhai",
                     "code": "fn respond(ctx) { let n = ctx.state.incr(\"c\"); http(200, `${n}`) }" } }

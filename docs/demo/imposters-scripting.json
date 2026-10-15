@@ -7,7 +7,6 @@
       "recordRequests": true,
       "_rift": {
         "flowState": {
-          "backend": "inmemory",
           "ttlSeconds": 600
         }
       },

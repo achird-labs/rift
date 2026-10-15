@@ -377,7 +377,7 @@ async fn reflected_request_data_is_never_templated() {
         &manager,
         serde_json::json!({
             "protocol": "http",
-            "_rift": { "flowState": { "backend": "inmemory" } },
+            "_rift": { "flowState": {} },
             "stubs": [
                 {
                     "predicates": [{ "equals": { "path": "/seed" } }],
@@ -567,7 +567,7 @@ async fn state_key_present_and_missing() {
         &manager,
         serde_json::json!({
             "protocol": "http",
-            "_rift": { "flowState": { "backend": "inmemory" } },
+            "_rift": { "flowState": {} },
             "stubs": [
                 {
                     "predicates": [{ "equals": { "path": "/seed" } }],

@@ -36,7 +36,7 @@ async fn get(c: &reqwest::Client, port: u16, path: &str, space: Option<&str>) ->
 }
 
 fn order_fsm(port: u16, flow_id_source: Option<&str>) -> serde_json::Value {
-    let mut flow_state = serde_json::json!({ "backend": "inmemory", "ttlSeconds": 300 });
+    let mut flow_state = serde_json::json!({ "ttlSeconds": 300 });
     if let Some(src) = flow_id_source {
         flow_state["flowIdSource"] = serde_json::json!(src);
     }
@@ -60,7 +60,7 @@ fn order_fsm(port: u16, flow_id_source: Option<&str>) -> serde_json::Value {
 fn correlated_config(port: u16, stubs: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "port": port, "protocol": "http", "recordRequests": true,
-        "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300,
+        "_rift": { "flowState": { "ttlSeconds": 300,
             "flowIdSource": "header:X-Mock-Space" } },
         "stubs": stubs
     })
@@ -207,58 +207,11 @@ async fn delete_flow_state_clears_whole_flow() {
     let _ = manager.delete_imposter(imposter_port).await;
 }
 
-// Issue #853: a `flowState.backend` no build serves is rejected with 400 over the real admin
-// surface, and the body names both the rejected backend and the ones that ARE selectable — so an
-// operator whose binary lacks a feature can tell a typo from a missing build. This is the HTTP-level
-// proof of the #325/#377 contract: never a silent NoOpFlowStore downgrade.
+// Issue #1463: `flowState.backend` is gone. A config that still carries one (even the removed
+// `"redis"`) is not refused: the key decodes into `extra`, selects nothing, and the imposter gets
+// the in-memory store.
 #[tokio::test]
-async fn create_imposter_rejects_an_unregistered_flow_state_backend() {
-    let imposter_port = free_port();
-    let manager = std::sync::Arc::new(
-        ImposterManager::new()
-            .with_flow_store_backends(rift_http_proxy::default_flow_store_backends()),
-    );
-    let server = rift_http_proxy::admin_api::AdminApiServer::new(
-        "127.0.0.1:0".parse().unwrap(),
-        manager.clone(),
-        None,
-    );
-    let admin = bind_admin(server).await;
-
-    let c = reqwest::Client::new();
-    let r = c
-        .post(format!("{admin}/imposters"))
-        .header("content-type", "application/json")
-        .body(
-            serde_json::json!({
-                "port": imposter_port, "protocol": "http", "stubs": [],
-                "_rift": { "flowState": { "backend": "postgres" } }
-            })
-            .to_string(),
-        )
-        .send()
-        .await
-        .expect("post");
-    assert_eq!(
-        r.status(),
-        400,
-        "an unregistered flowState.backend must be rejected at creation"
-    );
-    let body = r.text().await.expect("body");
-    assert!(
-        body.contains("postgres"),
-        "the 400 must name the rejected backend, got: {body}"
-    );
-    assert!(
-        body.contains("inmemory"),
-        "the 400 must list the backends this build serves, got: {body}"
-    );
-}
-
-// Issue #1337: the Redis backend was removed; naming it is a 400 at admission (not at decode) whose
-// body says so and points at rift-cluster.
-#[tokio::test]
-async fn create_imposter_with_removed_redis_backend_is_400_with_a_pointer_to_rift_cluster() {
+async fn create_imposter_with_a_leftover_backend_key_is_accepted() {
     let manager = std::sync::Arc::new(ImposterManager::new());
     let server = rift_http_proxy::admin_api::AdminApiServer::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -279,14 +232,11 @@ async fn create_imposter_with_removed_redis_backend_is_400_with_a_pointer_to_rif
         .expect("post imposter");
     assert_eq!(
         r.status(),
-        400,
-        "backend \"redis\" must be refused at admission"
+        201,
+        "a leftover flowState.backend must not be refused"
     );
-    let body = r.text().await.expect("body");
-    assert!(
-        body.contains("removed in 0.22.0") && body.contains("rift-cluster"),
-        "the 400 must say the backend was removed and point at rift-cluster, got: {body}"
-    );
+
+    manager.delete_all().await;
 }
 
 // Issue #530: creating an imposter with flowState.ttlSeconds < 1 is rejected with 400.
@@ -308,7 +258,7 @@ async fn create_imposter_rejects_non_positive_ttl_seconds() {
         .body(
             serde_json::json!({
                 "port": imposter_port, "protocol": "http", "stubs": [],
-                "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 0 } }
+                "_rift": { "flowState": { "ttlSeconds": 0 } }
             })
             .to_string(),
         )
@@ -2743,7 +2693,7 @@ async fn get_imposter_exposes_flowstate_redacted() {
     // flattened extras — include one with a credentialed URL to prove the GET projection strips it.
     let config = serde_json::from_value(serde_json::json!({
         "port": imposter_port, "protocol": "http",
-        "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300,
+        "_rift": { "flowState": { "ttlSeconds": 300,
             "redis": { "url": "redis://user:topsecret@host:6379" },
             "flowIdSource": "header:X-Mock-Space" } },
         "stubs": [{ "predicates": [{ "equals": { "path": "/x" } }],

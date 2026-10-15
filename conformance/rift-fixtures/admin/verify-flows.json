@@ -2,7 +2,7 @@
   "protocol": "http",
   "name": "admin · verify flowId scoping",
   "recordRequests": true,
-  "_rift": { "flowState": { "backend": "inmemory", "flowIdSource": "header:X-Space" } },
+  "_rift": { "flowState": { "flowIdSource": "header:X-Space" } },
   "stubs": [
     {
       "predicates": [{ "equals": { "path": "/hi" } }],

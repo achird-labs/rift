@@ -977,7 +977,6 @@ impl ServerBuilder {
                 let mut built = ImposterManager::with_datadir(cli.datadir.clone())
                     .with_tls_defaults(tls_defaults)
                     .with_accept_runtimes(self.accept_runtimes)
-                    .with_flow_store_backends(crate::default_flow_store_backends())
                     .with_body_limits(body_limits)
                     .with_journal_max_bytes(journal_max_bytes);
                 if let Some(client) = &upstream_client {

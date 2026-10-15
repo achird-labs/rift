@@ -405,7 +405,7 @@ With standard cycling, if User A triggers the first failure, User B gets the sec
   "port": 4545,
   "protocol": "http",
   "_rift": {
-    "flowState": { "backend": "inmemory", "ttlSeconds": 300, "flowIdSource": "header:X-User-Id" }
+    "flowState": { "ttlSeconds": 300, "flowIdSource": "header:X-User-Id" }
   },
   "stubs": [{
     "predicates": [{ "equals": { "path": "/api/resource" } }],
@@ -434,7 +434,7 @@ Now each user experiences their own retry sequence:
 ```json
 {
   "_rift": {
-    "flowState": { "backend": "inmemory", "ttlSeconds": 86400, "flowIdSource": "header:X-Api-Key" }
+    "flowState": { "ttlSeconds": 86400, "flowIdSource": "header:X-Api-Key" }
   },
   "stubs": [
     {

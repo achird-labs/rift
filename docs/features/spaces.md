@@ -37,7 +37,6 @@ their `space`.
   "recordRequests": true,
   "_rift": {
     "flowState": {
-      "backend": "inmemory",
       "ttlSeconds": 300,
       "flowIdSource": "header:X-Mock-Space"
     }

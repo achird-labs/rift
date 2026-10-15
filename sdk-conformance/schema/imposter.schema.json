@@ -988,11 +988,6 @@
       "additionalProperties": true,
       "description": "Flow state configuration for Rift extensions",
       "properties": {
-        "backend": {
-          "default": "inmemory",
-          "description": "Backend type: \"inmemory\" (the only built-in)",
-          "type": "string"
-        },
         "flowIdSource": {
           "description": "Source for the correlation `flow_id`: `\"imposter_port\"` (default) or `\"header:<Name>\"`.\nFlattened directly under `flowState` (issue #266). Absent ⇒ `\"imposter_port\"`.",
           "type": [

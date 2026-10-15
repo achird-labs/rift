@@ -2,13 +2,17 @@
 //! returning a fallback value. The raise propagates through `should_inject_bounded` to the
 //! existing 500 (`x-rift-script-error`). Covered for both engines (Rhai / JS).
 //!
-//! The failing backend comes from rift-mock-core's `test-backend` feature: `_rift.flowState.backend =
-//! "failing"` installs a store whose ops fail. This needs no Docker.
+//! The failing store is a test `FlowStoreProvider` (`support/failing_flow_store.rs`) injected
+//! through `ImposterManager::with_flow_store_provider`. This needs no Docker.
 //!
 //! `ctx.state` is unconditionally fail-loud (issue #358).
 
-use rift_http_proxy::imposter::{ImposterConfig, ImposterManager};
+use rift_http_proxy::imposter::ImposterConfig;
 use std::time::Duration;
+
+#[path = "support/failing_flow_store.rs"]
+mod failing_flow_store;
+use failing_flow_store::failing_manager;
 
 fn cfg(v: serde_json::Value) -> ImposterConfig {
     serde_json::from_value(v).expect("test imposter config")
@@ -19,7 +23,6 @@ fn cfg(v: serde_json::Value) -> ImposterConfig {
 fn script_imposter(engine: &str, code: &str) -> ImposterConfig {
     cfg(serde_json::json!({
         "protocol": "http",
-        "_rift": { "flowState": { "backend": "failing" } },
         "stubs": [{
             "predicates": [{ "equals": { "path": "/go" } }],
             "responses": [{ "_rift": { "script": { "engine": engine, "code": code } } }]
@@ -28,7 +31,7 @@ fn script_imposter(engine: &str, code: &str) -> ImposterConfig {
 }
 
 async fn assert_fails_loud(engine: &str, code: &str) {
-    let manager = ImposterManager::new();
+    let manager = failing_manager();
     let port = manager
         .create_imposter(script_imposter(engine, code))
         .await

@@ -26,7 +26,7 @@ fn free_port() -> u16 {
 fn imposter(port: u16) -> serde_json::Value {
     serde_json::json!({
         "port": port, "protocol": "http",
-        "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300 } },
+        "_rift": { "flowState": { "ttlSeconds": 300 } },
         "stubs": [
             { "id": "a", "scenarioName": "order", "requiredScenarioState": "Started",
               "responses": [{ "is": { "statusCode": 200 } }] }

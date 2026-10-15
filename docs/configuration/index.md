@@ -132,7 +132,6 @@ Extend Mountebank configurations with advanced chaos engineering features:
   "protocol": "http",
   "_rift": {
     "flowState": {
-      "backend": "inmemory",
       "ttlSeconds": 300
     }
   },

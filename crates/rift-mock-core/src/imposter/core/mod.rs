@@ -449,40 +449,13 @@ impl Imposter {
     /// `config.port` must be resolved (Some) before the imposter serves requests: a shared
     /// journal keys by port, and unresolved ports would silently multiplex onto slot 0.
     ///
-    /// Fails (issue #325) when an explicitly-requested `_rift.flowState.backend` cannot be
-    /// built (e.g. an unregistered backend name, including the removed `"redis"`) —
-    /// such requests must not silently downgrade to `NoOpFlowStore`. The implicit NoOp (no
-    /// `_rift.flowState` configured) still succeeds.
+    /// Fails (issue #530) when `_rift.flowState.ttlSeconds` is not positive. The implicit NoOp
+    /// (no `_rift.flowState` configured) still succeeds.
     pub fn new_with_hooks_and_journal(
         config: ImposterConfig,
         provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
         sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
         journal: Option<Arc<dyn crate::imposter::journal::RequestJournal>>,
-    ) -> anyhow::Result<Self> {
-        Self::new_with_hooks_journal_and_backends(
-            config,
-            provider,
-            sequencer,
-            journal,
-            &crate::extensions::flow_state::FlowStoreBackends::new(),
-        )
-    }
-
-    /// Create a new imposter with all embedder hooks, including the named flow-store backend
-    /// registry (issue #853).
-    ///
-    /// `backends` supplies every `_rift.flowState.backend` beyond the built-in `"inmemory"` — most
-    /// if any. With an empty
-    /// registry (what [`Self::new_with_hooks_and_journal`] passes) a config naming an unregistered
-    /// backend fails construction with an error listing what *is* available, rather than
-    /// downgrading to `NoOpFlowStore`. The removed `"redis"` gets its own removal message.
-    /// This is admission, not decode: the same bytes still deserialize.
-    pub fn new_with_hooks_journal_and_backends(
-        config: ImposterConfig,
-        provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
-        sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
-        journal: Option<Arc<dyn crate::imposter::journal::RequestJournal>>,
-        backends: &crate::extensions::flow_state::FlowStoreBackends,
     ) -> anyhow::Result<Self> {
         let load_clock = LoadClock::new();
         let loaded_at = load_clock.next();
@@ -508,13 +481,13 @@ impl Imposter {
         // `_rift.flowState` selection.
         //
         // Metered here rather than inside `create_flow_store` (issue #999): this is the single
-        // point every selection path funnels through — provider, `inmemory`, the `failing` test
-        // backend, a registered backend, and the NoOp fallback — so one wrap
+        // point every selection path funnels through — provider, `inmemory` and the NoOp
+        // fallback — so one wrap
         // counts `rift_flow_state_ops_total` for all of them. The decorator forwards every trait
         // method, including `is_blocking`, so backend behaviour is unchanged.
         let flow_store: Arc<dyn FlowStore> =
             Arc::new(crate::extensions::flow_state::MeteredFlowStore::new(
-                Self::create_flow_store(&config, provider, backends)?,
+                Self::create_flow_store(&config, provider)?,
             ));
 
         let enabled = config.enabled;
@@ -717,7 +690,9 @@ impl Imposter {
         });
     }
 
-    /// Create flow store based on _rift.flowState configuration.
+    /// Create the flow store: a [`FlowStoreProvider`](crate::extensions::flow_state::FlowStoreProvider) store if one is installed and supplies one,
+    /// otherwise an in-memory store sized by `_rift.flowState` (issue #1463 removed the named
+    /// `backend` selector; a leftover `backend` key decodes into `extra` and selects nothing).
     /// Falls back to a default in-memory store (not NoOp) when stubs declare the scenario FSM or
     /// carry a `_rift.script` that might call `ctx.state` (issue #358), so both work out of the
     /// box without explicit `_rift.flowState`. Only an imposter with neither surface gets the
@@ -731,7 +706,6 @@ impl Imposter {
     fn create_flow_store(
         config: &ImposterConfig,
         provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
-        backends: &crate::extensions::flow_state::FlowStoreBackends,
     ) -> anyhow::Result<Arc<dyn FlowStore>> {
         if let Some(provider) = provider
             && let Some(store) = provider.provide(config)
@@ -756,34 +730,15 @@ impl Imposter {
             // Fail-loud config validation (issue #530): a non-positive default TTL misbehaves late
             // and inconsistently (in-memory → instant expiry of every write; a networked store → error on
             // the first write), so reject it at construction. This surfaces as a 400 via
-            // ImposterError::FlowStoreConfig, matching the unrecognized-backend rule (#377).
+            // ImposterError::FlowStoreConfig.
             crate::extensions::flow_state::validate_ttl_seconds(flow_state_config.ttl_seconds)?;
-            return match flow_state_config.backend.as_str() {
-                "inmemory" => {
-                    info!(
-                        "Creating InMemory FlowStore for imposter (ttl={}s)",
-                        flow_state_config.ttl_seconds
-                    );
-                    Ok(Arc::new(InMemoryFlowStore::new(
-                        flow_state_config.ttl_seconds as u64,
-                    )))
-                }
-                #[cfg(feature = "test-backend")]
-                "failing" => {
-                    info!("Creating deliberately failing FlowStore (test-backend feature)");
-                    Ok(Arc::new(crate::extensions::flow_state::FailingFlowStore))
-                }
-                // Any other name is resolved through the registered backends (issue #853) — that
-                // is how an embedder's store is selected
-                // without this crate depending on it. An unregistered name is a config error, not
-                // a reason to silently downgrade to NoOp (issue #377).
-                other => match backends.get(other) {
-                    Some(factory) => factory.build(flow_state_config),
-                    None => Err(crate::extensions::flow_state::unknown_backend_error(
-                        other, backends,
-                    )),
-                },
-            };
+            info!(
+                "Creating InMemory FlowStore for imposter (ttl={}s)",
+                flow_state_config.ttl_seconds
+            );
+            return Ok(Arc::new(InMemoryFlowStore::new(
+                flow_state_config.ttl_seconds as u64,
+            )));
         }
 
         if Self::uses_scenario_fsm(&config.stubs) {
@@ -1265,101 +1220,111 @@ mod tests {
         );
     }
 
-    // Issue #1337: the Redis backend was removed. An imposter naming it must fail construction
-    // (admission) with the removal text pointing at rift-cluster, never a silent NoOp downgrade
-    // (#377). That the same bytes still DECODE is pinned in tests/replay_floor.rs.
+    // Issue #1463: `flowState.backend` is gone. A config that still names one (including the
+    // removed `"redis"` and its block) decodes with the key in `extra`, and gets the in-memory
+    // store — no name selects anything any more, so there is nothing to refuse.
     #[test]
-    fn explicit_redis_is_refused_at_admission() {
-        let raw = json!({
-            "port": 0, "protocol": "http", "stubs": [],
-            "_rift": { "flowState": { "backend": "redis", "redis": { "url": "redis://localhost:6379" } } }
+    fn a_leftover_backend_key_lands_in_extra_and_gets_the_in_memory_store() {
+        for backend in ["inmemory", "redis", "postgres"] {
+            let raw = json!({
+                "port": 0, "protocol": "http", "stubs": [],
+                "_rift": { "flowState": { "backend": backend, "redis": { "url": "redis://localhost:6379" } } }
+            });
+            let cfg: crate::imposter::ImposterConfig =
+                serde_json::from_value(raw).expect("a leftover backend key must still decode");
+            let flow_state = cfg
+                .rift
+                .as_ref()
+                .and_then(|r| r.flow_state.as_ref())
+                .expect("flowState decodes");
+            assert_eq!(
+                flow_state.extra.get("backend"),
+                Some(&json!(backend)),
+                "the stray key must be preserved in extra, not dropped"
+            );
+            let imp = Imposter::new_with_hooks_and_journal(cfg, None, None, None)
+                .expect("a leftover backend key must not fail construction");
+            assert_eq!(imp.flow_store.increment("f", "n").expect("incr"), 1);
+            assert_eq!(
+                imp.flow_store.increment("f", "n").expect("incr"),
+                2,
+                "backend={backend}: the store must be the in-memory one (NoOp would return 1 again)"
+            );
+        }
+    }
+
+    /// A provider that hands out one shared store and counts how often it was asked.
+    struct CountingProvider {
+        store: Arc<dyn FlowStore>,
+        calls: std::sync::atomic::AtomicUsize,
+        supply: bool,
+    }
+
+    impl crate::extensions::flow_state::FlowStoreProvider for CountingProvider {
+        fn provide(&self, _config: &crate::imposter::ImposterConfig) -> Option<Arc<dyn FlowStore>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.supply.then(|| Arc::clone(&self.store))
+        }
+    }
+
+    // Issue #1463: the provider is the only store seam. A store it supplies wins over an
+    // explicit `_rift.flowState`, and is consulted exactly once per construction.
+    #[test]
+    fn a_provider_store_overrides_an_explicit_flow_state() {
+        let shared: Arc<dyn FlowStore> = Arc::new(crate::backends::InMemoryFlowStore::new(60));
+        shared
+            .set("f", "seed", json!("from-provider"))
+            .expect("seed");
+        let provider = Arc::new(CountingProvider {
+            store: Arc::clone(&shared),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            supply: true,
         });
-        let cfg: crate::imposter::ImposterConfig =
-            serde_json::from_value(raw).expect("naming redis must still decode");
-        let err = match Imposter::new_with_hooks_and_journal(cfg, None, None, None) {
-            Ok(_) => panic!("the removed redis backend must fail construction, not NoOp"),
-            Err(e) => format!("{e:#}"),
-        };
-        assert!(
-            err.contains("removed in 0.22.0") && err.contains("rift-cluster"),
-            "the error must say the backend was removed and point at rift-cluster, got: {err}"
-        );
-    }
-
-    // Issue #853: the "factory registered" half. A registered backend is built through its factory
-    // — proving the seam works with no store dependency anywhere in this crate.
-    #[test]
-    fn a_registered_backend_factory_is_consulted_for_its_name() {
-        use crate::extensions::flow_state::{
-            FlowStore, FlowStoreBackendFactory, FlowStoreBackends,
-        };
-
-        struct CountingFactory(std::sync::atomic::AtomicUsize);
-        impl FlowStoreBackendFactory for CountingFactory {
-            fn name(&self) -> &'static str {
-                "counting"
-            }
-            fn build(
-                &self,
-                _config: &crate::imposter::RiftFlowStateConfig,
-            ) -> anyhow::Result<Arc<dyn FlowStore>> {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(Arc::new(crate::backends::InMemoryFlowStore::new(60)))
-            }
-        }
-
-        let factory = Arc::new(CountingFactory(std::sync::atomic::AtomicUsize::new(0)));
-        let backends = FlowStoreBackends::new().with(Arc::clone(&factory) as Arc<_>);
+        let as_dyn: Arc<dyn crate::extensions::flow_state::FlowStoreProvider> = provider.clone();
         let cfg = serde_json::from_value(json!({
             "port": 0, "protocol": "http", "stubs": [],
-            "_rift": { "flowState": { "backend": "counting" } }
+            "_rift": { "flowState": { "ttlSeconds": 300 } }
         }))
         .expect("valid imposter config");
 
-        Imposter::new_with_hooks_journal_and_backends(cfg, None, None, None, &backends)
-            .expect("a registered backend must build");
+        let imp = Imposter::new_with_hooks_and_journal(cfg, Some(&as_dyn), None, None)
+            .expect("a provider store must build");
         assert_eq!(
-            factory.0.load(std::sync::atomic::Ordering::SeqCst),
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "the factory must be consulted exactly once for its own backend name"
+            "the provider must be consulted exactly once"
+        );
+        assert_eq!(
+            imp.flow_store.get("f", "seed").expect("get"),
+            Some(json!("from-provider")),
+            "the imposter must use the provider's store, not a fresh in-memory one"
         );
     }
 
-    // Issue #853: a factory whose build fails must fail imposter construction — the error channel
-    // that made a named factory the right seam rather than `FlowStoreProvider` (#325).
+    // A provider that declines (`None`) defers to the built-in selection: `_rift.flowState`
+    // still gets its own in-memory store.
     #[test]
-    fn a_failing_backend_factory_fails_construction() {
-        use crate::extensions::flow_state::{
-            FlowStore, FlowStoreBackendFactory, FlowStoreBackends,
-        };
-
-        struct Broken;
-        impl FlowStoreBackendFactory for Broken {
-            fn name(&self) -> &'static str {
-                "broken"
-            }
-            fn build(
-                &self,
-                _config: &crate::imposter::RiftFlowStateConfig,
-            ) -> anyhow::Result<Arc<dyn FlowStore>> {
-                anyhow::bail!("the backend is unreachable")
-            }
-        }
-
-        let backends = FlowStoreBackends::new().with(Arc::new(Broken));
+    fn a_declining_provider_defers_to_the_in_memory_store() {
+        let provider = Arc::new(CountingProvider {
+            store: Arc::new(crate::extensions::flow_state::NoOpFlowStore),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            supply: false,
+        });
+        let as_dyn: Arc<dyn crate::extensions::flow_state::FlowStoreProvider> = provider.clone();
         let cfg = serde_json::from_value(json!({
             "port": 0, "protocol": "http", "stubs": [],
-            "_rift": { "flowState": { "backend": "broken" } }
+            "_rift": { "flowState": { "ttlSeconds": 300 } }
         }))
         .expect("valid imposter config");
-        let err =
-            match Imposter::new_with_hooks_journal_and_backends(cfg, None, None, None, &backends) {
-                Ok(_) => panic!("a failing factory must fail construction, not NoOp"),
-                Err(e) => format!("{e:#}"),
-            };
-        assert!(
-            err.contains("the backend is unreachable"),
-            "the factory's own error must survive, got: {err}"
+
+        let imp = Imposter::new_with_hooks_and_journal(cfg, Some(&as_dyn), None, None)
+            .expect("a declining provider must not fail construction");
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(imp.flow_store.increment("f", "n").expect("incr"), 1);
+        assert_eq!(
+            imp.flow_store.increment("f", "n").expect("incr"),
+            2,
+            "the fallback must be the in-memory store, not the provider's declined NoOp"
         );
     }
 
@@ -1428,28 +1393,13 @@ mod tests {
     }
 
     #[test]
-    fn inmemory_backend_construction_succeeds() {
+    fn explicit_flow_state_construction_succeeds() {
         let cfg = serde_json::from_value(json!({
             "port": 0, "protocol": "http", "stubs": [],
-            "_rift": { "flowState": { "backend": "inmemory" } }
+            "_rift": { "flowState": {} }
         }))
         .expect("valid imposter config");
         assert!(Imposter::new_with_hooks_and_journal(cfg, None, None, None).is_ok());
-    }
-
-    // Issue #377: an explicitly-set but unrecognized backend (a typo) must fail construction, not
-    // silently downgrade to NoOp — the same fail-loud contract #325 gave the (since removed) redis arm.
-    #[test]
-    fn explicit_unknown_backend_fails_construction() {
-        let cfg = serde_json::from_value(json!({
-            "port": 0, "protocol": "http", "stubs": [],
-            "_rift": { "flowState": { "backend": "postgres" } }
-        }))
-        .expect("valid imposter config");
-        assert!(
-            Imposter::new_with_hooks_and_journal(cfg, None, None, None).is_err(),
-            "an unrecognized flowState.backend must fail construction, not fall back to NoOp"
-        );
     }
 
     // Issue #530: a non-positive flowState.ttlSeconds misbehaves late (instant expiry / SETEX
@@ -1459,7 +1409,7 @@ mod tests {
         for ttl in [0, -1] {
             let cfg = serde_json::from_value(json!({
                 "port": 0, "protocol": "http", "stubs": [],
-                "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": ttl } }
+                "_rift": { "flowState": { "ttlSeconds": ttl } }
             }))
             .expect("valid imposter config");
             let msg = match Imposter::new_with_hooks_and_journal(cfg, None, None, None) {
@@ -1478,7 +1428,7 @@ mod tests {
     fn ttl_seconds_one_is_accepted() {
         let cfg = serde_json::from_value(json!({
             "port": 0, "protocol": "http", "stubs": [],
-            "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 1 } }
+            "_rift": { "flowState": { "ttlSeconds": 1 } }
         }))
         .expect("valid imposter config");
         assert!(Imposter::new_with_hooks_and_journal(cfg, None, None, None).is_ok());

@@ -6,24 +6,10 @@
 // embedder holding only `rift-http-proxy` names them at the root exactly as it would on
 // `rift-mock-core` (issues #965, #1234), not via `imposter::fault_io`.
 pub use rift_mock_core::{
-    FaultCell, FaultIo, InjectedFault, TcpFaultKind, backends, behaviors, config, extensions,
-    flow_state, imposter, is_injected_fault, proxy, recording, response, scripting, stub_analysis,
+    FaultCell, FaultIo, InjectedFault, TcpFaultKind, backends, behaviors, extensions, flow_state,
+    imposter, is_injected_fault, proxy, recording, response, scripting, stub_analysis,
     tcp_fault_carrier, template, util,
 };
-
-/// The named flow-state backends this build ships (issue #853).
-///
-/// One owner for "which backends exist in a shipped artifact", so the binary and the C-ABI cannot
-/// drift apart: both register the result of this on their `ImposterManager`. The registry is empty
-/// because `"inmemory"` is built in; the function stays as the single seam a future named backend
-/// would register through.
-///
-/// A backend absent here is not a silent downgrade: naming it in `_rift.flowState.backend` fails
-/// imposter creation with an error listing what is available (issues #325/#377).
-#[must_use]
-pub fn default_flow_store_backends() -> extensions::flow_state::FlowStoreBackends {
-    extensions::flow_state::FlowStoreBackends::new()
-}
 
 /// Install the process-wide rustls `ring` crypto provider, idempotently (issue #343).
 ///

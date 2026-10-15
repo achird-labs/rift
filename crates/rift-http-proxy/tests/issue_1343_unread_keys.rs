@@ -45,7 +45,7 @@ const WRAPPER_KEYS: [&str; 3] = ["imposters", "intercept", "routes"];
 /// `RiftFlowStateConfig`'s typed fields. Anything else lands in its `extra` map, which only an
 /// embedder's `FlowStoreProvider` reads; standalone Rift drops it. That includes a `redis` block
 /// left over from before #1356.
-const FLOW_STATE_KEYS: [&str; 3] = ["backend", "ttlSeconds", "flowIdSource"];
+const FLOW_STATE_KEYS: [&str; 2] = ["ttlSeconds", "flowIdSource"];
 
 /// The `StubResponse` variants in the priority `TryFrom<StubResponseRaw>` picks them: the first
 /// present one is read and the rest are not. A response with none of them is a `_rift`-only
@@ -1120,7 +1120,7 @@ fn a_shadowed_response_variant_and_behaviors_block_are_reported() {
 #[test]
 fn rift_extension_enums_are_walked() {
     let document = json!({ "protocol": "http",
-        "_rift": { "flowState": { "backend": "inmemory", "ttlSecond": 5 } },
+        "_rift": { "flowState": { "ttlSecond": 5 } },
         "stubs": [{ "responses": [{ "is": {}, "_rift": {
             "fault": { "tcp": { "probability": 0.5, "type": "CONNECTION_RESET_BY_PEER", "chance": 1 } },
             "conditional": { "etag": true, "lastModifed": "load" },

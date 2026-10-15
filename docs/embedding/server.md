@@ -15,7 +15,7 @@ The server composition lives in the `rift_http_proxy::server` module (`Cli`, `Co
 `ServerBuilder`, `RunningServer`, `admin_bind_addr`, `run_metrics_server`, `bind_metrics_server`,
 `RunningMetrics`); none of these are re-exported at the crate root. The crate root re-exports the
 `rift-mock-core` modules plus the TCP-fault seam (`TcpFaultKind`, `tcp_fault_carrier`, `FaultCell`,
-`FaultIo`, `InjectedFault`, `is_injected_fault`), `default_flow_store_backends` and
+`FaultIo`, `InjectedFault`, `is_injected_fault`) and
 `install_default_crypto_provider`. `gateway::apply_tcp_fault` applies a fault carrier on a listener
 of your own ([SPI → Detecting a TCP fault in-process]({{ site.baseurl }}/embedding/spi/#detecting-a-tcp-fault-in-process)).
 

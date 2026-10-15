@@ -16,7 +16,6 @@ pub const QUAMINA_BODY_FIELD_DIMENSION: bool = cfg!(feature = "quamina-matching"
 
 // ===== Core Mountebank-compatible modules =====
 pub mod behaviors;
-pub mod config;
 pub mod imposter;
 pub mod proxy;
 pub mod recording;

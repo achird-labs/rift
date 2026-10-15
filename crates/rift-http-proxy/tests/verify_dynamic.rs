@@ -343,8 +343,7 @@ async fn verify_normal_pass_drives_space_partitioned_stubs() {
         &manager,
         serde_json::json!({
             "protocol": "http",
-            "_rift": { "flowState": { "backend": "inmemory",
-                "flowIdSource": "header:X-Mock-Space" } },
+            "_rift": { "flowState": { "flowIdSource": "header:X-Mock-Space" } },
             "stubs": [
                 { "space": "alice", "predicates": [{ "equals": { "path": "/data" } }],
                   "responses": [{ "is": { "statusCode": 200, "body": { "owner": "alice" } } }] },
@@ -383,8 +382,7 @@ async fn verify_flow_id_header_does_not_clobber_detection() {
         &manager,
         serde_json::json!({
             "protocol": "http",
-            "_rift": { "flowState": { "backend": "inmemory",
-                "flowIdSource": "header:X-Mock-Space" } },
+            "_rift": { "flowState": { "flowIdSource": "header:X-Mock-Space" } },
             "stubs": [
                 { "space": "alice", "predicates": [{ "equals": { "path": "/d" } }],
                   "responses": [{ "is": { "statusCode": 200, "body": { "o": "alice" } } }] },

@@ -2456,7 +2456,7 @@ fn w014_does_not_fire_when_flow_state_is_configured() {
     let mut v = make_imposter(json!([rift_script_stub(json!({
         "code": "fn respond(ctx) { let n = ctx.state.incr(\"attempts\"); http(200) }"
     }))]));
-    v["_rift"] = json!({ "flowState": { "backend": "inmemory" } });
+    v["_rift"] = json!({ "flowState": {} });
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());
     assert!(
@@ -2541,7 +2541,7 @@ fn w014_does_not_fire_for_state_ops_when_flow_state_is_configured() {
     let mut v = make_imposter(json!([state_ops_stub(json!([
         { "op": "increment", "key": "hits" }
     ]))]));
-    v["_rift"] = json!({ "flowState": { "backend": "inmemory" } });
+    v["_rift"] = json!({ "flowState": {} });
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());
     assert!(

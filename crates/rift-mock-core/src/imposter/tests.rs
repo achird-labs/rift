@@ -3244,7 +3244,7 @@ mod scenario_fsm_tests {
     }
 
     fn order_fsm(port: u16, flow_id_source: Option<&str>) -> serde_json::Value {
-        let mut flow_state = serde_json::json!({ "backend": "inmemory", "ttlSeconds": 300 });
+        let mut flow_state = serde_json::json!({ "ttlSeconds": 300 });
         if let Some(src) = flow_id_source {
             flow_state["flowIdSource"] = serde_json::json!(src);
         }
@@ -3372,7 +3372,7 @@ mod scenario_fsm_tests {
     }
 
     fn imposter_with_source(port: u16, src: Option<&str>) -> Imposter {
-        let mut flow_state = serde_json::json!({ "backend": "inmemory", "ttlSeconds": 300 });
+        let mut flow_state = serde_json::json!({ "ttlSeconds": 300 });
         if let Some(s) = src {
             flow_state["flowIdSource"] = serde_json::json!(s);
         }
@@ -3408,7 +3408,7 @@ mod scenario_fsm_tests {
     fn scenario_gate_selects_stub_by_state() {
         let cfg = serde_json::from_value(serde_json::json!({
             "port": 7001, "protocol": "http",
-            "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300 } },
+            "_rift": { "flowState": { "ttlSeconds": 300 } },
             "stubs": [
                 { "scenarioName": "order", "requiredScenarioState": "Started",
                   "predicates": [{ "equals": { "path": "/s" } }],
@@ -3461,7 +3461,7 @@ mod correlated_space_tests {
     fn correlated_config(port: u16, stubs: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
             "port": port, "protocol": "http", "recordRequests": true,
-            "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300,
+            "_rift": { "flowState": { "ttlSeconds": 300,
                 "flowIdSource": "header:X-Mock-Space" } },
             "stubs": stubs
         })

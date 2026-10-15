@@ -1,7 +1,7 @@
 {
   "protocol": "http",
   "name": "core · FSM two-step",
-  "_rift": { "flowState": { "backend": "inmemory" } },
+  "_rift": { "flowState": {} },
   "stubs": [
     {
       "scenarioName": "s",

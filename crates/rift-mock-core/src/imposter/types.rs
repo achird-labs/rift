@@ -2494,9 +2494,6 @@ impl ImposterConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftFlowStateConfig {
-    /// Backend type: "inmemory" (the only built-in)
-    #[serde(default = "default_flow_backend")]
-    pub backend: String,
     /// Default TTL for state entries in seconds
     #[serde(default = "default_flow_ttl")]
     pub ttl_seconds: i64,
@@ -2507,24 +2504,20 @@ pub struct RiftFlowStateConfig {
     /// Options belonging to a provider-supplied store ([`FlowStoreProvider`]).
     ///
     /// An embedder that plugs in its own [`FlowStore`] has, today, nowhere to put
-    /// that store's configuration: every field here describes a built-in backend,
+    /// that store's configuration: every field here describes the built-in in-memory store,
     /// and adding one per embedder does not scale (nor should this crate learn
     /// their vocabulary). Unrecognised keys under `flowState` therefore collect
     /// here instead of being dropped, and the provider parses what it owns.
     ///
-    /// The built-in `"inmemory"` backend ignores this entirely — it reads only the typed fields
-    /// above, so an unknown key changes nothing for it. This is also what keeps a `redis: {…}`
-    /// block from a config written before that backend was removed decodable (it is refused at
-    /// admission, not at decode — rift-cluster replays stored bytes).
+    /// The built-in in-memory store ignores this entirely — it reads only the typed fields
+    /// above, so an unknown key changes nothing for it. This is also what keeps a config written
+    /// before `backend` was removed (issue #1463) decodable: a leftover `backend` key, or a
+    /// `redis: {…}` block, lands here and selects nothing (rift-cluster replays stored bytes).
     ///
     /// [`FlowStoreProvider`]: crate::extensions::flow_state::FlowStoreProvider
     /// [`FlowStore`]: crate::extensions::flow_state::FlowStore
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
-}
-
-fn default_flow_backend() -> String {
-    "inmemory".to_string()
 }
 
 fn default_flow_ttl() -> i64 {
@@ -2534,7 +2527,6 @@ fn default_flow_ttl() -> i64 {
 impl Default for RiftFlowStateConfig {
     fn default() -> Self {
         Self {
-            backend: default_flow_backend(),
             ttl_seconds: default_flow_ttl(),
             flow_id_source: None,
             extra: serde_json::Map::new(),
@@ -3723,16 +3715,16 @@ mod tests {
     #[test]
     fn provider_options_collect_in_extra() {
         let fs: RiftFlowStateConfig = serde_json::from_value(json!({
-            "backend": "inmemory",
             "ttlSeconds": 60,
+            "flowIdSource": "header:X-Flow",
             "readConsistency": "strong",
             "nested": { "fsyncIntervalMs": 50 }
         }))
         .unwrap();
 
         // The typed fields still bind; only what is left over collects.
-        assert_eq!(fs.backend, "inmemory");
         assert_eq!(fs.ttl_seconds, 60);
+        assert_eq!(fs.flow_id_source.as_deref(), Some("header:X-Flow"));
         assert_eq!(
             fs.extra.get("readConsistency").and_then(|v| v.as_str()),
             Some("strong")
@@ -3745,7 +3737,7 @@ mod tests {
             Some(50)
         );
         assert!(
-            !fs.extra.contains_key("backend") && !fs.extra.contains_key("ttlSeconds"),
+            !fs.extra.contains_key("flowIdSource") && !fs.extra.contains_key("ttlSeconds"),
             "a key a typed field already claimed must not also land in extra: {:?}",
             fs.extra
         );
@@ -3779,7 +3771,6 @@ mod tests {
     #[test]
     fn an_empty_extra_adds_nothing_to_the_wire_form() {
         let input = json!({
-            "backend": "inmemory",
             "ttlSeconds": 900,
             "flowIdSource": "header:X-Flow"
         });
@@ -3788,15 +3779,15 @@ mod tests {
 
         let out = serde_json::to_value(&fs).unwrap();
         let keys: Vec<&String> = out.as_object().unwrap().keys().collect();
-        assert_eq!(keys.len(), 3, "serializing gained or lost a key: {keys:?}");
-        assert_eq!(out.get("backend"), input.get("backend"));
+        assert_eq!(keys.len(), 2, "serializing gained or lost a key: {keys:?}");
         assert_eq!(out.get("ttlSeconds"), input.get("ttlSeconds"));
         assert_eq!(out.get("flowIdSource"), input.get("flowIdSource"));
     }
 
-    // Issue #1337: the Redis backend was removed, but a stored config naming it must still DECODE
-    // (rift-cluster replays admitted bytes; a decode-time refusal would make them unreadable). The
-    // leftover `redis` block is carried in `extra` and survives a re-serialize unchanged.
+    // Issues #1337/#1463: the Redis backend and then `backend` itself were removed, but a stored
+    // config naming one must still DECODE (rift-cluster replays admitted bytes; a decode-time
+    // refusal would make them unreadable). The leftover `backend` key and `redis` block are
+    // carried in `extra` and survive a re-serialize unchanged.
     #[test]
     fn a_leftover_redis_backend_and_block_still_decode_and_round_trip() {
         let input = json!({
@@ -3805,7 +3796,7 @@ mod tests {
             "redis": { "url": "redis://localhost:6379", "poolSize": 4 }
         });
         let fs: RiftFlowStateConfig = serde_json::from_value(input.clone()).unwrap();
-        assert_eq!(fs.backend, "redis");
+        assert_eq!(fs.extra.get("backend"), Some(&json!("redis")));
         assert_eq!(
             fs.extra.get("redis"),
             Some(&json!({ "url": "redis://localhost:6379", "poolSize": 4 }))
@@ -3819,7 +3810,7 @@ mod tests {
     fn extra_defaults_empty() {
         let fs: RiftFlowStateConfig = serde_json::from_value(json!({})).unwrap();
         assert!(fs.extra.is_empty());
-        assert_eq!(fs.backend, "inmemory");
+        assert_eq!(fs.ttl_seconds, 300);
         assert!(RiftFlowStateConfig::default().extra.is_empty());
     }
 
@@ -3827,7 +3818,6 @@ mod tests {
     #[test]
     fn flat_flow_id_source_round_trips() {
         let fs: RiftFlowStateConfig = serde_json::from_value(json!({
-            "backend": "inmemory",
             "flowIdSource": "header:X-Mock-Space"
         }))
         .unwrap();
@@ -3960,8 +3950,7 @@ mod tests {
     // Issue #266: an absent `flowIdSource` deserializes to None and is omitted on serialize.
     #[test]
     fn absent_flow_id_source_is_none_and_omitted() {
-        let fs: RiftFlowStateConfig =
-            serde_json::from_value(json!({ "backend": "inmemory" })).unwrap();
+        let fs: RiftFlowStateConfig = serde_json::from_value(json!({ "ttlSeconds": 60 })).unwrap();
         assert_eq!(fs.flow_id_source, None);
         let out = serde_json::to_value(&fs).unwrap();
         assert!(out.get("flowIdSource").is_none());

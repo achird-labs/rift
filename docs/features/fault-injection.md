@@ -423,7 +423,7 @@ hand-built `#{ inject:, fault: }` map:
   "port": 4545,
   "protocol": "http",
   "_rift": {
-    "flowState": {"backend": "inmemory", "ttlSeconds": 300}
+    "flowState": {"ttlSeconds": 300}
   },
   "stubs": [{
     "responses": [{
@@ -493,7 +493,7 @@ Use scripting to fail a specific number of requests before succeeding:
   "port": 4545,
   "protocol": "http",
   "_rift": {
-    "flowState": {"backend": "inmemory", "ttlSeconds": 300, "flowIdSource": "header:X-Request-Id"}
+    "flowState": {"ttlSeconds": 300, "flowIdSource": "header:X-Request-Id"}
   },
   "stubs": [{
     "predicates": [{ "equals": { "path": "/api/resource" } }],

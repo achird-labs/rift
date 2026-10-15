@@ -24,7 +24,7 @@ let port = manager.create_imposter(config).await?; // port 0 is auto-assigned
 store, request journal, proxy-recording store, response sequencer, event listener, response
 decorator, no-match interceptor, exchange inspector — and the built-in behaviour stays in place for
 any you do not install. The engine ships only the in-memory flow store; any other store plugs in through
-`with_flow_store_backends` or `with_flow_store_provider`.
+`with_flow_store_provider`.
 
 ## Features
 

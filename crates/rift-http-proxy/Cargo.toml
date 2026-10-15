@@ -123,8 +123,6 @@ features = ["test-util"]
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 # `WebSocketStream` is a `Stream`/`Sink`; the combinators come from here.
 futures-util = "0.3"
-# Turn on the failing flow-store backend for backend-outage tests (issue #318)
-rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-features = false, features = ["test-backend"] }
 # Corpus lint gate (issue #460): lint every vendored fixture via the library API.
 rift-lint = { path = "../rift-lint", version = "0.1.0" }
 # Unread-key gate (issue #1343): reports every key a derived `Deserialize` skips.

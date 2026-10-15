@@ -94,7 +94,6 @@ async fn test_rift_flow_state_inmemory_basic() {
         "protocol": "http",
         "_rift": {
             "flowState": {
-                "backend": "inmemory",
                 "ttlSeconds": 300
             }
         },
@@ -137,9 +136,7 @@ async fn test_rift_flow_state_persistence_across_requests() {
         "port": imposter_port,
         "protocol": "http",
         "_rift": {
-            "flowState": {
-                "backend": "inmemory"
-            }
+            "flowState": {}
         },
         "stubs": [
             {
@@ -484,7 +481,7 @@ async fn test_mountebank_predicates_with_rift_extensions() {
         "port": imposter_port,
         "protocol": "http",
         "_rift": {
-            "flowState": {"backend": "inmemory"}
+            "flowState": {}
         },
         "stubs": [
             {
@@ -609,7 +606,7 @@ async fn test_default_response_with_rift_config() {
         "port": imposter_port,
         "protocol": "http",
         "_rift": {
-            "flowState": {"backend": "inmemory"}
+            "flowState": {}
         },
         "defaultResponse": {
             "statusCode": 404,
