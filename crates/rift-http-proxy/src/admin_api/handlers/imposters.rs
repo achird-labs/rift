@@ -1243,6 +1243,7 @@ mod requests_filter_tests {
             headers.insert("X-Tenant".to_string(), vec![t.to_string()]);
         }
         RecordedRequest {
+            body_omitted: false,
             mode: ResponseMode::Text,
             request_from: "127.0.0.1".to_string(),
             method: "GET".to_string(),
@@ -1904,24 +1905,32 @@ mod requests_filter_tests {
         let _ = m.delete_imposter(19756).await;
     }
 
-    // AC12 (#603), end to end: drive the real 10k cap through the real recording path and
-    // confirm a stale cursor is told it lost data. The double above pins the plumbing; this
-    // pins that genuine retention pressure actually reaches the wire.
+    // AC12 (#603), end to end: drive real byte-budget eviction (#1441) through the real
+    // recording path and confirm a stale cursor is told it lost data. The double above pins the
+    // plumbing; this pins that genuine retention pressure actually reaches the wire.
     #[tokio::test]
     async fn get_requests_truncated_by_real_cap_eviction() {
-        let m = manager_with(19757, None, &[]).await;
+        // Exactly KEPT of these fixed-cost entries fit the manager's journal budget.
+        const KEPT: usize = 100;
+        let budget = KEPT * crate::imposter::journal::entry_cost(&rec_at("/00000", "A"));
+        let m = Arc::new(
+            ImposterManager::new()
+                .with_journal_max_bytes(std::num::NonZeroUsize::new(budget).expect("non-zero")),
+        );
+        let config = serde_json::from_value(serde_json::json!({
+            "port": 19757, "protocol": "http", "recordRequests": true, "stubs": []
+        }))
+        .expect("config");
+        m.create_imposter(config).await.expect("create");
         let imposter = m.get_imposter(19757).expect("imposter");
-        for i in 0..(crate::imposter::MAX_RECORDED_REQUESTS + 5) {
-            imposter.record_request(rec_at(&format!("/{i}"), "A"));
+        for i in 0..(KEPT + 5) {
+            imposter.record_request(rec_at(&format!("/{i:05}"), "A"));
         }
 
         // Indices 1..=5 were evicted; a cursor at 2 never received 3..=5.
         let resp = handle_get_requests(19757, Some("since=2"), m.clone()).await;
         assert_eq!(header(&resp, "x-rift-truncated"), Some("true"));
-        assert_eq!(
-            next_index(&resp),
-            Some((crate::imposter::MAX_RECORDED_REQUESTS + 5).to_string()).as_deref()
-        );
+        assert_eq!(next_index(&resp), Some((KEPT + 5).to_string()).as_deref());
 
         // A cursor past the eviction watermark lost nothing.
         let resp = handle_get_requests(19757, Some("since=5"), m.clone()).await;
@@ -2018,6 +2027,7 @@ mod verify_tests {
 
     fn rec(method: &str, path: &str) -> RecordedRequest {
         RecordedRequest {
+            body_omitted: false,
             mode: ResponseMode::Text,
             request_from: "127.0.0.1:5000".to_string(),
             method: method.to_string(),
@@ -2296,6 +2306,7 @@ mod replace_all_tests {
             .get_imposter(19766)
             .expect("imposter")
             .record_request(RecordedRequest {
+                body_omitted: false,
                 mode: ResponseMode::Text,
                 request_from: "127.0.0.1:5000".to_string(),
                 method: "GET".to_string(),

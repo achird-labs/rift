@@ -108,7 +108,7 @@ rift_free(result);
 ```
 
 - **Options JSON** (pass `NULL` or `{}` for all defaults; every field optional):
-  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"noParse":false,"config":null,"allowInjection":false,"requireAdminAuth":false,"upstreamCaFile":null,"upstreamCaPem":null,"upstreamTlsSkipVerify":false,"maxBodySize":null,"bodyMemoryBudget":null}`.
+  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"noParse":false,"config":null,"allowInjection":false,"requireAdminAuth":false,"upstreamCaFile":null,"upstreamCaPem":null,"upstreamTlsSkipVerify":false,"maxBodySize":null,"bodyMemoryBudget":null,"journalMaxBytes":null}`.
   `port: 0` binds an ephemeral port; `host` must be an IP literal — IPv4, or IPv6 bare (`::1`) or
   bracketed (`[::1]`), a numeric scope id (`fe80::1%2`) kept — and a DNS name such as `localhost` is
   refused (#1137; before that fix a bare IPv6 host could never bind). The metrics server, if asked
@@ -161,15 +161,17 @@ rift_free(result);
   later as a per-request proxy error.
 - **`upstreamTlsSkipVerify`** (default `false`): accept any upstream certificate. Development only;
   it logs a warning whenever a client is built with it.
+
+  The relay reads the trust when the listener **binds**, so start the intercept listener after the
+  `rift_serve_admin` that sets it.
 - **`maxBodySize`** (default `536870912`, 512 MiB) and **`bodyMemoryBudget`** (default
   `1073741824`, 1 GiB; `0` = unbounded): the per-body ceiling (`413`) and the in-flight memory
   budget shared by every body (`503` + `Retry-After`) — see
   [Body size limits]({{ site.baseurl }}/configuration/cli/#body-size-limits). The budget must be at
   least the ceiling, or this call fails. Set them before creating imposters: an imposter keeps the
   limits current when it was created.
-
-  The relay reads the trust when the listener **binds**, so start the intercept listener after the
-  `rift_serve_admin` that sets it.
+- **`journalMaxBytes`** (default `805306368`, 768 MiB): bytes of recorded requests each imposter
+  keeps, oldest evicted first. Like the body limits, set it before creating imposters.
 - **`allowInjection`** (default `false`): whether Rift admits script/`inject` imposters
   (`inject`/`decorate`/`shellTransform`/JS-function `wait`/`_rift.script`), mirroring the
   `--allowInjection` CLI flag. Leave it `false` unless you intend to permit them.
@@ -218,7 +220,7 @@ check before sending one:
 {"version":"…","commit":"…","builtAt":"…","features":["javascript"],
  "serveOptions":["host","port","apiKey","metricsPort","configFile","noParse","config",
                  "allowInjection","requireAdminAuth","upstreamCaFile","upstreamCaPem",
-                 "upstreamTlsSkipVerify","maxBodySize","bodyMemoryBudget"]}
+                 "upstreamTlsSkipVerify","maxBodySize","bodyMemoryBudget","journalMaxBytes"]}
 ```
 
 0.17.0 published the first eight keys without `noParse`; `noParse` and the three `upstream*` keys

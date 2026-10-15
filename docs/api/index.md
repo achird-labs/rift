@@ -549,7 +549,8 @@ curl -i "localhost:2525/imposters/3000/savedRequests?since=12&match=flow_id=tena
 - **Indices survive deletion.** `DELETE savedRequests` and scoped clears do not reset them:
   entries recorded afterwards simply get larger indices, so a cursor held across a clear stays
   valid and is *not* reported as truncated. Deleting data you asked to delete is not a hole.
-- **`x-rift-truncated` means one thing:** the 10,000-entry cap evicted entries you had not seen.
+- **`x-rift-truncated` means one thing:** the journal's byte budget (`--journal-max-bytes`,
+  default 768 MiB per imposter) evicted entries you had not seen.
   Re-poll without `since` to rebuild a baseline. Note that `since=0` ("replay everything") does
   report truncation once anything has been evicted, while omitting `since` ("snapshot what is
   retained") never does — the two return the same entries but ask different questions.
@@ -874,7 +875,7 @@ Get current configuration.
   "serveOptions": [
     "host", "port", "apiKey", "metricsPort", "configFile", "noParse", "config",
     "allowInjection", "requireAdminAuth", "upstreamCaFile", "upstreamCaPem",
-    "upstreamTlsSkipVerify", "maxBodySize", "bodyMemoryBudget"
+    "upstreamTlsSkipVerify", "maxBodySize", "bodyMemoryBudget", "journalMaxBytes"
   ],
   "process": {
     "nodeVersion": "N/A (Rust)", "architecture": "aarch64", "platform": "macos",

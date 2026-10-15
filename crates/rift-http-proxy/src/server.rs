@@ -375,6 +375,19 @@ pub struct Cli {
     )]
     pub body_memory_budget: usize,
 
+    /// Bytes of recorded requests each imposter keeps, oldest evicted first (issue #1441). Bounds
+    /// memory where Mountebank's journal grows without limit; the default (768 MiB) holds any body
+    /// the default body ceiling admits, even a binary one at its base64 size.
+    #[arg(
+        long,
+        value_name = "BYTES",
+        env = "RIFT_JOURNAL_MAX_BYTES",
+        default_value_t = rift_mock_core::imposter::DEFAULT_JOURNAL_MAX_BYTES,
+        global = true,
+        help_heading = "Server options"
+    )]
+    pub journal_max_bytes: usize,
+
     /// Start a TLS-MITM intercept/redirect proxy listener on this port (epic #394). Off when
     /// unset. Configure rules and export the CA via the admin API's `/intercept/*` routes.
     #[arg(
@@ -491,6 +504,7 @@ impl std::fmt::Debug for Cli {
             upstream_tls_skip_verify,
             max_body_size,
             body_memory_budget,
+            journal_max_bytes,
             intercept_port,
             intercept_auth,
             intercept_ca_cert,
@@ -533,6 +547,7 @@ impl std::fmt::Debug for Cli {
             .field("upstream_tls_skip_verify", upstream_tls_skip_verify)
             .field("max_body_size", max_body_size)
             .field("body_memory_budget", body_memory_budget)
+            .field("journal_max_bytes", journal_max_bytes)
             .field("intercept_port", intercept_port)
             .field("intercept_auth", &intercept_auth.as_ref().map(|_| REDACTED))
             .field("intercept_ca_cert", intercept_ca_cert)
@@ -936,6 +951,8 @@ impl ServerBuilder {
 
         // Validated here so a budget below the ceiling is a startup error (issue #1439).
         let body_limits = body_limits_from(cli.max_body_size, cli.body_memory_budget)?;
+        let journal_max_bytes = std::num::NonZeroUsize::new(cli.journal_max_bytes)
+            .context("--journal-max-bytes must be at least 1")?;
         let manager = match self.manager {
             Some(manager) => manager,
             None => {
@@ -961,7 +978,8 @@ impl ServerBuilder {
                     .with_tls_defaults(tls_defaults)
                     .with_accept_runtimes(self.accept_runtimes)
                     .with_flow_store_backends(crate::default_flow_store_backends())
-                    .with_body_limits(body_limits);
+                    .with_body_limits(body_limits)
+                    .with_journal_max_bytes(journal_max_bytes);
                 if let Some(client) = &upstream_client {
                     built = built.with_upstream_client(Arc::clone(client));
                 }

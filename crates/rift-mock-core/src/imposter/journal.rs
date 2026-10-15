@@ -2,9 +2,9 @@
 //! `RwLock<Vec<RecordedRequest>>` + `AtomicU64` counter, so embedders can substitute retention
 //! policies, spill-to-disk, or external sinks.
 //!
-//! The default [`LocalJournal`] is behavior-identical to the embedded storage it replaces:
-//! same 10k cap with oldest-first eviction, same count semantics (`clear` resets it,
-//! `retain` does not). A journal injected via
+//! The default [`LocalJournal`] keeps each port's entries under a byte budget with oldest-first
+//! eviction (issue #1441; a 10,000-entry count cap before it), with the same count semantics as the
+//! embedded storage it replaced (`clear` resets it, `retain` does not). A journal injected via
 //! [`ImposterManager::with_request_journal`](crate::imposter::ImposterManager::with_request_journal)
 //! is shared across imposters and keyed by port; imposter deletion clears its port slice so
 //! stale entries never resurrect on a later imposter reusing the port.
@@ -12,11 +12,30 @@
 use super::types::{MatchOutcome, RecordedRequest};
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-/// Cap on stored entries per port (issue #186); oldest evicted first.
-pub const MAX_RECORDED_REQUESTS: usize = 10_000;
+/// Default byte budget per port (issue #1441). Large enough to record, in full, any body the
+/// default body ceiling admits (#1439, 512 MiB): a binary body is journalled base64-encoded, so a
+/// ceiling-sized one costs about 683 MiB, plus its headers. Mountebank's journal is unbounded; a
+/// count cap of 10,000 entries could not bound memory once bodies may be hundreds of MiB.
+pub const DEFAULT_JOURNAL_MAX_BYTES: usize = 768 * 1024 * 1024;
+
+/// What an entry costs besides its strings, so entries with empty bodies are bounded too.
+const ENTRY_OVERHEAD: usize = 256;
+
+/// What an entry is charged against the budget: its body, path, header and query text, plus a
+/// fixed overhead. Computed once, at record time.
+pub fn entry_cost(req: &RecordedRequest) -> usize {
+    let headers: usize = req
+        .headers
+        .iter()
+        .map(|(name, values)| name.len() + values.iter().map(String::len).sum::<usize>())
+        .sum();
+    let query: usize = req.query.iter().map(|(k, v)| k.len() + v.len()).sum();
+    ENTRY_OVERHEAD + req.body.as_ref().map_or(0, String::len) + req.path.len() + headers + query
+}
 
 /// Result of reading a port's recorded requests.
 pub struct JournalRead {
@@ -167,7 +186,9 @@ struct PortSlot {
     /// time (issue #314: scoped clears must not re-derive flows from stored headers). A
     /// `VecDeque` so the oldest-first cap eviction is O(1) `pop_front` instead of an O(n)
     /// `Vec::remove(0)` shift (issue #289).
-    entries: RwLock<VecDeque<(u64, String, RecordedRequest)>>,
+    entries: RwLock<VecDeque<(u64, String, RecordedRequest, usize)>>,
+    /// The summed cost of `entries` (issue #1441), changed only under the `entries` write lock.
+    bytes: AtomicUsize,
     count: AtomicU64,
     /// Last index handed out for this port; 1-based, so 0 reads as "nothing recorded yet".
     /// Assigned under the `entries` write lock so index order always matches deque order.
@@ -183,15 +204,42 @@ struct PortSlot {
     /// connections, −55% in the #702 sweep). Deliberate deletions re-arm it, so each fill-up
     /// warns exactly once.
     cap_warned: AtomicBool,
+    /// Whether the "body larger than the whole budget" warning already fired for this port.
+    omit_warned: AtomicBool,
 }
 
-/// Reference journal with the exact semantics of the storage it replaced.
-#[derive(Default)]
+impl PortSlot {
+    /// Re-derive `bytes` after a deliberate deletion removed arbitrary entries.
+    fn recount(&self, entries: &VecDeque<(u64, String, RecordedRequest, usize)>) {
+        self.bytes
+            .store(entries.iter().map(|e| e.3).sum(), Ordering::SeqCst);
+    }
+}
+
+/// The default journal: each port's entries bounded by a byte budget, oldest evicted first.
 pub struct LocalJournal {
     ports: RwLock<HashMap<u16, Arc<PortSlot>>>,
+    max_bytes: NonZeroUsize,
+}
+
+impl Default for LocalJournal {
+    fn default() -> Self {
+        Self::with_max_bytes(
+            NonZeroUsize::new(DEFAULT_JOURNAL_MAX_BYTES).expect("the default budget is non-zero"),
+        )
+    }
 }
 
 impl LocalJournal {
+    /// A journal keeping at most `max_bytes` of recorded requests per port (issue #1441).
+    #[must_use]
+    pub fn with_max_bytes(max_bytes: NonZeroUsize) -> Self {
+        Self {
+            ports: RwLock::default(),
+            max_bytes,
+        }
+    }
+
     fn slot(&self, port: u16) -> Arc<PortSlot> {
         if let Some(slot) = self.ports.read().get(&port) {
             return Arc::clone(slot);
@@ -211,25 +259,49 @@ impl RequestJournal for LocalJournal {
 
     fn record_indexed(&self, port: u16, flow_id: &str, req: RecordedRequest) -> Option<u64> {
         let slot = self.slot(port);
-        // Allocated before taking the lock to keep the critical section minimal.
+        let max = self.max_bytes.get();
+        // Allocated and costed before taking the lock to keep the critical section minimal.
         let flow = flow_id.to_string();
+        let mut req = req;
+        let mut cost = entry_cost(&req);
+        // A body bigger than the whole budget is recorded without it — flagged, never dropped —
+        // so the request still shows up (issue #1441). The defaults leave room for a ceiling-sized
+        // binary body at its base64 size, so this needs a budget set below that.
+        if cost > max && req.body.is_some() {
+            if !slot.omit_warned.swap(true, Ordering::SeqCst) {
+                tracing::warn!(
+                    port,
+                    cost,
+                    max,
+                    "Recorded request is larger than the journal's byte budget; recording it \
+                     without its body (warned once per port)"
+                );
+            }
+            req.body = None;
+            req.body_omitted = true;
+            cost = entry_cost(&req);
+        }
         let mut entries = slot.entries.write();
-        if entries.len() >= MAX_RECORDED_REQUESTS {
+        while slot.bytes.load(Ordering::SeqCst) + cost > max {
+            let Some((evicted, _, _, evicted_cost)) = entries.pop_front() else {
+                break;
+            };
             if !slot.cap_warned.swap(true, Ordering::SeqCst) {
                 tracing::warn!(
                     port,
-                    max = MAX_RECORDED_REQUESTS,
-                    "Recorded requests cap reached; evicting oldest entries (warned once per fill-up)"
+                    max_bytes = max,
+                    "Recorded requests byte cap reached; evicting oldest entries (warned once per \
+                     fill-up)"
                 );
             }
-            if let Some((evicted, _, _)) = entries.pop_front() {
-                slot.evicted_through.store(evicted, Ordering::SeqCst);
-            }
+            slot.bytes.fetch_sub(evicted_cost, Ordering::SeqCst);
+            slot.evicted_through.store(evicted, Ordering::SeqCst);
         }
         // Assigned under the write lock: a fetch_add outside it could interleave with a
         // concurrent recorder and push entries in a different order than their indices.
         let index = slot.last_index.fetch_add(1, Ordering::SeqCst) + 1;
-        entries.push_back((index, flow, req));
+        entries.push_back((index, flow, req, cost));
+        slot.bytes.fetch_add(cost, Ordering::SeqCst);
         Some(index)
     }
 
@@ -240,7 +312,7 @@ impl RequestJournal for LocalJournal {
                 .entries
                 .read()
                 .iter()
-                .map(|(_, _, req)| req.clone())
+                .map(|(_, _, req, _)| req.clone())
                 .collect(),
             complete: true,
         }
@@ -254,8 +326,8 @@ impl RequestJournal for LocalJournal {
                 .entries
                 .read()
                 .iter()
-                .filter(|(_, _, req)| keep(req))
-                .map(|(_, _, req)| req.clone())
+                .filter(|(_, _, req, _)| keep(req))
+                .map(|(_, _, req, _)| req.clone())
                 .collect(),
             complete: true,
         }
@@ -274,9 +346,9 @@ impl RequestJournal for LocalJournal {
         Some(JournalReadSince {
             entries: entries
                 .iter()
-                .filter(|(index, _, _)| *index > cut)
-                .filter(|(_, _, req)| keep(req))
-                .map(|(index, _, req)| JournalEntry {
+                .filter(|(index, _, _, _)| *index > cut)
+                .filter(|(_, _, req, _)| keep(req))
+                .map(|(index, _, req, _)| JournalEntry {
                     index: *index,
                     request: req.clone(),
                 })
@@ -292,6 +364,7 @@ impl RequestJournal for LocalJournal {
         let slot = self.slot(port);
         let mut entries = slot.entries.write();
         entries.clear();
+        slot.bytes.store(0, Ordering::SeqCst);
         slot.count.store(0, Ordering::SeqCst);
         // A deliberate deletion starts a new fill-up, which deserves its own cap warning.
         // Re-armed while still holding the write lock, like the swap in `record_indexed`, so
@@ -303,14 +376,16 @@ impl RequestJournal for LocalJournal {
     fn retain(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) {
         let slot = self.slot(port);
         let mut entries = slot.entries.write();
-        entries.retain(|(_, _, req)| keep(req));
+        entries.retain(|(_, _, req, _)| keep(req));
+        slot.recount(&entries);
         slot.cap_warned.store(false, Ordering::SeqCst);
     }
 
     fn clear_flow(&self, port: u16, flow_id: &str) -> anyhow::Result<()> {
         let slot = self.slot(port);
         let mut entries = slot.entries.write();
-        entries.retain(|(_, flow, _)| flow != flow_id);
+        entries.retain(|(_, flow, _, _)| flow != flow_id);
+        slot.recount(&entries);
         slot.cap_warned.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -324,7 +399,7 @@ impl RequestJournal for LocalJournal {
         let mut entries = slot.entries.write();
         // Indices are assigned under this same write lock, so the deque is always in strictly
         // ascending index order — a binary search is exact here, not merely a heuristic.
-        if let Ok(position) = entries.binary_search_by(|(entry, _, _)| entry.cmp(&index)) {
+        if let Ok(position) = entries.binary_search_by(|(entry, _, _, _)| entry.cmp(&index)) {
             entries[position].2.match_outcome = Some(outcome);
         }
     }
@@ -334,7 +409,7 @@ impl RequestJournal for LocalJournal {
         let mut entries = slot.entries.write();
         // Same exactness as `attach_match`: indices are assigned under this write lock, so the
         // deque is in strictly ascending index order and the search is precise, not heuristic.
-        if let Ok(position) = entries.binary_search_by(|(entry, _, _)| entry.cmp(&index)) {
+        if let Ok(position) = entries.binary_search_by(|(entry, _, _, _)| entry.cmp(&index)) {
             entries[position].2.status = Some(status);
             entries[position].2.latency_ms = Some(latency_ms);
         }
@@ -346,8 +421,20 @@ mod tests {
     use super::*;
     use crate::imposter::ResponseMode;
 
+    /// How many fixed-cost entries [`capped`] holds.
+    const CAP: usize = 100;
+
+    /// A journal sized to hold exactly [`CAP`] entries of `req(&format!("/{i:05}"))`, whose
+    /// fixed-width paths make every entry cost the same.
+    fn capped() -> LocalJournal {
+        LocalJournal::with_max_bytes(
+            NonZeroUsize::new(CAP * entry_cost(&req("/00000"))).expect("non-zero"),
+        )
+    }
+
     fn req(path: &str) -> RecordedRequest {
         RecordedRequest {
+            body_omitted: false,
             mode: ResponseMode::Text,
             request_from: "t".into(),
             method: "GET".into(),
@@ -443,17 +530,131 @@ mod tests {
         assert_eq!((entries[0].status, entries[0].latency_ms), (None, None));
     }
 
-    // AC1: the 10k cap evicts oldest-first, exactly like the embedded Vec did.
+    // AC1: the cap evicts oldest-first, exactly like the embedded Vec did (by bytes since #1441).
     #[test]
-    fn local_caps_at_10k_evicting_oldest() {
-        let j = LocalJournal::default();
-        for i in 0..(MAX_RECORDED_REQUESTS + 10) {
-            j.record(1, "f", req(&format!("/{i}")));
+    fn local_caps_evicting_oldest() {
+        let j = capped();
+        for i in 0..(CAP + 10) {
+            j.record(1, "f", req(&format!("/{i:05}")));
         }
         let read = j.read(1);
-        assert_eq!(read.entries.len(), MAX_RECORDED_REQUESTS);
-        assert_eq!(read.entries[0].path, "/10", "oldest entries evicted first");
+        assert_eq!(read.entries.len(), CAP);
+        assert_eq!(
+            read.entries[0].path, "/00010",
+            "oldest entries evicted first"
+        );
         assert!(read.complete, "the local backend is always complete");
+    }
+
+    fn with_body(len: usize) -> RecordedRequest {
+        RecordedRequest {
+            body: Some("x".repeat(len)),
+            ..req("/b")
+        }
+    }
+
+    /// Issue #1441: the budget is bytes. Five 300 KiB bodies under 1 MiB keep the newest three.
+    #[test]
+    fn the_journal_evicts_by_bytes() {
+        let j = LocalJournal::with_max_bytes(NonZeroUsize::new(1024 * 1024).expect("non-zero"));
+        for _ in 0..5 {
+            j.record_indexed(1, "f", with_body(300 * 1024));
+        }
+        let read = cursor(&j, 1, None);
+        assert_eq!(indices(&read), vec![3, 4, 5], "the oldest two were evicted");
+        assert!(
+            cursor(&j, 1, Some(1)).truncated,
+            "a cursor at 1 lost entry 2"
+        );
+        assert!(!cursor(&j, 1, Some(2)).truncated);
+        let slot = j.slot(1);
+        assert!(slot.bytes.load(Ordering::SeqCst) <= 1024 * 1024);
+        assert_eq!(
+            slot.bytes.load(Ordering::SeqCst),
+            3 * entry_cost(&with_body(300 * 1024))
+        );
+    }
+
+    /// Issue #1441: there is no count cap any more, as in Mountebank.
+    #[test]
+    fn many_small_entries_are_all_kept() {
+        let j = LocalJournal::default();
+        for i in 0..20_000 {
+            j.record(1, "f", req(&format!("/{i}")));
+        }
+        assert_eq!(j.read(1).entries.len(), 20_000);
+    }
+
+    /// Issue #1441: a body larger than the whole budget is recorded without it, flagged, rather
+    /// than dropped — the request still shows up.
+    #[test]
+    fn a_body_larger_than_the_budget_is_recorded_without_it() {
+        let j = LocalJournal::with_max_bytes(NonZeroUsize::new(4096).expect("non-zero"));
+        j.record(1, "f", req("/small"));
+        j.record(1, "f", with_body(8192));
+        let entries = j.read(1).entries;
+        let big = entries.last().expect("recorded");
+        assert_eq!(big.path, "/b");
+        assert_eq!(big.body, None);
+        assert!(big.body_omitted);
+        assert!(!entries[0].body_omitted, "{entries:?}");
+    }
+
+    /// The default budget records a ceiling-sized body in full even at its base64 size, with room
+    /// for its headers, so `_bodyOmitted` never appears under the default limits.
+    #[test]
+    fn the_default_budget_holds_a_ceiling_sized_binary_body() {
+        let ceiling = crate::imposter::body_limits::DEFAULT_MAX_BODY_BYTES;
+        let base64 = ceiling.div_ceil(3) * 4;
+        assert!(DEFAULT_JOURNAL_MAX_BYTES >= base64 + 64 * 1024 * 1024);
+    }
+
+    /// `_bodyOmitted` is a Rift extension like `_mode`: absent unless set, so existing output is
+    /// byte-identical, and a recording from before it existed decodes as `false`.
+    #[test]
+    fn body_omitted_is_on_the_wire_only_when_set() {
+        let plain = serde_json::to_value(req("/a")).expect("serialize");
+        assert!(plain.get("_bodyOmitted").is_none(), "{plain}");
+        let omitted = serde_json::to_value(RecordedRequest {
+            body_omitted: true,
+            ..req("/a")
+        })
+        .expect("serialize");
+        assert_eq!(omitted["_bodyOmitted"], serde_json::json!(true));
+        let mut old = plain;
+        old.as_object_mut().expect("object").remove("_bodyOmitted");
+        let decoded: RecordedRequest = serde_json::from_value(old).expect("decode");
+        assert!(!decoded.body_omitted);
+    }
+
+    /// Deliberate deletions give their bytes back, so the next fill-up has the whole budget.
+    #[test]
+    fn deletions_return_their_bytes() {
+        let j = capped();
+        for i in 0..CAP {
+            j.record(
+                1,
+                if i % 2 == 0 { "a" } else { "b" },
+                req(&format!("/{i:05}")),
+            );
+        }
+        j.clear_flow(1, "a").expect("clear_flow");
+        assert_eq!(
+            j.slot(1).bytes.load(Ordering::SeqCst),
+            (CAP / 2) * entry_cost(&req("/00000"))
+        );
+        j.retain(1, &|_| false);
+        assert_eq!(j.slot(1).bytes.load(Ordering::SeqCst), 0);
+        for i in 0..CAP {
+            j.record(1, "f", req(&format!("/{i:05}")));
+        }
+        assert_eq!(
+            j.read(1).entries.len(),
+            CAP,
+            "the whole budget is free again"
+        );
+        j.clear(1).expect("clear");
+        assert_eq!(j.slot(1).bytes.load(Ordering::SeqCst), 0);
     }
 
     // Issue #485: read_filtered returns only entries matching the predicate (same result as
@@ -500,16 +701,16 @@ mod tests {
     // a diagnostic annotation must never panic, and must never scribble on a neighbouring entry.
     #[test]
     fn attach_match_on_an_absent_entry_is_a_no_op() {
-        let j = LocalJournal::default();
-        for i in 0..(MAX_RECORDED_REQUESTS + 5) {
-            j.record_indexed(1, "f", req(&format!("/{i}")));
+        let j = capped();
+        for i in 0..(CAP + 5) {
+            j.record_indexed(1, "f", req(&format!("/{i:05}")));
         }
         // Indices 1..=5 fell off the front; 6 is the oldest retained.
         j.attach_match(1, 1, outcome());
         j.attach_match(9999, 1, outcome());
 
         let entries = j.read(1).entries;
-        assert_eq!(entries.len(), MAX_RECORDED_REQUESTS);
+        assert_eq!(entries.len(), CAP);
         assert!(
             entries.iter().all(|r| r.match_outcome.is_none()),
             "attaching to an evicted index must not land on any surviving entry"
@@ -725,15 +926,15 @@ mod tests {
     // not yet seen.
     #[test]
     fn cursor_truncated_only_on_eviction_past_cursor() {
-        let j = LocalJournal::default();
-        for i in 0..(MAX_RECORDED_REQUESTS + 10) {
-            j.record_indexed(1, "f", req(&format!("/{i}")));
+        let j = capped();
+        for i in 0..(CAP + 10) {
+            j.record_indexed(1, "f", req(&format!("/{i:05}")));
         }
         // Indices 1..=10 were evicted; the oldest retained is 11.
         let read = cursor(&j, 1, None);
-        assert_eq!(read.entries.len(), MAX_RECORDED_REQUESTS);
+        assert_eq!(read.entries.len(), CAP);
         assert_eq!(indices(&read)[0], 11, "oldest surviving index");
-        assert_eq!(read.next, (MAX_RECORDED_REQUESTS + 10) as u64);
+        assert_eq!(read.next, (CAP + 10) as u64);
 
         assert!(
             cursor(&j, 1, Some(5)).truncated,
@@ -765,9 +966,9 @@ mod tests {
     // question, and the difference is the whole point of the flag.
     #[test]
     fn cursor_since_zero_differs_from_baseline_only_in_truncation() {
-        let j = LocalJournal::default();
-        for i in 0..(MAX_RECORDED_REQUESTS + 3) {
-            j.record_indexed(1, "f", req(&format!("/{i}")));
+        let j = capped();
+        for i in 0..(CAP + 3) {
+            j.record_indexed(1, "f", req(&format!("/{i:05}")));
         }
 
         let baseline = cursor(&j, 1, None);
@@ -891,9 +1092,9 @@ mod tests {
     #[test]
     #[tracing_test::traced_test]
     fn cap_warns_once_per_fill_not_per_eviction() {
-        let j = LocalJournal::default();
-        for i in 0..(MAX_RECORDED_REQUESTS + 100) {
-            j.record(1, "f", req(&format!("/{i}")));
+        let j = capped();
+        for i in 0..(CAP + 100) {
+            j.record(1, "f", req(&format!("/{i:05}")));
         }
         logs_assert(|lines: &[&str]| {
             let n = lines.iter().filter(|l| l.contains("cap reached")).count();
@@ -910,10 +1111,10 @@ mod tests {
     #[test]
     #[tracing_test::traced_test]
     fn cap_warning_rearms_after_deliberate_deletions() {
-        let j = LocalJournal::default();
+        let j = capped();
         let fill = |j: &LocalJournal| {
-            for i in 0..(MAX_RECORDED_REQUESTS + 5) {
-                j.record(1, "f", req(&format!("/{i}")));
+            for i in 0..(CAP + 5) {
+                j.record(1, "f", req(&format!("/{i:05}")));
             }
         };
         fill(&j); // 5 evictions → 1 warning
@@ -941,10 +1142,10 @@ mod tests {
     #[test]
     #[tracing_test::traced_test]
     fn cap_warning_is_independent_per_port() {
-        let j = LocalJournal::default();
+        let j = capped();
         for port in [1u16, 2] {
-            for i in 0..(MAX_RECORDED_REQUESTS + 5) {
-                j.record(port, "f", req(&format!("/{i}")));
+            for i in 0..(CAP + 5) {
+                j.record(port, "f", req(&format!("/{i:05}")));
             }
         }
         logs_assert(|lines: &[&str]| {

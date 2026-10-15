@@ -247,6 +247,15 @@ record.
 
 ### Changed
 
+- **The request journal is bounded by bytes, not 10,000 entries** (#1441). Each imposter keeps up
+  to `--journal-max-bytes` / `RIFT_JOURNAL_MAX_BYTES` / `journalMaxBytes` (default 768 MiB) of
+  recorded requests, oldest evicted first; the count cap is gone, as in Mountebank. A request whose
+  body is larger than the whole budget is recorded without the body and flagged
+  `"_bodyOmitted": true`. `x-rift-truncated` now reports byte-budget eviction. Embedders:
+  `RecordedRequest` gains a `body_omitted` field (source-breaking for struct literals), and
+  `MAX_RECORDED_REQUESTS` is replaced by `DEFAULT_JOURNAL_MAX_BYTES` and
+  `ImposterManager::with_journal_max_bytes`.
+
 - **Body limits rise to Mountebank's ceiling, behind a shared memory budget** (#1439). The largest
   imposter request, proxied upstream response and admin body accepted goes from 10 MiB (64 MiB for
   admin) to 512 MiB, the point past which Mountebank crashes; over it is still `413`. A new

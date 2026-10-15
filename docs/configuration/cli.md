@@ -198,6 +198,7 @@ Server options:
       --upstream-tls-skip-verify   Accept any certificate on outbound TLS (development only; prefer --upstream-ca-file)
       --max-body-size <BYTES>      Largest request, admin or proxied-response body accepted; over it is a 413 (default 536870912, 512 MiB)
       --body-memory-budget <BYTES>  Memory shared by every body buffered at once; used up, a request gets 503 + Retry-After (default 1073741824, 1 GiB; 0 = unbounded)
+      --journal-max-bytes <BYTES>  Bytes of recorded requests kept per imposter, oldest evicted first (default 805306368, 768 MiB)
       --intercept-port <PORT>      Start the TLS-MITM intercept/redirect proxy on this port (epic #394); off when unset
       --intercept-auth <USER:PASS>  Require Proxy-Authorization: Basic on every CONNECT to the intercept proxy; open when unset
       --intercept-ca-cert <FILE>   PEM CA certificate for interception (with --intercept-ca-key); a CA is generated if omitted
@@ -519,6 +520,7 @@ wins over the built-in default (and over an `--rcfile` value — see [RC file](#
 | `RIFT_UPSTREAM_CA_FILE` | Extra CA certificate(s) (PEM **file**) trusted for outbound TLS — `proxy` stubs and `--configfile` URLs. **Appended** to the OS trust store | |
 | `RIFT_UPSTREAM_TLS_SKIP_VERIFY` | Accept any certificate on outbound TLS (`true`/`false`); development only | `false` |
 | `RIFT_MAX_BODY_SIZE` | Largest request, admin or proxied-response body accepted, in bytes (env alias of `--max-body-size`); over it is a `413` | `536870912` |
+| `RIFT_JOURNAL_MAX_BYTES` | Bytes of recorded requests each imposter keeps, oldest evicted first (env alias of `--journal-max-bytes`); a body larger than the whole budget is recorded without it and flagged `_bodyOmitted` | `805306368` |
 | `RIFT_BODY_MEMORY_BUDGET` | Memory, in bytes, shared by every body buffered at once (env alias of `--body-memory-budget`); used up, a request gets `503` + `Retry-After`. At least `RIFT_MAX_BODY_SIZE`; `0` = unbounded | `1073741824` |
 | `RIFT_INTERCEPT_PORT` | Start the intercept/TLS-MITM proxy on this port (epic #394) | |
 | `RIFT_INTERCEPT_AUTH` | `user:pass` required in `Proxy-Authorization` on every `CONNECT` to the intercept proxy (env alias of `--intercept-auth`); open when unset | |

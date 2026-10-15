@@ -64,4 +64,5 @@ pub const SERVE_OPTION_KEYS: &[&str] = &[
     "upstreamTlsSkipVerify",
     "maxBodySize",
     "bodyMemoryBudget",
+    "journalMaxBytes",
 ];

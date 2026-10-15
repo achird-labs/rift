@@ -3143,6 +3143,7 @@ fn ffi_a_document_using_every_advertised_option_still_serves() {
                 "upstreamTlsSkipVerify" => serde_json::json!(false),
                 "maxBodySize" => serde_json::json!(1_048_576),
                 "bodyMemoryBudget" => serde_json::json!(2_097_152),
+                "journalMaxBytes" => serde_json::json!(4_194_304),
                 other => {
                     panic!("unhandled advertised serve option `{other}` — extend this fixture")
                 }
