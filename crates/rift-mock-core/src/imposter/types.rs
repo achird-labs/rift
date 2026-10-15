@@ -30,6 +30,15 @@ pub struct RecordedRequest {
     pub headers: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// The body was larger than the journal's whole byte budget, so the request was recorded
+    /// without it rather than dropped (issue #1441). A Rift extension, like `_mode`: absent (and
+    /// `false`) for every request recorded with its body, so existing output is unchanged.
+    #[serde(
+        rename = "_bodyOmitted",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub body_omitted: bool,
     /// Whether `body` is UTF-8 text or a base64-encoded binary body (issue #636), mirroring
     /// `IsResponse::mode` (issue #117). `#[serde(default)]` so recordings from before this field
     /// existed deserialize as `Text`; omitted on serialize for a text body so recordings and
@@ -88,9 +97,9 @@ pub struct RecordedRequest {
 /// [`MatchOutcome::tried_omitted`].
 ///
 /// An outcome rides on every journal entry and the journal ring holds
-/// [`MAX_RECORDED_REQUESTS`](crate::imposter::MAX_RECORDED_REQUESTS) (10k) entries per port, so an
-/// uncapped list would let one imposter with a few hundred stubs multiply the journal's footprint
-/// by that stub count. Twenty-five is well past the point where reading the list by hand stops
+/// up to [`DEFAULT_JOURNAL_MAX_BYTES`](crate::imposter::DEFAULT_JOURNAL_MAX_BYTES) of entries per
+/// port, so an uncapped list would let one imposter with a few hundred stubs multiply the journal's
+/// footprint by that stub count. Twenty-five is well past the point where reading the list by hand stops
 /// being how you diagnose a miss.
 pub const MAX_TRIED_STUBS: usize = 25;
 
@@ -4818,6 +4827,7 @@ mod tests {
     #[test]
     fn an_unannotated_recording_omits_the_outcome_fields() {
         let req = RecordedRequest {
+            body_omitted: false,
             request_from: "127.0.0.1:1234".to_string(),
             method: "GET".to_string(),
             path: "/x".to_string(),
@@ -4845,6 +4855,7 @@ mod tests {
 
         // And when they are set, they are plain fields the console can read.
         let annotated = RecordedRequest {
+            body_omitted: false,
             status: Some(503),
             latency_ms: Some(42),
             node: Some("rift-2".to_string()),
@@ -4862,6 +4873,7 @@ mod tests {
     #[test]
     fn recorded_request_text_body_omits_mode_field() {
         let req = RecordedRequest {
+            body_omitted: false,
             request_from: "127.0.0.1:1234".to_string(),
             method: "POST".to_string(),
             path: "/x".to_string(),
@@ -4888,6 +4900,7 @@ mod tests {
     #[test]
     fn recorded_request_binary_body_carries_mode_field() {
         let req = RecordedRequest {
+            body_omitted: false,
             request_from: "127.0.0.1:1234".to_string(),
             method: "POST".to_string(),
             path: "/x".to_string(),
@@ -4913,6 +4926,7 @@ mod tests {
     #[test]
     fn recorded_request_without_match_outcome_serializes_unchanged() {
         let req = RecordedRequest {
+            body_omitted: false,
             request_from: "127.0.0.1:1234".to_string(),
             method: "POST".to_string(),
             path: "/x".to_string(),

@@ -61,7 +61,7 @@ pub use script_resolve::{
 #[allow(unused_imports)]
 pub mod journal;
 pub use journal::{
-    JournalEntry, JournalRead, JournalReadSince, LocalJournal, MAX_RECORDED_REQUESTS,
+    DEFAULT_JOURNAL_MAX_BYTES, JournalEntry, JournalRead, JournalReadSince, LocalJournal,
     RequestJournal,
 };
 

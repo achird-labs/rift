@@ -866,6 +866,7 @@ async fn handle_request_inner(
     // indices.
     *journal_index = if imposter.config.record_requests {
         let recorded = RecordedRequest {
+            body_omitted: false,
             request_from: client_addr.to_string(),
             method: method.clone(),
             path: path.clone(),

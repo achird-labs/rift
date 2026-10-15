@@ -281,6 +281,9 @@ struct ServeOptions {
     /// request gets 503 with `Retry-After`. At least `maxBodySize`; `0` is unbounded. Default
     /// 1073741824 (1 GiB).
     body_memory_budget: Option<usize>,
+    /// Bytes of recorded requests each imposter keeps, oldest evicted first (issue #1441).
+    /// Default 805306368 (768 MiB).
+    journal_max_bytes: Option<usize>,
 }
 
 /// Parse `{"imposters":[...]}` or a bare `[...]` into imposter configs (the reload input shape).
@@ -2095,6 +2098,10 @@ async fn build_admin_plane_inner(
         .context("maxBodySize / bodyMemoryBudget")?;
         handle.manager.set_body_limits(limits);
     }
+    if let Some(max) = opts.journal_max_bytes {
+        let max = std::num::NonZeroUsize::new(max).context("journalMaxBytes must be at least 1")?;
+        handle.manager.set_journal_max_bytes(max);
+    }
     // Outbound TLS trust policy (issue #974), before any imposter exists: imposters read the
     // client when they are created, and a bad anchor must fail this call rather than surface later
     // as a per-request proxy error. Both spellings of the anchor are accepted, but not together —
@@ -2421,6 +2428,7 @@ mod build_admin_plane_chain_tests {
             upstream_tls_skip_verify: None,
             max_body_size: None,
             body_memory_budget: None,
+            journal_max_bytes: None,
         };
         let Err(err) = handle.runtime.block_on(build_admin_plane(&handle, &opts)) else {
             panic!("a missing configFile must fail the admin build");
@@ -2716,6 +2724,7 @@ mod serve_option_capability_tests {
             "upstreamTlsSkipVerify": false,
             "maxBodySize": 1048576,
             "bodyMemoryBudget": 2097152,
+            "journalMaxBytes": 4194304,
         });
         assert_eq!(
             full.as_object().expect("object").len(),

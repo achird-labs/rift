@@ -2062,8 +2062,10 @@ mod tests {
             record_requests: true,
             ..Default::default()
         };
-        let imposter = Imposter::new(config).expect("test imposter");
+        // A budget of exactly 100 of the entries below (issue #1441: bytes, not a count).
+        let budget = 100;
         let req = RecordedRequest {
+            body_omitted: false,
             mode: ResponseMode::Text,
             request_from: "127.0.0.1".to_string(),
             method: "GET".to_string(),
@@ -2078,16 +2080,21 @@ mod tests {
             node: None,
         };
 
-        use crate::imposter::journal::MAX_RECORDED_REQUESTS;
-        for _ in 0..MAX_RECORDED_REQUESTS + 10 {
+        let per_entry = crate::imposter::journal::entry_cost(&req);
+        let journal = Arc::new(crate::imposter::journal::LocalJournal::with_max_bytes(
+            std::num::NonZeroUsize::new(budget * per_entry).expect("non-zero"),
+        ));
+        let imposter = Imposter::new_with_hooks_and_journal(config, None, None, Some(journal))
+            .expect("test imposter");
+        for _ in 0..budget + 10 {
             imposter.record_request(req.clone());
         }
 
         let recorded = imposter.get_recorded_requests();
         assert_eq!(
             recorded.len(),
-            MAX_RECORDED_REQUESTS,
-            "Recorded requests must not exceed the cap"
+            budget,
+            "Recorded requests must not exceed the byte budget"
         );
     }
 
@@ -2107,6 +2114,7 @@ mod tests {
             let mut headers = std::collections::HashMap::new();
             headers.insert("X-Mock-Space".to_string(), vec![space.to_string()]);
             RecordedRequest {
+                body_omitted: false,
                 mode: ResponseMode::Text,
                 request_from: "127.0.0.1".to_string(),
                 method: "GET".to_string(),

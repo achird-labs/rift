@@ -101,6 +101,16 @@ with `Retry-After` when the bodies buffered at once would exceed `--body-memory-
 1 GiB), where Mountebank would run out of heap. Below those limits the two serve the same bodies.
 See [Body size limits]({{ site.baseurl }}/configuration/cli/#body-size-limits).
 
+## Recorded requests are bounded by bytes
+
+Mountebank's request journal grows without limit. Rift keeps each imposter's recorded requests
+under a byte budget, `--journal-max-bytes` (default 768 MiB), evicting the oldest first; there is
+no count limit, so small requests are kept in any number. The default holds any body the body
+ceiling admits, even a binary one, which is journalled base64-encoded (a third larger). A body
+larger than the whole budget (possible only with a budget set lower) is recorded without its body
+and flagged `"_bodyOmitted": true`, never dropped.
+A cursor read past evicted entries reports it with `x-rift-truncated`.
+
 ## keyCaseSensitive is honoured as written
 
 Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`. Three consequences:

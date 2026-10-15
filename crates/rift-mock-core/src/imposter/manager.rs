@@ -341,6 +341,10 @@ pub struct ImposterManager {
     sequencer: Option<Arc<dyn ResponseSequencer>>,
     /// Pluggable recorded-request backend (issue #314); None = per-imposter LocalJournal.
     request_journal: Option<Arc<dyn RequestJournal>>,
+    /// Byte budget for each imposter's own `LocalJournal` (issue #1441); `0` keeps the default. An
+    /// atomic for the same reason `upstream_client` is an `ArcSwap`: the C-ABI sets it after the
+    /// manager exists. Ignored when a shared journal is injected — that one keeps its own policy.
+    journal_max_bytes: std::sync::atomic::AtomicUsize,
     /// Pluggable proxy-recording backend (issue #315); None = per-imposter LocalProxyStore.
     proxy_store: Option<Arc<dyn ProxyRecordingStore>>,
     /// Client every `proxy` stub dials upstream with (issue #974); empty = the process-wide default
@@ -406,6 +410,7 @@ impl ImposterManager {
             flow_store_backends: crate::extensions::flow_state::FlowStoreBackends::new(),
             sequencer: None,
             request_journal: None,
+            journal_max_bytes: std::sync::atomic::AtomicUsize::new(0),
             proxy_store: None,
             upstream_client: ArcSwapOption::empty(),
             body_guard: ArcSwap::from_pointee(super::body_limits::BodyGuard::default()),
@@ -539,9 +544,25 @@ impl ImposterManager {
         self
     }
 
+    /// Bound each imposter's recorded requests to `max_bytes` (issue #1441), oldest evicted first.
+    /// Builder form of [`Self::set_journal_max_bytes`].
+    #[must_use]
+    pub fn with_journal_max_bytes(self, max_bytes: std::num::NonZeroUsize) -> Self {
+        self.set_journal_max_bytes(max_bytes);
+        self
+    }
+
+    /// Set the journal byte budget on an already-constructed manager (issue #1441). Imposters
+    /// read it when they are created; those that already exist keep theirs. Has no effect on a
+    /// journal injected with [`Self::with_request_journal`].
+    pub fn set_journal_max_bytes(&self, max_bytes: std::num::NonZeroUsize) {
+        self.journal_max_bytes
+            .store(max_bytes.get(), std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Register a pluggable recorded-request backend (issue #314), shared across imposters
     /// and keyed by port. Without one, each imposter keeps a private in-memory journal with
-    /// the historical semantics (10k cap, clear-resets-count). Imposter deletion clears the
+    /// a byte budget (see [`Self::with_journal_max_bytes`]) and clear-resets-count semantics. Imposter deletion clears the
     /// port's slice so stale entries never resurrect on a later imposter reusing the port.
     ///
     /// Caveat: deletion lets in-flight requests drain naturally, so a request completing
@@ -909,11 +930,23 @@ impl ImposterManager {
             info!("Imposter bound to {}:{}", bind_host, port);
         }
         // Create imposter
+        // A private journal per imposter unless one is shared, sized by the manager's byte
+        // budget when one is set (issue #1441).
+        let journal = self.request_journal.clone().or_else(|| {
+            std::num::NonZeroUsize::new(
+                self.journal_max_bytes
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            )
+            .map(|max| {
+                Arc::new(super::journal::LocalJournal::with_max_bytes(max))
+                    as Arc<dyn RequestJournal>
+            })
+        });
         let mut imposter = Imposter::new_with_hooks_journal_and_backends(
             config,
             self.flow_store_provider.as_ref(),
             self.sequencer.clone(),
-            self.request_journal.clone(),
+            journal,
             &self.flow_store_backends,
         )
         .map_err(|e| ImposterError::FlowStoreConfig(format!("{e:#}")))?;
@@ -3598,6 +3631,7 @@ mod tests {
 
     fn recorded(path: &str) -> RecordedRequest {
         RecordedRequest {
+            body_omitted: false,
             mode: ResponseMode::Text,
             request_from: "127.0.0.1".to_string(),
             method: "GET".to_string(),

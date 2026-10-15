@@ -158,6 +158,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert(name.to_string(), vec![value.to_string()]);
         RecordedRequest {
+            body_omitted: false,
             mode: ResponseMode::Text,
             request_from: "127.0.0.1".to_string(),
             method: "GET".to_string(),
