@@ -22,7 +22,6 @@ use std::sync::Arc;
 /// A stub whose `proxy.injectHeaders` names one header twice, differing only in case.
 fn duplicate_inject_headers() -> serde_json::Value {
     serde_json::json!({
-        "port": 22800,
         "protocol": "http",
         "stubs": [{"responses": [{"proxy": {
             "to": "http://127.0.0.1:1",
@@ -71,8 +70,10 @@ async fn posting_a_duplicate_named_header_is_refused_with_an_actionable_400() {
         .text()
         .await
         .expect("body");
-    assert!(
-        !listed.contains("22800"),
+    let listed: serde_json::Value = serde_json::from_str(&listed).expect("list is json");
+    assert_eq!(
+        listed["imposters"].as_array().map(Vec::len),
+        Some(0),
         "a refused document must leave no imposter behind: {listed}"
     );
 }

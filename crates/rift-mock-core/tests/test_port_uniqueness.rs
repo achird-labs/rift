@@ -1,56 +1,28 @@
-//! Issue #1036: every fixed test port belongs to exactly one file.
+//! Issues #1036 and #1438: tests do not write fixed ports.
 //!
-//! # Why this is a real failure mode, and why it is invisible
+//! # Why
 //!
-//! The issue that prompted this guard blamed `cargo test` for running test *binaries*
-//! concurrently. It does not — measured: three `tests/*.rs` binaries each sleeping 3s ran strictly
-//! back-to-back. Cargo parallelises `#[test]` functions *within* a binary, never across binaries.
-//! Two mechanisms do produce real collisions:
+//! A fixed port is bound twice whenever the same test binary runs twice at once: `ship-issues`
+//! worktrees building side by side, `--lib` and `--tests` in two terminals, or two loops of one
+//! file. (`cargo test` itself runs binaries one after another; it parallelises `#[test]`
+//! functions within one.) Nothing announces the collision. Imposter listeners bind with
+//! `SO_REUSEADDR` **and** `SO_REUSEPORT` (`proxy/network.rs`), so both binds succeed and the kernel
+//! load-balances: the loser gets the *other* imposter's response and fails on a decode or status
+//! mismatch pointing nowhere near the cause (#999, #1397). Unique ports per file (#1036) cannot
+//! prevent that, so tests take a port from the manager or the OS instead (CONTRIBUTING, "Fixed
+//! test ports"), and this guard refuses any literal in the old fixed-port block.
 //!
-//! 1. **Concurrent `cargo` invocations on one machine.** `ship-issues` worktrees building side by
-//!    side, or `--lib` and `--tests` in two terminals — which is also how CI runs them, on
-//!    different runners. This is what bit #999.
-//! 2. **Two tests in one file sharing a literal**, since those *do* run on a thread pool together.
-//!
-//! Neither announces itself. Imposter listeners bind with `SO_REUSEADDR` **and** `SO_REUSEPORT`
-//! (`proxy/network.rs`), and the in-manager duplicate check is per-`ImposterManager`, so two binds
-//! on one port both succeed and the kernel load-balances between them. The loser does not get
-//! `AddrInUse`; it gets the *other* imposter's response, and fails on a decode or a status
-//! mismatch that points nowhere near the real cause. CI being green is not evidence a port is free
-//! — which is exactly why this has to be a static check rather than something a test run finds.
-//!
-//! # Scope
-//!
-//! This enforces **cross-file** uniqueness only. Two tests in the *same* file sharing a literal is
-//! mechanism (2) above and is deliberately not caught here: a port in a shared helper is
-//! legitimate, and there is no way to tell the two apart from the literal alone. That stays a
-//! review rule.
-//!
-//! Modelled on `no_blanket_dead_code_allow.rs`, including its anti-vacuity floors — a guard whose
-//! matcher silently stopped matching would pass forever.
+//! Modelled on `no_blanket_dead_code_allow.rs`, including an anti-vacuity floor and a test pinning
+//! the matcher — a guard whose matcher silently stopped matching would pass forever.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// The sanctioned block for fixed test ports.
-///
-/// Bounded **below** `find_available_port`'s 49152 floor so a fixed port can never be handed out
-/// as an auto-assigned one, and above the privileged range.
+/// The block fixed test ports used to be taken from (#1036), now refused outright (#1438).
 const PORT_LO: u16 = 15000;
 const PORT_HI: u16 = 24999;
 
-/// Blocks owned by one file because it derives ports from a counter base rather than writing each
-/// literal — so a literal from another file landing inside one is a collision the plain
-/// one-file-per-port rule cannot see.
-const RESERVED: &[(u16, u16, &str)] = &[
-    (18000, 18021, "rift_extensions.rs"),
-    (19000, 19091, "mountebank_compatibility.rs"),
-    (15100, 15299, "apply_config_bench.rs"),
-    (20100, 20199, "compat_rift_only.rs"),
-];
-
-/// Ports allowed in more than one file, with the reason. Keep this list short: a growing one means
-/// the rule is not being followed rather than that the rule is wrong.
+/// Literals in the block that are not ports, with the reason. Keep this list short: a number that is
+/// not a port is better written with a separator (`20_000`), which the matcher skips.
 const EXCEPTIONS: &[(&str, &str)] = &[(
     "15000",
     "a lint fixture URL (`http://localhost:15000`) in rift-lint's I002 rule and its test — parsed \
@@ -150,84 +122,40 @@ fn rel(path: &Path) -> String {
 }
 
 #[test]
-fn every_fixed_test_port_belongs_to_exactly_one_file() {
+fn no_test_writes_a_fixed_port() {
     let files = rust_sources();
-    let mut owners: HashMap<u16, Vec<(String, usize)>> = HashMap::new();
-    for path in &files {
-        let text = std::fs::read_to_string(path).expect("read source");
-        for (port, line) in port_literals(&text) {
-            let entry = owners.entry(port).or_default();
-            if !entry.iter().any(|(f, _)| f == &rel(path)) {
-                entry.push((rel(path), line));
-            }
-        }
-    }
-
-    // Anti-vacuity: if the walk or the matcher silently stopped working, every assertion below
-    // would pass on an empty set. These floors are well under the real numbers (219 files, 395
-    // ports at the time of writing) so ordinary churn cannot trip them.
+    // Anti-vacuity: if the walk silently stopped finding files, the assertion below would pass on
+    // nothing. Well under the real number so ordinary churn cannot trip it.
     assert!(
         files.len() > 100,
         "expected to scan >100 Rust sources, found {} — the walk is broken, and a guard that \
          scans nothing passes forever",
         files.len()
     );
-    assert!(
-        owners.len() > 200,
-        "expected >200 distinct port literals, found {} — the matcher is broken",
-        owners.len()
-    );
 
-    let exempt: HashMap<u16, &str> = EXCEPTIONS
+    let exempt: Vec<u16> = EXCEPTIONS
         .iter()
-        .map(|(p, why)| (p.parse().expect("exception port parses"), *why))
+        .map(|(p, _)| p.parse().expect("exception port parses"))
         .collect();
-
-    let mut shared: Vec<String> = owners
-        .iter()
-        .filter(|(port, files)| files.len() > 1 && !exempt.contains_key(port))
-        .map(|(port, files)| {
-            let where_ = files
-                .iter()
-                .map(|(f, l)| format!("{f}:{l}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("  {port}: {where_}")
-        })
-        .collect();
-    shared.sort();
-
-    assert!(
-        shared.is_empty(),
-        "these fixed ports appear in more than one file, so two concurrent `cargo` runs can bind \
-         each one twice — and SO_REUSEPORT means neither gets AddrInUse, they just serve each \
-         other's traffic:\n{}\n\nGive each file its own port, or prefer an auto-assigned one: \
-         `create_imposter` returns the bound port, and the listeners expose `local_addr()`.",
-        shared.join("\n")
-    );
-
-    // A literal inside a counter-owned block is a collision even if it appears in only one other
-    // file, because the owning file's ports are computed rather than written.
-    let mut trespass: Vec<String> = Vec::new();
-    for (port, locations) in &owners {
-        for (lo, hi, owner) in RESERVED {
-            if (*lo..=*hi).contains(port) {
-                for (file, line) in locations {
-                    if !file.ends_with(owner) {
-                        trespass.push(format!(
-                            "  {port} at {file}:{line} is inside {lo}-{hi}, owned by {owner}"
-                        ));
-                    }
-                }
+    let mut found: Vec<String> = Vec::new();
+    for path in &files {
+        let text = std::fs::read_to_string(path).expect("read source");
+        for (port, line) in port_literals(&text) {
+            if !exempt.contains(&port) {
+                found.push(format!("  {}:{line}: {port}", rel(path)));
             }
         }
     }
-    trespass.sort();
     assert!(
-        trespass.is_empty(),
-        "these literals fall inside a range another file allocates from a counter:\n{}",
-        trespass.join("\n")
-    );
+        found.is_empty(),
+        "tests do not write fixed ports: two concurrent runs of one binary bind each twice, and \
+         SO_REUSEPORT means neither gets AddrInUse — they serve each other's traffic (#1438). Omit \
+         the port and use what `create_imposter` returns, bind `127.0.0.1:0` for a listener the \
+         test owns, or use `free_port()` when the port must be written into text first (see \
+         CONTRIBUTING, \"Fixed test ports\"). A number here that is not a port: write it as \
+         `20_000`.\n{}",
+        found.join("\n")
+    )
 }
 
 /// Pins the matcher itself. Without this, a matcher that quietly stopped recognising ports would

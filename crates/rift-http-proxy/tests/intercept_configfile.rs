@@ -11,6 +11,15 @@ use rift_http_proxy::server::{Cli, ServerBuilder};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// A port that has to be written into the config text before anything binds it.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind an ephemeral port")
+        .local_addr()
+        .expect("local addr")
+        .port()
+}
+
 fn write_config(dir: &tempfile::TempDir, body: &str) -> PathBuf {
     let path = dir.path().join("config.json");
     let mut f = std::fs::File::create(&path).expect("create config");
@@ -154,19 +163,22 @@ async fn configfile_intercept_block_serves_without_any_admin_call() {
 #[tokio::test]
 async fn configfile_intercept_block_forwards_to_a_declared_imposter() {
     let dir = tempfile::tempdir().unwrap();
+    let imposter_port = free_port();
     let path = write_config(
         &dir,
-        r#"{
-            "imposters": [
-                { "port": 24655, "protocol": "http", "name": "datafile",
-                  "stubs": [{ "responses": [{ "is": { "statusCode": 200,
-                                                      "body": "{\"flag\":\"from-imposter\"}" } }] }] }
-            ],
+        &serde_json::json!({
+            "imposters": [{
+                "port": imposter_port, "protocol": "http", "name": "datafile",
+                "stubs": [{ "responses": [{ "is": { "statusCode": 200,
+                                                    "body": "{\"flag\":\"from-imposter\"}" } }] }]
+            }],
             "intercept": {
                 "port": 0,
-                "rules": [{ "host": "cdn.example.com", "action": { "forward": { "port": 24655 } } }]
+                "rules": [{ "host": "cdn.example.com",
+                            "action": { "forward": { "port": imposter_port } } }]
             }
-        }"#,
+        })
+        .to_string(),
     );
 
     let server = ServerBuilder::from_cli(cli_with_config(&path, &[]))
@@ -266,7 +278,7 @@ async fn runtime_admin_rules_layer_on_top_of_the_seeded_set() {
 #[tokio::test]
 async fn configfile_without_intercept_block_leaves_listener_off() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_config(&dir, r#"{"imposters":[{"port":24656,"protocol":"http"}]}"#);
+    let path = write_config(&dir, r#"{"imposters":[{"protocol":"http"}]}"#);
     let server = ServerBuilder::from_cli(cli_with_config(&path, &[]))
         .start()
         .await

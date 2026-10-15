@@ -3,24 +3,25 @@
 //! validation over HTTP, `_rift` fault headers / empty `_rift`, inject header casing, and
 //! `_rift.warnings`.
 //!
-//! Each test spawns its own server on a private port slot (admin, imposter, backend) taken from
-//! the block reserved for this file in `test_port_uniqueness.rs`.
+//! Each test spawns its own server on three distinct OS-chosen ports (admin, imposter, backend),
+//! so concurrent runs of this binary never share one.
 
 mod support;
 
 use reqwest::{Client, Response};
 use serde_json::{Value, json};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tokio::time::sleep;
 
 const HOST: &str = "http://127.0.0.1";
-const PORT_BASE: u16 = 20100;
-const SLOT: u16 = 3;
-/// Last port of this file's block in `test_port_uniqueness.rs`'s `RESERVED` list.
-const PORT_END: u16 = 20199;
 
-static NEXT_SLOT: AtomicU16 = AtomicU16::new(PORT_BASE);
+/// Three distinct ports: the probe listeners are all held until every port is chosen, so none repeats.
+fn free_ports() -> [u16; 3] {
+    let listeners: Vec<std::net::TcpListener> = (0..3)
+        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port"))
+        .collect();
+    std::array::from_fn(|i| listeners[i].local_addr().expect("local addr").port())
+}
 
 /// A spawned Rift server, killed on drop. `imposter` and `backend` are free ports for the test.
 struct Rift {
@@ -33,12 +34,7 @@ struct Rift {
 
 impl Rift {
     async fn start() -> Self {
-        let admin = NEXT_SLOT.fetch_add(SLOT, Ordering::SeqCst);
-        assert!(
-            admin + SLOT - 1 <= PORT_END,
-            "compat_rift_only.rs has outgrown its reserved ports {PORT_BASE}-{PORT_END}: widen the \
-             block in test_port_uniqueness.rs"
-        );
+        let [admin, imposter, backend] = free_ports();
         let child = tokio::process::Command::new(support::server_bin())
             .args(["--port", &admin.to_string(), "--allow-injection"])
             .stdout(std::process::Stdio::null())
@@ -57,8 +53,8 @@ impl Rift {
             {
                 return Self {
                     admin,
-                    imposter: admin + 1,
-                    backend: admin + 2,
+                    imposter,
+                    backend,
                     client,
                     _child: child,
                 };

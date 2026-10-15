@@ -135,29 +135,31 @@ fixing one of those means deleting that branch of the model.
 
 ## Fixed test ports
 
-A test that binds a fixed port takes it from **15000-24999**, and **each port belongs to exactly
-one file**. `crates/rift-mock-core/tests/test_port_uniqueness.rs` enforces both, over
-`crates/*/tests/**` and `crates/*/src/**`, and names the offending `file:line` pairs when it fails.
+Tests do not write fixed ports. `crates/rift-mock-core/tests/test_port_uniqueness.rs` refuses any
+integer literal in **15000-24999** under `crates/*/tests/**` and `crates/*/src/**`, and names each
+`file:line` it finds.
 
-Two things make this worth a guard rather than a convention:
+A fixed port is bound twice whenever the same test binary runs twice at once: two worktrees
+building side by side, `--lib` and `--tests` in two terminals, or two loops of one file. The
+collision is silent. Imposter listeners bind with `SO_REUSEADDR` and `SO_REUSEPORT`, so neither
+binder gets `AddrInUse` — the kernel load-balances, and the loser receives the *other* imposter's
+responses, failing on a decode or status mismatch that points nowhere near the cause. **CI being
+green is not evidence a port is free.** Take a port from, best first:
 
-- **Concurrent `cargo` runs on one machine** — two worktrees building side by side, or `--lib` and
-  `--tests` in two terminals, which is also how CI runs them, on separate runners. `cargo test`
-  does *not* run test binaries concurrently within one invocation, so this is the mechanism that
-  actually bites.
-- **Collisions are silent.** Imposter listeners bind with `SO_REUSEADDR` and `SO_REUSEPORT`, so
-  neither binder gets `AddrInUse` — the kernel load-balances, and the loser receives the *other*
-  imposter's responses. It surfaces as a decode or status-mismatch failure pointing nowhere near
-  the cause. **CI being green is not evidence a port is free.**
+1. **The manager.** Omit `port` (or pass `0`); `create_imposter` returns the port it bound, and it
+   keeps the probe listener bound, so a concurrent run simply gets another one. Through the admin
+   API, read `port` back from the `201` body. This covers almost every in-process test.
+2. **The OS, for a listener the test owns.** Bind `127.0.0.1:0` and use `local_addr()`, as the
+   admin, front-door and intercept listeners do; an upstream server for a proxy test is the usual
+   case.
+3. **`free_port()`** (bind `:0`, read the port, drop the listener) only when the port has to be
+   written into text before anything binds it: a `--configfile` document, a CLI argument, a URL in
+   a stub, or a test about explicit ports. Copy the six-line helper as the files already using it
+   do.
 
-**Prefer an auto-assigned port for a new in-process test.** `create_imposter` returns the port it
-bound (pass `port: 0`, or omit it), and the admin, front-door and intercept listeners all expose
-`local_addr()`. A fixed literal is only needed when a spawned binary has to be told where to
-connect.
-
-The guard checks *cross-file* uniqueness. Two tests in the **same** file sharing a port is a real
-collision too — those do run concurrently, on a thread pool — but a literal in a shared helper is
-legitimate, and nothing in the literal distinguishes the two. That one stays a review rule.
+Never learn the next auto-assigned port and then pass it explicitly: that reopens the race the
+manager closes. A number in the block that is not a port (a duration, a size) is written with a
+separator, `20_000`, which the guard skips.
 
 ## Mountebank is the oracle
 

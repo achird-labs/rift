@@ -19,27 +19,28 @@ fn enable_strict_behaviors() {
     unsafe { std::env::set_var("RIFT_STRICT_BEHAVIORS", "1") };
 }
 
-async fn mk(manager: &ImposterManager, cfg: serde_json::Value) {
+async fn mk(manager: &ImposterManager, cfg: serde_json::Value) -> u16 {
     let config = serde_json::from_value(cfg).expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
+    port
 }
 
 #[tokio::test]
 async fn the_env_var_makes_an_undecodable_binary_default_response_a_500() {
     enable_strict_behaviors();
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 21920, "protocol": "http", "stubs": [],
+            "protocol": "http", "stubs": [],
             "defaultResponse": { "statusCode": 200, "body": "not!valid!base64!", "_mode": "binary" }
         }),
     )
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:21920/no-stub-matches-this")
+        .get(format!("http://127.0.0.1:{port}/no-stub-matches-this"))
         .send()
         .await
         .expect("send");
@@ -56,7 +57,7 @@ async fn the_env_var_makes_an_undecodable_binary_default_response_a_500() {
         Some("true"),
         "the strict 500 must still say it came from the default response"
     );
-    let _ = manager.delete_imposter(21920).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // The same process-wide flag on the stub `is` path, which had no end-to-end env-var test either —
@@ -65,10 +66,10 @@ async fn the_env_var_makes_an_undecodable_binary_default_response_a_500() {
 async fn the_env_var_makes_an_undecodable_binary_is_body_a_500() {
     enable_strict_behaviors();
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 21921, "protocol": "http",
+            "protocol": "http",
             "stubs": [{ "responses": [{ "is": {
                 "statusCode": 200, "body": "not!valid!base64!", "_mode": "binary"
             } }] }]
@@ -77,11 +78,11 @@ async fn the_env_var_makes_an_undecodable_binary_is_body_a_500() {
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:21921/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send");
     assert_eq!(resp.status(), 500);
     assert!(resp.headers().contains_key("x-rift-binary-error"));
-    let _ = manager.delete_imposter(21921).await;
+    let _ = manager.delete_imposter(port).await;
 }

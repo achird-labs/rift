@@ -5,10 +5,11 @@
 use rift_http_proxy::imposter::ImposterManager;
 use std::time::Duration;
 
-async fn mk(manager: &ImposterManager, cfg: serde_json::Value) {
+async fn mk(manager: &ImposterManager, cfg: serde_json::Value) -> u16 {
     let config = serde_json::from_value(cfg).expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
+    port
 }
 
 fn set_cookie_count(resp: &reqwest::Response) -> usize {
@@ -19,10 +20,10 @@ fn set_cookie_count(resp: &reqwest::Response) -> usize {
 #[tokio::test]
 async fn copy_behavior_preserves_multi_value_set_cookie() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19272, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{
                     "is": { "statusCode": 200,
                         "headers": { "Set-Cookie": ["a=1", "b=2"] },
@@ -35,7 +36,7 @@ async fn copy_behavior_preserves_multi_value_set_cookie() {
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19272/x?q=hi")
+        .get(format!("http://127.0.0.1:{port}/x?q=hi"))
         .send()
         .await
         .expect("send");
@@ -44,7 +45,7 @@ async fn copy_behavior_preserves_multi_value_set_cookie() {
         2,
         "two Set-Cookie lines must survive a copy behavior"
     );
-    let _ = manager.delete_imposter(19272).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 /// AC2 — a `lookup` behavior must not collapse multiple `Set-Cookie` lines into one.
@@ -54,10 +55,10 @@ async fn lookup_behavior_preserves_multi_value_set_cookie() {
     std::fs::write(&csv, "id,name\nhi,World\n").expect("write csv");
 
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19275, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{
                     "is": { "statusCode": 200,
                         "headers": { "Set-Cookie": ["a=1", "n=${row}[name]"] },
@@ -73,7 +74,7 @@ async fn lookup_behavior_preserves_multi_value_set_cookie() {
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19275/x?q=hi")
+        .get(format!("http://127.0.0.1:{port}/x?q=hi"))
         .send()
         .await
         .expect("send");
@@ -89,7 +90,7 @@ async fn lookup_behavior_preserves_multi_value_set_cookie() {
         vec!["a=1".to_string(), "n=World".to_string()],
         "two Set-Cookie lines must survive a lookup behavior, each substituted"
     );
-    let _ = manager.delete_imposter(19275).await;
+    let _ = manager.delete_imposter(port).await;
     let _ = std::fs::remove_file(&csv);
 }
 
@@ -98,10 +99,10 @@ async fn lookup_behavior_preserves_multi_value_set_cookie() {
 #[tokio::test]
 async fn decorate_behavior_preserves_multi_value_set_cookie() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19274, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{
                     "is": { "statusCode": 200,
                         "headers": { "set-cookie": ["a=1", "b=2"], "X-Keep": "kept" },
@@ -113,7 +114,7 @@ async fn decorate_behavior_preserves_multi_value_set_cookie() {
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19274/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send");
@@ -134,7 +135,7 @@ async fn decorate_behavior_preserves_multi_value_set_cookie() {
         "ordinary single-value headers must survive the decorate round-trip"
     );
     assert_eq!(body, "decorated", "decorate must still transform the body");
-    let _ = manager.delete_imposter(19274).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 /// AC3 (override) — a decorate script that sets its own Set-Cookie wins; the held-aside originals
@@ -142,10 +143,10 @@ async fn decorate_behavior_preserves_multi_value_set_cookie() {
 #[tokio::test]
 async fn decorate_script_set_cookie_overrides_originals() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19276, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{
                     "is": { "statusCode": 200,
                         "headers": { "Set-Cookie": ["a=1", "b=2"] },
@@ -157,7 +158,7 @@ async fn decorate_script_set_cookie_overrides_originals() {
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19276/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send");
@@ -173,17 +174,17 @@ async fn decorate_script_set_cookie_overrides_originals() {
         vec!["z=9".to_string()],
         "a script-set Set-Cookie must win, replacing the held-aside originals"
     );
-    let _ = manager.delete_imposter(19276).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 /// AC4 — token substitution still works on single-value headers and the body when behaviors run.
 #[tokio::test]
 async fn copy_behavior_substitutes_single_value_header_and_body() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19273, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{
                     "is": { "statusCode": 200,
                         "headers": { "X-Token": "v=${q}" },
@@ -196,7 +197,7 @@ async fn copy_behavior_substitutes_single_value_header_and_body() {
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19273/x?q=hi")
+        .get(format!("http://127.0.0.1:{port}/x?q=hi"))
         .send()
         .await
         .expect("send");
@@ -215,5 +216,5 @@ async fn copy_behavior_substitutes_single_value_header_and_body() {
         body, "x=hi",
         "copy substitution must still apply to the body"
     );
-    let _ = manager.delete_imposter(19273).await;
+    let _ = manager.delete_imposter(port).await;
 }

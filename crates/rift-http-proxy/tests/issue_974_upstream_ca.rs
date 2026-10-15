@@ -67,9 +67,8 @@ async fn spawn_private_origin_serving(ca: Arc<CertificateAuthority>, body: Strin
     port
 }
 
-fn proxy_imposter(port: u16, origin_port: u16) -> serde_json::Value {
+fn proxy_imposter(origin_port: u16) -> serde_json::Value {
     serde_json::json!({
-        "port": port,
         "protocol": "http",
         "stubs": [{
             "responses": [{
@@ -82,13 +81,11 @@ fn proxy_imposter(port: u16, origin_port: u16) -> serde_json::Value {
 /// Drive one request through an imposter created on `manager`, returning (status, body, headers).
 async fn proxy_once(
     manager: &Arc<ImposterManager>,
-    imposter_port: u16,
     origin_port: u16,
-) -> (u16, String, reqwest::header::HeaderMap) {
-    manager
+) -> (u16, String, reqwest::header::HeaderMap, u16) {
+    let imposter_port = manager
         .create_imposter(
-            serde_json::from_value(proxy_imposter(imposter_port, origin_port))
-                .expect("imposter config"),
+            serde_json::from_value(proxy_imposter(origin_port)).expect("imposter config"),
         )
         .await
         .expect("create the proxying imposter");
@@ -106,7 +103,7 @@ async fn proxy_once(
     let status = response.status().as_u16();
     let headers = response.headers().clone();
     let body = response.text().await.unwrap_or_default();
-    (status, body, headers)
+    (status, body, headers, imposter_port)
 }
 
 #[tokio::test]
@@ -117,7 +114,7 @@ async fn proxy_without_a_trusted_ca_is_refused_as_an_upstream_failure() {
 
     // The default policy trusts the OS store, which cannot contain this just-generated CA.
     let manager = Arc::new(ImposterManager::new());
-    let (status, body, headers) = proxy_once(&manager, 19955, origin_port).await;
+    let (status, body, headers, port) = proxy_once(&manager, origin_port).await;
 
     assert_eq!(status, 502, "an untrusted chain is an upstream failure");
     assert!(
@@ -136,7 +133,7 @@ async fn proxy_without_a_trusted_ca_is_refused_as_an_upstream_failure() {
         body.contains("upstream failure"),
         "the envelope must classify it as an upstream failure, got: {body}"
     );
-    let _ = manager.delete_imposter(19955).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
@@ -153,7 +150,7 @@ async fn proxy_with_the_ca_pem_reaches_the_private_origin() {
         ImposterManager::new()
             .with_upstream_client(build_upstream_client(&policy).expect("client under the CA")),
     );
-    let (status, body, headers) = proxy_once(&manager, 19956, origin_port).await;
+    let (status, body, headers, port) = proxy_once(&manager, origin_port).await;
 
     assert_eq!(
         status, 200,
@@ -167,7 +164,7 @@ async fn proxy_with_the_ca_pem_reaches_the_private_origin() {
         headers.contains_key("x-rift-proxy"),
         "a proxied response is marked as one"
     );
-    let _ = manager.delete_imposter(19956).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
@@ -184,11 +181,11 @@ async fn proxy_with_skip_verify_reaches_the_private_origin() {
         ImposterManager::new()
             .with_upstream_client(build_upstream_client(&policy).expect("skip-verify client")),
     );
-    let (status, body, _) = proxy_once(&manager, 19957, origin_port).await;
+    let (status, body, _, port) = proxy_once(&manager, origin_port).await;
 
     assert_eq!(status, 200, "skip-verify must accept the private chain");
     assert_eq!(body, ORIGIN_BODY);
-    let _ = manager.delete_imposter(19957).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 /// The C-ABI sets its policy after the manager exists (`rift_start` precedes `rift_serve_admin`),
@@ -206,13 +203,13 @@ async fn set_upstream_client_applies_to_imposters_created_afterwards() {
     };
     manager.set_upstream_client(build_upstream_client(&policy).expect("client under the CA"));
 
-    let (status, body, _) = proxy_once(&manager, 19958, origin_port).await;
+    let (status, body, _, port) = proxy_once(&manager, origin_port).await;
     assert_eq!(
         status, 200,
         "a client set after construction must still apply"
     );
     assert_eq!(body, ORIGIN_BODY);
-    let _ = manager.delete_imposter(19958).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 /// The flags exist under both spellings the docs advertise. `verify-docs-coverage.sh` gates that
@@ -257,7 +254,7 @@ mod config_source {
 
     fn imposter_doc() -> String {
         serde_json::json!({
-            "imposters": [{ "port": 19959, "protocol": "http", "stubs": [] }]
+            "imposters": [{ "protocol": "http", "stubs": [] }]
         })
         .to_string()
     }
@@ -319,9 +316,9 @@ mod cli_startup {
             "--host",
             "127.0.0.1",
             "--port",
-            "12641",
+            "0",
             "--metrics-port",
-            "19488",
+            "0",
             "--upstream-ca-file",
             "/nonexistent/rift-974/corp-ca.pem",
         ])

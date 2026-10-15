@@ -35,15 +35,15 @@ fn init_env() {
     unsafe { std::env::set_var("RIFT_HTTP_HEADER_TIMEOUT", HEADER_TIMEOUT_SECS.to_string()) };
 }
 
-async fn serve(config: serde_json::Value) -> Arc<ImposterManager> {
+async fn serve(config: serde_json::Value) -> (Arc<ImposterManager>, u16) {
     init_env();
     let manager = Arc::new(ImposterManager::new());
-    manager
+    let port = manager
         .create_imposter(serde_json::from_value(config).expect("imposter config"))
         .await
         .expect("create imposter");
     tokio::time::sleep(Duration::from_millis(250)).await;
-    manager
+    (manager, port)
 }
 
 /// Connect, optionally send `probe`, then read until the server closes. Returns how long the
@@ -144,19 +144,19 @@ fn assert_closed_by_the_deadline(closed: Option<Duration>, what: &str) {
 #[serial_test::serial]
 async fn a_plaintext_imposter_closes_a_connection_that_sends_nothing() {
     // THE BUG on the cheapest listener to reach. Pre-fix this connection is held forever.
-    let manager = serve(serde_json::json!({
-        "port": 21540, "protocol": "http",
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "http",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]
     }))
     .await;
 
-    let closed = tokio::task::spawn_blocking(|| time_until_close(21540, b""))
+    let closed = tokio::task::spawn_blocking(move || time_until_close(port, b""))
         .await
         .expect("probe task");
 
     assert_closed_by_the_deadline(closed, "a client that sent nothing");
 
-    let _ = manager.delete_imposter(21540).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // Issue #1045: the counter must actually be wired to the listener, and must discriminate the
@@ -168,8 +168,8 @@ async fn a_plaintext_imposter_closes_a_connection_that_sends_nothing() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_dropped_connection_is_counted_under_the_kind_that_caused_it() {
-    let manager = serve(serde_json::json!({
-        "port": 21549, "protocol": "http",
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "http",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]
     }))
     .await;
@@ -178,12 +178,12 @@ async fn a_dropped_connection_is_counted_under_the_kind_that_caused_it() {
     let eofs_before = preface_failures("imposter", "eof");
 
     // Connect and stay silent -> the sniffer's deadline expires -> `Timeout`.
-    let _ = tokio::task::spawn_blocking(|| time_until_close(21549, b""))
+    let _ = tokio::task::spawn_blocking(move || time_until_close(port, b""))
         .await
         .expect("silent probe");
     // Connect and hang up immediately -> the read returns 0 bytes -> `Eof`.
-    tokio::task::spawn_blocking(|| {
-        drop(TcpStream::connect(("127.0.0.1", 21549)).expect("connect"));
+    tokio::task::spawn_blocking(move || {
+        drop(TcpStream::connect(("127.0.0.1", port)).expect("connect"));
     })
     .await
     .expect("eof probe");
@@ -199,7 +199,7 @@ async fn a_dropped_connection_is_counted_under_the_kind_that_caused_it() {
          from a systemic `io` rate is the entire reason this metric exists"
     );
 
-    let _ = manager.delete_imposter(21549).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 /// Read one child of `rift_preface_failures_total` out of the scrape.
@@ -230,19 +230,19 @@ const EMPTY_SETTINGS: &[u8] = &[0, 0, 0, 4, 0, 0, 0, 0, 0];
 #[tokio::test]
 #[serial_test::serial]
 async fn a_plaintext_imposter_closes_a_connection_that_sends_only_the_h2_preface() {
-    let manager = serve(serde_json::json!({
-        "port": 22700, "protocol": "http",
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "http",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]
     }))
     .await;
 
-    let closed = tokio::task::spawn_blocking(|| time_until_close_draining(22700, H2_PREFACE))
+    let closed = tokio::task::spawn_blocking(move || time_until_close_draining(port, H2_PREFACE))
         .await
         .expect("probe task");
 
     assert_closed_by_the_deadline(closed, "a client that sent only the h2 preface");
 
-    let _ = manager.delete_imposter(22700).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // The post-SETTINGS hole, which the issue does not mention and which `header_read_timeout` has no
@@ -251,15 +251,15 @@ async fn a_plaintext_imposter_closes_a_connection_that_sends_only_the_h2_preface
 #[tokio::test]
 #[serial_test::serial]
 async fn a_plaintext_imposter_closes_an_h2_connection_that_never_sends_a_request() {
-    let manager = serve(serde_json::json!({
-        "port": 22701, "protocol": "http",
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "http",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]
     }))
     .await;
 
     let mut probe = H2_PREFACE.to_vec();
     probe.extend_from_slice(EMPTY_SETTINGS);
-    let closed = tokio::task::spawn_blocking(move || time_until_close_draining(22701, &probe))
+    let closed = tokio::task::spawn_blocking(move || time_until_close_draining(port, &probe))
         .await
         .expect("probe task");
 
@@ -268,7 +268,7 @@ async fn a_plaintext_imposter_closes_an_h2_connection_that_never_sends_a_request
         "an h2 peer that completed the handshake then went quiet",
     );
 
-    let _ = manager.delete_imposter(22701).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // The panic guard. `Time::Empty` panics with "timeout set, but no timer set" the first time an h2
@@ -278,8 +278,8 @@ async fn a_plaintext_imposter_closes_an_h2_connection_that_never_sends_a_request
 #[tokio::test]
 #[serial_test::serial]
 async fn a_prior_knowledge_h2_request_is_served_rather_than_panicking() {
-    let manager = serve(serde_json::json!({
-        "port": 22702, "protocol": "http",
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "http",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "h2-ok"}}]}]
     }))
     .await;
@@ -289,7 +289,7 @@ async fn a_prior_knowledge_h2_request_is_served_rather_than_panicking() {
         .build()
         .expect("h2 client");
     let body = client
-        .get("http://127.0.0.1:22702/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("an h2 request must be served, not panic the connection task")
@@ -299,7 +299,7 @@ async fn a_prior_knowledge_h2_request_is_served_rather_than_panicking() {
 
     assert_eq!(body, "h2-ok");
 
-    let _ = manager.delete_imposter(22702).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
@@ -309,19 +309,19 @@ async fn a_plaintext_imposter_closes_a_connection_stuck_mid_preface() {
     // a complete 24-byte preface or a diverging byte, so `P` — which *matches* the preface's first
     // byte — leaves the connection just as stuck as sending nothing. A fix keyed on "has the
     // client sent any bytes?" would pass the test above and fail this one.
-    let manager = serve(serde_json::json!({
-        "port": 21541, "protocol": "http",
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "http",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]
     }))
     .await;
 
-    let closed = tokio::task::spawn_blocking(|| time_until_close(21541, b"P"))
+    let closed = tokio::task::spawn_blocking(move || time_until_close(port, b"P"))
         .await
         .expect("probe task");
 
     assert_closed_by_the_deadline(closed, "a client stuck mid-preface");
 
-    let _ = manager.delete_imposter(21541).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
@@ -330,13 +330,13 @@ async fn an_https_imposter_closes_a_connection_that_sends_nothing_after_the_hand
     // The case the issue is titled for. The TLS handshake itself is already bounded; the
     // unbounded window starts immediately after it, and a parked TLS connection costs more than a
     // plaintext one (a whole `TlsStream` plus session state).
-    let manager = serve(serde_json::json!({
-        "port": 21542, "protocol": "https",
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "https",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]
     }))
     .await;
 
-    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", 21542))
+    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
         .expect("connect");
     let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(insecure_client_config()));
@@ -362,7 +362,7 @@ async fn an_https_imposter_closes_a_connection_that_sends_nothing_after_the_hand
         "closed, but not within the budget"
     );
 
-    let _ = manager.delete_imposter(21542).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
@@ -371,14 +371,14 @@ async fn a_slow_but_legitimate_client_is_still_served() {
     // The companion that passes before the fix too. Without it, "close everything quickly" would
     // satisfy every assertion above while breaking real clients — the deadline must bound silence,
     // not latency.
-    let manager = serve(serde_json::json!({
-        "port": 21543, "protocol": "http",
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "http",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "served"}}]}]
     }))
     .await;
 
-    let body = tokio::task::spawn_blocking(|| {
-        let mut stream = TcpStream::connect(("127.0.0.1", 21543)).expect("connect");
+    let body = tokio::task::spawn_blocking(move || {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .expect("timeout");
@@ -401,7 +401,7 @@ async fn a_slow_but_legitimate_client_is_still_served() {
         "a client that pauses and then sends a real request must still be served, got: {body}"
     );
 
-    let _ = manager.delete_imposter(21543).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
@@ -410,15 +410,15 @@ async fn a_request_arriving_immediately_is_unaffected() {
     // Guards the replay path: detection consumes bytes off the socket, and if they were not handed
     // back byte-exact the very first request on every connection would break. That failure would
     // be catastrophic and obvious — which is exactly why it deserves a cheap pin rather than trust.
-    let manager = serve(serde_json::json!({
-        "port": 21544, "protocol": "http",
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "http",
         "stubs": [{"predicates": [{"equals": {"path": "/replayed"}}],
                    "responses": [{"is": {"statusCode": 200, "body": "intact"}}]}]
     }))
     .await;
 
     let body = reqwest::Client::new()
-        .get("http://127.0.0.1:21544/replayed")
+        .get(format!("http://127.0.0.1:{port}/replayed"))
         .send()
         .await
         .expect("request")
@@ -432,7 +432,7 @@ async fn a_request_arriving_immediately_is_unaffected() {
          is corrupted"
     );
 
-    let _ = manager.delete_imposter(21544).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 /// The imposter serves a self-signed certificate, so the client must not verify it — this is a
@@ -448,8 +448,8 @@ async fn an_established_keep_alive_connection_survives_past_the_deadline() {
     // So: establish a connection, serve a request on it, let it sit idle for longer than the
     // detection deadline, then serve a second request on the SAME connection. The pool reuses it,
     // so a second success means it was never torn down.
-    let manager = serve(serde_json::json!({
-        "port": 21545, "protocol": "http",
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "http",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "alive"}}]}]
     }))
     .await;
@@ -462,7 +462,7 @@ async fn an_established_keep_alive_connection_survives_past_the_deadline() {
         .expect("client");
 
     let first = client
-        .get("http://127.0.0.1:21545/one")
+        .get(format!("http://127.0.0.1:{port}/one"))
         .send()
         .await
         .expect("first request")
@@ -475,7 +475,7 @@ async fn an_established_keep_alive_connection_survives_past_the_deadline() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let second = client
-        .get("http://127.0.0.1:21545/two")
+        .get(format!("http://127.0.0.1:{port}/two"))
         .send()
         .await
         .expect(
@@ -488,7 +488,7 @@ async fn an_established_keep_alive_connection_survives_past_the_deadline() {
         .expect("second body");
     assert_eq!(second, "alive");
 
-    let _ = manager.delete_imposter(21545).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
@@ -498,8 +498,8 @@ async fn an_established_h2_connection_survives_past_the_deadline() {
     // be long-lived and multiplexed, and it reaches the server through the very preface sniff this
     // change adds — a full 24-byte preface, the one input that makes the sniffer read to its
     // maximum length before resolving.
-    let manager = serve(serde_json::json!({
-        "port": 21546, "protocol": "http",
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "http",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "h2-alive"}}]}]
     }))
     .await;
@@ -511,7 +511,7 @@ async fn an_established_h2_connection_survives_past_the_deadline() {
         .expect("h2 client");
 
     let first = client
-        .get("http://127.0.0.1:21546/one")
+        .get(format!("http://127.0.0.1:{port}/one"))
         .send()
         .await
         .expect("first h2 request")
@@ -523,7 +523,7 @@ async fn an_established_h2_connection_survives_past_the_deadline() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let second = client
-        .get("http://127.0.0.1:21546/two")
+        .get(format!("http://127.0.0.1:{port}/two"))
         .send()
         .await
         .expect("an idle h2 connection must survive past the detection deadline")
@@ -532,7 +532,7 @@ async fn an_established_h2_connection_survives_past_the_deadline() {
         .expect("second body");
     assert_eq!(second, "h2-alive");
 
-    let _ = manager.delete_imposter(21546).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]

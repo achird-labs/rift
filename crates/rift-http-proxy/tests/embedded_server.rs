@@ -11,16 +11,24 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-fn imposter_cfg(port: u16, body: &str) -> ImposterConfig {
+fn imposter_cfg(body: &str) -> ImposterConfig {
     serde_json::from_value(serde_json::json!({
         "protocol": "http",
-        "port": port,
         "stubs": [{
             "predicates": [{"equals": {"path": "/ping"}}],
             "responses": [{"is": {"statusCode": 200, "body": body}}]
         }]
     }))
     .expect("test imposter config")
+}
+
+/// A port that must appear in text (a config document) before anything binds it.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind an ephemeral port")
+        .local_addr()
+        .expect("local addr")
+        .port()
 }
 
 async fn wait_for_http(url: &str) {
@@ -38,8 +46,8 @@ async fn wait_for_http(url: &str) {
 #[tokio::test]
 async fn server_builder_with_injected_manager_serves_admin_api() {
     let manager = Arc::new(ImposterManager::new());
-    manager
-        .create_imposter(imposter_cfg(19480, "pong"))
+    let imposter_port = manager
+        .create_imposter(imposter_cfg("pong"))
         .await
         .expect("create imposter");
 
@@ -50,7 +58,7 @@ async fn server_builder_with_injected_manager_serves_admin_api() {
         "--port",
         "0",
         "--metrics-port",
-        "22600",
+        "0",
     ])
     .expect("cli parse");
 
@@ -75,12 +83,12 @@ async fn server_builder_with_injected_manager_serves_admin_api() {
         .collect();
     assert_eq!(
         ports,
-        vec![19480],
+        vec![u64::from(imposter_port)],
         "admin API must serve the injected manager's imposters"
     );
 
     // The pre-built imposter also serves traffic (it was created before run()).
-    let served = reqwest::get("http://127.0.0.1:19480/ping")
+    let served = reqwest::get(format!("http://127.0.0.1:{imposter_port}/ping"))
         .await
         .expect("imposter reachable")
         .text()
@@ -103,7 +111,7 @@ async fn server_builder_refuses_the_removed_redis_backend() {
         "--port",
         "0",
         "--metrics-port",
-        "19483",
+        "0",
     ])
     .expect("cli parse");
 
@@ -118,7 +126,7 @@ async fn server_builder_refuses_the_removed_redis_backend() {
         .header("content-type", "application/json")
         .body(
             serde_json::json!({
-                "port": 19482, "protocol": "http", "stubs": [],
+                "protocol": "http", "stubs": [],
                 "_rift": { "flowState": {
                     "backend": "redis",
                     "redis": { "url": "redis://127.0.0.1:1" }
@@ -149,11 +157,12 @@ async fn run_metrics_server_serves_metrics() {
     // having already recorded one — order-dependent, and it fails under `--exact`.
     rift_http_proxy::extensions::metrics::record_request("GET", 200);
 
-    let addr: std::net::SocketAddr = "127.0.0.1:19482".parse().expect("addr");
+    let port = free_port();
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
     tokio::spawn(run_metrics_server(addr));
-    wait_for_http("http://127.0.0.1:19482/metrics").await;
+    wait_for_http(&format!("http://127.0.0.1:{port}/metrics")).await;
 
-    let resp = reqwest::get("http://127.0.0.1:19482/metrics")
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/metrics"))
         .await
         .expect("metrics reachable");
     assert_eq!(resp.status(), 200);
@@ -163,7 +172,7 @@ async fn run_metrics_server_serves_metrics() {
         "expected the rift_requests_total this test recorded, got: {body:.200}"
     );
 
-    let not_found = reqwest::get("http://127.0.0.1:19482/other")
+    let not_found = reqwest::get(format!("http://127.0.0.1:{port}/other"))
         .await
         .expect("request");
     assert_eq!(not_found.status(), 404);
@@ -175,9 +184,10 @@ async fn run_metrics_server_serves_metrics() {
 async fn server_builder_internal_manager_loads_configfile_and_reloads() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("imposters.json");
+    let port = free_port();
     let cfg = |body: &str| {
         format!(
-            r#"{{"imposters":[{{"port":19485,"protocol":"http","stubs":[
+            r#"{{"imposters":[{{"port":{port},"protocol":"http","stubs":[
                 {{"predicates":[{{"equals":{{"path":"/ping"}}}}],
                  "responses":[{{"is":{{"statusCode":200,"body":"{body}"}}}}]}}]}}]}}"#
         )
@@ -191,7 +201,7 @@ async fn server_builder_internal_manager_loads_configfile_and_reloads() {
         "--port",
         "0",
         "--metrics-port",
-        "19486",
+        "0",
         "--configfile",
         path.to_str().expect("utf8 path"),
     ])
@@ -203,7 +213,7 @@ async fn server_builder_internal_manager_loads_configfile_and_reloads() {
         .expect("server starts");
     let admin = format!("http://{}", server.admin_addr());
 
-    let served = reqwest::get("http://127.0.0.1:19485/ping")
+    let served = reqwest::get(format!("http://127.0.0.1:{port}/ping"))
         .await
         .expect("imposter reachable")
         .text()
@@ -218,7 +228,7 @@ async fn server_builder_internal_manager_loads_configfile_and_reloads() {
         .await
         .expect("reload");
     assert_eq!(resp.status(), 200, "config source is wired for reload");
-    let served = reqwest::get("http://127.0.0.1:19485/ping")
+    let served = reqwest::get(format!("http://127.0.0.1:{port}/ping"))
         .await
         .expect("imposter reachable")
         .text()
@@ -238,7 +248,7 @@ async fn server_builder_run_fails_on_missing_tls_cert_file() {
         "--port",
         "12613",
         "--metrics-port",
-        "19487",
+        "0",
         "--default-tls-cert",
         "/nonexistent/cert.pem",
         "--default-tls-key",
@@ -288,22 +298,23 @@ fn spawn_dispatch_listener(
 }
 
 // AC3: dispatch_to_port is the #212 gateway core, callable from any listener — here a
-// bare hyper listener that forwards every request in-process to the imposter on 19483.
+// bare hyper listener that forwards every request in-process to the imposter it creates.
 #[tokio::test]
 async fn dispatch_to_port_routes_in_process() {
     let manager = Arc::new(ImposterManager::new());
-    manager
-        .create_imposter(imposter_cfg(19483, "dispatched"))
+    let imposter_port = manager
+        .create_imposter(imposter_cfg("dispatched"))
         .await
         .expect("create imposter");
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:12611")
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");
-    spawn_dispatch_listener(listener, manager.clone(), 19483);
-    wait_for_http("http://127.0.0.1:12611/ping").await;
+    let addr = listener.local_addr().expect("listener addr");
+    spawn_dispatch_listener(listener, manager.clone(), imposter_port);
+    wait_for_http(&format!("http://{addr}/ping")).await;
 
-    let served = reqwest::get("http://127.0.0.1:12611/ping")
+    let served = reqwest::get(format!("http://{addr}/ping"))
         .await
         .expect("listener reachable")
         .text()
@@ -315,11 +326,12 @@ async fn dispatch_to_port_routes_in_process() {
     );
 
     // A port with no imposter is a 404 error response, not a hang or panic.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:19484")
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
     spawn_dispatch_listener(listener, manager.clone(), 1);
-    let resp = reqwest::get("http://127.0.0.1:19484/ping")
+    let resp = reqwest::get(format!("http://{addr}/ping"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 404, "no imposter on the target port");
@@ -339,10 +351,10 @@ async fn dispatch_to_port_returns_the_tcp_fault_carrier_untouched() {
     use rift_http_proxy::tcp_fault_carrier;
 
     let manager = Arc::new(ImposterManager::new());
-    manager
+    let fault_port = manager
         .create_imposter(
             serde_json::from_value(serde_json::json!({
-                "protocol": "http", "port": 19486,
+                "protocol": "http",
                 "stubs": [{ "responses": [{ "fault": "CONNECTION_RESET_BY_PEER" }] }]
             }))
             .expect("fault imposter config"),
@@ -363,7 +375,7 @@ async fn dispatch_to_port_returns_the_tcp_fault_carrier_untouched() {
         let service = service_fn(move |req| {
             let mgr = mgr.clone();
             async move {
-                let carrier = dispatch_to_port(&mgr, 19486, req).await;
+                let carrier = dispatch_to_port(&mgr, fault_port, req).await;
                 let report = tcp_fault_carrier(&carrier).unwrap_or("not a carrier");
                 Ok::<_, std::convert::Infallible>(hyper::Response::new(http_body_util::Full::new(
                     hyper::body::Bytes::from(report),
@@ -557,14 +569,17 @@ async fn server_builder_start_reports_addrs_and_shuts_down_both() {
 async fn server_builder_start_binds_front_door_and_routes_to_imposter() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("imposters.json");
+    let imposter_port = free_port();
     std::fs::write(
         &path,
-        r#"{"imposters":[{"port":19490,"protocol":"http","stubs":[
-            {"predicates":[{"equals":{"path":"/ping"}}],
-             "responses":[{"is":{"statusCode":200,"body":"front-door-pong"}}]}]}],
-           "routes":{"routes":[
-             {"id":"pay","match":{"host":"payments.test"},"target":{"port":19490}}
-           ]}}"#,
+        format!(
+            r#"{{"imposters":[{{"port":{imposter_port},"protocol":"http","stubs":[
+            {{"predicates":[{{"equals":{{"path":"/ping"}}}}],
+             "responses":[{{"is":{{"statusCode":200,"body":"front-door-pong"}}}}]}}]}}],
+           "routes":{{"routes":[
+             {{"id":"pay","match":{{"host":"payments.test"}},"target":{{"port":{imposter_port}}}}}
+           ]}}}}"#
+        ),
     )
     .expect("write config");
 
@@ -610,7 +625,7 @@ async fn server_builder_start_binds_front_door_and_routes_to_imposter() {
     assert_eq!(
         resp.text().await.expect("body"),
         "front-door-pong",
-        "the request reached imposter 19490 via the route, not the gateway fallback"
+        "the request reached imposter {imposter_port} via the route, not the gateway fallback"
     );
 
     running.shutdown().await;
@@ -944,7 +959,7 @@ async fn server_builder_still_accepts_and_enforces_a_real_api_key() {
         "--port",
         "0",
         "--metrics-port",
-        "22604",
+        "0",
         "--api-key",
         "s3cret-token",
     ])

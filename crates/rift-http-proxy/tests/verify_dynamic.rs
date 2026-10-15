@@ -18,12 +18,12 @@ async fn start_admin(manager: Arc<ImposterManager>) -> String {
     format!("http://{}", running.local_addr())
 }
 
-async fn create(manager: &ImposterManager, config: serde_json::Value) {
+async fn create(manager: &ImposterManager, config: serde_json::Value) -> u16 {
     let config = serde_json::from_value(config).expect("valid imposter config");
     manager
         .create_imposter(config)
         .await
-        .expect("create imposter");
+        .expect("create imposter")
 }
 
 async fn run_verify(admin: &str) -> std::process::Output {
@@ -42,7 +42,7 @@ async fn verify_dynamic_asserts_proxy_verify_and_fault() {
     create(
         &manager,
         serde_json::json!({
-            "port": 22644, "protocol": "http",
+            "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/r" } }],
                 "responses": [
@@ -64,7 +64,7 @@ async fn verify_dynamic_asserts_proxy_verify_and_fault() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19862, "protocol": "http",
+            "protocol": "http",
             "stubs": [{ "responses": [{ "proxy": {
                 "to": "http://127.0.0.1:1", "mode": "proxyOnce",
                 "predicateGenerators": [{ "matches": { "method": true, "path": true } }]
@@ -77,7 +77,7 @@ async fn verify_dynamic_asserts_proxy_verify_and_fault() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19863, "protocol": "http",
+            "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/err" } }],
                 "responses": [{ "is": { "statusCode": 200 },
@@ -126,7 +126,7 @@ async fn verify_dynamic_fails_on_wrong_expectation() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19871, "protocol": "http",
+            "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/ok" } }],
                 "responses": [{ "is": { "statusCode": 200, "body": "ok" } }],
@@ -157,7 +157,7 @@ async fn dynamic_skipped_without_flag() {
     create(
         &manager,
         serde_json::json!({
-            "port": 22646, "protocol": "http",
+            "protocol": "http",
             "stubs": [{ "responses": [{ "proxy": {
                 "to": "http://127.0.0.1:1", "mode": "proxyOnce",
                 "predicateGenerators": [{ "matches": { "path": true } }]
@@ -194,7 +194,7 @@ async fn verify_dynamic_asserts_tcp_fault() {
     create(
         &manager,
         serde_json::json!({
-            "port": 22649, "protocol": "http",
+            "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/reset" } }],
                 "responses": [{ "is": { "statusCode": 200 },
@@ -231,7 +231,7 @@ async fn verify_normal_pass_asserts_tcp_fault() {
     create(
         &manager,
         serde_json::json!({
-            "port": 22651, "protocol": "http",
+            "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/reset" } }],
                 "responses": [{ "is": { "statusCode": 200 },
@@ -268,7 +268,7 @@ async fn verify_normal_pass_accepts_date_template_body() {
     create(
         &manager,
         serde_json::json!({
-            "port": 22652, "protocol": "http",
+            "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/token" } }],
                 "responses": [{ "is": { "statusCode": 200,
@@ -306,7 +306,7 @@ async fn verify_normal_pass_accepts_plaintext_template_body() {
     create(
         &manager,
         serde_json::json!({
-            "port": 22653, "protocol": "http",
+            "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/snapshot" } }],
                 "responses": [{ "is": { "statusCode": 200, "body": "snapshot taken at {{NOW}}" } }]
@@ -342,7 +342,7 @@ async fn verify_normal_pass_drives_space_partitioned_stubs() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19931, "protocol": "http",
+            "protocol": "http",
             "_rift": { "flowState": { "backend": "inmemory",
                 "flowIdSource": "header:X-Mock-Space" } },
             "stubs": [
@@ -382,7 +382,7 @@ async fn verify_flow_id_header_does_not_clobber_detection() {
     create(
         &manager,
         serde_json::json!({
-            "port": 22654, "protocol": "http",
+            "protocol": "http",
             "_rift": { "flowState": { "backend": "inmemory",
                 "flowIdSource": "header:X-Mock-Space" } },
             "stubs": [
@@ -424,7 +424,7 @@ async fn verify_skips_space_stub_when_flow_id_unresolvable() {
     create(
         &manager,
         serde_json::json!({
-            "port": 22657, "protocol": "http",
+            "protocol": "http",
             "stubs": [{ "space": "alice", "predicates": [{ "equals": { "path": "/d" } }],
                 "responses": [{ "is": { "statusCode": 200, "body": "A" } }] }]
         }),
@@ -457,7 +457,7 @@ async fn verify_normal_pass_drives_xpath_attribute_stub() {
     create(
         &manager,
         serde_json::json!({
-            "port": 22660, "protocol": "http",
+            "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "body": "admin" },
                     "xpath": { "selector": "string(//user/@role)" } }],
@@ -491,7 +491,7 @@ async fn verify_skips_unsynthesizable_xpath_stub() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19981, "protocol": "http",
+            "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "body": "5" },
                     "xpath": { "selector": "count(//item)" } }],
@@ -529,10 +529,10 @@ async fn verify_dynamic_recreates_from_the_replayable_form() {
     // the plain `GET /imposters/:port` prints. `defaultForward` is replayable-only (Mountebank has
     // no form for it), so a recreate from the plain detail answers 200 with an empty body here.
     let manager = Arc::new(ImposterManager::new());
-    create(
+    let upstream_port = create(
         &manager,
         serde_json::json!({
-            "port": 22991, "protocol": "http",
+            "protocol": "http",
             "stubs": [{ "responses": [{ "is": { "statusCode": 200, "body": "from-upstream" } }] }]
         }),
     )
@@ -540,8 +540,8 @@ async fn verify_dynamic_recreates_from_the_replayable_form() {
     create(
         &manager,
         serde_json::json!({
-            "port": 22990, "protocol": "http",
-            "defaultForward": "http://127.0.0.1:22991",
+            "protocol": "http",
+            "defaultForward": format!("http://127.0.0.1:{upstream_port}"),
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/local" } }],
                 "responses": [{ "is": { "statusCode": 200, "body": "local" } }],

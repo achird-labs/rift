@@ -12,7 +12,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_rift-verify");
 async fn verify_json_output_has_summary_fields() {
     let manager = Arc::new(ImposterManager::new());
     let cfg = serde_json::from_value(serde_json::json!({
-        "port": 22655, "protocol": "http",
+        "protocol": "http",
         "stubs": [{
             "predicates": [{ "equals": { "path": "/ping" } }],
             "responses": [{ "is": { "statusCode": 200, "body": "pong" } }]

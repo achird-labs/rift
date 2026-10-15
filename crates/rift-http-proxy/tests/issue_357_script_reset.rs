@@ -9,7 +9,7 @@ use std::sync::Arc;
 async fn script_reset_resets_the_connection() {
     let manager = Arc::new(ImposterManager::new());
     let cfg = serde_json::from_value(serde_json::json!({
-        "port": 19947, "protocol": "http",
+        "protocol": "http",
         "stubs": [{
             "predicates": [{ "equals": { "path": "/boom" } }],
             "responses": [{
@@ -18,13 +18,13 @@ async fn script_reset_resets_the_connection() {
         }]
     }))
     .expect("valid imposter config");
-    manager.create_imposter(cfg).await.expect("create imposter");
+    let port = manager.create_imposter(cfg).await.expect("create imposter");
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // A script reset() must tear down the socket, so the client sees a transport-level error
     // (reqwest Err), not a normal HTTP response. If reset() were mis-wired to a plain 502 (or the
     // H1-only gate were missing and HTTP/2 swallowed the abort), this would return Ok instead.
-    let result = reqwest::get("http://127.0.0.1:19947/boom").await;
+    let result = reqwest::get(format!("http://127.0.0.1:{port}/boom")).await;
     assert!(
         result.is_err(),
         "script reset() must reset the connection (transport error), got: {result:?}"

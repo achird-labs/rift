@@ -13,14 +13,15 @@ use tokio::time::sleep;
 const ADMIN_URL: &str = "http://127.0.0.1";
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Helper to get a free port for testing
+/// Two distinct OS-chosen ports (admin, imposter) for one test. Both probe listeners are held
+/// until both ports are chosen, so they never repeat and concurrent runs never share one.
 fn get_test_ports() -> (u16, u16) {
-    // Use high ports to avoid conflicts
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static PORT_COUNTER: AtomicU16 = AtomicU16::new(18000);
-    let admin = PORT_COUNTER.fetch_add(2, Ordering::SeqCst);
-    let imposter = admin + 1;
-    (admin, imposter)
+    let admin = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+    let imposter = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+    (
+        admin.local_addr().expect("local addr").port(),
+        imposter.local_addr().expect("local addr").port(),
+    )
 }
 
 /// Start a Rift server for testing

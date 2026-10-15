@@ -17,11 +17,20 @@ use rift_mock_core::extensions::authz::{AdminAuthorizer, AuthzDecision, AuthzReq
 use rift_mock_core::imposter::{EventContext, ImposterEvent, ImposterEventListener};
 use std::sync::Arc;
 
-fn imposter_cfg(port: u16) -> ImposterConfig {
+fn imposter_cfg() -> ImposterConfig {
     serde_json::from_value(serde_json::json!({
-        "port": port, "protocol": "http", "stubs": []
+        "protocol": "http", "stubs": []
     }))
     .expect("test imposter config")
+}
+
+/// The auto-assigned port out of a `201` create response.
+async fn created_port(resp: reqwest::Response) -> u16 {
+    let body: serde_json::Value = resp.json().await.expect("create response is json");
+    let port = body["port"]
+        .as_u64()
+        .expect("create response carries the port");
+    u16::try_from(port).expect("port fits u16")
 }
 
 /// Records each event together with the attribution it arrived with, so assertions read as
@@ -101,14 +110,15 @@ async fn a_named_principal_reaches_the_change_event() {
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/imposters"))
-        .json(&serde_json::json!({"port": 18551, "protocol": "http", "stubs": []}))
+        .json(&serde_json::json!({"protocol": "http", "stubs": []}))
         .send()
         .await
         .expect("create imposter");
     assert_eq!(resp.status(), 201);
+    let port = created_port(resp).await;
 
     assert_eq!(
-        listener.principal_for(|e| matches!(e, ImposterEvent::Created(18551))),
+        listener.principal_for(|e| matches!(e, ImposterEvent::Created(p) if *p == port)),
         Some("alice".to_string()),
         "the creating principal must be attributed to the Created event"
     );
@@ -124,14 +134,15 @@ async fn no_authorizer_installed_leaves_the_principal_unset() {
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/imposters"))
-        .json(&serde_json::json!({"port": 18552, "protocol": "http", "stubs": []}))
+        .json(&serde_json::json!({"protocol": "http", "stubs": []}))
         .send()
         .await
         .expect("create imposter");
     assert_eq!(resp.status(), 201);
+    let port = created_port(resp).await;
 
     assert_eq!(
-        listener.principal_for(|e| matches!(e, ImposterEvent::Created(18552))),
+        listener.principal_for(|e| matches!(e, ImposterEvent::Created(p) if *p == port)),
         None,
         "with no authorizer installed there is no principal to attribute"
     );
@@ -147,14 +158,15 @@ async fn an_allow_without_a_principal_leaves_it_unset() {
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/imposters"))
-        .json(&serde_json::json!({"port": 18553, "protocol": "http", "stubs": []}))
+        .json(&serde_json::json!({"protocol": "http", "stubs": []}))
         .send()
         .await
         .expect("create imposter");
     assert_eq!(resp.status(), 201);
+    let port = created_port(resp).await;
 
     assert_eq!(
-        listener.principal_for(|e| matches!(e, ImposterEvent::Created(18553))),
+        listener.principal_for(|e| matches!(e, ImposterEvent::Created(p) if *p == port)),
         None,
         "an Allow that names nobody must not manufacture a principal"
     );
@@ -175,7 +187,7 @@ async fn a_fleet_wide_delete_attributes_the_actor_but_names_no_port() {
     let client = reqwest::Client::new();
     client
         .post(format!("{base}/imposters"))
-        .json(&serde_json::json!({"port": 18554, "protocol": "http", "stubs": []}))
+        .json(&serde_json::json!({"protocol": "http", "stubs": []}))
         .send()
         .await
         .expect("create imposter");
@@ -209,21 +221,22 @@ async fn a_single_imposter_delete_is_attributed() {
     }))
     .await;
     let client = reqwest::Client::new();
-    client
+    let created = client
         .post(format!("{base}/imposters"))
-        .json(&serde_json::json!({"port": 18556, "protocol": "http", "stubs": []}))
+        .json(&serde_json::json!({"protocol": "http", "stubs": []}))
         .send()
         .await
         .expect("create imposter");
+    let port = created_port(created).await;
     let resp = client
-        .delete(format!("{base}/imposters/18556"))
+        .delete(format!("{base}/imposters/{port}"))
         .send()
         .await
         .expect("delete imposter");
     assert_eq!(resp.status(), 200);
 
     assert_eq!(
-        listener.principal_for(|e| matches!(e, ImposterEvent::Deleted(18556))),
+        listener.principal_for(|e| matches!(e, ImposterEvent::Deleted(p) if *p == port)),
         Some("dave".to_string()),
         "deleting one imposter must record who deleted it"
     );
@@ -239,14 +252,15 @@ async fn a_stub_mutation_is_attributed() {
     }))
     .await;
     let client = reqwest::Client::new();
-    client
+    let created = client
         .post(format!("{base}/imposters"))
-        .json(&serde_json::json!({"port": 18557, "protocol": "http", "stubs": []}))
+        .json(&serde_json::json!({"protocol": "http", "stubs": []}))
         .send()
         .await
         .expect("create imposter");
+    let port = created_port(created).await;
     let resp = client
-        .post(format!("{base}/imposters/18557/stubs"))
+        .post(format!("{base}/imposters/{port}/stubs"))
         .json(&serde_json::json!({
             "stub": {
                 "predicates": [{"equals": {"path": "/ping"}}],
@@ -259,7 +273,7 @@ async fn a_stub_mutation_is_attributed() {
     assert!(resp.status().is_success(), "add stub: {}", resp.status());
 
     assert_eq!(
-        listener.principal_for(|e| matches!(e, ImposterEvent::StubsChanged(18557))),
+        listener.principal_for(|e| matches!(e, ImposterEvent::StubsChanged(p) if *p == port)),
         Some("erin".to_string()),
         "a stub edit must record who made it"
     );
@@ -274,14 +288,15 @@ async fn an_enabled_toggle_is_attributed() {
     }))
     .await;
     let client = reqwest::Client::new();
-    client
+    let created = client
         .post(format!("{base}/imposters"))
-        .json(&serde_json::json!({"port": 18558, "protocol": "http", "stubs": []}))
+        .json(&serde_json::json!({"protocol": "http", "stubs": []}))
         .send()
         .await
         .expect("create imposter");
+    let port = created_port(created).await;
     let resp = client
-        .post(format!("{base}/imposters/18558/disable"))
+        .post(format!("{base}/imposters/{port}/disable"))
         .send()
         .await
         .expect("disable imposter");
@@ -291,9 +306,9 @@ async fn an_enabled_toggle_is_attributed() {
         listener.principal_for(|e| matches!(
             e,
             ImposterEvent::EnabledChanged {
-                port: 18558,
+                port: p,
                 enabled: false
-            }
+            } if *p == port
         )),
         Some("frank".to_string()),
         "pausing an imposter must record who paused it"
@@ -335,24 +350,26 @@ async fn concurrent_requests_do_not_cross_attribute() {
     let one = client
         .post(format!("{base}/imposters"))
         .header("authorization", "grace")
-        .json(&serde_json::json!({"port": 18559, "protocol": "http", "stubs": []}))
+        .json(&serde_json::json!({"protocol": "http", "stubs": []}))
         .send();
     let two = client
         .post(format!("{base}/imposters"))
         .header("authorization", "heidi")
-        .json(&serde_json::json!({"port": 18560, "protocol": "http", "stubs": []}))
+        .json(&serde_json::json!({"protocol": "http", "stubs": []}))
         .send();
     let (r1, r2) = tokio::join!(one, two);
-    assert_eq!(r1.expect("create 18559").status(), 201);
-    assert_eq!(r2.expect("create 18560").status(), 201);
+    let (r1, r2) = (r1.expect("create first"), r2.expect("create second"));
+    assert_eq!(r1.status(), 201);
+    assert_eq!(r2.status(), 201);
+    let (port_1, port_2) = (created_port(r1).await, created_port(r2).await);
 
     assert_eq!(
-        listener.principal_for(|e| matches!(e, ImposterEvent::Created(18559))),
+        listener.principal_for(|e| matches!(e, ImposterEvent::Created(p) if *p == port_1)),
         Some("grace".to_string()),
         "each imposter must be attributed to the caller that created it"
     );
     assert_eq!(
-        listener.principal_for(|e| matches!(e, ImposterEvent::Created(18560))),
+        listener.principal_for(|e| matches!(e, ImposterEvent::Created(p) if *p == port_2)),
         Some("heidi".to_string()),
         "a concurrent request must not inherit the other caller's principal"
     );
@@ -371,13 +388,13 @@ async fn a_direct_manager_mutation_outside_any_request_has_no_principal() {
             .with_event_listener(Arc::clone(&listener) as Arc<dyn ImposterEventListener>),
     );
 
-    manager
-        .create_imposter(imposter_cfg(18555))
+    let port = manager
+        .create_imposter(imposter_cfg())
         .await
         .expect("create imposter directly");
 
     assert_eq!(
-        listener.principal_for(|e| matches!(e, ImposterEvent::Created(18555))),
+        listener.principal_for(|e| matches!(e, ImposterEvent::Created(p) if *p == port)),
         None,
         "outside a request scope there is no principal; reading one must be None, not a panic"
     );

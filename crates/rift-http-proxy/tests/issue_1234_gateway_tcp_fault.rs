@@ -19,9 +19,9 @@ use std::time::Duration;
 /// Every carrier site: a top-level Mountebank `fault`, `_rift.fault.tcp`, and a script `reset()`.
 const FAULT_PATHS: [&str; 5] = ["/reset", "/empty", "/garbage", "/malformed", "/script"];
 
-async fn fault_imposter(manager: &ImposterManager, port: u16) {
+async fn fault_imposter(manager: &ImposterManager) -> u16 {
     let config = serde_json::from_value(serde_json::json!({
-        "port": port, "protocol": "http", "recordRequests": true,
+        "protocol": "http", "recordRequests": true,
         "stubs": [
             { "predicates": [{ "equals": { "path": "/reset" } }],
               "responses": [{ "fault": "CONNECTION_RESET_BY_PEER" }] },
@@ -41,11 +41,12 @@ async fn fault_imposter(manager: &ImposterManager, port: u16) {
         ]
     }))
     .expect("fault imposter config");
-    manager
+    let port = manager
         .create_imposter(config)
         .await
         .expect("create imposter");
     tokio::time::sleep(Duration::from_millis(200)).await;
+    port
 }
 
 async fn start_admin(manager: Arc<ImposterManager>) -> (RunningAdminApi, String) {
@@ -123,9 +124,8 @@ fn expected(path: &str) -> Observed {
 // site, each observed exactly as the imposter's own port observes it.
 #[tokio::test]
 async fn h1_fault_through_every_door_matches_the_imposter_port() {
-    let port = 21340;
     let manager = Arc::new(ImposterManager::new());
-    fault_imposter(&manager, port).await;
+    let port = fault_imposter(&manager).await;
     let (admin, admin_base) = start_admin(manager.clone()).await;
     let (front, front_base) = start_front_door(manager.clone(), port).await;
 
@@ -210,9 +210,8 @@ async fn assert_h2_stream_reset(base: &str, port: u16, label: &str) {
 
 #[tokio::test]
 async fn h2_fault_resets_only_its_stream_on_both_doors() {
-    let port = 21341;
     let manager = Arc::new(ImposterManager::new());
-    fault_imposter(&manager, port).await;
+    let port = fault_imposter(&manager).await;
     let (admin, admin_base) = start_admin(manager.clone()).await;
     let (front, front_base) = start_front_door(manager.clone(), port).await;
 
@@ -228,9 +227,8 @@ async fn h2_fault_resets_only_its_stream_on_both_doors() {
 // client's next request (on a new connection) are unaffected.
 #[tokio::test]
 async fn h1_keep_alive_ok_fault_ok() {
-    let port = 21342;
     let manager = Arc::new(ImposterManager::new());
-    fault_imposter(&manager, port).await;
+    let port = fault_imposter(&manager).await;
     let (admin, admin_base) = start_admin(manager.clone()).await;
     let (front, front_base) = start_front_door(manager.clone(), port).await;
 
@@ -263,9 +261,8 @@ async fn h1_keep_alive_ok_fault_ok() {
 // (#1227) — aborting the connection must not change that.
 #[tokio::test]
 async fn gateway_fault_is_journaled_without_status() {
-    let port = 21343;
     let manager = Arc::new(ImposterManager::new());
-    fault_imposter(&manager, port).await;
+    let port = fault_imposter(&manager).await;
     let (admin, admin_base) = start_admin(manager.clone()).await;
 
     let _ = observe(&format!("{admin_base}/__rift/{port}/reset")).await;
@@ -346,9 +343,8 @@ fn captured() -> Captured {
 #[tokio::test]
 async fn injected_faults_are_not_logged_as_errors() {
     let captured = captured();
-    let port = 21344;
     let manager = Arc::new(ImposterManager::new());
-    fault_imposter(&manager, port).await;
+    let port = fault_imposter(&manager).await;
     let (admin, admin_base) = start_admin(manager.clone()).await;
     let (front, front_base) = start_front_door(manager.clone(), port).await;
 

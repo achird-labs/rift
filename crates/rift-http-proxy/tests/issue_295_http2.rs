@@ -4,29 +4,30 @@
 use rift_http_proxy::imposter::ImposterManager;
 use std::time::Duration;
 
-async fn mk(manager: &ImposterManager, port: u16) {
+async fn mk(manager: &ImposterManager) -> u16 {
     let cfg = serde_json::json!({
-        "port": port, "protocol": "http", "stubs": [
+        "protocol": "http", "stubs": [
             { "responses": [{ "is": { "statusCode": 200, "body": "h2-ok" } }] }
         ]
     });
     let config = serde_json::from_value(cfg).expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
+    port
 }
 
 // AC1: an HTTP/2 prior-knowledge (h2c) client gets a served response over HTTP/2.
 #[tokio::test]
 async fn imposter_serves_http2_prior_knowledge() {
     let manager = ImposterManager::new();
-    mk(&manager, 19895).await;
+    let port = mk(&manager).await;
 
     let client = reqwest::Client::builder()
         .http2_prior_knowledge()
         .build()
         .expect("h2 client");
     let resp = client
-        .get("http://127.0.0.1:19895/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("h2 request must succeed");
@@ -37,7 +38,7 @@ async fn imposter_serves_http2_prior_knowledge() {
     );
     let body = resp.text().await.expect("body");
     assert_eq!(body, "h2-ok");
-    let _ = manager.delete_imposter(19895).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // AC3: an imposter that can fire a TCP fault is served HTTP/1-only — TCP faults are connection-level
@@ -47,7 +48,7 @@ async fn imposter_serves_http2_prior_knowledge() {
 async fn tcp_fault_imposter_is_http1_only() {
     let manager = ImposterManager::new();
     let cfg = serde_json::json!({
-        "port": 19897, "protocol": "http", "stubs": [
+        "protocol": "http", "stubs": [
             { "predicates": [{ "equals": { "path": "/ok" } }],
               "responses": [{ "is": { "statusCode": 200, "body": "ok" } }] },
             { "predicates": [{ "equals": { "path": "/boom" } }],
@@ -56,7 +57,7 @@ async fn tcp_fault_imposter_is_http1_only() {
         ]
     });
     let config = serde_json::from_value(cfg).expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // h2 prior-knowledge against the normal path must fail: the listener is HTTP/1-only.
@@ -65,36 +66,39 @@ async fn tcp_fault_imposter_is_http1_only() {
         .build()
         .expect("h2 client");
     assert!(
-        h2.get("http://127.0.0.1:19897/ok").send().await.is_err(),
+        h2.get(format!("http://127.0.0.1:{port}/ok"))
+            .send()
+            .await
+            .is_err(),
         "a TCP-fault imposter must not negotiate HTTP/2"
     );
     // An ordinary HTTP/1 client still works on the non-fault path.
     let h1 = reqwest::Client::builder().build().expect("h1 client");
     let resp = h1
-        .get("http://127.0.0.1:19897/ok")
+        .get(format!("http://127.0.0.1:{port}/ok"))
         .send()
         .await
         .expect("h1 request");
     assert_eq!(resp.text().await.expect("body"), "ok");
-    let _ = manager.delete_imposter(19897).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // AC2: an ordinary HTTP/1 client still works (auto-negotiation must not regress HTTP/1).
 #[tokio::test]
 async fn imposter_still_serves_http1() {
     let manager = ImposterManager::new();
-    mk(&manager, 19896).await;
+    let port = mk(&manager).await;
 
     let client = reqwest::Client::builder()
         .http1_only()
         .build()
         .expect("h1 client");
     let resp = client
-        .get("http://127.0.0.1:19896/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("h1 request must succeed");
     assert_eq!(resp.version(), reqwest::Version::HTTP_11);
     assert_eq!(resp.text().await.expect("body"), "h2-ok");
-    let _ = manager.delete_imposter(19896).await;
+    let _ = manager.delete_imposter(port).await;
 }

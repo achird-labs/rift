@@ -175,11 +175,7 @@ async fn lifecycle_events_created_and_deleted() {
         .await
         .expect("hello");
 
-    let port = create(
-        &mgr,
-        serde_json::json!({"port":18801,"protocol":"http","stubs":[]}),
-    )
-    .await;
+    let port = create(&mgr, serde_json::json!({"protocol":"http","stubs":[]})).await;
     let created = sse
         .wait_for("imposter", Duration::from_secs(5))
         .await
@@ -202,7 +198,7 @@ async fn request_event_matches_saved_requests() {
     let (addr, mgr, running) = start_server(None).await;
     let iport = create(
         &mgr,
-        serde_json::json!({"port":18802,"protocol":"http","recordRequests":true,
+        serde_json::json!({"protocol":"http","recordRequests":true,
             "stubs":[{"responses":[{"is":{"statusCode":200,"body":"ok"}}]}]}),
     )
     .await;
@@ -276,7 +272,7 @@ async fn request_event_index_matches_savedrequests_cursor() {
     let (addr, mgr, running) = start_server(None).await;
     let iport = create(
         &mgr,
-        serde_json::json!({"port":18814,"protocol":"http","recordRequests":true,
+        serde_json::json!({"protocol":"http","recordRequests":true,
             "stubs":[{"responses":[{"is":{"statusCode":200,"body":"ok"}}]}]}),
     )
     .await;
@@ -336,7 +332,7 @@ async fn types_lifecycle_suppresses_request_events() {
     let (addr, mgr, running) = start_server(None).await;
     let iport = create(
         &mgr,
-        serde_json::json!({"port":18803,"protocol":"http","recordRequests":true,
+        serde_json::json!({"protocol":"http","recordRequests":true,
             "stubs":[{"responses":[{"is":{"statusCode":200}}]}]}),
     )
     .await;
@@ -357,8 +353,8 @@ async fn types_lifecycle_suppresses_request_events() {
 #[tokio::test]
 async fn port_filter_scopes_request_events() {
     let (addr, mgr, running) = start_server(None).await;
-    let a = create(&mgr, serde_json::json!({"port":18804,"protocol":"http","recordRequests":true,"stubs":[{"responses":[{"is":{"statusCode":200}}]}]})).await;
-    let b = create(&mgr, serde_json::json!({"port":18805,"protocol":"http","recordRequests":true,"stubs":[{"responses":[{"is":{"statusCode":200}}]}]})).await;
+    let a = create(&mgr, serde_json::json!({"protocol":"http","recordRequests":true,"stubs":[{"responses":[{"is":{"statusCode":200}}]}]})).await;
+    let b = create(&mgr, serde_json::json!({"protocol":"http","recordRequests":true,"stubs":[{"responses":[{"is":{"statusCode":200}}]}]})).await;
     let (mut sse, _s) = Sse::connect(addr, &format!("/events?types=requests&port={a}"), None).await;
     sse.wait_for("hello", Duration::from_secs(5))
         .await
@@ -391,7 +387,7 @@ async fn match_flow_id_filter_scopes_request_events() {
     // different flows — the same scoping `GET /savedRequests?match=flow_id=` applies.
     let iport = create(
         &mgr,
-        serde_json::json!({"port":18806,"protocol":"http","recordRequests":true,
+        serde_json::json!({"protocol":"http","recordRequests":true,
             "_rift":{"flowState":{"flowIdSource":"header:X-Space"}},
             "stubs":[{"responses":[{"is":{"statusCode":200}}]}]}),
     )
@@ -434,7 +430,7 @@ async fn match_method_and_path_filter_scopes_request_events() {
     let (addr, mgr, running) = start_server(None).await;
     let iport = create(
         &mgr,
-        serde_json::json!({"port":18815,"protocol":"http","recordRequests":true,
+        serde_json::json!({"protocol":"http","recordRequests":true,
             "stubs":[{"responses":[{"is":{"statusCode":200}}]}]}),
     )
     .await;
@@ -507,7 +503,7 @@ async fn lagged_event_on_backpressure() {
     for _ in 0..2000u32 {
         mgr.event_bus().publish_lifecycle(
             rift_mock_core::imposter::ImposterAction::StubsChanged,
-            Some(22661),
+            Some(1),
         );
     }
     // Now drain: a `lagged` frame must appear, and the stream keeps going (not closed).
@@ -520,10 +516,8 @@ async fn lagged_event_on_backpressure() {
         "lagged reports missed>=1"
     );
     // The stream must CONTINUE after lagging (not silently die): a fresh event still arrives.
-    mgr.event_bus().publish_lifecycle(
-        rift_mock_core::imposter::ImposterAction::Created,
-        Some(17777),
-    );
+    mgr.event_bus()
+        .publish_lifecycle(rift_mock_core::imposter::ImposterAction::Created, Some(2));
     let after = sse
         .wait_for("imposter", Duration::from_secs(5))
         .await
@@ -539,8 +533,8 @@ async fn lagged_event_on_backpressure() {
 #[tokio::test]
 async fn alias_endpoint_streams_scoped_requests() {
     let (addr, mgr, running) = start_server(None).await;
-    let a = create(&mgr, serde_json::json!({"port":18810,"protocol":"http","recordRequests":true,"stubs":[{"responses":[{"is":{"statusCode":200}}]}]})).await;
-    let b = create(&mgr, serde_json::json!({"port":18811,"protocol":"http","recordRequests":true,"stubs":[{"responses":[{"is":{"statusCode":200}}]}]})).await;
+    let a = create(&mgr, serde_json::json!({"protocol":"http","recordRequests":true,"stubs":[{"responses":[{"is":{"statusCode":200}}]}]})).await;
+    let b = create(&mgr, serde_json::json!({"protocol":"http","recordRequests":true,"stubs":[{"responses":[{"is":{"statusCode":200}}]}]})).await;
     // The alias auto-scopes to its port and streams request events without any query params.
     let (mut sse, status) =
         Sse::connect(addr, &format!("/imposters/{a}/savedRequests/stream"), None).await;
@@ -573,7 +567,7 @@ async fn no_types_param_streams_both_families_with_monotonic_ids() {
         .expect("hello");
 
     // Default (no types=) streams BOTH families: a lifecycle event and a request event.
-    let iport = create(&mgr, serde_json::json!({"port":18812,"protocol":"http","recordRequests":true,"stubs":[{"responses":[{"is":{"statusCode":200}}]}]})).await;
+    let iport = create(&mgr, serde_json::json!({"protocol":"http","recordRequests":true,"stubs":[{"responses":[{"is":{"statusCode":200}}]}]})).await;
     let created = sse
         .wait_for("imposter", Duration::from_secs(5))
         .await
@@ -660,7 +654,11 @@ async fn refusals_answer_the_errors_envelope() {
 async fn no_request_event_when_record_requests_disabled() {
     let (addr, mgr, running) = start_server(None).await;
     // recordRequests omitted (defaults false): the request is neither journaled nor streamed.
-    let iport = create(&mgr, serde_json::json!({"port":18813,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200}}]}]})).await;
+    let iport = create(
+        &mgr,
+        serde_json::json!({"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200}}]}]}),
+    )
+    .await;
     let (mut sse, _s) = Sse::connect(addr, "/events?types=requests", None).await;
     sse.wait_for("hello", Duration::from_secs(5))
         .await

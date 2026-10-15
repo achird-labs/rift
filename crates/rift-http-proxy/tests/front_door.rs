@@ -44,11 +44,11 @@ fn prefix_match(prefix: &str) -> RouteMatch {
 
 /// Create an imposter on `port` whose stub matches only an exact path (+ optional query),
 /// responding with `body` — used to assert the imposter saw exactly that request target.
-async fn exact_path_imposter(manager: &ImposterManager, port: u16, path: &str, body: &str) {
+async fn exact_path_imposter(manager: &ImposterManager, path: &str, body: &str) -> u16 {
     manager
         .create_imposter(
             serde_json::from_value(serde_json::json!({
-                "port": port, "protocol": "http",
+                "protocol": "http",
                 "stubs": [{
                     "predicates": [{"equals": {"path": path}}],
                     "responses": [{"is": {"statusCode": 200, "body": body}}]
@@ -57,7 +57,16 @@ async fn exact_path_imposter(manager: &ImposterManager, port: u16, path: &str, b
             .unwrap(),
         )
         .await
-        .expect("create imposter");
+        .expect("create imposter")
+}
+
+/// A port with no imposter on it: bound to learn it, then released.
+fn unused_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind an ephemeral port")
+        .local_addr()
+        .expect("local addr")
+        .port()
 }
 
 /// Bind a front door on an OS-assigned port serving `table`, returning the running handle and its
@@ -123,13 +132,13 @@ async fn start_front_door_with_observer(
 #[tokio::test]
 async fn host_routes_reach_different_imposters() {
     let manager = Arc::new(ImposterManager::new());
-    exact_path_imposter(&manager, 19900, "/", "from-a").await;
-    exact_path_imposter(&manager, 19901, "/", "from-b").await;
+    let port_a = exact_path_imposter(&manager, "/", "from-a").await;
+    let port_b = exact_path_imposter(&manager, "/", "from-b").await;
 
     let table = RouteTable {
         routes: vec![
-            route("a", host_match("a.test"), 19900, false),
-            route("b", host_match("b.test"), 19901, false),
+            route("a", host_match("a.test"), port_a, false),
+            route("b", host_match("b.test"), port_b, false),
         ],
     };
     let (running, base) = start_front_door(manager.clone(), table).await;
@@ -162,10 +171,10 @@ async fn strip_prefix_true_strips_the_path_the_imposter_sees() {
     // The imposter only has a stub for the STRIPPED path; if the front door failed to strip,
     // this predicate would never match and the imposter's Mountebank-style 200-with-no-match
     // fallback (or a 4xx) would show up instead of "stripped".
-    exact_path_imposter(&manager, 19902, "/x", "stripped").await;
+    let port = exact_path_imposter(&manager, "/x", "stripped").await;
 
     let table = RouteTable {
-        routes: vec![route("p", prefix_match("/api"), 19902, true)],
+        routes: vec![route("p", prefix_match("/api"), port, true)],
     };
     let (running, base) = start_front_door(manager.clone(), table).await;
 
@@ -180,10 +189,10 @@ async fn strip_prefix_true_strips_the_path_the_imposter_sees() {
 async fn strip_prefix_false_leaves_the_true_path_intact() {
     let manager = Arc::new(ImposterManager::new());
     // Without stripping, the imposter must see the untouched `/api/x`.
-    exact_path_imposter(&manager, 19903, "/api/x", "unstripped").await;
+    let port = exact_path_imposter(&manager, "/api/x", "unstripped").await;
 
     let table = RouteTable {
-        routes: vec![route("p", prefix_match("/api"), 19903, false)],
+        routes: vec![route("p", prefix_match("/api"), port, false)],
     };
     let (running, base) = start_front_door(manager.clone(), table).await;
 
@@ -197,10 +206,10 @@ async fn strip_prefix_false_leaves_the_true_path_intact() {
 #[tokio::test]
 async fn strip_prefix_of_the_prefix_itself_yields_root_not_empty() {
     let manager = Arc::new(ImposterManager::new());
-    exact_path_imposter(&manager, 19904, "/", "root").await;
+    let port = exact_path_imposter(&manager, "/", "root").await;
 
     let table = RouteTable {
-        routes: vec![route("p", prefix_match("/api"), 19904, true)],
+        routes: vec![route("p", prefix_match("/api"), port, true)],
     };
     let (running, base) = start_front_door(manager.clone(), table).await;
 
@@ -215,10 +224,10 @@ async fn strip_prefix_of_the_prefix_itself_yields_root_not_empty() {
 #[tokio::test]
 async fn query_strings_survive_stripping_and_passthrough() {
     let manager = Arc::new(ImposterManager::new());
-    manager
+    let strip_port = manager
         .create_imposter(
             serde_json::from_value(serde_json::json!({
-                "port": 19905, "protocol": "http",
+                "protocol": "http",
                 "stubs": [{
                     "predicates": [{"equals": {"path": "/x", "query": {"q": "1"}}}],
                     "responses": [{"is": {"statusCode": 200, "body": "stripped-query"}}]
@@ -228,10 +237,10 @@ async fn query_strings_survive_stripping_and_passthrough() {
         )
         .await
         .expect("create imposter");
-    manager
+    let pass_port = manager
         .create_imposter(
             serde_json::from_value(serde_json::json!({
-                "port": 19906, "protocol": "http",
+                "protocol": "http",
                 "stubs": [{
                     "predicates": [{"equals": {"path": "/api/x", "query": {"q": "1"}}}],
                     "responses": [{"is": {"statusCode": 200, "body": "unstripped-query"}}]
@@ -244,8 +253,8 @@ async fn query_strings_survive_stripping_and_passthrough() {
 
     let table = RouteTable {
         routes: vec![
-            route("strip", prefix_match("/api"), 19905, true),
-            route("pass", host_match("pass.test"), 19906, false),
+            route("strip", prefix_match("/api"), strip_port, true),
+            route("pass", host_match("pass.test"), pass_port, false),
         ],
     };
     let (running, base) = start_front_door(manager.clone(), table).await;
@@ -270,8 +279,9 @@ async fn query_strings_survive_stripping_and_passthrough() {
 #[tokio::test]
 async fn unmatched_request_is_404_with_the_no_route_header() {
     let manager = Arc::new(ImposterManager::new());
+    let dead_port = unused_port();
     let table = RouteTable {
-        routes: vec![route("only", host_match("only.test"), 19907, false)],
+        routes: vec![route("only", host_match("only.test"), dead_port, false)],
     };
     let (running, base) = start_front_door(manager.clone(), table).await;
 
@@ -291,9 +301,10 @@ async fn unmatched_request_is_404_with_the_no_route_header() {
 #[tokio::test]
 async fn matched_route_to_a_dead_port_is_404_without_the_no_route_header() {
     let manager = Arc::new(ImposterManager::new());
-    // No imposter is ever created on 19908 — the route matches, its target does not exist.
+    let dead_port = unused_port();
+    // No imposter is ever created on the unused port — the route matches, its target does not exist.
     let table = RouteTable {
-        routes: vec![route("dead", host_match("dead.test"), 19908, false)],
+        routes: vec![route("dead", host_match("dead.test"), dead_port, false)],
     };
     let (running, base) = start_front_door(manager.clone(), table).await;
 
@@ -316,11 +327,11 @@ async fn matched_route_to_a_dead_port_is_404_without_the_no_route_header() {
 #[tokio::test]
 async fn gateway_addressing_still_works_through_the_front_door_with_an_empty_table() {
     let manager = Arc::new(ImposterManager::new());
-    exact_path_imposter(&manager, 19909, "/y", "gatewayed").await;
+    let port = exact_path_imposter(&manager, "/y", "gatewayed").await;
 
     let (running, base) = start_front_door(manager.clone(), RouteTable::default()).await;
 
-    let resp = reqwest::get(format!("{base}/__rift/19909/y"))
+    let resp = reqwest::get(format!("{base}/__rift/{port}/y"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -334,10 +345,10 @@ async fn gateway_addressing_still_works_through_the_front_door_with_an_empty_tab
 #[tokio::test]
 async fn a_matched_dispatch_is_observed_exactly_once_with_its_route_id() {
     let manager = Arc::new(ImposterManager::new());
-    exact_path_imposter(&manager, 19910, "/", "from-a").await;
+    let port = exact_path_imposter(&manager, "/", "from-a").await;
 
     let table = RouteTable {
-        routes: vec![route("a", host_match("a.test"), 19910, false)],
+        routes: vec![route("a", host_match("a.test"), port, false)],
     };
     let (running, base, observer) = start_front_door_with_observer(manager.clone(), table).await;
 
@@ -356,10 +367,10 @@ async fn a_matched_dispatch_is_observed_exactly_once_with_its_route_id() {
 #[tokio::test]
 async fn two_requests_to_the_same_route_produce_two_observations() {
     let manager = Arc::new(ImposterManager::new());
-    exact_path_imposter(&manager, 19911, "/", "from-a").await;
+    let port = exact_path_imposter(&manager, "/", "from-a").await;
 
     let table = RouteTable {
-        routes: vec![route("a", host_match("a.test"), 19911, false)],
+        routes: vec![route("a", host_match("a.test"), port, false)],
     };
     let (running, base, observer) = start_front_door_with_observer(manager.clone(), table).await;
     let client = reqwest::Client::new();
@@ -384,13 +395,13 @@ async fn two_requests_to_the_same_route_produce_two_observations() {
 #[tokio::test]
 async fn requests_to_different_routes_are_attributed_to_the_right_id() {
     let manager = Arc::new(ImposterManager::new());
-    exact_path_imposter(&manager, 19912, "/", "from-a").await;
-    exact_path_imposter(&manager, 19913, "/", "from-b").await;
+    let port_a = exact_path_imposter(&manager, "/", "from-a").await;
+    let port_b = exact_path_imposter(&manager, "/", "from-b").await;
 
     let table = RouteTable {
         routes: vec![
-            route("a", host_match("a.test"), 19912, false),
-            route("b", host_match("b.test"), 19913, false),
+            route("a", host_match("a.test"), port_a, false),
+            route("b", host_match("b.test"), port_b, false),
         ],
     };
     let (running, base, observer) = start_front_door_with_observer(manager.clone(), table).await;
@@ -417,12 +428,13 @@ async fn requests_to_different_routes_are_attributed_to_the_right_id() {
 #[tokio::test]
 async fn a_route_whose_imposter_is_gone_is_still_observed() {
     let manager = Arc::new(ImposterManager::new());
-    // No imposter is ever created on 19914 — the route matches, its target does not exist, and
+    let dead_port = unused_port();
+    // No imposter is ever created on the unused port — the route matches, its target does not exist, and
     // the response is a 404. The route still claimed the request: this is the case a HITS column
     // exists to reveal (a route that only ever 404s), so it must be observed exactly like a
     // healthy dispatch.
     let table = RouteTable {
-        routes: vec![route("dead", host_match("dead.test"), 19914, false)],
+        routes: vec![route("dead", host_match("dead.test"), dead_port, false)],
     };
     let (running, base, observer) = start_front_door_with_observer(manager.clone(), table).await;
 
@@ -441,7 +453,7 @@ async fn a_route_whose_imposter_is_gone_is_still_observed() {
 #[tokio::test]
 async fn gateway_addressing_is_not_observed() {
     let manager = Arc::new(ImposterManager::new());
-    exact_path_imposter(&manager, 19915, "/y", "gatewayed").await;
+    let port = exact_path_imposter(&manager, "/y", "gatewayed").await;
 
     // Empty route table: nothing can claim this request via the route table, so it falls through
     // to the single-port gateway's own `/__rift/:port` addressing — which never claimed a route
@@ -449,7 +461,7 @@ async fn gateway_addressing_is_not_observed() {
     let (running, base, observer) =
         start_front_door_with_observer(manager.clone(), RouteTable::default()).await;
 
-    let resp = reqwest::get(format!("{base}/__rift/19915/y"))
+    let resp = reqwest::get(format!("{base}/__rift/{port}/y"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -461,8 +473,9 @@ async fn gateway_addressing_is_not_observed() {
 #[tokio::test]
 async fn an_unmatched_request_is_not_observed() {
     let manager = Arc::new(ImposterManager::new());
+    let dead_port = unused_port();
     let table = RouteTable {
-        routes: vec![route("only", host_match("only.test"), 19916, false)],
+        routes: vec![route("only", host_match("only.test"), dead_port, false)],
     };
     let (running, base, observer) = start_front_door_with_observer(manager.clone(), table).await;
 

@@ -17,9 +17,9 @@ async fn runaway_script_times_out_and_sibling_stays_responsive() {
 
     // Imposter A: an infinite-loop Rhai script (bare expression, issue #357 Item 2 — the whole
     // body IS the entrypoint, so the loop actually runs), bounded to 500ms.
-    manager
+    let port_a = manager
         .create_imposter(cfg(serde_json::json!({
-            "protocol": "http", "port": 19191,
+            "protocol": "http",
             "_rift": { "scriptEngine": { "defaultEngine": "rhai", "timeoutMs": 500 } },
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/hang" } }],
@@ -31,9 +31,9 @@ async fn runaway_script_times_out_and_sibling_stays_responsive() {
         .expect("create A");
 
     // Imposter B: a plain, unrelated imposter.
-    manager
+    let port_b = manager
         .create_imposter(cfg(serde_json::json!({
-            "protocol": "http", "port": 19192,
+            "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/health" } }],
                 "responses": [{ "is": { "statusCode": 200, "body": "ok" } }]
@@ -43,17 +43,17 @@ async fn runaway_script_times_out_and_sibling_stays_responsive() {
         .expect("create B");
 
     // Sibling responds before the runaway even starts.
-    let before = reqwest::get("http://127.0.0.1:19192/health")
+    let before = reqwest::get(format!("http://127.0.0.1:{port_b}/health"))
         .await
         .expect("B reachable")
         .status();
     assert_eq!(before, 200);
 
     // Fire the runaway request in the background (do not await it fully).
-    let hang = tokio::spawn(async {
+    let hang = tokio::spawn(async move {
         let start = Instant::now();
         let resp = reqwest::Client::new()
-            .get("http://127.0.0.1:19191/hang")
+            .get(format!("http://127.0.0.1:{port_a}/hang"))
             .timeout(Duration::from_secs(10))
             .send()
             .await;
@@ -64,7 +64,7 @@ async fn runaway_script_times_out_and_sibling_stays_responsive() {
     tokio::time::sleep(Duration::from_millis(150)).await;
     let sibling_start = Instant::now();
     let during = reqwest::Client::new()
-        .get("http://127.0.0.1:19192/health")
+        .get(format!("http://127.0.0.1:{port_b}/health"))
         .timeout(Duration::from_secs(3))
         .send()
         .await
@@ -104,9 +104,9 @@ async fn runaway_script_times_out_and_sibling_stays_responsive() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn normal_script_none_and_latency_serve_200() {
     let manager = Arc::new(ImposterManager::new());
-    manager
+    let port = manager
         .create_imposter(cfg(serde_json::json!({
-            "protocol": "http", "port": 19193,
+            "protocol": "http",
             "stubs": [
                 { "predicates": [{ "equals": { "path": "/pass" } }],
                   "responses": [{ "_rift": { "script": { "engine": "rhai",
@@ -119,12 +119,12 @@ async fn normal_script_none_and_latency_serve_200() {
         .await
         .expect("create");
 
-    let pass = reqwest::get("http://127.0.0.1:19193/pass")
+    let pass = reqwest::get(format!("http://127.0.0.1:{port}/pass"))
         .await
         .expect("pass reachable");
     assert_eq!(pass.status(), 200, "None decision serves 200");
 
-    let slow = reqwest::get("http://127.0.0.1:19193/slow")
+    let slow = reqwest::get(format!("http://127.0.0.1:{port}/slow"))
         .await
         .expect("slow reachable");
     assert_eq!(slow.status(), 200, "Latency decision serves 200");

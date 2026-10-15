@@ -6,20 +6,21 @@
 use rift_http_proxy::imposter::ImposterManager;
 use std::time::Duration;
 
-async fn mk(manager: &ImposterManager, cfg: serde_json::Value) {
+async fn mk(manager: &ImposterManager, cfg: serde_json::Value) -> u16 {
     let config = serde_json::from_value(cfg).expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
+    port
 }
 
 // AC1: a decorate script that throws attaches x-rift-decorate-error (body unchanged).
 #[tokio::test]
 async fn decorate_failure_sets_error_header() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19891, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
                   "_behaviors": { "decorate": "function (request, response) { throw new Error('boom'); }" } }] }
             ]
@@ -28,7 +29,7 @@ async fn decorate_failure_sets_error_header() {
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19891/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send");
@@ -39,17 +40,17 @@ async fn decorate_failure_sets_error_header() {
         "a failing decorate must attach x-rift-decorate-error, not be a silent success"
     );
     assert_eq!(body, "original", "the fallback body is still served");
-    let _ = manager.delete_imposter(19891).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // AC2: a failing shellTransform attaches x-rift-shelltransform-error (body kept, per #269).
 #[tokio::test]
 async fn shell_transform_failure_sets_error_header() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19892, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
                   "_behaviors": { "shellTransform": "exit 1" } }] }
             ]
@@ -58,7 +59,7 @@ async fn shell_transform_failure_sets_error_header() {
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19892/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send");
@@ -69,17 +70,17 @@ async fn shell_transform_failure_sets_error_header() {
         "a failing shellTransform must attach x-rift-shelltransform-error"
     );
     assert_eq!(body, "original", "the body is kept unchanged (issue #269)");
-    let _ = manager.delete_imposter(19892).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // AC3: a binary-mode body that isn't valid base64 attaches x-rift-binary-error.
 #[tokio::test]
 async fn binary_decode_failure_sets_error_header() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19893, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "not!valid!base64!", "_mode": "binary" } }] }
             ]
         }),
@@ -87,7 +88,7 @@ async fn binary_decode_failure_sets_error_header() {
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19893/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send");
@@ -95,5 +96,5 @@ async fn binary_decode_failure_sets_error_header() {
         resp.headers().contains_key("x-rift-binary-error"),
         "a failing binary base64 decode must attach x-rift-binary-error"
     );
-    let _ = manager.delete_imposter(19893).await;
+    let _ = manager.delete_imposter(port).await;
 }

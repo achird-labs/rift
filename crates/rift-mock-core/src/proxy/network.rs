@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn http_tuning_parse_reads_max_buf() {
-        assert_eq!(http(Some(" 16384 "), None, None).max_buf_size, 16384);
+        assert_eq!(http(Some(" 32768 "), None, None).max_buf_size, 32768);
     }
 
     #[test]
@@ -765,7 +765,7 @@ mod tests {
         assert_eq!(http_warns(None, None, None), vec![]);
         assert_eq!(sock_warns(None, None), vec![]);
         assert_eq!(
-            http_warns(Some("16384"), Some("10"), Some("500")),
+            http_warns(Some("32768"), Some("10"), Some("500")),
             vec![],
             "values that were honoured must not warn"
         );

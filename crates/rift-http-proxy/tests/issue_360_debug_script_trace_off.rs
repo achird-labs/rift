@@ -11,7 +11,7 @@ use std::time::Duration;
 async fn matched_script_response_has_no_trace_header_when_debug_is_off() {
     let manager = ImposterManager::new();
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": 20091, "protocol": "http",
+        "protocol": "http",
         "stubs": [{
             "responses": [{
                 "_rift": {
@@ -24,10 +24,10 @@ async fn matched_script_response_has_no_trace_header_when_debug_is_off() {
         }]
     }))
     .expect("valid imposter config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let resp = reqwest::get("http://127.0.0.1:20091/x")
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/x"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 200);
@@ -36,5 +36,5 @@ async fn matched_script_response_has_no_trace_header_when_debug_is_off() {
         "trace header must be absent when debug mode is off"
     );
 
-    let _ = manager.delete_imposter(20091).await;
+    let _ = manager.delete_imposter(port).await;
 }

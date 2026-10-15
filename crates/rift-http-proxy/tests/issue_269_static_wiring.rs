@@ -4,20 +4,21 @@
 use rift_http_proxy::imposter::ImposterManager;
 use std::time::Duration;
 
-async fn mk(manager: &ImposterManager, cfg: serde_json::Value) {
+async fn mk(manager: &ImposterManager, cfg: serde_json::Value) -> u16 {
     let config = serde_json::from_value(cfg).expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
+    port
 }
 
 /// AC1 — `${request.*}` expands on a static `is` body AND in response headers.
 #[tokio::test]
 async fn static_response_expands_request_templates() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19881, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "predicates": [{ "equals": { "path": "/tpl" } }],
                   "responses": [{ "is": { "statusCode": 200,
                     "headers": { "X-Echo-Path": "${request.path}" },
@@ -29,7 +30,7 @@ async fn static_response_expands_request_templates() {
 
     let c = reqwest::Client::new();
     let resp = c
-        .get("http://127.0.0.1:19881/tpl?x=1")
+        .get(format!("http://127.0.0.1:{port}/tpl?x=1"))
         .header("X-Foo", "bar")
         .send()
         .await
@@ -49,17 +50,17 @@ async fn static_response_expands_request_templates() {
         Some("/tpl"),
         "request templates must expand in response headers"
     );
-    let _ = manager.delete_imposter(19881).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 /// AC2 — `shellTransform` runs on a static `is` response.
 #[tokio::test]
 async fn static_response_applies_shell_transform() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19882, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
                   "_behaviors": { "shellTransform": "printf transformed" } }] }
             ]
@@ -69,7 +70,7 @@ async fn static_response_applies_shell_transform() {
 
     let c = reqwest::Client::new();
     let body = c
-        .get("http://127.0.0.1:19882/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send")
@@ -80,7 +81,7 @@ async fn static_response_applies_shell_transform() {
         body, "transformed",
         "shellTransform must run on a static `is` response"
     );
-    let _ = manager.delete_imposter(19882).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 /// AC3 — a non-proxied request increments `rift_requests_total` with the served status label.
@@ -100,10 +101,10 @@ async fn static_response_records_request_metric() {
 
     let before = requests_total_418();
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19883, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "is": { "statusCode": 418, "body": "teapot" } }] }
             ]
         }),
@@ -112,7 +113,7 @@ async fn static_response_records_request_metric() {
 
     let c = reqwest::Client::new();
     let resp = c
-        .get("http://127.0.0.1:19883/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send");
@@ -125,17 +126,17 @@ async fn static_response_records_request_metric() {
         before + 1,
         "rift_requests_total{{status=418}} must increment by exactly one for the served request (before={before} after={after})"
     );
-    let _ = manager.delete_imposter(19883).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 /// AC2 (failure path) — a failing `shellTransform` leaves the body unchanged (warn-and-keep).
 #[tokio::test]
 async fn static_response_shell_transform_failure_keeps_body() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19884, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
                   "_behaviors": { "shellTransform": "exit 1" } }] }
             ]
@@ -145,7 +146,7 @@ async fn static_response_shell_transform_failure_keeps_body() {
 
     let c = reqwest::Client::new();
     let body = c
-        .get("http://127.0.0.1:19884/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send")
@@ -156,5 +157,5 @@ async fn static_response_shell_transform_failure_keeps_body() {
         body, "original",
         "a failing shellTransform must leave the body unchanged"
     );
-    let _ = manager.delete_imposter(19884).await;
+    let _ = manager.delete_imposter(port).await;
 }
