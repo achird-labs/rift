@@ -10,7 +10,7 @@ Two trees, with opposite questions:
 The specification lives in this repository so a behaviour change and the scenario that pins it land
 in one pull request. Two runners read this tree while the features move from one to the other
 (#1338, #1346): the Rust runner in [`runner/`](runner/) (cucumber-rs) runs the features in its
-`spec::PORTED_FEATURES` (today 00, 01, 02 and 09), and the Scala runner (zio-bdd) in rift-conformance
+`spec::PORTED_FEATURES` (today 00, 01, 02, 06, 07, 09, 11, 14, 17 and 18), and the Scala runner (zio-bdd) in rift-conformance
 runs every other one. Each feature has exactly one runner: the Scala runner drops the files listed
 in its `conformance/ported.txt` (rift-conformance#244), and a porting batch updates both lists in the
 same release. The container mode is the exception until the Rust runner has one (#1467).
@@ -74,13 +74,26 @@ the runner reads the one the engine assigned back from the `201`, so there is no
 race. Only fixtures that name a port (`a fresh verbatim imposter`, the corpus's 45xx imposters)
 bind a fixed one.
 
-In embedded mode, feature 09's `@upstream-trust` scenario does not run: it starts a second engine
-with `--upstream-ca-file`, and only external mode spawns engines. The run lists what it left out.
+Feature 11's reload scenarios each start an engine of their own serving a config file (on the
+fixed ports 4870-4878 the fixtures name), stopped after the scenario: a spawned `rift --configfile`
+in external mode, a second in-process engine given the file as `configFile` in embedded mode.
+
+External mode runs every ported scenario. Embedded mode leaves out (`Mode::excludes`; the run lists
+what it left out):
+
+- feature 09's `@upstream-trust` scenario: it starts a second engine with `--upstream-ca-file`, and
+  only external mode spawns engines;
+- feature 11's three `@front-door` scenarios: the front door is `rift --front-door`, which
+  `rift_serve_admin` has no option for. One of the three (the warning for a routes block without
+  `--front-door`) would run, but carries the tag.
+
+Unlike the Scala runner's embedded leg, this one runs `@metrics-port` (the embedded engine serves
+its own metrics listener) and `@no-config-source` (its shared engine has no config file).
 
 Known limit of embedded mode: the engine is linked into the test binary, so under `cargo test` it
-runs at the debug profile, not the release build external mode spawns. Batch 1 has no timing
-assertions, but the timing-sensitive features of later batches (latency faults, timeouts, `wait`
-behaviours) may need `cargo test --release` or an exclusion in embedded mode.
+runs at the debug profile, not the release build external mode spawns. The timing assertions ported
+so far are lower bounds (`wait` behaviours), which a slower engine still meets; an upper bound or a
+timeout may need `cargo test --release` in embedded mode.
 
 ### The Scala runner (every other feature)
 

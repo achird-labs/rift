@@ -5,12 +5,21 @@ use std::path::PathBuf;
 /// The feature files this runner runs. Each one ported here is also listed in the Scala runner's
 /// `conformance/ported.txt` (EtaCassiopeia/rift-conformance#244), which drops it from that runner's
 /// external, embedded and lint legs, so every feature has exactly one runner during the move.
-/// Later batches: #1347, #1348, #1349, #1350.
+/// Batch 1 (#1346) is 00, 01, 02 and 09, batch 2 (#1347) 06, 07, 11, 14, 17 and 18; later batches:
+/// #1348, #1349, #1350. Embedded mode leaves out `@upstream-trust` (09) and `@front-door` (11):
+/// see `harness::Mode::excludes`.
 pub const PORTED_FEATURES: &[&str] = &[
     "00-smoke.feature",
     "01-consistency-gate.feature",
     "02-core-serving.feature",
     "09-gateway-https-metrics.feature",
+    // Batch 2 (#1347).
+    "06-behaviors.feature",
+    "07-spaces-and-fsm.feature",
+    "11-reload.feature",
+    "14-behaviors-response-types.feature",
+    "17-metrics.feature",
+    "18-match-diagnostics.feature",
 ];
 
 /// The conformance tree: `features/`, `rift-fixtures/`, `rift-lint-fixtures/`, `rift-scripts/`.

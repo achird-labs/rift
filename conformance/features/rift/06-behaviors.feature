@@ -76,10 +76,10 @@ Feature: Response behaviors — copy, lookup, wait, shellTransform, decorate
 
   # rift#1195 (0.18.0): a `behaviors` ARRAY runs every copy/lookup/shellTransform element in order, as
   # Mountebank 2.9.1 does. Before, the fold kept only the last element per key, so `${A}` stayed
-  # literal. The imposter is the static corpus file 21, which the feature-01 gate also lints and
-  # rift-verifies.
+  # literal. The imposter was rift-conformance's corpus file 21; it is a fixture here because rift's
+  # own corpus (sdk-conformance/corpus) is the one the SDKs replay and does not carry it (#1347).
   Scenario: a behaviors array applies every copy element in order
-    Given a fresh imposter from corpus file "21-behaviors-array-copy"
+    Given a fresh imposter from fixture "behaviors/array-copy"
     When the client sends "GET" "/copy"
     Then the response status is 200
     And the response body is "A=cop B=GET"

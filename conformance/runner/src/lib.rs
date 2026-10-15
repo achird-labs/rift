@@ -11,12 +11,14 @@
 //! - [`tools`]: `rift-lint` / `rift-verify` run as subprocesses, their JSON parsed.
 //! - [`build_info`]: the `BUILD_INFO` a staged build carries (feature 01's coherence gate).
 //! - [`http`]: the HTTP clients the steps send with (plain, trust-all TLS, verifying TLS, mTLS).
+//! - [`prom`]: Prometheus text exposition, parsed per series (feature 17's metric deltas).
 //! - [`spec`]: where the specification lives and which features this runner has ported.
 
 pub mod build_info;
 pub mod error;
 pub mod harness;
 pub mod http;
+pub mod prom;
 pub mod spec;
 pub mod tools;
 

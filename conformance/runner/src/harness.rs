@@ -2,7 +2,8 @@
 //!
 //! One [`Harness`] per run owns the shared engine every scenario drives over HTTP. Its admin and
 //! metrics URLs are fixed for the run. Scenarios that need an engine started with different flags
-//! (feature 09 `@upstream-trust`) spawn a [`SpawnedEngine`] of their own beside it.
+//! (feature 09 `@upstream-trust`) spawn a [`SpawnedEngine`] of their own beside it, and feature 11's
+//! reload scenarios start a [`ReloadEngine`] serving a config file of their own.
 
 use crate::HarnessError;
 use crate::build_info::BuildInfo;
@@ -63,7 +64,10 @@ impl Mode {
     pub fn excludes(self, tag: &str) -> Option<&'static str> {
         match (self, tag) {
             (Self::Embedded, "upstream-trust") => Some(
-                "starts a second engine with --upstream-ca-file, and only external mode spawns engines",
+                "starts a second engine with --upstream-ca-file, which this harness only spawns in external mode",
+            ),
+            (Self::Embedded, "front-door") => Some(
+                "drives the front door of `rift --front-door`, which rift_serve_admin has no option for",
             ),
             _ => None,
         }
@@ -169,8 +173,8 @@ impl Harness {
         let build_info = BuildInfo::load(&config.build_dir)?;
         let tools = Tools::from_build_dir(&config.build_dir);
         let engine = match config.mode {
-            Mode::External => Engine::External(spawn_with_retry(&config, &[]).await?),
-            Mode::Embedded => Engine::Embedded(EmbeddedEngine::start(&config).await?),
+            Mode::External => Engine::External(spawn_with_retry(&config, &[], false).await?),
+            Mode::Embedded => Engine::Embedded(EmbeddedEngine::start(&config, None).await?),
             Mode::Container => {
                 return Err(HarnessError::Unsupported {
                     what: "the shared engine",
@@ -229,7 +233,52 @@ impl Harness {
             "--upstream-ca-file".to_string(),
             ca_file.display().to_string(),
         ];
-        spawn_with_retry(&self.config, &args).await
+        spawn_with_retry(&self.config, &args, false).await
+    }
+
+    /// Start a dedicated engine serving `json` from a config file it reloads from (feature 11): a
+    /// spawned `rift --configfile`, or in embedded mode a second in-process engine given the file as
+    /// `configFile`. `front_door` also starts the front door, which only a spawned engine has. The
+    /// caller owns it and stops it after the scenario.
+    pub async fn start_reload_engine(
+        &self,
+        json: &str,
+        front_door: bool,
+    ) -> Result<ReloadEngine, HarnessError> {
+        let config_path = self.config.log_dir.join("reload-config.json");
+        write_file(&config_path, json)?;
+        let (engine, admin_url) = match self.config.mode {
+            Mode::External => {
+                let args = vec![
+                    "--configfile".to_string(),
+                    config_path.display().to_string(),
+                ];
+                let e = spawn_with_retry(&self.config, &args, front_door).await?;
+                let url = e.admin_url.clone();
+                (ReloadKind::Spawned(e), url)
+            }
+            Mode::Embedded if !front_door => {
+                let e = EmbeddedEngine::start(&self.config, Some(&config_path)).await?;
+                let url = e.admin_url.clone();
+                (ReloadKind::Embedded(e), url)
+            }
+            Mode::Embedded | Mode::Container => {
+                return Err(HarnessError::Unsupported {
+                    what: "the reload engine",
+                    mode: self.config.mode.name(),
+                });
+            }
+        };
+        let front_door_port = match &engine {
+            ReloadKind::Spawned(e) => e.front_door_port,
+            ReloadKind::Embedded(_) => None,
+        };
+        Ok(ReloadEngine {
+            engine,
+            admin_url,
+            config_path,
+            front_door_port,
+        })
     }
 
     /// Kill the shared engine synchronously, without waiting for it: the teardown of last resort,
@@ -284,16 +333,19 @@ pub struct SpawnedEngine {
     child: Child,
     pub admin_url: String,
     pub metrics_url: String,
+    /// `--front-door`'s port, when it was started with one.
+    pub front_door_port: Option<u16>,
     pub log: PathBuf,
 }
 
 async fn spawn_with_retry(
     config: &Config,
     extra: &[String],
+    front_door: bool,
 ) -> Result<SpawnedEngine, HarnessError> {
     let mut failures = Vec::new();
     for _ in 0..SPAWN_ATTEMPTS {
-        match SpawnedEngine::start(config, extra).await {
+        match SpawnedEngine::start(config, extra, front_door).await {
             Ok(engine) => return Ok(engine),
             Err(e) => failures.push(e.to_string()),
         }
@@ -305,11 +357,20 @@ async fn spawn_with_retry(
 }
 
 impl SpawnedEngine {
-    /// Spawn `rift --port <admin> --nologfile --metrics-port <m> --allow-injection <extra>` in the
-    /// corpus root, output to a log file, and wait until its admin and metrics listeners answer.
-    async fn start(config: &Config, extra: &[String]) -> Result<Self, HarnessError> {
+    /// Spawn `rift --port <admin> --nologfile --metrics-port <m> --allow-injection <extra>` (plus
+    /// `--front-door <fd>` when asked) in the corpus root, output to a log file, and wait until its
+    /// admin and metrics listeners answer and the front door accepts.
+    async fn start(
+        config: &Config,
+        extra: &[String],
+        front_door: bool,
+    ) -> Result<Self, HarnessError> {
         let admin_port = free_port()?;
         let metrics_port = free_port()?;
+        let front_door_port = if front_door { Some(free_port()?) } else { None };
+        let front_door_args = front_door_port
+            .map(|p| vec!["--front-door".to_string(), p.to_string()])
+            .unwrap_or_default();
         let log = config.log_dir.join(format!("engine-{admin_port}.log"));
         let log_file = std::fs::File::create(&log).map_err(|source| HarnessError::Io {
             action: "creating",
@@ -330,6 +391,7 @@ impl SpawnedEngine {
             .arg(metrics_port.to_string())
             .arg("--allow-injection")
             .args(extra)
+            .args(&front_door_args)
             .current_dir(&config.corpus_root)
             .stdin(Stdio::null())
             .stdout(log_file)
@@ -345,6 +407,7 @@ impl SpawnedEngine {
             child,
             admin_url: format!("http://localhost:{admin_port}"),
             metrics_url: format!("http://localhost:{metrics_port}"),
+            front_door_port,
             log,
         };
         match engine.await_ready().await {
@@ -400,6 +463,22 @@ impl SpawnedEngine {
                 tokio::time::sleep(READINESS_SPACING).await;
             }
         }
+        if let Some(port) = self.front_door_port {
+            loop {
+                let last = match tokio::net::TcpStream::connect(("localhost", port)).await {
+                    Ok(_) => break,
+                    Err(e) => e.to_string(),
+                };
+                if Instant::now() >= deadline {
+                    return Err(HarnessError::NotReady(format!(
+                        "the front door on {port} did not accept within {READINESS_BUDGET:?} (last: {last}); log {}:\n{}",
+                        self.log.display(),
+                        log_tail(&self.log)
+                    )));
+                }
+                tokio::time::sleep(READINESS_SPACING).await;
+            }
+        }
         Ok(())
     }
 
@@ -431,6 +510,52 @@ impl SpawnedEngine {
     }
 }
 
+/// Feature 11's per-scenario engine and the config file it reloads from.
+#[derive(Debug)]
+pub struct ReloadEngine {
+    engine: ReloadKind,
+    pub admin_url: String,
+    pub config_path: PathBuf,
+    pub front_door_port: Option<u16>,
+}
+
+#[derive(Debug)]
+enum ReloadKind {
+    Spawned(SpawnedEngine),
+    Embedded(EmbeddedEngine),
+}
+
+impl ReloadEngine {
+    /// Replace the config file without reloading: the scenario drives the reload itself.
+    pub fn rewrite_config(&self, json: &str) -> Result<(), HarnessError> {
+        write_file(&self.config_path, json)
+    }
+
+    /// The spawned engine's log; an embedded engine logs into this process.
+    #[must_use]
+    pub fn log(&self) -> Option<&Path> {
+        match &self.engine {
+            ReloadKind::Spawned(e) => Some(&e.log),
+            ReloadKind::Embedded(_) => None,
+        }
+    }
+
+    pub async fn stop(self) -> Result<(), HarnessError> {
+        match self.engine {
+            ReloadKind::Spawned(e) => e.stop().await,
+            ReloadKind::Embedded(e) => e.stop().await,
+        }
+    }
+}
+
+fn write_file(path: &Path, contents: &str) -> Result<(), HarnessError> {
+    std::fs::write(path, contents).map_err(|source| HarnessError::Io {
+        action: "writing",
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 /// The last 40 lines of an engine log, for a failure message.
 #[must_use]
 pub fn log_tail(path: &Path) -> String {
@@ -444,6 +569,7 @@ pub fn log_tail(path: &Path) -> String {
 }
 
 /// The engine running in this process through rift-ffi's C-ABI, exactly as an SDK embeds it.
+#[derive(Debug)]
 struct EmbeddedEngine {
     handle: HandlePtr,
     admin_url: String,
@@ -452,6 +578,7 @@ struct EmbeddedEngine {
 
 /// `rift_start`'s opaque handle. Every C-ABI entry point takes it from any thread (the SDKs call
 /// them from arbitrary JVM/Go/Node threads); it is only ever passed back to them.
+#[derive(Debug)]
 struct HandlePtr(*mut rift_ffi::RiftHandle);
 // SAFETY: the handle is an opaque pointer into rift-ffi, whose entry points are documented as
 // callable from any thread; this runner never dereferences it.
@@ -472,7 +599,8 @@ struct ServeAdminReply {
 }
 
 impl EmbeddedEngine {
-    async fn start(config: &Config) -> Result<Self, HarnessError> {
+    /// `config_file`, when given, is loaded and becomes the engine's reload source.
+    async fn start(config: &Config, config_file: Option<&Path>) -> Result<Self, HarnessError> {
         let mut options = serde_json::json!({
             "host": "127.0.0.1",
             "port": 0,
@@ -481,6 +609,9 @@ impl EmbeddedEngine {
         });
         if let Some(max) = config.max_body_size {
             options["maxBodySize"] = max.into();
+        }
+        if let Some(path) = config_file {
+            options["configFile"] = path.display().to_string().into();
         }
         let options = CString::new(options.to_string())
             .map_err(|e| HarnessError::Embedded(format!("options JSON: {e}")))?;
@@ -580,10 +711,14 @@ mod tests {
     }
 
     #[test]
-    fn only_embedded_excludes_upstream_trust() {
-        assert!(Mode::Embedded.excludes("upstream-trust").is_some());
-        assert!(Mode::External.excludes("upstream-trust").is_none());
+    fn only_embedded_excludes_the_spawned_engine_tags() {
+        for tag in ["upstream-trust", "front-door"] {
+            assert!(Mode::Embedded.excludes(tag).is_some(), "{tag}");
+            assert!(Mode::External.excludes(tag).is_none(), "{tag}");
+        }
         assert!(Mode::Embedded.excludes("full-corpus-verify").is_none());
+        assert!(Mode::Embedded.excludes("metrics-port").is_none());
+        assert!(Mode::Embedded.excludes("no-config-source").is_none());
     }
 
     #[test]

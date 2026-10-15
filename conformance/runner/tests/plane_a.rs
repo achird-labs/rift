@@ -24,18 +24,22 @@ use cucumber::{World as _, cli, gherkin, given, then, when};
 use futures::FutureExt as _;
 use regex::Regex;
 use rift_conformance_runner::HarnessError;
-use rift_conformance_runner::harness::{Config, Harness, Mode, SpawnedEngine, log_tail};
+use rift_conformance_runner::harness::{
+    Config, Harness, Mode, ReloadEngine, SpawnedEngine, free_port, log_tail,
+};
 use rift_conformance_runner::http::{
     Clients, FailureKind, Response, classify_failure, install_crypto_provider,
 };
+use rift_conformance_runner::prom::{self, PromText, Series};
 use rift_conformance_runner::spec::{PORTED_FEATURES, features_dir, fixtures_dir};
 use rift_conformance_runner::tools::{CORPUS_VERIFY_ARGS, binary_version};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The steps' view of the harness `run()` owns. `run()` leaks it to get the `&'static` the step
 /// functions need, and holds a [`Teardown`] guard so the engine is still stopped when the run
@@ -114,6 +118,23 @@ struct PlaneA {
     upstream_port: Option<u16>,
     /// A dedicated engine this scenario started (feature 09 `@upstream-trust`), killed after it.
     side_engine: Option<SpawnedEngine>,
+    /// Feature 11's engine serving a config file. While it runs it is the engine the admin steps
+    /// address, as the Scala runner swapped its shared engine for one; stopped after the scenario.
+    reload: Option<ReloadEngine>,
+    /// How long the last request took, send to last body byte.
+    elapsed: Option<Duration>,
+    /// Whether the last "expecting a transport error" send failed at the transport level.
+    transport_failed: Option<bool>,
+    /// Each listener's exposition when the scenario snapshotted it (feature 17's deltas).
+    snapshots: BTreeMap<String, PromText>,
+    burst: Option<Burst>,
+}
+
+/// A concurrent burst left running, joined by the step that asserts on it.
+#[derive(Debug)]
+struct Burst {
+    requested: usize,
+    requests: Vec<tokio::task::JoinHandle<Result<u16, String>>>,
 }
 
 impl PlaneA {
@@ -137,12 +158,18 @@ impl PlaneA {
         }
     }
 
-    fn record_curl(&mut self, method: &str, url: &str) {
+    fn record_curl(
+        &mut self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<&str>,
+    ) {
         let mut line = format!("curl -X {}", method.to_uppercase());
-        for (k, v) in &self.pending.headers {
+        for (k, v) in headers {
             line.push_str(&format!(" -H '{k}: {v}'"));
         }
-        if let Some(b) = &self.pending.body {
+        if let Some(b) = body {
             line.push_str(&format!(" -d '{b}'"));
         }
         line.push_str(&format!(" '{url}'"));
@@ -151,26 +178,53 @@ impl PlaneA {
 
     /// Send the staged request with `client` and keep the response.
     async fn send(&mut self, client: &reqwest::Client, method: &str, url: &str) -> Step {
-        self.record_curl(method, url);
-        let method_value = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
-            .with_context(|| format!("HTTP method {method:?}"))?;
-        let mut request = client.request(method_value, url);
-        for (k, v) in &self.pending.headers {
-            request = request.header(k, v);
-        }
-        if let Some(body) = &self.pending.body {
-            request = request.body(body.clone());
-        }
-        let resp = request
-            .send()
+        let headers = self.pending.headers.clone();
+        let body = self.pending.body.clone();
+        self.send_with(client, method, url, &headers, body.as_deref())
             .await
+    }
+
+    /// Send exactly `headers` and `body` (not the staged request) and keep the response.
+    async fn send_with(
+        &mut self,
+        client: &reqwest::Client,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<&str>,
+    ) -> Step {
+        self.record_curl(method, url, headers, body);
+        let (resp, took) = exchange(client, method, url, headers, body)
+            .await?
             .with_context(|| format!("transport failure on {method} {url}"))?;
-        self.last = Some(
-            Response::read(resp)
-                .await
-                .with_context(|| format!("reading the response of {method} {url}"))?,
-        );
+        self.last = Some(resp);
+        self.elapsed = Some(took);
         Ok(())
+    }
+
+    /// The admin API the scenario's engine serves: the reload engine's while one runs.
+    fn admin_url(&self) -> String {
+        self.reload
+            .as_ref()
+            .map_or_else(|| harness().admin_url.clone(), |r| r.admin_url.clone())
+    }
+
+    /// The last response's body as JSON.
+    fn last_json(&self) -> anyhow::Result<Value> {
+        let body = &self.last()?.body;
+        serde_json::from_str(body).with_context(|| format!("invalid admin JSON (body={body})"))
+    }
+
+    /// Assert `ok` holds for the value at `path` in the last response's JSON.
+    fn ensure_json_at(&self, path: &str, what: &str, ok: impl Fn(&Value) -> bool) -> Step {
+        let root = self.last_json()?;
+        let v = json_at(&root, path);
+        self.ensure(v.is_some_and(ok), || {
+            format!(
+                "expected {what} at '{path}', got {} in: {root}",
+                v.map_or_else(|| "<absent>".to_string(), Value::to_string)
+            )
+        })
     }
 
     /// Send with `client`, expecting no HTTP response at all (a refused handshake).
@@ -200,6 +254,51 @@ impl PlaneA {
                 }),
             },
         }
+    }
+}
+
+/// One request, timed from sending to the last body byte (the Scala runner timed its whole JDK
+/// send). The outer error is a request that could not be built; the inner one a transport failure.
+async fn exchange(
+    client: &reqwest::Client,
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> anyhow::Result<Result<(Response, Duration), reqwest::Error>> {
+    let method_value = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
+        .with_context(|| format!("HTTP method {method:?}"))?;
+    let mut request = client.request(method_value, url);
+    for (k, v) in headers {
+        request = request.header(k, v);
+    }
+    if let Some(body) = body {
+        request = request.body(body.to_string());
+    }
+    let started = Instant::now();
+    let sent = match request.send().await {
+        Ok(resp) => Response::read(resp).await,
+        Err(e) => Err(e),
+    };
+    Ok(sent.map(|r| (r, started.elapsed())))
+}
+
+/// The value at a dotted path (`stubs.1.id`): each segment an object key or an array index.
+fn json_at<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.').try_fold(root, |v, seg| match v {
+        Value::Object(m) => m.get(seg),
+        Value::Array(a) => seg.parse::<usize>().ok().and_then(|i| a.get(i)),
+        _ => None,
+    })
+}
+
+/// Numeric equality across JSON's integer and float forms, as the Scala runner's `BigDecimal` one.
+fn is_number(v: &Value, n: i64) -> bool {
+    match v {
+        Value::Number(x) => x
+            .as_i64()
+            .map_or_else(|| x.as_f64() == Some(n as f64), |i| i == n),
+        _ => false,
     }
 }
 
@@ -819,9 +918,1079 @@ async fn verify_corpus(w: &mut PlaneA) -> Step {
     })
 }
 
+// ── more imposter setups ─────────────────────────────────────────────────────────────────────
+
+/// A raw POST of a fixture expected to be refused at creation: the response is kept for the
+/// status/body steps rather than asserted 201. Its port is tracked, so a regression that accepts it
+/// cannot squat the port.
+#[when(regex = r#"^the client posts the imposter fixture "((?:\\.|[^"\\])*)"$"#)]
+async fn post_fixture_raw(w: &mut PlaneA, name: String) -> Step {
+    let raw = harness().rewrite_fixture(&load_fixture(&name)?);
+    let mut map = parse_object(&raw, &format!("fixture {name}"))?;
+    let port = free_port()?;
+    w.tracked.push(port);
+    map.insert("port".to_string(), port.into());
+    let json = Value::Object(map).to_string();
+    let url = format!("{}/imposters", w.admin_url());
+    w.send_with(
+        &clients().verifying,
+        "POST",
+        &url,
+        &json_content_type(),
+        Some(&json),
+    )
+    .await
+}
+
+fn json_content_type() -> Vec<(String, String)> {
+    vec![("Content-Type".to_string(), "application/json".to_string())]
+}
+
+// Feature 14 (rift#1194): a plain-HTTP upstream in the same engine, for proxy responses.
+#[given(regex = r#"^an upstream imposter from fixture "((?:\\.|[^"\\])*)"$"#)]
+async fn upstream_imposter(w: &mut PlaneA, name: String) -> Step {
+    fresh_imposter(w, name).await?;
+    w.upstream_port = w.current;
+    Ok(())
+}
+
+fn upstream(w: &PlaneA) -> anyhow::Result<u16> {
+    w.upstream_port
+        .ok_or_else(|| anyhow!("no upstream imposter in this scenario"))
+}
+
+/// The fixture names its proxy target `http://localhost:UPSTREAM_PORT`; the placeholder becomes the
+/// scenario's upstream port, known only once that imposter is posted.
+#[given(regex = r#"^a fresh imposter from fixture "((?:\\.|[^"\\])*)" proxying to the upstream$"#)]
+async fn fresh_proxy_imposter(w: &mut PlaneA, name: String) -> Step {
+    let up = upstream(w)?;
+    let h = harness();
+    let raw = h
+        .rewrite_fixture(&load_fixture(&name)?)
+        .replace("UPSTREAM_PORT", &up.to_string());
+    let port = post_at_engine_port(&h.admin_url, &raw, &format!("fixture {name}")).await?;
+    w.tracked.push(port);
+    w.current = Some(port);
+    Ok(())
+}
+
+/// `GET {admin}/imposters/{port}`'s `numberOfRequests`.
+async fn number_of_requests(w: &PlaneA, port: u16) -> anyhow::Result<i64> {
+    let url = format!("{}/imposters/{port}", w.admin_url());
+    let resp = get(&url).await?;
+    if resp.status != 200 {
+        bail!(
+            "GET {url} -> {} (expected 200): {}\n--- repro ---\n{}",
+            resp.status,
+            resp.body,
+            w.curl.join("\n")
+        );
+    }
+    let json: Value = serde_json::from_str(&resp.body)
+        .with_context(|| format!("invalid admin JSON (body={})", resp.body))?;
+    json.get("numberOfRequests")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("no 'numberOfRequests' field: {}", resp.body))
+}
+
+async fn get(url: &str) -> anyhow::Result<Response> {
+    let resp = clients()
+        .verifying
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    Response::read(resp)
+        .await
+        .with_context(|| format!("reading the response of GET {url}"))
+}
+
+#[then(regex = r"^the upstream imposter has recorded (\d+) requests$")]
+async fn upstream_recorded(w: &mut PlaneA, n: i64) -> Step {
+    let got = number_of_requests(w, upstream(w)?).await?;
+    w.ensure(got == n, || {
+        format!("expected the upstream to have received {n} request(s), got {got}")
+    })
+}
+
+#[then(regex = r"^imposter (\d+) has recorded (\d+) requests$")]
+async fn imposter_recorded(w: &mut PlaneA, port: u16, n: i64) -> Step {
+    let got = number_of_requests(w, port).await?;
+    w.ensure(got == n, || {
+        format!("expected imposter {port} to have recorded {n} request(s), got {got}")
+    })
+}
+
+// rift#1199: `GET /imposters/:port` writes a multi-item `_behaviors.copy` back as a `behaviors`
+// array holding one `{"copy": {...}}` element per item, the shape Mountebank itself loads.
+#[then(
+    regex = r"^the current imposter writes stub (\d+) back with (\d+) single-item copy behaviors$"
+)]
+async fn stub_written_back_with_copies(w: &mut PlaneA, index: usize, n: usize) -> Step {
+    let url = format!("{}/imposters/{}", w.admin_url(), w.current()?);
+    let resp = get(&url).await?;
+    let json: Value = serde_json::from_str(&resp.body)
+        .with_context(|| format!("invalid admin JSON (body={})", resp.body))?;
+    let behaviors = json
+        .get("stubs")
+        .and_then(Value::as_array)
+        .and_then(|stubs| stubs.get(index))
+        .and_then(|stub| stub.get("responses"))
+        .and_then(Value::as_array)
+        .and_then(|responses| responses.first())
+        .and_then(|first| first.get("behaviors"))
+        .and_then(Value::as_array);
+    let single_copies = behaviors.map_or(0, |b| {
+        b.iter()
+            .filter(|e| {
+                e.as_object()
+                    .is_some_and(|o| o.len() == 1 && o.get("copy").is_some_and(Value::is_object))
+            })
+            .count()
+    });
+    w.ensure(
+        behaviors.is_some_and(|b| b.len() == n) && single_copies == n,
+        || {
+            format!(
+                "expected stub {index} written back as {n} single-item copy behaviors, got {}",
+                behaviors.map_or_else(
+                    || "<no behaviors array>".to_string(),
+                    |b| Value::Array(b.clone()).to_string()
+                )
+            )
+        },
+    )
+}
+
+// ── more requests ────────────────────────────────────────────────────────────────────────────
+
+#[when(regex = r#"^the client sends "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" to port (\d+)$"#)]
+async fn send_to_port(w: &mut PlaneA, method: String, path: String, port: u16) -> Step {
+    let url = format!(
+        "http://{}:{port}{}",
+        harness().imposter_host(),
+        unescape(&path)
+    );
+    w.send(&clients().verifying, &method, &url).await
+}
+
+/// A transport-level failure is recorded, not raised. A refused connection or an unresolved host is
+/// still raised: that is an unreachable engine, never a fault (the Scala runner rethrows
+/// ConnectException/UnknownHostException for the same reason).
+#[when(
+    regex = r#"^the client sends "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" expecting a transport error$"#
+)]
+async fn send_expecting_transport_error(w: &mut PlaneA, method: String, path: String) -> Step {
+    let port = w.current()?;
+    let url = format!(
+        "http://{}:{port}{}",
+        harness().imposter_host(),
+        unescape(&path)
+    );
+    let headers = w.pending.headers.clone();
+    let body = w.pending.body.clone();
+    w.record_curl(&method, &url, &headers, body.as_deref());
+    let started = Instant::now();
+    match exchange(
+        &clients().verifying,
+        &method,
+        &url,
+        &headers,
+        body.as_deref(),
+    )
+    .await?
+    {
+        Ok((resp, took)) => {
+            w.last = Some(resp);
+            w.elapsed = Some(took);
+            w.transport_failed = Some(false);
+        }
+        Err(e) => {
+            if let FailureKind::Unreachable(cause) = classify_failure(&e) {
+                return Err(anyhow!("{url} was never reached: {cause}").into());
+            }
+            if e.is_builder() {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("building {method} {url}"))
+                    .into());
+            }
+            // Stricter than the Scala runner, which counted any failure: an engine that accepts
+            // and then hangs must not pass as a transport fault.
+            if e.is_timeout() {
+                return Err(anyhow::Error::new(e)
+                    .context(format!(
+                        "{method} {url} timed out instead of failing at the transport level"
+                    ))
+                    .into());
+            }
+            w.elapsed = Some(started.elapsed());
+            w.transport_failed = Some(true);
+        }
+    }
+    Ok(())
+}
+
+#[then(regex = r"^the request fails at the transport level$")]
+async fn request_failed_at_transport(w: &mut PlaneA) -> Step {
+    let failed = w
+        .transport_failed
+        .ok_or_else(|| anyhow!("no transport probe: send expecting a transport error first"))?;
+    let got = w.last.as_ref().map(|r| r.status);
+    w.ensure(failed, || {
+        format!(
+            "expected a transport-level failure{}",
+            got.map_or_else(String::new, |s| format!(", but got HTTP {s}"))
+        )
+    })
+}
+
+#[when(regex = r#"^the request header "((?:\\.|[^"\\])*)" is removed$"#)]
+async fn request_header_removed(w: &mut PlaneA, name: String) {
+    let name = unescape(&name);
+    w.pending
+        .headers
+        .retain(|(k, _)| !k.eq_ignore_ascii_case(&name));
+}
+
+/// An admin request; `payload` is `-` for none, else a fixture name. `{port}` in the path or the
+/// payload becomes the current imposter's port.
+#[when(
+    regex = r#"^the client sends admin "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" with payload "((?:\\.|[^"\\])*)"$"#
+)]
+async fn send_admin(w: &mut PlaneA, method: String, path: String, payload: String) -> Step {
+    let (path, payload) = (unescape(&path), unescape(&payload));
+    let body = if payload == "-" {
+        None
+    } else {
+        Some(load_fixture(&payload)?)
+    };
+    let mentions_port =
+        path.contains("{port}") || body.as_ref().is_some_and(|b| b.contains("{port}"));
+    let fill = |s: &str, port: Option<u16>| match port {
+        Some(p) => s.replace("{port}", &p.to_string()),
+        None => s.to_string(),
+    };
+    let port = if mentions_port {
+        Some(w.current()?)
+    } else {
+        None
+    };
+    let url = format!("{}{}", w.admin_url(), fill(&path, port));
+    let body = body.map(|b| fill(&b, port));
+    // Only `{port}` is filled. A fixture naming another placeholder (`{newPort}`, `{unknownPort}`,
+    // ...) would otherwise go out literally and a 4xx expectation would pass for the wrong reason.
+    let unfilled = Regex::new(r"\{[A-Za-z]+\}").expect("static regex");
+    if let Some(m) = std::iter::once(url.as_str())
+        .chain(body.as_deref())
+        .find_map(|s| unfilled.find(s))
+    {
+        return Err(anyhow!(
+            "admin payload placeholder {} is not supported by this runner",
+            m.as_str()
+        )
+        .into());
+    }
+    w.send_with(
+        &clients().verifying,
+        &method,
+        &url,
+        &json_content_type(),
+        body.as_deref(),
+    )
+    .await
+}
+
+// ── more responses ───────────────────────────────────────────────────────────────────────────
+
+#[then(regex = r#"^the response has no header "((?:\\.|[^"\\])*)"$"#)]
+async fn response_has_no_header(w: &mut PlaneA, name: String) -> Step {
+    let name = unescape(&name);
+    let values = w.last()?.header_values(&name);
+    let got = values.join(",");
+    w.ensure(values.is_empty(), || {
+        format!("expected no header {name}, got {got}")
+    })
+}
+
+#[then(regex = r"^the response took at least (\d+) ms$")]
+async fn response_took_at_least(w: &mut PlaneA, floor: u64) -> Step {
+    let took = w
+        .elapsed
+        .ok_or_else(|| anyhow!("no timing: send a request first"))?;
+    let ms = took.as_millis();
+    w.ensure(ms >= u128::from(floor), || {
+        format!("expected the request to take >= {floor} ms, took {ms} ms")
+    })
+}
+
+#[then(regex = r#"^the response JSON has no top-level field "((?:\\.|[^"\\])*)"$"#)]
+async fn json_no_top_level_field(w: &mut PlaneA, field: String) -> Step {
+    let field = unescape(&field);
+    let Value::Object(map) = w.last_json()? else {
+        return Err(anyhow!("response is not a JSON object: {}", w.last()?.body).into());
+    };
+    w.ensure(!map.contains_key(&field), || {
+        let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        format!(
+            "expected no top-level field '{field}', got {}",
+            keys.join(", ")
+        )
+    })
+}
+
+#[then(regex = r#"^the response JSON at "((?:\\.|[^"\\])*)" is the string "((?:\\.|[^"\\])*)"$"#)]
+async fn json_at_string(w: &mut PlaneA, path: String, want: String) -> Step {
+    let want = unescape(&want);
+    w.ensure_json_at(&unescape(&path), &format!("the string \"{want}\""), |v| {
+        v.as_str() == Some(want.as_str())
+    })
+}
+
+#[then(regex = r#"^the response JSON at "((?:\\.|[^"\\])*)" is the number (\d+)$"#)]
+async fn json_at_number(w: &mut PlaneA, path: String, n: i64) -> Step {
+    w.ensure_json_at(&unescape(&path), &format!("the number {n}"), |v| {
+        is_number(v, n)
+    })
+}
+
+#[then(regex = r#"^the response JSON at "((?:\\.|[^"\\])*)" is the boolean (true|false)$"#)]
+async fn json_at_bool(w: &mut PlaneA, path: String, want: String) -> Step {
+    let want = want == "true";
+    w.ensure_json_at(&unescape(&path), &want.to_string(), |v| {
+        v.as_bool() == Some(want)
+    })
+}
+
+#[then(regex = r#"^the response JSON at "((?:\\.|[^"\\])*)" is an empty array$"#)]
+async fn json_at_empty_array(w: &mut PlaneA, path: String) -> Step {
+    w.ensure_json_at(&unescape(&path), "an empty array", |v| {
+        v.as_array().is_some_and(Vec::is_empty)
+    })
+}
+
+#[then(regex = r#"^the response JSON at "((?:\\.|[^"\\])*)" has (\d+) elements$"#)]
+async fn json_at_len(w: &mut PlaneA, path: String, n: usize) -> Step {
+    w.ensure_json_at(&unescape(&path), &format!("an array of {n}"), |v| {
+        v.as_array().is_some_and(|a| a.len() == n)
+    })
+}
+
+#[then(regex = r#"^the response JSON at "((?:\\.|[^"\\])*)" contains "((?:\\.|[^"\\])*)"$"#)]
+async fn json_at_contains(w: &mut PlaneA, path: String, sub: String) -> Step {
+    let sub = unescape(&sub);
+    w.ensure_json_at(
+        &unescape(&path),
+        &format!("a string containing \"{sub}\""),
+        |v| v.as_str().is_some_and(|s| s.contains(&sub)),
+    )
+}
+
+#[then(regex = r#"^the response JSON at "((?:\\.|[^"\\])*)" is absent$"#)]
+async fn json_at_absent(w: &mut PlaneA, path: String) -> Step {
+    let path = unescape(&path);
+    let root = w.last_json()?;
+    let v = json_at(&root, &path);
+    w.ensure(v.is_none(), || {
+        format!(
+            "expected nothing at '{path}', got {} in: {root}",
+            v.map_or_else(String::new, Value::to_string)
+        )
+    })
+}
+
+#[then(regex = r"^the response is a JSON array of (\d+) elements$")]
+async fn response_json_array_len(w: &mut PlaneA, n: usize) -> Step {
+    let Value::Array(es) = w.last_json()? else {
+        return Err(anyhow!("response is not a JSON array: {}", w.last()?.body).into());
+    };
+    w.ensure(es.len() == n, || {
+        format!(
+            "expected {n} elements, got {}: {}",
+            es.len(),
+            Value::Array(es.clone())
+        )
+    })
+}
+
+/// `k=v,k2=v2`: each value is `absent`, an integer, or a string, the exact field a warning carries.
+fn warning_matches(warning: &serde_json::Map<String, Value>, fields: &str) -> bool {
+    fields
+        .split(',')
+        .map(str::trim)
+        .filter(|kv| !kv.is_empty())
+        .all(|kv| {
+            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+            let got = warning.get(k);
+            match v {
+                "absent" => got.is_none(),
+                n if n.parse::<i32>().is_ok() => {
+                    got.is_some_and(|g| n.parse::<i64>().is_ok_and(|n| is_number(g, n)))
+                }
+                s => got.and_then(Value::as_str) == Some(s),
+            }
+        })
+}
+
+#[then(
+    regex = r#"^the response has a "((?:\\.|[^"\\])*)" warning with "((?:\\.|[^"\\])*)" and a message containing "((?:\\.|[^"\\])*)"$"#
+)]
+async fn response_has_warning(w: &mut PlaneA, kind: String, fields: String, sub: String) -> Step {
+    let (kind, fields, sub) = (unescape(&kind), unescape(&fields), unescape(&sub));
+    let root = w.last_json()?;
+    let warnings: Vec<&serde_json::Map<String, Value>> = json_at(&root, "_rift.warnings")
+        .and_then(Value::as_array)
+        .map(|ws| ws.iter().filter_map(Value::as_object).collect())
+        .unwrap_or_default();
+    let hit = warnings.iter().any(|wn| {
+        wn.get("warningType").and_then(Value::as_str) == Some(kind.as_str())
+            && warning_matches(wn, &fields)
+            && wn
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.contains(&sub))
+    });
+    w.ensure(hit, || {
+        let listed: Vec<String> = warnings
+            .iter()
+            .map(|wn| Value::Object((*wn).clone()).to_string())
+            .collect();
+        format!(
+            "expected a '{kind}' warning with {fields} and a message containing '{sub}'; got [{}]",
+            listed.join(", ")
+        )
+    })
+}
+
+// ── rift-lint on a fixture (feature 14) ──────────────────────────────────────────────────────
+
+async fn lint_fixture(name: &str) -> anyhow::Result<rift_conformance_runner::tools::LintReport> {
+    let path = fixtures_dir().join(format!("{name}.json"));
+    Ok(harness().tools.lint(&path).await?)
+}
+
+#[then(regex = r#"^rift-lint reports "((?:\\.|[^"\\])*)" for fixture "((?:\\.|[^"\\])*)"$"#)]
+async fn lint_reports(w: &mut PlaneA, code: String, name: String) -> Step {
+    let (code, name) = (unescape(&code), unescape(&name));
+    let r = lint_fixture(&name).await?;
+    let codes: Vec<&str> = r.issues.iter().map(|i| i.code.as_str()).collect();
+    w.ensure(codes.contains(&code.as_str()), || {
+        format!(
+            "expected rift-lint to report {code} for {name}, got {codes:?}: {}",
+            r.raw
+        )
+    })
+}
+
+#[then(regex = r#"^rift-lint reports no "((?:\\.|[^"\\])*)" for fixture "((?:\\.|[^"\\])*)"$"#)]
+async fn lint_reports_no(w: &mut PlaneA, code: String, name: String) -> Step {
+    let (code, name) = (unescape(&code), unescape(&name));
+    let r = lint_fixture(&name).await?;
+    let codes: Vec<&str> = r.issues.iter().map(|i| i.code.as_str()).collect();
+    w.ensure(!codes.contains(&code.as_str()) && r.exit_code == 0, || {
+        format!(
+            "expected rift-lint to report no {code} (and exit 0) for {name}, got {codes:?} exit {}: {}",
+            r.exit_code, r.raw
+        )
+    })
+}
+
+// ── spaces and FSM scenarios (feature 07) ────────────────────────────────────────────────────
+
+/// An admin request on the current imposter (`{admin}/imposters/{port}{suffix}`), kept as the
+/// last response only by the steps that want it.
+async fn imposter_admin(
+    w: &mut PlaneA,
+    method: &str,
+    suffix: &str,
+    body: Option<Value>,
+) -> anyhow::Result<Response> {
+    let url = format!("{}/imposters/{}{suffix}", w.admin_url(), w.current()?);
+    let (headers, body) = match body {
+        Some(b) => (json_content_type(), Some(b.to_string())),
+        None => (Vec::new(), None),
+    };
+    w.record_curl(method, &url, &headers, body.as_deref());
+    let (resp, _) = exchange(
+        &clients().verifying,
+        method,
+        &url,
+        &headers,
+        body.as_deref(),
+    )
+    .await?
+    .with_context(|| format!("transport failure on {method} {url}"))?;
+    Ok(resp)
+}
+
+/// `POST .../spaces/{space}/stubs` with a minimal `equals path` / `is 200 body` stub.
+#[when(
+    regex = r#"^the client registers a stub in space "((?:\\.|[^"\\])*)" for path "((?:\\.|[^"\\])*)" returning "((?:\\.|[^"\\])*)"$"#
+)]
+async fn register_space_stub(w: &mut PlaneA, space: String, path: String, body: String) -> Step {
+    let space = unescape(&space);
+    let stub = serde_json::json!({
+        "predicates": [{"equals": {"path": unescape(&path)}}],
+        "responses": [{"is": {"statusCode": 200, "body": unescape(&body)}}]
+    });
+    let resp = imposter_admin(w, "POST", &format!("/spaces/{space}/stubs"), Some(stub)).await?;
+    w.ensure(resp.status == 201, || {
+        format!(
+            "POST spaces/{space}/stubs -> {} (expected 201): {}",
+            resp.status, resp.body
+        )
+    })
+}
+
+#[then(regex = r#"^space "((?:\\.|[^"\\])*)" has (\d+) stubs$"#)]
+async fn space_stub_count(w: &mut PlaneA, space: String, n: usize) -> Step {
+    let space = unescape(&space);
+    let resp = imposter_admin(w, "GET", &format!("/spaces/{space}/stubs"), None).await?;
+    let json: Value = serde_json::from_str(&resp.body)
+        .with_context(|| format!("invalid admin JSON (body={})", resp.body))?;
+    let got = json
+        .get("stubs")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| anyhow!("no 'stubs' array in spaces/{space} response: {}", resp.body))?;
+    w.ensure(got == n, || {
+        format!("expected space '{space}' to have {n} stub(s), got {got}")
+    })
+}
+
+#[when(regex = r#"^the client tears down space "((?:\\.|[^"\\])*)"$"#)]
+async fn tear_down_space(w: &mut PlaneA, space: String) -> Step {
+    let space = unescape(&space);
+    let resp = imposter_admin(w, "DELETE", &format!("/spaces/{space}"), None).await?;
+    w.ensure(resp.status == 200, || {
+        format!(
+            "DELETE spaces/{space} -> {} (expected 200): {}",
+            resp.status, resp.body
+        )
+    })
+}
+
+/// The named scenario's state from `GET .../scenarios[?flowId=]`, or `None` when it is not listed
+/// (a flow that was never touched).
+async fn scenario_state(
+    w: &mut PlaneA,
+    name: &str,
+    flow_id: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let query = flow_id.map_or_else(String::new, |f| format!("?flowId={f}"));
+    let resp = imposter_admin(w, "GET", &format!("/scenarios{query}"), None).await?;
+    let json: Value = serde_json::from_str(&resp.body)
+        .with_context(|| format!("invalid admin JSON (body={})", resp.body))?;
+    let scenarios = json
+        .get("scenarios")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("no 'scenarios' array in response: {}", resp.body))?;
+    Ok(scenarios
+        .iter()
+        .find(|s| s.get("name").and_then(Value::as_str) == Some(name))
+        .and_then(|s| s.get("state"))
+        .and_then(Value::as_str)
+        .map(str::to_string))
+}
+
+#[then(regex = r#"^scenario "((?:\\.|[^"\\])*)" is in state "((?:\\.|[^"\\])*)"$"#)]
+async fn scenario_in_state(w: &mut PlaneA, name: String, state: String) -> Step {
+    let (name, state) = (unescape(&name), unescape(&state));
+    let got = scenario_state(w, &name, None).await?;
+    w.ensure(got.as_deref() == Some(state.as_str()), || {
+        format!("expected scenario '{name}' state '{state}', got {got:?}")
+    })
+}
+
+#[then(
+    regex = r#"^scenario "((?:\\.|[^"\\])*)" in space "((?:\\.|[^"\\])*)" is in state "((?:\\.|[^"\\])*)"$"#
+)]
+async fn scenario_in_space_in_state(
+    w: &mut PlaneA,
+    name: String,
+    space: String,
+    state: String,
+) -> Step {
+    let (name, space, state) = (unescape(&name), unescape(&space), unescape(&state));
+    let got = scenario_state(w, &name, Some(&space)).await?;
+    w.ensure(got.as_deref() == Some(state.as_str()), || {
+        format!("expected scenario '{name}' in space '{space}' state '{state}', got {got:?}")
+    })
+}
+
+#[then(regex = r#"^scenario "((?:\\.|[^"\\])*)" in space "((?:\\.|[^"\\])*)" is untouched$"#)]
+async fn scenario_in_space_untouched(w: &mut PlaneA, name: String, space: String) -> Step {
+    let (name, space) = (unescape(&name), unescape(&space));
+    let got = scenario_state(w, &name, Some(&space)).await?;
+    w.ensure(got.is_none() || got.as_deref() == Some("Started"), || {
+        format!(
+            "expected scenario '{name}' in space '{space}' to be untouched (absent or 'Started'), got {got:?}"
+        )
+    })
+}
+
+#[when(regex = r"^the client resets scenarios$")]
+async fn reset_scenarios(w: &mut PlaneA) -> Step {
+    let resp = imposter_admin(w, "POST", "/scenarios/reset", Some(serde_json::json!({}))).await?;
+    w.ensure(resp.status == 200, || {
+        format!(
+            "POST scenarios/reset -> {} (expected 200): {}",
+            resp.status, resp.body
+        )
+    })
+}
+
+#[when(regex = r#"^the client sets scenario "((?:\\.|[^"\\])*)" state to "((?:\\.|[^"\\])*)"$"#)]
+async fn set_scenario_state(w: &mut PlaneA, name: String, state: String) -> Step {
+    let name = unescape(&name);
+    let body = serde_json::json!({"state": unescape(&state)});
+    let resp = imposter_admin(w, "PUT", &format!("/scenarios/{name}/state"), Some(body)).await?;
+    w.ensure(resp.status == 200, || {
+        format!(
+            "PUT scenarios/{name}/state -> {} (expected 200): {}",
+            resp.status, resp.body
+        )
+    })
+}
+
+/// Fire `n` GETs at the current imposter at once, left running: the burst step joins them.
+#[when(regex = r#"^the client fires (\d+) concurrent requests to "((?:\\.|[^"\\])*)"$"#)]
+async fn fire_concurrent(w: &mut PlaneA, n: usize, path: String) -> Step {
+    let port = w.current()?;
+    let url = format!(
+        "http://{}:{port}{}",
+        harness().imposter_host(),
+        unescape(&path)
+    );
+    let headers = w.pending.headers.clone();
+    let body = w.pending.body.clone();
+    w.record_curl("GET", &url, &headers, body.as_deref());
+    w.curl.push(format!("(x{n} concurrent, in flight)"));
+    let requests = (0..n)
+        .map(|_| {
+            let (url, headers, body) = (url.clone(), headers.clone(), body.clone());
+            tokio::spawn(async move {
+                match exchange(&clients().verifying, "GET", &url, &headers, body.as_deref()).await {
+                    Ok(Ok((resp, _))) => Ok(resp.status),
+                    Ok(Err(e)) => Err(format!("{e:#}")),
+                    Err(e) => Err(format!("{e:#}")),
+                }
+            })
+        })
+        .collect();
+    w.burst = Some(Burst {
+        requested: n,
+        requests,
+    });
+    Ok(())
+}
+
+#[then(regex = r"^all concurrent responses have status (\d+)$")]
+async fn concurrent_statuses(w: &mut PlaneA, code: u16) -> Step {
+    let burst = w
+        .burst
+        .take()
+        .ok_or_else(|| anyhow!("no concurrent burst fired in this scenario"))?;
+    let mut outcomes = Vec::with_capacity(burst.requests.len());
+    for request in burst.requests {
+        outcomes.push(
+            request
+                .await
+                .map_err(|e| format!("request task: {e}"))
+                .and_then(|r| r),
+        );
+    }
+    let statuses: Vec<u16> = outcomes
+        .iter()
+        .filter_map(|o| o.as_ref().ok().copied())
+        .collect();
+    w.ensure(
+        statuses.len() == burst.requested && statuses.iter().all(|s| *s == code),
+        || {
+            format!(
+                "expected all {} responses to be {code}, got {outcomes:?}",
+                burst.requested
+            )
+        },
+    )
+}
+
+// ── reload (feature 11, rift#316) ────────────────────────────────────────────────────────────
+
+/// A controlled 2-imposter config: one records requests (runtime state an incremental reload must
+/// keep), one is static. The Scala runner's `reloadConfigJson`, byte for byte.
+const RELOAD_CONFIG: &str = r#"{"imposters":[{"port":4870,"protocol":"http","recordRequests":true,"stubs":[{"predicates":[{"equals":{"path":"/a"}}],"responses":[{"is":{"statusCode":200,"body":"A"}}]}]},{"port":4871,"protocol":"http","stubs":[{"predicates":[{"equals":{"path":"/b"}}],"responses":[{"is":{"statusCode":200,"body":"B"}}]}]}]}"#;
+
+/// The `@front-door` config (rift#1160): imposters answering `A` (4872) and `B` (4873) plus a
+/// `routes` block holding `routes`.
+fn front_door_config(routes: &[Value]) -> String {
+    let imposter = |port: u16, body: &str| {
+        serde_json::json!({"port": port, "protocol": "http",
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "body": body}}]}]})
+    };
+    serde_json::json!({
+        "imposters": [imposter(4872, "A"), imposter(4873, "B")],
+        "routes": {"routes": routes}
+    })
+    .to_string()
+}
+
+fn host_route(id: &str, host: &str, port: u16) -> Value {
+    serde_json::json!({"id": id, "match": {"host": host}, "target": {"port": port}})
+}
+
+async fn start_reload_engine(w: &mut PlaneA, json: &str, front_door: bool) -> Step {
+    if let Some(old) = w.reload.take() {
+        old.stop().await?;
+    }
+    w.reload = Some(harness().start_reload_engine(json, front_door).await?);
+    Ok(())
+}
+
+fn reload_engine(w: &PlaneA) -> anyhow::Result<&ReloadEngine> {
+    w.reload
+        .as_ref()
+        .ok_or_else(|| anyhow!("no reload engine started in this scenario"))
+}
+
+#[given(regex = r"^the engine is started with the reload config file$")]
+async fn start_with_reload_config(w: &mut PlaneA) -> Step {
+    start_reload_engine(w, RELOAD_CONFIG, false).await
+}
+
+#[given(regex = r#"^the engine is started with the reload fixture "((?:\\.|[^"\\])*)"$"#)]
+async fn start_with_reload_fixture(w: &mut PlaneA, name: String) -> Step {
+    let json = load_fixture(&unescape(&name))?;
+    start_reload_engine(w, &json, false).await
+}
+
+#[given(
+    regex = r#"^the engine is started with the front door and a route from host "((?:\\.|[^"\\])*)" to port (\d+)$"#
+)]
+async fn start_with_front_door(w: &mut PlaneA, host: String, port: u16) -> Step {
+    let json = front_door_config(&[host_route("r", &unescape(&host), port)]);
+    start_reload_engine(w, &json, true).await
+}
+
+#[given(
+    regex = r#"^the engine is started without the front door and a route from host "((?:\\.|[^"\\])*)" to port (\d+)$"#
+)]
+async fn start_without_front_door(w: &mut PlaneA, host: String, port: u16) -> Step {
+    let json = front_door_config(&[host_route("r", &unescape(&host), port)]);
+    start_reload_engine(w, &json, false).await
+}
+
+#[when(regex = r#"^the reload config file routes host "((?:\\.|[^"\\])*)" to port (\d+)$"#)]
+async fn reload_config_routes(w: &mut PlaneA, host: String, port: u16) -> Step {
+    let json = front_door_config(&[host_route("r", &unescape(&host), port)]);
+    Ok(reload_engine(w)?.rewrite_config(&json)?)
+}
+
+#[when(regex = r"^the reload config file declares two routes with the same id$")]
+async fn reload_config_duplicate_routes(w: &mut PlaneA) -> Step {
+    let json = front_door_config(&[
+        host_route("dup", "c.test", 4872),
+        host_route("dup", "d.test", 4873),
+    ]);
+    Ok(reload_engine(w)?.rewrite_config(&json)?)
+}
+
+#[when(regex = r#"^the reload config file is rewritten to fixture "((?:\\.|[^"\\])*)"$"#)]
+async fn reload_config_to_fixture(w: &mut PlaneA, name: String) -> Step {
+    let json = load_fixture(&unescape(&name))?;
+    Ok(reload_engine(w)?.rewrite_config(&json)?)
+}
+
+#[when(regex = r"^the reload config file is rewritten to invalid JSON$")]
+async fn reload_config_invalid(w: &mut PlaneA) -> Step {
+    Ok(reload_engine(w)?.rewrite_config(r#"{"imposters":[ not json"#)?)
+}
+
+/// `POST {admin}/admin/reload`, its response kept whatever the outcome.
+async fn attempt_reload(w: &mut PlaneA) -> Step {
+    let url = format!("{}/admin/reload", w.admin_url());
+    w.send_with(&clients().verifying, "POST", &url, &[], None)
+        .await
+}
+
+#[when(regex = r"^the engine reloads its configuration$")]
+async fn reload(w: &mut PlaneA) -> Step {
+    attempt_reload(w).await?;
+    let r = w.last()?;
+    w.ensure(r.status == 200, || {
+        format!(
+            "POST admin/reload -> {} (expected 200): {}",
+            r.status, r.body
+        )
+    })
+}
+
+#[when(regex = r"^the engine reload is attempted$")]
+async fn reload_attempted(w: &mut PlaneA) -> Step {
+    attempt_reload(w).await
+}
+
+#[then(regex = r#"^the reload is refused naming "((?:\\.|[^"\\])*)"$"#)]
+async fn reload_refused(w: &mut PlaneA, reason: String) -> Step {
+    let reason = unescape(&reason);
+    let r = w.last()?;
+    w.ensure(r.status >= 400 && r.body.contains(&reason), || {
+        format!(
+            "expected the reload refused (status >= 400) naming '{reason}', got {}: {}",
+            r.status, r.body
+        )
+    })
+}
+
+#[then(regex = r#"^the reload report warns about "((?:\\.|[^"\\])*)"$"#)]
+async fn reload_warns(w: &mut PlaneA, text: String) -> Step {
+    let text = unescape(&text);
+    let json = w.last_json()?;
+    let warnings: Option<Vec<&str>> = json
+        .get("warnings")
+        .and_then(Value::as_array)
+        .map(|ws| ws.iter().filter_map(Value::as_str).collect());
+    w.ensure(
+        warnings
+            .as_ref()
+            .is_some_and(|ws| ws.iter().any(|x| x.contains(&text))),
+        || format!("expected a reload warning naming '{text}', got {warnings:?}"),
+    )
+}
+
+/// The field is unquoted in the feature (`created`, `deleted`, ...), as zio-bdd's `string` allows.
+#[then(regex = r"^the reload report (\w+) (\d+) imposters$")]
+async fn reload_report_count(w: &mut PlaneA, field: String, n: usize) -> Step {
+    let json = w.last_json()?;
+    let got = json
+        .get(&field)
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| anyhow!("no '{field}' array in reload report: {json}"))?;
+    w.ensure(got == n, || {
+        format!("expected reload report '{field}' to have length {n}, got {got}")
+    })
+}
+
+#[then(regex = r"^the reload report (\w+) port (\d+)$")]
+async fn reload_report_port(w: &mut PlaneA, field: String, port: i64) -> Step {
+    let json = w.last_json()?;
+    let ports: Option<Vec<i64>> = json
+        .get(&field)
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_i64).collect());
+    w.ensure(ports.as_deref() == Some(&[port][..]), || {
+        format!("expected reload report '{field}' == [{port}], got {ports:?}")
+    })
+}
+
+#[then(regex = r"^the reload report exposes all four change fields$")]
+async fn reload_report_fields(w: &mut PlaneA) -> Step {
+    let json = w.last_json()?;
+    let keys: Vec<&str> = json
+        .as_object()
+        .map(|m| m.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let required = ["created", "replaced", "stubPatched", "deleted"];
+    w.ensure(required.iter().all(|k| keys.contains(k)), || {
+        format!("expected reload report to expose {required:?}, got keys={keys:?} (body={json})")
+    })
+}
+
+#[then(regex = r#"^the reload report message is "((?:\\.|[^"\\])*)"$"#)]
+async fn reload_report_message(w: &mut PlaneA, message: String) -> Step {
+    let message = unescape(&message);
+    let Value::Object(map) = w.last_json()? else {
+        return Err(anyhow!("response is not a JSON object: {}", w.last()?.body).into());
+    };
+    let got = map.get("message").and_then(Value::as_str);
+    w.ensure(got == Some(message.as_str()), || {
+        format!("expected reload message '{message}', got {got:?}")
+    })
+}
+
+/// Over plain HTTP with an explicit `Host`, which is what the front door routes on.
+#[when(
+    regex = r#"^the client sends "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the front door with host "((?:\\.|[^"\\])*)"$"#
+)]
+async fn send_through_front_door(
+    w: &mut PlaneA,
+    method: String,
+    path: String,
+    host: String,
+) -> Step {
+    let port = reload_engine(w)?
+        .front_door_port
+        .ok_or_else(|| anyhow!("no front-door engine started in this scenario"))?;
+    let url = format!("http://localhost:{port}{}", unescape(&path));
+    let headers = vec![("Host".to_string(), unescape(&host))];
+    w.send_with(&clients().verifying, &method, &url, &headers, None)
+        .await
+}
+
+#[then(regex = r"^the imposter on port (\d+) no longer serves$")]
+async fn port_no_longer_serves(w: &mut PlaneA, port: u16) -> Step {
+    let connect = tokio::net::TcpStream::connect((harness().imposter_host(), port));
+    // Only a refused connection proves the listener is gone; a timeout or any other error proves
+    // nothing either way.
+    match tokio::time::timeout(Duration::from_secs(1), connect).await {
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => Ok(()),
+        Ok(Ok(_)) => w.ensure(false, || {
+            format!("expected port {port} to be gone after the reload, but it still accepts")
+        }),
+        Ok(Err(e)) => Err(anyhow!("connecting to port {port}: {e}").into()),
+        Err(_) => Err(anyhow!("connecting to port {port} timed out after 1s").into()),
+    }
+}
+
+// ── metrics (feature 17, #192) ───────────────────────────────────────────────────────────────
+
+async fn scrape(listener: &str) -> anyhow::Result<PromText> {
+    let h = harness();
+    let base = match listener {
+        "metrics" => &h.metrics_url,
+        "admin" => &h.admin_url,
+        other => bail!("unknown listener '{other}' (metrics|admin)"),
+    };
+    let url = format!("{base}/metrics");
+    let resp = get(&url).await?;
+    if resp.status != 200 {
+        let head: String = resp.body.chars().take(200).collect();
+        bail!("GET {url} -> {}: {head}", resp.status);
+    }
+    PromText::parse(&resp.body).map_err(|e| anyhow!("{url}: {e}"))
+}
+
+/// A selector with `{port}` filled from the scenario's current imposter.
+fn series_of(w: &PlaneA, sel: &str) -> anyhow::Result<Series> {
+    let filled = match w.current {
+        Some(p) => sel.replace("{port}", &p.to_string()),
+        None => sel.to_string(),
+    };
+    prom::selector(&filled).map_err(|e| anyhow!(e))
+}
+
+/// How far `sel` moved since the snapshot on `listener`, re-scraped 100 ms apart (up to 20 more
+/// times) until `done` holds: the engine may record a beat after the response. A series absent
+/// before counts as 0, since a labelled counter is born on its first increment.
+async fn delta(
+    w: &PlaneA,
+    listener: &str,
+    sel: &str,
+    done: impl Fn(f64) -> bool,
+) -> anyhow::Result<(Series, f64)> {
+    let series = series_of(w, sel)?;
+    let before = w
+        .snapshots
+        .get(listener)
+        .ok_or_else(|| anyhow!("no snapshot of the '{listener}' listener taken"))?
+        .get(&series)
+        .unwrap_or(0.0);
+    let mut retries = 0;
+    loop {
+        let d = scrape(listener).await?.get(&series).unwrap_or(0.0) - before;
+        if done(d) || retries == 20 {
+            return Ok((series, d));
+        }
+        retries += 1;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[when(regex = r#"^the client snapshots the "((?:\\.|[^"\\])*)" listener$"#)]
+async fn snapshot_listener(w: &mut PlaneA, listener: String) -> Step {
+    let listener = unescape(&listener);
+    let parsed = scrape(&listener).await?;
+    w.snapshots.insert(listener, parsed);
+    Ok(())
+}
+
+#[then(regex = r#"^on the "((?:\\.|[^"\\])*)" listener "((?:\\.|[^"\\])*)" grew by (\d+)$"#)]
+async fn grew_by(w: &mut PlaneA, listener: String, sel: String, n: u32) -> Step {
+    let n = f64::from(n);
+    let (s, d) = delta(w, &unescape(&listener), &unescape(&sel), |d| d >= n).await?;
+    w.ensure(d == n, || {
+        format!("expected {s} to grow by exactly {n}, it grew by {d}")
+    })
+}
+
+#[then(
+    regex = r#"^on the "((?:\\.|[^"\\])*)" listener "((?:\\.|[^"\\])*)" grew by at least (\d+)$"#
+)]
+async fn grew_by_at_least(w: &mut PlaneA, listener: String, sel: String, n: u32) -> Step {
+    let n = f64::from(n);
+    let (s, d) = delta(w, &unescape(&listener), &unescape(&sel), |d| d >= n).await?;
+    w.ensure(d >= n, || {
+        format!("expected {s} to grow by at least {n}, it grew by {d}")
+    })
+}
+
+#[then(regex = r#"^the metrics listener exports "((?:\\.|[^"\\])*)"$"#)]
+async fn metrics_exports(w: &mut PlaneA, sel: String) -> Step {
+    let s = series_of(w, &unescape(&sel))?;
+    let p = scrape("metrics").await?;
+    w.ensure(p.get(&s).is_some(), || {
+        format!("expected {s} to be exported; it is absent")
+    })
+}
+
+#[then(regex = r#"^the metrics listener reports "((?:\\.|[^"\\])*)" as (\d+)$"#)]
+async fn metrics_reports(w: &mut PlaneA, sel: String, n: u32) -> Step {
+    let s = series_of(w, &unescape(&sel))?;
+    let v = scrape("metrics").await?.get(&s);
+    w.ensure(v == Some(f64::from(n)), || {
+        format!(
+            "expected {s} = {n}, got {}",
+            v.map_or_else(|| "<absent>".to_string(), |v| v.to_string())
+        )
+    })
+}
+
+#[then(
+    regex = r#"^admin metric "((?:\\.|[^"\\])*)" equals the number of imposters listed by GET /imposters$"#
+)]
+async fn admin_metric_equals_listed(w: &mut PlaneA, sel: String) -> Step {
+    let s = series_of(w, &unescape(&sel))?;
+    let v = scrape("admin").await?.get(&s);
+    let url = format!("{}/imposters", harness().admin_url);
+    let body = get(&url).await?.body;
+    let json: Value =
+        serde_json::from_str(&body).with_context(|| format!("invalid admin JSON (body={body})"))?;
+    let n = json_at(&json, "imposters")
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    w.ensure(n.is_some_and(|n| v == Some(n as f64)), || {
+        format!(
+            "expected {s} to equal the GET /imposters count {}, got {}",
+            n.map_or_else(|| "<no imposters array>".to_string(), |n| n.to_string()),
+            v.map_or_else(|| "<absent>".to_string(), |v| v.to_string())
+        )
+    })
+}
+
+// #1045: connect, then hang up before sending a byte.
+#[when(regex = r"^a raw TCP connection to the current imposter closes without sending$")]
+async fn raw_connect_and_close(w: &mut PlaneA) -> Step {
+    let port = w.current()?;
+    let host = harness().imposter_host();
+    let connect = tokio::net::TcpStream::connect((host, port));
+    match tokio::time::timeout(Duration::from_secs(2), connect).await {
+        Ok(Ok(stream)) => {
+            drop(stream);
+            Ok(())
+        }
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            w.ensure(false, || format!("connect to {host}:{port} was refused"))
+        }
+        Ok(Err(e)) => Err(anyhow::Error::new(e)
+            .context(format!("connecting to {host}:{port}"))
+            .into()),
+        Err(_) => Err(anyhow!("connecting to {host}:{port} timed out after 2s").into()),
+    }
+}
+
 // ── the run ──────────────────────────────────────────────────────────────────────────────────
 
-/// After every scenario, even a failed one: delete its imposters from the shared engine and kill
+/// After every scenario, even a failed one: delete its imposters from the shared engine and stop
 /// any engine it started. A cleanup failure fails the run (as a hook error): a leaked imposter
 /// squats its port for every later scenario.
 async fn cleanup(world: Option<&mut PlaneA>) {
@@ -837,6 +2006,23 @@ async fn cleanup(world: Option<&mut PlaneA>) {
         let log = engine.log.clone();
         if let Err(e) = engine.stop().await {
             errors.push(format!("{e} (log {}:\n{})", log.display(), log_tail(&log)));
+        }
+    }
+    if let Some(engine) = w.reload.take() {
+        let log = engine.log().map(std::path::Path::to_path_buf);
+        if let Err(e) = engine.stop().await {
+            match log {
+                Some(log) => {
+                    errors.push(format!("{e} (log {}:\n{})", log.display(), log_tail(&log)));
+                }
+                None => errors.push(format!("stopping the embedded reload engine: {e}")),
+            }
+        }
+    }
+    // A burst nobody joined must not outlive its scenario.
+    if let Some(burst) = w.burst.take() {
+        for request in burst.requests {
+            request.abort();
         }
     }
     assert!(
