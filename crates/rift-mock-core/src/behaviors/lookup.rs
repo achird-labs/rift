@@ -385,6 +385,7 @@ mod tests {
             query,
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![LookupBehavior {
@@ -445,6 +446,7 @@ mod tests {
             query,
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![LookupBehavior {
@@ -518,6 +520,7 @@ mod tests {
             query,
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![LookupBehavior {
@@ -582,6 +585,7 @@ mod tests {
             query,
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![LookupBehavior {
@@ -640,6 +644,7 @@ mod tests {
             query,
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let behaviors = vec![LookupBehavior {
@@ -781,6 +786,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: body.map(str::to_string),
+            ..Default::default()
         };
         let served = apply_lookup_behaviors(
             "${row}[name]",
@@ -981,6 +987,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-Row".to_string(), vec![template.to_string()]);

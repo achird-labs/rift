@@ -29,14 +29,24 @@ pub fn apply_shell_transform(
     use std::process::Command;
 
     // Serialize request to JSON for MB_REQUEST
-    let request_json = serde_json::json!({
-        "method": request.method,
-        "path": request.path,
-        "query": request.query,
-        "headers": request.headers,
-        // `""` for a request without a body, as Mountebank's `JSON.stringify(request)` (#1365).
-        "body": request.body.as_deref().unwrap_or(""),
-    });
+    // Mountebank's `httpRequest.transform` keys. Each of `requestFrom`, `ip` and `form` is absent
+    // when `None`, as `JSON.stringify` omits an undefined value (issue #1451).
+    let mut request_json = serde_json::Map::new();
+    if let Some(request_from) = &request.request_from {
+        request_json.insert("requestFrom".into(), request_from.as_str().into());
+    }
+    request_json.insert("method".into(), request.method.as_str().into());
+    request_json.insert("path".into(), request.path.as_str().into());
+    request_json.insert("query".into(), serde_json::json!(request.query));
+    request_json.insert("headers".into(), serde_json::json!(request.headers));
+    // `""` for a request without a body, as Mountebank's `JSON.stringify(request)` (#1365).
+    request_json.insert("body".into(), request.body.as_deref().unwrap_or("").into());
+    if let Some(ip) = &request.ip {
+        request_json.insert("ip".into(), ip.as_str().into());
+    }
+    if let Some(form) = &request.form {
+        request_json.insert("form".into(), serde_json::json!(form));
+    }
 
     // Serialize response to JSON for MB_RESPONSE
     let response_json = serde_json::json!({
@@ -48,7 +58,10 @@ pub fn apply_shell_transform(
     let output = Command::new("sh")
         .arg("-c")
         .arg(command)
-        .env("MB_REQUEST", request_json.to_string())
+        .env(
+            "MB_REQUEST",
+            serde_json::Value::Object(request_json).to_string(),
+        )
         .env("MB_RESPONSE", response_json.to_string())
         .output()?;
 
@@ -207,6 +220,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: Some(r#"{"test": "data"}"#.to_string()),
+            ..Default::default()
         };
 
         // Simple echo command that outputs a fixed string
@@ -218,6 +232,29 @@ mod tests {
         );
     }
 
+    /// Issue #1451: a request with no client socket and no form leaves `requestFrom`, `ip` and
+    /// `form` out of `MB_REQUEST`, as `JSON.stringify` omits Mountebank's undefined ones.
+    #[test]
+    fn mb_request_omits_absent_client_fields() {
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/p".to_string(),
+            ..Default::default()
+        };
+        let output = apply_shell_transform("printf '%s' \"$MB_REQUEST\"", &request, "b", 200)
+            .expect("shell transform runs");
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("MB_REQUEST is JSON");
+        let fields = parsed.as_object().expect("an object");
+        for key in ["requestFrom", "ip", "form"] {
+            assert!(!fields.contains_key(key), "{key} must be absent: {output}");
+        }
+        assert_eq!(
+            fields.get("method"),
+            Some(&serde_json::json!("GET")),
+            "{output}"
+        );
+    }
+
     #[test]
     fn test_apply_shell_transform_with_env_vars() {
         let request = RequestContext {
@@ -226,6 +263,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         // Command that outputs the MB_REQUEST env var (which contains JSON)
@@ -250,6 +288,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
         let out = apply_shell_transform("printf '%s' \"$MB_REQUEST\"", &request, "x", 200)
             .expect("shell transform runs");
@@ -265,6 +304,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let mut headers = HashMap::new();
@@ -290,6 +330,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let mut headers = HashMap::new();
@@ -314,6 +355,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: Some(r#"{"name": "Alice"}"#.to_string()),
+            ..Default::default()
         };
 
         let mut headers = HashMap::new();
@@ -338,6 +380,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let mut headers = HashMap::new();
@@ -361,6 +404,7 @@ mod tests {
             query: HashMap::new(),
             headers: HashMap::new(),
             body: None,
+            ..Default::default()
         };
 
         let mut headers = HashMap::new();

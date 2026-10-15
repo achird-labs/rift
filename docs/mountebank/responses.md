@@ -671,7 +671,17 @@ request.path      // "/api/users/123"
 request.query     // { page: "1" }
 request.headers   // { "Content-Type": "application/json" } - one value per name, the first sent, names Title-Cased; a lookup in any case finds the header ([why](differences.md#request-header-names))
 request.body      // Request body as a string; call JSON.parse yourself for JSON. `""` when the request has no body, as in Mountebank
+request.requestFrom // "127.0.0.1:53124" - the client's address:port
+request.ip        // "127.0.0.1" - the client's address
+request.form      // { a: "1" } - the parsed body, only for a non-empty application/x-www-form-urlencoded body; undefined otherwise
 ```
+
+`requestFrom` and `ip` are the values the `requestFrom` and `ip` predicates match. On the default
+bind address an IPv4 client is `127.0.0.1` in Rift and `::ffff:127.0.0.1` in Mountebank — see
+[Client address](differences.md#client-address). A query or form key the client repeated reaches
+the script as one comma-joined string (`"1,2"`), where Mountebank gives an array, as it does for
+predicates ([differences](differences.md#exists-with-an-object-over-an-array)). The same request object reaches a predicate
+`inject`, a proxy's `predicateGenerators` `inject`, `decorate` and `shellTransform`'s `MB_REQUEST`.
 
 Rift also accepts Mountebank's current `function (config) { ... }` form: `config.request`,
 `config.state` and `config.logger` hold the same objects, and the request fields are copied onto

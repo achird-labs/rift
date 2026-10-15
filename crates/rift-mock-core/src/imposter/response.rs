@@ -542,6 +542,9 @@ pub fn apply_js_or_rhai_decorate(
                 // unknown here — say so rather than asserting `Text` over a possibly-base64 body
                 // (issue #636). `isBinary` is then absent for decorate scripts, not falsely false.
                 mode: None,
+                request_from: request.request_from.clone(),
+                ip: request.ip.clone(),
+                form: request.form.clone(),
             };
             // `execute_mountebank_config_decorate` calls `decorate_fn` as a function value
             // (`{decorate_fn}(__config)`), so a bare body with no `function`/arrow wrapper (the
@@ -608,6 +611,9 @@ pub fn apply_js_or_rhai_decorate(
                 // unknown here — say so rather than asserting `Text` over a possibly-base64 body
                 // (issue #636). `isBinary` is then absent for decorate scripts, not falsely false.
                 mode: None,
+                request_from: request.request_from.clone(),
+                ip: request.ip.clone(),
+                form: request.form.clone(),
             };
 
             match crate::scripting::execute_mountebank_decorate(
@@ -719,6 +725,7 @@ mod tests {
             query: std::collections::HashMap::new(),
             headers: std::collections::HashMap::new(),
             body: Some("REQ-BODY".to_string()),
+            ..Default::default()
         }
     }
 
@@ -805,6 +812,7 @@ mod tests {
             query: std::collections::HashMap::new(),
             headers: std::collections::HashMap::new(),
             body: Some(r#"{"order": {"id": 42, "items": ["a", "b"]}}"#.to_string()),
+            ..Default::default()
         };
         let script = r#"config => {
             var parsed = JSON.parse(config.request.body);
@@ -842,6 +850,7 @@ mod tests {
             query: std::collections::HashMap::new(),
             headers: std::collections::HashMap::new(),
             body: None,
+            ..Default::default()
         };
         // Bare body (starts with `config.response.`, detected via that prefix), containing an
         // inner `.map(x => x.id)` arrow.

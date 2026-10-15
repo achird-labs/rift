@@ -1156,6 +1156,7 @@ async fn handle_request_inner(
                     uri: &uri,
                     request_headers: &request_headers,
                     request_body: body_string.as_deref(),
+                    client_addr: Some(client_addr),
                     script_state_key: imposter.script_state_key(),
                     stub: stub_ref(&imposter, stub_index, &stub_state.stub),
                     csv_cache: csv_cache(),
@@ -1248,6 +1249,10 @@ async fn handle_request_inner(
                 // closure, so `body_string`'s borrow can't cross it.
                 body: body_string.as_deref().map(str::to_string),
                 mode: Some(body_mode.clone()),
+                request_from: Some(client_addr.to_string()),
+                ip: Some(client_addr.ip().to_string()),
+                form: Imposter::request_form(&request_headers, body_string.as_deref())
+                    .map(|form| form.into_iter().collect()),
             };
 
             match execute_mountebank_inject_bounded(
@@ -1308,6 +1313,7 @@ async fn handle_request_inner(
                             uri: &uri,
                             request_headers: &request_headers,
                             request_body: body_string.as_deref(),
+                            client_addr: Some(client_addr),
                             script_state_key: imposter.script_state_key(),
                             stub: stub_ref(&imposter, stub_index, &stub_state.stub),
                             csv_cache: csv_cache(),
@@ -1909,6 +1915,7 @@ async fn handle_request_inner(
                         uri: &uri,
                         request_headers: &request_headers,
                         request_body: body_string.as_deref(),
+                        client_addr: Some(client_addr),
                         script_state_key: imposter.script_state_key(),
                         stub: stub_ref(&imposter, stub_index, &stub_state.stub),
                         csv_cache: csv_cache(),

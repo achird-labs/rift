@@ -521,6 +521,7 @@ mod tests {
                 headers: HashMap::new(),
                 body: None,
                 mode: Some(ResponseMode::Text),
+                ..Default::default()
             }
         }
 

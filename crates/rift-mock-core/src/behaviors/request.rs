@@ -25,6 +25,12 @@ pub struct RequestContext {
     pub query: HashMap<String, String>,
     pub headers: HashMap<String, String>,
     pub body: Option<String>,
+    /// `requestFrom` / `ip` / `form` for `decorate` and `MB_REQUEST`, as Mountebank's
+    /// `httpRequest.transform` builds them (issue #1451). `None` when there is no client socket,
+    /// and `form` only for a non-empty urlencoded body.
+    pub request_from: Option<String>,
+    pub ip: Option<String>,
+    pub form: Option<HashMap<String, String>>,
 }
 
 impl RequestContext {
@@ -54,6 +60,7 @@ impl RequestContext {
         uri: &hyper::Uri,
         headers: &HashMap<String, Vec<String>, SH>,
         body: Option<&str>,
+        client_addr: Option<std::net::SocketAddr>,
     ) -> Self {
         // The shared parser (issue #1153) — this used to be an inline third copy of it. Collecting
         // into the std map re-hashes it, which #704 otherwise avoids; accepted here because it runs
@@ -80,6 +87,10 @@ impl RequestContext {
             query: query_map,
             headers: header_map,
             body: body.map(|s| s.to_string()),
+            request_from: client_addr.map(|addr| addr.to_string()),
+            ip: client_addr.map(|addr| addr.ip().to_string()),
+            form: crate::imposter::Imposter::request_form(headers, body)
+                .map(|form| form.into_iter().collect()),
         }
     }
 }
@@ -94,7 +105,7 @@ mod tests {
     #[test]
     fn from_request_passes_through_an_undecodable_query_value() {
         let uri: hyper::Uri = "/p?k=%FF".parse().unwrap();
-        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None);
+        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
         assert_eq!(
             ctx.query.get("k").map(String::as_str),
             Some("%FF"),
@@ -105,7 +116,7 @@ mod tests {
     #[test]
     fn from_request_still_decodes_a_valid_query_value() {
         let uri: hyper::Uri = "/p?k=hello%20world".parse().unwrap();
-        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None);
+        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
         assert_eq!(ctx.query.get("k").map(String::as_str), Some("hello world"));
     }
 
@@ -114,7 +125,7 @@ mod tests {
     #[test]
     fn from_request_decodes_an_encoded_query_key() {
         let uri: hyper::Uri = "/p?a%20b=1".parse().unwrap();
-        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None);
+        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
         assert_eq!(
             ctx.query.get("a b").map(String::as_str),
             Some("1"),
@@ -125,7 +136,7 @@ mod tests {
     #[test]
     fn from_request_passes_through_an_undecodable_query_key() {
         let uri: hyper::Uri = "/p?%FF=v".parse().unwrap();
-        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None);
+        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
         assert_eq!(
             ctx.query.get("%FF").map(String::as_str),
             Some("v"),
@@ -157,7 +168,7 @@ mod tests {
         ]);
         let uri: hyper::Uri = "/p".parse().unwrap();
 
-        let ctx = RequestContext::from_request("GET", &uri, &headers, None);
+        let ctx = RequestContext::from_request("GET", &uri, &headers, None, None);
 
         assert_eq!(
             ctx.headers.get("Content-Type").map(String::as_str),
@@ -194,7 +205,7 @@ mod tests {
             crate::imposter::headers::collect_request_headers(&raw, header_to_title_case);
         let uri: hyper::Uri = "/p".parse().unwrap();
 
-        let ctx = RequestContext::from_request("GET", &uri, &headers, None);
+        let ctx = RequestContext::from_request("GET", &uri, &headers, None, None);
 
         assert!(
             !ctx.headers.contains_key("X-Bin"),
@@ -225,7 +236,7 @@ mod tests {
             crate::imposter::headers::collect_request_headers(&raw, header_to_title_case);
         let uri: hyper::Uri = "/p".parse().unwrap();
 
-        let ctx = RequestContext::from_request("GET", &uri, &headers, None);
+        let ctx = RequestContext::from_request("GET", &uri, &headers, None, None);
 
         assert_eq!(ctx.headers.get("X-Id").map(String::as_str), Some("a"));
     }
@@ -238,7 +249,7 @@ mod tests {
         let headers = collected(&[("x-id", &["a", "b", "c"])]);
         let uri: hyper::Uri = "/p".parse().unwrap();
 
-        let ctx = RequestContext::from_request("GET", &uri, &headers, None);
+        let ctx = RequestContext::from_request("GET", &uri, &headers, None, None);
 
         assert_eq!(
             ctx.headers.get("X-Id").map(String::as_str),
@@ -256,7 +267,7 @@ mod tests {
             HashMap::from([("X-Empty".to_string(), Vec::new())]);
         let uri: hyper::Uri = "/p".parse().unwrap();
 
-        let ctx = RequestContext::from_request("GET", &uri, &headers, None);
+        let ctx = RequestContext::from_request("GET", &uri, &headers, None, None);
 
         assert!(!ctx.headers.contains_key("X-Empty"));
     }
@@ -264,7 +275,7 @@ mod tests {
     #[test]
     fn from_request_with_no_headers_yields_an_empty_map() {
         let uri: hyper::Uri = "/p".parse().unwrap();
-        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None);
+        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
         assert!(ctx.headers.is_empty());
     }
 }
