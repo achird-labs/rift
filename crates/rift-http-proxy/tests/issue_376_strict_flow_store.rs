@@ -16,9 +16,9 @@ fn cfg(v: serde_json::Value) -> ImposterConfig {
 
 // A respond(ctx) script that reads ctx.state then passes through. Under a failing backend the
 // read is the failure point.
-fn script_imposter(port: u16, engine: &str, code: &str) -> ImposterConfig {
+fn script_imposter(engine: &str, code: &str) -> ImposterConfig {
     cfg(serde_json::json!({
-        "protocol": "http", "port": port,
+        "protocol": "http",
         "_rift": { "flowState": { "backend": "failing" } },
         "stubs": [{
             "predicates": [{ "equals": { "path": "/go" } }],
@@ -27,10 +27,10 @@ fn script_imposter(port: u16, engine: &str, code: &str) -> ImposterConfig {
     }))
 }
 
-async fn assert_fails_loud(port: u16, engine: &str, code: &str) {
+async fn assert_fails_loud(engine: &str, code: &str) {
     let manager = ImposterManager::new();
-    manager
-        .create_imposter(script_imposter(port, engine, code))
+    let port = manager
+        .create_imposter(script_imposter(engine, code))
         .await
         .expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -54,19 +54,13 @@ async fn assert_fails_loud(port: u16, engine: &str, code: &str) {
 // AC1: Rhai ctx.state failure raises → 500.
 #[tokio::test]
 async fn rhai_flow_store_failure_raises() {
-    assert_fails_loud(
-        22656,
-        "rhai",
-        r#"fn respond(ctx){ ctx.state.get("k"); pass() }"#,
-    )
-    .await;
+    assert_fails_loud("rhai", r#"fn respond(ctx){ ctx.state.get("k"); pass() }"#).await;
 }
 
 // AC3: JS ctx.state failure raises → 500.
 #[tokio::test]
 async fn js_flow_store_failure_raises() {
     assert_fails_loud(
-        22659,
         "javascript",
         r#"function respond(ctx){ ctx.state.get("k"); return pass(); }"#,
     )

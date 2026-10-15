@@ -16,9 +16,9 @@ fn imposter_cfg(v: serde_json::Value) -> ImposterConfig {
     serde_json::from_value(v).expect("test imposter config")
 }
 
-fn failing_backend_cfg(port: u16) -> ImposterConfig {
+fn failing_backend_cfg() -> ImposterConfig {
     imposter_cfg(serde_json::json!({
-        "protocol": "http", "port": port,
+        "protocol": "http",
         "_rift": {"flowState": {"backend": "failing"}},
         "stubs": [{
             "scenarioName": "order",
@@ -94,12 +94,12 @@ async fn admin_responses_are_decorated() {
 #[tokio::test]
 async fn data_plane_scenario_gate_returns_structured_503() {
     let manager = Arc::new(ImposterManager::new());
-    manager
-        .create_imposter(failing_backend_cfg(22605))
+    let port = manager
+        .create_imposter(failing_backend_cfg())
         .await
         .expect("create");
 
-    let resp = reqwest::get("http://127.0.0.1:22605/gated")
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/gated"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 503);
@@ -115,13 +115,13 @@ async fn data_plane_scenario_gate_returns_structured_503() {
 #[tokio::test]
 async fn flow_state_admin_endpoint_returns_structured_503() {
     let manager = Arc::new(ImposterManager::new());
-    manager
-        .create_imposter(failing_backend_cfg(19494))
+    let port = manager
+        .create_imposter(failing_backend_cfg())
         .await
         .expect("create");
     let admin = start_admin(manager.clone()).await;
 
-    let resp = reqwest::get(format!("{admin}/admin/imposters/19494/flow-state/f/k"))
+    let resp = reqwest::get(format!("{admin}/admin/imposters/{port}/flow-state/f/k"))
         .await
         .expect("request");
     assert_eq!(
@@ -139,13 +139,13 @@ async fn flow_state_admin_endpoint_returns_structured_503() {
 #[tokio::test]
 async fn scenario_list_maps_backend_error_to_503() {
     let manager = Arc::new(ImposterManager::new());
-    manager
-        .create_imposter(failing_backend_cfg(19495))
+    let port = manager
+        .create_imposter(failing_backend_cfg())
         .await
         .expect("create");
     let admin = start_admin(manager.clone()).await;
 
-    let resp = reqwest::get(format!("{admin}/imposters/19495/scenarios"))
+    let resp = reqwest::get(format!("{admin}/imposters/{port}/scenarios"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 503);
@@ -161,9 +161,9 @@ async fn scenario_list_maps_backend_error_to_503() {
 #[tokio::test]
 async fn no_decorator_response_headers_unchanged() {
     let manager = Arc::new(ImposterManager::new());
-    manager
+    let port = manager
         .create_imposter(imposter_cfg(serde_json::json!({
-            "protocol": "http", "port": 19496,
+            "protocol": "http",
             "stubs": [{
                 "predicates": [{"equals": {"path": "/ping"}}],
                 "responses": [{"is": {
@@ -175,7 +175,7 @@ async fn no_decorator_response_headers_unchanged() {
         .await
         .expect("create");
 
-    let resp = reqwest::get("http://127.0.0.1:19496/ping")
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/ping"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 200);
@@ -196,9 +196,9 @@ async fn no_decorator_response_headers_unchanged() {
 #[tokio::test]
 async fn transition_write_failure_returns_structured_503() {
     let manager = Arc::new(ImposterManager::new());
-    manager
+    let port = manager
         .create_imposter(imposter_cfg(serde_json::json!({
-            "protocol": "http", "port": 19497,
+            "protocol": "http",
             "_rift": {"flowState": {"backend": "failing"}},
             "stubs": [{
                 "scenarioName": "order",
@@ -210,7 +210,7 @@ async fn transition_write_failure_returns_structured_503() {
         .await
         .expect("create");
 
-    let resp = reqwest::get("http://127.0.0.1:19497/transition")
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/transition"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 503, "a lost transition must fail loudly");
@@ -229,13 +229,13 @@ async fn admin_decorator_receives_backend_annotations() {
         ImposterManager::new()
             .with_response_decorator(recorder.clone() as Arc<dyn ResponseDecorator>),
     );
-    manager
-        .create_imposter(failing_backend_cfg(19498))
+    let port = manager
+        .create_imposter(failing_backend_cfg())
         .await
         .expect("create");
     let admin = start_admin(manager.clone()).await;
 
-    let resp = reqwest::get(format!("{admin}/admin/imposters/19498/flow-state/f/k"))
+    let resp = reqwest::get(format!("{admin}/admin/imposters/{port}/flow-state/f/k"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 503);
@@ -262,13 +262,13 @@ async fn gateway_503_is_decorated_with_admin_phase() {
         ImposterManager::new()
             .with_response_decorator(recorder.clone() as Arc<dyn ResponseDecorator>),
     );
-    manager
-        .create_imposter(failing_backend_cfg(19499))
+    let port = manager
+        .create_imposter(failing_backend_cfg())
         .await
         .expect("create");
     let admin = start_admin(manager.clone()).await;
 
-    let resp = reqwest::get(format!("{admin}/__rift/19499/gated"))
+    let resp = reqwest::get(format!("{admin}/__rift/{port}/gated"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 503);
@@ -341,15 +341,15 @@ async fn unauthorized_response_is_decorated() {
 #[tokio::test]
 async fn flow_state_write_endpoints_map_backend_error_to_503() {
     let manager = Arc::new(ImposterManager::new());
-    manager
-        .create_imposter(failing_backend_cfg(19504))
+    let port = manager
+        .create_imposter(failing_backend_cfg())
         .await
         .expect("create");
     let admin = start_admin(manager.clone()).await;
     let client = reqwest::Client::new();
 
     let put = client
-        .put(format!("{admin}/admin/imposters/19504/flow-state/f/k"))
+        .put(format!("{admin}/admin/imposters/{port}/flow-state/f/k"))
         .json(&serde_json::json!({"value": 1}))
         .send()
         .await
@@ -357,14 +357,14 @@ async fn flow_state_write_endpoints_map_backend_error_to_503() {
     assert_eq!(put.status(), 503, "PUT flow-state");
 
     let del = client
-        .delete(format!("{admin}/admin/imposters/19504/flow-state/f/k"))
+        .delete(format!("{admin}/admin/imposters/{port}/flow-state/f/k"))
         .send()
         .await
         .expect("delete");
     assert_eq!(del.status(), 503, "DELETE flow-state");
 
     let set_state = client
-        .put(format!("{admin}/imposters/19504/scenarios/order/state"))
+        .put(format!("{admin}/imposters/{port}/scenarios/order/state"))
         .json(&serde_json::json!({"state": "paid"}))
         .send()
         .await
@@ -372,7 +372,7 @@ async fn flow_state_write_endpoints_map_backend_error_to_503() {
     assert_eq!(set_state.status(), 503, "PUT scenario state");
 
     let reset = client
-        .post(format!("{admin}/imposters/19504/scenarios/reset"))
+        .post(format!("{admin}/imposters/{port}/scenarios/reset"))
         .send()
         .await
         .expect("reset");

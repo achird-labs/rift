@@ -52,12 +52,12 @@ fn documented_families() -> Vec<String> {
     names
 }
 
-async fn mk(manager: &ImposterManager, cfg: serde_json::Value) {
+async fn mk(manager: &ImposterManager, cfg: serde_json::Value) -> u16 {
     let config = serde_json::from_value(cfg).expect("valid imposter config");
     manager
         .create_imposter(config)
         .await
-        .expect("create imposter");
+        .expect("create imposter")
 }
 
 /// Drive one request at `port`, ignoring the outcome — several of these deliberately provoke a
@@ -87,10 +87,10 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     let manager = ImposterManager::new();
 
     // `_rift.fault` error at probability 1.0 -> faults_injected_total + error_status_total.
-    mk(
+    let error_port = mk(
         &manager,
         serde_json::json!({
-            "port": 21500, "protocol": "http", "stubs": [{ "responses": [{
+            "protocol": "http", "stubs": [{ "responses": [{
                 "is": { "statusCode": 200, "body": "ok" },
                 "_rift": { "fault": { "error": { "probability": 1.0, "status": 503, "body": "boom" } } }
             }] }]
@@ -99,10 +99,10 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     .await;
 
     // `_rift.fault` latency -> latency_injected_ms. 1ms so the suite does not pay for the signal.
-    mk(
+    let latency_port = mk(
         &manager,
         serde_json::json!({
-            "port": 21501, "protocol": "http", "stubs": [{ "responses": [{
+            "protocol": "http", "stubs": [{ "responses": [{
                 "is": { "statusCode": 200, "body": "ok" },
                 "_rift": { "fault": { "latency": { "probability": 1.0, "ms": 1 } } }
             }] }]
@@ -112,10 +112,10 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
 
     // A script that decides an error fault -> script_execution_duration_ms
     // + faults_injected_total{source="script"}.
-    mk(
+    let script_fault_port = mk(
         &manager,
         serde_json::json!({
-            "port": 21502, "protocol": "http", "stubs": [{ "responses": [{
+            "protocol": "http", "stubs": [{ "responses": [{
                 "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { http(503, \"scripted\") }" } }
             }] }]
         }),
@@ -123,10 +123,10 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     .await;
 
     // A script that throws -> script_errors_total.
-    mk(
+    let script_throw_port = mk(
         &manager,
         serde_json::json!({
-            "port": 21503, "protocol": "http", "stubs": [{ "responses": [{
+            "protocol": "http", "stubs": [{ "responses": [{
                 "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { throw \"deliberate\" }" } }
             }] }]
         }),
@@ -134,10 +134,10 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     .await;
 
     // A script touching flow state -> flow_state_ops_total, through the metered store decorator.
-    mk(
+    let flow_port = mk(
         &manager,
         serde_json::json!({
-            "port": 21504, "protocol": "http",
+            "protocol": "http",
             "_rift": { "flowState": { "backend": "inmemory" } },
             "stubs": [{ "responses": [{
                 "_rift": { "script": { "engine": "rhai",
@@ -148,19 +148,19 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     .await;
 
     // An in-test origin plus a proxy stub pointing at it -> upstream_request_duration_ms.
-    mk(
+    let origin_port = mk(
         &manager,
         serde_json::json!({
-            "port": 21505, "protocol": "http", "stubs": [{ "responses": [{
+            "protocol": "http", "stubs": [{ "responses": [{
                 "is": { "statusCode": 200, "body": "origin" } }] }]
         }),
     )
     .await;
-    mk(
+    let proxy_port = mk(
         &manager,
         serde_json::json!({
-            "port": 21506, "protocol": "http", "stubs": [{ "responses": [{
-                "proxy": { "to": "http://127.0.0.1:21505", "mode": "proxyAlways" } }] }]
+            "protocol": "http", "stubs": [{ "responses": [{
+                "proxy": { "to": format!("http://127.0.0.1:{origin_port}"), "mode": "proxyAlways" } }] }]
         }),
     )
     .await;
@@ -168,7 +168,14 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let client = reqwest::Client::new();
-    for port in [21500u16, 21501, 21502, 21503, 21504, 21506] {
+    for port in [
+        error_port,
+        latency_port,
+        script_fault_port,
+        script_throw_port,
+        flow_port,
+        proxy_port,
+    ] {
         hit(&client, port, "/x").await;
     }
 
@@ -193,21 +200,29 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     // NB: the Prometheus text encoder emits labels in ALPHABETICAL order, not the order they are
     // declared in the `CounterVec`. Write them sorted or these never match.
     for expected in [
-        r#"rift_faults_injected_total{rule_id="21500",source="rift",type="error"}"#,
-        r#"rift_faults_injected_total{rule_id="21501",source="rift",type="latency"}"#,
-        r#"rift_faults_injected_total{rule_id="21502",source="script",type="error"}"#,
-        r#"rift_error_status_total{rule_id="21500",status="503"}"#,
-        r#"rift_script_errors_total{error_type="runtime",rule_id="21503"}"#,
-        r#"rift_flow_state_ops_total{operation="increment",result="success"}"#,
+        format!(
+            r#"rift_faults_injected_total{{rule_id="{error_port}",source="rift",type="error"}}"#
+        ),
+        format!(
+            r#"rift_faults_injected_total{{rule_id="{latency_port}",source="rift",type="latency"}}"#
+        ),
+        format!(
+            r#"rift_faults_injected_total{{rule_id="{script_fault_port}",source="script",type="error"}}"#
+        ),
+        format!(r#"rift_error_status_total{{rule_id="{error_port}",status="503"}}"#),
+        format!(
+            r#"rift_script_errors_total{{error_type="runtime",rule_id="{script_throw_port}"}}"#
+        ),
+        r#"rift_flow_state_ops_total{operation="increment",result="success"}"#.to_string(),
         // Materialised at listener start, so it is present at 0 without provoking a failure —
         // which is the property the docs promise and the reason the row-count guard above does
         // not have to be taught about a family that only appears under fault.
-        r#"rift_preface_failures_total{kind="eof",listener="imposter"}"#,
-        r#"rift_preface_failures_total{kind="io",listener="imposter"}"#,
-        r#"rift_preface_failures_total{kind="timeout",listener="imposter"}"#,
+        r#"rift_preface_failures_total{kind="eof",listener="imposter"}"#.to_string(),
+        r#"rift_preface_failures_total{kind="io",listener="imposter"}"#.to_string(),
+        r#"rift_preface_failures_total{kind="timeout",listener="imposter"}"#.to_string(),
     ] {
         assert!(
-            scrape.contains(expected),
+            scrape.contains(&expected),
             "expected series `{expected}` in the scrape — the family may be present under the \
              wrong labels.\n{scrape}"
         );
@@ -221,7 +236,15 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
         "`source=\"v1\"` is not a documented label value; a fault is being counted twice.\n{scrape}"
     );
 
-    for port in [21500u16, 21501, 21502, 21503, 21504, 21505, 21506] {
+    for port in [
+        error_port,
+        latency_port,
+        script_fault_port,
+        script_throw_port,
+        flow_port,
+        origin_port,
+        proxy_port,
+    ] {
         let _ = manager.delete_imposter(port).await;
     }
 }
@@ -233,10 +256,10 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
 #[tokio::test]
 async fn a_zero_millisecond_latency_roll_injects_nothing_and_is_not_counted() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 21507, "protocol": "http", "stubs": [{ "responses": [{
+            "protocol": "http", "stubs": [{ "responses": [{
                 "is": { "statusCode": 200, "body": "ok" },
                 "_rift": { "fault": { "latency": { "probability": 1.0, "ms": 0 } } }
             }] }]
@@ -245,17 +268,30 @@ async fn a_zero_millisecond_latency_roll_injects_nothing_and_is_not_counted() {
     .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
+    // The registry is process-global and ports are reused, so a series for this port may already
+    // exist from an earlier imposter. What the roll must not do is add or change one.
+    let marker = format!(r#"rule_id="{port}""#);
+    let series = |scrape: &str| -> Vec<String> {
+        scrape
+            .lines()
+            .filter(|l| l.contains(&marker))
+            .map(str::to_string)
+            .collect()
+    };
+    let before = series(&rift_http_proxy::extensions::collect_metrics());
+
     let client = reqwest::Client::new();
-    hit(&client, 21507, "/x").await;
+    hit(&client, port, "/x").await;
 
     let scrape = rift_http_proxy::extensions::collect_metrics();
-    assert!(
-        !scrape.contains(r#"rule_id="21507""#),
+    assert_eq!(
+        series(&scrape),
+        before,
         "a latency fault whose delay is 0ms injects nothing and must not be counted as an \
          injected fault.\n{scrape}"
     );
 
-    let _ = manager.delete_imposter(21507).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 /// The two families #999 deliberately removed must not come back by way of the docs table: a row

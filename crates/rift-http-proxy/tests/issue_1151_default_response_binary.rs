@@ -10,10 +10,11 @@
 use rift_http_proxy::imposter::ImposterManager;
 use std::time::Duration;
 
-async fn mk(manager: &ImposterManager, cfg: serde_json::Value) {
+async fn mk(manager: &ImposterManager, cfg: serde_json::Value) -> u16 {
     let config = serde_json::from_value(cfg).expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
+    port
 }
 
 async fn get(port: u16) -> reqwest::Response {
@@ -29,16 +30,16 @@ async fn get(port: u16) -> reqwest::Response {
 #[tokio::test]
 async fn an_undecodable_binary_default_response_is_flagged_not_silent() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 21910, "protocol": "http", "stubs": [],
+            "protocol": "http", "stubs": [],
             "defaultResponse": { "statusCode": 200, "body": "not!valid!base64!", "_mode": "binary" }
         }),
     )
     .await;
 
-    let resp = get(21910).await;
+    let resp = get(port).await;
     assert_eq!(
         resp.status(),
         200,
@@ -63,7 +64,7 @@ async fn an_undecodable_binary_default_response_is_flagged_not_silent() {
         "not!valid!base64!",
         "lenient mode serves the raw body, exactly as the is path does (#269/#323)"
     );
-    let _ = manager.delete_imposter(21910).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // `strictBehaviors` turns the same failure into a 500 — the #375 contract the default site never
@@ -71,23 +72,23 @@ async fn an_undecodable_binary_default_response_is_flagged_not_silent() {
 #[tokio::test]
 async fn strict_behaviors_makes_an_undecodable_binary_default_response_a_500() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 21911, "protocol": "http", "stubs": [], "strictBehaviors": true,
+            "protocol": "http", "stubs": [], "strictBehaviors": true,
             "defaultResponse": { "statusCode": 200, "body": "not!valid!base64!", "_mode": "binary" }
         }),
     )
     .await;
 
-    let resp = get(21911).await;
+    let resp = get(port).await;
     assert_eq!(
         resp.status(),
         500,
         "strictBehaviors must fail loud on the default response too"
     );
     assert!(resp.headers().contains_key("x-rift-binary-error"));
-    let _ = manager.delete_imposter(21911).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // A non-string body is serialized to JSON text before the decode, so under `_mode: "binary"` it
@@ -95,21 +96,21 @@ async fn strict_behaviors_makes_an_undecodable_binary_default_response_a_500() {
 #[tokio::test]
 async fn an_object_body_in_binary_mode_is_flagged() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 21912, "protocol": "http", "stubs": [],
+            "protocol": "http", "stubs": [],
             "defaultResponse": { "statusCode": 200, "body": { "a": 1 }, "_mode": "binary" }
         }),
     )
     .await;
 
-    let resp = get(21912).await;
+    let resp = get(port).await;
     assert!(
         resp.headers().contains_key("x-rift-binary-error"),
         "an object body can never be valid base64, so binary mode must flag it"
     );
-    let _ = manager.delete_imposter(21912).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // The happy path had no test anywhere: a valid base64 default body serves the decoded bytes and
@@ -117,22 +118,22 @@ async fn an_object_body_in_binary_mode_is_flagged() {
 #[tokio::test]
 async fn a_valid_binary_default_response_serves_the_decoded_bytes() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 21913, "protocol": "http", "stubs": [],
+            "protocol": "http", "stubs": [],
             // base64("hello")
             "defaultResponse": { "statusCode": 200, "body": "aGVsbG8=", "_mode": "binary" }
         }),
     )
     .await;
 
-    let resp = get(21913).await;
+    let resp = get(port).await;
     assert_eq!(resp.status(), 200);
     assert!(
         !resp.headers().contains_key("x-rift-binary-error"),
         "a clean decode carries no error header"
     );
     assert_eq!(resp.bytes().await.expect("body").as_ref(), b"hello");
-    let _ = manager.delete_imposter(21913).await;
+    let _ = manager.delete_imposter(port).await;
 }

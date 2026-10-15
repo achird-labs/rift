@@ -57,11 +57,29 @@ fn origin_tls_acceptor(cert_pem: &str, key_pem: &str) -> tokio_rustls::TlsAccept
 
 /// A `wss://` echo origin. Answers `count` connections, echoing every text frame back with an
 /// `echo:` prefix so the test can tell a real round trip from an accidental reflection.
-fn spawn_wss_echo_origin(port: u16, cert_pem: String, key_pem: String, count: usize) {
+/// Binds an ephemeral port before returning, so the caller can use the port at once.
+fn bind_ephemeral() -> (TcpListener, u16) {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind origin");
+    std_listener.set_nonblocking(true).expect("nonblocking");
+    let port = std_listener.local_addr().expect("local addr").port();
+    (
+        TcpListener::from_std(std_listener).expect("tokio listener"),
+        port,
+    )
+}
+
+/// A port nothing listens on: bound to learn it, then released.
+fn unused_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind an ephemeral port")
+        .local_addr()
+        .expect("local addr")
+        .port()
+}
+
+fn spawn_wss_echo_origin(cert_pem: String, key_pem: String, count: usize) -> u16 {
+    let (listener, port) = bind_ephemeral();
     tokio::spawn(async move {
-        let listener = TcpListener::bind(("127.0.0.1", port))
-            .await
-            .expect("bind origin");
         let acceptor = origin_tls_acceptor(&cert_pem, &key_pem);
         for _ in 0..count {
             let Ok((tcp, _)) = listener.accept().await else {
@@ -92,6 +110,7 @@ fn spawn_wss_echo_origin(port: u16, cert_pem: String, key_pem: String, count: us
             });
         }
     });
+    port
 }
 
 async fn start_intercept(
@@ -170,16 +189,17 @@ async fn connect_through_proxy(
 #[tokio::test]
 async fn a_websocket_conversation_survives_the_intercept_tunnel() {
     let (cert_pem, key_pem) = origin_cert();
-    spawn_wss_echo_origin(23010, cert_pem.clone(), key_pem, 1);
+    let origin_port = spawn_wss_echo_origin(cert_pem.clone(), key_pem, 1);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let (listener, ca_pem) = start_intercept(InterceptRules::new(), cert_pem).await;
     let proxy = listener.local_addr();
 
     let outcome = tokio::time::timeout(BUDGET, async {
-        let tunnel = connect_through_proxy(proxy, "localhost:23010", &ca_pem).await;
+        let tunnel =
+            connect_through_proxy(proxy, &format!("localhost:{origin_port}"), &ca_pem).await;
         let (mut ws, response) =
-            tokio_tungstenite::client_async("ws://localhost:23010/chat", tunnel)
+            tokio_tungstenite::client_async(format!("ws://localhost:{origin_port}/chat"), tunnel)
                 .await
                 .expect("websocket handshake through the tunnel");
         assert_eq!(
@@ -225,12 +245,11 @@ async fn the_relayed_handshake_carries_host_and_not_the_proxy_credential() {
     let received = Arc::new(tokio::sync::Mutex::new(String::new()));
 
     // A raw TLS origin that captures the request head and then just closes.
+    let (capture_listener, origin_port) = bind_ephemeral();
     {
         let (cert_pem, key_pem, received) = (cert_pem.clone(), key_pem, Arc::clone(&received));
         tokio::spawn(async move {
-            let listener = TcpListener::bind(("127.0.0.1", 23015))
-                .await
-                .expect("bind capture origin");
+            let listener = capture_listener;
             let acceptor = origin_tls_acceptor(&cert_pem, &key_pem);
             if let Ok((tcp, _)) = listener.accept().await
                 && let Ok(mut tls) = acceptor.accept(tcp).await
@@ -251,15 +270,19 @@ async fn the_relayed_handshake_carries_host_and_not_the_proxy_credential() {
     let proxy = listener.local_addr();
 
     let _ = tokio::time::timeout(BUDGET, async {
-        let mut tunnel = connect_through_proxy(proxy, "localhost:23015", &ca_pem).await;
+        let mut tunnel =
+            connect_through_proxy(proxy, &format!("localhost:{origin_port}"), &ca_pem).await;
         // Sent by hand so the proxy credential can be included — a real client configured with
         // proxy auth may attach it to tunnelled requests too.
         tunnel
             .write_all(
-                b"GET /chat HTTP/1.1\r\nHost: localhost:23015\r\n\
-                  Connection: Upgrade\r\nUpgrade: websocket\r\n\
-                  Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-                  Proxy-Authorization: Basic c2VjcmV0OnBhc3N3b3Jk\r\n\r\n",
+                format!(
+                    "GET /chat HTTP/1.1\r\nHost: localhost:{origin_port}\r\n\
+                     Connection: Upgrade\r\nUpgrade: websocket\r\n\
+                     Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                     Proxy-Authorization: Basic c2VjcmV0OnBhc3N3b3Jk\r\n\r\n"
+                )
+                .as_bytes(),
             )
             .await
             .expect("write handshake");
@@ -298,7 +321,7 @@ async fn the_relayed_handshake_carries_host_and_not_the_proxy_credential() {
 async fn a_matching_rule_answers_the_handshake_instead_of_upgrading() {
     let (cert_pem, key_pem) = origin_cert();
     // The origin is running, so a passing test proves the rule won rather than that nothing worked.
-    spawn_wss_echo_origin(23011, cert_pem.clone(), key_pem, 1);
+    let origin_port = spawn_wss_echo_origin(cert_pem.clone(), key_pem, 1);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let rules = InterceptRules::new();
@@ -315,8 +338,9 @@ async fn a_matching_rule_answers_the_handshake_instead_of_upgrading() {
     let proxy = listener.local_addr();
 
     let outcome = tokio::time::timeout(BUDGET, async {
-        let tunnel = connect_through_proxy(proxy, "localhost:23011", &ca_pem).await;
-        tokio_tungstenite::client_async("ws://localhost:23011/chat", tunnel).await
+        let tunnel =
+            connect_through_proxy(proxy, &format!("localhost:{origin_port}"), &ca_pem).await;
+        tokio_tungstenite::client_async(format!("ws://localhost:{origin_port}/chat"), tunnel).await
     })
     .await
     .expect("the rule path must answer promptly, never hang");
@@ -337,13 +361,15 @@ async fn a_matching_rule_answers_the_handshake_instead_of_upgrading() {
 #[tokio::test]
 async fn an_unreachable_origin_answers_rather_than_hanging() {
     let (cert_pem, _key) = origin_cert();
-    // Nothing is listening on 23012.
+    // Nothing is listening on this port.
+    let origin_port = unused_port();
     let (listener, ca_pem) = start_intercept(InterceptRules::new(), cert_pem).await;
     let proxy = listener.local_addr();
 
     let outcome = tokio::time::timeout(BUDGET, async {
-        let tunnel = connect_through_proxy(proxy, "localhost:23012", &ca_pem).await;
-        tokio_tungstenite::client_async("ws://localhost:23012/chat", tunnel).await
+        let tunnel =
+            connect_through_proxy(proxy, &format!("localhost:{origin_port}"), &ca_pem).await;
+        tokio_tungstenite::client_async(format!("ws://localhost:{origin_port}/chat"), tunnel).await
     })
     .await
     .expect("an unreachable origin must produce an answer within the budget, not a hang");
@@ -362,11 +388,13 @@ async fn an_unreachable_origin_answers_rather_than_hanging() {
 #[tokio::test]
 async fn a_non_websocket_upgrade_is_unaffected() {
     let (cert_pem, _key) = origin_cert();
+    let origin_port = unused_port();
     let (listener, ca_pem) = start_intercept(InterceptRules::new(), cert_pem).await;
     let proxy = listener.local_addr();
 
     let body = tokio::time::timeout(BUDGET, async {
-        let mut tunnel = connect_through_proxy(proxy, "localhost:23013", &ca_pem).await;
+        let mut tunnel =
+            connect_through_proxy(proxy, &format!("localhost:{origin_port}"), &ca_pem).await;
         tunnel
             .write_all(
                 b"GET /x HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\n\
@@ -396,16 +424,16 @@ async fn a_non_websocket_upgrade_is_unaffected() {
 #[tokio::test]
 async fn listener_shutdown_terminates_a_live_relay() {
     let (cert_pem, key_pem) = origin_cert();
-    spawn_wss_echo_origin(23014, cert_pem.clone(), key_pem, 1);
+    let origin_port = spawn_wss_echo_origin(cert_pem.clone(), key_pem, 1);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let (listener, ca_pem) = start_intercept(InterceptRules::new(), cert_pem).await;
     let proxy = listener.local_addr();
 
-    let tunnel = connect_through_proxy(proxy, "localhost:23014", &ca_pem).await;
+    let tunnel = connect_through_proxy(proxy, &format!("localhost:{origin_port}"), &ca_pem).await;
     let (mut ws, _) = tokio::time::timeout(
         BUDGET,
-        tokio_tungstenite::client_async("ws://localhost:23014/chat", tunnel),
+        tokio_tungstenite::client_async(format!("ws://localhost:{origin_port}/chat"), tunnel),
     )
     .await
     .expect("handshake within budget")
@@ -449,7 +477,7 @@ async fn the_relay_uses_outbound_trust_set_after_a_clone_was_taken() {
     use rift_http_proxy::intercept_control::{InterceptControl, InterceptStartOptions};
 
     let (cert_pem, key_pem) = origin_cert();
-    spawn_wss_echo_origin(23020, cert_pem.clone(), key_pem, 1);
+    let origin_port = spawn_wss_echo_origin(cert_pem.clone(), key_pem, 1);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let control = InterceptControl::default();
@@ -477,9 +505,10 @@ async fn the_relay_uses_outbound_trust_set_after_a_clone_was_taken() {
         .to_string();
 
     let outcome = tokio::time::timeout(BUDGET, async {
-        let tunnel = connect_through_proxy(proxy, "localhost:23020", &ca_pem).await;
+        let tunnel =
+            connect_through_proxy(proxy, &format!("localhost:{origin_port}"), &ca_pem).await;
         let (mut ws, response) =
-            tokio_tungstenite::client_async("ws://localhost:23020/chat", tunnel)
+            tokio_tungstenite::client_async(format!("ws://localhost:{origin_port}/chat"), tunnel)
                 .await
                 .expect("websocket handshake through the tunnel");
         assert_eq!(response.status(), 101);

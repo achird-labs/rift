@@ -21,7 +21,7 @@ async fn unknown_function_is_a_request_time_error_in_debug_mode() {
     enable_debug();
     let manager = ImposterManager::new();
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": 20070, "protocol": "http",
+        "protocol": "http",
         "stubs": [{
             "responses": [{
                 "is": { "statusCode": 200, "body": "{{bogusFunction}}" },
@@ -30,10 +30,10 @@ async fn unknown_function_is_a_request_time_error_in_debug_mode() {
         }]
     }))
     .expect("valid imposter config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let resp = reqwest::get("http://127.0.0.1:20070/x")
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/x"))
         .await
         .expect("request");
     assert_eq!(
@@ -45,7 +45,7 @@ async fn unknown_function_is_a_request_time_error_in_debug_mode() {
         resp.headers().contains_key("x-rift-template-error"),
         "the 500 must carry x-rift-template-error so the failure is visible"
     );
-    let _ = manager.delete_imposter(20070).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 /// A malformed token (missing required argument) is the same debug-mode error, not a panic.
@@ -54,7 +54,7 @@ async fn malformed_token_is_a_request_time_error_in_debug_mode() {
     enable_debug();
     let manager = ImposterManager::new();
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": 20071, "protocol": "http",
+        "protocol": "http",
         "stubs": [{
             "responses": [{
                 // request.header requires a quoted header name argument.
@@ -64,10 +64,10 @@ async fn malformed_token_is_a_request_time_error_in_debug_mode() {
         }]
     }))
     .expect("valid imposter config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let resp = reqwest::get("http://127.0.0.1:20071/x")
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/x"))
         .await
         .expect("request");
     assert_eq!(
@@ -75,5 +75,5 @@ async fn malformed_token_is_a_request_time_error_in_debug_mode() {
         500,
         "a malformed token must fail loud in debug mode"
     );
-    let _ = manager.delete_imposter(20071).await;
+    let _ = manager.delete_imposter(port).await;
 }

@@ -327,6 +327,20 @@ fn read_failure_message(read: usize, partial: &str, error: &std::io::Error) -> S
 
 // ===== Helpers =====
 
+/// A port that has to be written into a document before anything binds it (or that is only ever a
+/// number in a parsed document).
+fn free_port() -> u16 {
+    free_ports::<1>()[0]
+}
+
+/// `N` distinct ports: every probe listener is held until all are chosen, so none repeats.
+fn free_ports<const N: usize>() -> [u16; N] {
+    let listeners: Vec<std::net::TcpListener> = (0..N)
+        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port"))
+        .collect();
+    std::array::from_fn(|i| listeners[i].local_addr().expect("local addr").port())
+}
+
 fn imposter_doc(port: u16, body: &str) -> String {
     format!(
         r#"{{"imposters":[{{"port":{port},"protocol":"http","recordRequests":true,
@@ -650,8 +664,9 @@ async fn merge_collision_names_both_sources() {
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a.json");
     let b = dir.path().join("b.json");
-    std::fs::write(&a, imposter_doc(21401, "from-a")).unwrap();
-    std::fs::write(&b, imposter_doc(21401, "from-b")).unwrap();
+    let port = free_port();
+    std::fs::write(&a, imposter_doc(port, "from-a")).unwrap();
+    std::fs::write(&b, imposter_doc(port, "from-b")).unwrap();
 
     let set = set_of(
         &[
@@ -677,7 +692,10 @@ async fn merge_collision_names_both_sources() {
         msg.contains(&b.display().to_string()),
         "the error must name the second source: {msg}"
     );
-    assert!(msg.contains("21401"), "the error must name the port: {msg}");
+    assert!(
+        msg.contains(&port.to_string()),
+        "the error must name the port: {msg}"
+    );
 }
 
 #[tokio::test]
@@ -685,8 +703,9 @@ async fn distinct_ports_across_sources_merge() {
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a.json");
     let b = dir.path().join("b.json");
-    std::fs::write(&a, imposter_doc(21402, "from-a")).unwrap();
-    std::fs::write(&b, imposter_doc(21403, "from-b")).unwrap();
+    let [port_a, port_b] = free_ports::<2>();
+    std::fs::write(&a, imposter_doc(port_a, "from-a")).unwrap();
+    std::fs::write(&b, imposter_doc(port_b, "from-b")).unwrap();
 
     let merged = set_of(
         &[
@@ -700,15 +719,18 @@ async fn distinct_ports_across_sources_merge() {
     .expect("distinct ports merge");
     let mut ports: Vec<u16> = merged.imposters.iter().filter_map(|c| c.port).collect();
     ports.sort_unstable();
-    assert_eq!(ports, vec![21402, 21403]);
+    let mut expected = vec![port_a, port_b];
+    expected.sort_unstable();
+    assert_eq!(ports, expected);
 }
 
 // ===== AC2: an ETag 304 re-parses nothing and re-applies nothing =====
 
 #[tokio::test]
 async fn http_source_304_serves_cache_without_reparsing() {
+    let port = free_port();
     let origin = Origin::start(Reply::Etagged {
-        body: imposter_doc(21404, "v1"),
+        body: imposter_doc(port, "v1"),
         etag: "\"v1\"".to_string(),
     });
     let source = HttpSource::new().unwrap();
@@ -740,7 +762,7 @@ async fn http_source_304_serves_cache_without_reparsing() {
         1,
         "the cached configs are served verbatim"
     );
-    assert_eq!(second.configs[0].port, Some(21404));
+    assert_eq!(second.configs[0].port, Some(port));
     assert_eq!(origin.hits(), 2);
     assert_eq!(
         origin.conditional_hits(),
@@ -751,8 +773,9 @@ async fn http_source_304_serves_cache_without_reparsing() {
 
 #[tokio::test]
 async fn changed_etag_refetches_and_reports_a_change() {
+    let [port_v1, port_v2] = free_ports::<2>();
     let origin = Origin::start(Reply::Etagged {
-        body: imposter_doc(21405, "v1"),
+        body: imposter_doc(port_v1, "v1"),
         etag: "\"v1\"".to_string(),
     });
     let source = HttpSource::new().unwrap();
@@ -760,13 +783,13 @@ async fn changed_etag_refetches_and_reports_a_change() {
 
     source.fetch(&r).await.expect("first fetch");
     origin.set(Reply::Etagged {
-        body: imposter_doc(21406, "v2"),
+        body: imposter_doc(port_v2, "v2"),
         etag: "\"v2\"".to_string(),
     });
 
     let second = source.fetch(&r).await.expect("second fetch");
     assert!(!second.unchanged, "a new ETag is a change");
-    assert_eq!(second.configs[0].port, Some(21406));
+    assert_eq!(second.configs[0].port, Some(port_v2));
     assert_eq!(second.meta.version.as_deref(), Some("\"v2\""));
 }
 
@@ -1318,7 +1341,10 @@ async fn remote_document_refuses_ejs_include() {
 #[tokio::test]
 async fn remote_document_refuses_ejs_stringify() {
     let origin = Origin::start(Reply::Etagged {
-        body: r#"{"imposters":[{"port":21407,"protocol":"http","stubs":[{"responses":[{"inject":"<%- stringify('/etc/passwd') %>"}]}]}]}"#.to_string(),
+        body: format!(
+            r#"{{"imposters":[{{"port":{},"protocol":"http","stubs":[{{"responses":[{{"inject":"<%- stringify('/etc/passwd') %>"}}]}}]}}]}}"#,
+            free_port()
+        ),
         etag: "\"str\"".to_string(),
     });
     let err = HttpSource::new()
@@ -1338,9 +1364,11 @@ async fn remote_document_refuses_ejs_stringify() {
 #[tokio::test]
 async fn remote_document_refuses_a_file_script_reference() {
     let origin = Origin::start(Reply::Etagged {
-        body: r#"{"imposters":[{"port":21408,"protocol":"http","stubs":[{"responses":[
-            {"_rift":{"script":{"file":"/etc/passwd"}}}]}]}]}"#
-            .to_string(),
+        body: format!(
+            r#"{{"imposters":[{{"port":{},"protocol":"http","stubs":[{{"responses":[
+            {{"_rift":{{"script":{{"file":"/etc/passwd"}}}}}}]}}]}}]}}"#,
+            free_port()
+        ),
         etag: "\"ref\"".to_string(),
     });
     let err = HttpSource::new()
@@ -1361,7 +1389,7 @@ async fn remote_document_refuses_a_file_script_reference() {
 async fn remote_document_still_substitutes_env() {
     unsafe { std::env::set_var("RIFT_TEST_U12_BODY", "from-env") };
     let origin = Origin::start(Reply::Etagged {
-        body: imposter_doc(21409, "<%= process.env.RIFT_TEST_U12_BODY %>"),
+        body: imposter_doc(free_port(), "<%= process.env.RIFT_TEST_U12_BODY %>"),
         etag: "\"env\"".to_string(),
     });
     let fetched = HttpSource::new()
@@ -1398,7 +1426,7 @@ async fn a_file_source_with_no_parse_keeps_a_literal_ejs_tag() {
 #[tokio::test]
 async fn remote_document_refuses_an_unsupported_ejs_tag() {
     let origin = Origin::start(Reply::Etagged {
-        body: imposter_doc(21430, "<% if (x) { %>"),
+        body: imposter_doc(free_port(), "<% if (x) { %>"),
         etag: "\"stmt\"".to_string(),
     });
     let err = HttpSource::new()
@@ -1418,7 +1446,7 @@ async fn remote_document_refuses_an_unsupported_ejs_tag() {
 async fn configfile_with_an_unsupported_ejs_tag_aborts_startup() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("imposters.json");
-    std::fs::write(&path, imposter_doc(21431, "<%= greeting %>")).unwrap();
+    std::fs::write(&path, imposter_doc(free_port(), "<%= greeting %>")).unwrap();
 
     let result = ServerBuilder::from_cli(cli(&[
         "--host",
@@ -1451,7 +1479,8 @@ async fn configfile_with_an_unsupported_ejs_tag_aborts_startup() {
 async fn reload_of_a_file_with_an_unsupported_ejs_tag_is_refused_and_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("imposters.json");
-    std::fs::write(&path, imposter_doc(21432, "v1")).unwrap();
+    let port = free_port();
+    std::fs::write(&path, imposter_doc(port, "v1")).unwrap();
 
     let server = ServerBuilder::from_cli(cli(&[
         "--host",
@@ -1467,7 +1496,7 @@ async fn reload_of_a_file_with_an_unsupported_ejs_tag_is_refused_and_changes_not
     let admin = server.admin_addr();
     let client = reqwest::Client::new();
 
-    std::fs::write(&path, imposter_doc(21432, "<% for (;;) { %>v2")).unwrap();
+    std::fs::write(&path, imposter_doc(port, "<% for (;;) { %>v2")).unwrap();
     let reload = client
         .post(format!("http://127.0.0.1:{}/admin/reload", admin.port()))
         .send()
@@ -1482,7 +1511,7 @@ async fn reload_of_a_file_with_an_unsupported_ejs_tag_is_refused_and_changes_not
     );
 
     let served = client
-        .get("http://127.0.0.1:21432/")
+        .get(format!("http://127.0.0.1:{port}/"))
         .send()
         .await
         .expect("imposter still serving")
@@ -1507,8 +1536,9 @@ async fn source_reload_is_incremental_across_sources() {
     let dir = tempfile::tempdir().unwrap();
     let changing = dir.path().join("changing.json");
     let stable = dir.path().join("stable.json");
-    std::fs::write(&changing, imposter_doc(21410, "v1")).unwrap();
-    std::fs::write(&stable, imposter_doc(21411, "stable")).unwrap();
+    let [changing_port, stable_port] = free_ports::<2>();
+    std::fs::write(&changing, imposter_doc(changing_port, "v1")).unwrap();
+    std::fs::write(&stable, imposter_doc(stable_port, "stable")).unwrap();
 
     let server = ServerBuilder::from_cli(cli(&[
         "--host",
@@ -1525,7 +1555,7 @@ async fn source_reload_is_incremental_across_sources() {
     let client = reqwest::Client::new();
 
     // Both sources loaded.
-    for port in [21410u16, 21411] {
+    for port in [changing_port, stable_port] {
         let body = client
             .get(format!("http://127.0.0.1:{port}/"))
             .send()
@@ -1538,14 +1568,14 @@ async fn source_reload_is_incremental_across_sources() {
     }
 
     // Give the stable imposter runtime state to lose.
-    let recorded_before = requests_for(&client, admin.port(), 21411).await;
+    let recorded_before = requests_for(&client, admin.port(), stable_port).await;
     assert_eq!(
         recorded_before, 1,
         "the probe request must have been recorded, or this test proves nothing"
     );
 
     // Change ONLY the first source.
-    std::fs::write(&changing, imposter_doc(21410, "v2")).unwrap();
+    std::fs::write(&changing, imposter_doc(changing_port, "v2")).unwrap();
     let reload = client
         .post(format!("http://127.0.0.1:{}/admin/reload", admin.port()))
         .send()
@@ -1559,7 +1589,7 @@ async fn source_reload_is_incremental_across_sources() {
 
     // The changed source took effect...
     let changed = client
-        .get("http://127.0.0.1:21410/")
+        .get(format!("http://127.0.0.1:{changing_port}/"))
         .send()
         .await
         .unwrap()
@@ -1570,7 +1600,7 @@ async fn source_reload_is_incremental_across_sources() {
 
     // ...and the untouched source's imposter kept its runtime state. A delete-and-recreate
     // reload — the mutant this test exists to catch — resets this to 0.
-    let recorded_after = requests_for(&client, admin.port(), 21411).await;
+    let recorded_after = requests_for(&client, admin.port(), stable_port).await;
     assert_eq!(
         recorded_after, recorded_before,
         "the sibling source's imposter must not have been recreated"
@@ -1604,7 +1634,7 @@ async fn requests_for(client: &reqwest::Client, admin_port: u16, imposter: u16) 
 #[tokio::test]
 async fn reload_failure_body_carries_the_fetch_cause() {
     let origin = Origin::start(Reply::Etagged {
-        body: imposter_doc(21419, "v1"),
+        body: imposter_doc(free_port(), "v1"),
         etag: "\"v1\"".to_string(),
     });
     let server = ServerBuilder::from_cli(cli(&[
@@ -1648,7 +1678,7 @@ async fn reload_failure_body_carries_the_fetch_cause() {
 async fn configfile_and_imposters_are_mutually_exclusive() {
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("c.json");
-    std::fs::write(&f, imposter_doc(21412, "x")).unwrap();
+    std::fs::write(&f, imposter_doc(free_port(), "x")).unwrap();
 
     let err = ServerBuilder::from_cli(cli(&[
         "--host",
@@ -1713,15 +1743,17 @@ fn registry_refuses_an_embedder_shadowing_a_builtin() {
 /// reported the intercept block as removed.
 #[tokio::test]
 async fn http_source_304_keeps_the_cached_intercept_and_routes_blocks() {
-    let doc = r#"{
-        "imposters": [ { "port": 21407, "protocol": "http", "stubs": [] } ],
+    let port = free_port();
+    let doc = serde_json::json!({
+        "imposters": [ { "port": port, "protocol": "http", "stubs": [] } ],
         "intercept": { "port": 0, "rules": [ { "host": "a.test",
                        "action": { "serve": { "statusCode": 200 } } } ] },
         "routes": { "routes": [ { "id": "svc", "match": { "host": "svc.test" },
-                                   "target": { "port": 21407 } } ] }
-    }"#;
+                                   "target": { "port": port } } ] }
+    })
+    .to_string();
     let origin = Origin::start(Reply::Etagged {
-        body: doc.to_string(),
+        body: doc,
         etag: "\"v1\"".to_string(),
     });
     let source = HttpSource::new().unwrap();

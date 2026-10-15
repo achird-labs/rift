@@ -19,11 +19,14 @@
 use rift_mock_core::imposter::ImposterManager;
 use std::time::Duration;
 
-async fn create(manager: &ImposterManager, cfg: serde_json::Value) {
+/// Creates the imposter on an auto-assigned port and returns it (issue #1438): the manager keeps
+/// the probe listener bound, so two concurrent runs of this file can never share a port.
+async fn create(manager: &ImposterManager, cfg: serde_json::Value) -> u16 {
     let config = serde_json::from_value(cfg).expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     // Give the listener a moment to bind before the request (matches the sibling HTTP tests).
     tokio::time::sleep(Duration::from_millis(150)).await;
+    port
 }
 
 async fn get(port: u16) -> reqwest::Response {
@@ -52,17 +55,17 @@ fn assert_json_content_type(resp: &reqwest::Response, door: &str) {
 #[tokio::test]
 async fn throwing_inject_response_returns_400() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22611, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "inject": "function (config) { throw new Error('boom-inject'); }" }] }
             ]
         }),
     )
     .await;
 
-    let resp = get(22611).await;
+    let resp = get(port).await;
     assert_eq!(resp.status(), 400, "a throwing inject is a 400, not a 500");
     assert!(resp.headers().contains_key("x-rift-imposter"));
     assert!(
@@ -79,7 +82,7 @@ async fn throwing_inject_response_returns_400() {
         "error message must surface the script failure, got: {body}"
     );
 
-    let _ = manager.delete_imposter(22611).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // Contract 2 (lenient): a throwing `decorate` → the original response is still served (status +
@@ -87,10 +90,10 @@ async fn throwing_inject_response_returns_400() {
 #[tokio::test]
 async fn decorate_error_lenient_serves_undecorated_with_header() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22612, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
                   "_behaviors": { "decorate": "function (request, response) { throw new Error('boom-decorate'); }" } }] }
             ]
@@ -98,7 +101,7 @@ async fn decorate_error_lenient_serves_undecorated_with_header() {
     )
     .await;
 
-    let resp = get(22612).await;
+    let resp = get(port).await;
     let status = resp.status();
     let has_header = resp.headers().contains_key("x-rift-decorate-error");
     let body = resp.text().await.expect("body");
@@ -115,7 +118,7 @@ async fn decorate_error_lenient_serves_undecorated_with_header() {
         "the original (undecorated) body is served"
     );
 
-    let _ = manager.delete_imposter(22612).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // Contract 2 (strict): the same failing `decorate` under `strictBehaviors` → 500, the fallback
@@ -123,10 +126,10 @@ async fn decorate_error_lenient_serves_undecorated_with_header() {
 #[tokio::test]
 async fn decorate_error_strict_returns_500() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22613, "protocol": "http", "strictBehaviors": true, "stubs": [
+            "protocol": "http", "strictBehaviors": true, "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
                   "_behaviors": { "decorate": "function (request, response) { throw new Error('boom-decorate'); }" } }] }
             ]
@@ -134,7 +137,7 @@ async fn decorate_error_strict_returns_500() {
     )
     .await;
 
-    let resp = get(22613).await;
+    let resp = get(port).await;
     let status = resp.status();
     let has_header = resp.headers().contains_key("x-rift-decorate-error");
     assert_json_content_type(&resp, "strict decorate error");
@@ -150,7 +153,7 @@ async fn decorate_error_strict_returns_500() {
         "the 500 body must name the strict decorate failure, got: {body}"
     );
 
-    let _ = manager.delete_imposter(22613).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // Contract 3: a throwing predicate `inject` (matcher error) → 400 with the DISTINCT
@@ -160,10 +163,10 @@ async fn decorate_error_strict_returns_500() {
 #[tokio::test]
 async fn predicate_inject_error_returns_400() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22614, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "predicates": [{ "inject": "function (config) { throw new Error('boom-predicate'); }" }],
                   "responses": [{ "is": { "statusCode": 200, "body": "unreached" } }] }
             ]
@@ -171,7 +174,7 @@ async fn predicate_inject_error_returns_400() {
     )
     .await;
 
-    let resp = get(22614).await;
+    let resp = get(port).await;
     assert_eq!(resp.status(), 400, "a throwing predicate inject is a 400");
     assert!(resp.headers().contains_key("x-rift-inject-error"));
     assert_json_content_type(&resp, "predicate inject error");
@@ -187,7 +190,7 @@ async fn predicate_inject_error_returns_400() {
         "error message must surface the predicate script failure, got: {body}"
     );
 
-    let _ = manager.delete_imposter(22614).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // Issue #499: a script hook that exceeds its wall-clock deadline is a transient 504 carrying the
@@ -214,10 +217,10 @@ const SLOW_RHAI_LOOP: &str = "let i = 0; while i < 500000 { i += 1; }";
 #[tokio::test]
 async fn rift_script_timeout_returns_504() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22618, "protocol": "http",
+            "protocol": "http",
             "_rift": { "scriptEngine": { "timeoutMs": 50 } },
             "stubs": [
                 { "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "let i = 0; loop { i += 1; }" } } }] }
@@ -226,7 +229,7 @@ async fn rift_script_timeout_returns_504() {
     )
     .await;
 
-    let resp = get(22618).await;
+    let resp = get(port).await;
     assert_eq!(
         resp.status(),
         504,
@@ -241,7 +244,7 @@ async fn rift_script_timeout_returns_504() {
         "the 504 body must name the timeout, got: {body}"
     );
 
-    let _ = manager.delete_imposter(22618).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // AC4 (lenient): a decorate that misses the deadline still serves the original response, now with
@@ -249,10 +252,10 @@ async fn rift_script_timeout_returns_504() {
 #[tokio::test]
 async fn decorate_timeout_lenient_serves_original_with_markers() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22620, "protocol": "http",
+            "protocol": "http",
             "_rift": { "scriptEngine": { "timeoutMs": 5 } },
             "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
@@ -262,7 +265,7 @@ async fn decorate_timeout_lenient_serves_original_with_markers() {
     )
     .await;
 
-    let resp = get(22620).await;
+    let resp = get(port).await;
     let status = resp.status();
     let has_decorate_err = resp.headers().contains_key("x-rift-decorate-error");
     let has_timeout = resp.headers().contains_key("x-rift-script-timeout");
@@ -284,7 +287,7 @@ async fn decorate_timeout_lenient_serves_original_with_markers() {
         "the original (undecorated) body is served"
     );
 
-    let _ = manager.delete_imposter(22620).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // AC4 (strict): the same decorate timeout under `strictBehaviors` → 504 (not the broken-script
@@ -292,10 +295,10 @@ async fn decorate_timeout_lenient_serves_original_with_markers() {
 #[tokio::test]
 async fn decorate_timeout_strict_returns_504() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22622, "protocol": "http", "strictBehaviors": true,
+            "protocol": "http", "strictBehaviors": true,
             "_rift": { "scriptEngine": { "timeoutMs": 5 } },
             "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
@@ -305,7 +308,7 @@ async fn decorate_timeout_strict_returns_504() {
     )
     .await;
 
-    let resp = get(22622).await;
+    let resp = get(port).await;
     let status = resp.status();
     let has_decorate_err = resp.headers().contains_key("x-rift-decorate-error");
     let has_timeout = resp.headers().contains_key("x-rift-script-timeout");
@@ -322,7 +325,7 @@ async fn decorate_timeout_strict_returns_504() {
         "the fallback body must NOT be served in strict mode"
     );
 
-    let _ = manager.delete_imposter(22622).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -344,10 +347,10 @@ fn envelope(body: &str) -> serde_json::Value {
 #[tokio::test]
 async fn script_error_with_quotes_yields_valid_json_envelope() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22627, "protocol": "http",
+            "protocol": "http",
             "stubs": [
                 { "responses": [{ "_rift": { "script": { "engine": "rhai",
                   "code": r#"fn respond(ctx) { throw `expected "ready", got "pending"`; }"# } } }] }
@@ -356,7 +359,7 @@ async fn script_error_with_quotes_yields_valid_json_envelope() {
     )
     .await;
 
-    let resp = get(22627).await;
+    let resp = get(port).await;
     assert_eq!(resp.status(), 500, "a broken script is a 500");
     assert!(resp.headers().contains_key("x-rift-script-error"));
     assert_json_content_type(&resp, "script error");
@@ -376,16 +379,16 @@ async fn script_error_with_quotes_yields_valid_json_envelope() {
     );
     assert!(v.get("error").is_none(), "the legacy shape must be gone");
 
-    let _ = manager.delete_imposter(22627).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
 async fn script_timeout_body_is_the_canonical_envelope() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22629, "protocol": "http",
+            "protocol": "http",
             "_rift": { "scriptEngine": { "timeoutMs": 50 } },
             "stubs": [
                 { "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "let i = 0; loop { i += 1; }" } } }] }
@@ -394,7 +397,7 @@ async fn script_timeout_body_is_the_canonical_envelope() {
     )
     .await;
 
-    let resp = get(22629).await;
+    let resp = get(port).await;
     assert_eq!(resp.status(), 504, "a deadline miss stays a 504");
     // The markers are the contract #499 established — the envelope change must not disturb them.
     assert!(resp.headers().contains_key("x-rift-script-error"));
@@ -411,16 +414,16 @@ async fn script_timeout_body_is_the_canonical_envelope() {
         "the 504 must still name the timeout: {body}"
     );
 
-    let _ = manager.delete_imposter(22629).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
 async fn strict_decorate_error_body_is_the_canonical_envelope() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22631, "protocol": "http", "strictBehaviors": true, "stubs": [
+            "protocol": "http", "strictBehaviors": true, "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
                   "_behaviors": { "decorate": "function (request, response) { throw new Error('boom-decorate'); }" } }] }
             ]
@@ -428,7 +431,7 @@ async fn strict_decorate_error_body_is_the_canonical_envelope() {
     )
     .await;
 
-    let resp = get(22631).await;
+    let resp = get(port).await;
     assert_eq!(resp.status(), 500);
     assert!(resp.headers().contains_key("x-rift-decorate-error"));
     assert_json_content_type(&resp, "strict decorate error");
@@ -443,7 +446,7 @@ async fn strict_decorate_error_body_is_the_canonical_envelope() {
         "the strict failure must still be named: {body}"
     );
 
-    let _ = manager.delete_imposter(22631).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // A static body (no error interpolated) — always valid JSON before and after, so this covers only
@@ -452,21 +455,21 @@ async fn strict_decorate_error_body_is_the_canonical_envelope() {
 #[tokio::test]
 async fn disabled_imposter_body_is_the_canonical_envelope() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22632, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "never served" } }] }
             ]
         }),
     )
     .await;
     manager
-        .get_imposter(22632)
+        .get_imposter(port)
         .expect("imposter exists")
         .set_enabled(false);
 
-    let resp = get(22632).await;
+    let resp = get(port).await;
     assert_eq!(resp.status(), 503);
     assert!(resp.headers().contains_key("x-rift-imposter-disabled"));
     assert_json_content_type(&resp, "disabled imposter");
@@ -481,7 +484,7 @@ async fn disabled_imposter_body_is_the_canonical_envelope() {
         "got: {body}"
     );
 
-    let _ = manager.delete_imposter(22632).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // The decorate door is the only one whose status is a VARIABLE (500 when the script throws, 504
@@ -492,10 +495,10 @@ async fn disabled_imposter_body_is_the_canonical_envelope() {
 #[tokio::test]
 async fn strict_decorate_timeout_envelope_code_follows_the_504() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22633, "protocol": "http", "strictBehaviors": true,
+            "protocol": "http", "strictBehaviors": true,
             "_rift": { "scriptEngine": { "timeoutMs": 5 } },
             "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
@@ -505,7 +508,7 @@ async fn strict_decorate_timeout_envelope_code_follows_the_504() {
     )
     .await;
 
-    let resp = get(22633).await;
+    let resp = get(port).await;
     assert_eq!(resp.status(), 504, "a strict decorate timeout is a 504");
     assert_json_content_type(&resp, "strict decorate timeout");
     let body = resp.text().await.expect("body");
@@ -522,7 +525,7 @@ async fn strict_decorate_timeout_envelope_code_follows_the_504() {
         "got: {body}"
     );
 
-    let _ = manager.delete_imposter(22633).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -542,10 +545,10 @@ async fn oversize_request_body_door_declares_json() {
         rift_mock_core::imposter::body_limits::BodyLimits::new(1024 * 1024, None)
             .expect("valid limits"),
     );
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22634, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "never served" } }] }
             ]
         }),
@@ -553,7 +556,7 @@ async fn oversize_request_body_door_declares_json() {
     .await;
 
     let resp = reqwest::Client::new()
-        .post("http://127.0.0.1:22634/x")
+        .post(format!("http://127.0.0.1:{port}/x"))
         .body(vec![b'x'; 1024 * 1024 + 1])
         .send()
         .await
@@ -564,16 +567,16 @@ async fn oversize_request_body_door_declares_json() {
     let v = envelope(&body);
     assert_eq!(v["errors"][0]["code"], "413");
 
-    let _ = manager.delete_imposter(22634).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
 async fn strict_shelltransform_door_declares_json() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 19777, "protocol": "http", "strictBehaviors": true, "stubs": [
+            "protocol": "http", "strictBehaviors": true, "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
                   "_behaviors": { "shellTransform": ["rift-no-such-command-687"] } }] }
             ]
@@ -581,7 +584,7 @@ async fn strict_shelltransform_door_declares_json() {
     )
     .await;
 
-    let resp = get(19777).await;
+    let resp = get(port).await;
     assert_eq!(
         resp.status(),
         500,
@@ -600,23 +603,23 @@ async fn strict_shelltransform_door_declares_json() {
         "got: {body}"
     );
 
-    let _ = manager.delete_imposter(19777).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
 async fn strict_binary_decode_door_declares_json() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 19778, "protocol": "http", "strictBehaviors": true, "stubs": [
+            "protocol": "http", "strictBehaviors": true, "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "not!valid!base64", "_mode": "binary" } }] }
             ]
         }),
     )
     .await;
 
-    let resp = get(19778).await;
+    let resp = get(port).await;
     assert_eq!(
         resp.status(),
         500,
@@ -635,7 +638,7 @@ async fn strict_binary_decode_door_declares_json() {
         "got: {body}"
     );
 
-    let _ = manager.delete_imposter(19778).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // The unresolved-script door. `file:`/`ref:` sources are populated by the config-time resolve pass,
@@ -645,10 +648,10 @@ async fn strict_binary_decode_door_declares_json() {
 #[tokio::test]
 async fn unresolved_script_door_declares_json() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22636, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "_rift": { "script": { "engine": "rhai",
                   "file": "never-resolved-687.rhai" } } }] }
             ]
@@ -656,7 +659,7 @@ async fn unresolved_script_door_declares_json() {
     )
     .await;
 
-    let resp = get(22636).await;
+    let resp = get(port).await;
     assert_eq!(resp.status(), 500, "an unresolved script source is a 500");
     assert!(resp.headers().contains_key("x-rift-script-error"));
     assert_json_content_type(&resp, "unresolved file:/ref: script");
@@ -671,7 +674,7 @@ async fn unresolved_script_door_declares_json() {
         "got: {body}"
     );
 
-    let _ = manager.delete_imposter(22636).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // The counter-case: an unrecognised `fault` serves a PLAIN-TEXT body, so the sweep that added
@@ -680,17 +683,17 @@ async fn unresolved_script_door_declares_json() {
 #[tokio::test]
 async fn unknown_fault_door_is_not_labelled_json() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 19779, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "fault": "NOT_A_REAL_FAULT" }] }
             ]
         }),
     )
     .await;
 
-    let resp = get(19779).await;
+    let resp = get(port).await;
     assert_eq!(resp.status(), 500);
     assert_ne!(
         resp.headers()
@@ -702,7 +705,7 @@ async fn unknown_fault_door_is_not_labelled_json() {
     let body = resp.text().await.expect("body");
     assert!(body.contains("Unknown fault"), "got: {body}");
 
-    let _ = manager.delete_imposter(19779).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // Issue #695: the terminal "Response build error" door — reached when a stub's own header value is
@@ -712,10 +715,10 @@ async fn unknown_fault_door_is_not_labelled_json() {
 #[tokio::test]
 async fn response_build_error_door_declares_json() {
     let manager = ImposterManager::new();
-    create(
+    let port = create(
         &manager,
         serde_json::json!({
-            "port": 22638, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "is": {
                     "statusCode": 200,
                     "headers": { "X-Bad": "line1\nline2" },
@@ -726,7 +729,7 @@ async fn response_build_error_door_declares_json() {
     )
     .await;
 
-    let resp = get(22638).await;
+    let resp = get(port).await;
     assert_eq!(
         resp.status(),
         500,
@@ -750,5 +753,5 @@ async fn response_build_error_door_declares_json() {
         "got: {body}"
     );
 
-    let _ = manager.delete_imposter(22638).await;
+    let _ = manager.delete_imposter(port).await;
 }

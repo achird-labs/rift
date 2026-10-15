@@ -6,20 +6,21 @@
 use rift_http_proxy::imposter::ImposterManager;
 use std::time::Duration;
 
-async fn mk(manager: &ImposterManager, cfg: serde_json::Value) {
+async fn mk(manager: &ImposterManager, cfg: serde_json::Value) -> u16 {
     let config = serde_json::from_value(cfg).expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
+    port
 }
 
 // AC1: strict + failing decorate → 500 with x-rift-decorate-error, fallback body NOT served.
 #[tokio::test]
 async fn strict_decorate_failure_returns_500() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19951, "protocol": "http", "strictBehaviors": true, "stubs": [
+            "protocol": "http", "strictBehaviors": true, "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
                   "_behaviors": { "decorate": "function (request, response) { throw new Error('boom'); }" } }] }
             ]
@@ -28,7 +29,7 @@ async fn strict_decorate_failure_returns_500() {
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19951/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send");
@@ -47,17 +48,17 @@ async fn strict_decorate_failure_returns_500() {
         body, "original",
         "the fallback body must NOT be served in strict mode"
     );
-    let _ = manager.delete_imposter(19951).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // AC2: strict + failing shellTransform → 500 with x-rift-shelltransform-error.
 #[tokio::test]
 async fn strict_shell_transform_failure_returns_500() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19952, "protocol": "http", "strictBehaviors": true, "stubs": [
+            "protocol": "http", "strictBehaviors": true, "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
                   "_behaviors": { "shellTransform": "exit 1" } }] }
             ]
@@ -66,7 +67,7 @@ async fn strict_shell_transform_failure_returns_500() {
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19952/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send");
@@ -85,17 +86,17 @@ async fn strict_shell_transform_failure_returns_500() {
         body, "original",
         "the fallback body must NOT be served in strict mode"
     );
-    let _ = manager.delete_imposter(19952).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // AC3: strict + invalid binary base64 → 500 with x-rift-binary-error.
 #[tokio::test]
 async fn strict_binary_decode_failure_returns_500() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19953, "protocol": "http", "strictBehaviors": true, "stubs": [
+            "protocol": "http", "strictBehaviors": true, "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "not!valid!base64!", "_mode": "binary" } }] }
             ]
         }),
@@ -103,7 +104,7 @@ async fn strict_binary_decode_failure_returns_500() {
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19953/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send");
@@ -116,7 +117,7 @@ async fn strict_binary_decode_failure_returns_500() {
         resp.headers().contains_key("x-rift-binary-error"),
         "the 500 must still carry x-rift-binary-error"
     );
-    let _ = manager.delete_imposter(19953).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // AC4 (regression guard): with the flag absent, #323/#269 lenient behavior is unchanged —
@@ -124,10 +125,10 @@ async fn strict_binary_decode_failure_returns_500() {
 #[tokio::test]
 async fn default_lenient_decorate_still_200() {
     let manager = ImposterManager::new();
-    mk(
+    let port = mk(
         &manager,
         serde_json::json!({
-            "port": 19954, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
                   "_behaviors": { "decorate": "function (request, response) { throw new Error('boom'); }" } }] }
             ]
@@ -136,7 +137,7 @@ async fn default_lenient_decorate_still_200() {
     .await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19954/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send");
@@ -152,5 +153,5 @@ async fn default_lenient_decorate_still_200() {
         body, "original",
         "default mode still serves the fallback body"
     );
-    let _ = manager.delete_imposter(19954).await;
+    let _ = manager.delete_imposter(port).await;
 }

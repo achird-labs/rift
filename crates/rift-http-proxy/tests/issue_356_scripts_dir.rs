@@ -16,14 +16,22 @@ async fn wait_for_http(url: &str) {
     panic!("server at {url} did not come up");
 }
 
-fn config_with_file_script(port: u16, file: &str) -> serde_json::Value {
+fn config_with_file_script(file: &str) -> serde_json::Value {
     serde_json::json!({
-        "port": port,
         "protocol": "http",
         "stubs": [{
             "responses": [{ "_rift": { "script": { "file": file } } }]
         }]
     })
+}
+
+/// The auto-assigned port out of a `201` create response.
+async fn created_port(resp: reqwest::Response) -> u16 {
+    let body: serde_json::Value = resp.json().await.expect("create response is json");
+    let port = body["port"]
+        .as_u64()
+        .expect("create response carries the port");
+    u16::try_from(port).expect("port fits u16")
 }
 
 #[tokio::test]
@@ -48,7 +56,7 @@ async fn file_script_within_scripts_dir_is_accepted() {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}/imposters"))
-        .json(&config_with_file_script(19551, "respond.rhai"))
+        .json(&config_with_file_script("respond.rhai"))
         .send()
         .await
         .expect("send");
@@ -79,7 +87,7 @@ async fn file_script_escaping_scripts_dir_is_rejected_without_reading() {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}/imposters"))
-        .json(&config_with_file_script(19552, "../secret.rhai"))
+        .json(&config_with_file_script("../secret.rhai"))
         .send()
         .await
         .expect("send");
@@ -113,7 +121,7 @@ async fn file_script_without_scripts_dir_configured_is_rejected() {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}/imposters"))
-        .json(&config_with_file_script(19553, "respond.rhai"))
+        .json(&config_with_file_script("respond.rhai"))
         .send()
         .await
         .expect("send");
@@ -134,7 +142,6 @@ async fn ref_to_unknown_registry_entry_is_rejected() {
     wait_for_http(&format!("http://{addr}/health")).await;
 
     let config = serde_json::json!({
-        "port": 19554,
         "protocol": "http",
         "stubs": [{
             "responses": [{ "_rift": { "script": { "ref": "doesNotExist" } } }]
@@ -172,7 +179,6 @@ async fn named_registry_ref_resolves_end_to_end() {
     wait_for_http(&format!("http://{addr}/health")).await;
 
     let config = serde_json::json!({
-        "port": 19555,
         "protocol": "http",
         "_rift": { "scripts": { "failTwice": { "file": "fail-twice.rhai" } } },
         "stubs": [{
@@ -191,9 +197,10 @@ async fn named_registry_ref_resolves_end_to_end() {
         201,
         "ref: to a file-backed registry entry must resolve"
     );
+    let port = created_port(resp).await;
 
     let imposter_resp = client
-        .get("http://127.0.0.1:19555/anything")
+        .get(format!("http://127.0.0.1:{port}/anything"))
         .send()
         .await
         .expect("hit the imposter");
@@ -235,16 +242,17 @@ async fn stub_add_endpoint_rejects_escaping_file_and_resolves_in_root() {
     // Create the target imposter (no stubs yet).
     let create = client
         .post(format!("http://{addr}/imposters"))
-        .json(&serde_json::json!({ "port": 19556, "protocol": "http", "stubs": [] }))
+        .json(&serde_json::json!({ "protocol": "http", "stubs": [] }))
         .send()
         .await
         .expect("create");
     assert_eq!(create.status(), 201);
+    let port = created_port(create).await;
 
     // POST a stub whose `file:` escapes the scripts root → 400, and the escaping stub is NOT
     // persisted (the imposter still has zero stubs).
     let escaping = client
-        .post(format!("http://{addr}/imposters/19556/stubs"))
+        .post(format!("http://{addr}/imposters/{port}/stubs"))
         .json(&serde_json::json!({
             "stub": { "responses": [{ "_rift": { "script": { "file": "../secret.rhai" } } }] }
         }))
@@ -257,7 +265,7 @@ async fn stub_add_endpoint_rejects_escaping_file_and_resolves_in_root() {
         "escaping file: via stub add must 400"
     );
     let stubs_now: serde_json::Value = client
-        .get(format!("http://{addr}/imposters/19556/stubs"))
+        .get(format!("http://{addr}/imposters/{port}/stubs"))
         .send()
         .await
         .expect("get stubs")
@@ -272,7 +280,7 @@ async fn stub_add_endpoint_rejects_escaping_file_and_resolves_in_root() {
 
     // POST a stub with an in-root `file:` → accepted, resolved, and it actually runs.
     let ok = client
-        .post(format!("http://{addr}/imposters/19556/stubs"))
+        .post(format!("http://{addr}/imposters/{port}/stubs"))
         .json(&serde_json::json!({
             "stub": { "responses": [{ "_rift": { "script": { "file": "boom.rhai" } } }] }
         }))
@@ -285,7 +293,7 @@ async fn stub_add_endpoint_rejects_escaping_file_and_resolves_in_root() {
         ok.status()
     );
     let served = client
-        .get("http://127.0.0.1:19556/anything")
+        .get(format!("http://127.0.0.1:{port}/anything"))
         .send()
         .await
         .expect("hit imposter");
@@ -316,15 +324,16 @@ async fn stub_replace_all_endpoint_rejects_escaping_file() {
     wait_for_http(&format!("http://{addr}/health")).await;
 
     let client = reqwest::Client::new();
-    client
+    let create = client
         .post(format!("http://{addr}/imposters"))
-        .json(&serde_json::json!({ "port": 19557, "protocol": "http", "stubs": [] }))
+        .json(&serde_json::json!({ "protocol": "http", "stubs": [] }))
         .send()
         .await
         .expect("create");
+    let port = created_port(create).await;
 
     let resp = client
-        .put(format!("http://{addr}/imposters/19557/stubs"))
+        .put(format!("http://{addr}/imposters/{port}/stubs"))
         .json(&serde_json::json!({
             "stubs": [{ "responses": [{ "_rift": { "script": { "file": "/etc/passwd" } } }] }]
         }))
@@ -348,19 +357,18 @@ async fn stub_replace_all_endpoint_rejects_escaping_file() {
 async fn unresolved_script_at_serve_time_returns_500() {
     // `file` set, `code` absent — the shape a resolve pass would have collapsed but here never ran.
     let config = serde_json::from_value(serde_json::json!({
-        "port": 19558,
         "protocol": "http",
         "stubs": [{ "responses": [{ "_rift": { "script": { "file": "unresolved.rhai" } } }] }]
     }))
     .expect("deserialize config");
 
     let manager = Arc::new(ImposterManager::new());
-    manager
+    let port = manager
         .create_imposter(config)
         .await
         .expect("create imposter directly (no resolve pass)");
 
-    let resp = reqwest::get("http://127.0.0.1:19558/anything")
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/anything"))
         .await
         .expect("hit imposter");
     assert_eq!(

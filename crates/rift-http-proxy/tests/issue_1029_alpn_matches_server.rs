@@ -43,51 +43,51 @@ fn plain_stub() -> serde_json::Value {
     serde_json::json!({"responses": [{"is": {"statusCode": 200, "body": "ok"}}]})
 }
 
-async fn serve(config: serde_json::Value) -> Arc<ImposterManager> {
+async fn serve(config: serde_json::Value) -> (Arc<ImposterManager>, u16) {
     let manager = Arc::new(ImposterManager::new());
-    manager
+    let port = manager
         .create_imposter(serde_json::from_value(config).expect("imposter config"))
         .await
         .expect("create imposter");
     tokio::time::sleep(Duration::from_millis(250)).await;
-    manager
+    (manager, port)
 }
 
 #[tokio::test]
 async fn a_fault_stub_imposter_does_not_advertise_h2() {
     // THE BUG. Today the handshake offers h2, the client selects it, and the server then speaks
     // HTTP/1 at it.
-    let manager = serve(serde_json::json!({
-        "port": 21550, "protocol": "https", "stubs": [fault_stub()]
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "https", "stubs": [fault_stub()]
     }))
     .await;
 
     assert_eq!(
-        negotiated_alpn(21550).await.as_deref(),
+        negotiated_alpn(port).await.as_deref(),
         Some("http/1.1"),
         "an imposter that is served HTTP/1-only must not offer h2 — a client that selects it has \
          already committed by the end of the handshake"
     );
 
-    let _ = manager.delete_imposter(21550).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
 async fn an_ordinary_https_imposter_still_negotiates_h2() {
     // Passes before the fix, and is here for that reason: without it, "never advertise h2" would
     // satisfy the test above while silently disabling HTTP/2 for every HTTPS imposter.
-    let manager = serve(serde_json::json!({
-        "port": 21551, "protocol": "https", "stubs": [plain_stub()]
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "https", "stubs": [plain_stub()]
     }))
     .await;
 
     assert_eq!(
-        negotiated_alpn(21551).await.as_deref(),
+        negotiated_alpn(port).await.as_deref(),
         Some("h2"),
         "an imposter with no fault and no script must still negotiate HTTP/2"
     );
 
-    let _ = manager.delete_imposter(21551).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
@@ -97,13 +97,13 @@ async fn the_advertisement_follows_a_stub_mutation_in_both_directions() {
     // admin API without rebuilding the acceptor. So threading the flag in at construction — the
     // fix the issue proposes — is correct only until the first stub mutation, and then wrong again
     // in whichever direction the mutation went.
-    let manager = serve(serde_json::json!({
-        "port": 21552, "protocol": "https", "stubs": [plain_stub()]
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "https", "stubs": [plain_stub()]
     }))
     .await;
 
     assert_eq!(
-        negotiated_alpn(21552).await.as_deref(),
+        negotiated_alpn(port).await.as_deref(),
         Some("h2"),
         "baseline: a plain stub negotiates h2"
     );
@@ -111,7 +111,7 @@ async fn the_advertisement_follows_a_stub_mutation_in_both_directions() {
     // Add a fault: the very next connection must stop advertising h2.
     manager
         .replace_stubs(
-            21552,
+            port,
             serde_json::from_value(serde_json::json!([fault_stub()])).expect("stubs"),
         )
         .await
@@ -119,7 +119,7 @@ async fn the_advertisement_follows_a_stub_mutation_in_both_directions() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     assert_eq!(
-        negotiated_alpn(21552).await.as_deref(),
+        negotiated_alpn(port).await.as_deref(),
         Some("http/1.1"),
         "after a fault stub is added, the offer must follow — the acceptor was built before this \
          mutation existed"
@@ -128,7 +128,7 @@ async fn the_advertisement_follows_a_stub_mutation_in_both_directions() {
     // And back again: the flip is not one-way.
     manager
         .replace_stubs(
-            21552,
+            port,
             serde_json::from_value(serde_json::json!([plain_stub()])).expect("stubs"),
         )
         .await
@@ -136,20 +136,20 @@ async fn the_advertisement_follows_a_stub_mutation_in_both_directions() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     assert_eq!(
-        negotiated_alpn(21552).await.as_deref(),
+        negotiated_alpn(port).await.as_deref(),
         Some("h2"),
         "removing the fault must restore the h2 offer"
     );
 
-    let _ = manager.delete_imposter(21552).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
 async fn a_script_stub_imposter_does_not_advertise_h2() {
     // A `_rift.script` response forces HTTP/1-only for the same reason a TCP fault does, and is a
     // separate predicate in the same decision — so it needs its own pin.
-    let manager = serve(serde_json::json!({
-        "port": 21553, "protocol": "https",
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "https",
         "stubs": [{"responses": [{"_rift": {"script": {
             "engine": "rhai",
             "code": "fn respond(ctx) { http(200, \"scripted\") }"
@@ -158,20 +158,20 @@ async fn a_script_stub_imposter_does_not_advertise_h2() {
     .await;
 
     assert_eq!(
-        negotiated_alpn(21553).await.as_deref(),
+        negotiated_alpn(port).await.as_deref(),
         Some("http/1.1"),
         "a scripted imposter is served HTTP/1-only, so it must not offer h2 either"
     );
 
-    let _ = manager.delete_imposter(21553).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
 async fn a_plaintext_imposter_with_a_fault_stub_is_unaffected() {
     // Regression guard for the branch this change does not touch: plaintext imposters have no
     // ALPN at all, and h2c prior-knowledge negotiation is unchanged.
-    let manager = serve(serde_json::json!({
-        "port": 21554, "protocol": "http",
+    let (manager, port) = serve(serde_json::json!({
+        "protocol": "http",
         "stubs": [{"predicates": [{"equals": {"path": "/ok"}}],
                    "responses": [{"is": {"statusCode": 200, "body": "plain"}}]},
                   fault_stub()]
@@ -179,7 +179,7 @@ async fn a_plaintext_imposter_with_a_fault_stub_is_unaffected() {
     .await;
 
     let body = reqwest::Client::new()
-        .get("http://127.0.0.1:21554/ok")
+        .get(format!("http://127.0.0.1:{port}/ok"))
         .send()
         .await
         .expect("plaintext request")
@@ -188,7 +188,7 @@ async fn a_plaintext_imposter_with_a_fault_stub_is_unaffected() {
         .expect("body");
     assert_eq!(body, "plain", "the plaintext path must be untouched");
 
-    let _ = manager.delete_imposter(21554).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
@@ -200,8 +200,8 @@ async fn a_negotiated_protocol_is_the_one_actually_served() {
 
     // HTTP/1-only state: a fault stub forces it, and a second stub answers a path so there is
     // something to serve without firing the fault.
-    let h1 = serve(serde_json::json!({
-        "port": 21555, "protocol": "https",
+    let (h1, p1) = serve(serde_json::json!({
+        "protocol": "https",
         "stubs": [{"predicates": [{"equals": {"path": "/ok"}}],
                    "responses": [{"is": {"statusCode": 200, "body": "h1-served"}}]},
                   fault_stub()]
@@ -209,7 +209,7 @@ async fn a_negotiated_protocol_is_the_one_actually_served() {
     .await;
 
     assert_eq!(
-        negotiated_alpn(21555).await.as_deref(),
+        negotiated_alpn(p1).await.as_deref(),
         Some("http/1.1"),
         "precondition: this imposter is HTTP/1-only"
     );
@@ -218,24 +218,24 @@ async fn a_negotiated_protocol_is_the_one_actually_served() {
         .danger_accept_invalid_certs(true)
         .build()
         .expect("client")
-        .get("https://127.0.0.1:21555/ok")
+        .get(format!("https://127.0.0.1:{p1}/ok"))
         .send()
         .await
         .expect("request over the negotiated protocol");
     assert_eq!(resp.version(), reqwest::Version::HTTP_11);
     assert_eq!(resp.text().await.expect("body"), "h1-served");
-    let _ = h1.delete_imposter(21555).await;
+    let _ = h1.delete_imposter(p1).await;
 
     // HTTP/2 state: nothing forces HTTP/1, so the offer includes h2 and the server must speak it.
-    let h2 = serve(serde_json::json!({
-        "port": 21556, "protocol": "https",
+    let (h2, p2) = serve(serde_json::json!({
+        "protocol": "https",
         "stubs": [{"predicates": [{"equals": {"path": "/ok"}}],
                    "responses": [{"is": {"statusCode": 200, "body": "h2-served"}}]}]
     }))
     .await;
 
     assert_eq!(
-        negotiated_alpn(21556).await.as_deref(),
+        negotiated_alpn(p2).await.as_deref(),
         Some("h2"),
         "precondition: this imposter negotiates h2"
     );
@@ -244,7 +244,7 @@ async fn a_negotiated_protocol_is_the_one_actually_served() {
         .danger_accept_invalid_certs(true)
         .build()
         .expect("client")
-        .get("https://127.0.0.1:21556/ok")
+        .get(format!("https://127.0.0.1:{p2}/ok"))
         .send()
         .await
         .expect("request over the negotiated protocol");
@@ -255,7 +255,7 @@ async fn a_negotiated_protocol_is_the_one_actually_served() {
          does not honour is the whole defect"
     );
     assert_eq!(resp.text().await.expect("body"), "h2-served");
-    let _ = h2.delete_imposter(21556).await;
+    let _ = h2.delete_imposter(p2).await;
 }
 
 /// The imposter serves a self-signed certificate; this is a test of protocol negotiation, not of

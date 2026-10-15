@@ -13,11 +13,19 @@ use rift_http_proxy::admin_api::{ADMIN_ROUTES, AdminApiServer, AdminRoute, Route
 use rift_http_proxy::imposter::ImposterManager;
 use rift_http_proxy::intercept_control::InterceptControl;
 
-const PORT: u16 = 23471;
+/// A port for the sample imposter, written into the config and the request paths before
+/// anything binds it; the same port is re-applied for every table entry.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind an ephemeral port")
+        .local_addr()
+        .expect("local addr")
+        .port()
+}
 
-fn imposter() -> serde_json::Value {
+fn imposter(port: u16) -> serde_json::Value {
     serde_json::json!({
-        "port": PORT, "protocol": "http",
+        "port": port, "protocol": "http",
         "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300 } },
         "stubs": [
             { "id": "a", "scenarioName": "order", "requiredScenarioState": "Started",
@@ -26,12 +34,12 @@ fn imposter() -> serde_json::Value {
     })
 }
 
-fn concrete(entry: &AdminRoute) -> String {
-    concrete_path(entry.path)
+fn concrete(entry: &AdminRoute, port: u16) -> String {
+    concrete_path(entry.path, port)
 }
 
-fn concrete_path(path: &str) -> String {
-    path.replace("{port}", &PORT.to_string())
+fn concrete_path(path: &str, port: u16) -> String {
+    path.replace("{port}", &port.to_string())
         .replace("{stubIndex}", "0")
         .replace("{stubId}", "a")
         .replace("{scenario}", "order")
@@ -39,10 +47,15 @@ fn concrete_path(path: &str) -> String {
         .replace("{key}", "k")
 }
 
-async fn send(client: &reqwest::Client, base: &str, entry: &AdminRoute) -> reqwest::Response {
+async fn send(
+    client: &reqwest::Client,
+    base: &str,
+    port: u16,
+    entry: &AdminRoute,
+) -> reqwest::Response {
     let method = reqwest::Method::from_bytes(entry.method.as_str().as_bytes()).expect("method");
     client
-        .request(method, format!("{base}{}", concrete(entry)))
+        .request(method, format!("{base}{}", concrete(entry, port)))
         .send()
         .await
         .unwrap_or_else(|e| panic!("{} {}: {e}", entry.method, entry.path))
@@ -67,18 +80,21 @@ async fn every_table_entry_is_dispatched() {
         .expect("admin binds");
     let base = format!("http://{}", admin.local_addr());
     let client = reqwest::Client::new();
+    let port = free_port();
 
     for entry in ADMIN_ROUTES {
         // Several entries delete the imposter or every imposter; each request sees it present.
         manager
-            .apply_config(vec![serde_json::from_value(imposter()).expect("config")])
+            .apply_config(vec![
+                serde_json::from_value(imposter(port)).expect("config"),
+            ])
             .await
             .expect("restore the sample imposter");
 
         if entry.family == RouteFamily::Events {
             // A stream never ends; its head is the proof it was dispatched.
             let response =
-                tokio::time::timeout(Duration::from_secs(5), send(&client, &base, entry))
+                tokio::time::timeout(Duration::from_secs(5), send(&client, &base, port, entry))
                     .await
                     .unwrap_or_else(|_| panic!("{} {} never answered", entry.method, entry.path));
             let content_type = response
@@ -97,7 +113,7 @@ async fn every_table_entry_is_dispatched() {
             continue;
         }
 
-        let response = send(&client, &base, entry).await;
+        let response = send(&client, &base, port, entry).await;
         assert!(
             !is_router_404(response).await,
             "{} {} fell through to the router's 404",
@@ -117,6 +133,7 @@ async fn intercept_entries_are_404_without_with_intercept() {
         .expect("admin binds");
     let base = format!("http://{}", admin.local_addr());
     let client = reqwest::Client::new();
+    let port = free_port();
 
     let intercept: Vec<_> = ADMIN_ROUTES
         .iter()
@@ -124,7 +141,7 @@ async fn intercept_entries_are_404_without_with_intercept() {
         .collect();
     assert!(!intercept.is_empty(), "the family is populated");
     for entry in intercept {
-        let response = send(&client, &base, entry).await;
+        let response = send(&client, &base, port, entry).await;
         assert!(
             is_router_404(response).await,
             "{} {} is served without with_intercept",
@@ -148,6 +165,7 @@ async fn no_unlisted_method_is_dispatched_on_a_listed_path() {
         .expect("admin binds");
     let base = format!("http://{}", admin.local_addr());
     let client = reqwest::Client::new();
+    let port = free_port();
     let methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
 
     let mut paths: Vec<&str> = ADMIN_ROUTES.iter().map(|r| r.path).collect();
@@ -162,10 +180,12 @@ async fn no_unlisted_method_is_dispatched_on_a_listed_path() {
                 continue;
             }
             manager
-                .apply_config(vec![serde_json::from_value(imposter()).expect("config")])
+                .apply_config(vec![
+                    serde_json::from_value(imposter(port)).expect("config"),
+                ])
                 .await
                 .expect("restore the sample imposter");
-            let url = format!("{base}{}", concrete_path(path));
+            let url = format!("{base}{}", concrete_path(path, port));
             let response = tokio::time::timeout(
                 Duration::from_secs(5),
                 client

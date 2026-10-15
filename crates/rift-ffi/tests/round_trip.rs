@@ -6,6 +6,14 @@
 use rift_ffi::*;
 use std::ffi::{CStr, CString, c_char};
 
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind an ephemeral port")
+        .local_addr()
+        .expect("local addr")
+        .port()
+}
+
 fn cstr(s: &str) -> CString {
     CString::new(s).expect("no interior NUL in test input")
 }
@@ -21,15 +29,17 @@ unsafe fn take_json(p: *mut c_char) -> String {
 
 #[test]
 fn ffi_round_trip() {
+    let imposter_port = free_port();
     unsafe {
         let h = rift_start();
         assert!(!h.is_null(), "rift_start returned null");
 
         // create imposter from JSON config; returns its port
-        let config =
-            cstr(r#"{ "port": 19990, "protocol": "http", "recordRequests": true, "stubs": [] }"#);
+        let config = cstr(&format!(
+            r#"{{ "port": {imposter_port}, "protocol": "http", "recordRequests": true, "stubs": [] }}"#
+        ));
         let port = rift_create_imposter(h, config.as_ptr());
-        assert_eq!(port, 19990);
+        assert_eq!(port, imposter_port);
 
         // replace stubs from a JSON array
         let stubs = cstr(
@@ -41,7 +51,7 @@ fn ffi_round_trip() {
         // the embedded mock serves on its port — drive it like any HTTP service
         let rt = tokio::runtime::Runtime::new().unwrap();
         let body = rt.block_on(async {
-            let r = reqwest::get("http://127.0.0.1:19990/hello")
+            let r = reqwest::get(format!("http://127.0.0.1:{imposter_port}/hello"))
                 .await
                 .expect("get");
             assert_eq!(r.status(), 200);
@@ -73,14 +83,16 @@ fn ffi_round_trip() {
 /// non-match diff.
 #[test]
 fn ffi_verify_round_trip() {
+    let imposter_port = free_port();
     unsafe {
         let h = rift_start();
         assert!(!h.is_null());
 
-        let config =
-            cstr(r#"{ "port": 19997, "protocol": "http", "recordRequests": true, "stubs": [] }"#);
+        let config = cstr(&format!(
+            r#"{{ "port": {imposter_port}, "protocol": "http", "recordRequests": true, "stubs": [] }}"#
+        ));
         let port = rift_create_imposter(h, config.as_ptr());
-        assert_eq!(port, 19997);
+        assert_eq!(port, imposter_port);
 
         let stubs = cstr(
             r#"[{ "predicates": [], "responses": [{ "is": { "statusCode": 200, "body": "ok" } }] }]"#,
@@ -89,10 +101,10 @@ fn ffi_verify_round_trip() {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            reqwest::get("http://127.0.0.1:19997/wanted")
+            reqwest::get(format!("http://127.0.0.1:{imposter_port}/wanted"))
                 .await
                 .expect("get");
-            reqwest::get("http://127.0.0.1:19997/other")
+            reqwest::get(format!("http://127.0.0.1:{imposter_port}/other"))
                 .await
                 .expect("get");
         });
@@ -208,12 +220,14 @@ unsafe fn serve_admin(h: *mut RiftHandle, opts: &str) -> serde_json::Value {
 // data-plane traffic, and scenario endpoints respond.
 #[test]
 fn ffi_serve_admin_exposes_manager_and_control_plane() {
+    let port_a = free_port();
+    let port_b = free_port();
     unsafe {
         let h = rift_start();
-        let cfg = cstr(
-            r#"{"port":19991,"protocol":"http","stubs":[{"predicates":[{"equals":{"path":"/ping"}}],"responses":[{"is":{"statusCode":200,"body":"pong"}}]}]}"#,
-        );
-        assert_eq!(rift_create_imposter(h, cfg.as_ptr()), 19991);
+        let cfg = cstr(&format!(
+            r#"{{"port":{port_a},"protocol":"http","stubs":[{{"predicates":[{{"equals":{{"path":"/ping"}}}}],"responses":[{{"is":{{"statusCode":200,"body":"pong"}}}}]}}]}}"#
+        ));
+        assert_eq!(rift_create_imposter(h, cfg.as_ptr()), port_a);
 
         let info = serve_admin(h, "{}");
         assert!(info["adminPort"].as_u64().expect("adminPort") > 0);
@@ -234,7 +248,7 @@ fn ffi_serve_admin_exposes_manager_and_control_plane() {
                 .filter_map(|i| i["port"].as_u64())
                 .collect();
             assert!(
-                ports.contains(&19991),
+                ports.contains(&u64::from(port_a)),
                 "FFI imposter visible via admin /imposters"
             );
 
@@ -242,7 +256,7 @@ fn ffi_serve_admin_exposes_manager_and_control_plane() {
             let create = reqwest::Client::new()
                 .post(format!("{admin_url}/imposters"))
                 .json(&serde_json::json!({
-                    "port":19992,"protocol":"http",
+                    "port":port_b,"protocol":"http",
                     "stubs":[{"responses":[{"is":{"statusCode":201,"body":"made"}}]}]
                 }))
                 .send()
@@ -253,13 +267,13 @@ fn ffi_serve_admin_exposes_manager_and_control_plane() {
                 "admin created imposter over the embedded plane"
             );
 
-            let served = reqwest::get("http://127.0.0.1:19992/anything")
+            let served = reqwest::get(format!("http://127.0.0.1:{port_b}/anything"))
                 .await
                 .expect("admin-created imposter reachable");
             assert_eq!(served.status(), 201);
 
             // Scenario endpoint responds (spot-check the wider control-plane surface).
-            let scen = reqwest::get(format!("{admin_url}/imposters/19991/scenarios"))
+            let scen = reqwest::get(format!("{admin_url}/imposters/{port_a}/scenarios"))
                 .await
                 .expect("scenarios endpoint reachable");
             assert_eq!(
@@ -279,9 +293,11 @@ fn ffi_serve_admin_exposes_manager_and_control_plane() {
 // (Direct FFI creation is ungated by design and is not exercised here.)
 #[test]
 fn ffi_serve_admin_allow_injection_gates_the_admin_plane() {
+    let port_a = free_port();
+    let port_b = free_port();
     unsafe {
         let inject_imposter = serde_json::json!({
-            "port": 19972, "protocol": "http",
+            "port": port_a, "protocol": "http",
             "stubs": [{ "responses": [{ "inject": "function (config) { return { statusCode: 200, body: 'hi' }; }" }] }]
         });
 
@@ -313,7 +329,7 @@ fn ffi_serve_admin_allow_injection_gates_the_admin_plane() {
             .to_string();
         rt().block_on(async {
             let mut reject = inject_imposter.clone();
-            reject["port"] = serde_json::json!(19973);
+            reject["port"] = serde_json::json!(port_b);
             let resp = reqwest::Client::new()
                 .post(format!("{url_off}/imposters"))
                 .json(&reject)
@@ -350,10 +366,11 @@ fn scripted_config_json(port: u16) -> String {
 // host path and stays ungated. The gate rejects the whole serve up front, so nothing is applied.
 #[test]
 fn ffi_serve_admin_config_file_inject_requires_allow_injection() {
+    let imposter_port = free_port();
     unsafe {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
-        std::fs::write(&path, scripted_config_json(19976)).expect("write config");
+        std::fs::write(&path, scripted_config_json(imposter_port)).expect("write config");
         let path_json = serde_json::json!(path.to_str().expect("utf8 path"));
 
         let h = rift_start();
@@ -374,7 +391,7 @@ fn ffi_serve_admin_config_file_inject_requires_allow_injection() {
             "the rejection must name the gate that blocked it, got: {msg}"
         );
         assert!(
-            msg.contains("19976"),
+            msg.contains(&format!("{imposter_port}")),
             "the rejection must name the offending port so the file can be fixed, got: {msg}"
         );
 
@@ -391,7 +408,7 @@ fn ffi_serve_admin_config_file_inject_requires_allow_injection() {
             .filter_map(|i| i["port"].as_u64())
             .collect();
         assert!(
-            !ports.contains(&19976),
+            !ports.contains(&u64::from(imposter_port)),
             "a rejected configFile must apply nothing, got ports: {ports:?}"
         );
 
@@ -402,10 +419,11 @@ fn ffi_serve_admin_config_file_inject_requires_allow_injection() {
 // Issue #616: the same file loads once the host opts in, so the gate is a gate and not a ban.
 #[test]
 fn ffi_serve_admin_config_file_inject_loads_with_allow_injection() {
+    let imposter_port = free_port();
     unsafe {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
-        std::fs::write(&path, scripted_config_json(19977)).expect("write config");
+        std::fs::write(&path, scripted_config_json(imposter_port)).expect("write config");
         let path_json = serde_json::json!(path.to_str().expect("utf8 path"));
 
         let h = rift_start();
@@ -429,7 +447,7 @@ fn ffi_serve_admin_config_file_inject_loads_with_allow_injection() {
                 .filter_map(|i| i["port"].as_u64())
                 .collect();
             assert!(
-                ports.contains(&19977),
+                ports.contains(&u64::from(imposter_port)),
                 "allowInjection=true must load the scripted configFile, got ports: {ports:?}"
             );
         });
@@ -527,13 +545,14 @@ fn ffi_serve_admin_no_parse_without_config_file_is_refused() {
 // still loads with allowInjection off.
 #[test]
 fn ffi_serve_admin_config_file_without_script_loads_ungated() {
+    let imposter_port = free_port();
     unsafe {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         std::fs::write(
             &path,
-            r#"{"imposters": [{"port": 19978, "protocol": "http",
-                 "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "plain"}}]}]}]}"#,
+            format!(r#"{{"imposters": [{{"port": {imposter_port}, "protocol": "http",
+                 "stubs": [{{"responses": [{{"is": {{"statusCode": 200, "body": "plain"}}}}]}}]}}]}}"#),
         )
         .expect("write config");
         let path_json = serde_json::json!(path.to_str().expect("utf8 path"));
@@ -559,7 +578,7 @@ fn ffi_serve_admin_config_file_without_script_loads_ungated() {
                 .filter_map(|i| i["port"].as_u64())
                 .collect();
             assert!(
-                ports.contains(&19978),
+                ports.contains(&u64::from(imposter_port)),
                 "a non-scripted configFile must load with allowInjection off, got ports: {ports:?}"
             );
         });
@@ -579,14 +598,17 @@ fn ffi_serve_admin_config_file_without_script_loads_ungated() {
 // nobody. `configFile` is gated (see above) because its content comes off disk, not from the host.
 #[test]
 fn ffi_serve_admin_inline_config_inject_is_ungated() {
+    let imposter_port = free_port();
     unsafe {
         let h = rift_start();
         let admin = serve_admin(
             h,
-            r#"{"allowInjection": false, "config": {"imposters": [
-                {"port": 19974, "protocol": "http",
-                 "stubs": [{"responses": [{"inject": "function (config) { return { statusCode: 200, body: 'hi' }; }"}]}]}
-            ]}}"#,
+            &format!(
+                r#"{{"allowInjection": false, "config": {{"imposters": [
+                {{"port": {imposter_port}, "protocol": "http",
+                 "stubs": [{{"responses": [{{"inject": "function (config) {{ return {{ statusCode: 200, body: 'hi' }}; }}"}}]}}]}}
+            ]}}}}"#
+            ),
         );
         let admin_url = admin["adminUrl"].as_str().expect("adminUrl").to_string();
 
@@ -604,7 +626,7 @@ fn ffi_serve_admin_inline_config_inject_is_ungated() {
                 .filter_map(|i| i["port"].as_u64())
                 .collect();
             assert!(
-                ports.contains(&19974),
+                ports.contains(&u64::from(imposter_port)),
                 "an inject imposter from the startup `config` must be created even with \
                  allowInjection off (the trusted host path is ungated), got ports: {ports:?}"
             );
@@ -647,10 +669,14 @@ fn ffi_apply_config_auto_assigns_every_port_zero_imposter() {
 // up-front validation failure returns NULL, sets last_error, and mutates nothing.
 #[test]
 fn ffi_apply_config_report_fields_and_validation() {
+    let port_a = free_port();
+    let port_b = free_port();
     unsafe {
         let h = rift_start();
 
-        let cfg = cstr(r#"{"imposters":[{"port":19993,"protocol":"http","stubs":[]}]}"#);
+        let cfg = cstr(&format!(
+            r#"{{"imposters":[{{"port":{port_a},"protocol":"http","stubs":[]}}]}}"#
+        ));
         let report = take_json(rift_apply_config(h, cfg.as_ptr()));
         let v: serde_json::Value = serde_json::from_str(&report).expect("report json");
         for k in [
@@ -671,25 +697,26 @@ fn ffi_apply_config_report_fields_and_validation() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|p| p.as_u64() == Some(19993)),
-            "19993 reported as created"
+                .any(|p| p.as_u64() == Some(u64::from(port_a))),
+            "{port_a} reported as created"
         );
 
         // An `enabled`-only change is reported in `toggled`, and only there.
-        let paused =
-            cstr(r#"{"imposters":[{"port":19993,"protocol":"http","enabled":false,"stubs":[]}]}"#);
+        let paused = cstr(&format!(
+            r#"{{"imposters":[{{"port":{port_a},"protocol":"http","enabled":false,"stubs":[]}}]}}"#
+        ));
         let report = take_json(rift_apply_config(h, paused.as_ptr()));
         let v: serde_json::Value = serde_json::from_str(&report).expect("report json");
-        assert_eq!(v["toggled"], serde_json::json!([19993]), "{v}");
+        assert_eq!(v["toggled"], serde_json::json!([port_a]), "{v}");
         for k in ["created", "replaced", "stubPatched", "deleted"] {
             assert_eq!(v[k], serde_json::json!([]), "`{k}` on a toggle: {v}");
         }
 
         // Duplicate explicit ports parse but fail up-front validation → NULL + last_error, and
-        // nothing is mutated (port 19994 is left free to bind afterward).
-        let dup = cstr(
-            r#"{"imposters":[{"port":19994,"protocol":"http","stubs":[]},{"port":19994,"protocol":"http","stubs":[]}]}"#,
-        );
+        // nothing is mutated (port <port> is left free to bind afterward).
+        let dup = cstr(&format!(
+            r#"{{"imposters":[{{"port":{port_b},"protocol":"http","stubs":[]}},{{"port":{port_b},"protocol":"http","stubs":[]}}]}}"#
+        ));
         assert!(
             rift_apply_config(h, dup.as_ptr()).is_null(),
             "invalid config set → NULL"
@@ -700,10 +727,13 @@ fn ffi_apply_config_report_fields_and_validation() {
         assert_eq!(
             rift_create_imposter(
                 h,
-                cstr(r#"{"port":19994,"protocol":"http","stubs":[]}"#).as_ptr()
+                cstr(&format!(
+                    r#"{{"port":{port_b},"protocol":"http","stubs":[]}}"#
+                ))
+                .as_ptr()
             ),
-            19994,
-            "nothing was mutated — 19994 is still free to bind"
+            port_b,
+            "nothing was mutated — {port_b} is still free to bind"
         );
 
         rift_stop(h);
@@ -714,15 +744,18 @@ fn ffi_apply_config_report_fields_and_validation() {
 // deleting an unknown port returns -1.
 #[test]
 fn ffi_delete_imposter_frees_port() {
+    let imposter_port = free_port();
     unsafe {
         let h = rift_start();
-        let cfg = cstr(r#"{"port":19995,"protocol":"http","stubs":[]}"#);
-        assert_eq!(rift_create_imposter(h, cfg.as_ptr()), 19995);
+        let cfg = cstr(&format!(
+            r#"{{"port":{imposter_port},"protocol":"http","stubs":[]}}"#
+        ));
+        assert_eq!(rift_create_imposter(h, cfg.as_ptr()), imposter_port);
 
-        assert_eq!(rift_delete_imposter(h, 19995), 0, "delete ok");
+        assert_eq!(rift_delete_imposter(h, imposter_port), 0, "delete ok");
         assert_eq!(
             rift_create_imposter(h, cfg.as_ptr()),
-            19995,
+            imposter_port,
             "port freed — re-create on the same port succeeds"
         );
 
@@ -823,15 +856,16 @@ fn ffi_last_error_set_cleared_and_reading_clears() {
 // — rift_start installs the ring default provider.
 #[test]
 fn ffi_https_imposter_without_host_provider() {
+    let imposter_port = free_port();
     unsafe {
         // NB: no rustls provider is installed by this test; rift_start must do it.
         let h = rift_start();
-        let cfg = cstr(
-            r#"{"port":19996,"protocol":"https","stubs":[{"responses":[{"is":{"statusCode":200,"body":"secure"}}]}]}"#,
-        );
+        let cfg = cstr(&format!(
+            r#"{{"port":{imposter_port},"protocol":"https","stubs":[{{"responses":[{{"is":{{"statusCode":200,"body":"secure"}}}}]}}]}}"#
+        ));
         assert_eq!(
             rift_create_imposter(h, cfg.as_ptr()),
-            19996,
+            imposter_port,
             "HTTPS imposter binds (self-signed) — provider is installed"
         );
 
@@ -841,7 +875,7 @@ fn ffi_https_imposter_without_host_provider() {
                 .build()
                 .expect("tls client");
             let r = client
-                .get("https://127.0.0.1:19996/anything")
+                .get(format!("https://127.0.0.1:{imposter_port}/anything"))
                 .send()
                 .await
                 .expect("https reachable");
@@ -993,11 +1027,12 @@ fn ffi_serve_admin_apikey_gates_and_rejects_wrong_type() {
 // reload source; the loaded imposter is visible over the admin API.
 #[test]
 fn ffi_serve_admin_loads_config_file() {
+    let imposter_port = free_port();
     unsafe {
         let path = std::env::temp_dir().join(format!("rift_ffi_cfg_{}.json", std::process::id()));
         std::fs::write(
             &path,
-            r#"{"imposters":[{"port":19998,"protocol":"http","stubs":[]}]}"#,
+            format!(r#"{{"imposters":[{{"port":{imposter_port},"protocol":"http","stubs":[]}}]}}"#),
         )
         .expect("write config file");
 
@@ -1023,7 +1058,7 @@ fn ffi_serve_admin_loads_config_file() {
                 .filter_map(|i| i["port"].as_u64())
                 .collect();
             assert!(
-                ports.contains(&19998),
+                ports.contains(&u64::from(imposter_port)),
                 "configFile imposter loaded and visible"
             );
         });
@@ -1095,6 +1130,7 @@ fn ffi_build_info_commit_matches_git_head() {
 // imposters, and reports the unbindable one as a per-port failure instead of a half-applied loop.
 #[test]
 fn ffi_serve_admin_config_file_partial_failure_does_not_leak() {
+    let imposter_port = free_port();
     unsafe {
         // Occupy the wildcard port an imposter would bind, so one config in the file cannot bind.
         let occupied = std::net::TcpListener::bind("0.0.0.0:0").expect("occupy port");
@@ -1105,7 +1141,7 @@ fn ffi_serve_admin_config_file_partial_failure_does_not_leak() {
         std::fs::write(
             &path,
             format!(
-                r#"{{"imposters":[{{"port":19970,"protocol":"http","stubs":[]}},{{"port":{busy},"protocol":"http","stubs":[]}}]}}"#
+                r#"{{"imposters":[{{"port":{imposter_port},"protocol":"http","stubs":[]}},{{"port":{busy},"protocol":"http","stubs":[]}}]}}"#
             ),
         )
         .expect("write config file");
@@ -1116,7 +1152,7 @@ fn ffi_serve_admin_config_file_partial_failure_does_not_leak() {
             serde_json::json!(path.to_str().unwrap())
         );
         // serve_admin() asserts non-NULL — the crux of the fix (the old create-loop returned NULL
-        // here after already creating 19970).
+        // here after already creating <port>).
         let info = serve_admin(h, &opts);
         let admin_url = info["adminUrl"].as_str().expect("adminUrl").to_string();
 
@@ -1133,7 +1169,10 @@ fn ffi_serve_admin_config_file_partial_failure_does_not_leak() {
                 .iter()
                 .filter_map(|i| i["port"].as_u64())
                 .collect();
-            assert!(ports.contains(&19970), "the bindable imposter loaded");
+            assert!(
+                ports.contains(&u64::from(imposter_port)),
+                "the bindable imposter loaded"
+            );
             assert!(
                 !ports.contains(&u64::from(busy)),
                 "the occupied port did not bind and was not partially left behind"
@@ -1151,6 +1190,7 @@ fn ffi_serve_admin_config_file_partial_failure_does_not_leak() {
 // reconcile treats the unchanged imposter as a no-op, so the retry succeeds with no duplicate.
 #[test]
 fn ffi_serve_admin_retry_after_partial_failure_is_idempotent() {
+    let imposter_port = free_port();
     unsafe {
         // Occupy the loopback metrics port (serve_admin binds metrics on 127.0.0.1 by default) so
         // the FIRST serve_admin fails at the metrics bind, AFTER the configFile imposter is applied.
@@ -1160,14 +1200,14 @@ fn ffi_serve_admin_retry_after_partial_failure_is_idempotent() {
         let path = std::env::temp_dir().join(format!("rift_ffi_retry_{}.json", std::process::id()));
         std::fs::write(
             &path,
-            r#"{"imposters":[{"port":19971,"protocol":"http","stubs":[]}]}"#,
+            format!(r#"{{"imposters":[{{"port":{imposter_port},"protocol":"http","stubs":[]}}]}}"#),
         )
         .expect("write config file");
         let cf = serde_json::json!(path.to_str().unwrap());
 
         let h = rift_start();
 
-        // First attempt: configFile applies (creates 19971), then the metrics bind fails → NULL.
+        // First attempt: configFile applies (creates <port>), then the metrics bind fails → NULL.
         let first = rift_serve_admin(
             h,
             cstr(&format!(
@@ -1185,7 +1225,7 @@ fn ffi_serve_admin_retry_after_partial_failure_is_idempotent() {
 
         drop(occupied);
 
-        // Retry with an ephemeral metrics port: apply_config sees 19971 unchanged (reconcile no-op),
+        // Retry with an ephemeral metrics port: apply_config sees <port> unchanged (reconcile no-op),
         // so this succeeds instead of hitting PortInUse.
         let info = serve_admin(h, &format!(r#"{{"configFile":{cf},"metricsPort":0}}"#));
         let admin_url = info["adminUrl"].as_str().expect("adminUrl").to_string();
@@ -1200,7 +1240,7 @@ fn ffi_serve_admin_retry_after_partial_failure_is_idempotent() {
                 .as_array()
                 .expect("array")
                 .iter()
-                .filter(|i| i["port"].as_u64() == Some(19971))
+                .filter(|i| i["port"].as_u64() == Some(u64::from(imposter_port)))
                 .count();
             assert_eq!(
                 count, 1,
@@ -1217,15 +1257,16 @@ fn ffi_serve_admin_retry_after_partial_failure_is_idempotent() {
 /// C-ABI, with the same wire fidelity as the admin-HTTP handlers.
 #[test]
 fn ffi_admin_plane_round_trip() {
+    let imposter_port = free_port();
     unsafe {
         let h = rift_start();
         assert!(!h.is_null());
-        let config = cstr(
-            r#"{ "port": 19991, "protocol": "http", "recordRequests": true,
-                 "_rift": { "flowState": { "backend": "inmemory" } }, "stubs": [] }"#,
-        );
+        let config = cstr(&format!(
+            r#"{{ "port": {imposter_port}, "protocol": "http", "recordRequests": true,
+                 "_rift": {{ "flowState": {{ "backend": "inmemory" }} }}, "stubs": [] }}"#
+        ));
         let port = rift_create_imposter(h, config.as_ptr());
-        assert_eq!(port, 19991);
+        assert_eq!(port, imposter_port);
 
         // --- flow state: put -> get (JSON {flowId,key,value}) -> delete -> get(null) ---
         let flow = cstr("flow-1");
@@ -1290,9 +1331,9 @@ fn ffi_admin_plane_round_trip() {
         // --- header-filtered recorded (issue #201): default flow-id source is the port ---
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let _ = reqwest::get("http://127.0.0.1:19991/ping").await;
+            let _ = reqwest::get(format!("http://127.0.0.1:{imposter_port}/ping")).await;
         });
-        let matching = cstr("19991");
+        let matching = cstr(&format!("{imposter_port}"));
         let recorded: serde_json::Value =
             serde_json::from_str(&take_json(rift_space_recorded(h, port, matching.as_ptr())))
                 .unwrap();
@@ -1387,15 +1428,16 @@ fn ffi_admin_plane_error_paths() {
 /// three outcomes without parsing `rift_last_error`.
 #[test]
 fn ffi_flow_state_get_absent_vs_error() {
+    let imposter_port = free_port();
     unsafe {
         let h = rift_start();
         assert!(!h.is_null());
-        let config = cstr(
-            r#"{ "port": 19994, "protocol": "http",
-                 "_rift": { "flowState": { "backend": "inmemory" } }, "stubs": [] }"#,
-        );
+        let config = cstr(&format!(
+            r#"{{ "port": {imposter_port}, "protocol": "http",
+                 "_rift": {{ "flowState": {{ "backend": "inmemory" }} }}, "stubs": [] }}"#
+        ));
         let port = rift_create_imposter(h, config.as_ptr());
-        assert_eq!(port, 19994);
+        assert_eq!(port, imposter_port);
 
         let flow = cstr("flow-x");
         let present = cstr("present");
@@ -1542,15 +1584,16 @@ fn ffi_flow_state_clear() {
 /// through the intercept port to both a served stub and a forwarded FFI imposter.
 #[test]
 fn ffi_intercept_serve_and_forward() {
+    let imposter_port = free_port();
     unsafe {
         let h = rift_start();
 
         // An FFI-created imposter is the target of the `forward` rule.
-        let upstream = cstr(
-            r#"{ "port": 19993, "protocol": "http",
-                 "stubs": [{ "responses": [{ "is": { "statusCode": 200, "body": "forwarded" } }] }] }"#,
-        );
-        assert_eq!(rift_create_imposter(h, upstream.as_ptr()), 19993);
+        let upstream = cstr(&format!(
+            r#"{{ "port": {imposter_port}, "protocol": "http",
+                 "stubs": [{{ "responses": [{{ "is": {{ "statusCode": 200, "body": "forwarded" }} }}] }}] }}"#
+        ));
+        assert_eq!(rift_create_imposter(h, upstream.as_ptr()), imposter_port);
 
         // Start the intercept listener on an OS-assigned port; learn interceptPort.
         let started = take_json(rift_start_intercept(h, cstr(r#"{"port":0}"#).as_ptr()));
@@ -1563,10 +1606,10 @@ fn ffi_intercept_serve_and_forward() {
         assert!(ca_pem.starts_with("-----BEGIN CERTIFICATE-----"));
 
         // Add a serve rule and a forward rule over FFI (batch).
-        let rules = cstr(
-            r#"[ { "host": "cdn.example.com", "action": { "serve": { "statusCode": 418, "body": "served" } } },
-                 { "host": "fwd.example.com", "action": { "forward": { "port": 19993 } } } ]"#,
-        );
+        let rules = cstr(&format!(
+            r#"[ {{ "host": "cdn.example.com", "action": {{ "serve": {{ "statusCode": 418, "body": "served" }} }} }},
+                 {{ "host": "fwd.example.com", "action": {{ "forward": {{ "port": {imposter_port} }} }} }} ]"#
+        ));
         assert_eq!(rift_intercept_add_rules(h, rules.as_ptr()), 0);
 
         // list reflects the added rules (Read completes the CRUD surface, all over FFI).
@@ -2088,6 +2131,7 @@ fn ffi_bind_doors_refuse_a_name_naming_it() {
 /// and the data plane is unaffected.
 #[test]
 fn ffi_intercept_optin_not_started() {
+    let imposter_port = free_port();
     unsafe {
         let h = rift_start();
         assert!(
@@ -2119,8 +2163,10 @@ fn ffi_intercept_optin_not_started() {
         assert!(!last.is_null(), "not-started failure records last_error");
         rift_free(last);
         // Data plane still works with intercept never started.
-        let cfg = cstr(r#"{ "port": 19994, "protocol": "http", "stubs": [] }"#);
-        assert_eq!(rift_create_imposter(h, cfg.as_ptr()), 19994);
+        let cfg = cstr(&format!(
+            r#"{{ "port": {imposter_port}, "protocol": "http", "stubs": [] }}"#
+        ));
+        assert_eq!(rift_create_imposter(h, cfg.as_ptr()), imposter_port);
         rift_stop(h);
     }
 }
@@ -2302,24 +2348,25 @@ fn ffi_intercept_rejects_unknown_ca_option() {
 
 #[test]
 fn ffi_admin_longtail_round_trip() {
+    let imposter_port = free_port();
     unsafe {
         let h = rift_start();
         assert!(!h.is_null());
 
-        let config = cstr(
-            r#"{ "port": 19960, "protocol": "http", "recordRequests": true,
-                 "stubs": [ { "id": "s1", "scenarioName": "order",
+        let config = cstr(&format!(
+            r#"{{ "port": {imposter_port}, "protocol": "http", "recordRequests": true,
+                 "stubs": [ {{ "id": "s1", "scenarioName": "order",
                               "requiredScenarioState": "Started",
-                              "predicates": [{ "equals": { "path": "/a" } }],
-                              "responses": [{ "is": { "statusCode": 200, "body": "a" } }] } ] }"#,
-        );
+                              "predicates": [{{ "equals": {{ "path": "/a" }} }}],
+                              "responses": [{{ "is": {{ "statusCode": 200, "body": "a" }} }}] }} ] }}"#
+        ));
         let port = rift_create_imposter(h, config.as_ptr());
-        assert_eq!(port, 19960);
+        assert_eq!(port, imposter_port);
 
         // 1. list imposters (summary form) — no _links, just the domain projection
         let list = take_json(rift_list_imposters(h, std::ptr::null()));
         let lv: serde_json::Value = serde_json::from_str(&list).unwrap();
-        assert_eq!(lv["imposters"][0]["port"], 19960);
+        assert_eq!(lv["imposters"][0]["port"], imposter_port);
         assert_eq!(lv["imposters"][0]["enabled"], true);
         assert!(lv["imposters"][0]["numberOfRequests"].is_number());
 
@@ -2332,13 +2379,13 @@ fn ffi_admin_longtail_round_trip() {
         // 2. get one imposter (detail) + replayable projection
         let det = take_json(rift_get_imposter(h, port, std::ptr::null()));
         let dv: serde_json::Value = serde_json::from_str(&det).unwrap();
-        assert_eq!(dv["port"], 19960);
+        assert_eq!(dv["port"], imposter_port);
         assert_eq!(dv["recordRequests"], true);
         assert_eq!(dv["stubs"].as_array().unwrap().len(), 1);
         let repl_opts = cstr(r#"{"replayable":true}"#);
         let rep = take_json(rift_get_imposter(h, port, repl_opts.as_ptr()));
         let rv: serde_json::Value = serde_json::from_str(&rep).unwrap();
-        assert_eq!(rv["port"], 19960);
+        assert_eq!(rv["port"], imposter_port);
         assert!(rv["stubs"].is_array());
 
         // 3. add one stub (append, index -1)
@@ -2390,7 +2437,9 @@ fn ffi_admin_longtail_round_trip() {
         // 7. record a request, then clear recorded
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            reqwest::get("http://127.0.0.1:19960/a").await.expect("get");
+            reqwest::get(format!("http://127.0.0.1:{imposter_port}/a"))
+                .await
+                .expect("get");
         });
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&take_json(rift_recorded(h, port)))
@@ -2459,6 +2508,7 @@ fn ffi_admin_longtail_round_trip() {
 
 #[test]
 fn ffi_admin_longtail_error_paths() {
+    let imposter_port = free_port();
     unsafe {
         // null handle → sentinels + last_error
         assert!(rift_list_imposters(std::ptr::null_mut(), std::ptr::null()).is_null());
@@ -2477,31 +2527,37 @@ fn ffi_admin_longtail_error_paths() {
         assert_eq!(rift_set_imposter_enabled(h, 12345, 1), -1);
 
         // create an imposter with no stubs for ref/JSON error paths
-        let cfg = cstr(r#"{ "port": 19961, "protocol": "http", "stubs": [] }"#);
-        assert_eq!(rift_create_imposter(h, cfg.as_ptr()), 19961);
+        let cfg = cstr(&format!(
+            r#"{{ "port": {imposter_port}, "protocol": "http", "stubs": [] }}"#
+        ));
+        assert_eq!(rift_create_imposter(h, cfg.as_ptr()), imposter_port);
         // out-of-range stub index → null
-        assert!(rift_get_stub(h, 19961, cstr(r#"{"index":99}"#).as_ptr()).is_null());
+        assert!(rift_get_stub(h, imposter_port, cstr(r#"{"index":99}"#).as_ptr()).is_null());
         // malformed ref JSON → null
-        assert!(rift_get_stub(h, 19961, cstr("not json").as_ptr()).is_null());
+        assert!(rift_get_stub(h, imposter_port, cstr("not json").as_ptr()).is_null());
         // malformed stub JSON on add → -1
-        assert_eq!(rift_add_stub(h, 19961, cstr("not json").as_ptr(), -1), -1);
+        assert_eq!(
+            rift_add_stub(h, imposter_port, cstr("not json").as_ptr(), -1),
+            -1
+        );
         rift_stop(h);
     }
 }
 
 #[test]
 fn ffi_admin_longtail_projections_and_edges() {
+    let imposter_port = free_port();
     unsafe {
         let h = rift_start();
         // Imposter with a pure-proxy stub + a regular stub, to exercise removeProxies stripping.
-        let cfg = cstr(
-            r#"{ "port": 19962, "protocol": "http", "recordRequests": true, "stubs": [
-                 { "id": "p", "predicates": [{ "equals": { "path": "/px" } }],
-                   "responses": [{ "proxy": { "to": "http://127.0.0.1:1", "mode": "proxyOnce" } }] },
-                 { "id": "r", "responses": [{ "is": { "statusCode": 200, "body": "r" } }] } ] }"#,
-        );
+        let cfg = cstr(&format!(
+            r#"{{ "port": {imposter_port}, "protocol": "http", "recordRequests": true, "stubs": [
+                 {{ "id": "p", "predicates": [{{ "equals": {{ "path": "/px" }} }}],
+                   "responses": [{{ "proxy": {{ "to": "http://127.0.0.1:1", "mode": "proxyOnce" }} }}] }},
+                 {{ "id": "r", "responses": [{{ "is": {{ "statusCode": 200, "body": "r" }} }}] }} ] }}"#
+        ));
         let port = rift_create_imposter(h, cfg.as_ptr());
-        assert_eq!(port, 19962);
+        assert_eq!(port, imposter_port);
 
         let stub_count = |json: &str, replayable_wrapper: bool| -> usize {
             let v: serde_json::Value = serde_json::from_str(json).unwrap();
@@ -2588,15 +2644,16 @@ fn ffi_admin_longtail_projections_and_edges() {
 
 #[test]
 fn ffi_admin_longtail_scenario_and_flow_edges() {
+    let imposter_port = free_port();
     unsafe {
         let h = rift_start();
-        let cfg = cstr(
-            r#"{ "port": 19963, "protocol": "http", "stubs": [
-                 { "scenarioName": "order", "requiredScenarioState": "Started",
-                   "responses": [{ "is": { "statusCode": 200 } }] } ] }"#,
-        );
+        let cfg = cstr(&format!(
+            r#"{{ "port": {imposter_port}, "protocol": "http", "stubs": [
+                 {{ "scenarioName": "order", "requiredScenarioState": "Started",
+                   "responses": [{{ "is": {{ "statusCode": 200 }} }}] }} ] }}"#
+        ));
         let port = rift_create_imposter(h, cfg.as_ptr());
-        assert_eq!(port, 19963);
+        assert_eq!(port, imposter_port);
 
         // missing "state" field → -1 with a specific message.
         assert_eq!(
@@ -2722,9 +2779,10 @@ fn ffi_admin_reload_reapplies_the_config_file_intercept_rules() {
 /// handling could be deleted wholesale and nothing would fail.
 #[test]
 fn ffi_serve_admin_config_file_seeds_the_intercept_block() {
+    let imposter_port = free_port();
     unsafe {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path_json = intercept_config_file(dir.path(), 19655, "");
+        let path_json = intercept_config_file(dir.path(), imposter_port, "");
 
         let h = rift_start();
         let info = take_json(rift_serve_admin(
@@ -2784,11 +2842,12 @@ fn ffi_serve_admin_config_file_seeds_the_intercept_block() {
 /// door. The gate runs before the listener starts, so a rejected file must leave nothing bound.
 #[test]
 fn ffi_serve_admin_config_file_intercept_inject_requires_allow_injection() {
+    let imposter_port = free_port();
     unsafe {
         let dir = tempfile::tempdir().expect("tempdir");
         let path_json = intercept_config_file(
             dir.path(),
-            19656,
+            imposter_port,
             r#", "predicates": [{ "inject": "function (request) { return true; }" }]"#,
         );
 
@@ -2823,7 +2882,7 @@ fn ffi_serve_admin_config_file_intercept_inject_requires_allow_injection() {
         );
         let listed = take_json(rift_list_imposters(h, std::ptr::null()));
         assert!(
-            !listed.contains("19656"),
+            !listed.contains(&format!("{imposter_port}")),
             "a rejected configFile must apply no imposters, got: {listed}"
         );
 
@@ -2837,9 +2896,10 @@ fn ffi_serve_admin_config_file_intercept_inject_requires_allow_injection() {
 /// successfully started. Driven through a real admin-bind failure (the port is already held).
 #[test]
 fn ffi_serve_admin_failure_after_intercept_start_leaves_no_listener() {
+    let imposter_port = free_port();
     unsafe {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path_json = intercept_config_file(dir.path(), 19657, "");
+        let path_json = intercept_config_file(dir.path(), imposter_port, "");
 
         // Hold a port so the admin bind — which happens after the block starts — must fail.
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
@@ -2954,15 +3014,16 @@ fn ffi_serve_admin_still_enforces_a_real_api_key() {
 // the removal, not a silent downgrade to NoOp.
 #[test]
 fn ffi_create_imposter_refuses_the_removed_redis_backend() {
+    let imposter_port = free_port();
     unsafe {
         let h = rift_start();
         assert!(!h.is_null(), "rift_start returned null");
 
-        let config = cstr(
-            r#"{"port": 22602, "protocol": "http", "stubs": [],
-                "_rift": {"flowState": {"backend": "redis",
-                                        "redis": {"url": "redis://127.0.0.1:1"}}}}"#,
-        );
+        let config = cstr(&format!(
+            r#"{{"port": {imposter_port}, "protocol": "http", "stubs": [],
+                "_rift": {{"flowState": {{"backend": "redis",
+                                        "redis": {{"url": "redis://127.0.0.1:1"}}}}}}}}"#
+        ));
         assert_eq!(
             rift_create_imposter(h, config.as_ptr()),
             0,

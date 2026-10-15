@@ -19,7 +19,7 @@ async fn server_builder_gates_a_scripted_configfile_on_allow_injection() {
     let path = dir.path().join("imposters.json");
     std::fs::write(
         &path,
-        r#"{"imposters":[{"port":19607,"protocol":"http","stubs":[
+        r#"{"imposters":[{"protocol":"http","stubs":[
             {"responses":[{"inject":"function (req) { return {body: 'x'}; }"}]}]}]}"#,
     )
     .expect("write scripted config");

@@ -34,18 +34,18 @@ async fn get(url: &str) -> (u16, Value) {
 async fn disabled_imposter_door() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
-        "port": 19921, "protocol": "http",
+        "protocol": "http",
         "stubs": [{ "responses": [{ "is": { "statusCode": 200 } }] }]
     }))
     .expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     manager
-        .get_imposter(19921)
+        .get_imposter(port)
         .expect("imposter exists")
         .set_enabled(false);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let (status, body) = get("http://127.0.0.1:19921/x").await;
+    let (status, body) = get(&format!("http://127.0.0.1:{port}/x")).await;
     assert_eq!(status, 503);
     assert_door(&body, "503", "imposter disabled", "disabled imposter");
 }
@@ -56,15 +56,15 @@ async fn disabled_imposter_door() {
 async fn response_inject_error_door_has_type_equal_to_code() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
-        "port": 19922, "protocol": "http", "stubs": [
+        "protocol": "http", "stubs": [
             { "responses": [{ "inject": "function (config) { throw new Error('boom'); }" }] }
         ]
     }))
     .expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let (status, body) = get("http://127.0.0.1:19922/x").await;
+    let (status, body) = get(&format!("http://127.0.0.1:{port}/x")).await;
     assert_eq!(status, 400);
     assert_door(
         &body,
@@ -79,16 +79,16 @@ async fn response_inject_error_door_has_type_equal_to_code() {
 async fn predicate_inject_error_door_has_type_equal_to_code() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
-        "port": 19923, "protocol": "http", "stubs": [{
+        "protocol": "http", "stubs": [{
             "predicates": [{ "inject": "function (config) { throw new Error('boom'); }" }],
             "responses": [{ "is": { "statusCode": 200 } }]
         }]
     }))
     .expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let (status, body) = get("http://127.0.0.1:19923/x").await;
+    let (status, body) = get(&format!("http://127.0.0.1:{port}/x")).await;
     assert_eq!(status, 400);
     assert_door(
         &body,
@@ -104,17 +104,17 @@ async fn predicate_inject_error_door_has_type_equal_to_code() {
 async fn script_error_door() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
-        "port": 19924, "protocol": "http", "stubs": [{
+        "protocol": "http", "stubs": [{
             "responses": [{
                 "_rift": { "script": { "engine": "rhai", "code": "throw \"script-boom\"" } }
             }]
         }]
     }))
     .expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let (status, body) = get("http://127.0.0.1:19924/x").await;
+    let (status, body) = get(&format!("http://127.0.0.1:{port}/x")).await;
     assert_eq!(status, 500);
     assert_door(&body, "500", "script error", "script error");
 }
@@ -129,18 +129,18 @@ async fn oversize_body_door_uses_the_default_table() {
             .expect("valid limits"),
     );
     let config = serde_json::from_value(serde_json::json!({
-        "port": 19925, "protocol": "http",
+        "protocol": "http",
         "stubs": [{ "responses": [{ "is": { "statusCode": 200 } }] }]
     }))
     .expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // One byte past the ceiling, with a known length: the refusal comes before the body is read,
     // so the 413 arrives rather than a reset (#1420, #1439).
     let huge = "x".repeat(1024 * 1024 + 1);
     let resp = reqwest::Client::new()
-        .post("http://127.0.0.1:19925/x")
+        .post(format!("http://127.0.0.1:{port}/x"))
         .body(huge)
         .send()
         .await
@@ -155,7 +155,7 @@ async fn oversize_body_door_uses_the_default_table() {
 async fn strict_behaviors_decorate_door() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
-        "port": 19926, "protocol": "http", "strictBehaviors": true,
+        "protocol": "http", "strictBehaviors": true,
         "stubs": [{
             "responses": [{
                 "is": { "statusCode": 200, "body": "original" },
@@ -164,10 +164,10 @@ async fn strict_behaviors_decorate_door() {
         }]
     }))
     .expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let (status, body) = get("http://127.0.0.1:19926/x").await;
+    let (status, body) = get(&format!("http://127.0.0.1:{port}/x")).await;
     assert_eq!(status, 500);
     assert_door(&body, "500", "behavior error", "strictBehaviors decorate");
 }
@@ -179,7 +179,7 @@ async fn strict_behaviors_decorate_door() {
 async fn strict_behaviors_shell_transform_door() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
-        "port": 19927, "protocol": "http", "strictBehaviors": true,
+        "protocol": "http", "strictBehaviors": true,
         "stubs": [{
             "responses": [{
                 "is": { "statusCode": 200, "body": "original" },
@@ -188,10 +188,10 @@ async fn strict_behaviors_shell_transform_door() {
         }]
     }))
     .expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let (status, body) = get("http://127.0.0.1:19927/x").await;
+    let (status, body) = get(&format!("http://127.0.0.1:{port}/x")).await;
     assert_eq!(status, 500);
     assert_door(
         &body,
@@ -207,16 +207,16 @@ async fn strict_behaviors_shell_transform_door() {
 async fn default_forward_upstream_failure_door() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
-        "port": 19928, "protocol": "http",
+        "protocol": "http",
         // Port 1 is reserved and never listening, so the forward fails to connect.
         "defaultForward": "http://127.0.0.1:1",
         "stubs": []
     }))
     .expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let (status, body) = get("http://127.0.0.1:19928/anything").await;
+    let (status, body) = get(&format!("http://127.0.0.1:{port}/anything")).await;
     assert_eq!(status, 502);
     assert_door(&body, "502", "upstream failure", "defaultForward upstream");
 }

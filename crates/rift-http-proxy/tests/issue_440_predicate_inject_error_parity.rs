@@ -16,7 +16,7 @@ use std::time::Duration;
 async fn throwing_predicate_inject_returns_mountebank_400_not_fallthrough() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
-        "port": 19898, "protocol": "http", "stubs": [
+        "protocol": "http", "stubs": [
             {
                 "predicates": [
                     { "inject": "function (config) { throw new Error('boom-predicate'); }" }
@@ -34,11 +34,11 @@ async fn throwing_predicate_inject_returns_mountebank_400_not_fallthrough() {
         ]
     }))
     .expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19898/x")
+        .get(format!("http://127.0.0.1:{port}/x"))
         .send()
         .await
         .expect("send");
@@ -70,7 +70,7 @@ async fn throwing_predicate_inject_returns_mountebank_400_not_fallthrough() {
         "the error message must surface the script failure, got: {body}"
     );
 
-    let _ = manager.delete_imposter(19898).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // Happy-path parity check (no behavior change): a predicate inject that does NOT throw still
@@ -79,7 +79,7 @@ async fn throwing_predicate_inject_returns_mountebank_400_not_fallthrough() {
 async fn non_erroring_predicate_inject_still_matches_correctly() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
-        "port": 19899, "protocol": "http", "stubs": [
+        "protocol": "http", "stubs": [
             {
                 "predicates": [
                     { "inject": "function (config) { return config.path === '/match'; }" }
@@ -92,13 +92,13 @@ async fn non_erroring_predicate_inject_still_matches_correctly() {
         ]
     }))
     .expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = reqwest::Client::new();
 
     let matched = client
-        .get("http://127.0.0.1:19899/match")
+        .get(format!("http://127.0.0.1:{port}/match"))
         .send()
         .await
         .expect("send");
@@ -109,7 +109,7 @@ async fn non_erroring_predicate_inject_still_matches_correctly() {
     );
 
     let not_matched = client
-        .get("http://127.0.0.1:19899/other")
+        .get(format!("http://127.0.0.1:{port}/other"))
         .send()
         .await
         .expect("send");
@@ -119,5 +119,5 @@ async fn non_erroring_predicate_inject_still_matches_correctly() {
         "a non-matching (Ok(false)) predicate inject must still fall through to the next stub"
     );
 
-    let _ = manager.delete_imposter(19899).await;
+    let _ = manager.delete_imposter(port).await;
 }

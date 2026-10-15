@@ -16,7 +16,7 @@ use std::time::Duration;
 async fn a_predicate_and_a_template_see_the_same_repeated_query_value() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
-        "port": 21930, "protocol": "http",
+        "protocol": "http",
         "stubs": [{
             "predicates": [{ "equals": { "query": { "color": "red,green" } } }],
             "responses": [{ "is": {
@@ -26,11 +26,11 @@ async fn a_predicate_and_a_template_see_the_same_repeated_query_value() {
         }]
     }))
     .expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:21930/p?color=red&color=green")
+        .get(format!("http://127.0.0.1:{port}/p?color=red&color=green"))
         .send()
         .await
         .expect("send");
@@ -44,7 +44,7 @@ async fn a_predicate_and_a_template_see_the_same_repeated_query_value() {
         "red,green",
         "the template must render the same value the predicate matched, not the last one"
     );
-    let _ = manager.delete_imposter(21930).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // The `{{ }}` syntax (`_rift.templated`) reads the same `RequestData.query`, so the fix reaches it
@@ -54,7 +54,7 @@ async fn a_predicate_and_a_template_see_the_same_repeated_query_value() {
 async fn the_templated_syntax_also_renders_a_repeated_key_comma_joined() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
-        "port": 21931, "protocol": "http",
+        "protocol": "http",
         "stubs": [{
             "responses": [{
                 "is": { "statusCode": 200, "body": "{{ request.query.color }}" },
@@ -63,16 +63,16 @@ async fn the_templated_syntax_also_renders_a_repeated_key_comma_joined() {
         }]
     }))
     .expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:21931/p?color=red&color=green")
+        .get(format!("http://127.0.0.1:{port}/p?color=red&color=green"))
         .send()
         .await
         .expect("send");
     assert_eq!(resp.text().await.expect("body"), "red,green");
-    let _ = manager.delete_imposter(21931).await;
+    let _ = manager.delete_imposter(port).await;
 }
 
 // The CHANGELOG promises the public path is unchanged after the parser moved to `util`. Only

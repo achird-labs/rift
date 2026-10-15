@@ -2195,6 +2195,14 @@ fn read_and_gate_datadir(
 mod tests {
     use super::*;
 
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind an ephemeral port")
+            .local_addr()
+            .expect("local addr")
+            .port()
+    }
+
     /// Issue #1369: a persisted `is: {}` must not come back as an explicit `statusCode`/`headers`,
     /// or a `--datadir` restart would silently lose the `defaultResponse` merge.
     #[tokio::test]
@@ -3075,16 +3083,18 @@ mod tests {
 
     #[tokio::test]
     async fn a_gated_file_source_aborts_before_creating_any_imposter() {
+        let port_a = free_port();
+        let port_b = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         // A clean imposter listed *before* the offender: if the gate ran per-imposter inside the
-        // create loop instead of up front, 22606 would already be bound and serving.
+        // create loop instead of up front, <port> would already be bound and serving.
         write_json(
             &path,
             serde_json::json!({"imposters": [
-                {"port": 22606, "protocol": "http",
+                {"port": port_a, "protocol": "http",
                  "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]},
-                {"port": 22607, "protocol": "http",
+                {"port": port_b, "protocol": "http",
                  "stubs": [{"responses": [{"inject": "function (req) { return {body: 'x'}; }"}]}]},
             ]}),
         );
@@ -3097,11 +3107,11 @@ mod tests {
         assert!(err.to_string().contains("--allowInjection"), "got: {err}");
 
         assert!(
-            manager.get_imposter(22606).is_err(),
+            manager.get_imposter(port_a).is_err(),
             "all-or-nothing: the clean imposter must not be half-loaded before the abort"
         );
         assert!(
-            manager.get_imposter(22607).is_err(),
+            manager.get_imposter(port_b).is_err(),
             "the offender must not load"
         );
 
@@ -3132,6 +3142,7 @@ mod tests {
     #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn source_loaded_imposters_are_not_persisted_to_the_datadir() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let datadir = dir.path().join("data");
         std::fs::create_dir(&datadir).expect("mkdir");
@@ -3139,7 +3150,7 @@ mod tests {
         write_json(
             &path,
             serde_json::json!({"imposters": [
-                {"port": 23761, "protocol": "http", "stubs": []},
+                {"port": imposter_port, "protocol": "http", "stubs": []},
                 {"protocol": "http", "stubs": []},
             ]}),
         );
@@ -3154,7 +3165,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({"responses": [{"is": {"statusCode": 200}}]}))
                 .expect("stub");
         manager
-            .add_stub(23761, stub, None)
+            .add_stub(imposter_port, stub, None)
             .await
             .expect("add_stub on a source-loaded imposter");
 
@@ -3250,18 +3261,20 @@ mod tests {
 
     #[tokio::test]
     async fn a_gated_configfile_beside_a_datadir_creates_nothing() {
+        let port_a = free_port();
+        let port_b = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let datadir = dir.path().join("data");
         std::fs::create_dir(&datadir).expect("mkdir");
         write_json(
-            &datadir.join("23771.json"),
-            serde_json::json!({"port": 23771, "protocol": "http", "stubs": []}),
+            &datadir.join(format!("{port_a}.json")),
+            serde_json::json!({"port": port_a, "protocol": "http", "stubs": []}),
         );
         let path = dir.path().join("imposters.json");
         write_json(
             &path,
             serde_json::json!({"imposters": [
-                {"port": 23772, "protocol": "http",
+                {"port": port_b, "protocol": "http",
                  "stubs": [{"responses": [{"inject": "function (req) { return {body: 'x'}; }"}]}]},
             ]}),
         );
@@ -3287,6 +3300,7 @@ mod tests {
     // auto-assigned port and written again under that port on every load, so copies accumulated.
     #[tokio::test]
     async fn a_port_less_datadir_file_is_skipped_and_left_untouched() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let datadir = dir.path().join("data");
         std::fs::create_dir(&datadir).expect("mkdir");
@@ -3299,8 +3313,8 @@ mod tests {
             serde_json::json!({"port": 0, "protocol": "http", "name": "port-zero", "stubs": []}),
         );
         write_json(
-            &datadir.join("23778.json"),
-            serde_json::json!({"port": 23778, "protocol": "http", "name": "from-datadir", "stubs": []}),
+            &datadir.join(format!("{imposter_port}.json")),
+            serde_json::json!({"port": imposter_port, "protocol": "http", "name": "from-datadir", "stubs": []}),
         );
         let listing = || {
             let mut names: Vec<String> = std::fs::read_dir(&datadir)
@@ -3322,7 +3336,7 @@ mod tests {
         );
         assert_eq!(
             manager
-                .get_imposter(23778)
+                .get_imposter(imposter_port)
                 .expect("served")
                 .config
                 .name
@@ -3332,7 +3346,11 @@ mod tests {
         // Before `delete_all`, which removes the served imposter's file and would hide a copy.
         assert_eq!(
             listing(),
-            vec!["0a.json", "0b.json", "23778.json"],
+            vec![
+                "0a.json".to_owned(),
+                "0b.json".to_owned(),
+                format!("{imposter_port}.json")
+            ],
             "no copy is written for a port-less file"
         );
         manager.delete_all().await;
@@ -3342,12 +3360,13 @@ mod tests {
     // `<port>.json` on load, so the next boot and every reload saw two files for one port.
     #[tokio::test]
     async fn a_datadir_file_not_named_after_its_port_is_skipped_and_left_untouched() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let datadir = dir.path().join("data");
         std::fs::create_dir(&datadir).expect("mkdir");
         write_json(
             &datadir.join("foo.json"),
-            serde_json::json!({"port": 23792, "protocol": "http", "stubs": []}),
+            serde_json::json!({"port": imposter_port, "protocol": "http", "stubs": []}),
         );
 
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
@@ -3360,7 +3379,11 @@ mod tests {
             .expect("read datadir")
             .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["foo.json"], "no `23792.json` copy is written");
+        assert_eq!(
+            names,
+            vec!["foo.json"],
+            "no `{imposter_port}.json` copy is written"
+        );
 
         let (parsed, skipped) = read_and_gate_datadir(&datadir, false).expect("listable");
         assert!(parsed.is_empty());
@@ -3368,7 +3391,9 @@ mod tests {
         assert_eq!(skipped[0].path, datadir.join("foo.json"));
         assert_eq!(
             skipped[0].reason,
-            "declares port 23792 but is named foo.json; a datadir file must be named 23792.json"
+            format!(
+                "declares port {imposter_port} but is named foo.json; a datadir file must be named {imposter_port}.json"
+            )
         );
     }
 
@@ -3377,18 +3402,22 @@ mod tests {
     // cannot change the outcome; the direct `datadir_file_problem` assertions pin that per file.
     #[tokio::test]
     async fn the_port_named_copy_is_served_beside_a_misnamed_original() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let datadir = dir.path().join("data");
         std::fs::create_dir(&datadir).expect("mkdir");
-        for (name, label) in [("foo.json", "original"), ("23793.json", "copy")] {
+        for (name, label) in [
+            ("foo.json".to_owned(), "original"),
+            (format!("{imposter_port}.json"), "copy"),
+        ] {
             write_json(
                 &datadir.join(name),
-                serde_json::json!({"port": 23793, "protocol": "http", "name": label, "stubs": []}),
+                serde_json::json!({"port": imposter_port, "protocol": "http", "name": label, "stubs": []}),
             );
         }
 
         let config: ImposterConfig = serde_json::from_value(
-            serde_json::json!({"port": 23793, "protocol": "http", "stubs": []}),
+            serde_json::json!({"port": imposter_port, "protocol": "http", "stubs": []}),
         )
         .expect("config");
         assert!(
@@ -3396,14 +3425,17 @@ mod tests {
                 .is_some()
         );
         assert_eq!(
-            crate::config_loader::datadir_file_problem(&datadir.join("23793.json"), &config),
+            crate::config_loader::datadir_file_problem(
+                &datadir.join(format!("{imposter_port}.json")),
+                &config
+            ),
             None
         );
 
         let (parsed, skipped) = read_and_gate_datadir(&datadir, false).expect("listable");
         assert_eq!(
             parsed.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
-            vec![datadir.join("23793.json")]
+            vec![datadir.join(format!("{imposter_port}.json"))]
         );
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].path, datadir.join("foo.json"));
@@ -3414,7 +3446,7 @@ mod tests {
             .expect("startup load");
         assert_eq!(
             manager
-                .get_imposter(23793)
+                .get_imposter(imposter_port)
                 .expect("served")
                 .config
                 .name
@@ -3470,12 +3502,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_datadir_is_created_and_the_sources_still_load() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let datadir = dir.path().join("data");
         let path = dir.path().join("imposters.json");
         write_json(
             &path,
-            serde_json::json!({"imposters": [{"port": 23774, "protocol": "http", "stubs": []}]}),
+            serde_json::json!({"imposters": [{"port": imposter_port, "protocol": "http", "stubs": []}]}),
         );
 
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
@@ -3484,7 +3517,7 @@ mod tests {
             .expect("startup load");
 
         assert!(datadir.is_dir(), "the datadir is created");
-        assert!(manager.get_imposter(23774).is_ok());
+        assert!(manager.get_imposter(imposter_port).is_ok());
 
         manager.delete_all().await;
     }
@@ -3493,13 +3526,14 @@ mod tests {
     // were already bound and serving.
     #[tokio::test]
     async fn an_unlistable_datadir_aborts_before_any_source_imposter_is_created() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let not_a_dir = dir.path().join("data");
         std::fs::write(&not_a_dir, "a file, not a directory").expect("write");
         let path = dir.path().join("imposters.json");
         write_json(
             &path,
-            serde_json::json!({"imposters": [{"port": 23775, "protocol": "http", "stubs": []}]}),
+            serde_json::json!({"imposters": [{"port": imposter_port, "protocol": "http", "stubs": []}]}),
         );
 
         let manager = Arc::new(ImposterManager::with_datadir(Some(not_a_dir.clone())));
@@ -3513,11 +3547,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_port_in_both_stores_names_the_datadir_file_as_skipped() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
-        let file = dir.path().join("23776.json");
+        let file = dir.path().join(format!("{imposter_port}.json"));
         let config = |name: &str| -> ImposterConfig {
             serde_json::from_value(
-                serde_json::json!({"port": 23776, "protocol": "http", "name": name, "stubs": []}),
+                serde_json::json!({"port": imposter_port, "protocol": "http", "name": name, "stubs": []}),
             )
             .expect("config")
         };
@@ -3543,7 +3578,7 @@ mod tests {
         );
         assert_eq!(
             manager
-                .get_imposter(23776)
+                .get_imposter(imposter_port)
                 .expect("served")
                 .config
                 .name
@@ -3613,18 +3648,19 @@ mod tests {
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn a_port_in_both_stores_is_served_from_the_source_and_the_file_is_kept() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let datadir = dir.path().join("data");
         std::fs::create_dir(&datadir).expect("mkdir");
         write_json(
-            &datadir.join("23773.json"),
-            serde_json::json!({"port": 23773, "protocol": "http", "name": "from-datadir", "stubs": []}),
+            &datadir.join(format!("{imposter_port}.json")),
+            serde_json::json!({"port": imposter_port, "protocol": "http", "name": "from-datadir", "stubs": []}),
         );
         let path = dir.path().join("imposters.json");
         write_json(
             &path,
             serde_json::json!({"imposters": [
-                {"port": 23773, "protocol": "http", "name": "from-configfile", "stubs": []}
+                {"port": imposter_port, "protocol": "http", "name": "from-configfile", "stubs": []}
             ]}),
         );
 
@@ -3636,7 +3672,7 @@ mod tests {
         assert_eq!(manager.count(), 1);
         assert_eq!(
             manager
-                .get_imposter(23773)
+                .get_imposter(imposter_port)
                 .expect("served")
                 .config
                 .name
@@ -3647,7 +3683,7 @@ mod tests {
         // match; `a_port_in_both_stores_names_the_datadir_file_as_skipped` checks the entry itself.
         assert!(logs_contain("were skipped and are NOT being served"));
         assert_eq!(
-            datadir_name(&datadir, 23773).as_deref(),
+            datadir_name(&datadir, imposter_port).as_deref(),
             Some("from-datadir")
         );
 
@@ -3656,15 +3692,17 @@ mod tests {
 
     #[tokio::test]
     async fn load_imposters_from_datadir_serves_the_clean_file_and_skips_the_scripted_one() {
+        let port_a = free_port();
+        let port_b = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         write_json(
-            &dir.path().join("22608.json"),
-            serde_json::json!({"port": 22608, "protocol": "http",
+            &dir.path().join(format!("{port_a}.json")),
+            serde_json::json!({"port": port_a, "protocol": "http",
                 "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]}),
         );
         write_json(
-            &dir.path().join("19604.json"),
-            serde_json::json!({"port": 19604, "protocol": "http",
+            &dir.path().join(format!("{port_b}.json")),
+            serde_json::json!({"port": port_b, "protocol": "http",
                 "stubs": [{"responses": [{"inject": "function (req) { return {body: 'x'}; }"}]}]}),
         );
 
@@ -3675,11 +3713,11 @@ mod tests {
             .expect("a gated datadir file is skipped, never fatal");
 
         assert!(
-            manager.get_imposter(22608).is_ok(),
+            manager.get_imposter(port_a).is_ok(),
             "the clean file must still be served — one gated file cannot brick startup"
         );
         assert!(
-            manager.get_imposter(19604).is_err(),
+            manager.get_imposter(port_b).is_err(),
             "the scripted file must not be served without --allowInjection"
         );
 
@@ -3688,10 +3726,11 @@ mod tests {
 
     #[tokio::test]
     async fn load_imposters_from_datadir_serves_the_scripted_file_with_the_flag() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         write_json(
-            &dir.path().join("19605.json"),
-            serde_json::json!({"port": 19605, "protocol": "http",
+            &dir.path().join(format!("{imposter_port}.json")),
+            serde_json::json!({"port": imposter_port, "protocol": "http",
                 "stubs": [{"responses": [{"inject": "function (req) { return {body: 'x'}; }"}]}]}),
         );
 
@@ -3701,7 +3740,7 @@ mod tests {
             .await
             .expect("datadir load succeeds");
         assert!(
-            manager.get_imposter(19605).is_ok(),
+            manager.get_imposter(imposter_port).is_ok(),
             "--allowInjection must serve the scripted file"
         );
 

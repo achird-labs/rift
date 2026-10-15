@@ -460,6 +460,14 @@ fn report_body(report: &ApplyReport, message: &str) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind an ephemeral port")
+            .local_addr()
+            .expect("local addr")
+            .port()
+    }
+
     #[test]
     fn test_handle_root() {
         let resp = handle_root("http://localhost:2525");
@@ -560,13 +568,16 @@ mod tests {
     /// reload replaces a table the embedder populated, rather than leaving it or merging into it.
     #[tokio::test]
     async fn a_legacy_reload_replaces_a_wired_front_door_table() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         std::fs::write(
             &path,
-            r#"{"imposters":[],"routes":{"routes":[
-                {"id":"new","match":{"host":"new.test"},"target":{"port":19479}}
-            ]}}"#,
+            format!(
+                r#"{{"imposters":[],"routes":{{"routes":[
+                {{"id":"new","match":{{"host":"new.test"}},"target":{{"port":{imposter_port}}}}}
+            ]}}}}"#
+            ),
         )
         .expect("write config");
         let source = crate::sources::ReloadSource::Legacy(Arc::new(
@@ -576,7 +587,7 @@ mod tests {
             },
         ));
         let old: crate::front_door::RouteTable = serde_json::from_str(
-            r#"{"routes":[{"id":"old","match":{"host":"old.test"},"target":{"port":19479}}]}"#,
+            &format!(r#"{{"routes":[{{"id":"old","match":{{"host":"old.test"}},"target":{{"port":{imposter_port}}}}}]}}"#),
         )
         .expect("table");
         let table: crate::front_door::FrontDoorRoutes = Arc::new(arc_swap::ArcSwap::from_pointee(
@@ -610,16 +621,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_reload_partial_failure_returns_report() {
+        let port_a = free_port();
+        let port_b = free_port();
         use http_body_util::BodyExt;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         std::fs::write(
             &path,
-            r#"{"imposters":[
-                {"port":19477,"protocol":"http","stubs":[]},
-                {"port":19478,"protocol":"https","cert":"not a pem","key":"not a pem","stubs":[]}
-            ]}"#,
+            format!(r#"{{"imposters":[
+                {{"port":{port_a},"protocol":"http","stubs":[]}},
+                {{"port":{port_b},"protocol":"https","cert":"not a pem","key":"not a pem","stubs":[]}}
+            ]}}"#),
         )
         .expect("write config");
         let source = crate::sources::ReloadSource::Legacy(Arc::new(
@@ -639,17 +652,17 @@ mod tests {
             body["errors"][0]["message"]
                 .as_str()
                 .unwrap_or_default()
-                .starts_with("Reload partially failed: 19478:"),
+                .starts_with(&format!("Reload partially failed: {port_b}:")),
             "got: {body}"
         );
         assert_eq!(
             body["created"],
-            serde_json::json!([19477]),
+            serde_json::json!([port_a]),
             "sibling applied"
         );
         assert_eq!(body["toggled"], serde_json::json!([]), "got: {body}");
-        assert!(manager.get_imposter(19477).is_ok());
-        assert!(manager.get_imposter(19478).is_err());
+        assert!(manager.get_imposter(port_a).is_ok());
+        assert!(manager.get_imposter(port_b).is_err());
 
         manager.delete_all().await;
     }
@@ -660,6 +673,7 @@ mod tests {
     // scripts as part of parsing), not just once at startup.
     #[tokio::test]
     async fn test_handle_reload_picks_up_edited_file_referenced_script() {
+        let imposter_port = free_port();
         use crate::imposter::StubResponse;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -670,7 +684,7 @@ mod tests {
         let config_path = dir.path().join("imposter.json");
         std::fs::write(
             &config_path,
-            r#"{"port":19479,"protocol":"http","stubs":[{"responses":[{"_rift":{"script":{"file":"respond.rhai"}}}]}]}"#,
+            format!(r#"{{"port":{imposter_port},"protocol":"http","stubs":[{{"responses":[{{"_rift":{{"script":{{"file":"respond.rhai"}}}}}}]}}]}}"#),
         )
         .expect("write config");
 
@@ -687,7 +701,9 @@ mod tests {
         let resp = handle_reload(manager.clone(), Some(source.clone()), None, None, true).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let script_code = |manager: &ImposterManager| {
-            let imposter = manager.get_imposter(19479).expect("imposter exists");
+            let imposter = manager
+                .get_imposter(imposter_port)
+                .expect("imposter exists");
             let stubs = imposter.get_stubs();
             match &stubs[0].responses[0] {
                 StubResponse::RiftScript { rift, .. } => {
@@ -729,18 +745,21 @@ mod tests {
 
     // ===== Issue #612: POST /admin/reload is the third config door and must gate too =====
 
-    /// Reload from `path`, then read back whether port 19481's stub carries a decorate behavior.
+    /// Reload from `path`, then read back whether the imposter's stub carries a decorate behavior.
     #[tokio::test]
     async fn test_handle_reload_rejects_injection_when_flag_off() {
+        let imposter_port = free_port();
         use http_body_util::BodyExt;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         std::fs::write(
             &path,
-            r#"{"imposters":[{"port":19481,"protocol":"http","stubs":[
-                {"responses":[{"is":{"statusCode":200,"body":"original"}}]}
-            ]}]}"#,
+            format!(
+                r#"{{"imposters":[{{"port":{imposter_port},"protocol":"http","stubs":[
+                {{"responses":[{{"is":{{"statusCode":200,"body":"original"}}}}]}}
+            ]}}]}}"#
+            ),
         )
         .expect("write clean config");
         let source = crate::sources::ReloadSource::Legacy(Arc::new(
@@ -753,15 +772,17 @@ mod tests {
         let manager = Arc::new(ImposterManager::new());
         let resp = handle_reload(manager.clone(), Some(source.clone()), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::OK, "clean config reloads");
-        assert!(manager.get_imposter(19481).is_ok());
+        assert!(manager.get_imposter(imposter_port).is_ok());
 
         // Edit the config to add a decorate behavior — a script surface.
         std::fs::write(
             &path,
-            r#"{"imposters":[{"port":19481,"protocol":"http","stubs":[
-                {"responses":[{"is":{"statusCode":200,"body":"decorated"},
-                 "_behaviors":{"decorate":"function (req, res) { res.body = 'pwned'; }"}}]}
-            ]}]}"#,
+            format!(
+                r#"{{"imposters":[{{"port":{imposter_port},"protocol":"http","stubs":[
+                {{"responses":[{{"is":{{"statusCode":200,"body":"decorated"}},
+                 "_behaviors":{{"decorate":"function (req, res) {{ res.body = 'pwned'; }}"}}}}]}}
+            ]}}]}}"#
+            ),
         )
         .expect("write scripted config");
 
@@ -779,7 +800,9 @@ mod tests {
         );
 
         // Validate-before-touch: the running imposter is untouched by the refused reload.
-        let imposter = manager.get_imposter(19481).expect("imposter still running");
+        let imposter = manager
+            .get_imposter(imposter_port)
+            .expect("imposter still running");
         let stubs = imposter.get_stubs();
         let body_of = |r: &crate::imposter::StubResponse| match r {
             crate::imposter::StubResponse::Is { is, .. } => is.body.clone(),
@@ -797,14 +820,17 @@ mod tests {
     // AC8: with the flag set, the same scripted reload applies.
     #[tokio::test]
     async fn test_handle_reload_applies_injection_when_flag_set() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         std::fs::write(
             &path,
-            r#"{"imposters":[{"port":22601,"protocol":"http","stubs":[
-                {"responses":[{"is":{"statusCode":200,"body":"decorated"},
-                 "_behaviors":{"decorate":"function (req, res) { res.body = 'ok'; }"}}]}
-            ]}]}"#,
+            format!(
+                r#"{{"imposters":[{{"port":{imposter_port},"protocol":"http","stubs":[
+                {{"responses":[{{"is":{{"statusCode":200,"body":"decorated"}},
+                 "_behaviors":{{"decorate":"function (req, res) {{ res.body = 'ok'; }}"}}}}]}}
+            ]}}]}}"#
+            ),
         )
         .expect("write scripted config");
         let source = crate::sources::ReloadSource::Legacy(Arc::new(
@@ -821,7 +847,7 @@ mod tests {
             StatusCode::OK,
             "--allowInjection must permit a decorate behavior on reload"
         );
-        assert!(manager.get_imposter(22601).is_ok());
+        assert!(manager.get_imposter(imposter_port).is_ok());
 
         manager.delete_all().await;
     }
@@ -870,22 +896,26 @@ mod tests {
 
     #[tokio::test]
     async fn reload_refuses_a_port_declared_by_a_source_and_by_the_datadir() {
+        let port_a = free_port();
+        let port_b = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let (file, datadir) = two_stores(
             dir.path(),
-            r#"{"imposters":[{"port":23742,"protocol":"http","stubs":[]}]}"#,
+            &format!(r#"{{"imposters":[{{"port":{port_a},"protocol":"http","stubs":[]}}]}}"#),
         );
         std::fs::write(
-            datadir.join("23742.json"),
-            r#"{"port":23742,"protocol":"http","stubs":[]}"#,
+            datadir.join(format!("{port_a}.json")),
+            format!(r#"{{"port":{port_a},"protocol":"http","stubs":[]}}"#),
         )
         .expect("write datadir file");
 
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
         manager
             .create_imposter(
-                serde_json::from_str(r#"{"port":23743,"protocol":"http","stubs":[]}"#)
-                    .expect("config"),
+                serde_json::from_str(&format!(
+                    r#"{{"port":{port_b},"protocol":"http","stubs":[]}}"#
+                ))
+                .expect("config"),
             )
             .await
             .expect("running imposter");
@@ -900,18 +930,20 @@ mod tests {
         let body = body_json(resp).await;
         let message = body["errors"][0]["message"].as_str().unwrap_or_default();
         assert!(
-            message.starts_with("Reload failed (imposters unchanged): port 23742 is declared by"),
+            message.starts_with(&format!(
+                "Reload failed (imposters unchanged): port {port_a} is declared by"
+            )),
             "got: {body}"
         );
 
         assert_eq!(manager.count(), 1, "nothing was applied");
-        assert!(manager.get_imposter(23742).is_err());
-        assert!(manager.get_imposter(23743).is_ok());
+        assert!(manager.get_imposter(port_a).is_err());
+        assert!(manager.get_imposter(port_b).is_ok());
         assert!(
-            datadir.join("23742.json").exists(),
+            datadir.join(format!("{port_a}.json")).exists(),
             "the operator's file is untouched"
         );
-        assert!(datadir.join("23743.json").exists());
+        assert!(datadir.join(format!("{port_b}.json")).exists());
 
         manager.delete_all().await;
     }
@@ -953,12 +985,13 @@ mod tests {
     // a datadir is part of the reload.
     #[tokio::test]
     async fn reload_applies_a_datadir_change_when_every_source_is_unchanged() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let datadir = dir.path().join("data");
         std::fs::create_dir(&datadir).expect("mkdir");
         std::fs::write(
-            datadir.join("23741.json"),
-            r#"{"port":23741,"protocol":"http","stubs":[]}"#,
+            datadir.join(format!("{imposter_port}.json")),
+            format!(r#"{{"port":{imposter_port},"protocol":"http","stubs":[]}}"#),
         )
         .expect("write datadir file");
 
@@ -972,8 +1005,12 @@ mod tests {
         let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
-        assert_eq!(body["created"], serde_json::json!([23741]), "got: {body}");
-        assert!(manager.get_imposter(23741).is_ok());
+        assert_eq!(
+            body["created"],
+            serde_json::json!([imposter_port]),
+            "got: {body}"
+        );
+        assert!(manager.get_imposter(imposter_port).is_ok());
 
         manager.delete_all().await;
     }
@@ -982,13 +1019,14 @@ mod tests {
     // change is the `enabled` flag.
     #[tokio::test]
     async fn reload_reports_a_toggled_port() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         let write = |enabled: bool| {
             std::fs::write(
                 &path,
                 format!(
-                    r#"{{"imposters":[{{"port":23751,"protocol":"http","enabled":{enabled},"stubs":[]}}]}}"#
+                    r#"{{"imposters":[{{"port":{imposter_port},"protocol":"http","enabled":{enabled},"stubs":[]}}]}}"#
                 ),
             )
             .expect("write config");
@@ -1008,7 +1046,11 @@ mod tests {
         let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
-        assert_eq!(body["toggled"], serde_json::json!([23751]), "got: {body}");
+        assert_eq!(
+            body["toggled"],
+            serde_json::json!([imposter_port]),
+            "got: {body}"
+        );
         for field in ["created", "replaced", "stubPatched", "deleted"] {
             assert_eq!(body[field], serde_json::json!([]), "{field}: {body}");
         }
@@ -1052,13 +1094,16 @@ mod tests {
 
     #[tokio::test]
     async fn reload_with_a_malformed_datadir_file_leaves_imposters_unchanged() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let (file, datadir) = two_stores(dir.path(), r#"{"imposters":[]}"#);
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
         manager
             .create_imposter(
-                serde_json::from_str(r#"{"port":23744,"protocol":"http","stubs":[]}"#)
-                    .expect("config"),
+                serde_json::from_str(&format!(
+                    r#"{{"port":{imposter_port},"protocol":"http","stubs":[]}}"#
+                ))
+                .expect("config"),
             )
             .await
             .expect("running imposter");
@@ -1078,21 +1123,24 @@ mod tests {
                 && message.contains("broken.json"),
             "the refusal must name the file, got: {body}"
         );
-        assert!(manager.get_imposter(23744).is_ok());
-        assert!(datadir.join("23744.json").exists());
+        assert!(manager.get_imposter(imposter_port).is_ok());
+        assert!(datadir.join(format!("{imposter_port}.json")).exists());
 
         manager.delete_all().await;
     }
 
     #[tokio::test]
     async fn reload_refuses_a_scripted_datadir_file_without_allow_injection() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let (file, datadir) = two_stores(dir.path(), r#"{"imposters":[]}"#);
         std::fs::write(
-            datadir.join("23745.json"),
-            r#"{"port":23745,"protocol":"http","stubs":[
-                {"responses":[{"inject":"function (req) { return {body: 'x'}; }"}]}
-            ]}"#,
+            datadir.join(format!("{imposter_port}.json")),
+            format!(
+                r#"{{"port":{imposter_port},"protocol":"http","stubs":[
+                {{"responses":[{{"inject":"function (req) {{ return {{body: 'x'}}; }}"}}]}}
+            ]}}"#
+            ),
         )
         .expect("write scripted file");
 
@@ -1104,7 +1152,7 @@ mod tests {
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
         let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        assert!(manager.get_imposter(23745).is_err());
+        assert!(manager.get_imposter(imposter_port).is_err());
 
         manager.delete_all().await;
     }
@@ -1140,11 +1188,12 @@ mod tests {
     // Issue #1125: both reload shapes that read a datadir refuse a file that names no port.
     #[tokio::test]
     async fn reload_refuses_a_port_less_datadir_file() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let (file, datadir) = two_stores(dir.path(), r#"{"imposters":[]}"#);
         std::fs::write(
-            datadir.join("23779.json"),
-            r#"{"port":23779,"protocol":"http","stubs":[]}"#,
+            datadir.join(format!("{imposter_port}.json")),
+            format!(r#"{{"port":{imposter_port},"protocol":"http","stubs":[]}}"#),
         )
         .expect("write datadir file");
         std::fs::write(datadir.join("0a.json"), r#"{"protocol":"http","stubs":[]}"#)
@@ -1176,11 +1225,12 @@ mod tests {
     // Issue #1128: both reload shapes that read a datadir refuse a file not named after its port.
     #[tokio::test]
     async fn reload_refuses_a_datadir_file_not_named_after_its_port() {
+        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let (file, datadir) = two_stores(dir.path(), r#"{"imposters":[]}"#);
         std::fs::write(
             datadir.join("foo.json"),
-            r#"{"port":23796,"protocol":"http","stubs":[]}"#,
+            format!(r#"{{"port":{imposter_port},"protocol":"http","stubs":[]}}"#),
         )
         .expect("write misnamed file");
 
@@ -1200,7 +1250,8 @@ mod tests {
             let body = body_json(resp).await;
             let message = body["errors"][0]["message"].as_str().unwrap_or_default();
             assert!(
-                message.contains("foo.json") && message.contains("must be named 23796.json"),
+                message.contains("foo.json")
+                    && message.contains(&format!("must be named {imposter_port}.json")),
                 "got: {body}"
             );
             assert_eq!(manager.count(), 0, "nothing was applied");
