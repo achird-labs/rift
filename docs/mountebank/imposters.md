@@ -67,7 +67,7 @@ and the related fields are covered in [TLS/HTTPS](../features/tls.md).
 | `defaultForward` | string | No | Rift extension: forward an unmatched request to this base URL (takes precedence over `defaultResponse`) |
 | `recordRequests` | boolean | No | Store requests for verification (default `false`) |
 | `recordMatches` | boolean | No | **Accepted, no effect**: per-stub `matches` are not recorded. `true` is reported as [`config_key_ignored`](../features/stub-analysis.md#config_key_ignored) in `_rift.warnings` and by `rift-lint` `W017`. Use `recordRequests`: each recorded request carries `matchOutcome` |
-| `allowCORS` | boolean | No | Enable CORS headers and handle preflight requests |
+| `allowCORS` | any | No | Enable CORS headers and handle preflight requests when JavaScript-truthy (`true`, `"yes"`, `1` …); printed back in every view as configured |
 | `strictBehaviors` | boolean | No | Rift extension: a failing behavior returns `500` instead of a fallback (see [Behaviors](behaviors.md#error-semantics)) |
 | `service_name` / `serviceName` | string | No | Service identifier for documentation |
 | `service_info` / `serviceInfo` | object | No | Additional service metadata |

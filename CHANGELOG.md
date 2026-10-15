@@ -270,6 +270,15 @@ record.
 
 ### Changed
 
+- **`allowCORS` is printed in every imposter view, and any truthy value is accepted** (#1453), as
+  Mountebank 2.9.2+ does. `allowCORS` takes any JSON value, read by JavaScript truthiness (`"yes"`
+  and `1` turn CORS on, `0` and `""` leave it off; a non-boolean used to be a `400`), and when truthy
+  it is printed exactly as configured in the create response, `GET /imposters/:port`,
+  `?replayable=true`, the `GET /imposters` list (also `?list=true`) and the C-ABI imposter views. A
+  stored `true` keeps its bytes. For embedders of `rift-mock-core`: `ImposterConfig::allow_cors` is
+  now an `AllowCors` (read it with `.enabled()`, build it with `true.into()`), and the imposter JSON
+  Schema types `allowCORS` as any value.
+
 - **Script request types carry the client fields** (#1451). For embedders of `rift-mock-core`:
   `RequestContext::from_request` takes a `client_addr: Option<SocketAddr>` parameter, and
   `MountebankRequest` and `RequestContext` gain the public fields `request_from`, `ip` and `form`

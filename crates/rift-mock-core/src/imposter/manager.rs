@@ -7583,7 +7583,7 @@ mod tests {
             let imposter = manager.imposters.get(port_0).expect("registered");
             assert!(!imposter.is_bound());
             assert!(
-                imposter.config.allow_cors,
+                imposter.config.allow_cors.enabled(),
                 "the replacement config is the one now serving"
             );
             assert!(

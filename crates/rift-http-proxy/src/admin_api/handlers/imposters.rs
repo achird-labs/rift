@@ -219,6 +219,7 @@ fn imposter_list_value(
                     name: i.config.name.clone(),
                     default_response: i.config.default_response.clone(),
                     number_of_requests: i.get_request_count(),
+                    allow_cors: i.config.allow_cors.value().cloned(),
                     links: make_imposter_links(base_url, port),
                 })
             })
@@ -237,6 +238,7 @@ fn imposter_list_value(
                     stub_count: i.stub_count(),
                     enabled: i.is_enabled(),
                     record_requests: i.config.record_requests,
+                    allow_cors: i.config.allow_cors.value().cloned(),
                     links: make_imposter_links(base_url, port),
                 })
             })
@@ -484,6 +486,7 @@ fn imposter_detail(
         number_of_requests: imposter.get_request_count(),
         enabled: imposter.is_enabled(),
         record_requests: imposter.config.record_requests,
+        allow_cors: imposter.config.allow_cors.value().cloned(),
         tls: tls_header(&imposter.config),
         requests: imposter.get_recorded_requests(),
         stubs: stubs_with_links,

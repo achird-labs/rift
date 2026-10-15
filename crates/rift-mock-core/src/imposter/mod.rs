@@ -39,14 +39,15 @@ mod tests;
 // Re-export public types (used by external consumers like admin_api)
 #[allow(unused_imports)]
 pub use types::{
-    ConditionalGet, ConditionalValidators, DebugImposter, DebugMatchResult, DebugRequest,
-    DebugResponse, DebugResponsePreview, DebugStubInfo, ImposterConfig, ImposterError, IsResponse,
-    LastModified, MAX_TRIED_STUBS, MatchOutcome, PathRewrite, Predicate, PredicateOperation,
-    PredicateParameters, PredicateSelector, ProxyResponse, RecordedRequest, ResponseMode,
-    RiftConfig, RiftConnectionPoolConfig, RiftErrorFault, RiftFaultConfig, RiftFlowStateConfig,
-    RiftLatencyFault, RiftMetricsConfig, RiftProxyConfig, RiftResponseExtension, RiftScriptConfig,
-    RiftScriptEngineConfig, RiftTcpFault, RiftUpstreamConfig, Stub, StubResponse, TriedStub,
-    TriedWhy, admission_check, admission_check_stub, deserialize_replayed,
+    AllowCors, ConditionalGet, ConditionalValidators, DebugImposter, DebugMatchResult,
+    DebugRequest, DebugResponse, DebugResponsePreview, DebugStubInfo, ImposterConfig,
+    ImposterError, IsResponse, LastModified, MAX_TRIED_STUBS, MatchOutcome, PathRewrite, Predicate,
+    PredicateOperation, PredicateParameters, PredicateSelector, ProxyResponse, RecordedRequest,
+    ResponseMode, RiftConfig, RiftConnectionPoolConfig, RiftErrorFault, RiftFaultConfig,
+    RiftFlowStateConfig, RiftLatencyFault, RiftMetricsConfig, RiftProxyConfig,
+    RiftResponseExtension, RiftScriptConfig, RiftScriptEngineConfig, RiftTcpFault,
+    RiftUpstreamConfig, Stub, StubResponse, TriedStub, TriedWhy, admission_check,
+    admission_check_stub, deserialize_replayed,
 };
 
 #[cfg(feature = "schema")]

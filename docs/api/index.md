@@ -249,10 +249,12 @@ Get imposter details.
 The detail prints the keys Mountebank's detail prints (#1334): `defaultResponse` when set, and for
 an `https` imposter its TLS metadata — `mutualAuth` and `rejectUnauthorized` always, `cert`, `key`
 and `ca` when the imposter configured them (a self-signed or server-default certificate is not
-printed). Rift-only config keys — `defaultForward`, `allowCORS`, `strictBehaviors`, `recordMatches`,
-`serviceName`, `serviceInfo` and the config `_rift` block — appear only with `?replayable=true`;
-Mountebank prints none of them, and the detail's `_rift` key carries `warnings` and a redacted
-`flowState` instead. Use `?replayable=true` to copy an imposter.
+printed). `allowCORS` is a Mountebank key, printed in every view when truthy: it accepts any JSON
+value, read by JavaScript truthiness, and the create response, the detail, `?replayable=true` and the
+list all print it exactly as configured, as Mountebank 2.9.2+ does. Rift-only config keys —
+`defaultForward`, `strictBehaviors`, `recordMatches`, `serviceName`, `serviceInfo` and the config
+`_rift` block — appear only with `?replayable=true`; Mountebank prints none of them, and the
+detail's `_rift` key carries `warnings` and a redacted `flowState` instead. Use `?replayable=true` to copy an imposter.
 
 **Example:**
 ```bash

@@ -3584,3 +3584,35 @@ fn ffi_imposter_views_print_default_response_and_tls() {
         rift_stop(h);
     }
 }
+
+/// Issue #1453: the C-ABI imposter views print `allowCORS` exactly as configured when it is
+/// truthy, as `GET /imposters` and `GET /imposters/{port}` do (Mountebank 2.9.2+).
+#[test]
+fn ffi_imposter_views_print_a_truthy_allow_cors_verbatim() {
+    unsafe {
+        let h = rift_start();
+        assert!(!h.is_null(), "rift_start returned null");
+        let config = cstr(r#"{ "port": 0, "protocol": "http", "allowCORS": "yes" }"#);
+        let port = rift_create_imposter(h, config.as_ptr());
+        assert_ne!(port, 0, "allowCORS \"yes\" is accepted");
+
+        let detail: serde_json::Value =
+            serde_json::from_str(&take_json(rift_get_imposter(h, port, std::ptr::null())))
+                .expect("detail JSON");
+        assert_eq!(detail["allowCORS"], serde_json::json!("yes"), "{detail}");
+
+        let listed: serde_json::Value =
+            serde_json::from_str(&take_json(rift_list_imposters(h, std::ptr::null())))
+                .expect("list JSON");
+        let entry = listed["imposters"]
+            .as_array()
+            .expect("imposters")
+            .iter()
+            .find(|i| i["port"] == serde_json::json!(port))
+            .expect("listed");
+        assert_eq!(entry["allowCORS"], serde_json::json!("yes"), "{entry}");
+
+        assert_eq!(rift_delete_all(h), 0);
+        rift_stop(h);
+    }
+}

@@ -608,7 +608,8 @@ struct ImposterProjection {
 /// List imposters. `options_json` (null = defaults): `{"replayable":bool,"removeProxies":bool}`.
 /// Replayable returns `{"imposters":[<ImposterConfig>,...]}` (the same projection the admin
 /// `?replayable=true` route serves); otherwise a Mountebank-style summary
-/// `{"imposters":[{"protocol","port","name"?,"defaultResponse"?,"numberOfRequests","enabled"},...]}`,
+/// `{"imposters":[{"protocol","port","name"?,"defaultResponse"?,"numberOfRequests","enabled",
+/// "allowCORS"?},...]}` (`allowCORS` as configured, when truthy),
 /// skipping any imposter with no assigned port (mirroring `handle_list`'s summary branch). Returns
 /// (caller frees with [`rift_free`]) null on any error (null handle or malformed options JSON).
 ///
@@ -653,6 +654,9 @@ pub unsafe extern "C" fn rift_list_imposters(
                         if let Some(default_response) = &i.config.default_response {
                             entry["defaultResponse"] = json!(default_response);
                         }
+                        if let Some(allow_cors) = i.config.allow_cors.value() {
+                            entry["allowCORS"] = allow_cors.clone();
+                        }
                         entry
                     })
                 })
@@ -672,7 +676,7 @@ pub unsafe extern "C" fn rift_list_imposters(
 /// Get one imposter. `options_json` — same shape as [`rift_list_imposters`]. Replayable returns
 /// the single `ImposterConfig` (same `removeProxies` projection); otherwise a detail object
 /// `{"protocol","port","name"?,"defaultResponse"?,"numberOfRequests","enabled","recordRequests",
-/// "stubs","requests"}`, plus the TLS metadata `GET /imposters/{port}` prints for an https imposter
+/// "allowCORS"?,"stubs","requests"}` (`allowCORS` as configured, when truthy), plus the TLS metadata `GET /imposters/{port}` prints for an https imposter
 /// (`mutualAuth`, `rejectUnauthorized`, and `cert`/`key`/`ca` when configured).
 /// Returns (caller frees) null on any error (null handle, unknown port, or malformed options).
 ///
@@ -731,6 +735,9 @@ pub unsafe extern "C" fn rift_get_imposter(
             }
             if let Some(default_response) = &imposter.config.default_response {
                 detail["defaultResponse"] = json!(default_response);
+            }
+            if let Some(allow_cors) = imposter.config.allow_cors.value() {
+                detail["allowCORS"] = allow_cors.clone();
             }
             if let Some(tls) = tls_header(&imposter.config) {
                 match serde_json::to_value(tls) {

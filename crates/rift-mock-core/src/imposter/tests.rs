@@ -150,7 +150,7 @@ fn test_execute_stub() {
         record_requests: false,
         stubs: vec![],
         default_response: None,
-        allow_cors: false,
+        allow_cors: false.into(),
         service_name: None,
         service_info: None,
         rift: None,
@@ -292,7 +292,7 @@ async fn test_imposter_manager_create_delete() {
         record_requests: false,
         stubs: vec![],
         default_response: None,
-        allow_cors: false,
+        allow_cors: false.into(),
         service_name: None,
         service_info: None,
         rift: None,
@@ -2957,7 +2957,7 @@ async fn test_cors_options_preflight() {
     let config = ImposterConfig {
         port: None,
         protocol: "http".to_string(),
-        allow_cors: true,
+        allow_cors: true.into(),
         stubs: vec![],
         ..Default::default()
     };
@@ -3014,7 +3014,7 @@ async fn test_cors_headers_on_stub_response() {
     let config = ImposterConfig {
         port: None,
         protocol: "http".to_string(),
-        allow_cors: true,
+        allow_cors: true.into(),
         stubs: vec![stub],
         ..Default::default()
     };
@@ -3044,7 +3044,7 @@ async fn test_cors_disabled_no_cors_headers() {
     let config = ImposterConfig {
         port: None,
         protocol: "http".to_string(),
-        allow_cors: false,
+        allow_cors: false.into(),
         stubs: vec![],
         ..Default::default()
     };
