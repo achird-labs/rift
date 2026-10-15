@@ -31,6 +31,15 @@ pub(crate) mod counters {
         static XPATH_COMPILE: Cell<usize> = const { Cell::new(0) };
         /// Bumped on a JSONPath selector compile (a global cache miss).
         static JSONPATH_COMPILE: Cell<usize> = const { Cell::new(0) };
+        /// Bumped once each time a request body is parsed as JSON by [`super::LazyJson`].
+        static JSON_PARSE: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn bump_json_parse() {
+        JSON_PARSE.with(|c| c.set(c.get() + 1));
+    }
+    pub(crate) fn json_parses() -> usize {
+        JSON_PARSE.with(Cell::get)
     }
 
     pub(crate) fn bump_dom_parse() {
@@ -47,6 +56,7 @@ pub(crate) mod counters {
         DOM_PARSE.with(|c| c.set(0));
         XPATH_COMPILE.with(|c| c.set(0));
         JSONPATH_COMPILE.with(|c| c.set(0));
+        JSON_PARSE.with(|c| c.set(0));
     }
     pub(crate) fn dom_parses() -> usize {
         DOM_PARSE.with(Cell::get)
@@ -731,9 +741,60 @@ impl<'a> LazyXmlDom<'a> {
     }
 }
 
+/// A request body parsed as JSON on first use, then shared (issue #1442) — the JSON sibling of
+/// [`LazyXmlDom`]. Matching used to parse every request body up front, so a large body cost its
+/// whole parse tree even when no stub needed it. Now it is parsed only for what compares structure
+/// (an object/array body expectation, `exists` on the body, a jsonpath selector, the body index
+/// dimensions), and then exactly once per request (#290).
+///
+/// Not JSON (or no body) is `None`, cached like a success: whether a body is JSON is the question,
+/// not an error.
+pub(crate) struct LazyJson<'a> {
+    body: Option<&'a str>,
+    parsed: OnceCell<Option<serde_json::Value>>,
+}
+
+impl<'a> LazyJson<'a> {
+    pub(crate) fn new(body: Option<&'a str>) -> Self {
+        Self {
+            body,
+            parsed: OnceCell::new(),
+        }
+    }
+
+    /// No body to parse: what a predicate with a selector compares against instead of the raw body.
+    pub(crate) fn absent() -> Self {
+        Self::new(None)
+    }
+
+    /// The parsed body, parsing on the first call only.
+    pub(crate) fn get(&self) -> Option<&serde_json::Value> {
+        self.parsed
+            .get_or_init(|| {
+                let body = self.body?;
+                #[cfg(test)]
+                counters::bump_json_parse();
+                serde_json::from_str(body).ok()
+            })
+            .as_ref()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lazy_json_parses_only_on_first_use() {
+        counters::reset();
+        let lazy = LazyJson::new(Some(r#"{"a":1}"#));
+        assert_eq!(counters::json_parses(), 0, "nothing parsed until asked");
+        assert_eq!(lazy.get(), Some(&serde_json::json!({"a": 1})));
+        assert!(lazy.get().is_some());
+        assert_eq!(counters::json_parses(), 1, "parsed once");
+        assert_eq!(LazyJson::new(Some("not json")).get(), None);
+        assert_eq!(LazyJson::absent().get(), None);
+    }
 
     #[test]
     fn test_extraction_regex() {

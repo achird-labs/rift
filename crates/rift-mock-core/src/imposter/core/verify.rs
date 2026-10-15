@@ -111,10 +111,7 @@ impl Imposter {
         predicates: &[Predicate],
     ) -> anyhow::Result<bool> {
         let form = Self::parse_form_data(&req.headers, req.body.as_deref());
-        let body_json = req
-            .body
-            .as_deref()
-            .and_then(|b| serde_json::from_str::<Value>(b).ok());
+        let body_json = crate::behaviors::LazyJson::new(req.body.as_deref());
         let client_ip = client_ip_of(req);
         // `RecordedRequest.query` is the fixed std-hasher journal/serde boundary (out of scope for
         // #704); `stub_matches_inner`'s `query_map` parameter is concretely `FastMap` (it is always
@@ -140,7 +137,7 @@ impl Imposter {
             client_ip.as_deref(),
             form.as_ref(),
             self.script_state_key(),
-            body_json.as_ref(),
+            &body_json,
             xml_dom.as_ref(),
             Some(&query_map),
         )

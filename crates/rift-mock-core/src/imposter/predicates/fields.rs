@@ -26,9 +26,9 @@ pub(crate) fn check_predicate_fields<F, H>(
     // Concretely `FastMap` — see `predicate_matches_inner`.
     form: Option<&FastMap<String, String>>,
     key_case_sensitive: bool,
-    // Request body already parsed once per request (issue #290); `Some` only for a
-    // no-selector predicate whose `body` field then equals this parse.
-    body_json: Option<&serde_json::Value>,
+    // The request body, parsed at most once per request (issue #290) and only when an object or
+    // array `body` expectation needs the tree (#1442); absent for a selector predicate.
+    body_json: &crate::behaviors::LazyJson<'_>,
 ) -> bool
 where
     F: Fn(&str, &str) -> bool,
@@ -39,6 +39,9 @@ where
     // every request differing only in the stripped part. `matches` is the exception: its expected
     // value is a pattern (`check_predicate_fields_regex`).
     let compare = |expected: &str, actual: &str| compare(&apply_except(expected), actual);
+
+    // What a field other than the body passes: only the body has a parse to share.
+    let absent = crate::behaviors::LazyJson::absent();
 
     // Helper for key comparison based on keyCaseSensitive
     let key_matches = |expected_key: &str, actual_key: &str| -> bool {
@@ -55,7 +58,7 @@ where
     // When expected is a string/primitive, compare directly with except applied.
     let check_string_field = |expected: &serde_json::Value,
                               actual: &str,
-                              pre_parsed: Option<&serde_json::Value>|
+                              pre_parsed: &crate::behaviors::LazyJson<'_>|
      -> bool {
         match expected {
             serde_json::Value::Object(_) | serde_json::Value::Array(_) => compare_json_recursive(
@@ -65,7 +68,7 @@ where
                 deep_equals,
                 key_case_sensitive,
                 &apply_except,
-                pre_parsed,
+                pre_parsed.get(),
             ),
             _ => {
                 let actual = apply_except(actual);
@@ -82,14 +85,14 @@ where
 
     // Check method
     if let Some(expected) = obj.get("method")
-        && !check_string_field(expected, method, None)
+        && !check_string_field(expected, method, &absent)
     {
         return false;
     }
 
     // Check path
     if let Some(expected) = obj.get("path")
-        && !check_string_field(expected, path, None)
+        && !check_string_field(expected, path, &absent)
     {
         return false;
     }
@@ -104,7 +107,7 @@ where
     // Check requestFrom (IP:port) - Mountebank compatible
     if let Some(expected) = obj.get("requestFrom") {
         let actual = request_from.unwrap_or("");
-        if !check_string_field(expected, actual, None) {
+        if !check_string_field(expected, actual, &absent) {
             return false;
         }
     }
@@ -112,7 +115,7 @@ where
     // Check ip (just the IP address) - Mountebank compatible
     if let Some(expected) = obj.get("ip") {
         let actual = client_ip.unwrap_or("");
-        if !check_string_field(expected, actual, None) {
+        if !check_string_field(expected, actual, &absent) {
             return false;
         }
     }
@@ -137,7 +140,7 @@ where
 
             match actual {
                 Some(actual) => {
-                    if !check_string_field(expected_val, actual, None) {
+                    if !check_string_field(expected_val, actual, &absent) {
                         return false;
                     }
                 }
@@ -164,7 +167,7 @@ where
 
             match actual {
                 Some(actual) => {
-                    if !check_string_field(expected_val, actual, None) {
+                    if !check_string_field(expected_val, actual, &absent) {
                         return false;
                     }
                 }
@@ -195,7 +198,7 @@ where
                 Some(values) => {
                     if !values
                         .iter()
-                        .any(|v| check_string_field(expected_val, v.as_str(), None))
+                        .any(|v| check_string_field(expected_val, v.as_str(), &absent))
                     {
                         return false;
                     }
@@ -227,7 +230,7 @@ pub(crate) fn check_predicate_fields_regex<H>(
     form: Option<&FastMap<String, String>>,
     key_case_sensitive: bool,
     // Request body already parsed once per request (issue #290); see `check_predicate_fields`.
-    body_json: Option<&serde_json::Value>,
+    body_json: &crate::behaviors::LazyJson<'_>,
 ) -> bool
 where
     H: RequestHeaders,
@@ -236,6 +239,9 @@ where
     // unparseable pattern, which callers treat as "no match" — same as the previous per-request
     // `Regex::new` returning `Err`.
     let build_regex = |pattern: &str| cached_regex(pattern, !case_sensitive);
+
+    // What a field other than the body passes: only the body has a parse to share.
+    let absent = crate::behaviors::LazyJson::absent();
 
     // Helper for key comparison based on keyCaseSensitive
     let key_matches = |expected_key: &str, actual_key: &str| -> bool {
@@ -251,7 +257,7 @@ where
     // When expected is a string, build regex and match directly.
     let check_regex_field = |expected: &serde_json::Value,
                              actual: &str,
-                             pre_parsed: Option<&serde_json::Value>|
+                             pre_parsed: &crate::behaviors::LazyJson<'_>|
      -> bool {
         match expected {
             serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
@@ -268,7 +274,7 @@ where
                     false,
                     key_case_sensitive,
                     &apply_except,
-                    pre_parsed,
+                    pre_parsed.get(),
                 )
             }
             _ => {
@@ -291,14 +297,14 @@ where
 
     // Check method
     if let Some(expected) = obj.get("method")
-        && !check_regex_field(expected, method, None)
+        && !check_regex_field(expected, method, &absent)
     {
         return false;
     }
 
     // Check path
     if let Some(expected) = obj.get("path")
-        && !check_regex_field(expected, path, None)
+        && !check_regex_field(expected, path, &absent)
     {
         return false;
     }
@@ -312,14 +318,14 @@ where
 
     // Check requestFrom
     if let Some(expected) = obj.get("requestFrom")
-        && !check_regex_field(expected, request_from.unwrap_or(""), None)
+        && !check_regex_field(expected, request_from.unwrap_or(""), &absent)
     {
         return false;
     }
 
     // Check ip
     if let Some(expected) = obj.get("ip")
-        && !check_regex_field(expected, client_ip.unwrap_or(""), None)
+        && !check_regex_field(expected, client_ip.unwrap_or(""), &absent)
     {
         return false;
     }
@@ -335,7 +341,7 @@ where
 
             match actual {
                 Some(actual) => {
-                    if !check_regex_field(pattern_val, actual, None) {
+                    if !check_regex_field(pattern_val, actual, &absent) {
                         return false;
                     }
                 }
@@ -354,7 +360,7 @@ where
 
             match actual {
                 Some(actual) => {
-                    if !check_regex_field(pattern_val, actual, None) {
+                    if !check_regex_field(pattern_val, actual, &absent) {
                         return false;
                     }
                 }
@@ -377,7 +383,7 @@ where
                 Some(values) => {
                     if !values
                         .iter()
-                        .any(|v| check_regex_field(pattern_val, v.as_str(), None))
+                        .any(|v| check_regex_field(pattern_val, v.as_str(), &absent))
                     {
                         return false;
                     }

@@ -148,9 +148,9 @@ impl Imposter {
 
         let imposter_port = self.script_state_key();
         let flow_id = self.resolve_flow_id(headers_map);
-        // Parse the request body as JSON once per request and reuse it across every stub's
-        // predicates, instead of re-parsing per predicate per stub (issue #290).
-        let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
+        // The request body as JSON, parsed at most once per request and shared across every stub's
+        // predicates (issue #290) — and only if a predicate or body dimension reads it (#1442).
+        let body_json = crate::behaviors::LazyJson::new(body);
         // Likewise parse the query string once per request rather than per predicate (issue #480).
         let query_map = crate::imposter::predicates::parse_query(query);
         // Likewise the XML DOM (issue #711): lazily parsed on first XPath predicate touched, then
@@ -158,7 +158,7 @@ impl Imposter {
         // one per XPath predicate evaluation.
         let xml_dom = body.map(crate::behaviors::LazyXmlDom::new);
         for stub_idx in snapshot
-            .candidates_with_body(method, path, body_json.as_ref())
+            .candidates_with_body(method, path, &body_json)
             .iter()
         {
             let stub_state = &stubs[stub_idx];
@@ -199,7 +199,7 @@ impl Imposter {
                 client_ip,
                 form.as_ref(),
                 imposter_port,
-                body_json.as_ref(),
+                &body_json,
                 xml_dom.as_ref(),
                 Some(&query_map),
             )? {
@@ -386,7 +386,7 @@ impl Imposter {
         let form = Self::parse_form_data(headers_map, body);
         let imposter_port = self.script_state_key();
         let flow_id = self.resolve_flow_id(headers_map);
-        let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
+        let body_json = crate::behaviors::LazyJson::new(body);
         let query_map = crate::imposter::predicates::parse_query(query);
         let xml_dom = body.map(crate::behaviors::LazyXmlDom::new);
         for (index, stub_state) in stubs.iter().enumerate() {
@@ -413,7 +413,7 @@ impl Imposter {
                 client_ip,
                 form.as_ref(),
                 imposter_port,
-                body_json.as_ref(),
+                &body_json,
                 xml_dom.as_ref(),
                 Some(&query_map),
             )? {
@@ -1626,6 +1626,102 @@ mod bounded_matching_tests {
             counters::dom_parses(),
             0,
             "no XPath predicate touched → the DOM must never be parsed"
+        );
+    }
+
+    // Issue #1442: a JSON request body no stub reads is never parsed — matching used to parse every
+    // body up front, so a large one cost its whole tree even against path-only stubs.
+    #[test]
+    fn no_json_parse_when_no_stub_reads_the_body() {
+        let imp = imposter(json!([
+            { "predicates": [{ "equals": { "path": "/a" } }],
+              "responses": [{ "is": { "statusCode": 200 } }] }
+        ]));
+        let headers = no_headers();
+        counters::reset();
+        let hit = imp
+            .find_matching_stub_with_client(
+                "POST",
+                "/a",
+                &headers,
+                None,
+                Some(r#"{"k":1}"#),
+                None,
+                None,
+            )
+            .expect("no backend error");
+        assert_eq!(hit.map(|(_, i)| i), Some(0));
+        assert_eq!(
+            counters::json_parses(),
+            0,
+            "no stub reads the body: never parsed"
+        );
+    }
+
+    // Issue #1442: a string body predicate compares text, so it needs no parse tree either.
+    #[test]
+    fn no_json_parse_for_string_body_predicates() {
+        let imp = imposter(json!([
+            { "predicates": [{ "contains": { "body": "nope" } }],
+              "responses": [{ "is": { "statusCode": 200 } }] },
+            { "predicates": [{ "matches": { "body": "^x" } }],
+              "responses": [{ "is": { "statusCode": 200 } }] },
+            { "predicates": [{ "equals": { "body": r#"{"k":1}"# } }],
+              "responses": [{ "is": { "statusCode": 200 } }] }
+        ]));
+        let headers = no_headers();
+        counters::reset();
+        let hit = imp
+            .find_matching_stub_with_client(
+                "POST",
+                "/a",
+                &headers,
+                None,
+                Some(r#"{"k":1}"#),
+                None,
+                None,
+            )
+            .expect("no backend error");
+        assert_eq!(hit.map(|(_, i)| i), Some(2));
+        assert_eq!(
+            counters::json_parses(),
+            0,
+            "string body predicates never parse"
+        );
+    }
+
+    // Issue #1442 with #290: once a stub does read the body it is parsed, and only once, however
+    // many body predicates (and the deepEquals body dimension) look at it afterwards.
+    #[test]
+    fn a_body_read_by_later_stubs_is_parsed_once() {
+        let imp = imposter(json!([
+            { "predicates": [{ "equals": { "path": "/other" } }],
+              "responses": [{ "is": { "statusCode": 200 } }] },
+            { "predicates": [{ "equals": { "body": { "k": 2 } } }],
+              "responses": [{ "is": { "statusCode": 200 } }] },
+            { "predicates": [{ "deepEquals": { "body": { "k": 3 } } }],
+              "responses": [{ "is": { "statusCode": 200 } }] },
+            { "predicates": [{ "equals": { "body": { "k": 1 } } }, { "exists": { "body": { "k": true } } }],
+              "responses": [{ "is": { "statusCode": 200 } }] }
+        ]));
+        let headers = no_headers();
+        counters::reset();
+        let hit = imp
+            .find_matching_stub_with_client(
+                "POST",
+                "/a",
+                &headers,
+                None,
+                Some(r#"{"k":1}"#),
+                None,
+                None,
+            )
+            .expect("no backend error");
+        assert_eq!(hit.map(|(_, i)| i), Some(3));
+        assert_eq!(
+            counters::json_parses(),
+            1,
+            "parsed once for the whole request"
         );
     }
 

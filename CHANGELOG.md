@@ -409,6 +409,14 @@ record.
   rift-cluster replay of old bytes is unaffected. State shared across processes is a rift-cluster
   deployment; see `docs/deployment/kubernetes.md`.
 
+### Performance
+
+- **Request bodies are parsed as JSON only when a stub compares their structure** (#1442).
+  Matching used to parse every request body up front, so a large JSON body cost its whole parse
+  tree, often several times its size, even against stubs that only look at the path or match the
+  body as text. The parse now happens on first use — an object/array body predicate, `exists` on
+  the body, a jsonpath selector — still at most once per request (#290).
+
 ### Removed
 
 - **The Redis flow-state backend** (#1337): the `rift-store-redis` crate (no longer published; its

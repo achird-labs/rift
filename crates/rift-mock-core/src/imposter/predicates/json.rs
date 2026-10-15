@@ -166,7 +166,7 @@ pub(crate) fn check_exists_predicate<H>(
     form: Option<&FastMap<String, String>>,
     key_case_sensitive: bool,
     // `body` parsed once per request, when it is the compared body (no selector) and is JSON.
-    body_json: Option<&serde_json::Value>,
+    body_json: &crate::behaviors::LazyJson<'_>,
     apply_except: &dyn for<'a> Fn(&'a str) -> Cow<'a, str>,
 ) -> bool
 where
@@ -202,7 +202,7 @@ where
         let holds = match expected {
             // An empty body (after `except`) is the falsy container; a non-empty one is truthy
             // whatever it parses to. `satisfied` makes that check itself on the raw text.
-            serde_json::Value::Object(fields) => match body_json {
+            serde_json::Value::Object(fields) => match body_json.get() {
                 Some(parsed) => check.present(Some(body)) && check.fields(fields, parsed),
                 None => check.satisfied(fields, &serde_json::Value::String(body.to_owned())),
             },
