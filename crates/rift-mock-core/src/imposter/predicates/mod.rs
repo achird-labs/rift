@@ -4,7 +4,8 @@
 //! Also supports requestFrom, ip, and form fields.
 
 use crate::behaviors::{
-    LazyXmlDom, Selection, json_node_text, jsonpath_selection, xpath_selection, xpath_selection_in,
+    LazyJson, LazyXmlDom, Selection, json_node_text, jsonpath_selection, xpath_selection,
+    xpath_selection_in,
 };
 use crate::imposter::types::{Predicate, PredicateOperation, PredicateSelector};
 use crate::util::FastMap;
@@ -88,7 +89,7 @@ where
 {
     // Parse the body and query once for standalone callers; the request hot path parses each once
     // per request (before the stub scan) and calls `stub_matches_inner` directly (issues #290, #480).
-    let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
+    let body_json = LazyJson::new(body);
     let query_map = parse_query(query);
     let form_fast: Option<FastMap<String, String>> =
         form.map(|f| f.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
@@ -106,7 +107,7 @@ where
         client_ip,
         form_fast.as_ref(),
         imposter_port,
-        body_json.as_ref(),
+        &body_json,
         None,
         Some(&query_map),
     )
@@ -131,7 +132,7 @@ pub(crate) fn stub_matches_inner<H>(
     // common non-form-predicate case, gives type inference nothing to pin the hasher to).
     form: Option<&FastMap<String, String>>,
     imposter_port: u16,
-    body_json: Option<&serde_json::Value>,
+    body_json: &LazyJson<'_>,
     // The once-per-request lazily-parsed XML DOM (issue #711): `Some` on the request hot path
     // (`find_matching_stub_with_client`/`_linear`), which constructs one `LazyXmlDom` before the
     // stub loop and shares it across every stub's XPath predicates, so the body is parsed at most
@@ -188,7 +189,7 @@ pub(crate) fn stub_matches_explained<H>(
     client_ip: Option<&str>,
     form: Option<&FastMap<String, String>>,
     imposter_port: u16,
-    body_json: Option<&serde_json::Value>,
+    body_json: &LazyJson<'_>,
     xml_dom: Option<&LazyXmlDom<'_>>,
     query_map: Option<&FastMap<String, String>>,
 ) -> anyhow::Result<Option<usize>>
@@ -273,7 +274,7 @@ where
 {
     // Standalone callers parse the body and query here; the request hot path parses each once per
     // request and calls `predicate_matches_inner` directly with the shared parses (issues #290, #480).
-    let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
+    let body_json = LazyJson::new(body);
     let query_map = parse_query(query);
     let form_fast: Option<FastMap<String, String>> =
         form.map(|f| f.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
@@ -290,7 +291,7 @@ where
         client_ip,
         form_fast.as_ref(),
         imposter_port,
-        body_json.as_ref(),
+        &body_json,
         None,
         Some(&query_map),
     )
@@ -318,7 +319,7 @@ pub(crate) fn predicate_matches_inner<H>(
     // Concretely `FastMap` — see `stub_matches_inner`.
     form: Option<&FastMap<String, String>>,
     imposter_port: u16,
-    body_json: Option<&serde_json::Value>,
+    body_json: &LazyJson<'_>,
     // The once-per-request lazily-parsed XML DOM (issue #711) — see `stub_matches_inner`.
     xml_dom: Option<&LazyXmlDom<'_>>,
     // Concretely `FastMap` — see `stub_matches_inner`.
@@ -415,7 +416,7 @@ where
     // fallback only covers a body that is not JSON/XML, which Mountebank also reads as `""`.
     let selection = match &predicate.parameters.selector {
         Some(PredicateSelector::JsonPath { selector }) => Some(
-            match body_json {
+            match body_json.get() {
                 Some(json) => jsonpath_selection(json, selector),
                 None => serde_json::from_str::<serde_json::Value>(body_str)
                     .ok()
@@ -438,10 +439,11 @@ where
 
     // The once-parsed body corresponds to the compared body only when there is no selector; with a
     // jsonpath/xpath selector the compared body is a selected value, so don't reuse the parse.
+    let absent = LazyJson::absent();
     let field_body_json = if predicate.parameters.selector.is_none() {
         body_json
     } else {
-        None
+        &absent
     };
 
     // One leaf operator against one candidate body.
@@ -3168,7 +3170,7 @@ mod tests {
                 None,
                 None,
                 0,
-                None,
+                &LazyJson::absent(),
                 None,
                 None,
             )
@@ -3189,7 +3191,7 @@ mod tests {
                 None,
                 None,
                 0,
-                None,
+                &LazyJson::absent(),
                 None,
                 None,
             )
@@ -3210,7 +3212,7 @@ mod tests {
                 None,
                 None,
                 0,
-                None,
+                &LazyJson::absent(),
                 None,
                 None,
             )
@@ -3270,7 +3272,7 @@ mod tests {
             None,
             None,
             0,
-            None,
+            &LazyJson::absent(),
             None,
             Some(&parsed),
         )
@@ -3286,7 +3288,7 @@ mod tests {
             None,
             None,
             0,
-            None,
+            &LazyJson::absent(),
             None,
             None,
         )
@@ -3404,7 +3406,7 @@ mod tests {
             None,
             None,
             0,
-            None,
+            &LazyJson::absent(),
             None,
             None,
         )
@@ -3465,7 +3467,7 @@ mod tests {
                 None,
                 None,
                 0,
-                None,
+                &LazyJson::absent(),
                 None,
                 None,
             )

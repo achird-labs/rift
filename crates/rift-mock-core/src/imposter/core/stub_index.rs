@@ -65,9 +65,10 @@ use std::sync::Arc;
 pub(crate) struct DimensionRequest<'a> {
     pub(crate) method: &'a str,
     pub(crate) path: &'a str,
-    /// The request body parsed as JSON once per request (#290), if it parsed. `None` for a non-JSON
-    /// or absent body — the body dimension (#708) can only prune JSON request bodies.
-    pub(crate) body: Option<&'a serde_json::Value>,
+    /// The request body, parsed as JSON on first use (#290, #1442). Only the body dimensions read
+    /// it, and only when they prune, so a request no body-keyed stub can match is never parsed.
+    /// Not JSON or absent reads as `None` — the body dimension (#708) prunes JSON bodies only.
+    pub(crate) body: &'a crate::behaviors::LazyJson<'a>,
 }
 
 /// One pruning dimension of the index. See the module docs for the soundness rule this contract
@@ -700,7 +701,7 @@ struct BodyHashDimension {
 
 impl Dimension for BodyHashDimension {
     fn select(&self, request: &DimensionRequest<'_>, out: &mut CandidateBits) {
-        match request.body {
+        match request.body.get() {
             // A non-JSON (or absent) body can never `deepEquals` an object/array expected body, so
             // every indexed stub is soundly excluded — only `always` stubs survive.
             None => out.copy_from(&self.always),
@@ -850,7 +851,9 @@ impl Dimension for BodyFieldDimension {
             let Some(q) = &self.quamina else { return };
             // A field-equals-on-object predicate can never match a non-JSON/absent body, so only
             // `always` stubs survive — exactly like the body-hash dimension.
-            let Some(body) = request.body else { return };
+            let Some(body) = request.body.get() else {
+                return;
+            };
             // A JSON-ish string leaf in the request body is equivalent to a container an indexed
             // stub may expect (both directions), which no structural pass can reconcile — so this
             // dimension must not prune this request. Widen to all; Stage-2 decides (mirrors the
@@ -1333,16 +1336,17 @@ impl StubSnapshot {
     /// [`StubIndex::candidates`]. The body dimension then contributes only its `always` stubs.
     #[cfg(test)]
     pub(crate) fn candidates(&self, method: &str, path: &str) -> CandidateBits {
-        self.candidates_with_body(method, path, None)
+        self.candidates_with_body(method, path, &crate::behaviors::LazyJson::absent())
     }
 
-    /// Candidate stub ids for a request, threading the once-per-request parsed body (#290/#708) so
-    /// the deepEquals-body dimension can prune. `body_json` is `None` for a non-JSON/absent body.
+    /// Candidate stub ids for a request, threading the request's lazily-parsed body (#290, #708,
+    /// #1442) so the deepEquals-body dimension can prune; it is parsed only if a body dimension
+    /// actually prunes.
     pub(crate) fn candidates_with_body(
         &self,
         method: &str,
         path: &str,
-        body_json: Option<&serde_json::Value>,
+        body_json: &crate::behaviors::LazyJson<'_>,
     ) -> CandidateBits {
         self.index.candidates(&DimensionRequest {
             method,
@@ -1406,7 +1410,8 @@ mod tests {
         path: &str,
         body: &Value,
     ) -> Vec<usize> {
-        snap.candidates_with_body(method, path, Some(body))
+        let text = body.to_string();
+        snap.candidates_with_body(method, path, &crate::behaviors::LazyJson::new(Some(&text)))
             .iter()
             .collect()
     }
