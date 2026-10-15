@@ -11,8 +11,9 @@ The specification lives in this repository so a behaviour change and the scenari
 in one pull request. Two runners read this tree while the features move from one to the other
 (#1338, #1346): the Rust runner in [`runner/`](runner/) (cucumber-rs) runs the features in its
 `spec::PORTED_FEATURES` (today 00, 01, 02 and 09), and the Scala runner (zio-bdd) in rift-conformance
-runs every other one. Once EtaCassiopeia/rift-conformance#237 lands each feature has exactly one
-runner; until then 00, 01, 02 and 09 run under both.
+runs every other one. Each feature has exactly one runner: the Scala runner drops the files listed
+in its `conformance/ported.txt` (rift-conformance#244), and a porting batch updates both lists in the
+same release. The container mode is the exception until the Rust runner has one (#1467).
 
 ## Layout (the contract a runner consumes)
 
