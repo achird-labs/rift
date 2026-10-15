@@ -993,25 +993,36 @@ async fn a_restarting_reload_within_one_second_of_a_change_moves_last_modified()
 /// the port's clock.
 #[tokio::test]
 async fn recreating_the_imposter_within_one_second_moves_last_modified() {
-    let manager = ImposterManager::new();
-    let port = imposter_with(&manager, vec![one_stub("s", "a")]).await;
-    at_start_of_a_second().await;
-    manager
-        .replace_stub(port, 0, stub(one_stub("s", "b")))
-        .await
-        .expect("replace");
-    let (stamp_b, _) = last_modified_and_body(port).await;
-    manager.delete_imposter(port).await.expect("delete");
-    let recreated = create(
-        &manager,
-        json!({ "port": port, "protocol": "http", "stubs": [one_stub("s", "c")] }),
-    )
-    .await;
-    assert_eq!(recreated, port);
-    let (status, stamp_c, body) = revalidate(port, &stamp_b).await;
-    assert_eq!((status, body.as_str()), (200, "c"));
-    assert!(secs(&stamp_c) > secs(&stamp_b));
-    manager.delete_all().await;
+    // Recreating on the same port means naming a port the manager just released, and a concurrent
+    // test in this binary can be handed it in between (#1438, the #1420 case-2 pattern no port
+    // source avoids). Losing that race says nothing about Last-Modified, so start over with a fresh
+    // imposter rather than fail.
+    for _ in 0..5 {
+        let manager = ImposterManager::new();
+        let port = imposter_with(&manager, vec![one_stub("s", "a")]).await;
+        at_start_of_a_second().await;
+        manager
+            .replace_stub(port, 0, stub(one_stub("s", "b")))
+            .await
+            .expect("replace");
+        let (stamp_b, _) = last_modified_and_body(port).await;
+        manager.delete_imposter(port).await.expect("delete");
+        let config = serde_json::from_value(
+            json!({ "port": port, "protocol": "http", "stubs": [one_stub("s", "c")] }),
+        )
+        .expect("valid imposter config");
+        match manager.create_imposter(config).await {
+            Err(rift_mock_core::imposter::ImposterError::BindError(..)) => continue,
+            other => assert_eq!(other.expect("recreate"), port),
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let (status, stamp_c, body) = revalidate(port, &stamp_b).await;
+        assert_eq!((status, body.as_str()), (200, "c"));
+        assert!(secs(&stamp_c) > secs(&stamp_b));
+        manager.delete_all().await;
+        return;
+    }
+    panic!("the released port was taken by a concurrent test on every attempt");
 }
 
 // ===== Issue #1303: a stub newly exposed by a delete, move or predicate change is re-stamped =====
