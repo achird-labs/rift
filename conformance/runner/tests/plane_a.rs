@@ -5,7 +5,8 @@
 //!   `.github/workflows/conformance.yml` does. Unset, the run prints why and passes, unless
 //!   `RIFT_CONFORMANCE_REQUIRE` is set (CI sets it), when it fails.
 //! - `RIFT_MODE`: `external` (default; spawn the staged binary), `embedded` (link rift-ffi and serve
-//!   the admin API in this process) or `container` (not implemented yet: reported, not run).
+//!   the admin API in this process) or `container` (`docker run` the image `RIFT_IMAGE`, required,
+//!   with the imposter ranges published 1:1; fresh imposters take ports from a pool there).
 //! - `RIFT_CORPUS_ROOT`, `RIFT_FEATURES_DIR`, `RIFT_MAX_BODY_SIZE`: as for the Scala runner.
 //!
 //! cucumber's own flags still work after `--`: `--name <regex>`, `--tags <expr>`, `--fail-fast`.
@@ -25,7 +26,7 @@ use futures::FutureExt as _;
 use regex::Regex;
 use rift_conformance_runner::HarnessError;
 use rift_conformance_runner::harness::{
-    Config, Harness, Mode, ReloadEngine, SpawnedEngine, free_port, log_tail,
+    Config, Harness, ReloadEngine, SpawnedEngine, free_port, log_tail,
 };
 use rift_conformance_runner::http::{
     Clients, FailureKind, Response, classify_failure, install_crypto_provider,
@@ -39,6 +40,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// The steps' view of the harness `run()` owns. `run()` leaks it to get the `&'static` the step
@@ -46,6 +48,8 @@ use std::time::{Duration, Instant};
 /// panics outside cucumber's per-step catch (a static is never dropped, so it cannot do that).
 static HARNESS: OnceLock<&'static Harness> = OnceLock::new();
 static CLIENTS: OnceLock<Clients> = OnceLock::new();
+/// Scenarios that ran to their `after` hook, whatever their outcome.
+static SCENARIOS_RUN: AtomicUsize = AtomicUsize::new(0);
 
 fn harness() -> &'static Harness {
     HARNESS
@@ -340,14 +344,28 @@ async fn post_imposter(admin: &str, json: &str) -> anyhow::Result<(u16, String)>
 }
 
 /// POST an imposter with any `port` removed, so the engine assigns one, and return that port
-/// (read back from the 201). No probe-then-bind window: the engine binds the port it reports.
+/// (read back from the 201). No probe-then-bind window: the engine binds the port it reports. In
+/// container mode the port comes from the harness's pool instead, walking on past a refused one.
 async fn post_at_engine_port(admin: &str, raw: &str, what: &str) -> anyhow::Result<u16> {
     let mut map = parse_object(raw, what)?;
     map.remove("port");
-    let (status, body) = post_imposter(admin, &Value::Object(map).to_string()).await?;
-    if status != 201 {
-        bail!("POST imposter ({what}) returned {status}, expected 201: {body}");
-    }
+    let body = if let Some(pool) = harness().imposter_port_pool() {
+        let (_, body) = pool
+            .claim(|port| {
+                let mut map = map.clone();
+                map.insert("port".to_string(), port.into());
+                async move { post_imposter(admin, &Value::Object(map).to_string()).await }
+            })
+            .await
+            .with_context(|| format!("POST imposter ({what})"))?;
+        body
+    } else {
+        let (status, body) = post_imposter(admin, &Value::Object(map).to_string()).await?;
+        if status != 201 {
+            bail!("POST imposter ({what}) returned {status}, expected 201: {body}");
+        }
+        body
+    };
     declared_port(&body, &format!("the 201 for {what}"))
 }
 
@@ -2112,19 +2130,6 @@ async fn run() -> ExitCode {
         }
     };
     let mode = config.mode;
-    if mode == Mode::Container {
-        discard_empty(&log_dir);
-        let msg = "RIFT_MODE=container is not implemented in this runner yet (follow-up to \
-                   rift#1346: the image-run engine behind 1:1 published ports, as the Scala \
-                   runner's RiftHarnessContainer). Use RIFT_MODE=external or embedded.";
-        return if required {
-            eprintln!("plane_a: FAILED: {msg}");
-            ExitCode::FAILURE
-        } else {
-            eprintln!("plane_a: SKIPPED, 0 scenarios run: {msg}");
-            ExitCode::SUCCESS
-        };
-    }
 
     match Clients::new() {
         Ok(c) => {
@@ -2176,7 +2181,10 @@ async fn run() -> ExitCode {
     let writer = PlaneA::cucumber::<PathBuf>()
         .max_concurrent_scenarios(1)
         .fail_on_skipped()
-        .after(|_, _, _, _, world| cleanup(world).boxed_local())
+        .after(|_, _, _, _, world| {
+            SCENARIOS_RUN.fetch_add(1, Ordering::Relaxed);
+            cleanup(world).boxed_local()
+        })
         .with_parser(Ported)
         .with_cli(cli)
         .filter_run(ported, move |feature, rule, scenario| {
@@ -2209,7 +2217,12 @@ async fn run() -> ExitCode {
             excluded.join("\n  ")
         );
     }
-    let failed = writer.execution_has_failed();
+    let mut failed = writer.execution_has_failed();
+    // A green step that ran nothing (a filter or exclusion that matched everything) proves nothing.
+    if required && SCENARIOS_RUN.load(Ordering::Relaxed) == 0 {
+        eprintln!("plane_a: FAILED: no scenario ran (RIFT_CONFORMANCE_REQUIRE is set)");
+        failed = true;
+    }
     if let Err(e) = &shutdown {
         eprintln!("plane_a: stopping the engine: {e}");
     }

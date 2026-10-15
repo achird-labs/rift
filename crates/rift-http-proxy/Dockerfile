@@ -35,6 +35,7 @@ COPY crates/rift-ejs/Cargo.toml ./crates/rift-ejs/
 COPY crates/rift-mock-core/Cargo.toml ./crates/rift-mock-core/
 COPY crates/rift-ffi/Cargo.toml ./crates/rift-ffi/
 COPY conformance/differential/Cargo.toml ./conformance/differential/
+COPY conformance/runner/Cargo.toml ./conformance/runner/
 
 # Create dummy source files to build dependencies.
 # Every workspace member needs an entry here, even one this image does not run: cargo resolves the
@@ -47,6 +48,8 @@ RUN mkdir -p crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches \
     echo "" > crates/rift-mock-core/src/lib.rs && \
     echo "" > crates/rift-ffi/src/lib.rs && \
     mkdir -p conformance/differential/src && echo "" > conformance/differential/src/lib.rs && \
+    mkdir -p conformance/runner/src conformance/runner/tests && echo "" > conformance/runner/src/lib.rs && \
+    echo "fn main() {}" > conformance/runner/tests/plane_a.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/main.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/bin/verify.rs && \
     echo "fn main() {}" > crates/rift-mock-core/benches/imposter_matcher_bench.rs && \
@@ -56,7 +59,7 @@ RUN mkdir -p crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches \
     echo "fn main() {}" > crates/rift-lint/src/main.rs && \
     echo "fn main() {}" > crates/rift-tui/src/main.rs && \
     cargo build --release --locked --package rift-http-proxy --features ${FEATURES} && \
-    rm -rf crates/*/src crates/*/benches conformance/differential/src
+    rm -rf crates/*/src crates/*/benches conformance/differential/src conformance/runner/src conformance/runner/tests
 
 # Copy entire workspace (needed for internal dependencies)
 COPY . .
