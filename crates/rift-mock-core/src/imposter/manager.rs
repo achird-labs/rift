@@ -3710,7 +3710,12 @@ mod tests {
             .apply_config(vec![p1.clone(), p2])
             .await
             .expect("initial apply");
-        assert_eq!(report.created, vec![port_0, port_1]);
+        // OS-assigned ports arrive in any order; the report's order is not the point here.
+        let mut created = report.created.clone();
+        created.sort_unstable();
+        let mut expected = vec![port_0, port_1];
+        expected.sort_unstable();
+        assert_eq!(created, expected);
         assert!(report.failed.is_empty());
 
         let untouched = manager.get_imposter(port_0).unwrap();
@@ -4155,7 +4160,10 @@ mod tests {
                 .expect("apply_one");
             assert_eq!(report.created, vec![port_1]);
             assert!(report.deleted.is_empty(), "{report:?}");
-            assert_eq!(manager.imposters.ports(), vec![port_0, port_1]);
+            // `ports()` is ascending; OS-assigned ports arrive in any order.
+            let mut expected = vec![port_0, port_1];
+            expected.sort_unstable();
+            assert_eq!(manager.imposters.ports(), expected);
             manager.delete_all().await;
         }
 
