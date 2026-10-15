@@ -3461,6 +3461,392 @@
           "path": "/submit"
         }
       ]
+    },
+    {
+      "name": "targeted: an xpath equals reads a BOM, trailing text and undefined entities as Mountebank's xmldom does (#1455)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "1"
+                    },
+                    "caseSensitive": true,
+                    "xpath": {
+                      "selector": "//b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "one"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "x&nbsp;y"
+                    },
+                    "caseSensitive": true,
+                    "xpath": {
+                      "selector": "//b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "nbsp"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "&copy;"
+                    },
+                    "caseSensitive": true,
+                    "xpath": {
+                      "selector": "//b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "copy"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "a&nbsp;b"
+                    },
+                    "caseSensitive": true,
+                    "xpath": {
+                      "selector": "//b/@x"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "attr"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "\ufeff<a><b>1</b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>1</b></a>trailing"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>x&nbsp;y</b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>&amp;&lt;</b><b>&copy;</b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b><![CDATA[x&nbsp;y]]></b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b x=\"a&nbsp;b\">1</b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<x:a><b>1</b></x:a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>1</b><br></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>1</b>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>1</b></a><c>2</c>"
+        }
+      ]
+    },
+    {
+      "name": "targeted: an xpath exists reads a BOM, trailing text and undefined entities as Mountebank's xmldom does (#1455)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "body": true
+                    },
+                    "xpath": {
+                      "selector": "//b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "exists"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "\ufeff<a><b>1</b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>1</b></a>trailing"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>x&nbsp;y</b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>&amp;&lt;</b><b>&copy;</b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b x=\"a&nbsp;b\">1</b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<x:a><b>1</b></x:a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>1</b><br></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>1</b>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>1</b></a><c>2</c>"
+        }
+      ]
+    },
+    {
+      "name": "targeted: an xpath copy reads a BOM, trailing text and undefined entities as Mountebank's xmldom does (#1455)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "[$B][$X]"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$B",
+                          "using": {
+                            "method": "xpath",
+                            "selector": "//b"
+                          }
+                        }
+                      },
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$X",
+                          "using": {
+                            "method": "xpath",
+                            "selector": "//b/@x"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "\ufeff<a><b>1</b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>1</b></a>trailing"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>x&nbsp;y</b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>&amp;&lt;</b><b>&copy;</b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b><![CDATA[x&nbsp;y]]></b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b x=\"a&nbsp;b\">1</b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<x:a><b>1</b></x:a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>1</b><br></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>1</b>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>1</b></a><c>2</c>"
+        }
+      ]
     }
   ]
 }
