@@ -1,0 +1,13 @@
+{
+  "protocol": "http",
+  "name": "admin · surface base",
+  "recordRequests": true,
+  "_rift": { "flowState": { "backend": "inmemory" } },
+  "stubs": [
+    {
+      "id": "stub-hi",
+      "predicates": [{ "equals": { "path": "/hi" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "hi" } }]
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+{
+  "protocol": "http",
+  "name": "diagnostics · match outcome",
+  "recordRequests": true,
+  "stubs": [
+    {
+      "id": "s0",
+      "predicates": [
+        {
+          "equals": {
+            "path": "/m"
+          }
+        },
+        {
+          "equals": {
+            "headers": {
+              "X-K": "yes"
+            }
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "zero"
+          }
+        }
+      ]
+    },
+    {
+      "id": "s1",
+      "scenarioName": "sc",
+      "requiredScenarioState": "X",
+      "predicates": [
+        {
+          "equals": {
+            "path": "/m"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "one"
+          }
+        }
+      ]
+    },
+    {
+      "id": "s2",
+      "space": "s",
+      "predicates": [
+        {
+          "equals": {
+            "path": "/m"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "two"
+          }
+        }
+      ]
+    },
+    {
+      "id": "hit",
+      "predicates": [
+        {
+          "equals": {
+            "path": "/hit"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "hit"
+          }
+        }
+      ]
+    }
+  ]
+}

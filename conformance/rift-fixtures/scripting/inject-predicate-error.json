@@ -1,0 +1,10 @@
+{
+  "protocol": "http",
+  "name": "scripting · predicate-inject error (throwing script)",
+  "stubs": [
+    {
+      "predicates": [{ "inject": "function (config) { throw new Error(\"boom\"); }" }],
+      "responses": [{ "is": { "statusCode": 200, "body": "PI" } }]
+    }
+  ]
+}

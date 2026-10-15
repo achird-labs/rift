@@ -1,0 +1,24 @@
+{
+  "protocol": "http",
+  "name": "metrics \u00b7 error fault",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "ok"
+          },
+          "_rift": {
+            "fault": {
+              "error": {
+                "probability": 1,
+                "status": 503
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

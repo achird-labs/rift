@@ -1,0 +1,17 @@
+{
+  "protocol": "http",
+  "name": "core · copy path group",
+  "stubs": [
+    {
+      "predicates": [{ "matches": { "path": "^/orders/[0-9]+$" } }],
+      "responses": [
+        {
+          "is": { "statusCode": 200, "body": "id=${ID}" },
+          "_behaviors": {
+            "copy": [{ "from": "path", "into": "${ID}", "using": { "method": "regex", "selector": "/orders/([0-9]+)" } }]
+          }
+        }
+      ]
+    }
+  ]
+}

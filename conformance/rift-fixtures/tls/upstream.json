@@ -1,0 +1,25 @@
+{
+  "protocol": "https",
+  "name": "tls \u00b7 HTTPS upstream serving a leaf signed by the test CA (rift#974)",
+  "cert": "-----BEGIN CERTIFICATE-----\nMIIClzCCAX+gAwIBAgIUb76s3Bu32t04g8Yk97Awl6nREj0wDQYJKoZIhvcNAQEL\nBQAwLTErMCkGA1UEAwwicmlmdC1jb25mb3JtYW5jZS10ZXN0LWludGVyY2VwdC1j\nYTAeFw0yNjA5MjkwMjU5MDBaFw00NjA5MjQwMjU5MDBaMBQxEjAQBgNVBAMMCWxv\nY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABINeIvN4Hq6nluClNF4d\nx/glTp7sLh+ukMwXDgKgJOkxVfKej4WynGswUY6utjnmkm3C40bQ/56JL4SYaTzU\npaOjgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww\nCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQW\nBBQFFykmXW4Tc+8DGcDc9dA00gVkszAfBgNVHSMEGDAWgBSSlbpvl+VQ7TncCG8D\nootZHZDvlTANBgkqhkiG9w0BAQsFAAOCAQEAYLl6o+p7bEqeoYpwNh7XGytSBF9P\nP7gejJxmPYcz7UdGSaNFpWoE3Ic2VzBKIXfvlQbHmf4D94xoTC4LDm021xeZxrsR\n+Va2YNpBwC5z71ktJPlng4R/FFZgrN4cRq14rVxekm+BIejEavDxY0B72AzCafZB\njKWHXCvtWM59e/IsOLK2MkBrDXl2TVPoWCieKqnvSwJOsVzacB20zZL8vHMRhwYG\nveyjA8Hwcjio9gNIK71BvCdBkWz4SouMpSJlntfikfaBGAf2ZsIgii6vC1jPEEkW\nnNYxYS6bPSrDXul440CKJGqWX1wAkeI+EHAGioUacTf8hBryNlsFBV0hIg==\n-----END CERTIFICATE-----\n",
+  "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXEX/fnYkYAcizx3v\nahNgfzAVPeWgrbxN9qx9CQ4iGnqhRANCAASDXiLzeB6up5bgpTReHcf4JU6e7C4f\nrpDMFw4CoCTpMVXyno+FspxrMFGOrrY55pJtwuNG0P+eiS+EmGk81KWj\n-----END PRIVATE KEY-----\n",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/up"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "upstream-tls-ok"
+          }
+        }
+      ]
+    }
+  ]
+}

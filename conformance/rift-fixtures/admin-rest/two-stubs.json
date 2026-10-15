@@ -1,0 +1,16 @@
+{
+  "protocol": "http",
+  "name": "admin-rest · two stubs",
+  "stubs": [
+    {
+      "id": "a",
+      "predicates": [{ "equals": { "path": "/a" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "a" } }]
+    },
+    {
+      "id": "b",
+      "predicates": [{ "equals": { "path": "/b" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "b" } }]
+    }
+  ]
+}

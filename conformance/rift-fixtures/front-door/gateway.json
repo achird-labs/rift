@@ -1,0 +1,16 @@
+{
+  "protocol": "http",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "root" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/search", "query": { "q": "1" } } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "q is 1" } }]
+    },
+    {
+      "responses": [{ "is": { "statusCode": 404, "body": "miss" } }]
+    }
+  ]
+}

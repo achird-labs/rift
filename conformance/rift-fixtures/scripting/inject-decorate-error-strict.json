@@ -1,0 +1,11 @@
+{
+  "protocol": "http",
+  "name": "scripting · decorate error, strictBehaviors (throwing script)",
+  "strictBehaviors": true,
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/inject-decorate" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "DEC" }, "_behaviors": { "decorate": "function (config, response) { throw new Error(\"boom\"); }" } }]
+    }
+  ]
+}

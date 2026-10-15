@@ -1,0 +1,11 @@
+{
+  "port": 4808,
+  "protocol": "http",
+  "name": "admin · pre-existing (PUT /imposters swap probe)",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/old" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "old" } }]
+    }
+  ]
+}

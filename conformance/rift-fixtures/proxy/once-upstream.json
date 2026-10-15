@@ -1,0 +1,11 @@
+{
+  "port": 4813,
+  "protocol": "http",
+  "name": "proxy · once upstream",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/svc" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "UP" } }]
+    }
+  ]
+}

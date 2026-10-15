@@ -1,0 +1,134 @@
+{
+  "protocol": "http",
+  "name": "behaviors-response-types \u00b7 behaviors on proxy responses (rift#1194)",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/always"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:UPSTREAM_PORT",
+            "mode": "proxyAlways"
+          },
+          "_behaviors": {
+            "decorate": "config => { config.response.body += 'X'; }"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/once"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:UPSTREAM_PORT",
+            "mode": "proxyOnce",
+            "predicateGenerators": [
+              {
+                "matches": {
+                  "path": true
+                }
+              }
+            ]
+          },
+          "_behaviors": {
+            "decorate": "config => { config.response.body += 'X'; }"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/generated"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:UPSTREAM_PORT",
+            "mode": "proxyOnce",
+            "predicateGenerators": [
+              {
+                "matches": {
+                  "path": true
+                }
+              }
+            ],
+            "addDecorateBehavior": "config => { config.response.body += 'Y'; }"
+          },
+          "_behaviors": {
+            "decorate": "config => { config.response.body += 'X'; }"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/failing"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:UPSTREAM_PORT",
+            "mode": "proxyOnce",
+            "predicateGenerators": [
+              {
+                "matches": {
+                  "path": true
+                }
+              }
+            ]
+          },
+          "_behaviors": {
+            "decorate": "config => { throw new Error('boom'); }"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/repeat"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:UPSTREAM_PORT",
+            "mode": "proxyAlways"
+          },
+          "_behaviors": {
+            "repeat": 2
+          }
+        },
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "after"
+          }
+        }
+      ]
+    }
+  ]
+}

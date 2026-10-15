@@ -1,0 +1,16 @@
+{
+  "protocol": "http",
+  "name": "proxy options \u00b7 once-store",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:UPSTREAM_PORT",
+            "mode": "proxyOnce"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "protocol": "http",
+  "name": "proxy options \u00b7 key-cert",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:UPSTREAM_PORT",
+            "key": "k",
+            "cert": "c",
+            "passphrase": "p",
+            "ciphers": "x"
+          }
+        }
+      ]
+    }
+  ]
+}

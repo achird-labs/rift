@@ -1,0 +1,10 @@
+{
+  "port": 4599,
+  "protocol": "http",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/svc" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "upstream-ok" } }]
+    }
+  ]
+}

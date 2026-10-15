@@ -564,6 +564,15 @@ jobs:
             "sdk-conformance-${{ steps.version.outputs.VERSION }}.tar.gz"
           ls -l sdk-conformance-*.tar.gz*
 
+      # Issue #1339: package rift-conformance-<version>.tar.gz — the Plane A specification (the
+      # features and fixtures the rift-conformance runner executes), version-locked to this
+      # release, so the runner can be pointed at a released engine's own spec.
+      - name: Generate Plane A conformance specification
+        run: |
+          ./scripts/gen-conformance-features.sh "${{ steps.version.outputs.VERSION }}" \
+            "rift-conformance-${{ steps.version.outputs.VERSION }}.tar.gz"
+          ls -l rift-conformance-*.tar.gz*
+
       # Issue #1281: package rift-templates-<version>.tar.gz — the vendor-mock template catalog
       # (templates/), each template's requires.rift stamped to this release. CI's `templates` job
       # proves every template boots and passes its smoke test on this commit; here we only package.
@@ -683,6 +692,8 @@ jobs:
             ffi-manifest.json
             sdk-conformance-*.tar.gz
             sdk-conformance-*.tar.gz.sha256
+            rift-conformance-*.tar.gz
+            rift-conformance-*.tar.gz.sha256
             rift-templates-*.tar.gz
             rift-templates-*.tar.gz.sha256
         env:

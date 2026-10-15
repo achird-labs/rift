@@ -1,0 +1,21 @@
+{
+  "protocol": "http",
+  "name": "core · ASCII-only case folding (rift#480)",
+  "stubs": [
+    {
+      "predicates": [{ "startsWith": { "body": "café" }, "caseSensitive": false }],
+      "responses": [{ "is": { "statusCode": 200, "body": "sw" } }]
+    },
+    {
+      "predicates": [{ "contains": { "body": "naïve" }, "caseSensitive": false }],
+      "responses": [{ "is": { "statusCode": 200, "body": "co" } }]
+    },
+    {
+      "predicates": [{ "endsWith": { "body": "élan" }, "caseSensitive": false }],
+      "responses": [{ "is": { "statusCode": 200, "body": "ew" } }]
+    },
+    {
+      "responses": [{ "is": { "statusCode": 200, "body": "no" } }]
+    }
+  ]
+}

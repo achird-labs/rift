@@ -1,0 +1,16 @@
+{
+  "protocol": "http",
+  "name": "behaviors · a malformed earlier copy element is refused, not loaded dead (rift#1195)",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/copy" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "body": "A=${A} B=${B}" },
+        "behaviors": [
+          { "copy": { "into": "${A}", "using": { "method": "regex", "selector": "c.p" } } },
+          { "copy": { "from": "method", "into": "${B}", "using": { "method": "regex", "selector": ".+" } } }
+        ]
+      }]
+    }
+  ]
+}

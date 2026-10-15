@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "engineVersion": "0.0.0-dev",
+  "features": [
+    {
+      "file": "features/rift/00-smoke.feature",
+      "name": "Plane A smoke — the harness posts a fresh imposter and drives it directly"
+    },
+    {
+      "file": "features/rift/01-consistency-gate.feature",
+      "name": "Cross-tool consistency — engine, rift-lint, and rift-verify agree on the corpus"
+    },
+    {
+      "file": "features/rift/02-core-serving.feature",
+      "name": "Core serving — predicates, cycling, copy, FSM, headers, templates, forward, gateway"
+    },
+    {
+      "file": "features/rift/03-faults-transport.feature",
+      "name": "Faults and transport errors"
+    },
+    {
+      "file": "features/rift/04-scripting-bounds.feature",
+      "name": "Scripting engines and runaway bounds"
+    },
+    {
+      "file": "features/rift/05-templating.feature",
+      "name": "Response templating — request variables and date tokens"
+    },
+    {
+      "file": "features/rift/06-behaviors.feature",
+      "name": "Response behaviors — copy, lookup, wait, shellTransform, decorate"
+    },
+    {
+      "file": "features/rift/07-spaces-and-fsm.feature",
+      "name": "Spaces (flow-id partitioning) and FSM declarative-scenario state"
+    },
+    {
+      "file": "features/rift/08-admin-surface.feature",
+      "name": "Admin surface — stub-by-id, enable/disable, savedRequests filtering, flow-state KV, atomic PUT /imposters"
+    },
+    {
+      "file": "features/rift/09-gateway-https-metrics.feature",
+      "name": "Single-port gateway, binary-mode responses, self-signed HTTPS, and Prometheus metrics"
+    },
+    {
+      "file": "features/rift/10-proxy-record.feature",
+      "name": "Proxy record/replay — proxyOnce, proxyTransparent, proxyAlways chains, and predicateGenerators"
+    },
+    {
+      "file": "features/rift/11-reload.feature",
+      "name": "Incremental reload (rift#316) — POST /admin/reload reconciles toward --configfile"
+    },
+    {
+      "file": "features/rift/12-intercept.feature",
+      "name": "Intercept / TLS-MITM forward-proxy (rift#413) — CONNECT interception with rule matching"
+    },
+    {
+      "file": "features/rift/13-error-envelope.feature",
+      "name": "Error-response envelope — the standard {\"errors\":[{code,message}]} contract on every error door"
+    },
+    {
+      "file": "features/rift/14-behaviors-response-types.feature",
+      "name": "Behaviors and repeat on inject, proxy and fault responses (rift#1184)"
+    },
+    {
+      "file": "features/rift/16-front-door.feature",
+      "name": "Front door routing and single-port gateway dispatch (rift docs/features/front-door.md, gateway.md)"
+    },
+    {
+      "file": "features/rift/17-metrics.feature",
+      "name": "Metrics — the Prometheus families on --metrics-port and the admin GET /metrics"
+    },
+    {
+      "file": "features/rift/18-match-diagnostics.feature",
+      "name": "Match diagnostics — _rift.warnings stub analysis, the X-Rift-Debug report, journal matchOutcome"
+    },
+    {
+      "file": "features/rift/19-flow-state-declarative.feature",
+      "name": "Declarative flow state — _rift.stateOps, fail-loud flowState config, the clear-flow admin route"
+    },
+    {
+      "file": "features/rift/20-tls-and-http2.feature",
+      "name": "TLS termination options and HTTP/2 negotiation (rift docs/features/tls.md, #977/#1029)"
+    },
+    {
+      "file": "features/rift/21-admin-rest.feature",
+      "name": "Admin REST long tail — system routes, listing views, delete-all, teardown, stub surgery, spaces, scenarios, body cap"
+    },
+    {
+      "file": "features/rift/22-mountebank-compat.feature",
+      "name": "Mountebank compatibility — predicates, imposter options and response forms the corpus only loads"
+    }
+  ]
+}

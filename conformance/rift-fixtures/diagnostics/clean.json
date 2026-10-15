@@ -1,0 +1,23 @@
+{
+  "protocol": "http",
+  "name": "diagnostics · clean",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/1"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "ok"
+          }
+        }
+      ]
+    }
+  ]
+}

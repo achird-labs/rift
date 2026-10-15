@@ -1,0 +1,20 @@
+{
+  "protocol": "http",
+  "name": "behaviors-response-types · repeat on fault responses and the top-level repeat (rift#1192)",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/fault" } }],
+      "responses": [
+        { "fault": "CONNECTION_RESET_BY_PEER", "_behaviors": { "repeat": 2 } },
+        { "is": { "statusCode": 200, "body": "after" } }
+      ]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/top-level" } }],
+      "responses": [
+        { "is": { "statusCode": 200, "body": "a" }, "repeat": 3, "_behaviors": { "repeat": 1 } },
+        { "is": { "statusCode": 200, "body": "b" } }
+      ]
+    }
+  ]
+}

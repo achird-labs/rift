@@ -1,0 +1,48 @@
+{
+  "protocol": "http",
+  "name": "diagnostics · debug",
+  "stubs": [
+    {
+      "id": "one",
+      "predicates": [
+        {
+          "equals": {
+            "path": "/one"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "one"
+          }
+        }
+      ]
+    },
+    {
+      "id": "cyc",
+      "predicates": [
+        {
+          "equals": {
+            "path": "/c"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 201,
+            "body": "A-body"
+          }
+        },
+        {
+          "is": {
+            "statusCode": 202,
+            "body": "B-body"
+          }
+        }
+      ]
+    }
+  ]
+}

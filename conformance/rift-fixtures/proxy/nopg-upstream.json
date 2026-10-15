@@ -1,0 +1,11 @@
+{
+  "port": 4815,
+  "protocol": "http",
+  "name": "proxy · no-predicateGenerators upstream",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/svc" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "UP2" } }]
+    }
+  ]
+}

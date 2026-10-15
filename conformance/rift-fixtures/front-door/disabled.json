@@ -1,0 +1,62 @@
+{
+  "imposters": [
+    {
+      "port": 4872,
+      "protocol": "http",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "A"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "port": 4873,
+      "protocol": "http",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "B"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "routes": {
+    "routes": [
+      {
+        "id": "off",
+        "priority": 10,
+        "enabled": false,
+        "match": {
+          "host": "flag.test"
+        },
+        "target": {
+          "port": 4872
+        }
+      },
+      {
+        "id": "on",
+        "match": {
+          "host": "flag.test"
+        },
+        "target": {
+          "port": 4873
+        }
+      }
+    ]
+  }
+}

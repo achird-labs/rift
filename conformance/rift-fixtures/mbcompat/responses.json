@@ -1,0 +1,133 @@
+{
+  "protocol": "http",
+  "name": "mbcompat · response forms",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/flat204"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "statusCode": "204"
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/flat-and-is"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "statusCode": 500,
+          "body": "flat",
+          "is": {
+            "statusCode": 200,
+            "body": "is-wins"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/object"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": {
+              "a": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/numbers"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": {
+              "f": 0.1,
+              "big": 7e23
+            }
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/echo"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "got ${request.body}"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/mixed"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "A"
+          }
+        },
+        {
+          "inject": "function(config){ return {statusCode: 200, body: 'B'}; }"
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "startsWith": {
+            "path": "/users/"
+          }
+        }
+      ],
+      "routePattern": "/users/:id",
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "id=${request.pathParams.id}"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "protocol": "http",
+  "name": "diagnostics · catch-all last",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/1"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "ok"
+          }
+        }
+      ]
+    },
+    {
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "ok"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "protocol": "http",
+  "name": "spaces · FSM sequential + concurrent settle (rift#311)",
+  "stubs": [
+    {
+      "scenarioName": "cas",
+      "requiredScenarioState": "Started",
+      "newScenarioState": "one",
+      "predicates": [{ "equals": { "path": "/s" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "a" } }]
+    },
+    {
+      "scenarioName": "cas",
+      "requiredScenarioState": "one",
+      "newScenarioState": "two",
+      "predicates": [{ "equals": { "path": "/s" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "b" } }]
+    },
+    {
+      "scenarioName": "cas",
+      "requiredScenarioState": "two",
+      "predicates": [{ "equals": { "path": "/s" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "terminal" } }]
+    }
+  ]
+}

@@ -13,6 +13,12 @@ record.
 
 ### Added
 
+- **The Plane A conformance specification lives in this repository** (#1339). The Gherkin
+  features, fixtures, rift-lint fixtures and scripts the rift-conformance runner executes moved
+  from that repository to `conformance/`, so a behaviour change and the scenario pinning it land in
+  one pull request. Each release now publishes `rift-conformance-<version>.tar.gz` (and `.sha256`)
+  holding the specification of exactly that release; point the runner at it with
+  `RIFT_FEATURES_DIR`. See `conformance/README.md`.
 - **Predicate generators record `requestFrom`, `ip` and `form`** (#1446), as Mountebank's
   `predicatesFor` does. `requestFrom` and `ip` come from the client's socket, as the matcher reads
   them; a recorded `requestFrom` includes the client's port, so it matches that connection only.

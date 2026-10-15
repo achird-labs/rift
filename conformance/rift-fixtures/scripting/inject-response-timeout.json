@@ -1,0 +1,11 @@
+{
+  "protocol": "http",
+  "name": "scripting · response-inject timeout (timeoutMs 200)",
+  "_rift": { "scriptEngine": { "timeoutMs": 200 } },
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/inject-response" } }],
+      "responses": [{ "inject": "function (config) { var s = Date.now(); while (Date.now() - s < 2000) {} return { statusCode: 200, body: \"OK\" }; }" }]
+    }
+  ]
+}

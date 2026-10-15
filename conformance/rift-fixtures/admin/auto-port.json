@@ -1,0 +1,23 @@
+{
+  "protocol": "http",
+  "name": "admin · auto-port",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/auto"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "auto"
+          }
+        }
+      ]
+    }
+  ]
+}

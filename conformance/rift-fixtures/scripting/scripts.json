@@ -1,0 +1,15 @@
+{
+  "protocol": "http",
+  "name": "scripting · engines",
+  "_rift": { "flowState": { "backend": "inmemory" } },
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/rhai" } }],
+      "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { let c = ctx.state.incr_by(\"n\", 1); http(200, `${c}`) }" } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/js" } }],
+      "responses": [{ "inject": "function (config) { return { statusCode: 200, body: \"js-ok\" }; }" }]
+    }
+  ]
+}

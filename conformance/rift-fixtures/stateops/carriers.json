@@ -1,0 +1,25 @@
+{
+  "protocol": "http",
+  "name": "stateops · carried-not-executed _rift.sequencing + _rift.dataset",
+  "_rift": { "sequencing": { "mode": "x" } },
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/ds" } }],
+      "responses": [
+        {
+          "is": { "statusCode": 200, "body": "served" },
+          "_rift": {
+            "dataset": {
+              "name": "users",
+              "version": 3,
+              "key": { "from": "path", "using": { "method": "regex", "selector": "/ds/(.*)$" } },
+              "keyColumn": "id",
+              "into": "${row}",
+              "digest": "sha256:0f1e2d3c"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

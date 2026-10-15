@@ -1,0 +1,23 @@
+{
+  "imposters": [
+    {
+      "port": 4990,
+      "protocol": "http",
+      "stubs": [
+        {
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200
+              },
+              "_behaviors": [
+                null,
+                null
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

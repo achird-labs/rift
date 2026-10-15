@@ -1,0 +1,10 @@
+{
+  "protocol": "http",
+  "name": "scripting · response-inject error (throwing script)",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/inject-response" } }],
+      "responses": [{ "inject": "function (config) { throw new Error(\"boom\"); }" }]
+    }
+  ]
+}

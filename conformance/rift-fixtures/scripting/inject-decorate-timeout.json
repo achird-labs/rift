@@ -1,0 +1,11 @@
+{
+  "protocol": "http",
+  "name": "scripting · decorate timeout, non-strict (timeoutMs 200)",
+  "_rift": { "scriptEngine": { "timeoutMs": 200 } },
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/inject-decorate" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "DEC" }, "_behaviors": { "decorate": "function (config, response) { var s = Date.now(); while (Date.now() - s < 2000) {} }" } }]
+    }
+  ]
+}

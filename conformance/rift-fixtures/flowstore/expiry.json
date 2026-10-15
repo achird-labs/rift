@@ -1,0 +1,9 @@
+{
+  "protocol": "http",
+  "name": "flowstore · default TTL expiry",
+  "_rift": { "flowState": { "ttlSeconds": 1 } },
+  "stubs": [
+    { "predicates": [{ "equals": { "path": "/set" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ ctx.state.set(\"k\", \"v1\"); http(200, \"ok\") }" } } }] },
+    { "predicates": [{ "equals": { "path": "/get" } }], "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx){ http(200, ctx.state.get_or(\"k\", \"EXPIRED\")) }" } } }] }
+  ]
+}

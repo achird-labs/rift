@@ -1,0 +1,27 @@
+{
+  "protocol": "http",
+  "name": "flowstore · scenario-state transitions",
+  "_rift": { "flowState": {} },
+  "stubs": [
+    {
+      "scenarioName": "checkout",
+      "requiredScenarioState": "Started",
+      "newScenarioState": "paid",
+      "predicates": [{ "equals": { "path": "/step" } }],
+      "responses": [{ "is": { "statusCode": 201, "body": "started->paid" } }]
+    },
+    {
+      "scenarioName": "checkout",
+      "requiredScenarioState": "paid",
+      "newScenarioState": "shipped",
+      "predicates": [{ "equals": { "path": "/step" } }],
+      "responses": [{ "is": { "statusCode": 202, "body": "paid->shipped" } }]
+    },
+    {
+      "scenarioName": "checkout",
+      "requiredScenarioState": "shipped",
+      "predicates": [{ "equals": { "path": "/step" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "shipped" } }]
+    }
+  ]
+}

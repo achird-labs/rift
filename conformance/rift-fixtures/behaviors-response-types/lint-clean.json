@@ -1,0 +1,33 @@
+{
+  "port": 4541,
+  "protocol": "http",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "inject": "function (config) { return { statusCode: 200 }; }",
+          "_behaviors": {
+            "decorate": "config => {}"
+          }
+        },
+        {
+          "proxy": {
+            "to": "http://localhost:4531"
+          },
+          "_behaviors": {
+            "wait": 10
+          }
+        },
+        {
+          "is": {
+            "statusCode": 200
+          },
+          "_behaviors": {
+            "repeat": 2
+          }
+        }
+      ]
+    }
+  ],
+  "name": "behaviors-response-types \u00b7 lint: behaviors on inject/proxy blocks and a repeat-only block raise no W017"
+}

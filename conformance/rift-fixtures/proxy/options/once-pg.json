@@ -1,0 +1,23 @@
+{
+  "protocol": "http",
+  "name": "proxy options \u00b7 once-pg",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:UPSTREAM_PORT",
+            "mode": "proxyOnce",
+            "predicateGenerators": [
+              {
+                "matches": {
+                  "path": true
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

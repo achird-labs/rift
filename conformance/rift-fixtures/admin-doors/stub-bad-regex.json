@@ -1,0 +1,1 @@
+{ "stub": { "predicates": [{ "matches": { "query": { "q": "([" } } }], "responses": [{ "is": { "statusCode": 200 } }] } }

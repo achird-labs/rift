@@ -1,0 +1,6 @@
+{
+  "protocol": "http",
+  "name": "stateops · ttlSeconds 0 is refused",
+  "_rift": { "flowState": { "ttlSeconds": 0 } },
+  "stubs": []
+}

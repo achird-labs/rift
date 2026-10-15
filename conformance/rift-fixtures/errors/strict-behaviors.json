@@ -1,0 +1,20 @@
+{
+  "protocol": "http",
+  "name": "errors · strictBehaviors shellTransform + binary-decode failures",
+  "strictBehaviors": true,
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/shell" } }],
+      "responses": [
+        {
+          "is": { "statusCode": 200, "body": "SH" },
+          "_behaviors": { "shellTransform": "/nonexistent/rift-conformance-no-such-command" }
+        }
+      ]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/binary" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "not-base64!!!", "_mode": "binary" } }]
+    }
+  ]
+}

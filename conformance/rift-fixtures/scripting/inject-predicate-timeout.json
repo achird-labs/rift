@@ -1,0 +1,11 @@
+{
+  "protocol": "http",
+  "name": "scripting · predicate-inject timeout (timeoutMs 200)",
+  "_rift": { "scriptEngine": { "timeoutMs": 200 } },
+  "stubs": [
+    {
+      "predicates": [{ "inject": "function (config) { var s = Date.now(); while (Date.now() - s < 2000) {} return true; }" }],
+      "responses": [{ "is": { "statusCode": 200, "body": "PI" } }]
+    }
+  ]
+}

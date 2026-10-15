@@ -1,0 +1,27 @@
+{
+  "protocol": "http",
+  "name": "faults \u00b7 error headers naming one header twice are refused",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200
+          },
+          "_rift": {
+            "fault": {
+              "error": {
+                "probability": 1.0,
+                "status": 503,
+                "headers": {
+                  "X-A": "1",
+                  "x-a": "2"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

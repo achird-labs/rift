@@ -1,0 +1,10 @@
+{
+  "protocol": "http",
+  "name": "core · multi Set-Cookie",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/h" } }],
+      "responses": [{ "is": { "statusCode": 200, "headers": { "Set-Cookie": ["a=1", "b=2"] }, "body": "h" } }]
+    }
+  ]
+}

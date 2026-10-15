@@ -86,6 +86,10 @@ jobs:
       - name: SDK conformance packager self-test
         run: ./scripts/gen-sdk-conformance.sh --self-test
 
+      # Issue #1339: same for the Plane A specification tree (conformance/features + fixtures).
+      - name: Plane A conformance packager self-test
+        run: ./scripts/gen-conformance-features.sh --self-test
+
       # Issue #915: the sdk-matrix drift reporter's lifecycle (create once, comment while red,
       # close on green, per-SDK marker isolation, fail-closed red path / fail-open green path)
       # is only ever exercised by its self-test — the real workflow runs it against live issues.

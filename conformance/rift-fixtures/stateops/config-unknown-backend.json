@@ -1,0 +1,6 @@
+{
+  "protocol": "http",
+  "name": "stateops · an unregistered backend is refused",
+  "_rift": { "flowState": { "backend": "mystore" } },
+  "stubs": []
+}

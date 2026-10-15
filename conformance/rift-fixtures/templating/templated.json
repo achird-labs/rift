@@ -1,0 +1,18 @@
+{
+  "protocol": "http",
+  "name": "templating · declarative {{ }} functions behind the opt-in templated flag (rift#444)",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/hdr" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "hi {{ request.header 'X-Name' }}" }, "_rift": { "templated": true } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/plain" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "hi {{ request.header 'X-Name' }}" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/rand" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "n={{ randomInt 7 7 }}" }, "_rift": { "templated": true } }]
+    }
+  ]
+}

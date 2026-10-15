@@ -1,0 +1,40 @@
+{
+  "protocol": "http",
+  "name": "diagnostics · potentially shadowed",
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "startsWith": {
+            "path": "/a"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "ok"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/a/b"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "ok"
+          }
+        }
+      ]
+    }
+  ]
+}

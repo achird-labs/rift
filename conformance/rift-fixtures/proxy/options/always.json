@@ -1,0 +1,23 @@
+{
+  "protocol": "http",
+  "name": "proxy options \u00b7 always",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:UPSTREAM_PORT",
+            "mode": "proxyAlways",
+            "predicateGenerators": [
+              {
+                "matches": {
+                  "path": true
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

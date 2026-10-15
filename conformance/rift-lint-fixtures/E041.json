@@ -1,0 +1,27 @@
+{
+  "imposters": [
+    {
+      "port": 4990,
+      "protocol": "http",
+      "stubs": [
+        {
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200
+              },
+              "_rift": {
+                "fault": {
+                  "tcp": {
+                    "probability": 1.5,
+                    "type": "RESET"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

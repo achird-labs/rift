@@ -1,0 +1,24 @@
+{
+  "protocol": "http",
+  "name": "metrics \u00b7 latency fault",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "ok"
+          },
+          "_rift": {
+            "fault": {
+              "latency": {
+                "probability": 1,
+                "ms": 50
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

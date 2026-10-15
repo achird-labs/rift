@@ -1,0 +1,10 @@
+{
+  "port": {newPort},
+  "protocol": "http",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "body": "" }, "xpath": { "selector": "//*[[" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "MATCHED" } }]
+    }
+  ]
+}

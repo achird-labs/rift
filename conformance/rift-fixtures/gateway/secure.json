@@ -1,0 +1,11 @@
+{
+  "port": 4812,
+  "protocol": "https",
+  "name": "gateway · secure",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/sec" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "secure" } }]
+    }
+  ]
+}

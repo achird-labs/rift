@@ -1,0 +1,17 @@
+{
+  "port": 4800,
+  "protocol": "http",
+  "name": "proxy · transparent proxy",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:4817",
+            "mode": "proxyTransparent"
+          }
+        }
+      ]
+    }
+  ]
+}

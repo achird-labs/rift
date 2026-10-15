@@ -1,0 +1,10 @@
+{
+  "protocol": "http",
+  "name": "core · date template",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/d" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "{{DAYS+5}}" } }]
+    }
+  ]
+}

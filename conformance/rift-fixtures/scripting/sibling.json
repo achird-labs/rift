@@ -1,0 +1,11 @@
+{
+  "port": 4805,
+  "protocol": "http",
+  "name": "scripting · sibling (fixed port, posted before the runaways)",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/alive" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "alive" } }]
+    }
+  ]
+}

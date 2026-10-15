@@ -1,0 +1,60 @@
+{
+  "imposters": [
+    {
+      "port": 4872,
+      "protocol": "http",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "A"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "port": 4873,
+      "protocol": "http",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "B"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "routes": {
+    "routes": [
+      {
+        "id": "a-wild",
+        "match": {
+          "host": "*.shop.test"
+        },
+        "target": {
+          "port": 4873
+        }
+      },
+      {
+        "id": "z-exact",
+        "match": {
+          "host": "api.shop.test"
+        },
+        "target": {
+          "port": 4872
+        }
+      }
+    ]
+  }
+}

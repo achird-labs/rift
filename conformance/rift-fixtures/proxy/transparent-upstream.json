@@ -1,0 +1,11 @@
+{
+  "port": 4817,
+  "protocol": "http",
+  "name": "proxy · transparent upstream",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/t" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "TP" } }]
+    }
+  ]
+}

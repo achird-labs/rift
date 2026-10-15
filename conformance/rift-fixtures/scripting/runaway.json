@@ -1,0 +1,11 @@
+{
+  "protocol": "http",
+  "name": "scripting · runaway (timeoutMs 300)",
+  "_rift": { "scriptEngine": { "defaultEngine": "rhai", "timeoutMs": 300 } },
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/hang" } }],
+      "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { let x = 0; loop { x += 1; } }" } } }]
+    }
+  ]
+}

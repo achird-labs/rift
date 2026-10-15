@@ -1,0 +1,51 @@
+{
+  "imposters": [
+    {
+      "port": 4829,
+      "protocol": "http",
+      "name": "admin · explicit port beside an auto one",
+      "stubs": [
+        {
+          "predicates": [
+            {
+              "equals": {
+                "path": "/explicit"
+              }
+            }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "explicit"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "protocol": "http",
+      "name": "admin · auto-port in a batch",
+      "stubs": [
+        {
+          "predicates": [
+            {
+              "equals": {
+                "path": "/auto"
+              }
+            }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "auto"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

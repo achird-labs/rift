@@ -1,0 +1,14 @@
+{
+  "imposters": [
+    {
+      "port": 4990,
+      "protocol": "http",
+      "_rift": {
+        "scriptEngine": {
+          "defaultEngine": "lua"
+        }
+      },
+      "stubs": []
+    }
+  ]
+}

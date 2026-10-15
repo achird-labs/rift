@@ -1,0 +1,10 @@
+{
+  "protocol": "http",
+  "name": "core · gateway target",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/deep/path" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "gw" } }]
+    }
+  ]
+}

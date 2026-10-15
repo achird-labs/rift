@@ -1,0 +1,20 @@
+{
+  "protocol": "http",
+  "name": "core · FSM two-step",
+  "_rift": { "flowState": { "backend": "inmemory" } },
+  "stubs": [
+    {
+      "scenarioName": "s",
+      "requiredScenarioState": "Started",
+      "newScenarioState": "done",
+      "predicates": [{ "equals": { "path": "/go" } }],
+      "responses": [{ "is": { "statusCode": 201, "body": "first" } }]
+    },
+    {
+      "scenarioName": "s",
+      "requiredScenarioState": "done",
+      "predicates": [{ "equals": { "path": "/go" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "second" } }]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "imposters": [
+    {
+      "port": 4990,
+      "protocol": "http",
+      "stubs": [
+        {
+          "predicates": [
+            {
+              "and": [
+                {
+                  "matches": {
+                    "path": "[invalid("
+                  }
+                }
+              ]
+            }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "protocol": "http",
+  "name": "diagnostics · recordMatches",
+  "recordMatches": true,
+  "stubs": [
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/1"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "ok"
+          }
+        }
+      ]
+    }
+  ]
+}

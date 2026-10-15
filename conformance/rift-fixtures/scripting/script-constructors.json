@@ -1,0 +1,18 @@
+{
+  "protocol": "http",
+  "name": "scripting · Script API v2 result constructors (delay/reset/pass, rift#442)",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/delay" } }],
+      "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { delay(300) }" } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/reset" } }],
+      "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { reset() }" } } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/pass" } }],
+      "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { pass() }" } } }]
+    }
+  ]
+}

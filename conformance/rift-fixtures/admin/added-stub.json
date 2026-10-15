@@ -1,0 +1,1 @@
+{ "stub": { "predicates": [{ "equals": { "path": "/added" } }], "responses": [{ "is": { "statusCode": 200, "body": "added" } }] } }

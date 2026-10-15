@@ -1,0 +1,34 @@
+{
+  "protocol": "http",
+  "name": "behaviors · copy / lookup / wait / shellTransform / decorate",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/ch" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "rid=${rid}" }, "_behaviors": { "copy": [{ "from": { "headers": "X-Request-Id" }, "into": "${rid}", "using": { "method": "regex", "selector": ".*" } }] } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/cj" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "who=${who}" }, "_behaviors": { "copy": [{ "from": "body", "into": "${who}", "using": { "method": "jsonpath", "selector": "$.user.name" } }] } }]
+    },
+    {
+      "predicates": [{ "matches": { "path": "^/cat/[0-9]+$" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "name=${row}[name]" }, "_behaviors": { "lookup": [{ "key": { "from": "path", "using": { "method": "regex", "selector": "/cat/([0-9]+)" } }, "fromDataSource": { "csv": { "path": "data/products.csv", "keyColumn": "id" } }, "into": "${row}" }] } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/wait" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "waited" }, "_behaviors": { "wait": "function(){ return 600; }" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/sh" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "original" }, "_behaviors": { "shellTransform": "printf transformed" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/cc" } }],
+      "responses": [{ "is": { "statusCode": 200, "headers": { "Set-Cookie": ["a=1", "b=2"] }, "body": "x=${q}" }, "_behaviors": { "copy": [{ "from": { "query": "q" }, "into": "${q}", "using": { "method": "regex", "selector": ".*" } }] } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/dec" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "orig" }, "_behaviors": { "decorate": "config => { config.response.body = \"decorated\"; }" } }]
+    }
+  ]
+}

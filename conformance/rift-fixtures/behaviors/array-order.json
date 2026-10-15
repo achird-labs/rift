@@ -1,0 +1,47 @@
+{
+  "protocol": "http",
+  "name": "behaviors · a behaviors array is an ordered program; the object form runs in Mountebank's order (rift#1198, rift#1199)",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/decorate-twice" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "x" }, "behaviors": [
+        { "decorate": "config => { config.response.body += '1'; }" },
+        { "decorate": "config => { config.response.body += '2'; }" }
+      ] }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/wait-twice" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "waited" }, "behaviors": [{ "wait": 300 }, { "wait": 300 }] }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/decorate-then-copy" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "${T}" }, "behaviors": [
+        { "decorate": "config => { config.response.body = config.response.body.replace('${T}', 'DEC-WON'); }" },
+        { "copy": { "from": { "headers": "X-T" }, "into": "${T}", "using": { "method": "regex", "selector": ".*" } } }
+      ] }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/object-order" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "orig" }, "_behaviors": {
+        "decorate": "config => { config.response.body += 'D'; }",
+        "shellTransform": "printf S"
+      } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/object-copy-lookup" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "q=${Q} name=${R}[name]" }, "_behaviors": {
+        "copy": { "from": { "headers": "X-Q" }, "into": "${Q}", "using": { "method": "regex", "selector": ".*" } },
+        "lookup": { "key": { "from": { "query": "id" }, "using": { "method": "regex", "selector": ".*" } }, "fromDataSource": { "csv": { "path": "data/products.csv", "keyColumn": "id" } }, "into": "${R}" }
+      } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/multi-copy" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "a=${A} b=${B}" }, "_behaviors": {
+        "copy": [
+          { "from": "path", "into": "${A}", "using": { "method": "regex", "selector": "multi" } },
+          { "from": "method", "into": "${B}", "using": { "method": "regex", "selector": ".+" } }
+        ]
+      } }]
+    }
+  ]
+}

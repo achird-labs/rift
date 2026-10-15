@@ -1,0 +1,20 @@
+{
+  "port": 4819,
+  "protocol": "http",
+  "name": "proxy · generror proxy",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:4818",
+            "mode": "proxyOnce",
+            "predicateGenerators": [
+              { "inject": "function (config) { throw new Error(\"boom\"); }" }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
