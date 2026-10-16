@@ -57,6 +57,18 @@ record.
   `ListenAddr`, `admin_listen_addr`, `AdminApiServer::listen` and `RunningAdminApi::local_addrs` are
   new.
 
+- **Imposters created without a `host` now bind the server's `--host` (`MB_HOST`), as Mountebank
+  does** (#1517). This is a behaviour and security change: `--host 127.0.0.1` now confines
+  imposters to loopback too, where before they listened on every interface even when the admin API
+  was confined. It applies to every door: `POST`/`PUT /imposters`, auto-assigned ports,
+  `--configfile` and `--datadir` startup. An imposter's own `host` still wins, and the inherited host
+  is never printed or stored, so a datadir imposter follows the `--host` of the server that loads it.
+  `--local-only` does not narrow imposter binds. A test rig that confines the admin API with
+  `--host 127.0.0.1` but reaches imposters from another machine or a container
+  (`host.docker.internal`) must give those imposters `"host": "0.0.0.0"` or drop `--host`. For
+  embedders, `ImposterManager::with_default_host` is new; a manager injected through
+  `ServerBuilder::manager` does not inherit `--host`.
+
 ### Fixed
 
 - **An explicit `"host": "::"` is dual-stack on every platform** (#1514), including Windows and

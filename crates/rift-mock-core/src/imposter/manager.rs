@@ -396,6 +396,9 @@ pub struct ImposterManager {
     /// (issue #143). `false` (the default) keeps the all-or-nothing behavior. See
     /// [`Self::with_serve_unbound`].
     serve_unbound: bool,
+    /// The `host` an imposter binds when its config names none (issue #1517). See
+    /// [`Self::with_default_host`].
+    default_host: Option<Arc<str>>,
     /// Upper bound on how long `delete` waits for a torn-down imposter's in-flight connections to
     /// drain before returning anyway with a warning (issue #596). Never configurable at runtime;
     /// overridable only in tests via [`Self::with_conn_drain`].
@@ -440,6 +443,7 @@ impl ImposterManager {
             exchange_inspector_provider: None,
             accept_runtimes: None,
             serve_unbound: false,
+            default_host: None,
             conn_drain: DEFAULT_CONN_DRAIN,
             event_bus: Arc::new(super::events::AdminEventBus::new()),
         }
@@ -468,6 +472,28 @@ impl ImposterManager {
     pub fn with_serve_unbound(mut self, serve_unbound: bool) -> Self {
         self.serve_unbound = serve_unbound;
         self
+    }
+
+    /// The `host` an imposter binds when its config names none: Mountebank's `--host`, which every
+    /// host-less imposter inherits (`imposter.js:194-195`, issue #1517). An imposter's own `host`
+    /// always wins.
+    ///
+    /// Never written into the config: it is a property of this server, not of the imposter, so
+    /// `GET`, `?replayable`, `rift save`, the datadir and any replicated stored bytes are unchanged
+    /// by it, and a datadir imposter follows the `--host` of whichever server loads it. `None` (the
+    /// default) binds every interface, dual-stack `[::]` (#1514).
+    ///
+    /// `rift`'s own server sets this from `--host` only on the manager it builds itself; an
+    /// embedder injecting its own manager decides for itself.
+    #[must_use]
+    pub fn with_default_host(mut self, host: Option<String>) -> Self {
+        self.default_host = host.map(Arc::from);
+        self
+    }
+
+    /// The host an imposter with this config binds: its own `host`, else [`Self::with_default_host`].
+    fn bind_host_for<'a>(&'a self, config: &'a ImposterConfig) -> Option<&'a str> {
+        config.host.as_deref().or(self.default_host.as_deref())
     }
 
     /// Fan imposter accept loops out across per-core worker runtimes (RFC-712, issue #745):
@@ -906,10 +932,11 @@ impl ImposterManager {
         };
 
         // Owned (not borrowed from `config`): the per-core fan-out (#745) rebinds listeners
-        // after `config` has moved into the imposter. `None` is Mountebank's default, dual-stack
-        // `[::]` (#1514), and is never written back into `config.host`: the config is what is
-        // printed, persisted and replicated, and Mountebank prints no host either.
-        let bind_host: Option<String> = config.host.clone();
+        // after `config` has moved into the imposter. Neither the server default host (#1517) nor
+        // `None`, Mountebank's dual-stack `[::]` (#1514), is ever written back into `config.host`:
+        // the config is what is printed, persisted and replicated, and Mountebank prints no host
+        // either.
+        let bind_host: Option<String> = self.bind_host_for(&config).map(str::to_owned);
         let explicit_port = config.explicit_port();
 
         // One fallible bind phase covering BOTH binds — the port probe and the fan-out listener
@@ -1230,7 +1257,7 @@ impl ImposterManager {
             .config
             .port
             .ok_or_else(|| ImposterError::BindError(0, anyhow::anyhow!("imposter has no port")))?;
-        let bind_host = imposter.config.host.as_deref();
+        let bind_host = self.bind_host_for(&imposter.config);
         // Re-resolved rather than cached: an https imposter must not silently start serving
         // cleartext on rebind if its cert has since become unreadable.
         let tls_acceptors = if imposter.config.protocol.eq_ignore_ascii_case("https") {
@@ -7971,6 +7998,129 @@ mod tests {
                 "the retry must see the same method/path/query/headers/body as the first attempt"
             );
 
+            manager.delete_all().await;
+        }
+    }
+
+    // =========================================================================
+    // Issue #1517: host-less imposters inherit the server's `--host`
+    // =========================================================================
+    mod default_host {
+        use super::*;
+        use std::net::{IpAddr, SocketAddr};
+        use std::time::Duration;
+
+        fn has_ipv6_loopback() -> bool {
+            std::net::TcpListener::bind("[::1]:0").is_ok()
+        }
+
+        fn accepts(ip: IpAddr, port: u16) -> bool {
+            std::net::TcpStream::connect_timeout(&SocketAddr::new(ip, port), Duration::from_secs(2))
+                .is_ok()
+        }
+
+        const V4_LOOPBACK: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        const V6_LOOPBACK: IpAddr = IpAddr::V6(std::net::Ipv6Addr::LOCALHOST);
+
+        /// A loopback-confined imposter answers `127.0.0.1` and not `[::1]`, which the dual-stack
+        /// `[::]` a host-less imposter otherwise binds would answer. Without IPv6 the two cannot
+        /// be told apart this way, so the `[::1]` half is skipped.
+        fn assert_v4_loopback_only(port: u16) {
+            assert!(accepts(V4_LOOPBACK, port), "127.0.0.1:{port} must answer");
+            if has_ipv6_loopback() {
+                assert!(
+                    !accepts(V6_LOOPBACK, port),
+                    "[::1]:{port} must refuse: the imposter inherited 127.0.0.1"
+                );
+            }
+        }
+
+        fn host_less(port: Option<u16>) -> ImposterConfig {
+            let mut v = json!({"protocol": "http", "stubs": [stub_json("inherited")]});
+            if let Some(p) = port {
+                v["port"] = json!(p);
+            }
+            imposter_cfg(v)
+        }
+
+        #[tokio::test]
+        async fn a_host_less_imposter_binds_the_default_host() {
+            let manager = ImposterManager::new().with_default_host(Some("127.0.0.1".to_string()));
+            for explicit in [Some(free_port()), None] {
+                let port = manager
+                    .create_imposter(host_less(explicit))
+                    .await
+                    .expect("create");
+                assert_v4_loopback_only(port);
+                assert_eq!(
+                    manager.imposters.get(port).expect("registered").config.host,
+                    None,
+                    "the inherited host is never written into the config"
+                );
+            }
+            manager.delete_all().await;
+        }
+
+        #[tokio::test]
+        async fn an_imposter_host_overrides_the_default_host() {
+            if !has_ipv6_loopback() {
+                return;
+            }
+            let manager = ImposterManager::new().with_default_host(Some("127.0.0.1".to_string()));
+            let port = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "host": "::", "stubs": [stub_json("own")]
+                })))
+                .await
+                .expect("create");
+            assert!(
+                accepts(V6_LOOPBACK, port),
+                "the imposter's own `::` wins over the default 127.0.0.1"
+            );
+            manager.delete_all().await;
+        }
+
+        #[tokio::test]
+        async fn no_default_host_keeps_the_dual_stack_bind() {
+            if !has_ipv6_loopback() {
+                return;
+            }
+            let manager = ImposterManager::new().with_default_host(None);
+            let port = manager
+                .create_imposter(host_less(None))
+                .await
+                .expect("create");
+            assert!(accepts(V4_LOOPBACK, port) && accepts(V6_LOOPBACK, port));
+            manager.delete_all().await;
+        }
+
+        // The #143 heal binds where the create would have, so an imposter that could not bind at
+        // apply time does not come back on every interface once its port frees up.
+        #[tokio::test]
+        async fn a_rebind_uses_the_default_host() {
+            // A plain (non-reusable) listener on the exact address the imposter will bind, so the
+            // reusable bind cannot join it.
+            let squatter = std::net::TcpListener::bind("127.0.0.1:0").expect("squat");
+            let port = squatter.local_addr().expect("squat addr").port();
+            let manager = ImposterManager::new()
+                .with_serve_unbound(true)
+                .with_default_host(Some("127.0.0.1".to_string()));
+            manager
+                .apply_config(vec![host_less(Some(port))])
+                .await
+                .expect("apply validates");
+            assert!(
+                !manager.imposters.get(port).expect("registered").is_bound(),
+                "the squatted port leaves the imposter unbound"
+            );
+
+            drop(squatter);
+            manager
+                .apply_config(vec![host_less(Some(port))])
+                .await
+                .expect("apply validates");
+            assert!(manager.imposters.get(port).expect("registered").is_bound());
+            assert_v4_loopback_only(port);
             manager.delete_all().await;
         }
     }

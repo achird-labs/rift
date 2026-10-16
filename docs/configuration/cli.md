@@ -169,7 +169,7 @@ rift [OPTIONS] [COMMAND]
 
 Server options:
       --port <PORT>                Admin API port [default: 2525]
-      --host <HOST>                IP address to bind the admin API to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`) [default: every interface, IPv6 and IPv4]
+      --host <HOST>                IP address to bind the admin API and host-less imposters to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`) [default: every interface, IPv6 and IPv4]
       --configfile <FILE>          Load imposters from a JSON/YAML file on startup (sugar for --imposters file:<FILE>)
       --imposters <URI[,URI...]>   Load imposters from one or more source URIs: file:<path>, a bare path, or https://… (see Imposter Sources below)
       --datadir <DIR>              Directory for persistent imposter storage
@@ -385,6 +385,11 @@ it on any bind. Loopback (`127.0.0.0/8`, `::1`) satisfies it with no key. `0.0.0
 unspecified addresses, not loopback, so they are flagged — as is any specific off-host interface
 such as `10.0.0.5`.
 
+`--host` also confines imposters, as in Mountebank: an imposter created without a `host` binds the
+server's `--host`, so `--host 127.0.0.1` keeps host-less imposters on loopback as well as the admin
+API. An imposter that names its own `host` (`"host": "0.0.0.0"`) binds that instead. `--local-only`
+does not narrow imposter binds; it confines the admin API and `/metrics` only.
+
 The same rule applies at every door onto the admin plane, so an embedded host gets it too: the
 C-ABI `rift_serve_admin` accepts `"requireAdminAuth": true` in its options, and an embedder building
 an `AdminApiServer` directly gets it from `.with_require_admin_auth(true)`.
@@ -502,7 +507,7 @@ wins over the built-in default (and over an `--rcfile` value — see [RC file](#
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `MB_PORT` | Admin API port | `2525` |
-| `MB_HOST` | Admin API bind IP address (IPv4, or IPv6 `::1` / `[::1]`) | every interface, IPv6 and IPv4 (`[::]` dual-stack; `0.0.0.0` on a host without IPv6) |
+| `MB_HOST` | Admin API and host-less imposter bind IP address (IPv4, or IPv6 `::1` / `[::1]`) | every interface, IPv6 and IPv4 (`[::]` dual-stack; `0.0.0.0` on a host without IPv6) |
 | `MB_CONFIGFILE` | Imposter config file | |
 | `RIFT_IMPOSTERS` | Imposter source URIs (env alias of `--imposters`) | |
 | `MB_DATADIR` | Persistent storage directory | |
