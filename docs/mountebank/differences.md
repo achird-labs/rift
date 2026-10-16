@@ -254,6 +254,14 @@ prints that inherited host. Mountebank writes it into the imposter's `imposter.j
 stores only what was posted, so a Rift datadir imposter without a `host` follows the `--host` of the
 server that loads it.
 
+## `PUT /imposters` that fails part-way
+
+Rift does not delete the running set before a `PUT /imposters`. A port that fails to bind is
+reported in `failed` and leaves the others applied, where Mountebank deletes every imposter first
+and is left with none. A successful `PUT` gives every imposter in the body fresh runtime state, as
+Mountebank's recreate does; `?reconcile=true` keeps the state of unchanged imposters instead (see
+[`PUT /imposters`](../api/index.md#put-imposters)).
+
 ## Elsewhere in these docs
 
 Each of these is described where the feature is:

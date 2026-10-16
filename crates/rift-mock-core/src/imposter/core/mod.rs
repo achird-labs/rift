@@ -550,6 +550,11 @@ pub struct Imposter {
     pub(crate) conn_tracker: tokio_util::task::TaskTracker,
     /// Flow store for Rift extensions (stateful scripting)
     pub flow_store: Arc<dyn FlowStore>,
+    /// Whether `flow_store` is the built-in in-memory store rather than a
+    /// [`FlowStoreProvider`](crate::extensions::flow_state::FlowStoreProvider)'s. Only the built-in
+    /// one is this imposter's to clear on a runtime reset (issue #1518): a recreate would get the
+    /// provider's store back from the provider.
+    flow_store_is_default: bool,
     /// Pluggable response-cursor backend (issue #313); None = embedded per-stub cycler.
     pub(crate) sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
     /// Cached stub-overlap analysis warnings (issue #423). `None` = dirty; recomputed lazily on the
@@ -641,9 +646,11 @@ impl Imposter {
         // fallback — so one wrap
         // counts `rift_flow_state_ops_total` for all of them. The decorator forwards every trait
         // method, including `is_blocking`, so backend behaviour is unchanged.
+        let provided = provider.and_then(|provider| provider.provide(&config));
+        let flow_store_is_default = provided.is_none();
         let flow_store: Arc<dyn FlowStore> =
             Arc::new(crate::extensions::flow_state::MeteredFlowStore::new(
-                Self::create_flow_store(&config, provider)?,
+                Self::create_flow_store(&config, provided)?,
             ));
 
         let enabled = config.enabled;
@@ -669,6 +676,7 @@ impl Imposter {
             serve_handles: Mutex::new(Vec::new()),
             conn_tracker: tokio_util::task::TaskTracker::new(),
             flow_store,
+            flow_store_is_default,
             sequencer,
             stub_warnings: ArcSwapOption::empty(),
             imposter_level: OnceLock::new(),
@@ -878,9 +886,11 @@ impl Imposter {
         });
     }
 
-    /// Create the flow store: a [`FlowStoreProvider`](crate::extensions::flow_state::FlowStoreProvider) store if one is installed and supplies one,
-    /// otherwise an in-memory store sized by `_rift.flowState` (issue #1463 removed the named
-    /// `backend` selector; a leftover `backend` key decodes into `extra` and selects nothing).
+    /// Create the flow store: the store a
+    /// [`FlowStoreProvider`](crate::extensions::flow_state::FlowStoreProvider) supplied
+    /// (`provided`), if any, otherwise an in-memory store sized by `_rift.flowState` (issue #1463
+    /// removed the named `backend` selector; a leftover `backend` key decodes into `extra` and
+    /// selects nothing).
     /// Every other imposter gets a default in-memory store too (issue #1504): the admin
     /// flow-state and scenario routes and the FFI write the store outside request matching, and
     /// stubs can gain scenarios or scripts later via an in-place `PUT/POST /imposters/:port/stubs`,
@@ -888,11 +898,9 @@ impl Imposter {
     /// branches remain only to log what an operator relying on the default should know.
     fn create_flow_store(
         config: &ImposterConfig,
-        provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
+        provided: Option<Arc<dyn FlowStore>>,
     ) -> anyhow::Result<Arc<dyn FlowStore>> {
-        if let Some(provider) = provider
-            && let Some(store) = provider.provide(config)
-        {
+        if let Some(store) = provided {
             // A provider store wins over any built-in selection, including an explicit
             // `_rift.flowState` — log it so an operator whose config was overridden can see why.
             if config
