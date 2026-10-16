@@ -118,8 +118,8 @@ async fn local_only_restricts_the_metrics_listener_too() {
     server.shutdown().await;
 }
 
-// The converse: without `--local-only`, metrics keeps binding every interface. `--host` alone must
-// NOT relocate it — that would move the listener for anyone who binds the admin plane to a specific
+// The converse: without `--local-only`, metrics keeps binding every interface — `[::]` dual-stack,
+// or `0.0.0.0` on a host without IPv6 (#1528). `--host` alone must NOT relocate it — that would move the listener for anyone who binds the admin plane to a specific
 // interface, which is a separate decision from the one above.
 #[tokio::test]
 async fn without_local_only_metrics_still_binds_every_interface() {
@@ -139,6 +139,12 @@ async fn without_local_only_metrics_still_binds_every_interface() {
         metrics.ip().is_unspecified(),
         "--host must not relocate the metrics listener, got {metrics}"
     );
+    if std::net::TcpListener::bind("[::]:0").is_ok() {
+        assert!(
+            metrics.is_ipv6(),
+            "a host with IPv6 binds /metrics on [::], got {metrics}"
+        );
+    }
 
     server.shutdown().await;
 }
@@ -172,7 +178,10 @@ async fn require_admin_auth_accepts_a_non_loopback_bind_with_a_key() {
 #[tokio::test]
 async fn the_default_keyless_non_loopback_bind_still_starts() {
     let cli = Cli::parse_from(["rift", "--port", "0", "--metrics-port", "0"]);
-    assert_eq!(cli.host, "0.0.0.0", "the default --host must stay 0.0.0.0");
+    assert_eq!(
+        cli.host, None,
+        "no --host by default: every interface, IPv6 and IPv4 (#1528)"
+    );
     assert!(
         !cli.require_admin_auth,
         "strict mode must be opt-in, never the default"

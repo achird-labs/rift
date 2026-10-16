@@ -4097,6 +4097,122 @@ fn ffi_clear_proxy_recordings_restarts_an_unrecorded_cycle() {
         assert_eq!([next(), next()], ["A", "B"]);
         assert_eq!(rift_clear_proxy_recordings(h, port), 0);
         assert_eq!([next(), next(), next()], ["A", "B", "C"]);
+
+        assert_eq!(rift_delete_all(h), 0);
+        rift_stop(h);
+    }
+}
+
+/// #1515: `rift_update_stub` with `{"index"}` restarts the stub's response cycle, even with an
+/// identical stub, as Mountebank's `overwriteAtIndex` does; `{"id"}` keeps it.
+#[test]
+fn ffi_update_stub_by_index_restarts_the_cycle_and_by_id_keeps_it() {
+    unsafe {
+        let h = rift_start();
+        assert!(!h.is_null(), "rift_start returned null");
+        let stub = r#"{ "id": "s", "responses": [
+            { "is": { "body": "A" } }, { "is": { "body": "B" } }, { "is": { "body": "C" } } ] }"#;
+        let config = cstr(&format!(r#"{{ "protocol": "http", "stubs": [{stub}] }}"#));
+        let port = rift_create_imposter(h, config.as_ptr());
+        assert_ne!(port, 0, "auto-assigned port");
+        let rt = rt();
+        let next = |n: usize| -> Vec<String> {
+            rt.block_on(async {
+                let client = reqwest::Client::builder()
+                    .pool_max_idle_per_host(0)
+                    .build()
+                    .expect("client");
+                let mut bodies = Vec::new();
+                for _ in 0..n {
+                    bodies.push(
+                        client
+                            .get(format!("http://127.0.0.1:{port}/"))
+                            .send()
+                            .await
+                            .expect("get")
+                            .text()
+                            .await
+                            .expect("text"),
+                    );
+                }
+                bodies
+            })
+        };
+
+        assert_eq!(next(2), ["A", "B"]);
+        let same = cstr(stub);
+        assert_eq!(
+            rift_update_stub(h, port, cstr(r#"{"index":0}"#).as_ptr(), same.as_ptr()),
+            0
+        );
+        assert_eq!(next(3), ["A", "B", "C"], "by index: the cycle starts over");
+
+        assert_eq!(next(1), ["A"]);
+        assert_eq!(
+            rift_update_stub(h, port, cstr(r#"{"id":"s"}"#).as_ptr(), same.as_ptr()),
+            0
+        );
+        assert_eq!(next(1), ["B"], "by id: the cycle continues");
+
+        assert_eq!(rift_delete_all(h), 0);
+        rift_stop(h);
+    }
+}
+
+/// #1518: `PUT /imposters` now resets the imposters in its body, as Mountebank's recreate does, but
+/// `rift_apply_config` is the reconcile and stays one: an identical config keeps the cursor and
+/// the journal.
+#[test]
+fn ffi_apply_config_with_an_identical_config_keeps_runtime_state() {
+    unsafe {
+        let h = rift_start();
+        assert!(!h.is_null(), "rift_start returned null");
+        let config = cstr(
+            r#"{ "protocol": "http", "recordRequests": true, "stubs": [{ "responses": [
+            { "is": { "body": "A" } }, { "is": { "body": "B" } }, { "is": { "body": "C" } } ] }] }"#,
+        );
+        let port = rift_create_imposter(h, config.as_ptr());
+        assert_ne!(port, 0, "auto-assigned port");
+        let rt = rt();
+        let next = |n: usize| -> Vec<String> {
+            rt.block_on(async {
+                let client = reqwest::Client::builder()
+                    .pool_max_idle_per_host(0)
+                    .build()
+                    .expect("client");
+                let mut bodies = Vec::new();
+                for _ in 0..n {
+                    bodies.push(
+                        client
+                            .get(format!("http://127.0.0.1:{port}/"))
+                            .send()
+                            .await
+                            .expect("get")
+                            .text()
+                            .await
+                            .expect("text"),
+                    );
+                }
+                bodies
+            })
+        };
+
+        assert_eq!(next(2), ["A", "B"]);
+        let same = cstr(&format!(
+            r#"{{ "imposters": [{{ "port": {port}, "protocol": "http", "recordRequests": true,
+            "stubs": [{{ "responses": [
+            {{ "is": {{ "body": "A" }} }}, {{ "is": {{ "body": "B" }} }}, {{ "is": {{ "body": "C" }} }} ] }}] }}] }}"#
+        ));
+        let report = take_json(rift_apply_config(h, same.as_ptr()));
+        let v: serde_json::Value = serde_json::from_str(&report).expect("report json");
+        assert_eq!(v["failed"], serde_json::json!([]), "{v}");
+        let detail: serde_json::Value =
+            serde_json::from_str(&take_json(rift_get_imposter(h, port, std::ptr::null())))
+                .expect("detail json");
+        assert_eq!(detail["numberOfRequests"], 2, "{detail}");
+        assert_eq!(next(1), ["C"], "the cursor is kept");
+
+        assert_eq!(rift_delete_all(h), 0);
         rift_stop(h);
     }
 }

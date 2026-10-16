@@ -647,6 +647,719 @@
           "path": "/imposters/4545/requests"
         }
       ]
+    },
+    {
+      "name": "admin_api: PUT /imposters with the same document restarts every imposter's cycles and journal (#1518)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/x"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "A"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "B"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "C"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/y"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "P"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "Q"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "R"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/x"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "K"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "L"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "times": 2
+        },
+        {
+          "do": "send",
+          "port": 4546,
+          "path": "/x",
+          "times": 1
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "recordRequests": true,
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "equals": {
+                          "path": "/x"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "A"
+                        }
+                      },
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "B"
+                        }
+                      },
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "C"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "predicates": [
+                      {
+                        "equals": {
+                          "path": "/y"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "P"
+                        }
+                      },
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "Q"
+                        }
+                      },
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "R"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "port": 4546,
+                "protocol": "http",
+                "recordRequests": true,
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "equals": {
+                          "path": "/x"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "K"
+                        }
+                      },
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "L"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "times": 3
+        },
+        {
+          "do": "send",
+          "port": 4546,
+          "path": "/x",
+          "times": 1
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4546"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: PUT /imposters with one stub changed restarts the untouched stubs' cycles and the journal (#1518)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/x"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "A"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "B"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "C"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/y"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "P"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "Q"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "R"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/x"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "K"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "L"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "times": 2
+        },
+        {
+          "do": "send",
+          "port": 4546,
+          "path": "/x",
+          "times": 1
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "recordRequests": true,
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "equals": {
+                          "path": "/x"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "A"
+                        }
+                      },
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "B"
+                        }
+                      },
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "C"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "predicates": [
+                      {
+                        "equals": {
+                          "path": "/y"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "P2"
+                        }
+                      },
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "Q2"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "port": 4546,
+                "protocol": "http",
+                "recordRequests": true,
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "equals": {
+                          "path": "/x"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "K"
+                        }
+                      },
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "L"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/y",
+          "times": 1
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "times": 3
+        },
+        {
+          "do": "send",
+          "port": 4546,
+          "path": "/x",
+          "times": 1
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4546"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: PUT /imposters deletes an imposter left out of the body and resets the rest (#1518)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/x"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "A"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "B"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "C"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/y"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "P"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "Q"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "R"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/x"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "K"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "L"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "times": 2
+        },
+        {
+          "do": "send",
+          "port": 4546,
+          "path": "/x",
+          "times": 1
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "recordRequests": true,
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "equals": {
+                          "path": "/x"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "A"
+                        }
+                      },
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "B"
+                        }
+                      },
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "C"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "predicates": [
+                      {
+                        "equals": {
+                          "path": "/y"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "P"
+                        }
+                      },
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "Q"
+                        }
+                      },
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "R"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "times": 3
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4546"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters"
+        }
+      ]
     }
   ]
 }

@@ -99,6 +99,10 @@ pub mod gateway;
 /// (issue #19). The gateway above addresses imposters by port; this addresses
 /// them by what the request says.
 pub mod front_door;
+// Where the admin, metrics and front-door listeners bind (issue #1528); `ListenAddr` is re-exported
+// from `server`.
+pub(crate) mod listen;
+
 // CLI surface + ServerBuilder + metrics server; the `rift` binary is a thin caller
 pub mod server;
 

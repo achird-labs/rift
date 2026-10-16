@@ -123,6 +123,8 @@ features = ["test-util"]
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 # `WebSocketStream` is a `Stream`/`Sink`; the combinators come from here.
 futures-util = "0.3"
+# Reads `IPV6_V6ONLY` back off a bound listener (issue #1528).
+socket2 = "0.6"
 # Corpus lint gate (issue #460): lint every vendored fixture via the library API.
 rift-lint = { path = "../rift-lint", version = "0.1.0" }
 # Unread-key gate (issue #1343): reports every key a derived `Deserialize` skips.

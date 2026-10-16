@@ -83,7 +83,8 @@ pub trait ResponseSequencer: Send + Sync {
     /// Return the upcoming response index without advancing.
     fn peek(&self, key: SequenceKey<'_>, response_count: usize, repeats: &[u32]) -> Result<usize>;
     /// Reset cursors: one stub's (`Some(stub_key)`) or every cursor on the port (`None`).
-    /// Also the GC hook — called on stub delete, bulk stub replace, and imposter teardown.
+    /// Also the GC hook — called on stub delete, a stub replace by index, bulk stub replace, and
+    /// imposter teardown.
     fn reset_scope(&self, port: u16, stub_key: Option<&str>);
 }
 ```

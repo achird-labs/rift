@@ -176,11 +176,12 @@ pub fn apply_rcfile_defaults_reporting(
                     cli.port = p;
                 }
             }
+            // Only when no `--host`/`MB_HOST` was given: an explicit `0.0.0.0` is a choice too.
             "host" => {
-                if cli.host == "0.0.0.0"
+                if cli.host.is_none()
                     && let Some(h) = val.as_str()
                 {
-                    cli.host = h.to_string();
+                    cli.host = Some(h.to_string());
                 }
             }
             "logLevel" | "loglevel" => {
@@ -760,6 +761,23 @@ mod tests {
         let mut cli = Cli::try_parse_from(["rift"]).expect("cli parse");
         apply_rcfile_defaults(&mut cli, &rcfile).expect("unknown keys are not fatal");
         assert!(logs_contain("unsupported key 'bogusKey'"));
+    }
+
+    // Issue #1528: an rcfile `host` applies only when no `--host` was given. It used to compare
+    // against the old default literal, so an explicit `--host 0.0.0.0` was overridden.
+    #[test]
+    fn rcfile_host_applies_only_when_host_is_unset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rcfile = dir.path().join("rift.rc");
+        std::fs::write(&rcfile, r#"{"host": "10.0.0.1"}"#).expect("write rcfile");
+
+        let mut unset = cli(&[]);
+        apply_rcfile_defaults(&mut unset, &rcfile).expect("applies");
+        assert_eq!(unset.host.as_deref(), Some("10.0.0.1"));
+
+        let mut explicit = cli(&["--host", "0.0.0.0"]);
+        apply_rcfile_defaults(&mut explicit, &rcfile).expect("applies");
+        assert_eq!(explicit.host.as_deref(), Some("0.0.0.0"));
     }
 
     // Issue #1137: `rift save --host ::1` built `http://::1:2525/...`, which no client can parse.

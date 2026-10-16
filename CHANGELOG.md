@@ -23,6 +23,13 @@ record.
   added to existing stubs, and restarts every remaining stub's response cycle**, as Mountebank does
   (#1519). Any `is` response carrying a numeric `_proxyResponseTime` is removed, whoever wrote it,
   and a stub left with no responses goes. Recorded requests are kept.
+- **`PUT /imposters` now resets the runtime state of every imposter in the body, as Mountebank's
+  delete-and-recreate does** (#1518): response cycles, recorded requests and `numberOfRequests`,
+  injection state, scenario and flow state, and saved `proxyOnce` responses. The reset is in place,
+  after the reconcile, so listeners stay bound and a port that fails still leaves the rest applied.
+  Pass `?reconcile=true` to keep the previous behaviour, which leaves unchanged imposters' state
+  alone; older engines ignore the parameter and reconcile, so a client can send it unconditionally.
+  `POST /admin/reload` and `rift_apply_config` are unchanged.
 
 - **An imposter without `host` now listens dual-stack on `::`, as Mountebank does** (#1514),
   falling back to `0.0.0.0` on a host without IPv6. It answers on `::1` too, so a `localhost`
@@ -31,6 +38,11 @@ record.
   `::ffff:127.0.0.1`, as Mountebank does: an `ip` predicate written `127.0.0.1` against such an
   imposter must become `::ffff:127.0.0.1`, or the imposter must set `"host": "0.0.0.0"` (still IPv4
   only). The printed and stored imposter still carries no `host`.
+
+- **Replacing a stub by index restarts its response cycle, as Mountebank does** (#1515), even when
+  the new stub is identical (`PUT /imposters/:port/stubs/:index`, `rift_update_stub` with
+  `{"index"}`, `ImposterManager::replace_stub`), and resets a `ResponseSequencer`'s cursor for it.
+  Replacing by id still keeps the cycle.
 
 - **An XPath selector that selects an element now reads its first child node, as Mountebank does**
   (#1495), rather than all of the element's text. `//a` on `<a>x<b/>y</a>` reads `x`; an element
@@ -51,6 +63,17 @@ record.
   (#1501), rather than the lowest free port from 49152. The listener that learned the port serves
   it. On Linux the port comes from `ip_local_port_range` (32768–60999 by default), so it can be
   below 49152.
+
+- **With no `--host`, the admin API, `/metrics` and a bare-port `--front-door` now listen on every
+  IPv6 and IPv4 interface (`[::]` dual-stack), as Mountebank does** (#1528), falling back to
+  `0.0.0.0` on a host without IPv6. Rift now works on IPv6 and dual-stack Kubernetes clusters
+  without flags. `--local-only` listens on `::1` as well as `127.0.0.1`. An explicit `--host` binds
+  exactly that address, and an IPv6 `--host` is now dual-stack on every OS. The container images no
+  longer set `MB_HOST=0.0.0.0`. `GET /config` reports the `--host` flag as `options.host` (`null`
+  when unset), and an rcfile `host` no longer overrides an explicit `--host 0.0.0.0`. For embedders,
+  `Cli::host` is now `Option<String>` and `admin_bind_addr` returns `[::]:port` when it is unset;
+  `ListenAddr`, `admin_listen_addr`, `AdminApiServer::listen` and `RunningAdminApi::local_addrs` are
+  new.
 
 ### Fixed
 

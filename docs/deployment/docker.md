@@ -35,7 +35,8 @@ API, same imposter behaviour, same ports, same environment variables.
 
 Both are multi-arch (`linux/amd64`, `linux/arm64`). Version tags keep the leading `v` of the release
 tag. Both run as the unprivileged user `rift` (uid 1000) with `/data` as the working directory, and
-set `MB_PORT=2525`, `MB_HOST=0.0.0.0`, `MB_LOGLEVEL=info` and `RIFT_METRICS_PORT=9090`. The
+set `MB_PORT=2525`, `MB_LOGLEVEL=info` and `RIFT_METRICS_PORT=9090`. They leave `MB_HOST` unset, so
+the admin API and `/metrics` listen on every interface, IPv6 and IPv4 (`[::]` dual-stack). The
 entrypoint is `rift`, so arguments after the image name are `rift` flags or a subcommand.
 
 The images declare `EXPOSE 2525 9090 4545-4550 8080-8090` as documentation only — publish the ports
@@ -308,7 +309,7 @@ Three things that fail quietly in containers:
 
 - **The bind host.** `POST /intercept` defaults to `127.0.0.1`, which another container cannot
   reach. Name `"host": "0.0.0.0"` in the config block (as above); a bare `--intercept-port` binds
-  on `--host`, default `0.0.0.0`, and warns unless `--intercept-auth` is set. Keep the listener off
+  on the admin server's address (every interface when `--host` is unset), and warns unless `--intercept-auth` is set. Keep the listener off
   published ports unless something outside the network needs it.
 - **Key file permissions.** The image runs as uid 1000, and `intercept-ca generate` writes the key
   `0600` as you, so on a Linux bind mount rift cannot read it and fails at startup. For a CI or demo

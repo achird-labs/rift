@@ -443,6 +443,23 @@ impl StubState {
         }
     }
 
+    /// This stub with a fresh response cycle (#1515): the same content, content hash, load stamp
+    /// and recorded claim, but a new cycler and a new slot, so neither the embedded cursor nor a
+    /// sequencer keyed by slot carries over. In-flight requests holding the old state advance the
+    /// old cycler, never the new one.
+    #[must_use]
+    pub(crate) fn with_fresh_cycle(&self) -> Self {
+        Self {
+            stub: self.stub.clone(),
+            cycler: Arc::new(RuleCycler::new()),
+            slot: NEXT_STUB_SLOT.fetch_add(1, Ordering::Relaxed),
+            content_hash: self.content_hash.clone(),
+            loaded_at: self.loaded_at,
+            recorded_claim: self.recorded_claim.clone(),
+            cycle: None,
+        }
+    }
+
     /// [`with_stub`](Self::with_stub) for a stub whose content hash the caller already computed.
     #[must_use]
     pub(crate) fn with_stub_hashed(&self, stub: Stub, hash: u64) -> Self {
@@ -533,6 +550,11 @@ pub struct Imposter {
     pub(crate) conn_tracker: tokio_util::task::TaskTracker,
     /// Flow store for Rift extensions (stateful scripting)
     pub flow_store: Arc<dyn FlowStore>,
+    /// Whether `flow_store` is the built-in in-memory store rather than a
+    /// [`FlowStoreProvider`](crate::extensions::flow_state::FlowStoreProvider)'s. Only the built-in
+    /// one is this imposter's to clear on a runtime reset (issue #1518): a recreate would get the
+    /// provider's store back from the provider.
+    flow_store_is_default: bool,
     /// Pluggable response-cursor backend (issue #313); None = embedded per-stub cycler.
     pub(crate) sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
     /// Cached stub-overlap analysis warnings (issue #423). `None` = dirty; recomputed lazily on the
@@ -624,9 +646,11 @@ impl Imposter {
         // fallback — so one wrap
         // counts `rift_flow_state_ops_total` for all of them. The decorator forwards every trait
         // method, including `is_blocking`, so backend behaviour is unchanged.
+        let provided = provider.and_then(|provider| provider.provide(&config));
+        let flow_store_is_default = provided.is_none();
         let flow_store: Arc<dyn FlowStore> =
             Arc::new(crate::extensions::flow_state::MeteredFlowStore::new(
-                Self::create_flow_store(&config, provider)?,
+                Self::create_flow_store(&config, provided)?,
             ));
 
         let enabled = config.enabled;
@@ -652,6 +676,7 @@ impl Imposter {
             serve_handles: Mutex::new(Vec::new()),
             conn_tracker: tokio_util::task::TaskTracker::new(),
             flow_store,
+            flow_store_is_default,
             sequencer,
             stub_warnings: ArcSwapOption::empty(),
             imposter_level: OnceLock::new(),
@@ -865,9 +890,11 @@ impl Imposter {
         }));
     }
 
-    /// Create the flow store: a [`FlowStoreProvider`](crate::extensions::flow_state::FlowStoreProvider) store if one is installed and supplies one,
-    /// otherwise an in-memory store sized by `_rift.flowState` (issue #1463 removed the named
-    /// `backend` selector; a leftover `backend` key decodes into `extra` and selects nothing).
+    /// Create the flow store: the store a
+    /// [`FlowStoreProvider`](crate::extensions::flow_state::FlowStoreProvider) supplied
+    /// (`provided`), if any, otherwise an in-memory store sized by `_rift.flowState` (issue #1463
+    /// removed the named `backend` selector; a leftover `backend` key decodes into `extra` and
+    /// selects nothing).
     /// Every other imposter gets a default in-memory store too (issue #1504): the admin
     /// flow-state and scenario routes and the FFI write the store outside request matching, and
     /// stubs can gain scenarios or scripts later via an in-place `PUT/POST /imposters/:port/stubs`,
@@ -875,11 +902,9 @@ impl Imposter {
     /// branches remain only to log what an operator relying on the default should know.
     fn create_flow_store(
         config: &ImposterConfig,
-        provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
+        provided: Option<Arc<dyn FlowStore>>,
     ) -> anyhow::Result<Arc<dyn FlowStore>> {
-        if let Some(provider) = provider
-            && let Some(store) = provider.provide(config)
-        {
+        if let Some(store) = provided {
             // A provider store wins over any built-in selection, including an explicit
             // `_rift.flowState` — log it so an operator whose config was overridden can see why.
             if config
@@ -1616,9 +1641,9 @@ mod tests {
     }
 
     #[test]
-    fn replace_stub_preserves_response_cursor() {
-        // Gate for #287: the index-based in-place replace reuses the slot's cycler (via
-        // `with_stub`), so the response cursor survives a content swap rather than resetting.
+    fn replace_stub_restarts_the_response_cycle() {
+        // #1515: a replace by index is Mountebank's `overwriteAtIndex`, which rewraps the stub, so
+        // the new content starts its cycle over (it used to inherit the old cursor, #287).
         let cfg = serde_json::from_value(json!({
             "port": 0, "protocol": "http",
             "stubs": [{
@@ -1643,9 +1668,43 @@ mod tests {
         imp.replace_stub(0, new).expect("index in bounds");
         assert_eq!(
             served_body(&imp.snapshot().stubs()[0]),
-            "D",
-            "cursor (index 1) preserved and content swapped"
+            "C",
+            "cycle restarted"
         );
+    }
+
+    #[test]
+    fn replace_stub_with_identical_content_restarts_the_cycle() {
+        let stub = json!({
+            "predicates": [{ "equals": { "path": "/c" } }],
+            "responses": [
+                { "is": { "statusCode": 200, "body": "A" } },
+                { "is": { "statusCode": 200, "body": "B" } },
+                { "is": { "statusCode": 200, "body": "C" } }
+            ]
+        });
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http", "stubs": [stub.clone()]
+        }))
+        .unwrap();
+        let imp = Imposter::new(cfg).expect("test imposter");
+        let before = imp.snapshot().stubs()[0].clone();
+        assert_eq!(served_body(&before), "A");
+        assert_eq!(served_body(&before), "B");
+        imp.replace_stub(0, serde_json::from_value(stub).unwrap())
+            .expect("index in bounds");
+        let after = imp.snapshot().stubs()[0].clone();
+        assert_ne!(
+            after.slot, before.slot,
+            "a new slot, so slot-keyed cursors restart"
+        );
+        assert_eq!(
+            after.loaded_at(),
+            before.loaded_at(),
+            "#1294: identical content keeps its stamp"
+        );
+        let served: Vec<String> = (0..3).map(|_| served_body(&after)).collect();
+        assert_eq!(served, ["A", "B", "C"], "Mountebank: `A B · A B C`");
     }
 
     #[test]
