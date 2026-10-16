@@ -6,11 +6,12 @@ use std::path::PathBuf;
 /// `conformance/ported.txt` (EtaCassiopeia/rift-conformance#244), which drops it from that runner's
 /// external, embedded and lint legs, so every feature has exactly one runner during the move.
 /// Batch 1 (#1346) is 00, 01, 02 and 09, batch 2 (#1347) 06, 07, 11, 14, 17 and 18, batch 3 (#1348)
-/// 03, 05, 10, 19 and 21, batch 4 (#1349) 04, 08, 13 and 22, batch 5 (#1350) 20 and 16. Embedded
-/// mode leaves out `@upstream-trust` (09), `@front-door` (11, 16), `@rift-debug-env` (05, 19) and
-/// `@tls-flags` (20); container mode those, `@admin-isolated` (21), `@full-corpus-verify` (01),
-/// `@reload-engine` (11), `@connect-refused` (08, 21), `@host-port` (08), `@loopback-client` (22)
-/// and `@tcp-rst` (03): see `harness::Mode::excludes`.
+/// 03, 05, 10, 19 and 21, batch 4 (#1349) 04, 08, 13 and 22, batch 5 (#1350) 20, 16 and 12.
+/// Embedded mode leaves out `@upstream-trust` (09), `@front-door` (11, 16), `@rift-debug-env` (05,
+/// 19) and `@tls-flags` (20); container mode those, `@admin-isolated` (21), `@full-corpus-verify`
+/// (01), `@reload-engine` (11), `@connect-refused` (08, 21), `@host-port` (08), `@loopback-client`
+/// (22), `@tcp-rst` (03) and `@intercept-runtime`, `@intercept-auth` and `@intercept-ws` (12): see
+/// `harness::Mode::excludes`.
 pub const PORTED_FEATURES: &[&str] = &[
     "00-smoke.feature",
     "01-consistency-gate.feature",
@@ -37,6 +38,7 @@ pub const PORTED_FEATURES: &[&str] = &[
     // Batch 5 (#1350).
     "20-tls-and-http2.feature",
     "16-front-door.feature",
+    "12-intercept.feature",
 ];
 
 /// The conformance tree: `features/`, `rift-fixtures/`, `rift-lint-fixtures/`, `rift-scripts/`.

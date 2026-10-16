@@ -3768,12 +3768,15 @@ name = "rift-conformance-runner"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "cucumber",
  "futures",
+ "p12",
  "regex",
  "reqwest",
  "rift-ffi",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

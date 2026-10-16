@@ -11,6 +11,8 @@
 //! - [`tools`]: `rift-lint` / `rift-verify` run as subprocesses, their JSON parsed.
 //! - [`build_info`]: the `BUILD_INFO` a staged build carries (feature 01's coherence gate).
 //! - [`http`]: the HTTP clients the steps send with (plain, trust-all TLS, verifying TLS, mTLS).
+//! - [`intercept`]: the CONNECT tunnel through the intercept listener, the truststores it exports,
+//!   and a TLS WebSocket echo origin (feature 12).
 //! - [`prom`]: Prometheus text exposition, parsed per series (feature 17's metric deltas).
 //! - [`raw`]: what the HTTP client cannot show: bytes read off a bare socket, a two-stream h2c
 //!   exchange, an over-cap body sent while the answer is read, a bare TCP connect.
@@ -23,6 +25,7 @@ pub mod build_info;
 pub mod error;
 pub mod harness;
 pub mod http;
+pub mod intercept;
 pub mod prom;
 pub mod raw;
 pub mod spec;
