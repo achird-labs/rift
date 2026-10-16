@@ -89,3 +89,27 @@ Feature: Core serving — predicates, cycling, copy, FSM, headers, templates, fo
       | contains accent      | the NAÏVE cat | no     |
       | endsWith ASCII       | grand-élAN    | ew     |
       | endsWith accent      | grand-Élan    | no     |
+
+  # rift 0.22 (rift#1280): `_rift.conditional` sends a content ETag and Last-Modified on GET/HEAD and
+  # answers a matching validator with a bodyless 304. Mountebank has no conditional GET, so Rift only.
+  # The tag is a function of the served bytes ("hello"), the same on every process and node.
+  Scenario: _rift.conditional sends validators and answers a matching one with 304 (rift#1280)
+    Given a fresh imposter from fixture "core/conditional"
+    When the client sends "GET" "/"
+    Then the response status is 200
+    And the response header "ETag" is "\"fnv1a64-a430d84680aabd0b\""
+    And the response header "Last-Modified" is "Sat, 03 Oct 2026 12:00:00 GMT"
+    When the request header "If-None-Match" is "\"fnv1a64-a430d84680aabd0b\""
+    And the client sends "GET" "/"
+    Then the response status is 304
+    And the response body is ""
+    When the request header "If-None-Match" is removed
+    And the request header "If-Modified-Since" is "Sat, 03 Oct 2026 12:00:00 GMT"
+    And the client sends "GET" "/"
+    Then the response status is 304
+    When the request header "If-Modified-Since" is removed
+    And the request header "If-None-Match" is "*"
+    And the client sends "POST" "/"
+    Then the response status is 200
+    And the response has no header "ETag"
+    And the response has no header "Last-Modified"

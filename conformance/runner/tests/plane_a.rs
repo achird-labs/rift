@@ -1285,6 +1285,12 @@ async fn send_admin_to(
     payload: &str,
 ) -> Step {
     let (path, payload) = (unescape(path), unescape(payload));
+    // A rule installed through this step lands on the shared listener, whose rules outlive the
+    // scenario: mark it for the clear after it before the request goes out, so a refused-by-mistake
+    // or leaked rule cannot reach a later scenario that lists or counts them.
+    if matches!(method, "POST" | "PUT") && path.starts_with("/intercept/rules") {
+        w.intercept_rules_added = true;
+    }
     let body = if payload == "-" {
         None
     } else {
@@ -5136,6 +5142,65 @@ async fn ws_engine_rule(w: &mut PlaneA, body: String, host: String) -> Step {
     add_own_engine_rule(w, body, host).await
 }
 
+// ── @intercept-upstream-trust: a forward to an `https` target (rift#1273) ──
+
+#[given(
+    regex = r#"^an intercept rule on that engine forwards host "((?:\\.|[^"\\])*)" to the HTTPS upstream at host "((?:\\.|[^"\\])*)" with scheme "((?:\\.|[^"\\])*)"$"#
+)]
+async fn engine_rule_forwards_to_https_upstream(
+    w: &mut PlaneA,
+    host: String,
+    target: String,
+    scheme: String,
+) -> Step {
+    let (admin, _) = intercept_engine(w)?;
+    let port = w
+        .upstream_port
+        .ok_or_else(|| anyhow!("no HTTPS upstream imposter in this scenario"))?;
+    let rule = serde_json::json!({
+        "host": unescape(&host),
+        "action": {"forward": {"port": port, "host": unescape(&target), "scheme": unescape(&scheme)}}
+    })
+    .to_string();
+    let r = intercept_admin(w, &admin, "POST", "/intercept/rules", Some(&rule)).await?;
+    w.ensure(r.status == 201, || {
+        format!("POST /intercept/rules -> {}: {}", r.status, r.body)
+    })
+}
+
+/// A GET through the scenario's own intercept listener, trusting the CA that engine exports: it is
+/// minted per engine in some modes, so the committed test CA is not assumed.
+#[when(
+    regex = r#"^an HTTPS GET to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through that engine's intercept listener$"#
+)]
+async fn https_get_via_own_engine(w: &mut PlaneA, host: String, path: String) -> Step {
+    let (host, path) = (unescape(&host), unescape(&path));
+    let (admin, port) = intercept_engine(w)?;
+    let ca = ca_pem_of(w, &admin).await?;
+    w.ensure(ca.status == 200, || {
+        format!("GET /intercept/ca.pem -> {}: {}", ca.status, ca.body)
+    })?;
+    let roots = tls::certs_from_pem(ca.body.as_bytes())?;
+    w.curl.push(format!(
+        "curl -sv --proxy http://127.0.0.1:{port} --cacert <engine CA> https://{host}{path}"
+    ));
+    let mut conn = intercept::tunnel(
+        "127.0.0.1",
+        port,
+        &host,
+        443,
+        &roots,
+        tls::ALPN_HTTP1,
+        &[],
+        None,
+    )
+    .await?;
+    let read = conn
+        .exchange(&wire::request("GET", &host, &path, &[], b""))
+        .await?;
+    w.keep_raw(read, &host)
+}
+
 fn ws_origin(w: &PlaneA) -> anyhow::Result<&intercept::WsEchoOrigin> {
     w.ws_origin
         .as_ref()
@@ -5215,6 +5280,69 @@ async fn ws_leaf_minted(w: &mut PlaneA) -> Step {
             }
         },
     )
+}
+
+// rift#1277: a minted leaf names the CA's key, so a verifier that looks the issuer up by key
+// identifier (a JDK path builder, strict OpenSSL) finds it.
+#[then(
+    regex = r"^the tunnel's leaf certificate names the intercept CA's key as its Authority Key Identifier$"
+)]
+async fn leaf_names_ca_key(w: &mut PlaneA) -> Step {
+    use x509_parser::extensions::ParsedExtension;
+    let host = w
+        .tunnel
+        .as_ref()
+        .map(|(h, _)| h.clone())
+        .ok_or_else(|| anyhow!("no open raw tunnel in this scenario"))?;
+    let leaf = open_tunnel_to(w, &host)?
+        .peer_certificates()
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("the tunnel presented no certificate"))?;
+    let admin = harness().admin_url.clone();
+    let ca = ca_pem_of(w, &admin).await?;
+    w.ensure(ca.status == 200, || {
+        format!("GET /intercept/ca.pem -> {}: {}", ca.status, ca.body)
+    })?;
+    let ca_der = tls::certs_from_pem(ca.body.as_bytes())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("/intercept/ca.pem holds no certificate"))?;
+    let (_, ca_cert) = x509_parser::parse_x509_certificate(ca_der.as_ref())
+        .map_err(|e| anyhow!("parsing the intercept CA: {e}"))?;
+    let (_, leaf_cert) = x509_parser::parse_x509_certificate(leaf.as_ref())
+        .map_err(|e| anyhow!("parsing the tunnel's leaf: {e}"))?;
+    let ski: Option<Vec<u8>> =
+        ca_cert
+            .extensions()
+            .iter()
+            .find_map(|e| match e.parsed_extension() {
+                ParsedExtension::SubjectKeyIdentifier(k) => Some(k.0.to_vec()),
+                _ => None,
+            });
+    let aki: Option<Vec<u8>> =
+        leaf_cert
+            .extensions()
+            .iter()
+            .find_map(|e| match e.parsed_extension() {
+                ParsedExtension::AuthorityKeyIdentifier(a) => {
+                    a.key_identifier.as_ref().map(|k| k.0.to_vec())
+                }
+                _ => None,
+            });
+    let hex = |b: &Option<Vec<u8>>| {
+        b.as_ref().map_or_else(
+            || "<absent>".to_string(),
+            |b| b.iter().map(|x| format!("{x:02x}")).collect::<String>(),
+        )
+    };
+    w.ensure(aki.is_some() && aki == ski, || {
+        format!(
+            "expected the leaf's Authority Key Identifier to equal the CA's Subject Key Identifier, got AKI {} and SKI {}",
+            hex(&aki),
+            hex(&ski)
+        )
+    })
 }
 
 #[then(regex = r#"^a text frame "((?:\\.|[^"\\])*)" is echoed back as "((?:\\.|[^"\\])*)"$"#)]

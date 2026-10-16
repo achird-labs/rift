@@ -1,0 +1,6 @@
+[
+  {
+    "host": "swap.example.com",
+    "action": { "serve": { "statusCode": 200, "headers": { "content-type": "text/plain" }, "body": "new" } }
+  }
+]

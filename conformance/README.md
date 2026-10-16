@@ -103,6 +103,7 @@ Some scenarios start an engine of their own, stopped after the scenario:
 | `@intercept-runtime` (12) | One with no intercept listener, started and stopped over its admin API; one scenario's also without `--allow-injection`. |
 | `@intercept-auth` (12) | An intercept listener requiring `Proxy-Authorization` (`--intercept-auth u:p`). |
 | `@intercept-ws` (12) | An intercept listener whose WebSocket relay trusts the test CA upstream, relaying to a TLS echo origin the runner serves on the loopback. |
+| `@intercept-upstream-trust` (12) | An intercept listener trusting the test CA upstream (`--upstream-ca-file`), forwarding a rule to an `https` imposter. |
 
 ### The three modes
 
@@ -165,8 +166,8 @@ Container mode starts no engine but the shared one, and leaves out (`Mode::exclu
 
 - every tag in [Engines a scenario starts](#engines-a-scenario-starts): `@reload-engine`,
   `@front-door`, `@upstream-trust`, `@rift-debug-env`, `@admin-isolated`, `@tls-flags`,
-  `@intercept-runtime`, `@intercept-auth` and `@intercept-ws` (whose echo origin is on the host's
-  loopback, which the container cannot reach either). Feature 11's `@no-config-source` scenario runs
+  `@intercept-runtime`, `@intercept-auth`, `@intercept-upstream-trust` and `@intercept-ws` (whose
+  echo origin is on the host's loopback, which the container cannot reach either). Feature 11's `@no-config-source` scenario runs
   on the shared engine and still runs;
 - `@full-corpus-verify` (01): `rift-verify --verify-dynamic` has the engine bind imposters on dynamic
   ports, which are not published;

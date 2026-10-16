@@ -106,6 +106,19 @@ Feature: Incremental reload (rift#316) — POST /admin/reload reconciles toward 
     When the client sends "GET" "/a" to port 4870
     Then the response body is "A"
 
+  # The config's `intercept` block is re-seeded on reload (rift#1271); `"imposters": []` keeps the
+  # scenario off the fixed reload ports.
+  @reload-engine
+  Scenario: a reload re-seeds the config file's intercept rules (rift#1271)
+    Given the engine is started with the reload fixture "reload/intercept-before"
+    When the reload config file is rewritten to fixture "reload/intercept-after"
+    And the engine reloads its configuration
+    Then the response JSON at "intercept.rulesSeeded" is the number 2
+    And the response JSON at "intercept.rulesRuntime" is the number 0
+    When the client sends admin "GET" "/intercept/rules" with payload "-"
+    Then the response is a JSON array of 2 elements
+    And the response JSON at "0.action.serve.body" is the string "v2"
+
   # The shared engine has no config source (external mode). The embedded harness always reloads
   # from a config file, so @no-config-source is excluded there.
   @no-config-source
