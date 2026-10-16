@@ -13,7 +13,8 @@ Rift is designed as a drop-in replacement for Mountebank. This guide covers the 
 
 ## Compatibility Overview
 
-Rift maintains full compatibility with Mountebank's HTTP/HTTPS protocol support:
+Rift is compatible with **Mountebank 2.9.5**, the latest release ([`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mountebank)).
+It maintains full compatibility with Mountebank's HTTP/HTTPS protocol support:
 
 | Feature | Mountebank | Rift | Notes |
 |:--------|:-----------|:-----|:------|

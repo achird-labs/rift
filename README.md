@@ -21,6 +21,12 @@ Rift is a [Mountebank](https://www.mbtest.dev/)-compatible mock server written i
 
 ### Mountebank Compatible
 
+Rift is compatible with **Mountebank 2.9.5**, the latest release ([`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mountebank)).
+Every pull request that changes the engine runs a [differential harness](conformance/differential/)
+that sends the same requests to Mountebank 2.9.5 and to Rift and fails on any difference that isn't
+[documented](https://achird-labs.github.io/rift/mountebank/differences); a weekly job opens an issue
+when a newer Mountebank is released.
+
 - **Same REST API** - Works with existing Mountebank clients and tooling
 - **Same Configuration** - Load your `imposters.json` without changes
 - **Same Behavior** - Predicates, responses, behaviors all work identically

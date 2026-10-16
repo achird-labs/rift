@@ -206,6 +206,13 @@ jobs:
           ./scripts/verify-docs-coverage.sh --self-test
           ./scripts/verify-docs-coverage.sh
 
+      # The docs state Rift is compatible with the latest Mountebank; keep that version equal to the
+      # differential oracle's MB_VERSION, so moving the oracle can't leave the old release advertised.
+      - name: Verify the docs name the oracle's Mountebank version
+        run: |
+          ./scripts/verify-mountebank-version-docs.sh --self-test
+          ./scripts/verify-mountebank-version-docs.sh
+
       # Issue #777: rift-http-proxy and rift-ffi take rift-mock-core with default-features = false,
       # so a feature that is default-ON for the library reaches nothing users run unless it is
       # forwarded. That is how the quamina dimension shipped into the library and out of the binary
