@@ -80,6 +80,38 @@ Feature: Mountebank compatibility — predicates, imposter options and response 
     When the client sends "GET" "/li"
     Then the response body is "legacy-inject"
 
+  # rift#1255 / #1257, Mountebank parity (pinned in conformance/differential too): jsonpath-plus
+  # shorthands load, and a selector that selects several values matches when ANY of them holds.
+  # The expected value sits at index 1 so only an open-ended slice finds it, and `c` is not a direct
+  # child of `b` so only a descendant segment finds it.
+  Scenario: a [:0] slice end is open-ended, so the whole array is selected
+    Given a fresh imposter from fixture "mbcompat/predicates"
+    When the request body is "{\"x\":{\"y\":[{\"z\":\"second\"},{\"z\":\"first\"}]}}"
+    And the client sends "POST" "/jp-slice"
+    Then the response body is "jp-slice"
+
+  Scenario: a .[ segment is a descendant segment
+    Given a fresh imposter from fixture "mbcompat/predicates"
+    When the request body is "{\"a\":{\"b\":{\"q\":[{\"c\":\"deep\"}]}}}"
+    And the client sends "POST" "/jp-desc"
+    Then the response body is "jp-desc"
+
+  Scenario: equals holds when any selected value equals; deepEquals compares the whole selection
+    Given a fresh imposter from fixture "mbcompat/predicates"
+    When the request body is "{\"x\":{\"y\":[{\"z\":\"second\"},{\"z\":\"first\"}]}}"
+    And the client sends "POST" "/jp-any"
+    Then the response body is "jp-any"
+    When the client sends "POST" "/jp-nodeep"
+    Then the response header "x-rift-no-match" is "true"
+    When the client sends "POST" "/jp-deep"
+    Then the response body is "jp-deep"
+
+  Scenario: an xpath selector over several nodes matches when any of them equals
+    Given a fresh imposter from fixture "mbcompat/predicates"
+    When the request body is "<users><user><name>alice</name></user><user><name>bob</name></user></users>"
+    And the client sends "POST" "/xp-any"
+    Then the response body is "xp-any"
+
   # ── imposter options ───────────────────────────────────────────────────────────────────────────
 
   Scenario: a miss is served the defaultResponse, marked x-rift-default-response

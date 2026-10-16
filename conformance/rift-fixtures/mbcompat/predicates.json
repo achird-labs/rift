@@ -277,6 +277,159 @@
           }
         }
       ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/jp-slice"
+          }
+        },
+        {
+          "equals": {
+            "body": "first"
+          },
+          "jsonpath": {
+            "selector": "$.x.y.[:0].z"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "jp-slice"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/jp-desc"
+          }
+        },
+        {
+          "equals": {
+            "body": "deep"
+          },
+          "jsonpath": {
+            "selector": "$.a.b.[0].c"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "jp-desc"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/jp-any"
+          }
+        },
+        {
+          "equals": {
+            "body": "second"
+          },
+          "jsonpath": {
+            "selector": "$.x.y[*].z"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "jp-any"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/jp-nodeep"
+          }
+        },
+        {
+          "deepEquals": {
+            "body": "first"
+          },
+          "jsonpath": {
+            "selector": "$.x.y[*].z"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "jp-nodeep"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/jp-deep"
+          }
+        },
+        {
+          "deepEquals": {
+            "body": [
+              "second",
+              "first"
+            ]
+          },
+          "jsonpath": {
+            "selector": "$.x.y[*].z"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "jp-deep"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/xp-any"
+          }
+        },
+        {
+          "equals": {
+            "body": "bob"
+          },
+          "xpath": {
+            "selector": "//user/name"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "xp-any"
+          }
+        }
+      ]
     }
   ]
 }

@@ -1,0 +1,16 @@
+{
+  "port": {newPort},
+  "protocol": "http",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "is": { "statusCode": 200, "body": "v=$X" },
+          "_behaviors": {
+            "copy": [{ "from": "body", "into": "$X", "using": { "method": "xpath", "selector": "//*[[" } }]
+          }
+        }
+      ]
+    }
+  ]
+}
