@@ -639,7 +639,7 @@ async fn last_modified_and_body(port: u16) -> (String, String) {
 }
 
 #[tokio::test]
-async fn replace_stub_with_identical_content_keeps_last_modified_and_cursor() {
+async fn replace_stub_with_identical_content_keeps_last_modified_but_restarts_the_cycle() {
     let manager = ImposterManager::new();
     let port = create(
         &manager,
@@ -656,7 +656,8 @@ async fn replace_stub_with_identical_content_keeps_last_modified_and_cursor() {
         .expect("replace");
     let (after, body) = last_modified_and_body(port).await;
     assert_eq!(after, stamp, "an identical replace is not a change");
-    assert_eq!(body, "b", "the cycle position is kept, as it always was");
+    // #1515: a replace by index restarts the cycle, as Mountebank's `overwriteAtIndex` does.
+    assert_eq!(body, "a", "the cycle starts over");
     manager.delete_all().await;
 }
 

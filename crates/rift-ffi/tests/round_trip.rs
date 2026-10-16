@@ -4069,3 +4069,59 @@ fn ffi_second_start_intercept_is_refused_while_one_runs() {
         rift_stop(h);
     }
 }
+
+/// #1515: `rift_update_stub` with `{"index"}` restarts the stub's response cycle, even with an
+/// identical stub, as Mountebank's `overwriteAtIndex` does; `{"id"}` keeps it.
+#[test]
+fn ffi_update_stub_by_index_restarts_the_cycle_and_by_id_keeps_it() {
+    unsafe {
+        let h = rift_start();
+        assert!(!h.is_null(), "rift_start returned null");
+        let stub = r#"{ "id": "s", "responses": [
+            { "is": { "body": "A" } }, { "is": { "body": "B" } }, { "is": { "body": "C" } } ] }"#;
+        let config = cstr(&format!(r#"{{ "protocol": "http", "stubs": [{stub}] }}"#));
+        let port = rift_create_imposter(h, config.as_ptr());
+        assert_ne!(port, 0, "auto-assigned port");
+        let rt = rt();
+        let next = |n: usize| -> Vec<String> {
+            rt.block_on(async {
+                let client = reqwest::Client::builder()
+                    .pool_max_idle_per_host(0)
+                    .build()
+                    .expect("client");
+                let mut bodies = Vec::new();
+                for _ in 0..n {
+                    bodies.push(
+                        client
+                            .get(format!("http://127.0.0.1:{port}/"))
+                            .send()
+                            .await
+                            .expect("get")
+                            .text()
+                            .await
+                            .expect("text"),
+                    );
+                }
+                bodies
+            })
+        };
+
+        assert_eq!(next(2), ["A", "B"]);
+        let same = cstr(stub);
+        assert_eq!(
+            rift_update_stub(h, port, cstr(r#"{"index":0}"#).as_ptr(), same.as_ptr()),
+            0
+        );
+        assert_eq!(next(3), ["A", "B", "C"], "by index: the cycle starts over");
+
+        assert_eq!(next(1), ["A"]);
+        assert_eq!(
+            rift_update_stub(h, port, cstr(r#"{"id":"s"}"#).as_ptr(), same.as_ptr()),
+            0
+        );
+        assert_eq!(next(1), ["B"], "by id: the cycle continues");
+
+        assert_eq!(rift_delete_all(h), 0);
+        rift_stop(h);
+    }
+}

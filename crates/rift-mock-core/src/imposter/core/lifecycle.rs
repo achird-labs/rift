@@ -89,6 +89,10 @@ impl Imposter {
 
     /// Replace the stub with `id` in place (position preserved). The replacement keeps `id` as its
     /// addressable id regardless of the supplied stub's `id`. Returns `false` if no such id.
+    ///
+    /// Unlike [`replace_stub`](Self::replace_stub), the stub keeps its response cycle: this is not
+    /// a Mountebank route, so parity does not reach it, and rift-cluster drives `proxyAlways`
+    /// merges through it, which must not restart a recording's cycle (#1515).
     #[must_use]
     pub fn replace_stub_by_id(&self, id: &str, mut stub: Stub) -> bool {
         self.mutate_stubs(|stubs| {
@@ -98,7 +102,7 @@ impl Imposter {
                     // Swap a fresh Arc that reuses the slot's cycler + slot token, so the slot's
                     // response-cycling state is kept and in-flight requests holding the old Arc keep
                     // serving their snapshot (issue #287).
-                    replace_at(stubs, i, stub, &self.load_clock);
+                    replace_at(stubs, i, stub, &self.load_clock, OnReplace::KeepCycle);
                     true
                 }
                 None => false,
@@ -157,14 +161,14 @@ impl Imposter {
             .map(|s| s.stub.clone())
     }
 
-    /// Replace a stub at a specific index
+    /// Replace a stub at a specific index. The stub starts its response cycle over, even with
+    /// identical content, as Mountebank's `overwriteAtIndex` rewraps it (#1515).
     pub fn replace_stub(&self, index: usize, stub: Stub) -> Result<(), ImposterError> {
         self.mutate_stubs(|stubs| {
             if index >= stubs.len() {
                 return Err(ImposterError::StubIndexOutOfBounds(index));
             }
-            // Reuse the slot's cycler + slot token (issue #287); see `replace_stub_by_id`.
-            replace_at(stubs, index, stub, &self.load_clock);
+            replace_at(stubs, index, stub, &self.load_clock, OnReplace::ResetCycle);
             Ok(())
         })
     }
@@ -229,15 +233,39 @@ impl Imposter {
 /// the slot keeps its cycler and slot token (issue #287) and takes a stamp from `clock` (issue
 /// #1301) — and when the new stub is eligible for different requests, so do the stubs behind it,
 /// which may now answer requests it answered (issue #1303).
-fn replace_at(stubs: &mut [Arc<StubState>], i: usize, stub: Stub, clock: &LoadClock) {
+fn replace_at(
+    stubs: &mut [Arc<StubState>],
+    i: usize,
+    stub: Stub,
+    clock: &LoadClock,
+    on_replace: OnReplace,
+) {
     let hash = crate::imposter::reconcile::content_hash(&stub);
     if stubs[i].content_hash() == hash {
+        if on_replace == OnReplace::ResetCycle {
+            stubs[i] = Arc::new(stubs[i].with_fresh_cycle());
+        }
         return;
     }
     let at = clock.next();
     let exposes = !matches_alike(&stubs[i].stub, &stub);
-    stubs[i] = Arc::new(stubs[i].with_stub_hashed(stub, hash).with_loaded_at(at));
+    let state = match on_replace {
+        OnReplace::KeepCycle => stubs[i].with_stub_hashed(stub, hash),
+        OnReplace::ResetCycle => StubState::with_hash(stub, hash),
+    };
+    stubs[i] = Arc::new(state.with_loaded_at(at));
     if exposes {
         restamp(stubs, i + 1.., at);
     }
+}
+
+/// What a replace does to the slot's response cycle (#1515).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OnReplace {
+    /// Mountebank's `overwriteAtIndex`: the stub starts its cycle over, even with identical content
+    /// (a new slot, so a sequencer keyed by slot starts over too).
+    ResetCycle,
+    /// Rift's id-addressed replace: the slot keeps its cycler and slot token (#287), and an
+    /// identical replace keeps the state outright (#1294).
+    KeepCycle,
 }

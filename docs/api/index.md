@@ -414,6 +414,8 @@ Get a single stub by its array index, with its `_links`.
 ### PUT /imposters/{port}/stubs/{index}
 
 Replace a stub at a specific index. The body is the bare stub, with no `{"stub": …}` envelope.
+The stub starts its response cycle over, even when the new stub is identical, as in Mountebank.
+Its `_rift.conditional` `Last-Modified: load` moves only when the content changed.
 **Response:** `200 OK` with the imposter detail.
 
 **Request Body:**
@@ -441,7 +443,7 @@ by that id instead of by positional index, so concurrent edits don't shift the t
 | Method | Path | Action |
 |:-------|:-----|:-------|
 | `GET` | `/imposters/{port}/stubs/by-id/{id}` | Get the stub with this id (the bare stub JSON) |
-| `PUT` | `/imposters/{port}/stubs/by-id/{id}` | Replace the stub with this id (position preserved) |
+| `PUT` | `/imposters/{port}/stubs/by-id/{id}` | Replace the stub with this id (position and response cycle preserved) |
 | `DELETE` | `/imposters/{port}/stubs/by-id/{id}` | Delete the stub with this id |
 
 `PUT` takes the bare stub. `PUT` and `DELETE` answer `200` with the imposter detail. An unknown id

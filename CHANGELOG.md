@@ -21,6 +21,11 @@ record.
   imposter must become `::ffff:127.0.0.1`, or the imposter must set `"host": "0.0.0.0"` (still IPv4
   only). The printed and stored imposter still carries no `host`.
 
+- **Replacing a stub by index restarts its response cycle, as Mountebank does** (#1515), even when
+  the new stub is identical (`PUT /imposters/:port/stubs/:index`, `rift_update_stub` with
+  `{"index"}`, `ImposterManager::replace_stub`), and resets a `ResponseSequencer`'s cursor for it.
+  Replacing by id still keeps the cycle.
+
 - **An XPath selector that selects an element now reads its first child node, as Mountebank does**
   (#1495), rather than all of the element's text. `//a` on `<a>x<b/>y</a>` reads `x`; an element
   that is empty or starts with an element reads as the string `undefined`, so `exists: true` now

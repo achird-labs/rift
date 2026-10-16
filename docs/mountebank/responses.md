@@ -361,7 +361,12 @@ See [Behaviors]({{ site.baseurl }}/mountebank/behaviors/#repeat) for more on the
 ### Cycling State
 
 - Cycling state is **per-stub** - each stub maintains its own position
-- State **resets** when the imposter is deleted and recreated
+- State **resets** when the imposter is deleted and recreated, when the stub is replaced at its
+  index (`PUT /imposters/:port/stubs/:index`, even with identical content), and when the whole
+  stub list is replaced (`PUT /imposters/:port/stubs`), as in Mountebank
+- State is **kept** when another stub is inserted, deleted or replaced, when the stub is moved,
+  when it is replaced by id (`PUT …/stubs/by-id/:id`, a Rift extension), and when a reload leaves
+  the stub unchanged
 - State is **not persisted** - restarting Rift resets all cycling positions
 
 ### Mixed Response Types
