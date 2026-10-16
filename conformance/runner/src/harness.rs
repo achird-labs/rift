@@ -3,9 +3,10 @@
 //!
 //! One [`Harness`] per run owns the shared engine every scenario drives over HTTP. Its admin and
 //! metrics URLs are fixed for the run. Scenarios that need an engine started with different flags
-//! (feature 09 `@upstream-trust`) spawn a [`SpawnedEngine`] of their own beside it, and feature 11's
-//! reload scenarios start a [`ReloadEngine`] serving a config file of their own. Container mode
-//! starts neither: [`Mode::excludes`] leaves those scenarios out.
+//! (feature 09 `@upstream-trust`, features 05 and 19 `@rift-debug-env`) spawn a [`SpawnedEngine`]
+//! of their own beside it, feature 11's reload scenarios start a [`ReloadEngine`] serving a config
+//! file of their own, and feature 21's `@admin-isolated` ones an empty [`IsolatedEngine`]. Container
+//! mode starts none of them: [`Mode::excludes`] leaves those scenarios out.
 
 use crate::HarnessError;
 use crate::build_info::BuildInfo;
@@ -41,6 +42,8 @@ const CONTAINER_POOL: (u16, u16) = (4880, 4899);
 const IMAGE_WORKDIR: &str = "/data";
 /// Every container this runner starts carries it, so one leaked by an interrupted run is findable.
 const CONTAINER_LABEL: &str = "rift-conformance=1";
+/// Where every engine this runner starts is addressed (see [`Harness::imposter_host`]).
+const LOOPBACK: &str = "127.0.0.1";
 
 /// How the engine is delivered. `RIFT_MODE`, default `external`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +114,15 @@ impl Mode {
             }
             (Self::Container, "reload-engine") => Some(
                 "starts an engine of its own serving a config file, which this harness doesn't start in a container",
+            ),
+            (Self::Embedded, "rift-debug-env") => Some(
+                "needs debug mode, which is RIFT_DEBUG read once per process, so an in-process engine cannot have it for one scenario",
+            ),
+            (Self::Container, "rift-debug-env") => Some(
+                "starts an engine of its own with --debug, which this harness doesn't start in a container",
+            ),
+            (Self::Container, "admin-isolated") => Some(
+                "starts a second engine of its own, which this harness doesn't start in a container",
             ),
             _ => None,
         }
@@ -291,11 +303,13 @@ impl Harness {
         self.port_pool.as_ref()
     }
 
-    /// The host imposters are reached on: the engine's own host in external and embedded mode, and
-    /// the container's ports published 1:1 on the host's loopback in container mode.
+    /// The host imposters are reached on: the loopback the engine binds in external and embedded
+    /// mode, and the one the container's ports are published 1:1 on in container mode. IPv4 by
+    /// address, never `localhost`: macOS resolves that to `::1` first, where an unrelated process
+    /// may hold the same port while the engine listens on IPv4 only.
     #[must_use]
     pub fn imposter_host(&self) -> &'static str {
-        "localhost"
+        LOOPBACK
     }
 
     /// Make a fixture's engine-cwd-relative data paths (a `lookup`'s `"data/products.csv"`)
@@ -332,6 +346,43 @@ impl Harness {
         spawn_with_retry(&self.config, &args, false).await
     }
 
+    /// Start a dedicated engine with the extra CLI `flags` (features 05 and 19 `@rift-debug-env`:
+    /// `--debug`). The caller owns it; dropping it kills the process.
+    pub async fn spawn_flag_engine(&self, flags: &[String]) -> Result<SpawnedEngine, HarnessError> {
+        if self.config.mode != Mode::External {
+            return Err(HarnessError::Unsupported {
+                what: "an engine started with extra flags",
+                mode: self.config.mode.name(),
+            });
+        }
+        spawn_with_retry(&self.config, flags, false).await
+    }
+
+    /// Start a second, empty engine of the run's kind (feature 21 `@admin-isolated`), for admin
+    /// calls that would wipe the shared engine: a spawned `rift`, or in embedded mode a second
+    /// in-process engine. The caller owns it and stops it after the scenario.
+    pub async fn start_isolated_engine(&self) -> Result<IsolatedEngine, HarnessError> {
+        let engine = match self.config.mode {
+            Mode::External => {
+                OwnedEngine::Spawned(spawn_with_retry(&self.config, &[], false).await?)
+            }
+            Mode::Embedded => {
+                OwnedEngine::Embedded(EmbeddedEngine::start(&self.config, None).await?)
+            }
+            Mode::Container => {
+                return Err(HarnessError::Unsupported {
+                    what: "the isolated admin engine",
+                    mode: self.config.mode.name(),
+                });
+            }
+        };
+        let admin_url = match &engine {
+            OwnedEngine::Spawned(e) => e.admin_url.clone(),
+            OwnedEngine::Embedded(e) => e.admin_url.clone(),
+        };
+        Ok(IsolatedEngine { engine, admin_url })
+    }
+
     /// Start a dedicated engine serving `json` from a config file it reloads from (feature 11): a
     /// spawned `rift --configfile`, or in embedded mode a second in-process engine given the file as
     /// `configFile`. `front_door` also starts the front door, which only a spawned engine has. The
@@ -351,12 +402,12 @@ impl Harness {
                 ];
                 let e = spawn_with_retry(&self.config, &args, front_door).await?;
                 let url = e.admin_url.clone();
-                (ReloadKind::Spawned(e), url)
+                (OwnedEngine::Spawned(e), url)
             }
             Mode::Embedded if !front_door => {
                 let e = EmbeddedEngine::start(&self.config, Some(&config_path)).await?;
                 let url = e.admin_url.clone();
-                (ReloadKind::Embedded(e), url)
+                (OwnedEngine::Embedded(e), url)
             }
             Mode::Embedded | Mode::Container => {
                 return Err(HarnessError::Unsupported {
@@ -366,8 +417,8 @@ impl Harness {
             }
         };
         let front_door_port = match &engine {
-            ReloadKind::Spawned(e) => e.front_door_port,
-            ReloadKind::Embedded(_) => None,
+            OwnedEngine::Spawned(e) => e.front_door_port,
+            OwnedEngine::Embedded(_) => None,
         };
         Ok(ReloadEngine {
             engine,
@@ -503,8 +554,8 @@ impl SpawnedEngine {
             })?;
         let mut engine = Self {
             child,
-            admin_url: format!("http://localhost:{admin_port}"),
-            metrics_url: format!("http://localhost:{metrics_port}"),
+            admin_url: format!("http://{LOOPBACK}:{admin_port}"),
+            metrics_url: format!("http://{LOOPBACK}:{metrics_port}"),
             front_door_port,
             log,
         };
@@ -536,7 +587,7 @@ impl SpawnedEngine {
         .await?;
         if let Some(port) = self.front_door_port {
             loop {
-                let last = match tokio::net::TcpStream::connect(("localhost", port)).await {
+                let last = match tokio::net::TcpStream::connect((LOOPBACK, port)).await {
                     Ok(_) => break,
                     Err(e) => e.to_string(),
                 };
@@ -788,8 +839,8 @@ impl ContainerEngine {
         }
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let engine = Self {
-            admin_url: format!("http://localhost:{admin_port}"),
-            metrics_url: format!("http://localhost:{metrics_port}"),
+            admin_url: format!("http://{LOOPBACK}:{admin_port}"),
+            metrics_url: format!("http://{LOOPBACK}:{metrics_port}"),
             name,
             log,
         };
@@ -942,6 +993,12 @@ impl PortPool {
         }
     }
 
+    /// The pool's lowest port.
+    #[must_use]
+    pub fn lo(&self) -> u16 {
+        self.lo
+    }
+
     #[must_use]
     pub fn size(&self) -> usize {
         usize::from(self.span) + 1
@@ -994,16 +1051,34 @@ pub fn port_taken(status: u16, body: &str) -> bool {
 /// Feature 11's per-scenario engine and the config file it reloads from.
 #[derive(Debug)]
 pub struct ReloadEngine {
-    engine: ReloadKind,
+    engine: OwnedEngine,
     pub admin_url: String,
     pub config_path: PathBuf,
     pub front_door_port: Option<u16>,
 }
 
+/// An engine one scenario starts beside the shared one, of the run's own kind.
 #[derive(Debug)]
-enum ReloadKind {
+enum OwnedEngine {
     Spawned(SpawnedEngine),
     Embedded(EmbeddedEngine),
+}
+
+impl OwnedEngine {
+    /// The spawned engine's log; an embedded engine logs into this process.
+    fn log(&self) -> Option<&Path> {
+        match self {
+            Self::Spawned(e) => Some(&e.log),
+            Self::Embedded(_) => None,
+        }
+    }
+
+    async fn stop(self) -> Result<(), HarnessError> {
+        match self {
+            Self::Spawned(e) => e.stop().await,
+            Self::Embedded(e) => e.stop().await,
+        }
+    }
 }
 
 impl ReloadEngine {
@@ -1015,17 +1090,31 @@ impl ReloadEngine {
     /// The spawned engine's log; an embedded engine logs into this process.
     #[must_use]
     pub fn log(&self) -> Option<&Path> {
-        match &self.engine {
-            ReloadKind::Spawned(e) => Some(&e.log),
-            ReloadKind::Embedded(_) => None,
-        }
+        self.engine.log()
     }
 
     pub async fn stop(self) -> Result<(), HarnessError> {
-        match self.engine {
-            ReloadKind::Spawned(e) => e.stop().await,
-            ReloadKind::Embedded(e) => e.stop().await,
-        }
+        self.engine.stop().await
+    }
+}
+
+/// Feature 21's `@admin-isolated` engine: an empty engine whose imposters `DELETE /imposters` may
+/// wipe without touching the shared one's.
+#[derive(Debug)]
+pub struct IsolatedEngine {
+    engine: OwnedEngine,
+    pub admin_url: String,
+}
+
+impl IsolatedEngine {
+    /// The spawned engine's log; an embedded engine logs into this process.
+    #[must_use]
+    pub fn log(&self) -> Option<&Path> {
+        self.engine.log()
+    }
+
+    pub async fn stop(self) -> Result<(), HarnessError> {
+        self.engine.stop().await
     }
 }
 
@@ -1202,7 +1291,19 @@ mod tests {
         assert!(Mode::Embedded.excludes("no-config-source").is_none());
     }
 
-    const CONTAINER_TAGS: [&str; 8] = [
+    #[test]
+    fn debug_env_runs_only_in_external_mode_and_admin_isolated_not_in_a_container() {
+        assert!(Mode::External.excludes("rift-debug-env").is_none());
+        assert!(Mode::Embedded.excludes("rift-debug-env").is_some());
+        assert!(Mode::Container.excludes("rift-debug-env").is_some());
+        assert!(Mode::External.excludes("admin-isolated").is_none());
+        assert!(Mode::Embedded.excludes("admin-isolated").is_none());
+        assert!(Mode::Container.excludes("admin-isolated").is_some());
+    }
+
+    const CONTAINER_TAGS: [&str; 10] = [
+        "rift-debug-env",
+        "admin-isolated",
         "reload-engine",
         "upstream-trust",
         "front-door",
