@@ -382,6 +382,23 @@ pub fn create_reusable_listener(addr: SocketAddr) -> std::io::Result<TcpListener
     create_reusable_listener_tuned(addr, &SocketTuning::from_env())
 }
 
+/// Node's `listen(port)` with no host (#1514): `[::]:port`, dual-stack, else `0.0.0.0:port`. Node
+/// falls back on any error from the IPv6 bind; "address in use" never reaches it, because libuv
+/// defers `EADDRINUSE` to `listen()`, so here it is the caller's conflict and is returned rather
+/// than retried on IPv4, which would hand `localhost` clients to the holder.
+pub(crate) fn bind_unspecified<T>(
+    port: u16,
+    mut bind: impl FnMut(SocketAddr) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    match bind(SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port))) {
+        Err(e) if e.kind() != std::io::ErrorKind::AddrInUse => {
+            tracing::debug!("no dual-stack [::]:{port} ({e}); binding 0.0.0.0:{port}");
+            bind(SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port)))
+        }
+        bound => bound,
+    }
+}
+
 /// Whether an IPv6-only listener holds `port` on the IPv6 wildcard (issue #1501): a plain
 /// `IPV6_V6ONLY` bind of `[::]:port` is refused with `AddrInUse`. Any other failure (no IPv6 on
 /// the host, an address the stack does not offer) is not a holder, so the answer is `false`.
@@ -431,6 +448,12 @@ pub fn create_reusable_listener_tuned(
     };
 
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    // Dual-stack on every IPv6 bind, as libuv sets it for Node (#1514): `[::]` then takes IPv4
+    // clients too, on Windows and under `net.ipv6.bindv6only=1` as well. A specific IPv6 address
+    // such as `::1` is unaffected.
+    if domain == Domain::IPV6 {
+        socket.set_only_v6(false)?;
+    }
 
     socket.set_reuse_address(true)?;
 
@@ -664,6 +687,74 @@ impl AcceptErrorLog {
 mod tests {
     use super::*;
 
+    // ---- issue #1514: Node's default listen ----------------------------------------------
+
+    #[test]
+    fn bind_unspecified_takes_ipv6_first() {
+        let mut calls = Vec::new();
+        let bound = bind_unspecified(7, |addr| {
+            calls.push(addr);
+            Ok(addr)
+        });
+        assert_eq!(bound.expect("bound"), "[::]:7".parse().expect("addr"));
+        assert_eq!(calls.len(), 1, "no IPv4 call after a v6 success");
+    }
+
+    #[test]
+    fn bind_unspecified_falls_back_to_ipv4_on_any_other_error() {
+        for kind in [
+            std::io::ErrorKind::Unsupported,
+            std::io::ErrorKind::AddrNotAvailable,
+        ] {
+            let mut calls = Vec::new();
+            let bound = bind_unspecified(7, |addr: SocketAddr| {
+                calls.push(addr);
+                if addr.is_ipv6() {
+                    Err(std::io::Error::from(kind))
+                } else {
+                    Ok(addr)
+                }
+            });
+            assert_eq!(
+                bound.expect("v4"),
+                "0.0.0.0:7".parse().expect("addr"),
+                "{kind:?}"
+            );
+            assert_eq!(calls.len(), 2);
+        }
+    }
+
+    #[test]
+    fn bind_unspecified_returns_address_in_use_without_falling_back() {
+        let mut calls = 0;
+        let bound = bind_unspecified(7, |_addr: SocketAddr| -> std::io::Result<SocketAddr> {
+            calls += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::AddrInUse))
+        });
+        assert_eq!(
+            bound.expect_err("in use").kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+        assert_eq!(calls, 1, "Node never retries an in-use port on IPv4");
+    }
+
+    #[test]
+    fn an_ipv6_wildcard_listener_is_dual_stack() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let Ok(listener) = create_reusable_listener("[::]:0".parse().expect("addr")) else {
+            return; // no IPv6 on this host
+        };
+        assert!(
+            !socket2::SockRef::from(&listener)
+                .only_v6()
+                .expect("IPV6_V6ONLY")
+        );
+    }
+
     // ---- issue #1501: the holder checks behind auto-assign ------------------------------
 
     #[cfg(any(
@@ -692,6 +783,38 @@ mod tests {
         holder
             .bind(&SocketAddr::from(([127, 0, 0, 1], port)).into())
             .expect("a loopback listener binds beside the wildcard");
+        holder.listen(4).expect("listen");
+        assert!(loopback_listener_holds(port));
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    #[test]
+    fn a_loopback_holder_is_seen_beside_our_own_dual_stack_listener() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let Ok(ours) = create_reusable_listener("[::]:0".parse().expect("addr")) else {
+            return; // no IPv6 on this host
+        };
+        let port = ours.local_addr().expect("local addr").port();
+        assert!(
+            !loopback_listener_holds(port),
+            "our own dual-stack listener is not a loopback holder"
+        );
+
+        let holder = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).expect("socket");
+        holder.set_reuse_address(true).expect("SO_REUSEADDR");
+        holder
+            .bind(&SocketAddr::from(([127, 0, 0, 1], port)).into())
+            .expect("a loopback listener binds beside the dual-stack wildcard");
         holder.listen(4).expect("listen");
         assert!(loopback_listener_holds(port));
     }

@@ -71,7 +71,7 @@
           }
         },
         {
-          "startsWith": {
+          "contains": {
             "requestFrom": "127.0.0.1"
           }
         }
@@ -90,7 +90,7 @@
         {
           "equals": {
             "path": "/ip",
-            "ip": "127.0.0.1"
+            "ip": "::ffff:127.0.0.1"
           }
         }
       ],

@@ -320,7 +320,8 @@ async fn an_ip_and_form_generator_records_a_stub_that_replays() {
     assert!(
         recorded
             .iter()
-            .any(|p| p["deepEquals"]["ip"] == json!("127.0.0.1")),
+            // A host-less imposter listens dual-stack (#1514): an IPv4 client is IPv4-mapped.
+            .any(|p| p["deepEquals"]["ip"] == json!("::ffff:127.0.0.1")),
         "{stubs:?}"
     );
     admin.drop_all(&[port, upstream]).await;

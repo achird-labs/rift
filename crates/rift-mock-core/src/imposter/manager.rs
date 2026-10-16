@@ -904,15 +904,18 @@ impl ImposterManager {
         };
 
         // Owned (not borrowed from `config`): the per-core fan-out (#745) rebinds listeners
-        // after `config` has moved into the imposter.
-        let bind_host: String = config.host.clone().unwrap_or_else(|| "0.0.0.0".to_string());
+        // after `config` has moved into the imposter. `None` is Mountebank's default, dual-stack
+        // `[::]` (#1514), and is never written back into `config.host`: the config is what is
+        // printed, persisted and replicated, and Mountebank prints no host either.
+        let bind_host: Option<String> = config.host.clone();
         let explicit_port = config.explicit_port();
 
         // One fallible bind phase covering BOTH binds — the port probe and the fan-out listener
         // group — because either can fail with `BindError` and the degradation below has to cover
         // the fan-out topology too (that is the one clustered deployments actually run).
         let (port, listeners, bind_failure) = match (
-            self.bind_for_create(&bind_host, explicit_port).await,
+            self.bind_for_create(bind_host.as_deref(), explicit_port)
+                .await,
             explicit_port,
         ) {
             (Ok((port, listeners)), _) => (port, Some(listeners), None),
@@ -922,8 +925,9 @@ impl ImposterManager {
             (Err(e @ ImposterError::BindError(..)), Some(p)) if allow_unbound => {
                 warn!(
                     port = p,
-                    "could not bind {bind_host}:{p} ({e}); registering the imposter without a \
-                         listener so in-process routes still serve it"
+                    "could not bind {}:{p} ({e}); registering the imposter without a listener so \
+                         in-process routes still serve it",
+                    bind_host.as_deref().unwrap_or("[::]")
                 );
                 (p, None, Some(e))
             }
@@ -932,8 +936,12 @@ impl ImposterManager {
 
         config.port = Some(port);
 
-        if listeners.is_some() {
-            info!("Imposter bound to {}:{}", bind_host, port);
+        if let Some(bound) = listeners
+            .as_ref()
+            .and_then(|group| group.first())
+            .and_then(|listener| listener.local_addr().ok())
+        {
+            info!("Imposter bound to {bound}");
         }
         // Create imposter
         // A private journal per imposter unless one is shared, sized by the manager's byte
@@ -1049,7 +1057,7 @@ impl ImposterManager {
     /// and so the whole bind is one fallible unit the caller can choose to tolerate.
     async fn bind_for_create(
         &self,
-        bind_host: &str,
+        bind_host: Option<&str>,
         explicit_port: Option<u16>,
     ) -> Result<(u16, Vec<TcpListener>), ImposterError> {
         let (port, probe) = match explicit_port {
@@ -1058,14 +1066,7 @@ impl ImposterManager {
                 if self.imposters.contains(p) {
                     return Err(ImposterError::PortInUse(p));
                 }
-                // Bind with SO_REUSEADDR/REUSEPORT so a hot-reload (#197) can re-bind the same port
-                // immediately after the previous imposter's listener is torn down.
-                let addr = Self::resolve_bind_addr(bind_host, p).await?;
-                (
-                    p,
-                    crate::proxy::network::create_reusable_listener(addr)
-                        .map_err(|e| ImposterError::BindError(p, anyhow::Error::new(e)))?,
-                )
+                (p, Self::bind_probe(bind_host, p).await?)
             }
             None => self.bind_auto_port(bind_host).await?,
         };
@@ -1116,6 +1117,22 @@ impl ImposterManager {
                 Ok(group)
             }
         }
+    }
+
+    /// One reusable listener on `port` (SO_REUSEADDR/REUSEPORT, so a hot-reload (#197) can re-bind
+    /// the port right after the previous listener is torn down): at `host`, or with none where
+    /// Mountebank's Node listens by default, `[::]` dual-stack, else `0.0.0.0` (#1514).
+    async fn bind_probe(host: Option<&str>, port: u16) -> Result<TcpListener, ImposterError> {
+        let bound = match host {
+            Some(host) => crate::proxy::network::create_reusable_listener(
+                Self::resolve_bind_addr(host, port).await?,
+            ),
+            None => crate::proxy::network::bind_unspecified(
+                port,
+                crate::proxy::network::create_reusable_listener,
+            ),
+        };
+        bound.map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))
     }
 
     /// An IP literal in either IPv6 spelling binds as written; anything else is resolved as a name,
@@ -1211,11 +1228,7 @@ impl ImposterManager {
             .config
             .port
             .ok_or_else(|| ImposterError::BindError(0, anyhow::anyhow!("imposter has no port")))?;
-        let bind_host: String = imposter
-            .config
-            .host
-            .clone()
-            .unwrap_or_else(|| "0.0.0.0".to_string());
+        let bind_host = imposter.config.host.as_deref();
         // Re-resolved rather than cached: an https imposter must not silently start serving
         // cleartext on rebind if its cert has since become unreadable.
         let tls_acceptors = if imposter.config.protocol.eq_ignore_ascii_case("https") {
@@ -1230,8 +1243,13 @@ impl ImposterManager {
             ));
         };
 
-        let addr = Self::resolve_bind_addr(&bind_host, port).await?;
-        let listeners = self.bind_listener_group(addr, None)?;
+        // The group binds the address the probe took, so a host-less imposter that fell back to
+        // IPv4 rebinds IPv4 throughout.
+        let probe = Self::bind_probe(bind_host, port).await?;
+        let addr = probe
+            .local_addr()
+            .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?;
+        let listeners = self.bind_listener_group(addr, Some(probe))?;
         let handles = self.spawn_accept_loops(
             imposter,
             listeners,
@@ -1255,7 +1273,7 @@ impl ImposterManager {
         if installed.is_empty() {
             *installed = handles;
             drop(installed);
-            info!("Imposter rebound to {}:{}", bind_host, port);
+            info!("Imposter rebound to {addr}");
         } else {
             // Lost the race: abort our loops so they stop accepting and drop their listeners,
             // rather than leaving a second untracked generation on the shared port.
@@ -1475,21 +1493,26 @@ impl ImposterManager {
     /// address a client may reach first: IPv6-only (`localhost` resolving `::1`), or `127.0.0.1` on
     /// the BSD family, whose port-0 search does not rule that out. A refused candidate stays bound
     /// until a port is chosen, so the kernel cannot hand it out again.
-    async fn bind_auto_port(&self, host: &str) -> Result<(u16, TcpListener), ImposterError> {
+    ///
+    /// A host-less imposter binds `[::]` dual-stack (#1514), where no IPv6-only listener can sit
+    /// beside it; a `127.0.0.1` listener still can on the BSD family, so that check applies to
+    /// either wildcard.
+    async fn bind_auto_port(
+        &self,
+        host: Option<&str>,
+    ) -> Result<(u16, TcpListener), ImposterError> {
         const ATTEMPTS: usize = 16;
-        let addr = Self::resolve_bind_addr(host, 0).await?;
         let mut refused = Vec::new();
         for _ in 0..ATTEMPTS {
-            let listener = crate::proxy::network::create_reusable_listener(addr)
-                .map_err(|e| ImposterError::BindError(0, anyhow::Error::new(e)))?;
-            let port = listener
+            let listener = Self::bind_probe(host, 0).await?;
+            let bound = listener
                 .local_addr()
-                .map_err(|e| ImposterError::BindError(0, anyhow::Error::new(e)))?
-                .port();
-            let v4_wildcard = addr.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+                .map_err(|e| ImposterError::BindError(0, anyhow::Error::new(e)))?;
+            let port = bound.port();
+            let v4_wildcard = bound.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
             if self.imposters.contains(port)
                 || (v4_wildcard && crate::proxy::network::ipv6_only_listener_holds(port))
-                || (v4_wildcard && loopback_holder(port))
+                || (bound.ip().is_unspecified() && loopback_holder(port))
             {
                 refused.push(listener);
                 continue;
@@ -2520,14 +2543,20 @@ mod tests {
     fn raise_fd_limit() {}
 
     /// Fixed port, only for a test that must name a port before the manager binds it (#1485).
-    /// Probes `0.0.0.0`, the family imposters bind, so a concurrent `127.0.0.1` socket on the same
-    /// number cannot take this test's connections.
+    /// Probes the wildcard a host-less imposter binds (dual-stack `[::]`, #1514), so a
+    /// concurrent socket on the same number cannot take this test's connections.
     fn free_port() -> u16 {
-        std::net::TcpListener::bind("0.0.0.0:0")
+        dual_stack_holder().local_addr().expect("local addr").port()
+    }
+
+    /// A plain listener on a fresh port of the wildcard a host-less imposter binds: `[::]`, which
+    /// is dual-stack by default on macOS and Linux (#1514), else `0.0.0.0` on a host without IPv6.
+    /// An IPv4-only holder no longer conflicts on macOS, where a dual-stack reusable bind beside it
+    /// succeeds.
+    fn dual_stack_holder() -> std::net::TcpListener {
+        std::net::TcpListener::bind("[::]:0")
+            .or_else(|_| std::net::TcpListener::bind("0.0.0.0:0"))
             .expect("bind an ephemeral port")
-            .local_addr()
-            .expect("local addr")
-            .port()
     }
 
     // ── Accept-error handling (issue #750) ───────────────────────────────────────────────────
@@ -7030,9 +7059,7 @@ mod tests {
             let rts = test_runtimes(2);
             let manager = ImposterManager::new().with_accept_runtimes(rts.handles.clone());
             // A plain listener occupies the port: the reusable group cannot join it.
-            let blocker = tokio::net::TcpListener::bind(("0.0.0.0", 0))
-                .await
-                .expect("blocker bind");
+            let blocker = dual_stack_holder();
             let port_0 = blocker.local_addr().expect("blocker addr").port();
 
             let err = manager
@@ -7074,10 +7101,8 @@ mod tests {
         /// The squat a real deployment sees: an unrelated process holding the port with a
         /// plain (non-SO_REUSEPORT) listener, so the reusable bind cannot join it. The squatter
         /// takes an OS-assigned port and keeps it, so nothing else can claim it first.
-        async fn squat() -> (tokio::net::TcpListener, u16) {
-            let listener = tokio::net::TcpListener::bind(("0.0.0.0", 0))
-                .await
-                .expect("squatter bind");
+        async fn squat() -> (std::net::TcpListener, u16) {
+            let listener = dual_stack_holder();
             let port = listener.local_addr().expect("squatter addr").port();
             (listener, port)
         }

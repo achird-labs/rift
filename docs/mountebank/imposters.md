@@ -59,7 +59,7 @@ and the related fields are covered in [TLS/HTTPS](../features/tls.md).
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
 | `port` | number | No | Port to listen on (auto-assigned if omitted, `null` or `0`) |
-| `host` | string | No | Address to bind (default `0.0.0.0`; use `127.0.0.1` for local-only). IPv4, IPv6 bare or bracketed (`::1`, `[::1]`), or a DNS name such as `localhost`, which is resolved |
+| `host` | string | No | Address to bind. Default: all interfaces, dual-stack (`::`), falling back to `0.0.0.0` on a host without IPv6, as in Mountebank; an explicit `0.0.0.0` is IPv4 only. Use `127.0.0.1` for local-only. IPv4, IPv6 bare or bracketed (`::1`, `[::1]`), or a DNS name such as `localhost`, which is resolved |
 | `protocol` | string | No | `http` or `https` (default: `http`) |
 | `name` | string | No | Human-readable name |
 | `stubs` | array | No | Request/response mappings |

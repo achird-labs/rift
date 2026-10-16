@@ -2315,8 +2315,10 @@ pub struct ImposterConfig {
     /// Port for the imposter. If not specified, an available port will be auto-assigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    /// Host/IP address to bind the imposter to. Defaults to "0.0.0.0" (all interfaces).
-    /// Use "127.0.0.1" or "localhost" for local-only access.
+    /// Host/IP address to bind the imposter to. Defaults to all interfaces, dual-stack ("::",
+    /// reporting IPv4 clients as IPv4-mapped addresses), or IPv4 "0.0.0.0" on a host without
+    /// IPv6, as Mountebank does. An explicit "0.0.0.0" is IPv4-only. Use "127.0.0.1" or
+    /// "localhost" for local-only access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     #[serde(default = "default_protocol")]

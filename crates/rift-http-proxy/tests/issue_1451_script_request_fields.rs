@@ -2,7 +2,9 @@
 //! `httpRequest.transform` adds `requestFrom` (`address:port`), `ip` and, for a non-empty urlencoded
 //! body, `form`; response `inject`, predicate `inject`, generator `inject`, `decorate` and
 //! `shellTransform`'s `MB_REQUEST` all receive it. Rift's values are its own transport view, the
-//! strings the `requestFrom`/`ip` predicates match (`127.0.0.1`, not `::ffff:127.0.0.1`).
+//! strings the `requestFrom`/`ip` predicates match. A host-less imposter listens dual-stack, as in
+//! Mountebank (#1514), so an IPv4 client is `::ffff:127.0.0.1` and its `requestFrom` is written
+//! `[::ffff:127.0.0.1]:<port>`.
 
 use std::sync::Arc;
 
@@ -42,10 +44,11 @@ async fn get(port: u16) -> String {
         .expect("body")
 }
 
-/// `127.0.0.1|127.0.0.1:<digits>|<rest>` → `<rest>`, or a panic naming what didn't match.
+/// `::ffff:127.0.0.1|[::ffff:127.0.0.1]:<digits>|<rest>` → `<rest>`, or a panic naming what didn't
+/// match.
 fn after_client_fields(body: &str) -> &str {
     let rest = body
-        .strip_prefix("127.0.0.1|127.0.0.1:")
+        .strip_prefix("::ffff:127.0.0.1|[::ffff:127.0.0.1]:")
         .unwrap_or_else(|| panic!("ip and requestFrom must lead the body: {body:?}"));
     let (port, rest) = rest
         .split_once('|')
@@ -95,7 +98,7 @@ async fn a_predicate_inject_sees_request_from_ip_and_form() {
         &manager,
         json!({"protocol": "http", "stubs": [
             {"predicates": [{"inject":
-                "function (config) { var r = config.request; return /^127\\.0\\.0\\.1\\|127\\.0\\.0\\.1:\\d+$/.test(r.ip + '|' + r.requestFrom) && (r.form || {}).a === '1'; }"
+                "function (config) { var r = config.request; return /^::ffff:127\\.0\\.0\\.1\\|\\[::ffff:127\\.0\\.0\\.1\\]:\\d+$/.test(r.ip + '|' + r.requestFrom) && (r.form || {}).a === '1'; }"
             }], "responses": [{"is": {"statusCode": 200, "body": "matched"}}]},
             {"predicates": [{"inject":
                 "function (config) { return typeof config.request.form === 'undefined'; }"
@@ -174,14 +177,14 @@ async fn a_generator_inject_records_the_client_ip_and_request_from() {
     assert_eq!(predicates.len(), 2, "{stubs:?}");
     assert_eq!(
         predicates[0],
-        json!({"equals": {"ip": "127.0.0.1"}}),
+        json!({"equals": {"ip": "::ffff:127.0.0.1"}}),
         "{stubs:?}"
     );
     let request_from = predicates[1]["equals"]["requestFrom"]
         .as_str()
         .unwrap_or_else(|| panic!("a recorded requestFrom string: {stubs:?}"));
     assert_eq!(
-        after_client_fields(&format!("127.0.0.1|{request_from}|")),
+        after_client_fields(&format!("::ffff:127.0.0.1|{request_from}|")),
         "",
         "{stubs:?}"
     );
@@ -236,9 +239,11 @@ async fn shell_transform_mb_request_carries_request_from_ip_and_form() {
     .await;
 
     let posted: Value = serde_json::from_str(&post_form(port, "a=1").await).expect("MB_REQUEST");
-    assert_eq!(posted["ip"], json!("127.0.0.1"), "{posted}");
+    assert_eq!(posted["ip"], json!("::ffff:127.0.0.1"), "{posted}");
     let request_from = posted["requestFrom"].as_str().unwrap_or_default();
-    let client_port = request_from.strip_prefix("127.0.0.1:").unwrap_or_default();
+    let client_port = request_from
+        .strip_prefix("[::ffff:127.0.0.1]:")
+        .unwrap_or_default();
     assert!(
         !client_port.is_empty() && client_port.bytes().all(|b| b.is_ascii_digit()),
         "requestFrom is address:port: {posted}"
@@ -246,7 +251,7 @@ async fn shell_transform_mb_request_carries_request_from_ip_and_form() {
     assert_eq!(posted["form"], json!({"a": "1"}), "{posted}");
 
     let got: Value = serde_json::from_str(&get(port).await).expect("MB_REQUEST");
-    assert_eq!(got["ip"], json!("127.0.0.1"), "{got}");
+    assert_eq!(got["ip"], json!("::ffff:127.0.0.1"), "{got}");
     assert!(got["requestFrom"].is_string(), "{got}");
     assert!(
         got.get("form").is_none(),

@@ -7,14 +7,18 @@ use rift_ffi::*;
 use std::ffi::{CStr, CString, c_char};
 
 // Fixed port: a test that re-binds a port it released, or that must name the port in a file the
-// engine reads before it starts. Probed on the wildcard family imposters bind (#1485), and random,
-// so concurrent auto-assigned creates do not race for it.
+// engine reads before it starts. Probed on the wildcard a host-less imposter binds (#1485, #1514),
+// and random, so concurrent auto-assigned creates do not race for it.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("0.0.0.0:0")
+    dual_stack_holder().local_addr().expect("local addr").port()
+}
+
+/// A plain listener on a fresh port of the wildcard a host-less imposter binds: `[::]`, dual-stack
+/// by default on macOS and Linux (#1514), else `0.0.0.0` on a host without IPv6.
+fn dual_stack_holder() -> std::net::TcpListener {
+    std::net::TcpListener::bind("[::]:0")
+        .or_else(|_| std::net::TcpListener::bind("0.0.0.0:0"))
         .expect("bind an ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
 }
 
 fn cstr(s: &str) -> CString {
@@ -1029,9 +1033,9 @@ fn ffi_serve_admin_loads_config_file() {
 #[test]
 fn ffi_apply_config_reports_per_port_failure() {
     unsafe {
-        // Occupy 0.0.0.0:<port> — the wildcard address imposters bind — so the manager's bind for
+        // Occupy <port> on the wildcard a host-less imposter binds (dual-stack, #1514) so the manager's bind for
         // that port deterministically collides during apply.
-        let occupied = std::net::TcpListener::bind("0.0.0.0:0").expect("occupy port");
+        let occupied = dual_stack_holder();
         let busy = occupied.local_addr().expect("addr").port();
 
         let h = rift_start();
@@ -1089,7 +1093,7 @@ fn ffi_build_info_commit_matches_git_head() {
 fn ffi_serve_admin_config_file_partial_failure_does_not_leak() {
     unsafe {
         // Occupy the wildcard port an imposter would bind, so one config in the file cannot bind.
-        let occupied = std::net::TcpListener::bind("0.0.0.0:0").expect("occupy port");
+        let occupied = dual_stack_holder();
         let busy = occupied.local_addr().expect("addr").port();
 
         let path =
