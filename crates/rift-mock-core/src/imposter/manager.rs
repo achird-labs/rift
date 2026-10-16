@@ -2482,8 +2482,11 @@ mod tests {
     #[cfg(not(unix))]
     fn raise_fd_limit() {}
 
+    /// Fixed port, only for a test that must name a port before the manager binds it (#1485).
+    /// Probes `0.0.0.0`, the family imposters bind, so a concurrent `127.0.0.1` socket on the same
+    /// number cannot take this test's connections.
     fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
+        std::net::TcpListener::bind("0.0.0.0:0")
             .expect("bind an ephemeral port")
             .local_addr()
             .expect("local addr")
@@ -2494,18 +2497,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_imposter_writes_to_datadir() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
 
         let config = serde_json::from_value(serde_json::json!({
             "protocol": "http",
-            "port": port_0,
             "stubs": []
         }))
         .unwrap();
 
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let file = dir.path().join(format!("{port_0}.json"));
@@ -2523,12 +2524,10 @@ mod tests {
     // so a restart silently lost config the author wrote.
     #[tokio::test]
     async fn a_behaviors_block_on_a_proxy_response_survives_the_datadir() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
         let config = serde_json::from_value(serde_json::json!({
             "protocol": "http",
-            "port": port_0,
             "stubs": [{"responses": [{
                 "proxy": {"to": "http://127.0.0.1:1"},
                 "_behaviors": {"wait": 500}
@@ -2536,7 +2535,7 @@ mod tests {
         }))
         .expect("config");
 
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
         let content =
             std::fs::read_to_string(dir.path().join(format!("{port_0}.json"))).expect("file");
         let json: serde_json::Value = serde_json::from_str(&content).expect("json");
@@ -2551,18 +2550,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_imposter_removes_from_datadir() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
 
         let config = serde_json::from_value(serde_json::json!({
             "protocol": "http",
-            "port": port_0,
             "stubs": []
         }))
         .unwrap();
 
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let file = dir.path().join(format!("{port_0}.json"));
@@ -2579,7 +2576,6 @@ mod tests {
     /// pre-check did not turn a missing file into a surfaced error.
     #[tokio::test]
     async fn test_delete_imposter_succeeds_when_datadir_file_already_removed() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
 
@@ -2587,12 +2583,11 @@ mod tests {
         // a port shared with another test or process load-balances between imposters (#814).
         let config = serde_json::from_value(serde_json::json!({
             "protocol": "http",
-            "port": port_0,
             "stubs": []
         }))
         .unwrap();
 
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Remove the file out from under the manager, so the unlink races with an absent file.
@@ -2611,7 +2606,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_stub_updates_datadir() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
 
@@ -2619,12 +2613,11 @@ mod tests {
         // would load-balance between two imposters and flake (#814).
         let config = serde_json::from_value(serde_json::json!({
             "protocol": "http",
-            "port": port_0,
             "stubs": []
         }))
         .unwrap();
 
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
         // Wait for create_imposter's fire-and-forget persistence to land.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -2644,8 +2637,8 @@ mod tests {
         manager.delete_imposter(port_0).await.unwrap();
     }
 
-    fn datadir_config(port: u16) -> ImposterConfig {
-        serde_json::from_value(serde_json::json!({"protocol": "http", "port": port, "stubs": []}))
+    fn datadir_config() -> ImposterConfig {
+        serde_json::from_value(serde_json::json!({"protocol": "http", "stubs": []}))
             .expect("config")
     }
 
@@ -2653,12 +2646,11 @@ mod tests {
     /// the next start after a kill — could see it empty or half-written. Every read must parse.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_concurrent_reader_never_sees_a_partial_datadir_file() {
-        let port_0 = free_port();
         use std::sync::atomic::{AtomicBool, Ordering};
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
-        manager
-            .create_imposter(datadir_config(port_0))
+        let port_0 = manager
+            .create_imposter(datadir_config())
             .await
             .expect("create");
 
@@ -2707,11 +2699,10 @@ mod tests {
     /// survived, not that the file was truncated on the way to failing (issue #1158).
     #[tokio::test]
     async fn a_failed_persist_leaves_the_previous_file_intact() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
-        manager
-            .create_imposter(datadir_config(port_0))
+        let port_0 = manager
+            .create_imposter(datadir_config())
             .await
             .expect("create");
         let file = dir.path().join(format!("{port_0}.json"));
@@ -2739,6 +2730,7 @@ mod tests {
     /// input, in the case that mattered — must survive the failed create.
     #[tokio::test]
     async fn a_create_that_cannot_persist_leaves_an_existing_file_alone() {
+        // Fixed port: the operator's `{port}.json` must exist before the create.
         let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join(format!("{port_0}.json"));
@@ -2748,7 +2740,9 @@ mod tests {
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
 
         let err = manager
-            .create_imposter(datadir_config(port_0))
+            .create_imposter(datadir_cfg(
+                serde_json::json!({"port": port_0, "protocol": "http", "stubs": []}),
+            ))
             .await
             .expect_err("the create cannot persist");
         assert!(matches!(err, ImposterError::PersistError(_)), "{err:?}");
@@ -2764,11 +2758,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_persist_leaves_no_temp_file_and_a_delete_removes_a_leftover() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
-        manager
-            .create_imposter(datadir_config(port_0))
+        let port_0 = manager
+            .create_imposter(datadir_config())
             .await
             .expect("create");
         assert_eq!(
@@ -2790,11 +2783,10 @@ mod tests {
     /// `Err` means "not deleted" (issue #1124), and a restart must still find the imposter.
     #[tokio::test]
     async fn a_delete_that_cannot_clear_the_temp_file_keeps_the_imposter_and_its_file() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
-        manager
-            .create_imposter(datadir_config(port_0))
+        let port_0 = manager
+            .create_imposter(datadir_config())
             .await
             .expect("create");
         // A non-empty directory at the temp path cannot be removed as a file.
@@ -2840,21 +2832,17 @@ mod tests {
     // its source, so neither its create nor a later stub edit may write it to the datadir.
     #[tokio::test]
     async fn ephemeral_imposter_never_touches_the_datadir() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
 
-        let explicit =
-            datadir_cfg(serde_json::json!({"port": port_0, "protocol": "http", "stubs": []}));
-        let port_less = datadir_cfg(serde_json::json!({"protocol": "http", "stubs": []}));
-        manager
-            .create_imposter_as(explicit, Persistence::Ephemeral)
+        let port_0 = manager
+            .create_imposter_as(datadir_config(), Persistence::Ephemeral)
             .await
-            .expect("create explicit");
+            .expect("create first");
         manager
-            .create_imposter_as(port_less, Persistence::Ephemeral)
+            .create_imposter_as(datadir_config(), Persistence::Ephemeral)
             .await
-            .expect("create port-less");
+            .expect("create second");
         manager
             .add_stub(port_0, one_stub(), None)
             .await
@@ -2868,38 +2856,36 @@ mod tests {
 
     #[tokio::test]
     async fn apply_desired_persists_only_datadir_entries() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
 
-        let entry = |value: serde_json::Value, persistence| DesiredImposter {
-            config: datadir_cfg(value),
+        let entry = |persistence| DesiredImposter {
+            config: datadir_config(),
             persistence,
         };
         let report = manager
             .apply_desired(vec![
-                entry(
-                    serde_json::json!({"port": port_0, "protocol": "http", "stubs": []}),
-                    Persistence::Ephemeral,
-                ),
-                entry(
-                    serde_json::json!({"port": port_1, "protocol": "http", "stubs": []}),
-                    Persistence::Datadir,
-                ),
-                entry(
-                    serde_json::json!({"protocol": "http", "stubs": []}),
-                    Persistence::Ephemeral,
-                ),
+                entry(Persistence::Ephemeral),
+                entry(Persistence::Datadir),
+                entry(Persistence::Ephemeral),
             ])
             .await
             .expect("apply");
 
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert_eq!(report.created.len(), 3);
+        let persisted: Vec<u16> = report
+            .created
+            .iter()
+            .copied()
+            .filter(|&p| {
+                manager.get_imposter(p).expect("running").persistence() == Persistence::Datadir
+            })
+            .collect();
+        assert_eq!(persisted.len(), 1, "{report:?}");
         assert_eq!(
             datadir_files(dir.path()),
-            vec![format!("{port_1}.json").to_string()]
+            vec![format!("{}.json", persisted[0])]
         );
 
         manager.delete_all().await;
@@ -2910,17 +2896,15 @@ mod tests {
     // and from then on it persists exactly as its new store requires.
     #[tokio::test]
     async fn apply_desired_retags_a_running_imposter_in_place() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        let port_0 = manager
+            .create_imposter_as(datadir_config(), Persistence::Ephemeral)
+            .await
+            .expect("create");
         let config =
             || datadir_cfg(serde_json::json!({"port": port_0, "protocol": "http", "stubs": []}));
         let file = dir.path().join(format!("{port_0}.json"));
-
-        manager
-            .create_imposter_as(config(), Persistence::Ephemeral)
-            .await
-            .expect("create");
         assert!(!file.exists());
 
         let report = manager
@@ -2967,17 +2951,13 @@ mod tests {
     // before the retag and wrote back the file the operator had moved into the config file.
     #[tokio::test]
     async fn apply_desired_retag_with_an_enabled_change_writes_no_file() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
-        let file = dir.path().join(format!("{port_0}.json"));
-
-        manager
-            .create_imposter(datadir_cfg(
-                serde_json::json!({"port": port_0, "protocol": "http", "stubs": []}),
-            ))
+        let port_0 = manager
+            .create_imposter(datadir_config())
             .await
             .expect("create");
+        let file = dir.path().join(format!("{port_0}.json"));
         std::fs::remove_file(&file).expect("operator removes the datadir file");
 
         let report = manager
@@ -3003,16 +2983,13 @@ mod tests {
     // through it, unchanged or edited, must not move that imposter into the datadir.
     #[tokio::test]
     async fn apply_config_keeps_a_running_imposter_in_its_store() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
-        let seeded = serde_json::json!({"port": port_0, "protocol": "http", "stubs": []});
-
-        manager
-            .create_imposter_as(datadir_cfg(seeded.clone()), Persistence::Ephemeral)
+        let port_0 = manager
+            .create_imposter_as(datadir_config(), Persistence::Ephemeral)
             .await
             .expect("create");
+        let seeded = serde_json::json!({"port": port_0, "protocol": "http", "stubs": []});
 
         let unchanged = manager
             .apply_config(vec![datadir_cfg(seeded)])
@@ -3033,11 +3010,12 @@ mod tests {
                 datadir_cfg(serde_json::json!(
                     {"port": port_0, "protocol": "http", "name": "renamed", "stubs": []}
                 )),
-                datadir_cfg(serde_json::json!({"port": port_1, "protocol": "http", "stubs": []})),
+                datadir_config(),
             ])
             .await
             .expect("apply with a new imposter");
-        assert_eq!(created.created, vec![port_1]);
+        assert_eq!(created.created.len(), 1, "{created:?}");
+        let port_1 = created.created[0];
 
         assert_eq!(
             datadir_files(dir.path()),
@@ -3056,17 +3034,13 @@ mod tests {
     // datadir reload, the operator's own file was lost along with the imposter.
     #[tokio::test]
     async fn a_failed_replace_from_the_datadir_keeps_its_file() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
-        let file = dir.path().join(format!("{port_0}.json"));
-
-        manager
-            .create_imposter(datadir_cfg(
-                serde_json::json!({"port": port_0, "protocol": "http", "stubs": []}),
-            ))
+        let port_0 = manager
+            .create_imposter(datadir_config())
             .await
             .expect("create");
+        let file = dir.path().join(format!("{port_0}.json"));
         assert!(file.exists());
 
         let report = manager
@@ -3093,17 +3067,13 @@ mod tests {
     // report says it was deleted, so a restart must not bring it back.
     #[tokio::test]
     async fn a_failed_replace_through_apply_config_removes_the_stale_file() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
-        let file = dir.path().join(format!("{port_0}.json"));
-
-        manager
-            .create_imposter(datadir_cfg(
-                serde_json::json!({"port": port_0, "protocol": "http", "stubs": []}),
-            ))
+        let port_0 = manager
+            .create_imposter(datadir_config())
             .await
             .expect("create");
+        let file = dir.path().join(format!("{port_0}.json"));
         assert!(file.exists());
 
         let report = manager
@@ -3125,19 +3095,18 @@ mod tests {
     // A stub patch and a move out of the datadir in one apply: the patch must not be written.
     #[tokio::test]
     async fn apply_desired_patch_and_retag_to_ephemeral_writes_nothing() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
-        let file = dir.path().join(format!("{port_0}.json"));
         let stub = |body: &str| serde_json::json!({"responses": [{"is": {"body": body}}]});
 
-        manager
+        let port_0 = manager
             .create_imposter(datadir_cfg(serde_json::json!({
-                "port": port_0, "protocol": "http",
+                "protocol": "http",
                 "stubs": [stub("a"), stub("b"), stub("c")]
             })))
             .await
             .expect("create");
+        let file = dir.path().join(format!("{port_0}.json"));
 
         let report = manager
             .apply_desired(vec![DesiredImposter {
@@ -3180,7 +3149,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_stub_returns_persist_error_on_write_failure() {
-        let port_0 = free_port();
         // Create must succeed first (issue #563 made create persist synchronously), so use a
         // writable datadir, then remove it so the *subsequent* add_stub write fails and must
         // propagate ImposterError::PersistError.
@@ -3191,12 +3159,11 @@ mod tests {
         let manager = ImposterManager::with_datadir(Some(datadir.clone()));
         let config: ImposterConfig = serde_json::from_value(serde_json::json!({
             "protocol": "http",
-            "port": port_0,
             "stubs": []
         }))
         .unwrap();
 
-        manager
+        let port_0 = manager
             .create_imposter(config)
             .await
             .expect("create should succeed with a writable datadir");
@@ -3222,14 +3189,12 @@ mod tests {
     // not silently succeed and vanish on restart (the fire-and-forget bug).
     #[tokio::test]
     async fn create_returns_persist_error_on_unwritable_datadir() {
-        let port_0 = free_port();
         let fake_dir = tempfile::tempdir().expect("tempdir");
         let nonexistent_datadir = fake_dir.path().join("does_not_exist_subdir");
         let manager = ImposterManager::with_datadir(Some(nonexistent_datadir));
 
         let config: ImposterConfig = serde_json::from_value(serde_json::json!({
             "protocol": "http",
-            "port": port_0,
             "stubs": []
         }))
         .unwrap();
@@ -3239,27 +3204,25 @@ mod tests {
             matches!(result, Err(ImposterError::PersistError(_))),
             "create must surface PersistError when the datadir is not writable, got: {result:?}"
         );
-        // Rolled back: the imposter must not linger in the map, and its port must be free again.
-        assert!(
-            manager.get_imposter(port_0).is_err(),
+        // Rolled back: the imposter must not linger in the map.
+        assert_eq!(
+            manager.count(),
+            0,
             "a create that failed to persist must not leave a running imposter"
         );
-        assert_eq!(manager.count(), 0, "the failed create must be rolled back");
     }
 
     #[tokio::test]
     async fn create_persists_file_synchronously() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
         let config: ImposterConfig = serde_json::from_value(serde_json::json!({
             "protocol": "http",
-            "port": port_0,
             "stubs": []
         }))
         .unwrap();
 
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
         // No sleep: create now awaits the persist, so the file exists the moment create returns.
         assert!(
             dir.path().join(format!("{port_0}.json")).exists(),
@@ -3297,6 +3260,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_closes_keepalive_connections() {
+        // Fixed port: probed again after the delete (see the #809 note below).
         let port_0 = free_port();
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpStream;
@@ -3475,6 +3439,7 @@ mod tests {
     // re-create binds cleanly and a fresh connection can only reach the new imposter.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_then_recreate_same_port_serves_new_generation() {
+        // Fixed port: re-bound after the delete (see the #809 note below).
         let port_0 = free_port();
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpStream;
@@ -3530,6 +3495,12 @@ mod tests {
 
     fn imposter_cfg(v: serde_json::Value) -> ImposterConfig {
         serde_json::from_value(v).expect("test imposter config")
+    }
+
+    /// `config` with its port set: a re-apply names the port the first create was assigned.
+    fn at(port: u16, mut config: ImposterConfig) -> ImposterConfig {
+        config.port = Some(port);
+        config
     }
 
     // Issue #423: imposters created through the manager (the path embedded/FFI consumers use, which
@@ -3676,28 +3647,25 @@ mod tests {
     // while a sibling port is modified.
     #[tokio::test]
     async fn apply_config_preserves_untouched_imposter_state() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let manager = ImposterManager::new();
-        let p1 = imposter_cfg(json!({
-            "protocol": "http", "port": port_0, "recordRequests": true,
-            "stubs": [cycled_stub_json("a1", "a2"), stub_json("b"), stub_json("c")]
-        }));
-        let p2 = imposter_cfg(json!({
-            "protocol": "http", "port": port_1,
-            "stubs": [stub_json("x"), stub_json("y"), stub_json("z")]
-        }));
-        let report = manager
-            .apply_config(vec![p1.clone(), p2])
+        let p1 = |port: Option<u16>| {
+            let mut v = json!({
+                "protocol": "http", "recordRequests": true,
+                "stubs": [cycled_stub_json("a1", "a2"), stub_json("b"), stub_json("c")]
+            });
+            if let Some(port) = port {
+                v["port"] = json!(port);
+            }
+            imposter_cfg(v)
+        };
+        let port_0 = manager.create_imposter(p1(None)).await.expect("create");
+        let port_1 = manager
+            .create_imposter(imposter_cfg(json!({
+                "protocol": "http",
+                "stubs": [stub_json("x"), stub_json("y"), stub_json("z")]
+            })))
             .await
-            .expect("initial apply");
-        // OS-assigned ports arrive in any order; the report's order is not the point here.
-        let mut created = report.created.clone();
-        created.sort_unstable();
-        let mut expected = vec![port_0, port_1];
-        expected.sort_unstable();
-        assert_eq!(created, expected);
-        assert!(report.failed.is_empty());
+            .expect("create");
 
         let untouched = manager.get_imposter(port_0).unwrap();
         untouched.record_request(recorded("/cycled"));
@@ -3708,7 +3676,7 @@ mod tests {
             "stubs": [stub_json("x"), stub_json("y"), stub_json("z2")]
         }));
         let report = manager
-            .apply_config(vec![p1, p2_changed])
+            .apply_config(vec![p1(Some(port_0)), p2_changed])
             .await
             .expect("second apply");
         assert!(report.created.is_empty());
@@ -3740,13 +3708,12 @@ mod tests {
     // reset runtime state the way a wholesale replace would.
     #[tokio::test]
     async fn apply_config_enabled_only_diff_toggles_in_place() {
-        let port_0 = free_port();
         let manager = ImposterManager::new();
         let initial = imposter_cfg(json!({
-            "protocol": "http", "port": port_0, "recordRequests": true,
+            "protocol": "http", "recordRequests": true,
             "stubs": [stub_json("a")]
         }));
-        manager.apply_config(vec![initial]).await.expect("create");
+        let port_0 = manager.create_imposter(initial).await.expect("create");
         let before = manager.get_imposter(port_0).unwrap();
         before.record_request(recorded("/a"));
         assert!(before.is_enabled());
@@ -3788,16 +3755,14 @@ mod tests {
     // the persisted file restores the operator's decision.
     #[tokio::test]
     async fn set_imposter_enabled_persists_emits_and_reload_restores() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let datadir = tempfile::tempdir().expect("tempdir");
         let listener = Arc::new(RecordingListener(Mutex::new(Vec::new())));
         let manager = ImposterManager::with_datadir(Some(datadir.path().to_path_buf()))
             .with_event_listener(listener.clone());
         let config = imposter_cfg(json!({
-            "protocol": "http", "port": port_0, "stubs": [stub_json("a")]
+            "protocol": "http", "stubs": [stub_json("a")]
         }));
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
 
         manager
             .set_imposter_enabled(port_0, false)
@@ -3823,10 +3788,10 @@ mod tests {
         let reloaded: ImposterConfig = serde_json::from_str(&persisted).expect("parses");
         assert!(!reloaded.enabled);
         let fresh = ImposterManager::new();
-        // Rebind on a fresh ephemeral port to avoid racing the old listener.
+        // Rebind on a fresh auto-assigned port to avoid racing the old listener.
         let mut reloaded = reloaded;
-        reloaded.port = Some(port_1);
-        fresh.create_imposter(reloaded).await.expect("recreate");
+        reloaded.port = None;
+        let port_1 = fresh.create_imposter(reloaded).await.expect("recreate");
         assert!(
             !fresh.get_imposter(port_1).unwrap().is_enabled(),
             "a restart must not silently re-enable a paused imposter"
@@ -3865,13 +3830,12 @@ mod tests {
     // AC2d: imposter-level field changes always replace wholesale.
     #[tokio::test]
     async fn apply_config_imposter_level_change_replaces_wholesale() {
-        let port_0 = free_port();
         let manager = ImposterManager::new();
         let initial = imposter_cfg(json!({
-            "protocol": "http", "port": port_0, "recordRequests": true,
+            "protocol": "http", "recordRequests": true,
             "stubs": [stub_json("a")]
         }));
-        manager.apply_config(vec![initial]).await.expect("create");
+        let port_0 = manager.create_imposter(initial).await.expect("create");
         let before = manager.get_imposter(port_0).unwrap();
         before.record_request(recorded("/a"));
 
@@ -3900,13 +3864,12 @@ mod tests {
     // AC2c: > 50 % of stubs changing falls back to whole-imposter replace.
     #[tokio::test]
     async fn apply_config_degenerate_stub_change_replaces_imposter() {
-        let port_0 = free_port();
         let manager = ImposterManager::new();
         let initial = imposter_cfg(json!({
-            "protocol": "http", "port": port_0,
+            "protocol": "http",
             "stubs": [stub_json("a"), stub_json("b")]
         }));
-        manager.apply_config(vec![initial]).await.expect("create");
+        let port_0 = manager.create_imposter(initial).await.expect("create");
         let before = manager.get_imposter(port_0).unwrap();
 
         let rewritten = imposter_cfg(json!({
@@ -3925,15 +3888,14 @@ mod tests {
     // AC6: full-set validation up front — nothing mutates on validation failure.
     #[tokio::test]
     async fn apply_config_validation_failure_mutates_nothing() {
-        let port_0 = free_port();
-        let port_1 = free_port();
-        let port_2 = free_port();
+        // Neither port is ever bound: validation refuses both sets before any bind.
+        let (port_1, port_2) = (1, 2);
         let manager = ImposterManager::new();
         let initial = imposter_cfg(json!({
-            "protocol": "http", "port": port_0,
+            "protocol": "http",
             "stubs": [stub_json("a")]
         }));
-        manager.apply_config(vec![initial]).await.expect("create");
+        let port_0 = manager.create_imposter(initial).await.expect("create");
         let before = manager.get_imposter(port_0).unwrap();
 
         let would_change = imposter_cfg(json!({
@@ -4036,18 +3998,19 @@ mod tests {
 
     #[tokio::test]
     async fn apply_config_creates_new_and_deletes_missing_ports() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let manager = ImposterManager::new();
-        let first = imposter_cfg(json!({"protocol": "http", "port": port_0, "stubs": []}));
+        let first = imposter_cfg(json!({"protocol": "http", "stubs": []}));
         let report = manager.apply_config(vec![first]).await.expect("apply");
-        assert_eq!(report.created, vec![port_0]);
+        assert_eq!(report.created.len(), 1, "{report:?}");
+        let port_0 = report.created[0];
 
-        let second = imposter_cfg(json!({"protocol": "http", "port": port_1, "stubs": []}));
+        let second = imposter_cfg(json!({"protocol": "http", "stubs": []}));
         let report = manager.apply_config(vec![second]).await.expect("apply");
-        assert_eq!(report.created, vec![port_1]);
+        assert_eq!(report.created.len(), 1, "{report:?}");
+        let port_1 = report.created[0];
+        // The delete frees `port_0` first, so auto-assign may hand the same number back.
         assert_eq!(report.deleted, vec![port_0]);
-        assert!(manager.get_imposter(port_0).is_err());
+        assert_eq!(manager.count(), 1);
         assert!(manager.get_imposter(port_1).is_ok());
 
         manager.delete_all().await;
@@ -4061,8 +4024,17 @@ mod tests {
             imposter_cfg(json!({"protocol": "http", "port": port, "stubs": stubs}))
         }
 
+        /// Create the starting imposter on an auto-assigned port, which `cfg` then names.
+        async fn seed(manager: &ImposterManager, stubs: serde_json::Value) -> u16 {
+            manager
+                .create_imposter(imposter_cfg(json!({"protocol": "http", "stubs": stubs})))
+                .await
+                .expect("seed")
+        }
+
         #[tokio::test]
         async fn creates_an_absent_port() {
+            // Fixed port: `apply_one` refuses a port-less config, so the absent port is named first.
             let port_0 = free_port();
             let manager = ImposterManager::new();
             let report = manager
@@ -4077,23 +4049,19 @@ mod tests {
 
         #[tokio::test]
         async fn patches_in_place_and_leaves_other_ports_untouched() {
-            let port_0 = free_port();
-            let port_1 = free_port();
             let listener = Arc::new(RecordingListener::default());
             let manager = ImposterManager::new().with_event_listener(listener.clone());
-            let p = |last: &str| {
-                cfg(
-                    port_0,
-                    json!([
-                        cycled_stub_json("p1", "p2"),
-                        stub_json("b"),
-                        stub_json("c"),
-                        stub_json(last)
-                    ]),
-                )
+            let stubs = |last: &str| {
+                json!([
+                    cycled_stub_json("p1", "p2"),
+                    stub_json("b"),
+                    stub_json("c"),
+                    stub_json(last)
+                ])
             };
-            let q = cfg(port_1, json!([cycled_stub_json("q1", "q2")]));
-            manager.apply_config(vec![p("d"), q]).await.expect("seed");
+            let port_0 = seed(&manager, stubs("d")).await;
+            let port_1 = seed(&manager, json!([cycled_stub_json("q1", "q2")])).await;
+            let p = |last: &str| cfg(port_0, stubs(last));
             let p_before = manager.get_imposter(port_0).unwrap();
             let q_before = manager.get_imposter(port_1).unwrap();
             assert_eq!(next_body(&p_before.snapshot().stubs()[0]), "p1");
@@ -4128,13 +4096,10 @@ mod tests {
 
         #[tokio::test]
         async fn never_deletes_ports_it_was_not_given() {
-            let port_0 = free_port();
-            let port_1 = free_port();
             let manager = ImposterManager::new();
-            manager
-                .apply_config(vec![cfg(port_0, json!([stub_json("a")]))])
-                .await
-                .expect("seed");
+            let port_0 = seed(&manager, json!([stub_json("a")])).await;
+            // Fixed port: `apply_one` refuses a port-less config, so the absent port is named first.
+            let port_1 = free_port();
             let report = manager
                 .apply_one(cfg(port_1, json!([stub_json("b")])))
                 .await
@@ -4150,11 +4115,10 @@ mod tests {
 
         #[tokio::test]
         async fn an_unchanged_config_touches_nothing() {
-            let port_0 = free_port();
             let listener = Arc::new(RecordingListener::default());
             let manager = ImposterManager::new().with_event_listener(listener.clone());
+            let port_0 = seed(&manager, json!([stub_json("a")])).await;
             let config = || cfg(port_0, json!([stub_json("a")]));
-            manager.apply_one(config()).await.expect("create");
             let before = manager.get_imposter(port_0).unwrap();
             listener.0.lock().clear();
             let report = manager.apply_one(config()).await.expect("re-apply");
@@ -4168,12 +4132,8 @@ mod tests {
 
         #[tokio::test]
         async fn toggles_enabled_in_place() {
-            let port_0 = free_port();
             let manager = ImposterManager::new();
-            manager
-                .apply_one(cfg(port_0, json!([stub_json("a")])))
-                .await
-                .expect("create");
+            let port_0 = seed(&manager, json!([stub_json("a")])).await;
             let before = manager.get_imposter(port_0).unwrap();
             let paused = imposter_cfg(json!({
                 "protocol": "http", "port": port_0, "enabled": false, "stubs": [stub_json("a")]
@@ -4189,12 +4149,8 @@ mod tests {
 
         #[tokio::test]
         async fn an_imposter_level_change_replaces() {
-            let port_0 = free_port();
             let manager = ImposterManager::new();
-            manager
-                .apply_one(cfg(port_0, json!([stub_json("a")])))
-                .await
-                .expect("create");
+            let port_0 = seed(&manager, json!([stub_json("a")])).await;
             let before = manager.get_imposter(port_0).unwrap();
             let renamed = imposter_cfg(json!({
                 "protocol": "http", "port": port_0, "name": "renamed", "stubs": [stub_json("a")]
@@ -4211,12 +4167,8 @@ mod tests {
 
         #[tokio::test]
         async fn a_degenerate_stub_change_replaces() {
-            let port_0 = free_port();
             let manager = ImposterManager::new();
-            manager
-                .apply_one(cfg(port_0, json!([stub_json("a"), stub_json("b")])))
-                .await
-                .expect("create");
+            let port_0 = seed(&manager, json!([stub_json("a"), stub_json("b")])).await;
             let report = manager
                 .apply_one(cfg(port_0, json!([stub_json("x"), stub_json("y")])))
                 .await
@@ -4243,12 +4195,8 @@ mod tests {
 
         #[tokio::test]
         async fn refuses_duplicate_stub_ids_and_an_invalid_protocol_without_mutating() {
-            let port_0 = free_port();
             let manager = ImposterManager::new();
-            manager
-                .apply_one(cfg(port_0, json!([stub_json("a")])))
-                .await
-                .expect("create");
+            let port_0 = seed(&manager, json!([stub_json("a")])).await;
             let before = manager.get_imposter(port_0).unwrap();
             let mut dup_a: serde_json::Value = stub_json("a");
             dup_a["id"] = json!("same");
@@ -4271,15 +4219,14 @@ mod tests {
 
         #[tokio::test]
         async fn desired_retags_a_running_imposter_in_place() {
-            let port_0 = free_port();
             let dir = tempfile::tempdir().expect("tempdir");
             let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
-            let config = || datadir_cfg(json!({"port": port_0, "protocol": "http", "stubs": []}));
-            let file = dir.path().join(format!("{port_0}.json"));
-            manager
-                .create_imposter_as(config(), Persistence::Ephemeral)
+            let port_0 = manager
+                .create_imposter_as(datadir_config(), Persistence::Ephemeral)
                 .await
                 .expect("create");
+            let config = || datadir_cfg(json!({"port": port_0, "protocol": "http", "stubs": []}));
+            let file = dir.path().join(format!("{port_0}.json"));
             let before = manager.get_imposter(port_0).unwrap();
             assert!(!file.exists());
 
@@ -4301,20 +4248,18 @@ mod tests {
         // desired config yields the same report (bar `deleted`, which only the whole-set sweep fills).
         #[tokio::test]
         async fn report_matches_apply_config_for_the_same_port() {
-            let port_0 = free_port();
-            let port_1 = free_port();
-            async fn run(port: u16, via_one: bool) -> ApplyReport {
+            async fn run(via_one: bool) -> (u16, ApplyReport) {
                 let manager = ImposterManager::new();
-                let seed = cfg(
-                    port,
+                let port = seed(
+                    &manager,
                     json!([
                         cycled_stub_json("a1", "a2"),
                         stub_json("b"),
                         stub_json("c"),
                         stub_json("d")
                     ]),
-                );
-                manager.apply_config(vec![seed]).await.expect("seed");
+                )
+                .await;
                 let next = imposter_cfg(json!({
                     "protocol": "http", "port": port, "enabled": false,
                     "stubs": [cycled_stub_json("a1", "a2"), stub_json("b"), stub_json("c"), stub_json("e")]
@@ -4326,10 +4271,10 @@ mod tests {
                 }
                 .expect("apply");
                 manager.delete_all().await;
-                report
+                (port, report)
             }
-            let one = run(port_0, true).await;
-            let all = run(port_1, false).await;
+            let (port_0, one) = run(true).await;
+            let (port_1, all) = run(false).await;
             assert_eq!(one.toggled, vec![port_0]);
             assert_eq!(one.stub_patched, vec![port_0]);
             assert_eq!(all.toggled, vec![port_1]);
@@ -4345,12 +4290,11 @@ mod tests {
     // imposter whose stubs carry multi-key maps (predicates, response headers).
     #[tokio::test]
     async fn apply_config_identical_multi_key_set_replaces_nothing() {
-        let port_0 = free_port();
         let listener = Arc::new(RecordingListener::default());
         let manager = ImposterManager::new().with_event_listener(listener.clone());
         let config = || {
             imposter_cfg(json!({
-                "protocol": "http", "port": port_0,
+                "protocol": "http",
                 "stubs": [{
                     "predicates": [{"equals": {"method": "GET", "path": "/m", "body": "x", "query": {"a": "1", "b": "2"}}}],
                     "responses": [
@@ -4360,14 +4304,14 @@ mod tests {
                 }, stub_json("b")]
             }))
         };
-        manager.apply_config(vec![config()]).await.expect("create");
+        let port_0 = manager.create_imposter(config()).await.expect("create");
         let before = manager.get_imposter(port_0).unwrap();
         assert_eq!(next_body(&before.snapshot().stubs()[0]), "m1");
         listener.0.lock().clear();
 
         for _ in 0..5 {
             let report = manager
-                .apply_config(vec![config()])
+                .apply_config(vec![at(port_0, config())])
                 .await
                 .expect("re-apply");
             assert!(
@@ -4403,20 +4347,19 @@ mod tests {
     // match index) as it was, rather than rebuilding an identical one per imposter per apply.
     #[tokio::test]
     async fn apply_config_identical_set_stores_no_snapshot() {
-        let port_0 = free_port();
         let manager = ImposterManager::new();
         let config = || {
             imposter_cfg(json!({
-                "protocol": "http", "port": port_0,
+                "protocol": "http",
                 "stubs": [stub_json("a"), stub_json("b"), cycled_stub_json("c1", "c2")]
             }))
         };
-        manager.apply_config(vec![config()]).await.expect("create");
+        let port_0 = manager.create_imposter(config()).await.expect("create");
         let imposter = manager.get_imposter(port_0).unwrap();
         let before = Arc::clone(&*imposter.snapshot());
 
         let report = manager
-            .apply_config(vec![config()])
+            .apply_config(vec![at(port_0, config())])
             .await
             .expect("re-apply");
         assert!(report.replaced.is_empty() && report.stub_patched.is_empty());
@@ -4437,14 +4380,12 @@ mod tests {
     // AC4: events fired per mutation kind.
     #[tokio::test]
     async fn events_fired_per_mutation_kind() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let listener = Arc::new(RecordingListener::default());
         let manager = ImposterManager::new().with_event_listener(listener.clone());
 
-        manager
+        let port_0 = manager
             .create_imposter(imposter_cfg(json!({
-                "protocol": "http", "port": port_0,
+                "protocol": "http",
                 "stubs": [stub_json("a"), stub_json("b"), stub_json("c")]
             })))
             .await
@@ -4458,14 +4399,15 @@ mod tests {
             "protocol": "http", "port": port_0,
             "stubs": [stub_json("b"), stub_json("a"), stub_json("c"), stub_json("e")]
         }));
-        let sibling = imposter_cfg(json!({"protocol": "http", "port": port_1, "stubs": []}));
-        manager
+        let sibling = imposter_cfg(json!({"protocol": "http", "stubs": []}));
+        let report = manager
             .apply_config(vec![patched_cfg, sibling.clone()])
             .await
             .expect("apply patch+create");
+        let port_1 = report.created[0];
         // drop the first imposter, keep the sibling unchanged
         manager
-            .apply_config(vec![sibling])
+            .apply_config(vec![at(port_1, sibling)])
             .await
             .expect("apply delete");
         // imposter-level change on the sibling
@@ -4499,20 +4441,19 @@ mod tests {
     // Issue #1399: the removed imposter comes back, and the event fires once per delete.
     #[tokio::test]
     async fn delete_imposter_returning_hands_back_the_imposter_and_emits_once() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let listener = Arc::new(RecordingListener::default());
         let manager = ImposterManager::new().with_event_listener(listener.clone());
 
+        let missing = 1;
         assert!(matches!(
-            manager.delete_imposter_returning(port_0).await,
-            Err(ImposterError::NotFound(pat_port)) if pat_port == port_0
+            manager.delete_imposter_returning(missing).await,
+            Err(ImposterError::NotFound(pat_port)) if pat_port == missing
         ));
         assert!(listener.0.lock().is_empty(), "a missing port emits nothing");
 
-        manager
+        let port_0 = manager
             .create_imposter(imposter_cfg(json!({
-                "protocol": "http", "port": port_0, "name": "gone", "stubs": []
+                "protocol": "http", "name": "gone", "stubs": []
             })))
             .await
             .expect("create");
@@ -4523,9 +4464,9 @@ mod tests {
         assert_eq!(removed.config.port, Some(port_0));
         assert!(manager.get_imposter(port_0).is_err());
 
-        manager
+        let port_1 = manager
             .create_imposter(imposter_cfg(json!({
-                "protocol": "http", "port": port_1, "stubs": []
+                "protocol": "http", "stubs": []
             })))
             .await
             .expect("create");
@@ -4568,13 +4509,10 @@ mod tests {
 
     #[tokio::test]
     async fn delete_imposter_surfaces_a_failed_unlink_and_keeps_serving() {
-        let port_0 = free_port();
         let datadir = BrokenDatadir::new();
         let manager = ImposterManager::with_datadir(Some(datadir.path.clone()));
-        manager
-            .create_imposter(imposter_cfg(
-                json!({"protocol": "http", "port": port_0, "stubs": []}),
-            ))
+        let port_0 = manager
+            .create_imposter(imposter_cfg(json!({"protocol": "http", "stubs": []})))
             .await
             .expect("create");
         datadir.break_it();
@@ -4604,21 +4542,17 @@ mod tests {
 
     #[tokio::test]
     async fn delete_all_reports_an_imposter_whose_file_cannot_be_removed() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let listener = Arc::new(RecordingListener::default());
         let datadir = BrokenDatadir::new();
         let manager = ImposterManager::with_datadir(Some(datadir.path.clone()))
             .with_event_listener(listener.clone());
-        manager
-            .create_imposter(imposter_cfg(
-                json!({"protocol": "http", "port": port_0, "stubs": []}),
-            ))
+        let port_0 = manager
+            .create_imposter(imposter_cfg(json!({"protocol": "http", "stubs": []})))
             .await
             .expect("create persisted");
-        manager
+        let port_1 = manager
             .create_imposter_as(
-                imposter_cfg(json!({"protocol": "http", "port": port_1, "stubs": []})),
+                imposter_cfg(json!({"protocol": "http", "stubs": []})),
                 Persistence::Ephemeral,
             )
             .await
@@ -4651,13 +4585,10 @@ mod tests {
 
     #[tokio::test]
     async fn delete_all_emits_all_deleted_when_nothing_failed() {
-        let port_0 = free_port();
         let listener = Arc::new(RecordingListener::default());
         let manager = ImposterManager::new().with_event_listener(listener.clone());
         manager
-            .create_imposter(imposter_cfg(
-                json!({"protocol": "http", "port": port_0, "stubs": []}),
-            ))
+            .create_imposter(imposter_cfg(json!({"protocol": "http", "stubs": []})))
             .await
             .expect("create");
         listener.0.lock().clear();
@@ -4670,13 +4601,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_apply_sweep_reports_an_imposter_whose_file_cannot_be_removed() {
-        let port_0 = free_port();
         let datadir = BrokenDatadir::new();
         let manager = ImposterManager::with_datadir(Some(datadir.path.clone()));
-        manager
-            .create_imposter(imposter_cfg(
-                json!({"protocol": "http", "port": port_0, "stubs": []}),
-            ))
+        let port_0 = manager
+            .create_imposter(imposter_cfg(json!({"protocol": "http", "stubs": []})))
             .await
             .expect("create");
         datadir.break_it();
@@ -4696,21 +4624,18 @@ mod tests {
     // still report its own write failure, not the cleanup's.
     #[tokio::test]
     async fn a_failed_create_reports_the_write_even_when_the_rollback_unlink_fails() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let not_a_dir = dir.path().join("data");
         std::fs::write(&not_a_dir, "not a directory").expect("write");
         let manager = ImposterManager::with_datadir(Some(not_a_dir));
 
         let err = manager
-            .create_imposter(imposter_cfg(
-                json!({"protocol": "http", "port": port_0, "stubs": []}),
-            ))
+            .create_imposter(imposter_cfg(json!({"protocol": "http", "stubs": []})))
             .await
             .expect_err("the write fails");
         let message = format!("{err}");
         assert!(
-            message.contains(&format!("Failed to write imposter {port_0}")),
+            message.contains("Failed to write imposter "),
             "got: {message}"
         );
         assert!(!message.contains("Failed to remove"), "got: {message}");
@@ -4720,13 +4645,10 @@ mod tests {
     // A replace whose re-create fails and whose stale-copy cleanup also fails reports both.
     #[tokio::test]
     async fn a_failed_replace_reports_a_cleanup_unlink_that_also_failed() {
-        let port_0 = free_port();
         let datadir = BrokenDatadir::new();
         let manager = ImposterManager::with_datadir(Some(datadir.path.clone()));
-        manager
-            .create_imposter(imposter_cfg(
-                json!({"protocol": "http", "port": port_0, "stubs": []}),
-            ))
+        let port_0 = manager
+            .create_imposter(imposter_cfg(json!({"protocol": "http", "stubs": []})))
             .await
             .expect("create");
         datadir.break_it();
@@ -4757,13 +4679,10 @@ mod tests {
     // recreate the deleted imposter's file.
     #[tokio::test]
     async fn a_write_after_delete_does_not_recreate_the_file() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
-        manager
-            .create_imposter(imposter_cfg(
-                json!({"protocol": "http", "port": port_0, "stubs": []}),
-            ))
+        let port_0 = manager
+            .create_imposter(imposter_cfg(json!({"protocol": "http", "stubs": []})))
             .await
             .expect("create");
         let stale = manager.get_imposter(port_0).expect("running");
@@ -4778,7 +4697,8 @@ mod tests {
 
     #[test]
     fn remove_if_same_leaves_a_different_imposter_in_place() {
-        let port_0 = free_port();
+        // A table key only: nothing binds it.
+        let port_0 = 1;
         let table = PortTable::new();
         let make = || {
             Arc::new(
@@ -4804,12 +4724,10 @@ mod tests {
     // Per-port apply failures land in `failed` while sibling ports still apply.
     #[tokio::test]
     async fn apply_config_partial_failure_reports_failed_port() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let manager = ImposterManager::new();
-        let good = imposter_cfg(json!({"protocol": "http", "port": port_0, "stubs": []}));
+        let good = imposter_cfg(json!({"protocol": "http", "stubs": []}));
         let bad_tls = imposter_cfg(json!({
-            "protocol": "https", "port": port_1,
+            "protocol": "https",
             "cert": "not a pem", "key": "not a pem",
             "stubs": []
         }));
@@ -4817,15 +4735,17 @@ mod tests {
             .apply_config(vec![good, bad_tls])
             .await
             .expect("apply");
-        assert_eq!(report.created, vec![port_0], "sibling still applied");
+        assert_eq!(report.created.len(), 1, "sibling still applied: {report:?}");
+        let port_0 = report.created[0];
         assert_eq!(report.failed.len(), 1);
+        // A port-less config's failure is reported under the `0` sentinel.
         assert!(
-            matches!(report.failed[0], (pat_port, ImposterError::Tls(_)) if pat_port == port_1),
+            matches!(report.failed[0], (0, ImposterError::Tls(_))),
             "got: {:?}",
             report.failed
         );
         assert!(manager.get_imposter(port_0).is_ok());
-        assert!(manager.get_imposter(port_1).is_err());
+        assert_eq!(manager.count(), 1);
 
         manager.delete_all().await;
     }
@@ -4835,14 +4755,13 @@ mod tests {
     // synchronous-persist contract.
     #[tokio::test]
     async fn apply_config_create_persist_failure_reports_failed_not_created() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let datadir = dir.path().join("datadir");
         std::fs::create_dir(&datadir).expect("mk datadir");
         let manager = ImposterManager::with_datadir(Some(datadir.clone()));
         std::fs::remove_dir_all(&datadir).expect("break the datadir");
 
-        let cfg = imposter_cfg(json!({"protocol": "http", "port": port_0, "stubs": []}));
+        let cfg = imposter_cfg(json!({"protocol": "http", "stubs": []}));
         let report = manager.apply_config(vec![cfg]).await.expect("apply");
         assert!(
             report.created.is_empty(),
@@ -4850,12 +4769,11 @@ mod tests {
             report.created
         );
         assert!(
-            matches!(report.failed[0], (pat_port, ImposterError::PersistError(_)) if pat_port == port_0),
+            matches!(report.failed[0], (0, ImposterError::PersistError(_))),
             "got: {:?}",
             report.failed
         );
-        assert!(manager.get_imposter(port_0).is_err(), "must be rolled back");
-        assert_eq!(manager.count(), 0);
+        assert_eq!(manager.count(), 0, "must be rolled back");
     }
 
     // A replace whose recreate fails after teardown is honestly reported: the port lands in
@@ -4863,12 +4781,11 @@ mod tests {
     // phantom imposter.
     #[tokio::test]
     async fn apply_config_failed_replace_reports_deletion_and_event() {
-        let port_0 = free_port();
         let listener = Arc::new(RecordingListener::default());
         let manager = ImposterManager::new().with_event_listener(listener.clone());
-        manager
+        let port_0 = manager
             .create_imposter(imposter_cfg(json!({
-                "protocol": "http", "port": port_0, "stubs": [stub_json("a")]
+                "protocol": "http", "stubs": [stub_json("a")]
             })))
             .await
             .expect("create");
@@ -4900,14 +4817,13 @@ mod tests {
     // otherwise silently corrupt the stub-key diff.
     #[tokio::test]
     async fn apply_config_rejects_duplicate_stub_ids() {
-        let port_0 = free_port();
         let manager = ImposterManager::new();
         let mut stub_a = stub_json("a");
         stub_a["id"] = json!("dup");
         let mut stub_b = stub_json("b");
         stub_b["id"] = json!("dup");
         let config = imposter_cfg(json!({
-            "protocol": "http", "port": port_0, "stubs": [stub_a, stub_b]
+            "protocol": "http", "stubs": [stub_a, stub_b]
         }));
         let result = manager.apply_config(vec![config]).await;
         assert!(
@@ -4921,14 +4837,13 @@ mod tests {
     // while the in-memory patch stands.
     #[tokio::test]
     async fn apply_config_patch_persist_failure_lands_in_failed() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let datadir = dir.path().join("datadir");
         std::fs::create_dir(&datadir).expect("mk datadir");
         let manager = ImposterManager::with_datadir(Some(datadir.clone()));
-        manager
+        let port_0 = manager
             .create_imposter(imposter_cfg(json!({
-                "protocol": "http", "port": port_0,
+                "protocol": "http",
                 "stubs": [stub_json("a"), stub_json("b"), stub_json("c")]
             })))
             .await
@@ -4961,14 +4876,13 @@ mod tests {
     // in `failed`; listing it in `toggled` too claims an apply that did not complete.
     #[tokio::test]
     async fn a_failed_enabled_toggle_is_reported_as_failed_not_toggled() {
-        let port_0 = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let datadir = dir.path().join("datadir");
         std::fs::create_dir(&datadir).expect("mk datadir");
         let manager = ImposterManager::with_datadir(Some(datadir.clone()));
-        manager
+        let port_0 = manager
             .create_imposter(imposter_cfg(json!({
-                "protocol": "http", "port": port_0, "stubs": [stub_json("a")]
+                "protocol": "http", "stubs": [stub_json("a")]
             })))
             .await
             .expect("create succeeds with a writable datadir");
@@ -4995,12 +4909,11 @@ mod tests {
     // move_stub is a positional move that preserves the moved slot's cycling state.
     #[tokio::test]
     async fn move_stub_repositions_and_preserves_cursor() {
-        let port_0 = free_port();
-        let port_1 = free_port();
+        let missing = 1;
         let manager = ImposterManager::new();
-        manager
+        let port_0 = manager
             .create_imposter(imposter_cfg(json!({
-                "protocol": "http", "port": port_0,
+                "protocol": "http",
                 "stubs": [cycled_stub_json("a1", "a2"), stub_json("b"), stub_json("c")]
             })))
             .await
@@ -5030,8 +4943,8 @@ mod tests {
             Err(ImposterError::StubIndexOutOfBounds(5))
         ));
         assert!(matches!(
-            manager.move_stub(port_1, 0, 0).await,
-            Err(ImposterError::NotFound(pat_port)) if pat_port == port_1
+            manager.move_stub(missing, 0, 0).await,
+            Err(ImposterError::NotFound(pat_port)) if pat_port == missing
         ));
 
         manager.delete_all().await;
@@ -5073,7 +4986,6 @@ mod tests {
         // provider's own store handle is visible via the imposter's flow store.
         #[tokio::test]
         async fn provider_store_is_used_for_new_imposters() {
-            let port_0 = free_port();
             let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
             let calls = Arc::new(Mutex::new(0));
             let provider = Arc::new(FixedProvider {
@@ -5083,10 +4995,8 @@ mod tests {
             let manager = ImposterManager::new()
                 .with_flow_store_provider(provider as Arc<dyn FlowStoreProvider>);
 
-            manager
-                .create_imposter(imposter_cfg(
-                    json!({"protocol": "http", "port": port_0, "stubs": []}),
-                ))
+            let port_0 = manager
+                .create_imposter(imposter_cfg(json!({"protocol": "http", "stubs": []})))
                 .await
                 .expect("create");
 
@@ -5107,7 +5017,6 @@ mod tests {
         // still gets a working (non-NoOp) in-memory store.
         #[tokio::test]
         async fn none_returning_provider_falls_through_to_builtin() {
-            let port_0 = free_port();
             let calls = Arc::new(Mutex::new(0));
             let provider = Arc::new(FixedProvider {
                 store: None,
@@ -5116,9 +5025,9 @@ mod tests {
             let manager = ImposterManager::new()
                 .with_flow_store_provider(provider as Arc<dyn FlowStoreProvider>);
 
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "stubs": [gated_stub()]
                 })))
                 .await
@@ -5142,7 +5051,6 @@ mod tests {
         // scenario stub added later, because it got the shared real store up front.
         #[tokio::test]
         async fn late_added_scenario_stub_advances_with_provider() {
-            let port_0 = free_port();
             let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
             let provider = Arc::new(FixedProvider {
                 store: Some(store),
@@ -5152,9 +5060,9 @@ mod tests {
                 .with_flow_store_provider(provider as Arc<dyn FlowStoreProvider>);
 
             // No scenario stubs, no _rift.flowState → would be NoOp without the provider.
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "stubs": [{
                         "predicates": [{"equals": {"path": "/plain"}}],
                         "responses": [{"is": {"statusCode": 200}}]
@@ -5186,11 +5094,10 @@ mod tests {
         // stands without a provider, i.e. behavior is byte-for-byte unchanged.
         #[tokio::test]
         async fn no_provider_leaves_late_added_scenario_stuck() {
-            let port_0 = free_port();
             let manager = ImposterManager::new();
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "stubs": [{
                         "predicates": [{"equals": {"path": "/plain"}}],
                         "responses": [{"is": {"statusCode": 200}}]
@@ -5233,7 +5140,6 @@ mod tests {
         // The provider receives the real ImposterConfig (per-imposter dispatch depends on it).
         #[tokio::test]
         async fn provider_receives_the_real_config() {
-            let port_0 = free_port();
             let seen_port = Arc::new(Mutex::new(None));
             let provider = Arc::new(CapturingProvider {
                 seen_port: Arc::clone(&seen_port),
@@ -5241,10 +5147,8 @@ mod tests {
             let manager = ImposterManager::new()
                 .with_flow_store_provider(provider as Arc<dyn FlowStoreProvider>);
 
-            manager
-                .create_imposter(imposter_cfg(
-                    json!({"protocol": "http", "port": port_0, "stubs": []}),
-                ))
+            let port_0 = manager
+                .create_imposter(imposter_cfg(json!({"protocol": "http", "stubs": []})))
                 .await
                 .expect("create");
 
@@ -5261,7 +5165,6 @@ mod tests {
         // `_rift.flowState` config (a refactor reversing the order must fail here).
         #[tokio::test]
         async fn provider_wins_over_explicit_flowstate_config() {
-            let port_0 = free_port();
             let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
             let provider = Arc::new(FixedProvider {
                 store: Some(Arc::clone(&store)),
@@ -5270,9 +5173,9 @@ mod tests {
             let manager = ImposterManager::new()
                 .with_flow_store_provider(provider as Arc<dyn FlowStoreProvider>);
 
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "_rift": {"flowState": {"ttlSeconds": 60}},
                     "stubs": []
                 })))
@@ -5296,7 +5199,6 @@ mod tests {
         // configured store (not NoOp).
         #[tokio::test]
         async fn none_provider_falls_through_to_configured_flowstate() {
-            let port_0 = free_port();
             let provider = Arc::new(FixedProvider {
                 store: None,
                 calls: Arc::new(Mutex::new(0)),
@@ -5304,9 +5206,9 @@ mod tests {
             let manager = ImposterManager::new()
                 .with_flow_store_provider(provider as Arc<dyn FlowStoreProvider>);
 
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "_rift": {"flowState": {"ttlSeconds": 60}},
                     "stubs": []
                 })))
@@ -5333,12 +5235,11 @@ mod tests {
     // attempt — never the no-match marker.
     #[tokio::test]
     async fn concurrent_mixed_array_never_serves_bogus_no_match() {
-        let port_0 = free_port();
         raise_fd_limit();
         let manager = ImposterManager::new();
-        manager
+        let port_0 = manager
             .create_imposter(imposter_cfg(json!({
-                "protocol": "http", "port": port_0,
+                "protocol": "http",
                 "stubs": [{
                     "predicates": [{"equals": {"path": "/m"}}],
                     "responses": [
@@ -5476,11 +5377,10 @@ mod tests {
         // decisions drive the served responses (repeat honored through the real pipeline).
         #[tokio::test]
         async fn sequencer_receives_keys_and_drives_cycling() {
-            let port_0 = free_port();
             let (recorder, manager) = manager_with_recorder();
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "stubs": [cycling_stub_json()]
                 })))
                 .await
@@ -5531,11 +5431,10 @@ mod tests {
         // preserve-on-replace), so a slot-keyed backend keeps its cursor position.
         #[tokio::test]
         async fn slot_survives_in_place_replace() {
-            let port_0 = free_port();
             let (recorder, manager) = manager_with_recorder();
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "stubs": [cycling_stub_json()]
                 })))
                 .await
@@ -5568,11 +5467,10 @@ mod tests {
         // imposter teardown (the GC hook).
         #[tokio::test]
         async fn reset_scope_fires_on_delete_bulk_replace_and_teardown() {
-            let port_0 = free_port();
             let (recorder, manager) = manager_with_recorder();
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "stubs": [cycling_stub_json(), stub_json("other")]
                 })))
                 .await
@@ -5613,12 +5511,11 @@ mod tests {
         // silent wrong response.
         #[tokio::test]
         async fn failing_sequencer_surfaces_structured_503() {
-            let port_0 = free_port();
             let manager = ImposterManager::new()
                 .with_sequencer(Arc::new(FailingSequencer) as Arc<dyn ResponseSequencer>);
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "stubs": [cycling_stub_json()]
                 })))
                 .await
@@ -5640,11 +5537,10 @@ mod tests {
         // flow id, which is orthogonal here).
         #[tokio::test]
         async fn space_scoped_stub_reports_scope() {
-            let port_0 = free_port();
             let (recorder, manager) = manager_with_recorder();
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "stubs": []
                 })))
                 .await
@@ -5685,12 +5581,11 @@ mod tests {
 
         #[tokio::test]
         async fn out_of_range_sequencer_index_surfaces_500() {
-            let port_0 = free_port();
             let manager = ImposterManager::new()
                 .with_sequencer(Arc::new(OobSequencer) as Arc<dyn ResponseSequencer>);
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "stubs": [cycling_stub_json()]
                 })))
                 .await
@@ -5712,11 +5607,10 @@ mod tests {
         // resolves and resets that same key.
         #[tokio::test]
         async fn idless_stub_content_key_and_delete_by_index_reset() {
-            let port_0 = free_port();
             let (recorder, manager) = manager_with_recorder();
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "stubs": [{
                         "predicates": [{"equals": {"path": "/anon"}}],
                         "responses": [{"is": {"statusCode": 200, "body": "anon"}}]
@@ -5754,10 +5648,9 @@ mod tests {
         // GC hook, and an untouched sibling keeps its slot (cursor survives the patch).
         #[tokio::test]
         async fn apply_config_patch_resets_removed_and_preserves_sibling_slot() {
-            let port_0 = free_port();
             let (recorder, manager) = manager_with_recorder();
             let initial = imposter_cfg(json!({
-                "protocol": "http", "port": port_0,
+                "protocol": "http",
                 "stubs": [
                     cycling_stub_json(),
                     {"id": "doomed",
@@ -5765,17 +5658,17 @@ mod tests {
                      "responses": [{"is": {"statusCode": 200, "body": "bye"}}]}
                 ]
             }));
-            manager
-                .apply_config(vec![initial.clone()])
+            let port_0 = manager
+                .create_imposter(initial.clone())
                 .await
-                .expect("create via apply");
+                .expect("create");
 
             let _ = reqwest::get(format!("http://127.0.0.1:{port_0}/cycle"))
                 .await
                 .expect("request");
             let slot_before = recorder.nexts.lock().last().expect("recorded").1;
 
-            let mut patched = initial;
+            let mut patched = at(port_0, initial);
             patched.stubs.truncate(1);
             manager.apply_config(vec![patched]).await.expect("patch");
 
@@ -5891,11 +5784,10 @@ mod tests {
         // numberOfRequests; nothing is recorded.
         #[tokio::test]
         async fn note_request_counts_even_when_recording_off() {
-            let port_0 = free_port();
             let (journal, manager) = manager_with_journal();
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "recordRequests": false,
+                    "protocol": "http", "recordRequests": false,
                     "stubs": [stub_json("ok")]
                 })))
                 .await
@@ -5919,11 +5811,10 @@ mod tests {
         // AC2: record carries the request's resolved flow id (per flowIdSource).
         #[tokio::test]
         async fn record_carries_resolved_flow_id() {
-            let port_0 = free_port();
             let (journal, manager) = manager_with_journal();
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "recordRequests": true,
+                    "protocol": "http", "recordRequests": true,
                     "_rift": { "flowState": { "flowIdSource": "header:X-Flow-Id" } },
                     "stubs": [stub_json("ok")]
                 })))
@@ -5959,11 +5850,10 @@ mod tests {
         // AC2: admin-facing imposter methods route through the injected journal.
         #[tokio::test]
         async fn admin_paths_route_through_journal() {
-            let port_0 = free_port();
             let (journal, manager) = manager_with_journal();
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "recordRequests": true,
+                    "protocol": "http", "recordRequests": true,
                     "stubs": [stub_json("ok")]
                 })))
                 .await
@@ -5992,11 +5882,10 @@ mod tests {
         // AC1/AC2: teardown_space clears exactly one correlated slice via clear_flow.
         #[tokio::test]
         async fn teardown_space_uses_clear_flow() {
-            let port_0 = free_port();
             let (journal, manager) = manager_with_journal();
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "recordRequests": true,
+                    "protocol": "http", "recordRequests": true,
                     "_rift": { "flowState": { "flowIdSource": "header:X-Flow-Id" } },
                     "stubs": [stub_json("ok")]
                 })))
@@ -6033,11 +5922,10 @@ mod tests {
         // must not resurrect on a later imposter reusing the port.
         #[tokio::test]
         async fn delete_imposter_clears_the_port() {
-            let port_0 = free_port();
             let (journal, manager) = manager_with_journal();
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "recordRequests": true,
+                    "protocol": "http", "recordRequests": true,
                     "stubs": [stub_json("ok")]
                 })))
                 .await
@@ -6056,13 +5944,12 @@ mod tests {
         // imposter wrappers: clear on port A leaves port B's entries and count intact.
         #[tokio::test]
         async fn shared_journal_isolates_ports_through_wrappers() {
-            let port_0 = free_port();
-            let port_1 = free_port();
             let (_journal, manager) = manager_with_journal();
-            for port in [port_1, port_0] {
-                manager
+            let mut ports = Vec::new();
+            for _ in 0..2 {
+                let port = manager
                     .create_imposter(imposter_cfg(json!({
-                        "protocol": "http", "port": port, "recordRequests": true,
+                        "protocol": "http", "recordRequests": true,
                         "stubs": [stub_json("ok")]
                     })))
                     .await
@@ -6070,7 +5957,9 @@ mod tests {
                 let _ = reqwest::get(format!("http://127.0.0.1:{port}/x"))
                     .await
                     .expect("request");
+                ports.push(port);
             }
+            let (port_1, port_0) = (ports[0], ports[1]);
 
             let a = manager.get_imposter(port_1).unwrap();
             let b = manager.get_imposter(port_0).unwrap();
@@ -6087,14 +5976,13 @@ mod tests {
         // An incomplete read (backend partially unreachable) still serves what it got.
         #[tokio::test]
         async fn incomplete_read_still_serves_entries() {
-            let port_0 = free_port();
             let manager = ImposterManager::new()
                 .with_request_journal(
                     Arc::new(IncompleteJournal(LocalJournal::default())) as Arc<dyn RequestJournal>
                 );
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "recordRequests": true,
+                    "protocol": "http", "recordRequests": true,
                     "stubs": [stub_json("ok")]
                 })))
                 .await
@@ -6159,14 +6047,13 @@ mod tests {
         // instead of being reported as a clean clear.
         #[tokio::test]
         async fn clear_recorded_requests_propagates_error() {
-            let port_0 = free_port();
             let manager = ImposterManager::new()
                 .with_request_journal(
                     Arc::new(FailingClearJournal::default()) as Arc<dyn RequestJournal>
                 );
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "recordRequests": true,
+                    "protocol": "http", "recordRequests": true,
                     "stubs": [stub_json("ok")]
                 })))
                 .await
@@ -6187,14 +6074,13 @@ mod tests {
         // AC2 (#330): teardown_space folds a clear_flow failure into its first-error report.
         #[tokio::test]
         async fn teardown_space_surfaces_journal_clear_failure() {
-            let port_0 = free_port();
             let manager = ImposterManager::new()
                 .with_request_journal(
                     Arc::new(FailingClearJournal::default()) as Arc<dyn RequestJournal>
                 );
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "recordRequests": true,
+                    "protocol": "http", "recordRequests": true,
                     "stubs": [stub_json("ok")]
                 })))
                 .await
@@ -6216,14 +6102,13 @@ mod tests {
         // must not fail the delete.
         #[tokio::test]
         async fn delete_imposter_survives_journal_clear_failure() {
-            let port_0 = free_port();
             let manager = ImposterManager::new()
                 .with_request_journal(
                     Arc::new(FailingClearJournal::default()) as Arc<dyn RequestJournal>
                 );
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "recordRequests": true,
+                    "protocol": "http", "recordRequests": true,
                     "stubs": [stub_json("ok")]
                 })))
                 .await
@@ -7044,12 +6929,11 @@ mod tests {
         // the port serves requests.
         #[tokio::test]
         async fn fanout_spawns_one_accept_loop_per_runtime_and_serves() {
-            let port_0 = free_port();
             let rts = test_runtimes(3);
             let manager = ImposterManager::new().with_accept_runtimes(rts.handles.clone());
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "stubs": [stub_json("fanout-ok")]
+                    "protocol": "http", "stubs": [stub_json("fanout-ok")]
                 })))
                 .await
                 .expect("create under per-core fan-out");
@@ -7080,12 +6964,11 @@ mod tests {
         // the strongest cross-platform proof that all N listeners are gone.
         #[tokio::test]
         async fn delete_closes_every_listener_and_frees_the_port() {
-            let port_0 = free_port();
             let rts = test_runtimes(3);
             let manager = ImposterManager::new().with_accept_runtimes(rts.handles.clone());
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "stubs": [stub_json("ok")]
+                    "protocol": "http", "stubs": [stub_json("ok")]
                 })))
                 .await
                 .expect("create");
@@ -7108,13 +6991,13 @@ mod tests {
         // listeners, and the port is creatable once the conflict clears.
         #[tokio::test]
         async fn create_is_all_or_nothing_on_bind_failure() {
-            let port_0 = free_port();
             let rts = test_runtimes(2);
             let manager = ImposterManager::new().with_accept_runtimes(rts.handles.clone());
             // A plain listener occupies the port: the reusable group cannot join it.
-            let blocker = tokio::net::TcpListener::bind(("0.0.0.0", port_0))
+            let blocker = tokio::net::TcpListener::bind(("0.0.0.0", 0))
                 .await
                 .expect("blocker bind");
+            let port_0 = blocker.local_addr().expect("blocker addr").port();
 
             let err = manager
                 .create_imposter(imposter_cfg(json!({
@@ -7153,11 +7036,14 @@ mod tests {
         use super::*;
 
         /// The squat a real deployment sees: an unrelated process holding the port with a
-        /// plain (non-SO_REUSEPORT) listener, so the reusable bind cannot join it.
-        async fn squat(port: u16) -> tokio::net::TcpListener {
-            tokio::net::TcpListener::bind(("0.0.0.0", port))
+        /// plain (non-SO_REUSEPORT) listener, so the reusable bind cannot join it. The squatter
+        /// takes an OS-assigned port and keeps it, so nothing else can claim it first.
+        async fn squat() -> (tokio::net::TcpListener, u16) {
+            let listener = tokio::net::TcpListener::bind(("0.0.0.0", 0))
                 .await
-                .expect("squatter bind")
+                .expect("squatter bind");
+            let port = listener.local_addr().expect("squatter addr").port();
+            (listener, port)
         }
 
         fn cfg(port: u16, body: &str) -> ImposterConfig {
@@ -7177,8 +7063,7 @@ mod tests {
         // Issue #1253: `apply_one` runs the rebind arm too.
         #[tokio::test]
         async fn apply_one_rebinds_an_unbound_imposter() {
-            let port_0 = free_port();
-            let blocker = squat(port_0).await;
+            let (blocker, port_0) = squat().await;
             let manager = ImposterManager::new().with_serve_unbound(true);
             let report = manager
                 .apply_one(cfg(port_0, "healed"))
@@ -7230,8 +7115,7 @@ mod tests {
         // apply path stays exactly as it was — no map entry at all.
         #[tokio::test]
         async fn serve_unbound_defaults_off() {
-            let port_0 = free_port();
-            let blocker = squat(port_0).await;
+            let (blocker, port_0) = squat().await;
             let manager = ImposterManager::new();
 
             let report = manager
@@ -7260,8 +7144,7 @@ mod tests {
         // `local-engine=` warning keep firing off exactly the field they already read.
         #[tokio::test]
         async fn an_unbound_apply_registers_the_imposter_and_reports_the_bind_failure() {
-            let port_0 = free_port();
-            let blocker = squat(port_0).await;
+            let (blocker, port_0) = squat().await;
             let manager = ImposterManager::new().with_serve_unbound(true);
 
             let report = manager
@@ -7303,8 +7186,7 @@ mod tests {
         // makes reconcile see "exists, unchanged" and the node never heals.
         #[tokio::test]
         async fn an_unbound_imposter_rebinds_on_the_next_apply() {
-            let port_0 = free_port();
-            let blocker = squat(port_0).await;
+            let (blocker, port_0) = squat().await;
             let manager = ImposterManager::new().with_serve_unbound(true);
             manager
                 .apply_config(vec![cfg(port_0, "healed")])
@@ -7362,8 +7244,7 @@ mod tests {
         // failure entry carries a current reason rather than a stale one from the first apply.
         #[tokio::test]
         async fn a_still_squatted_port_reports_the_failure_on_every_apply() {
-            let port_0 = free_port();
-            let blocker = squat(port_0).await;
+            let (blocker, port_0) = squat().await;
             let manager = ImposterManager::new().with_serve_unbound(true);
             manager
                 .apply_config(vec![cfg(port_0, "still-down")])
@@ -7399,8 +7280,7 @@ mod tests {
         // there means "the imposter does not exist" to every existing caller.
         #[tokio::test]
         async fn serve_unbound_does_not_change_direct_create() {
-            let port_0 = free_port();
-            let blocker = squat(port_0).await;
+            let (blocker, port_0) = squat().await;
             let manager = ImposterManager::new().with_serve_unbound(true);
 
             let err = manager
@@ -7426,12 +7306,13 @@ mod tests {
         // the port map and every other test here would still pass.
         #[tokio::test]
         async fn port_in_use_still_fails_hard_with_the_flag_on() {
-            let port_0 = free_port();
             let manager = ImposterManager::new().with_serve_unbound(true);
-            manager
-                .apply_config(vec![cfg(port_0, "first")])
+            let port_0 = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "stubs": [stub_json("first")]
+                })))
                 .await
-                .expect("apply validates");
+                .expect("create");
             let first = manager.imposters.get(port_0).expect("registered");
             assert!(first.is_bound(), "the first create bound the port for real");
 
@@ -7495,8 +7376,7 @@ mod tests {
         // loops to await and no connections to drain.
         #[tokio::test]
         async fn deleting_an_unbound_imposter_is_clean() {
-            let port_0 = free_port();
-            let blocker = squat(port_0).await;
+            let (blocker, port_0) = squat().await;
             let manager = ImposterManager::new().with_serve_unbound(true);
             manager
                 .apply_config(vec![cfg(port_0, "ok")])
@@ -7521,8 +7401,7 @@ mod tests {
         // the patch does not silently clear the node's degraded state.
         #[tokio::test]
         async fn a_stub_patch_applies_in_place_and_the_imposter_stays_unbound() {
-            let port_0 = free_port();
-            let blocker = squat(port_0).await;
+            let (blocker, port_0) = squat().await;
             let manager = ImposterManager::new().with_serve_unbound(true);
             manager
                 .apply_config(vec![cfg(port_0, "first")])
@@ -7561,8 +7440,7 @@ mod tests {
         // the exact regression this feature exists to prevent.
         #[tokio::test]
         async fn replacing_an_unbound_imposter_keeps_it_registered() {
-            let port_0 = free_port();
-            let blocker = squat(port_0).await;
+            let (blocker, port_0) = squat().await;
             let manager = ImposterManager::new().with_serve_unbound(true);
             manager
                 .apply_config(vec![cfg(port_0, "before")])
@@ -7605,8 +7483,7 @@ mod tests {
         // hard.
         #[tokio::test]
         async fn unbound_registration_works_under_per_core_fanout() {
-            let port_0 = free_port();
-            let blocker = squat(port_0).await;
+            let (blocker, port_0) = squat().await;
             let rts = super::per_core_fanout::test_runtimes(2);
             let manager = ImposterManager::new()
                 .with_serve_unbound(true)
@@ -7747,20 +7624,19 @@ mod tests {
         // no x-rift-no-match, interceptor consulted exactly once.
         #[tokio::test]
         async fn retry_match_rescues_after_stub_appears() {
-            let port_0 = free_port();
             let spy = Spy::rescuing();
             let manager = Arc::new(
                 ImposterManager::new()
                     .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>),
             );
             // Armed after construction so the rescue mutates the manager actually serving.
-            spy.arm_rescue(Arc::clone(&manager), port_0);
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "stubs": []
+                    "protocol": "http", "stubs": []
                 })))
                 .await
                 .expect("create");
+            spy.arm_rescue(Arc::clone(&manager), port_0);
 
             let (status, body, no_match) = get(port_0, "/late").await;
             assert_eq!(status, 200);
@@ -7785,13 +7661,12 @@ mod tests {
         // AC2: a second miss falls through exactly as Proceed would — and only one retry happens.
         #[tokio::test]
         async fn second_miss_falls_through_and_retries_only_once() {
-            let port_0 = free_port();
             let spy = Spy::new(NoMatchDirective::RetryMatch);
             let manager = ImposterManager::new()
                 .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>);
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "stubs": []
+                    "protocol": "http", "stubs": []
                 })))
                 .await
                 .expect("create");
@@ -7810,13 +7685,12 @@ mod tests {
         // AC3: a MATCHED request never consults the interceptor (hot path pays nothing).
         #[tokio::test]
         async fn matched_requests_never_consult_the_interceptor() {
-            let port_0 = free_port();
             let spy = Spy::new(NoMatchDirective::RetryMatch);
             let manager = ImposterManager::new()
                 .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>);
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "stubs": [{
                         "predicates": [{"equals": {"path": "/hit"}}],
                         "responses": [{"is": {"statusCode": 200, "body": "hit"}}]
@@ -7836,13 +7710,12 @@ mod tests {
         // AC4: Proceed is inert — the response is the untouched baseline fallthrough.
         #[tokio::test]
         async fn proceed_serves_the_baseline_fallthrough() {
-            let port_0 = free_port();
             let spy = Spy::new(NoMatchDirective::Proceed);
             let manager = ImposterManager::new()
                 .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>);
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "stubs": [],
                     "defaultResponse": {"statusCode": 503, "body": "default"}
                 })))
@@ -7861,13 +7734,12 @@ mod tests {
         // matching, so the hook is unreachable there.
         #[tokio::test]
         async fn disabled_imposter_never_consults_the_interceptor() {
-            let port_0 = free_port();
             let spy = Spy::new(NoMatchDirective::RetryMatch);
             let manager = ImposterManager::new()
                 .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>);
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "stubs": []
+                    "protocol": "http", "stubs": []
                 })))
                 .await
                 .expect("create");
@@ -7892,21 +7764,20 @@ mod tests {
         // silently misdirecting lagging requests upstream.
         #[tokio::test]
         async fn rescue_outranks_a_configured_default_response() {
-            let port_0 = free_port();
             let spy = Spy::rescuing();
             let manager = Arc::new(
                 ImposterManager::new()
                     .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>),
             );
-            spy.arm_rescue(Arc::clone(&manager), port_0);
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0,
+                    "protocol": "http",
                     "stubs": [],
                     "defaultResponse": {"statusCode": 503, "body": "default"}
                 })))
                 .await
                 .expect("create");
+            spy.arm_rescue(Arc::clone(&manager), port_0);
 
             let (status, body, _) = get(port_0, "/late").await;
             assert_eq!(
@@ -7925,7 +7796,6 @@ mod tests {
         // notice.
         #[tokio::test]
         async fn retry_passes_the_identical_request_facts() {
-            let port_0 = free_port();
             let spy = Spy::rescuing_with_stub(json!({
                 "predicates": [{"and": [
                     {"equals": {"path": "/echo", "method": "POST"}},
@@ -7939,13 +7809,13 @@ mod tests {
                 ImposterManager::new()
                     .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>),
             );
-            spy.arm_rescue(Arc::clone(&manager), port_0);
-            manager
+            let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
-                    "protocol": "http", "port": port_0, "stubs": []
+                    "protocol": "http", "stubs": []
                 })))
                 .await
                 .expect("create");
+            spy.arm_rescue(Arc::clone(&manager), port_0);
 
             let resp = reqwest::Client::new()
                 .post(format!("http://127.0.0.1:{port_0}/echo?tenant=acme"))
