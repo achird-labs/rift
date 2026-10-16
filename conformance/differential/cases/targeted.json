@@ -5907,7 +5907,14 @@
           "method": "POST",
           "path": "/first",
           "body": "<a><![CDATA[p]]>q</a>"
-        }
+        },
+          {
+            "do": "send",
+            "port": 4545,
+            "method": "POST",
+            "path": "/text",
+            "body": "<a>x<![CDATA[]]>y</a>"
+          }
       ]
     },
     {

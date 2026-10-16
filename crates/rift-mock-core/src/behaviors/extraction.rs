@@ -758,8 +758,9 @@ fn mb_node_value(node: sxd_xpath::nodeset::Node<'_>) -> String {
             Some(ChildOfElement::Element(_)) | None => UNDEFINED.to_string(),
         },
         // The XML declaration is a PI here, as in xmldom (see `normalize_like_xmldom`). Whitespace
-        // before the root element is not a node in this DOM, so `/` reads "undefined" where
-        // Mountebank reads that whitespace.
+        // before the root element and a DOCTYPE are not nodes in this DOM, so `/` reads
+        // "undefined" where Mountebank reads that whitespace, and a comment or PI after a leading
+        // DOCTYPE where Mountebank reads "undefined".
         Node::Root(root) => match root.children().first() {
             Some(ChildOfRoot::Comment(comment)) => comment.text().to_string(),
             Some(ChildOfRoot::ProcessingInstruction(instruction)) => pi(instruction.value()),
@@ -790,6 +791,9 @@ fn normalize_like_xmldom(package: &sxd_document::Package, xml: &str) {
         next: usize,
         new: Vec<ChildOfElement<'d>>,
         changed: bool,
+        /// The last node in `new` is a run of plain text that only dropped empty CDATA sections
+        /// have followed: xmldom's `normalize()` joins the next run onto it.
+        open_text: bool,
     }
 
     impl<'d> Frame<'d> {
@@ -800,6 +804,7 @@ fn normalize_like_xmldom(package: &sxd_document::Package, xml: &str) {
                 next: 0,
                 new: Vec::new(),
                 changed: false,
+                open_text: false,
             }
         }
 
@@ -855,6 +860,7 @@ fn normalize_like_xmldom(package: &sxd_document::Package, xml: &str) {
                     return;
                 };
                 frame.new.push(ChildOfElement::Element(element));
+                frame.open_text = false;
                 if kind == XmlPiece::StartTag {
                     stack.push(Frame::open(element));
                 }
@@ -876,6 +882,7 @@ fn normalize_like_xmldom(package: &sxd_document::Package, xml: &str) {
                     return;
                 };
                 frame.new.push(child);
+                frame.open_text = false;
             }
             XmlPiece::CData => {
                 let Some(child @ ChildOfElement::Text(_)) = frame.take() else {
@@ -885,6 +892,7 @@ fn normalize_like_xmldom(package: &sxd_document::Package, xml: &str) {
                     frame.changed = true;
                 } else {
                     frame.new.push(child);
+                    frame.open_text = false;
                 }
             }
             XmlPiece::Text => {
@@ -895,17 +903,25 @@ fn normalize_like_xmldom(package: &sxd_document::Package, xml: &str) {
                     };
                     texts.push(text);
                 }
-                match texts.as_slice() {
-                    [] => {}
-                    [one] => frame.new.push(ChildOfElement::Text(*one)),
-                    many => {
-                        let merged: String = many.iter().map(|t| t.text()).collect();
+                let joined = match (frame.open_text, frame.new.last()) {
+                    (true, Some(ChildOfElement::Text(previous))) => Some(*previous),
+                    _ => None,
+                };
+                match (joined, texts.as_slice()) {
+                    (_, []) => {}
+                    (None, [one]) => frame.new.push(ChildOfElement::Text(*one)),
+                    (joined, many) => {
+                        let merged: String = joined.iter().chain(many).map(|t| t.text()).collect();
+                        if joined.is_some() {
+                            frame.new.pop();
+                        }
                         frame
                             .new
                             .push(ChildOfElement::Text(document.create_text(&merged)));
                         frame.changed = true;
                     }
                 }
+                frame.open_text = true;
             }
             XmlPiece::Doctype => return,
         }
@@ -2640,7 +2656,19 @@ mod tests {
             assert_reads("<a>x<![CDATA[p]]>y</a>", "count(//a/text())", &["3"]);
             assert_reads("<a>x<![CDATA[p]]>y</a>", "//a/text()", &["x", "p", "y"]);
             assert_reads("<a><![CDATA[]]></a>", "count(//a/text())", &["0"]);
-            assert_reads("<a>x<![CDATA[]]>y</a>", "//a/text()", &["x", "y"]);
+            // xmldom's normalize() joins the text an empty CDATA left adjacent.
+            assert_reads("<a>x<![CDATA[]]>y</a>", "//a/text()", &["xy"]);
+            assert_reads("<a>x<![CDATA[]]>y</a>", "//a", &["xy"]);
+            assert_reads(
+                "<a>x<![CDATA[]]>y<![CDATA[]]>z<b/>w</a>",
+                "//a/text()",
+                &["xyz", "w"],
+            );
+            assert_reads(
+                "<a><![CDATA[p]]><![CDATA[q]]></a>",
+                "count(//a/text())",
+                &["2"],
+            );
         }
 
         #[test]
