@@ -10,7 +10,7 @@ Two trees, with opposite questions:
 The specification lives in this repository so a behaviour change and the scenario that pins it land
 in one pull request. Two runners read this tree while the features move from one to the other
 (#1338, #1346): the Rust runner in [`runner/`](runner/) (cucumber-rs) runs the features in its
-`spec::PORTED_FEATURES` (today 00, 01, 02, 03, 05, 06, 07, 09, 10, 11, 14, 17, 18, 19 and 21), and the Scala runner (zio-bdd) in rift-conformance
+`spec::PORTED_FEATURES` (today 00 to 11, 13, 14, 17, 18, 19, 21 and 22), and the Scala runner (zio-bdd) in rift-conformance
 runs every other one. Each feature has exactly one runner: the Scala runner drops the files listed
 in its `conformance/ported.txt` (rift-conformance#244), and a porting batch updates both lists in the
 same release. The container mode is the exception: the Scala runner's container leg keeps the
@@ -78,7 +78,10 @@ the runner reads the one the engine assigned back from the `201`, so there is no
 race. Only fixtures that name a port (`a fresh verbatim imposter`, the corpus's 45xx imposters)
 bind a fixed one. Feature 21's two imposters "on descending ports" take a fresh port for the first
 and, for the second, the highest port below it that the engine accepts (a `400` saying the port is
-in use moves one lower), so that one is bound by the engine too.
+in use moves one lower, and so does the `500` a bind failure is answered with while another process
+holds the port, until #1500 makes it a `400`), so that one is bound by the engine too. Feature 08's
+`PUT /imposters` scenarios replace the shared engine's whole imposter set, which is safe because
+scenarios run one at a time and each one's imposters are deleted after it.
 
 Feature 11's `@reload-engine` scenarios each start an engine of their own serving a config file (on
 the fixed ports 4870-4878 the fixtures name), stopped after the scenario: a spawned `rift
@@ -144,10 +147,10 @@ lists what it left out):
   Feature 11's `@no-config-source` scenario runs on the shared engine and still runs;
 - `@full-corpus-verify` (01): `rift-verify --verify-dynamic` has the engine bind imposters on dynamic
   ports, which are not published;
-- `@loopback-client`: Docker's forwarding rewrites the client address, so the engine never sees a
+- `@loopback-client` (22): Docker's forwarding rewrites the client address, so the engine never sees a
   loopback peer;
-- `@connect-refused` (21): a published port always accepts on the host;
-- `@host-port`: an engine-assigned port lands outside the published ranges;
+- `@connect-refused` (08, 21): a published port always accepts on the host;
+- `@host-port` (08): an engine-assigned port lands outside the published ranges;
 - `@tcp-rst` (03): Docker's forwarder turns the engine's RST into an orderly EOF.
 
 The last four are inherent to Docker port publishing; a feature that carries one of them when it is
