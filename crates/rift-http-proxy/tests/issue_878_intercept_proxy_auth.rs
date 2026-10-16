@@ -17,6 +17,8 @@ use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+/// Fixed port: the test asserts that a refused start left this exact port unbound.
+///
 /// Reserve a port, then release it, so a later bind attempt proves nothing else claimed it.
 fn free_port() -> u16 {
     let probe = StdTcpListener::bind("0.0.0.0:0").expect("probe bind");

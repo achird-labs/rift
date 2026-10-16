@@ -5,7 +5,6 @@
 //! `recordRequests`: its journal says how the bytes arrived (`_mode`) and how many there were
 //! (`content-length`).
 
-use std::net::TcpListener;
 use std::sync::Arc;
 
 use rift_http_proxy::admin_api::AdminApiServer;
@@ -16,12 +15,12 @@ use serde_json::{Value, json};
 const BINARY: &[u8] = &[0xFF, 0xFE, 0x00, 0x01, 0x02, 0xC0, 0xC1];
 const BINARY_BASE64: &str = "//4AAQLAwQ==";
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+/// The port the engine assigned, from a 201 body.
+fn port_of(body: &Value) -> u16 {
+    body["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .expect("assigned port")
 }
 
 async fn start() -> (reqwest::Client, String, Arc<ImposterManager>) {
@@ -37,7 +36,8 @@ async fn start() -> (reqwest::Client, String, Arc<ImposterManager>) {
     )
 }
 
-async fn create(client: &reqwest::Client, admin: &str, imposter: Value) {
+/// Create an imposter without a port; return the port the engine assigned.
+async fn create(client: &reqwest::Client, admin: &str, imposter: Value) -> u16 {
     let response = client
         .post(format!("{admin}/imposters"))
         .json(&imposter)
@@ -45,6 +45,7 @@ async fn create(client: &reqwest::Client, admin: &str, imposter: Value) {
         .await
         .expect("POST");
     assert_eq!(response.status().as_u16(), 201, "{imposter}");
+    port_of(&response.json().await.expect("json"))
 }
 
 async fn imposter(client: &reqwest::Client, admin: &str, port: u16) -> Value {
@@ -60,27 +61,23 @@ async fn imposter(client: &reqwest::Client, admin: &str, port: u16) -> Value {
 
 /// A recording upstream that answers a different body on each hit, so a replay is visible.
 async fn upstream(client: &reqwest::Client, admin: &str) -> u16 {
-    let port = free_port();
     create(
         client,
         admin,
-        json!({"port": port, "protocol": "http", "recordRequests": true, "stubs": [{"responses": [
+        json!({"protocol": "http", "recordRequests": true, "stubs": [{"responses": [
             {"is": {"body": "one"}}, {"is": {"body": "two"}}, {"is": {"body": "three"}}
         ]}]}),
     )
-    .await;
-    port
+    .await
 }
 
 async fn proxy(client: &reqwest::Client, admin: &str, config: Value) -> u16 {
-    let port = free_port();
     create(
         client,
         admin,
-        json!({"port": port, "protocol": "http", "stubs": [{"responses": [{"proxy": config}]}]}),
+        json!({"protocol": "http", "stubs": [{"responses": [{"proxy": config}]}]}),
     )
-    .await;
-    port
+    .await
 }
 
 async fn post(client: &reqwest::Client, port: u16, body: &'static [u8]) -> String {
@@ -147,11 +144,10 @@ async fn a_binary_body_reaches_the_upstream_byte_for_byte() {
 async fn default_forward_sends_the_bytes_too() {
     let (client, admin, manager) = start().await;
     let up = upstream(&client, &admin).await;
-    let port = free_port();
-    create(
+    let port = create(
         &client,
         &admin,
-        json!({"port": port, "protocol": "http", "defaultForward": format!("http://127.0.0.1:{up}")}),
+        json!({"protocol": "http", "defaultForward": format!("http://127.0.0.1:{up}")}),
     )
     .await;
 

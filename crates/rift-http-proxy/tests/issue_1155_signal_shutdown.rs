@@ -13,7 +13,6 @@
 
 mod support;
 
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -22,12 +21,45 @@ use std::time::{Duration, Instant};
 /// past this is a hang, not a slow drain.
 const EXIT_BUDGET: Duration = Duration::from_secs(5);
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+/// The admin port in the server's `listening on http://<addr>` line, once `--log` holds it.
+fn admin_port_in(log: &str) -> Option<u16> {
+    let line = log
+        .lines()
+        .find(|l| l.contains("Admin API") && l.contains("listening on http://"))?;
+    let addr = line.split("listening on http://").nth(1)?;
+    addr.split_whitespace()
+        .next()?
+        .rsplit(':')
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// POST an imposter without a port; return the port the engine assigned (it must answer 201).
+fn post_imposter(server: &Server, body: &str) -> u16 {
+    let out = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            "-X",
+            "POST",
+            "-H",
+            "content-type: application/json",
+            "--data",
+            body,
+            &format!("http://127.0.0.1:{}/imposters", server.admin_port),
+        ])
+        .output()
+        .expect("curl");
+    let out = String::from_utf8_lossy(&out.stdout);
+    let (json, code) = out.rsplit_once('\n').expect("status line");
+    assert_eq!(code, "201", "imposter creation must succeed: {json}");
+    let created: serde_json::Value = serde_json::from_str(json).expect("201 body");
+    created["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .expect("assigned port")
 }
 
 struct Server {
@@ -45,11 +77,9 @@ fn spawn_server(extra: &[&str]) -> Server {
     let datadir = dir.path().join("data");
     std::fs::create_dir_all(&datadir).expect("datadir");
     let log = dir.path().join("rift.log");
-    let admin_port = free_port();
-    let admin_s = admin_port.to_string();
     let mut args = vec![
         "--port",
-        &admin_s,
+        "0",
         "--host",
         "127.0.0.1",
         "--pidfile",
@@ -87,7 +117,7 @@ fn spawn_server(extra: &[&str]) -> Server {
     let child = command.spawn().expect("spawn rift");
     let mut server = Server {
         child,
-        admin_port,
+        admin_port: 0,
         pidfile,
         datadir,
         log,
@@ -106,42 +136,30 @@ fn wait_ready(server: &mut Server) {
             let log = std::fs::read_to_string(&server.log).unwrap_or_default();
             panic!("rift exited during startup with {status:?}: {log}");
         }
-        if std::net::TcpStream::connect(("127.0.0.1", server.admin_port)).is_ok()
+        if server.admin_port == 0 {
+            let log = std::fs::read_to_string(&server.log).unwrap_or_default();
+            if let Some(port) = admin_port_in(&log) {
+                server.admin_port = port;
+            }
+        }
+        if server.admin_port != 0
+            && std::net::TcpStream::connect(("127.0.0.1", server.admin_port)).is_ok()
             && server.pidfile.exists()
         {
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("rift did not come up on {}", server.admin_port);
+    let log = std::fs::read_to_string(&server.log).unwrap_or_default();
+    panic!(
+        "rift did not come up (admin port {}): {log}",
+        server.admin_port
+    );
 }
 
 /// Create an imposter over the admin API, so the datadir holds persisted state a stop could lose.
 fn create_imposter(server: &Server) -> (u16, PathBuf) {
-    let imposter_port = free_port();
-    let body = format!(r#"{{"port":{imposter_port},"protocol":"http","stubs":[]}}"#);
-    let status = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            "-X",
-            "POST",
-            "-H",
-            "content-type: application/json",
-            "--data",
-            &body,
-            &format!("http://127.0.0.1:{}/imposters", server.admin_port),
-        ])
-        .output()
-        .expect("curl");
-    assert_eq!(
-        String::from_utf8_lossy(&status.stdout),
-        "201",
-        "imposter creation must succeed"
-    );
+    let imposter_port = post_imposter(server, r#"{"protocol":"http","stubs":[]}"#);
     let persisted = server.datadir.join(format!("{imposter_port}.json"));
     assert!(
         persisted.exists(),
@@ -276,30 +294,10 @@ fn rift_stop_returns_only_after_the_server_has_exited() {
 #[test]
 fn sigterm_exits_even_while_a_script_is_still_running() {
     let mut server = spawn_server(&["--allowInjection"]);
-    let imposter_port = free_port();
     // The outer loop never ends; the inner one keeps each outer iteration well under Boa's per-loop
     // iteration cap, so the cap never frees the thread either.
-    let body = format!(
-        r#"{{"port":{imposter_port},"protocol":"http","stubs":[{{"responses":[{{"is":{{"statusCode":200}},"_behaviors":{{"decorate":"function (request, response) {{ for (;;) {{ for (var i = 0; i < 1000000; i++) {{}} }} }}"}}}}]}}]}}"#
-    );
-    let created = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            "-X",
-            "POST",
-            "-H",
-            "content-type: application/json",
-            "--data",
-            &body,
-            &format!("http://127.0.0.1:{}/imposters", server.admin_port),
-        ])
-        .output()
-        .expect("curl");
-    assert_eq!(String::from_utf8_lossy(&created.stdout), "201");
+    let body = r#"{"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200},"_behaviors":{"decorate":"function (request, response) { for (;;) { for (var i = 0; i < 1000000; i++) {} } }"}}]}]}"#;
+    let imposter_port = post_imposter(&server, body);
 
     // Occupy a blocking thread with the script. The client gives up; the thread does not.
     let url = format!("http://127.0.0.1:{imposter_port}/spin");

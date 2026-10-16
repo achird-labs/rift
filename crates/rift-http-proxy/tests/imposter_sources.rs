@@ -327,16 +327,17 @@ fn read_failure_message(read: usize, partial: &str, error: &std::io::Error) -> S
 
 // ===== Helpers =====
 
-/// A port that has to be written into a document before anything binds it (or that is only ever a
-/// number in a parsed document).
-fn free_port() -> u16 {
-    free_ports::<1>()[0]
-}
+/// A port that is only ever a number in a parsed (or refused) document; nothing binds it.
+const PARSED_PORT: u16 = 4545;
+/// A second such port, distinct from [`PARSED_PORT`].
+const OTHER_PARSED_PORT: u16 = 4546;
 
-/// `N` distinct ports: every probe listener is held until all are chosen, so none repeats.
+/// Fixed port: `N` distinct ports for documents that must name them before the server boots (a
+/// reload reconciles by port, so a port-less imposter would be recreated). Every probe is held
+/// until all are chosen, so none repeats, and probes `0.0.0.0`, the address imposters bind.
 fn free_ports<const N: usize>() -> [u16; N] {
     let listeners: Vec<std::net::TcpListener> = (0..N)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port"))
+        .map(|_| std::net::TcpListener::bind("0.0.0.0:0").expect("bind an ephemeral port"))
         .collect();
     std::array::from_fn(|i| listeners[i].local_addr().expect("local addr").port())
 }
@@ -344,6 +345,14 @@ fn free_ports<const N: usize>() -> [u16; N] {
 fn imposter_doc(port: u16, body: &str) -> String {
     format!(
         r#"{{"imposters":[{{"port":{port},"protocol":"http","recordRequests":true,
+            "stubs":[{{"responses":[{{"is":{{"statusCode":200,"body":"{body}"}}}}]}}]}}]}}"#
+    )
+}
+
+/// [`imposter_doc`] without a `port`, so the engine assigns one.
+fn portless_imposter_doc(body: &str) -> String {
+    format!(
+        r#"{{"imposters":[{{"protocol":"http","recordRequests":true,
             "stubs":[{{"responses":[{{"is":{{"statusCode":200,"body":"{body}"}}}}]}}]}}]}}"#
     )
 }
@@ -664,7 +673,7 @@ async fn merge_collision_names_both_sources() {
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a.json");
     let b = dir.path().join("b.json");
-    let port = free_port();
+    let port = PARSED_PORT;
     std::fs::write(&a, imposter_doc(port, "from-a")).unwrap();
     std::fs::write(&b, imposter_doc(port, "from-b")).unwrap();
 
@@ -703,7 +712,7 @@ async fn distinct_ports_across_sources_merge() {
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a.json");
     let b = dir.path().join("b.json");
-    let [port_a, port_b] = free_ports::<2>();
+    let [port_a, port_b] = [PARSED_PORT, OTHER_PARSED_PORT];
     std::fs::write(&a, imposter_doc(port_a, "from-a")).unwrap();
     std::fs::write(&b, imposter_doc(port_b, "from-b")).unwrap();
 
@@ -728,7 +737,7 @@ async fn distinct_ports_across_sources_merge() {
 
 #[tokio::test]
 async fn http_source_304_serves_cache_without_reparsing() {
-    let port = free_port();
+    let port = PARSED_PORT;
     let origin = Origin::start(Reply::Etagged {
         body: imposter_doc(port, "v1"),
         etag: "\"v1\"".to_string(),
@@ -773,7 +782,7 @@ async fn http_source_304_serves_cache_without_reparsing() {
 
 #[tokio::test]
 async fn changed_etag_refetches_and_reports_a_change() {
-    let [port_v1, port_v2] = free_ports::<2>();
+    let [port_v1, port_v2] = [PARSED_PORT, OTHER_PARSED_PORT];
     let origin = Origin::start(Reply::Etagged {
         body: imposter_doc(port_v1, "v1"),
         etag: "\"v1\"".to_string(),
@@ -1342,8 +1351,7 @@ async fn remote_document_refuses_ejs_include() {
 async fn remote_document_refuses_ejs_stringify() {
     let origin = Origin::start(Reply::Etagged {
         body: format!(
-            r#"{{"imposters":[{{"port":{},"protocol":"http","stubs":[{{"responses":[{{"inject":"<%- stringify('/etc/passwd') %>"}}]}}]}}]}}"#,
-            free_port()
+            r#"{{"imposters":[{{"port":{PARSED_PORT},"protocol":"http","stubs":[{{"responses":[{{"inject":"<%- stringify('/etc/passwd') %>"}}]}}]}}]}}"#
         ),
         etag: "\"str\"".to_string(),
     });
@@ -1365,9 +1373,8 @@ async fn remote_document_refuses_ejs_stringify() {
 async fn remote_document_refuses_a_file_script_reference() {
     let origin = Origin::start(Reply::Etagged {
         body: format!(
-            r#"{{"imposters":[{{"port":{},"protocol":"http","stubs":[{{"responses":[
-            {{"_rift":{{"script":{{"file":"/etc/passwd"}}}}}}]}}]}}]}}"#,
-            free_port()
+            r#"{{"imposters":[{{"port":{PARSED_PORT},"protocol":"http","stubs":[{{"responses":[
+            {{"_rift":{{"script":{{"file":"/etc/passwd"}}}}}}]}}]}}]}}"#
         ),
         etag: "\"ref\"".to_string(),
     });
@@ -1389,7 +1396,7 @@ async fn remote_document_refuses_a_file_script_reference() {
 async fn remote_document_still_substitutes_env() {
     unsafe { std::env::set_var("RIFT_TEST_U12_BODY", "from-env") };
     let origin = Origin::start(Reply::Etagged {
-        body: imposter_doc(free_port(), "<%= process.env.RIFT_TEST_U12_BODY %>"),
+        body: imposter_doc(PARSED_PORT, "<%= process.env.RIFT_TEST_U12_BODY %>"),
         etag: "\"env\"".to_string(),
     });
     let fetched = HttpSource::new()
@@ -1426,7 +1433,7 @@ async fn a_file_source_with_no_parse_keeps_a_literal_ejs_tag() {
 #[tokio::test]
 async fn remote_document_refuses_an_unsupported_ejs_tag() {
     let origin = Origin::start(Reply::Etagged {
-        body: imposter_doc(free_port(), "<% if (x) { %>"),
+        body: imposter_doc(PARSED_PORT, "<% if (x) { %>"),
         etag: "\"stmt\"".to_string(),
     });
     let err = HttpSource::new()
@@ -1446,7 +1453,7 @@ async fn remote_document_refuses_an_unsupported_ejs_tag() {
 async fn configfile_with_an_unsupported_ejs_tag_aborts_startup() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("imposters.json");
-    std::fs::write(&path, imposter_doc(free_port(), "<%= greeting %>")).unwrap();
+    std::fs::write(&path, imposter_doc(PARSED_PORT, "<%= greeting %>")).unwrap();
 
     let result = ServerBuilder::from_cli(cli(&[
         "--host",
@@ -1479,8 +1486,7 @@ async fn configfile_with_an_unsupported_ejs_tag_aborts_startup() {
 async fn reload_of_a_file_with_an_unsupported_ejs_tag_is_refused_and_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("imposters.json");
-    let port = free_port();
-    std::fs::write(&path, imposter_doc(port, "v1")).unwrap();
+    std::fs::write(&path, portless_imposter_doc("v1")).unwrap();
 
     let server = ServerBuilder::from_cli(cli(&[
         "--host",
@@ -1495,7 +1501,20 @@ async fn reload_of_a_file_with_an_unsupported_ejs_tag_is_refused_and_changes_not
     .expect("server starts");
     let admin = server.admin_addr();
     let client = reqwest::Client::new();
+    let listed: serde_json::Value = client
+        .get(format!("http://{admin}/imposters"))
+        .send()
+        .await
+        .expect("list imposters")
+        .json()
+        .await
+        .expect("imposters json");
+    let port = listed["imposters"][0]["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .unwrap_or_else(|| panic!("one imposter with a port: {listed}"));
 
+    // The edit names the assigned port, as an operator editing the running imposter would.
     std::fs::write(&path, imposter_doc(port, "<% for (;;) { %>v2")).unwrap();
     let reload = client
         .post(format!("http://127.0.0.1:{}/admin/reload", admin.port()))
@@ -1634,7 +1653,7 @@ async fn requests_for(client: &reqwest::Client, admin_port: u16, imposter: u16) 
 #[tokio::test]
 async fn reload_failure_body_carries_the_fetch_cause() {
     let origin = Origin::start(Reply::Etagged {
-        body: imposter_doc(free_port(), "v1"),
+        body: portless_imposter_doc("v1"),
         etag: "\"v1\"".to_string(),
     });
     let server = ServerBuilder::from_cli(cli(&[
@@ -1678,7 +1697,7 @@ async fn reload_failure_body_carries_the_fetch_cause() {
 async fn configfile_and_imposters_are_mutually_exclusive() {
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("c.json");
-    std::fs::write(&f, imposter_doc(free_port(), "x")).unwrap();
+    std::fs::write(&f, imposter_doc(PARSED_PORT, "x")).unwrap();
 
     let err = ServerBuilder::from_cli(cli(&[
         "--host",
@@ -1743,7 +1762,7 @@ fn registry_refuses_an_embedder_shadowing_a_builtin() {
 /// reported the intercept block as removed.
 #[tokio::test]
 async fn http_source_304_keeps_the_cached_intercept_and_routes_blocks() {
-    let port = free_port();
+    let port = PARSED_PORT;
     let doc = serde_json::json!({
         "imposters": [ { "port": port, "protocol": "http", "stubs": [] } ],
         "intercept": { "port": 0, "rules": [ { "host": "a.test",

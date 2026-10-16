@@ -3,19 +3,18 @@
 //! requests. With generators the user chose the identity: the generated predicates key it instead
 //! (issue #1333), so a body the generators ignore is the same request.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+/// The port the engine assigned, from a 201 body.
+fn port_of(body: &Value) -> u16 {
+    body["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .expect("assigned port")
 }
 
 async fn start() -> (reqwest::Client, String, Arc<ImposterManager>) {
@@ -31,7 +30,8 @@ async fn start() -> (reqwest::Client, String, Arc<ImposterManager>) {
     )
 }
 
-async fn create(client: &reqwest::Client, admin: &str, imposter: Value) {
+/// Create an imposter without a port; return the port the engine assigned.
+async fn create(client: &reqwest::Client, admin: &str, imposter: Value) -> u16 {
     let response = client
         .post(format!("{admin}/imposters"))
         .json(&imposter)
@@ -39,6 +39,7 @@ async fn create(client: &reqwest::Client, admin: &str, imposter: Value) {
         .await
         .expect("POST");
     assert_eq!(response.status().as_u16(), 201, "{imposter}");
+    port_of(&response.json().await.expect("json"))
 }
 
 async fn imposter(client: &reqwest::Client, admin: &str, port: u16) -> Value {
@@ -54,16 +55,14 @@ async fn imposter(client: &reqwest::Client, admin: &str, port: u16) -> Value {
 
 /// An upstream that answers a different body each time, so a replay is visible.
 async fn counting_upstream(client: &reqwest::Client, admin: &str) -> u16 {
-    let port = free_port();
     create(
         client,
         admin,
-        json!({"port": port, "protocol": "http", "recordRequests": true, "stubs": [{"responses": [
+        json!({"protocol": "http", "recordRequests": true, "stubs": [{"responses": [
             {"is": {"body": "one"}}, {"is": {"body": "two"}}, {"is": {"body": "three"}}
         ]}]}),
     )
-    .await;
-    port
+    .await
 }
 
 async fn proxy_once(
@@ -72,7 +71,6 @@ async fn proxy_once(
     upstream: u16,
     generators: Value,
 ) -> u16 {
-    let port = free_port();
     let mut proxy = json!({"to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyOnce"});
     if !generators.is_null() {
         proxy["predicateGenerators"] = generators;
@@ -80,10 +78,9 @@ async fn proxy_once(
     create(
         client,
         admin,
-        json!({"port": port, "protocol": "http", "stubs": [{"responses": [{"proxy": proxy}]}]}),
+        json!({"protocol": "http", "stubs": [{"responses": [{"proxy": proxy}]}]}),
     )
-    .await;
-    port
+    .await
 }
 
 async fn hits(client: &reqwest::Client, admin: &str, upstream: u16) -> usize {

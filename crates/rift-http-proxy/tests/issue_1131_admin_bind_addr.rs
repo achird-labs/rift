@@ -9,18 +9,10 @@
 
 use clap::Parser;
 use rift_http_proxy::server::{Cli, ServerBuilder, admin_bind_addr};
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 
 fn cli(argv: &[&str]) -> Cli {
     Cli::parse_from(argv)
-}
-
-/// Reserve a port, then release it, so the caller can bind it deterministically.
-fn free_port() -> u16 {
-    let probe = TcpListener::bind("127.0.0.1:0").expect("probe bind");
-    let port = probe.local_addr().expect("probe addr").port();
-    drop(probe);
-    port
 }
 
 // AC3 + AC4: the documented default — every interface, the Mountebank admin port.
@@ -105,26 +97,21 @@ fn a_bracketed_ipv6_host_resolves() {
 // A second definition of the rule inside `start()` would pass every test above and fail this one.
 #[tokio::test]
 async fn start_binds_exactly_the_address_the_seam_reports() {
-    let port = free_port();
-    let cli = cli(&[
-        "rift",
-        "--local-only",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        &port.to_string(),
-    ]);
+    // `--port 0`: the OS picks the port, so only the host half can be compared verbatim.
+    let cli = cli(&["rift", "--local-only", "--host", "0.0.0.0", "--port", "0"]);
     let expected = admin_bind_addr(&cli).expect("seam must resolve");
     assert_eq!(
         expected,
-        SocketAddr::from(([127, 0, 0, 1], port)),
+        SocketAddr::from(([127, 0, 0, 1], 0)),
         "guard: --local-only must pin loopback for this check to mean anything"
     );
 
     let server = ServerBuilder::from_cli(cli).start().await.expect("start");
+    let bound = server.admin_addr();
     assert_eq!(
-        server.admin_addr(),
-        expected,
+        bound.ip(),
+        expected.ip(),
         "start() must bind the address admin_bind_addr reports — one definition of the rule"
     );
+    assert_ne!(bound.port(), 0, "port 0 must bind an OS-assigned port");
 }

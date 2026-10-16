@@ -5,19 +5,18 @@
 //! removes the recorded responses and drops the stubs they leave empty; Rift marks a recorded stub
 //! with `recordedFrom`.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+/// The port the engine assigned, from a 201 body.
+fn port_of(body: &Value) -> u16 {
+    body["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .expect("assigned port")
 }
 
 struct Admin {
@@ -74,13 +73,12 @@ impl Admin {
 
     /// An upstream that answers `up` and records what it receives.
     async fn upstream(&self, response: Value) -> u16 {
-        let port = free_port();
-        self.create(
-            json!({"port": port, "protocol": "http", "recordRequests": true,
-            "stubs": [{"responses": [response]}]}),
+        port_of(
+            &self
+                .create(json!({"protocol": "http", "recordRequests": true,
+                "stubs": [{"responses": [response]}]}))
+                .await,
         )
-        .await;
-        port
     }
 
     async fn get(&self, port: u16) -> reqwest::Response {
@@ -123,8 +121,8 @@ fn recorded(stubs: &[Value]) -> usize {
         .count()
 }
 
-fn recording_proxy(port: u16, upstream: u16, mode: &str) -> Value {
-    json!({"port": port, "protocol": "http", "stubs": [
+fn recording_proxy(upstream: u16, mode: &str) -> Value {
+    json!({"protocol": "http", "stubs": [
         {"predicates": [{"equals": {"path": "/kept"}}], "responses": [{"is": {"body": "mine"}}]},
         {"responses": [{"proxy": {
             "to": format!("http://127.0.0.1:{upstream}"),
@@ -137,8 +135,7 @@ fn recording_proxy(port: u16, upstream: u16, mode: &str) -> Value {
 async fn clearing_removes_the_recorded_stubs(mode: &str) {
     let admin = Admin::start().await;
     let upstream = admin.upstream(json!({"is": {"body": "up"}})).await;
-    let port = free_port();
-    admin.create(recording_proxy(port, upstream, mode)).await;
+    let port = port_of(&admin.create(recording_proxy(upstream, mode)).await);
 
     assert_eq!(admin.get(port).await.text().await.expect("body"), "up");
     let before = admin.stubs(port).await;
@@ -184,10 +181,7 @@ async fn clearing_removes_a_proxy_always_recorded_stub() {
 async fn clearing_with_nothing_recorded_keeps_every_stub() {
     let admin = Admin::start().await;
     let upstream = admin.upstream(json!({"is": {"body": "up"}})).await;
-    let port = free_port();
-    admin
-        .create(recording_proxy(port, upstream, "proxyOnce"))
-        .await;
+    let port = port_of(&admin.create(recording_proxy(upstream, "proxyOnce")).await);
 
     let before = admin.stubs(port).await;
     admin.clear_saved_proxy_responses(port).await;

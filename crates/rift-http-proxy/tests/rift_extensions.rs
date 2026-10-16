@@ -8,46 +8,13 @@ mod support;
 use reqwest::Client;
 use serde_json::json;
 use std::time::{Duration, Instant};
-use tokio::time::sleep;
 
 const ADMIN_URL: &str = "http://127.0.0.1";
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Two distinct OS-chosen ports (admin, imposter) for one test. Both probe listeners are held
-/// until both ports are chosen, so they never repeat and concurrent runs never share one.
-fn get_test_ports() -> (u16, u16) {
-    let admin = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
-    let imposter = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
-    (
-        admin.local_addr().expect("local addr").port(),
-        imposter.local_addr().expect("local addr").port(),
-    )
-}
-
-/// Start a Rift server for testing
-async fn start_rift_server(admin_port: u16) -> tokio::process::Child {
-    let child = tokio::process::Command::new(support::server_bin())
-        .args(["--port", &admin_port.to_string(), "--allow-injection"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("Failed to start Rift server");
-
-    // Wait for server to be ready
-    let client = Client::new();
-    for _ in 0..50 {
-        if client
-            .get(format!("{ADMIN_URL}:{admin_port}/"))
-            .timeout(Duration::from_millis(200))
-            .send()
-            .await
-            .is_ok()
-        {
-            return child;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    panic!("Rift server failed to start within timeout");
+/// Start a Rift server for testing, returning it with the admin port it bound.
+async fn start_rift_server() -> (tokio::process::Child, u16) {
+    support::spawn_server(&["--allow-injection"]).await
 }
 
 /// Create an imposter via the admin API
@@ -84,13 +51,11 @@ async fn clear_imposters(client: &Client, admin_port: u16) {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_rift_flow_state_inmemory_basic() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with flow state and inject script that uses state
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "_rift": {
             "flowState": {
@@ -105,7 +70,7 @@ async fn test_rift_flow_state_inmemory_basic() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Make multiple requests and verify state is maintained
     for i in 1..=3 {
@@ -127,13 +92,11 @@ async fn test_rift_flow_state_inmemory_basic() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_rift_flow_state_persistence_across_requests() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with flow state that stores user data
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "_rift": {
             "flowState": {}
@@ -154,7 +117,7 @@ async fn test_rift_flow_state_persistence_across_requests() {
         ]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // First retrieve - should be empty
     let response = client
@@ -192,13 +155,11 @@ async fn test_rift_flow_state_persistence_across_requests() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_rift_fault_latency_100_percent() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with 100% probability latency fault
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [],
@@ -219,7 +180,7 @@ async fn test_rift_fault_latency_100_percent() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let start = Instant::now();
     let response = client
@@ -243,13 +204,11 @@ async fn test_rift_fault_latency_100_percent() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_rift_fault_latency_range() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with latency range
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [],
@@ -271,7 +230,7 @@ async fn test_rift_fault_latency_range() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let start = Instant::now();
     let response = client
@@ -298,13 +257,11 @@ async fn test_rift_fault_latency_range() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_rift_fault_error_100_percent() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with 100% error fault
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [],
@@ -326,7 +283,7 @@ async fn test_rift_fault_error_100_percent() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let response = client
         .get(format!("{ADMIN_URL}:{imposter_port}/test"))
@@ -344,13 +301,11 @@ async fn test_rift_fault_error_100_percent() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_rift_fault_probabilistic() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with 50% error probability
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [],
@@ -372,7 +327,7 @@ async fn test_rift_fault_probabilistic() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let mut success_count = 0;
     let mut error_count = 0;
@@ -410,13 +365,11 @@ async fn test_rift_fault_probabilistic() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_mountebank_behaviors_with_rift_fault() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with both Mountebank _behaviors and _rift fault
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"equals": {"path": "/test"}}],
@@ -441,7 +394,7 @@ async fn test_mountebank_behaviors_with_rift_fault() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let start = Instant::now();
     let response = client
@@ -472,13 +425,11 @@ async fn test_mountebank_behaviors_with_rift_fault() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_mountebank_predicates_with_rift_extensions() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with complex Mountebank predicates and _rift extensions
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "_rift": {
             "flowState": {}
@@ -513,7 +464,7 @@ async fn test_mountebank_predicates_with_rift_extensions() {
         ]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Test GET /api/* - should match first stub with _rift latency
     let start = Instant::now();
@@ -542,13 +493,11 @@ async fn test_mountebank_predicates_with_rift_extensions() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_response_cycling_with_rift_extensions() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with multiple responses that cycle, each with different _rift configs
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [],
@@ -568,7 +517,7 @@ async fn test_response_cycling_with_rift_extensions() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Sequential dispatch: concurrent requests reach the round-robin counter in
     // nondeterministic order, which makes the ordering assertion below unsound.
@@ -597,13 +546,11 @@ async fn test_response_cycling_with_rift_extensions() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_default_response_with_rift_config() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with default response and _rift flow state
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "_rift": {
             "flowState": {}
@@ -620,7 +567,7 @@ async fn test_default_response_with_rift_config() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Request to existing path
     let response = client

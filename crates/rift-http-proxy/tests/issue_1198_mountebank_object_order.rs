@@ -3,20 +3,11 @@
 //! (`compatibility.js`). Rift documented that as Mountebank's order and ran wait, copy, lookup,
 //! decorate, shellTransform, which differs twice.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
-}
 
 struct Admin {
     client: reqwest::Client,
@@ -41,8 +32,7 @@ impl Admin {
     }
 
     async fn serve(&self, body: &str, behaviors: Value) -> u16 {
-        let port = free_port();
-        let imposter = json!({"port": port, "protocol": "http", "stubs": [{"responses": [
+        let imposter = json!({"protocol": "http", "stubs": [{"responses": [
             {"is": {"body": body}, "_behaviors": behaviors}
         ]}]});
         let response = self
@@ -53,7 +43,11 @@ impl Admin {
             .await
             .expect("POST");
         assert_eq!(response.status().as_u16(), 201, "{imposter}");
-        port
+        let body: Value = response.json().await.expect("json");
+        body["port"]
+            .as_u64()
+            .and_then(|p| u16::try_from(p).ok())
+            .expect("assigned port")
     }
 
     async fn body(&self, port: u16, path_and_query: &str) -> String {

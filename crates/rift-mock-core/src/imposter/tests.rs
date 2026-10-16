@@ -10,14 +10,6 @@ use super::*;
 use crate::imposter::core::StubState;
 use std::collections::HashMap;
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind an ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
-
 fn predicates_from_jsons(predicates: Vec<serde_json::Value>) -> Vec<Predicate> {
     predicates
         .into_iter()
@@ -281,12 +273,10 @@ fn test_parse_query_url_encoded() {
 
 #[tokio::test]
 async fn test_imposter_manager_create_delete() {
-    let port_0 = free_port();
     let manager = ImposterManager::new();
 
-    // Try to create an imposter on a high port (less likely to conflict)
     let config = ImposterConfig {
-        port: Some(port_0),
+        port: None,
         protocol: "http".to_string(),
         name: Some("test".to_string()),
         record_requests: false,
@@ -299,16 +289,12 @@ async fn test_imposter_manager_create_delete() {
         ..Default::default()
     };
 
-    // This may fail if port is in use, which is fine for testing
-    let result = manager.create_imposter(config.clone()).await;
-    if result.is_ok() {
-        assert_eq!(manager.count(), 1);
+    let port_0 = manager.create_imposter(config).await.expect("create");
+    assert_eq!(manager.count(), 1);
 
-        // Delete it
-        let deleted = manager.delete_imposter(port_0).await;
-        assert!(deleted.is_ok());
-        assert_eq!(manager.count(), 0);
-    }
+    let deleted = manager.delete_imposter(port_0).await;
+    assert!(deleted.is_ok());
+    assert_eq!(manager.count(), 0);
 }
 
 #[tokio::test]
@@ -3072,14 +3058,12 @@ async fn test_cors_disabled_no_cors_headers() {
 // the CSV data source.
 #[tokio::test]
 async fn test_lookup_behavior_applied_on_is_response() {
-    let port_0 = free_port();
     let dir = tempfile::tempdir().expect("tempdir");
     let csv_path = dir.path().join("products.csv");
     std::fs::write(&csv_path, "id,name,price\n456,Gadget,19.99\n").expect("write csv");
     let csv_path = csv_path.to_str().expect("csv path utf8");
 
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": port_0,
         "protocol": "http",
         "stubs": [{
             "predicates": [{ "matches": { "path": "^/catalog/\\d+$" } }],
@@ -3102,7 +3086,7 @@ async fn test_lookup_behavior_applied_on_is_response() {
     .expect("config");
 
     let manager = ImposterManager::new();
-    manager
+    let port_0 = manager
         .create_imposter(config)
         .await
         .expect("create imposter");
@@ -3143,13 +3127,11 @@ async fn test_lookup_behavior_applied_on_is_response() {
 // matching the engine docs/tests and HTTP's case-insensitive header semantics.
 #[tokio::test]
 async fn test_script_header_access_is_case_insensitive() {
-    let port_0 = free_port();
     let script = "fn respond(ctx) { \
          let f = ctx.request.header(\"x-flow-id\"); if f == () { f = \"MISS\"; }; \
          http(200, f) }";
 
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": port_0,
         "protocol": "http",
         "stubs": [{
             "predicates": [{ "equals": { "path": "/whoami" } }],
@@ -3159,7 +3141,7 @@ async fn test_script_header_access_is_case_insensitive() {
     .expect("config");
 
     let manager = ImposterManager::new();
-    manager
+    let port_0 = manager
         .create_imposter(config)
         .await
         .expect("create imposter");
@@ -3190,13 +3172,11 @@ async fn test_script_header_access_is_case_insensitive() {
 // nothing failing.
 #[tokio::test]
 async fn test_script_sees_the_first_value_of_a_repeated_header() {
-    let port_0 = free_port();
     let script = "fn respond(ctx) { \
          let f = ctx.request.header(\"x-flow-id\"); if f == () { f = \"MISS\"; }; \
          http(200, f) }";
 
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": port_0,
         "protocol": "http",
         "stubs": [{
             "predicates": [{ "equals": { "path": "/whoami" } }],
@@ -3206,7 +3186,7 @@ async fn test_script_sees_the_first_value_of_a_repeated_header() {
     .expect("config");
 
     let manager = ImposterManager::new();
-    manager
+    let port_0 = manager
         .create_imposter(config)
         .await
         .expect("create imposter");
@@ -3243,13 +3223,13 @@ mod scenario_fsm_tests {
         req.send().await.expect("send").text().await.expect("body")
     }
 
-    fn order_fsm(port: u16, flow_id_source: Option<&str>) -> serde_json::Value {
+    fn order_fsm(flow_id_source: Option<&str>) -> serde_json::Value {
         let mut flow_state = serde_json::json!({ "ttlSeconds": 300 });
         if let Some(src) = flow_id_source {
             flow_state["flowIdSource"] = serde_json::json!(src);
         }
         serde_json::json!({
-            "port": port, "protocol": "http",
+            "protocol": "http",
             "_rift": { "flowState": flow_state },
             "stubs": [
                 { "scenarioName": "order", "requiredScenarioState": "Started",
@@ -3267,12 +3247,11 @@ mod scenario_fsm_tests {
 
     #[tokio::test]
     async fn scenario_auto_provisions_store_without_explicit_flow_state() {
-        let port_0 = free_port();
         // No `_rift.flowState` at all: declaring scenario stubs must auto-provision an in-memory
         // store so the FSM works out of the box (otherwise transitions silently no-op on NoOp).
         let manager = ImposterManager::new();
         let config = serde_json::from_value(serde_json::json!({
-            "port": port_0, "protocol": "http",
+            "protocol": "http",
             "stubs": [
                 { "scenarioName": "order", "requiredScenarioState": "Started",
                   "predicates": [{ "equals": { "path": "/status" } }],
@@ -3286,7 +3265,7 @@ mod scenario_fsm_tests {
             ]
         }))
         .unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
         let c = reqwest::Client::new();
 
         assert_eq!(get(&c, port_0, "/status", None).await, "unpaid");
@@ -3302,10 +3281,9 @@ mod scenario_fsm_tests {
 
     #[tokio::test]
     async fn scenario_transition_advances_state() {
-        let port_0 = free_port();
         let manager = ImposterManager::new();
-        let config = serde_json::from_value(order_fsm(port_0, None)).unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let config = serde_json::from_value(order_fsm(None)).unwrap();
+        let port_0 = manager.create_imposter(config).await.expect("create");
         let c = reqwest::Client::new();
 
         assert_eq!(
@@ -3329,10 +3307,9 @@ mod scenario_fsm_tests {
 
     #[tokio::test]
     async fn scenario_unmatched_in_state_keeps_state() {
-        let port_0 = free_port();
         let manager = ImposterManager::new();
-        let config = serde_json::from_value(order_fsm(port_0, None)).unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let config = serde_json::from_value(order_fsm(None)).unwrap();
+        let port_0 = manager.create_imposter(config).await.expect("create");
         let c = reqwest::Client::new();
 
         // /status only reads; it never carries newScenarioState, so it must not advance.
@@ -3348,11 +3325,9 @@ mod scenario_fsm_tests {
 
     #[tokio::test]
     async fn scenario_flow_ids_are_isolated() {
-        let port_0 = free_port();
         let manager = ImposterManager::new();
-        let config =
-            serde_json::from_value(order_fsm(port_0, Some("header:X-Mock-Space"))).unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let config = serde_json::from_value(order_fsm(Some("header:X-Mock-Space"))).unwrap();
+        let port_0 = manager.create_imposter(config).await.expect("create");
         let c = reqwest::Client::new();
 
         // Advance only space "alpha"; "beta" stays at the initial state on the same imposter.
@@ -3458,9 +3433,9 @@ mod correlated_space_tests {
     }
 
     /// Imposter whose flow_id = the X-Mock-Space header, with the given stubs.
-    fn correlated_config(port: u16, stubs: serde_json::Value) -> serde_json::Value {
+    fn correlated_config(stubs: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
-            "port": port, "protocol": "http", "recordRequests": true,
+            "protocol": "http", "recordRequests": true,
             "_rift": { "flowState": { "ttlSeconds": 300,
                 "flowIdSource": "header:X-Mock-Space" } },
             "stubs": stubs
@@ -3469,19 +3444,15 @@ mod correlated_space_tests {
 
     #[tokio::test]
     async fn space_scoped_stubs_isolate_responses() {
-        let port_0 = free_port();
         let manager = ImposterManager::new();
-        let config = serde_json::from_value(correlated_config(
-            port_0,
-            serde_json::json!([
-                { "space": "alpha", "predicates": [{ "equals": { "path": "/data" } }],
-                  "responses": [{ "is": { "statusCode": 200, "body": "ALPHA" } }] },
-                { "space": "beta", "predicates": [{ "equals": { "path": "/data" } }],
-                  "responses": [{ "is": { "statusCode": 200, "body": "BETA" } }] }
-            ]),
-        ))
+        let config = serde_json::from_value(correlated_config(serde_json::json!([
+            { "space": "alpha", "predicates": [{ "equals": { "path": "/data" } }],
+              "responses": [{ "is": { "statusCode": 200, "body": "ALPHA" } }] },
+            { "space": "beta", "predicates": [{ "equals": { "path": "/data" } }],
+              "responses": [{ "is": { "statusCode": 200, "body": "BETA" } }] }
+        ])))
         .unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
         let c = reqwest::Client::new();
 
         assert_eq!(
@@ -3516,17 +3487,13 @@ mod correlated_space_tests {
 
     #[tokio::test]
     async fn global_stub_matches_all_spaces() {
-        let port_0 = free_port();
         let manager = ImposterManager::new();
-        let config = serde_json::from_value(correlated_config(
-            port_0,
-            serde_json::json!([
-                { "predicates": [{ "equals": { "path": "/health" } }],
-                  "responses": [{ "is": { "statusCode": 200, "body": "OK" } }] }
-            ]),
-        ))
+        let config = serde_json::from_value(correlated_config(serde_json::json!([
+            { "predicates": [{ "equals": { "path": "/health" } }],
+              "responses": [{ "is": { "statusCode": 200, "body": "OK" } }] }
+        ])))
         .unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
         let c = reqwest::Client::new();
 
         assert_eq!(
@@ -3555,9 +3522,8 @@ mod correlated_space_tests {
 
     #[tokio::test]
     async fn space_scope_composes_with_scenario_fsm() {
-        let port_0 = free_port();
         let manager = ImposterManager::new();
-        let config = serde_json::from_value(correlated_config(port_0, serde_json::json!([
+        let config = serde_json::from_value(correlated_config(serde_json::json!([
             { "space": "alpha", "scenarioName": "order", "requiredScenarioState": "Started",
               "predicates": [{ "equals": { "path": "/status" } }],
               "responses": [{ "is": { "statusCode": 200, "body": "unpaid" } }] },
@@ -3571,7 +3537,7 @@ mod correlated_space_tests {
               "responses": [{ "is": { "statusCode": 200, "body": "beta" } }] }
         ])))
         .unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
         let c = reqwest::Client::new();
 
         assert_eq!(
@@ -3626,10 +3592,10 @@ mod default_forward_tests {
             .expect("send")
     }
 
-    /// Spin up an upstream imposter that echoes a body per path, on `port`.
-    async fn upstream(manager: &ImposterManager, port: u16) {
+    /// Spin up an upstream imposter that echoes a body per path; returns its port.
+    async fn upstream(manager: &ImposterManager) -> u16 {
         let config = serde_json::from_value(serde_json::json!({
-            "port": port, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "predicates": [{ "equals": { "path": "/ping" } }],
                   "responses": [{ "is": { "statusCode": 200, "body": "PONG" } }] },
                 { "predicates": [{ "equals": { "path": "/api/v1/users" } }],
@@ -3640,21 +3606,19 @@ mod default_forward_tests {
         manager
             .create_imposter(config)
             .await
-            .expect("create upstream");
+            .expect("create upstream")
     }
 
     #[tokio::test]
     async fn default_forward_proxies_unmatched() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let manager = ImposterManager::new();
-        upstream(&manager, port_0).await;
+        let port_0 = upstream(&manager).await;
         let config = serde_json::from_value(serde_json::json!({
-            "port": port_1, "protocol": "http",
+            "protocol": "http",
             "defaultForward": format!("http://127.0.0.1:{port_0}"), "stubs": []
         }))
         .unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let port_1 = manager.create_imposter(config).await.expect("create");
 
         let resp = get(port_1, "/ping").await;
         assert_eq!(resp.status(), 200);
@@ -3676,16 +3640,14 @@ mod default_forward_tests {
 
     #[tokio::test]
     async fn default_forward_preserves_path() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let manager = ImposterManager::new();
-        upstream(&manager, port_0).await;
+        let port_0 = upstream(&manager).await;
         let config = serde_json::from_value(serde_json::json!({
-            "port": port_1, "protocol": "http",
+            "protocol": "http",
             "defaultForward": format!("http://127.0.0.1:{port_0}"), "stubs": []
         }))
         .unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let port_1 = manager.create_imposter(config).await.expect("create");
 
         // /api/v1/users on the imposter is forwarded to upstream + /api/v1/users
         assert_eq!(
@@ -3699,12 +3661,10 @@ mod default_forward_tests {
 
     #[tokio::test]
     async fn matching_stub_takes_precedence_over_default_forward() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let manager = ImposterManager::new();
-        upstream(&manager, port_0).await;
+        let port_0 = upstream(&manager).await;
         let config = serde_json::from_value(serde_json::json!({
-            "port": port_1, "protocol": "http",
+            "protocol": "http",
             "defaultForward": format!("http://127.0.0.1:{port_0}"),
             "stubs": [
                 { "predicates": [{ "equals": { "path": "/local" } }],
@@ -3712,7 +3672,7 @@ mod default_forward_tests {
             ]
         }))
         .unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let port_1 = manager.create_imposter(config).await.expect("create");
 
         // a matched stub responds locally (not proxied)
         let local = get(port_1, "/local").await;
@@ -3727,16 +3687,16 @@ mod default_forward_tests {
 
     #[tokio::test]
     async fn default_forward_upstream_error_returns_502() {
-        let port_0 = free_port();
-        let port_1 = free_port();
+        // Nothing listens on port 1.
+        let port_1 = 1;
         let manager = ImposterManager::new();
         // defaultForward points at a port with no listener → upstream leg fails
         let config = serde_json::from_value(serde_json::json!({
-            "port": port_0, "protocol": "http",
+            "protocol": "http",
             "defaultForward": format!("http://127.0.0.1:{port_1}"), "stubs": []
         }))
         .unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
 
         let resp = get(port_0, "/anything").await;
         assert_eq!(resp.status(), 502);
@@ -3752,18 +3712,16 @@ mod default_forward_tests {
 
     #[tokio::test]
     async fn default_forward_request_is_audited_when_record_requests_enabled() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         // The forwarded request still appears in the recordRequests audit log — that feature is
         // independent of the proxy replay cache the transparent forward bypasses.
         let manager = ImposterManager::new();
-        upstream(&manager, port_0).await;
+        let port_0 = upstream(&manager).await;
         let config = serde_json::from_value(serde_json::json!({
-            "port": port_1, "protocol": "http", "recordRequests": true,
+            "protocol": "http", "recordRequests": true,
             "defaultForward": format!("http://127.0.0.1:{port_0}"), "stubs": []
         }))
         .unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let port_1 = manager.create_imposter(config).await.expect("create");
 
         assert_eq!(get(port_1, "/ping").await.text().await.unwrap(), "PONG");
 
@@ -3780,13 +3738,12 @@ mod default_forward_tests {
 
     #[tokio::test]
     async fn without_default_forward_unmatched_is_unchanged() {
-        let port_0 = free_port();
         let manager = ImposterManager::new();
         let config = serde_json::from_value(serde_json::json!({
-            "port": port_0, "protocol": "http", "stubs": []
+            "protocol": "http", "stubs": []
         }))
         .unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
 
         // existing no-match behaviour: 200 + x-rift-no-match, not a proxied body
         let resp = get(port_0, "/anything").await;
@@ -3817,20 +3774,19 @@ mod id_addressed_stub_tests {
         .unwrap()
     }
 
-    async fn imposter_on(port: u16) -> std::sync::Arc<ImposterManager> {
+    async fn imposter_on() -> (std::sync::Arc<ImposterManager>, u16) {
         let manager = std::sync::Arc::new(ImposterManager::new());
         let config = serde_json::from_value(serde_json::json!({
-            "port": port, "protocol": "http", "stubs": []
+            "protocol": "http", "stubs": []
         }))
         .unwrap();
-        manager.create_imposter(config).await.expect("create");
-        manager
+        let port = manager.create_imposter(config).await.expect("create");
+        (manager, port)
     }
 
     #[tokio::test]
     async fn delete_stub_by_id_preserves_position() {
-        let port_0 = free_port();
-        let manager = imposter_on(port_0).await;
+        let (manager, port_0) = imposter_on().await;
         for id in ["a", "b", "c"] {
             manager
                 .add_stub(port_0, stub_with_id(id, id), None)
@@ -3851,8 +3807,7 @@ mod id_addressed_stub_tests {
 
     #[tokio::test]
     async fn duplicate_stub_id_conflicts() {
-        let port_0 = free_port();
-        let manager = imposter_on(port_0).await;
+        let (manager, port_0) = imposter_on().await;
         manager
             .add_stub(port_0, stub_with_id("x", "first"), None)
             .await
@@ -3874,8 +3829,7 @@ mod id_addressed_stub_tests {
 
     #[tokio::test]
     async fn replace_stub_by_id_in_place() {
-        let port_0 = free_port();
-        let manager = imposter_on(port_0).await;
+        let (manager, port_0) = imposter_on().await;
         for id in ["a", "b", "c"] {
             manager
                 .add_stub(port_0, stub_with_id(id, id), None)
@@ -3917,8 +3871,7 @@ mod id_addressed_stub_tests {
 
     #[tokio::test]
     async fn concurrent_same_id_add_exactly_one_wins() {
-        let port_0 = free_port();
-        let manager = imposter_on(port_0).await;
+        let (manager, port_0) = imposter_on().await;
         // 12 tasks race to add the SAME id — the atomic dedup-under-lock must admit exactly one.
         let mut adds = tokio::task::JoinSet::new();
         for _ in 0..12 {
@@ -3942,8 +3895,7 @@ mod id_addressed_stub_tests {
 
     #[tokio::test]
     async fn concurrent_id_ops_stay_consistent() {
-        let port_0 = free_port();
-        let manager = imposter_on(port_0).await;
+        let (manager, port_0) = imposter_on().await;
         // add 0..20 concurrently, then delete the even ids concurrently
         let mut adds = tokio::task::JoinSet::new();
         for i in 0..20u32 {
@@ -4027,9 +3979,8 @@ mod backend_errors {
     }
 
     fn gated_imposter() -> Arc<Imposter> {
-        let port_0 = free_port();
         let config: ImposterConfig = serde_json::from_value(json!({
-            "protocol": "http", "port": port_0,
+            "protocol": "http",
             "stubs": [{
                 "scenarioName": "order",
                 "requiredScenarioState": "Started",
@@ -4060,9 +4011,8 @@ mod backend_errors {
     // error, never silently coerced to the initial state.
     #[test]
     fn scenario_state_non_string_value_errors() {
-        let port_0 = free_port();
         let config: ImposterConfig = serde_json::from_value(json!({
-            "protocol": "http", "port": port_0,
+            "protocol": "http",
             "stubs": [{
                 "scenarioName": "order",
                 "requiredScenarioState": "Started",
@@ -4163,9 +4113,8 @@ mod backend_errors {
     }
 
     fn gated_imposter_blocking() -> Arc<Imposter> {
-        let port_0 = free_port();
         let config: ImposterConfig = serde_json::from_value(json!({
-            "protocol": "http", "port": port_0,
+            "protocol": "http",
             "stubs": [{
                 "scenarioName": "order",
                 "requiredScenarioState": "Started",
@@ -4188,7 +4137,6 @@ mod backend_errors {
     /// its tuple destructuring would ship silently while the CHANGELOG claimed it fixed.
     #[tokio::test]
     async fn debug_matching_annotations_reach_the_decorator_on_a_blocking_store() {
-        let port_0 = free_port();
         use hyper::server::conn::http1;
         use hyper::service::service_fn;
         use hyper_util::rt::TokioIo;
@@ -4196,7 +4144,7 @@ mod backend_errors {
         // Same gated stub as the data-plane test, on its own port; the scenario gate is what makes
         // the matcher read the store.
         let config: ImposterConfig = serde_json::from_value(json!({
-            "protocol": "http", "port": port_0,
+            "protocol": "http",
             "stubs": [{
                 "scenarioName": "order",
                 "requiredScenarioState": "Started",
@@ -4210,9 +4158,10 @@ mod backend_errors {
         let imposter = Arc::new(imposter);
 
         let recorder = Arc::new(RecordingDecorator::default());
-        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port_0}"))
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
+        let port_0 = listener.local_addr().expect("addr").port();
         let imp = imposter.clone();
         let rec = recorder.clone();
         tokio::spawn(async move {
@@ -4265,9 +4214,8 @@ mod backend_errors {
     }
 
     fn script_imposter_blocking() -> Arc<Imposter> {
-        let port_0 = free_port();
         let config: ImposterConfig = serde_json::from_value(json!({
-            "protocol": "http", "port": port_0,
+            "protocol": "http",
             "stubs": [{
                 "predicates": [{"equals": {"path": "/scripted"}}],
                 "responses": [{
@@ -4297,7 +4245,6 @@ mod backend_errors {
     /// `imposter/core/matching.rs`), so the mechanism-level tests do not cover it.
     #[tokio::test]
     async fn script_ctx_state_annotations_reach_the_decorator_on_a_blocking_store() {
-        let port_0 = free_port();
         use hyper::server::conn::http1;
         use hyper::service::service_fn;
         use hyper_util::rt::TokioIo;
@@ -4305,9 +4252,10 @@ mod backend_errors {
         let imposter = script_imposter_blocking();
         let recorder = Arc::new(RecordingDecorator::default());
 
-        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port_0}"))
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
+        let port_0 = listener.local_addr().expect("addr").port();
         let imp = imposter.clone();
         let rec = recorder.clone();
         tokio::spawn(async move {
@@ -4370,7 +4318,6 @@ mod backend_errors {
     /// exactly why this went unnoticed.
     #[tokio::test]
     async fn decorated_data_plane_serves_503_and_annotations_on_a_blocking_store() {
-        let port_0 = free_port();
         use hyper::server::conn::http1;
         use hyper::service::service_fn;
         use hyper_util::rt::TokioIo;
@@ -4378,9 +4325,10 @@ mod backend_errors {
         let imposter = gated_imposter_blocking();
         let recorder = Arc::new(RecordingDecorator::default());
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:12618")
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
+        let port_0 = listener.local_addr().expect("addr").port();
         let imp = imposter.clone();
         let rec = recorder.clone();
         tokio::spawn(async move {
@@ -4413,7 +4361,7 @@ mod backend_errors {
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let resp = reqwest::get("http://127.0.0.1:12618/gated")
+        let resp = reqwest::get(format!("http://127.0.0.1:{port_0}/gated"))
             .await
             .expect("request");
         assert_eq!(resp.status(), 503, "backend failure is a structured 503");
@@ -4433,7 +4381,6 @@ mod backend_errors {
 
     #[tokio::test]
     async fn decorated_data_plane_serves_503_and_annotations() {
-        let port_0 = free_port();
         use hyper::server::conn::http1;
         use hyper::service::service_fn;
         use hyper_util::rt::TokioIo;
@@ -4441,9 +4388,10 @@ mod backend_errors {
         let imposter = gated_imposter();
         let recorder = Arc::new(RecordingDecorator::default());
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:12617")
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
+        let port_0 = listener.local_addr().expect("addr").port();
         let imp = imposter.clone();
         let rec = recorder.clone();
         tokio::spawn(async move {
@@ -4476,7 +4424,7 @@ mod backend_errors {
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let resp = reqwest::get("http://127.0.0.1:12617/gated")
+        let resp = reqwest::get(format!("http://127.0.0.1:{port_0}/gated"))
             .await
             .expect("request");
         assert_eq!(resp.status(), 503, "backend failure is a structured 503");
@@ -4516,19 +4464,18 @@ mod backend_errors {
     // AC2: the manager's builder wires the decorator into the real serve loop.
     #[tokio::test]
     async fn manager_with_decorator_decorates_normal_response() {
-        let port_0 = free_port();
         let recorder = Arc::new(RecordingDecorator::default());
         let manager = ImposterManager::new()
             .with_response_decorator(recorder.clone() as Arc<dyn ResponseDecorator>);
         let config: ImposterConfig = serde_json::from_value(json!({
-            "protocol": "http", "port": port_0,
+            "protocol": "http",
             "stubs": [{
                 "predicates": [{"equals": {"path": "/ping"}}],
                 "responses": [{"is": {"statusCode": 200, "body": "pong"}}]
             }]
         }))
         .expect("config");
-        manager.create_imposter(config).await.expect("create");
+        let port_0 = manager.create_imposter(config).await.expect("create");
 
         let resp = reqwest::get(format!("http://127.0.0.1:{port_0}/ping"))
             .await
@@ -4561,9 +4508,8 @@ mod cas_transitions {
     use serde_json::json;
 
     fn imposter_with(stub: serde_json::Value) -> Imposter {
-        let port_0 = free_port();
         let config: ImposterConfig = serde_json::from_value(json!({
-            "protocol": "http", "port": port_0,
+            "protocol": "http",
             "stubs": [stub]
         }))
         .expect("config");
@@ -4727,9 +4673,7 @@ mod cas_transitions {
 // templates and every script engine; absent a pattern the map stays empty (unchanged default).
 #[tokio::test]
 async fn test_path_params_template_end_to_end() {
-    let port_0 = free_port();
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": port_0,
         "protocol": "http",
         "stubs": [{
             "routePattern": "/users/:id",
@@ -4740,7 +4684,7 @@ async fn test_path_params_template_end_to_end() {
     .expect("config");
 
     let manager = ImposterManager::new();
-    manager
+    let port_0 = manager
         .create_imposter(config)
         .await
         .expect("create imposter");
@@ -4762,12 +4706,10 @@ async fn test_path_params_template_end_to_end() {
 
 #[tokio::test]
 async fn test_path_params_script_rhai() {
-    let port_0 = free_port();
     let script = "fn respond(ctx) { \
          let id = ctx.request.pathParams[\"id\"]; if id == () { id = \"MISS\"; } \
          http(200, id) }";
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": port_0,
         "protocol": "http",
         "stubs": [{
             "routePattern": "/users/:id",
@@ -4778,7 +4720,7 @@ async fn test_path_params_script_rhai() {
     .expect("config");
 
     let manager = ImposterManager::new();
-    manager
+    let port_0 = manager
         .create_imposter(config)
         .await
         .expect("create imposter");
@@ -4801,11 +4743,9 @@ async fn test_path_params_script_rhai() {
 #[cfg(feature = "javascript")]
 #[tokio::test]
 async fn test_path_params_script_js() {
-    let port_0 = free_port();
     let script = "function respond(ctx) { \
          return http(200, ctx.request.pathParams.id); }";
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": port_0,
         "protocol": "http",
         "stubs": [{
             "routePattern": "/users/:id",
@@ -4816,7 +4756,7 @@ async fn test_path_params_script_js() {
     .expect("config");
 
     let manager = ImposterManager::new();
-    manager
+    let port_0 = manager
         .create_imposter(config)
         .await
         .expect("create imposter");
@@ -4838,11 +4778,9 @@ async fn test_path_params_script_js() {
 
 #[tokio::test]
 async fn test_path_params_absent_pattern_is_empty() {
-    let port_0 = free_port();
     // No routePattern → pathParams stays empty and nothing errors (unchanged default). The `[]`
     // wrapper makes the empty substitution observable.
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": port_0,
         "protocol": "http",
         "stubs": [{
             "predicates": [{ "equals": { "path": "/users/456" } }],
@@ -4852,7 +4790,7 @@ async fn test_path_params_absent_pattern_is_empty() {
     .expect("config");
 
     let manager = ImposterManager::new();
-    manager
+    let port_0 = manager
         .create_imposter(config)
         .await
         .expect("create imposter");
@@ -4874,11 +4812,9 @@ async fn test_path_params_absent_pattern_is_empty() {
 
 #[tokio::test]
 async fn test_path_params_non_matching_pattern_is_empty() {
-    let port_0 = free_port();
     // routePattern is set but structurally does not match the request path (segment counts differ):
     // the predicate still matches, so the stub is served, but pathParams must be empty (no error).
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": port_0,
         "protocol": "http",
         "stubs": [{
             "routePattern": "/users/:id",
@@ -4889,7 +4825,7 @@ async fn test_path_params_non_matching_pattern_is_empty() {
     .expect("config");
 
     let manager = ImposterManager::new();
-    manager
+    let port_0 = manager
         .create_imposter(config)
         .await
         .expect("create imposter");
@@ -4914,12 +4850,9 @@ async fn test_path_params_non_matching_pattern_is_empty() {
 // HTTP/1-only, since a socket reset is incompatible with HTTP/2 stream multiplexing.
 #[test]
 fn script_bearing_stub_forces_http1_only() {
-    let port_0 = free_port();
-    let port_1 = free_port();
     use crate::imposter::core::Imposter;
 
     let with_script: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": port_0,
         "protocol": "http",
         "stubs": [{
             "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { reset() }" } } }]
@@ -4934,7 +4867,6 @@ fn script_bearing_stub_forces_http1_only() {
 
     // Control: a plain `is` stub with no script and no tcp fault stays HTTP/2-eligible.
     let plain: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": port_1,
         "protocol": "http",
         "stubs": [{ "responses": [{ "is": { "statusCode": 200 } }] }]
     }))
@@ -4961,10 +4893,10 @@ mod proxy_generator_failure_tests {
             .expect("send")
     }
 
-    /// Upstream imposter that returns 200 for `/gen`.
-    async fn upstream(manager: &ImposterManager, port: u16) {
+    /// Upstream imposter that returns 200 for `/gen`; returns its port.
+    async fn upstream(manager: &ImposterManager) -> u16 {
         let config = serde_json::from_value(serde_json::json!({
-            "port": port, "protocol": "http", "stubs": [
+            "protocol": "http", "stubs": [
                 { "predicates": [{ "equals": { "path": "/gen" } }],
                   "responses": [{ "is": { "statusCode": 200, "body": "OK" } }] }
             ]
@@ -4973,19 +4905,18 @@ mod proxy_generator_failure_tests {
         manager
             .create_imposter(config)
             .await
-            .expect("create upstream");
+            .expect("create upstream")
     }
 
     /// Proxy imposter (proxyOnce) whose single stub proxies to `upstream_port` with one inject
     /// predicate generator. Starts with exactly one stub (the proxy stub itself).
     async fn proxy_with_generator(
         manager: &ImposterManager,
-        port: u16,
         upstream_port: u16,
         inject_fn: &str,
-    ) {
+    ) -> u16 {
         let config = serde_json::from_value(serde_json::json!({
-            "port": port, "protocol": "http",
+            "protocol": "http",
             "stubs": [{ "responses": [{ "proxy": {
                 "to": format!("http://127.0.0.1:{upstream_port}"),
                 "mode": "proxyOnce",
@@ -4993,18 +4924,16 @@ mod proxy_generator_failure_tests {
             }}]}]
         }))
         .unwrap();
-        manager.create_imposter(config).await.expect("create proxy");
+        manager.create_imposter(config).await.expect("create proxy")
     }
 
     #[tokio::test]
     async fn proxy_generator_failure_skips_stub_and_tags_response() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let manager = ImposterManager::new();
-        upstream(&manager, port_0).await;
+        let port_0 = upstream(&manager).await;
         // A throwing generator: predicates cannot be produced.
         let throwing = r#"function(config, logger, predicates) { throw new Error("boom"); }"#;
-        proxy_with_generator(&manager, port_1, port_0, throwing).await;
+        let port_1 = proxy_with_generator(&manager, port_0, throwing).await;
 
         let resp = get(port_1, "/gen").await;
         assert_eq!(
@@ -5036,15 +4965,13 @@ mod proxy_generator_failure_tests {
 
     #[tokio::test]
     async fn proxy_generator_success_records_stub() {
-        let port_0 = free_port();
-        let port_1 = free_port();
         let manager = ImposterManager::new();
-        upstream(&manager, port_0).await;
+        let port_0 = upstream(&manager).await;
         // Control: a valid generator produces a real predicate → stub IS recorded, no error header.
         let ok_fn = r#"function(config, logger, predicates) {
             return [{ equals: { path: config.request.path } }];
         }"#;
-        proxy_with_generator(&manager, port_1, port_0, ok_fn).await;
+        let port_1 = proxy_with_generator(&manager, port_0, ok_fn).await;
 
         let resp = get(port_1, "/gen").await;
         assert_eq!(resp.status(), 200);
@@ -5414,9 +5341,7 @@ mod tcp_fault_carrier_seam {
 #[cfg(feature = "javascript")]
 #[tokio::test]
 async fn an_unresolved_engine_less_script_runs_in_the_default_engine() {
-    let port_0 = free_port();
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": port_0,
         "protocol": "http",
         "_rift": { "scriptEngine": { "defaultEngine": "javascript" } },
         "stubs": [{
@@ -5427,7 +5352,7 @@ async fn an_unresolved_engine_less_script_runs_in_the_default_engine() {
     }))
     .expect("config");
     let manager = ImposterManager::new();
-    manager
+    let port_0 = manager
         .create_imposter(config)
         .await
         .expect("create imposter");

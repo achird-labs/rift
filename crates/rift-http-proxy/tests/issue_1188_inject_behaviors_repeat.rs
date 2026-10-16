@@ -3,7 +3,6 @@
 //! `response.repeat`, the form `mb save` writes. Rift ran behaviors on `is` only and read `repeat`
 //! from an `is` response's block only.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,12 +10,12 @@ use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+/// The port the engine assigned, from a 201 body.
+fn port_of(body: &Value) -> u16 {
+    body["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .expect("assigned port")
 }
 
 async fn start_admin() -> (reqwest::Client, String, Arc<ImposterManager>) {
@@ -72,8 +71,8 @@ async fn bodies(client: &reqwest::Client, port: u16, n: usize) -> Vec<String> {
 const INJECT: &str =
     "function (config) { return { statusCode: 200, headers: { 'x-a': '1' }, body: 'inj' }; }";
 
-fn inject_imposter(port: u16, behaviors: Value) -> Value {
-    json!({"port": port, "protocol": "http", "stubs": [{"responses": [
+fn inject_imposter(behaviors: Value) -> Value {
+    json!({"protocol": "http", "stubs": [{"responses": [
         {"inject": INJECT, "_behaviors": behaviors}
     ]}]})
 }
@@ -83,16 +82,13 @@ fn inject_imposter(port: u16, behaviors: Value) -> Value {
 #[tokio::test]
 async fn decorate_rewrites_an_inject_response() {
     let (client, admin, manager) = start_admin().await;
-    let port = free_port();
-    created(
+    let port = port_of(&created(
         &client,
         &admin,
-        &inject_imposter(
-            port,
-            json!({"decorate": "function (request, response) { response.body = response.body + '-decorated'; }"}),
+        &inject_imposter(json!({"decorate": "function (request, response) { response.body = response.body + '-decorated'; }"}),
         ),
     )
-    .await;
+    .await);
     let response = client
         .get(format!("http://127.0.0.1:{port}/"))
         .send()
@@ -108,18 +104,19 @@ async fn decorate_rewrites_an_inject_response() {
 #[tokio::test]
 async fn copy_on_an_inject_response_reads_the_request() {
     let (client, admin, manager) = start_admin().await;
-    let port = free_port();
     let inject = "function (config) { return { statusCode: 200, body: 'path=${P}' }; }";
-    created(
-        &client,
-        &admin,
-        &json!({"port": port, "protocol": "http", "stubs": [{"responses": [{
-            "inject": inject,
-            "_behaviors": {"copy": [{"from": "path", "into": "${P}",
-                                      "using": {"method": "regex", "selector": ".+"}}]}
-        }]}]}),
-    )
-    .await;
+    let port = port_of(
+        &created(
+            &client,
+            &admin,
+            &json!({"protocol": "http", "stubs": [{"responses": [{
+                "inject": inject,
+                "_behaviors": {"copy": [{"from": "path", "into": "${P}",
+                                          "using": {"method": "regex", "selector": ".+"}}]}
+            }]}]}),
+        )
+        .await,
+    );
     let body = client
         .get(format!("http://127.0.0.1:{port}/orders/7"))
         .send()
@@ -135,13 +132,7 @@ async fn copy_on_an_inject_response_reads_the_request() {
 #[tokio::test]
 async fn wait_delays_an_inject_response() {
     let (client, admin, manager) = start_admin().await;
-    let port = free_port();
-    created(
-        &client,
-        &admin,
-        &inject_imposter(port, json!({"wait": 400})),
-    )
-    .await;
+    let port = port_of(&created(&client, &admin, &inject_imposter(json!({"wait": 400}))).await);
     let start = Instant::now();
     let body = client
         .get(format!("http://127.0.0.1:{port}/"))
@@ -164,16 +155,17 @@ async fn wait_delays_an_inject_response() {
 #[tokio::test]
 async fn a_failing_inject_runs_no_behavior() {
     let (client, admin, manager) = start_admin().await;
-    let port = free_port();
-    created(
-        &client,
-        &admin,
-        &json!({"port": port, "protocol": "http", "stubs": [{"responses": [{
-            "inject": "function (config) { throw new Error('boom'); }",
-            "_behaviors": {"wait": 1500}
-        }]}]}),
-    )
-    .await;
+    let port = port_of(
+        &created(
+            &client,
+            &admin,
+            &json!({"protocol": "http", "stubs": [{"responses": [{
+                "inject": "function (config) { throw new Error('boom'); }",
+                "_behaviors": {"wait": 1500}
+            }]}]}),
+        )
+        .await,
+    );
     let start = Instant::now();
     let response = client
         .get(format!("http://127.0.0.1:{port}/"))
@@ -195,8 +187,7 @@ async fn a_failing_decorate_on_an_inject_response_is_signalled_or_strict() {
     let (client, admin, manager) = start_admin().await;
     let throwing = json!({"decorate": "function (request, response) { throw new Error('boom'); }"});
 
-    let port = free_port();
-    created(&client, &admin, &inject_imposter(port, throwing.clone())).await;
+    let port = port_of(&created(&client, &admin, &inject_imposter(throwing.clone())).await);
     let response = client
         .get(format!("http://127.0.0.1:{port}/"))
         .send()
@@ -208,10 +199,9 @@ async fn a_failing_decorate_on_an_inject_response_is_signalled_or_strict() {
     assert_eq!(response.text().await.expect("body"), "inj");
     let _ = manager.delete_imposter(port).await;
 
-    let port = free_port();
-    let mut strict = inject_imposter(port, throwing);
+    let mut strict = inject_imposter(throwing);
     strict["strictBehaviors"] = json!(true);
-    created(&client, &admin, &strict).await;
+    let port = port_of(&created(&client, &admin, &strict).await);
     let response = client
         .get(format!("http://127.0.0.1:{port}/"))
         .send()
@@ -227,13 +217,14 @@ async fn a_failing_decorate_on_an_inject_response_is_signalled_or_strict() {
 #[tokio::test]
 async fn repeat_in_the_block_cycles_every_response_type() {
     let (client, admin, manager) = start_admin().await;
-    let upstream = free_port();
-    created(
-        &client,
-        &admin,
-        &json!({"port": upstream, "protocol": "http", "stubs": [{"responses": [{"is": {"body": "up"}}]}]}),
-    )
-    .await;
+    let upstream = port_of(
+        &created(
+            &client,
+            &admin,
+            &json!({"protocol": "http", "stubs": [{"responses": [{"is": {"body": "up"}}]}]}),
+        )
+        .await,
+    );
 
     let cases = [
         (
@@ -254,17 +245,17 @@ async fn repeat_in_the_block_cycles_every_response_type() {
         ),
     ];
     for (shape, response, first) in cases {
-        let port = free_port();
         let mut response = response;
         response["_behaviors"] = json!({"repeat": 2});
         let body = created(
             &client,
             &admin,
-            &json!({"port": port, "protocol": "http", "stubs": [{"responses": [
+            &json!({"protocol": "http", "stubs": [{"responses": [
                 response, {"is": {"body": "next"}}
             ]}]}),
         )
         .await;
+        let port = port_of(&body);
         assert_eq!(
             ignored_warnings(&body),
             Vec::<Value>::new(),
@@ -284,16 +275,17 @@ async fn repeat_in_the_block_cycles_every_response_type() {
 #[tokio::test]
 async fn top_level_repeat_cycles_an_is_response() {
     let (client, admin, manager) = start_admin().await;
-    let port = free_port();
-    created(
-        &client,
-        &admin,
-        &json!({"port": port, "protocol": "http", "stubs": [{"responses": [
-            {"is": {"body": "a"}, "repeat": 2},
-            {"is": {"body": "b"}}
-        ]}]}),
-    )
-    .await;
+    let port = port_of(
+        &created(
+            &client,
+            &admin,
+            &json!({"protocol": "http", "stubs": [{"responses": [
+                {"is": {"body": "a"}, "repeat": 2},
+                {"is": {"body": "b"}}
+            ]}]}),
+        )
+        .await,
+    );
     assert_eq!(bodies(&client, port, 4).await, vec!["a", "a", "b", "a"]);
 
     let fetched: Value = client
@@ -322,15 +314,15 @@ async fn top_level_repeat_cycles_an_inject_and_a_fault_response() {
             "<error>",
         ),
     ] {
-        let port = free_port();
         let body = created(
             &client,
             &admin,
-            &json!({"port": port, "protocol": "http", "stubs": [{"responses": [
+            &json!({"protocol": "http", "stubs": [{"responses": [
                 response.clone(), {"is": {"body": "next"}}
             ]}]}),
         )
         .await;
+        let port = port_of(&body);
         assert_eq!(ignored_warnings(&body), Vec::<Value>::new(), "{response}");
         assert_eq!(
             bodies(&client, port, 3).await,
@@ -358,29 +350,29 @@ async fn top_level_repeat_cycles_an_inject_and_a_fault_response() {
 #[tokio::test]
 async fn top_level_repeat_wins_over_the_block() {
     let (client, admin, manager) = start_admin().await;
-    let port = free_port();
-    created(
-        &client,
-        &admin,
-        &json!({"port": port, "protocol": "http", "stubs": [{"responses": [
-            {"is": {"body": "a"}, "repeat": 3, "_behaviors": {"repeat": 1, "wait": 1}},
-            {"is": {"body": "b"}}
-        ]}]}),
-    )
-    .await;
+    let port = port_of(
+        &created(
+            &client,
+            &admin,
+            &json!({"protocol": "http", "stubs": [{"responses": [
+                {"is": {"body": "a"}, "repeat": 3, "_behaviors": {"repeat": 1, "wait": 1}},
+                {"is": {"body": "b"}}
+            ]}]}),
+        )
+        .await,
+    );
     assert_eq!(bodies(&client, port, 4).await, vec!["a", "a", "a", "b"]);
     let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
 async fn a_top_level_repeat_that_is_not_a_u32_is_refused() {
-    let (client, admin, manager) = start_admin().await;
+    let (client, admin, _manager) = start_admin().await;
     for repeat in [json!(2.0), json!(4_294_967_296_u64), json!("2"), json!(-1)] {
-        let port = free_port();
         let response = create(
             &client,
             &admin,
-            &json!({"port": port, "protocol": "http", "stubs": [{"responses": [
+            &json!({"protocol": "http", "stubs": [{"responses": [
                 {"is": {"body": "a"}, "repeat": repeat}
             ]}]}),
         )
@@ -388,7 +380,6 @@ async fn a_top_level_repeat_that_is_not_a_u32_is_refused() {
         assert_eq!(response.status().as_u16(), 400, "{repeat}");
         let text = response.text().await.expect("body");
         assert!(text.contains("`repeat`"), "{repeat}: {text}");
-        let _ = manager.delete_imposter(port).await;
     }
 }
 
@@ -396,9 +387,8 @@ async fn a_top_level_repeat_that_is_not_a_u32_is_refused() {
 /// block `repeat` does not make the file valid.
 #[tokio::test]
 async fn a_malformed_block_repeat_is_refused_under_a_valid_top_level_one() {
-    let (client, admin, manager) = start_admin().await;
-    let port = free_port();
-    let imposter = json!({"port": port, "protocol": "http", "stubs": [{"responses": [
+    let (client, admin, _manager) = start_admin().await;
+    let imposter = json!({"protocol": "http", "stubs": [{"responses": [
         {"is": {"body": "a"}, "repeat": 2, "_behaviors": {"repeat": "bad"}}
     ]}]});
     let response = create(&client, &admin, &imposter).await;
@@ -420,22 +410,22 @@ async fn a_malformed_block_repeat_is_refused_under_a_valid_top_level_one() {
         e035,
         vec!["stubs[0].responses[0]._behaviors.repeat".to_string()]
     );
-    let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
 async fn a_null_top_level_repeat_is_absent() {
     let (client, admin, manager) = start_admin().await;
-    let port = free_port();
-    created(
-        &client,
-        &admin,
-        &json!({"port": port, "protocol": "http", "stubs": [{"responses": [
-            {"is": {"body": "a"}, "repeat": null, "_behaviors": {"repeat": 2}},
-            {"is": {"body": "b"}}
-        ]}]}),
-    )
-    .await;
+    let port = port_of(
+        &created(
+            &client,
+            &admin,
+            &json!({"protocol": "http", "stubs": [{"responses": [
+                {"is": {"body": "a"}, "repeat": null, "_behaviors": {"repeat": 2}},
+                {"is": {"body": "b"}}
+            ]}]}),
+        )
+        .await,
+    );
     assert_eq!(bodies(&client, port, 3).await, vec!["a", "a", "b"]);
     let _ = manager.delete_imposter(port).await;
 }
@@ -463,9 +453,9 @@ async fn a_behaviors_block_is_reported_only_where_something_in_it_is_ignored() {
     .into_iter()
     .map(|r| json!({"responses": [r]}))
     .collect();
-    let port = free_port();
-    let imposter = json!({"port": port, "protocol": "http", "stubs": stubs});
+    let imposter = json!({"protocol": "http", "stubs": stubs});
     let body = created(&client, &admin, &imposter).await;
+    let port = port_of(&body);
     let messages: Vec<Value> = ignored_warnings(&body)
         .into_iter()
         .map(|w| w["message"].clone())

@@ -7,15 +7,34 @@
 
 mod support;
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Reserve a port, then release it, so the child can bind it.
-fn free_port() -> u16 {
-    let probe = TcpListener::bind("127.0.0.1:0").expect("probe bind");
-    probe.local_addr().expect("probe addr").port()
+/// The port in the admin API's `listening on http://<addr>` line, if `line` is that line.
+fn admin_port_in(line: &str) -> Option<u16> {
+    if !line.contains("Admin API") {
+        return None;
+    }
+    let addr = line.split("listening on http://").nth(1)?;
+    addr.split_whitespace()
+        .next()?
+        .rsplit(':')
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// The first `"port": N` in an admin response body.
+fn first_port_in(response: &str) -> Option<u16> {
+    let rest = response.split("\"port\":").nth(1)?;
+    let digits: String = rest
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
 }
 
 /// Kills the child on every exit path, panics included.
@@ -50,43 +69,58 @@ fn get(port: u16, path: &str) -> Option<String> {
 fn rift_start_with_flags_after_the_subcommand_boots_and_serves_health() {
     let dir = tempfile::tempdir().expect("tempdir");
     let configfile = dir.path().join("imposters.json");
-    let port = free_port();
-    let metrics_port = free_port();
     // One imposter, so the test proves `--configfile` after `start` is loaded, not just parsed.
-    let imposter_port = free_port();
     std::fs::write(
         &configfile,
-        format!(
-            r#"{{"imposters": [{{"port": {imposter_port}, "protocol": "http",
-                "stubs": [{{"responses": [{{"is": {{"body": "loaded-from-configfile"}}}}]}}]}}]}}"#
-        ),
+        r#"{"imposters": [{"protocol": "http",
+            "stubs": [{"responses": [{"is": {"body": "loaded-from-configfile"}}]}]}]}"#,
     )
     .expect("write configfile");
 
     let child = Command::new(support::server_bin())
         .args([
             "start",
+            // Port 0 (read back from stdout) rather than a probed port, which another test can take.
             "--port",
-            &port.to_string(),
+            "0",
             "--metrics-port",
-            &metrics_port.to_string(),
+            "0",
             "--host",
             "127.0.0.1",
             "--configfile",
         ])
         .arg(&configfile)
+        .env("NO_COLOR", "1")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn rift start");
     let mut server = Server(child);
+    let stdout = server.0.stdout.take().expect("piped stdout");
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Keeps draining after the port is found, so the child never blocks on a full pipe.
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Some(port) = admin_port_in(&line) {
+                let _ = tx.send(port);
+            }
+        }
+    });
+    let mut port = None;
 
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if let Some(response) = get(port, "/health") {
+        if port.is_none() {
+            port = rx.try_recv().ok();
+        }
+        if let Some(response) = port.and_then(|port| get(port, "/health")) {
             let status = response.lines().next().unwrap_or_default();
             assert!(status.contains("200"), "got: {status}");
+            let port = port.expect("admin port");
+            let listed = get(port, "/imposters").expect("GET /imposters");
+            let imposter_port = first_port_in(&listed)
+                .unwrap_or_else(|| panic!("the configfile's imposter is listed: {listed}"));
             let served = get(imposter_port, "/").expect("the configfile's imposter answers");
             assert!(served.contains("loaded-from-configfile"), "got: {served}");
             return;
@@ -100,7 +134,7 @@ fn rift_start_with_flags_after_the_subcommand_boots_and_serves_health() {
         }
         assert!(
             Instant::now() < deadline,
-            "/health never answered on {port}"
+            "/health never answered (admin port {port:?})"
         );
         std::thread::sleep(Duration::from_millis(100));
     }

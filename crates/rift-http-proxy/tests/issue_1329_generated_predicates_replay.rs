@@ -8,19 +8,18 @@
 //! As in `issue_1327_predicate_generator_selectors.rs`, a response the recorded stub serves carries
 //! no `x-rift-proxy` header; one that reaches the proxy does.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+/// The port the engine assigned, from a 201 body.
+fn port_of(body: &Value) -> u16 {
+    body["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .expect("assigned port")
 }
 
 struct Admin {
@@ -70,21 +69,23 @@ impl Admin {
 
     /// A recording upstream and a `mode` proxy imposter in front of it with `generator`.
     async fn proxy(&self, mode: &str, generator: Value) -> (u16, u16) {
-        let upstream = free_port();
-        self.create(
-            json!({"port": upstream, "protocol": "http", "recordRequests": true,
-            "stubs": [{"responses": [{"is": {"body": "up"}}]}]}),
-        )
-        .await;
-        let port = free_port();
-        self.create(
-            json!({"port": port, "protocol": "http", "stubs": [{"responses": [{"proxy": {
-                "to": format!("http://127.0.0.1:{upstream}"),
-                "mode": mode,
-                "predicateGenerators": [generator]
-            }}]}]}),
-        )
-        .await;
+        let upstream = port_of(
+            &self
+                .create(json!({"protocol": "http", "recordRequests": true,
+            "stubs": [{"responses": [{"is": {"body": "up"}}]}]}))
+                .await,
+        );
+        let port = port_of(
+            &self
+                .create(
+                    json!({"protocol": "http", "stubs": [{"responses": [{"proxy": {
+                        "to": format!("http://127.0.0.1:{upstream}"),
+                        "mode": mode,
+                        "predicateGenerators": [generator]
+                    }}]}]}),
+                )
+                .await,
+        );
         (port, upstream)
     }
 

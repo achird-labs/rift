@@ -863,14 +863,9 @@ pub fn filter_proxy_stubs(stubs: Vec<crate::imposter::Stub>) -> Vec<crate::impos
 // since building a real `hyper::body::Incoming` outside a running server is impractical in a
 // `--lib` unit test; the handlers above are a thin `if let Some(rejection) = ... { return }`
 // wrapper around this function.
+/// A port no imposter in a test's fresh manager holds. Nothing binds it.
 #[cfg(test)]
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind an ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
+const UNUSED_PORT: u16 = 1;
 
 #[cfg(test)]
 mod allow_injection_tests {
@@ -1286,13 +1281,12 @@ mod requests_filter_tests {
     }
 
     async fn manager_with(
-        port: u16,
         flow_id_source: Option<&str>,
         recorded: &[RecordedRequest],
-    ) -> Arc<ImposterManager> {
+    ) -> (Arc<ImposterManager>, u16) {
         let manager = Arc::new(ImposterManager::new());
         let mut cfg = serde_json::json!({
-            "port": port, "protocol": "http", "recordRequests": true, "stubs": []
+            "protocol": "http", "recordRequests": true, "stubs": []
         });
         if let Some(src) = flow_id_source {
             cfg["_rift"] = serde_json::json!({
@@ -1300,12 +1294,12 @@ mod requests_filter_tests {
             });
         }
         let config = serde_json::from_value(cfg).expect("config");
-        manager.create_imposter(config).await.expect("create");
+        let port = manager.create_imposter(config).await.expect("create");
         let imposter = manager.get_imposter(port).expect("imposter");
         for r in recorded {
             imposter.record_request(r.clone());
         }
-        manager
+        (manager, port)
     }
 
     async fn requests(resp: Response<Full<Bytes>>) -> Vec<RecordedRequest> {
@@ -1313,25 +1307,20 @@ mod requests_filter_tests {
         serde_json::from_slice(&bytes).expect("decode requests")
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_returns_all_without_match() {
-        let port = free_port();
-        let m = manager_with(port, None, &[rec("A", None), rec("B", None)]).await;
+        let (m, port) = manager_with(None, &[rec("A", None), rec("B", None)]).await;
         let resp = handle_get_requests(port, None, m.clone()).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(requests(resp).await.len(), 2);
         let _ = m.delete_imposter(port).await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_filters_by_header() {
-        let port = free_port();
-        let m = manager_with(
-            port,
-            None,
-            &[rec("A", None), rec("B", None), rec("A", None)],
-        )
-        .await;
+        let (m, port) = manager_with(None, &[rec("A", None), rec("B", None), rec("A", None)]).await;
         let resp = handle_get_requests(port, Some("match=header:X-Mock-Space=A"), m.clone()).await;
         let got = requests(resp).await;
         assert_eq!(got.len(), 2, "only the two X-Mock-Space=A requests");
@@ -1345,10 +1334,10 @@ mod requests_filter_tests {
         let _ = m.delete_imposter(port).await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_no_match_is_empty_200() {
-        let port = free_port();
-        let m = manager_with(port, None, &[rec("A", None)]).await;
+        let (m, port) = manager_with(None, &[rec("A", None)]).await;
         let resp =
             handle_get_requests(port, Some("match=header:X-Mock-Space=ZZZ"), m.clone()).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1356,11 +1345,10 @@ mod requests_filter_tests {
         let _ = m.delete_imposter(port).await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_flow_id_header_source_parity() {
-        let port = free_port();
-        let m = manager_with(
-            port,
+        let (m, port) = manager_with(
             Some("header:X-Mock-Space"),
             &[rec("A", None), rec("B", None)],
         )
@@ -1381,10 +1369,10 @@ mod requests_filter_tests {
         let _ = m.delete_imposter(port).await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_flow_id_imposter_port() {
-        let imposter_port = free_port();
-        let m = manager_with(imposter_port, None, &[rec("A", None), rec("B", None)]).await;
+        let (m, imposter_port) = manager_with(None, &[rec("A", None), rec("B", None)]).await;
         // default flow_id_source = imposter_port → every request shares flow_id = port
         let all = handle_get_requests(
             imposter_port,
@@ -1398,11 +1386,10 @@ mod requests_filter_tests {
         let _ = m.delete_imposter(imposter_port).await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_multiple_match_anded() {
-        let port = free_port();
-        let m = manager_with(
-            port,
+        let (m, port) = manager_with(
             None,
             &[
                 rec("A", Some("t1")),
@@ -1424,16 +1411,16 @@ mod requests_filter_tests {
 
     #[tokio::test]
     async fn get_requests_unknown_port_404() {
-        let port = free_port();
+        let port = UNUSED_PORT;
         let m = Arc::new(ImposterManager::new());
         let resp = handle_get_requests(port, None, m).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_malformed_match_400() {
-        let port = free_port();
-        let m = manager_with(port, None, &[rec("A", None)]).await;
+        let (m, port) = manager_with(None, &[rec("A", None)]).await;
         let resp = handle_get_requests(port, Some("match=query=a"), m.clone()).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let _ = m.delete_imposter(port).await;
@@ -1448,11 +1435,10 @@ mod requests_filter_tests {
 
     // #700: `method=`/`path=` filter GET, compose with header/flow_id/since, and (like every other
     // clause) advance the cursor past rejected entries so a filtered tail never re-scans.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_filters_by_method_and_path() {
-        let port = free_port();
-        let m = manager_with(
-            port,
+        let (m, port) = manager_with(
             Some("header:X-Mock-Space"),
             &[
                 rec_mp("GET", "/orders", "alice"),
@@ -1490,11 +1476,10 @@ mod requests_filter_tests {
 
     // #700 (AC4): a `since` window filtered by method/path still advances the cursor across every
     // scanned entry, even the ones the filter rejects.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_since_composes_with_method_path() {
-        let port = free_port();
-        let m = manager_with(
-            port,
+        let (m, port) = manager_with(
             None,
             &[
                 rec_mp("GET", "/a", "A"),
@@ -1520,11 +1505,10 @@ mod requests_filter_tests {
     }
 
     // #700: `method=`/`path=` scope a targeted DELETE too — both surfaces share the parser.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn delete_requests_targeted_clear_by_method() {
-        let port = free_port();
-        let m = manager_with(
-            port,
+        let (m, port) = manager_with(
             None,
             &[
                 rec_mp("GET", "/x", "A"),
@@ -1541,15 +1525,10 @@ mod requests_filter_tests {
         let _ = m.delete_imposter(port).await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn delete_requests_targeted_clear_removes_only_slice() {
-        let port = free_port();
-        let m = manager_with(
-            port,
-            None,
-            &[rec("A", None), rec("B", None), rec("A", None)],
-        )
-        .await;
+        let (m, port) = manager_with(None, &[rec("A", None), rec("B", None), rec("A", None)]).await;
         let base = "http://localhost:2525";
         handle_clear_requests(port, Some("match=header:X-Mock-Space=A"), base, m.clone()).await;
         let remaining = requests(handle_get_requests(port, None, m.clone()).await).await;
@@ -1558,10 +1537,10 @@ mod requests_filter_tests {
         let _ = m.delete_imposter(port).await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn delete_requests_without_match_clears_all() {
-        let port = free_port();
-        let m = manager_with(port, None, &[rec("A", None), rec("B", None)]).await;
+        let (m, port) = manager_with(None, &[rec("A", None), rec("B", None)]).await;
         let base = "http://localhost:2525";
         handle_clear_requests(port, None, base, m.clone()).await;
         let remaining = requests(handle_get_requests(port, None, m.clone()).await).await;
@@ -1604,18 +1583,18 @@ mod requests_filter_tests {
 
     // AC3 (#330): an unclearable backend makes DELETE savedRequests return a structured 503
     // rather than an unconditional 200 over stale data.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn delete_requests_backend_clear_failure_maps_to_503() {
-        let imposter_port = free_port();
         let manager = Arc::new(
             ImposterManager::new().with_request_journal(Arc::new(FailingClearJournal::default())
                 as Arc<dyn crate::imposter::RequestJournal>),
         );
         let cfg = serde_json::from_value(serde_json::json!({
-            "port": imposter_port, "protocol": "http", "recordRequests": true, "stubs": []
+            "protocol": "http", "recordRequests": true, "stubs": []
         }))
         .expect("config");
-        manager.create_imposter(cfg).await.expect("create");
+        let imposter_port = manager.create_imposter(cfg).await.expect("create");
         let base = "http://localhost:2525";
         let resp = handle_clear_requests(imposter_port, None, base, manager.clone()).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1633,10 +1612,10 @@ mod requests_filter_tests {
         let _ = manager.delete_imposter(imposter_port).await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn delete_requests_malformed_match_400() {
-        let port = free_port();
-        let m = manager_with(port, None, &[rec("A", None)]).await;
+        let (m, port) = manager_with(None, &[rec("A", None)]).await;
         let base = "http://localhost:2525";
         let resp = handle_clear_requests(port, Some("match=query=a"), base, m.clone()).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -1697,11 +1676,10 @@ mod requests_filter_tests {
 
     // AC7 (#603): `?since=` serves only entries newer than the cursor, and reports the new
     // cursor in the response header. The body stays the historical bare array.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_since_returns_newer_with_cursor_header() {
-        let port = free_port();
-        let m = manager_with(
-            port,
+        let (m, port) = manager_with(
             None,
             &[rec_at("/a", "A"), rec_at("/b", "A"), rec_at("/c", "A")],
         )
@@ -1727,11 +1705,10 @@ mod requests_filter_tests {
 
     // AC8 (#603): `since` and `match` compose — cursor cut first, filter after — and a window
     // that matches nothing still advances the cursor.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_since_composes_with_match() {
-        let port = free_port();
-        let m = manager_with(
-            port,
+        let (m, port) = manager_with(
             None,
             &[
                 rec_at("/1", "A"),
@@ -1766,10 +1743,10 @@ mod requests_filter_tests {
     }
 
     // AC9 (#603): a malformed cursor is rejected before any journal work.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_rejects_non_numeric_since() {
-        let port = free_port();
-        let m = manager_with(port, None, &[rec_at("/a", "A")]).await;
+        let (m, port) = manager_with(None, &[rec_at("/a", "A")]).await;
         for bad in ["since=abc", "since=-1", "since=", "since=1.5"] {
             let resp = handle_get_requests(port, Some(bad), m.clone()).await;
             assert_eq!(
@@ -1811,31 +1788,29 @@ mod requests_filter_tests {
     }
 
     async fn manager_with_journal(
-        port: u16,
         journal: Arc<dyn crate::imposter::RequestJournal>,
         recorded: &[RecordedRequest],
-    ) -> Arc<ImposterManager> {
+    ) -> (Arc<ImposterManager>, u16) {
         let manager = Arc::new(ImposterManager::new().with_request_journal(journal));
         let cfg = serde_json::from_value(serde_json::json!({
-            "port": port, "protocol": "http", "recordRequests": true, "stubs": []
+            "protocol": "http", "recordRequests": true, "stubs": []
         }))
         .expect("config");
-        manager.create_imposter(cfg).await.expect("create");
+        let port = manager.create_imposter(cfg).await.expect("create");
         let imposter = manager.get_imposter(port).expect("imposter");
         for r in recorded {
             imposter.record_request(r.clone());
         }
-        manager
+        (manager, port)
     }
 
     // AC10 (#603): against a backend without stable indices the endpoint behaves exactly as it
     // does today — full list, no cursor headers. That absence IS the SDK capability probe, so
     // it must hold even when the client asks for a cursor.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_omits_cursor_headers_without_support() {
-        let port = free_port();
-        let m = manager_with_journal(
-            port,
+        let (m, port) = manager_with_journal(
             Arc::new(CursorlessJournal::default()),
             &[rec_at("/a", "A"), rec_at("/b", "A")],
         )
@@ -1860,18 +1835,17 @@ mod requests_filter_tests {
 
     // AC11 (#603): the baseline poll (no `since`) is unchanged in body but carries the cursor
     // the SDK loop starts from — including on an empty journal.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_baseline_reports_next_index() {
-        let port_a = free_port();
-        let port_b = free_port();
-        let empty = manager_with(port_a, None, &[]).await;
+        let (empty, port_a) = manager_with(None, &[]).await;
         let resp = handle_get_requests(port_a, None, empty.clone()).await;
         assert_eq!(next_index(&resp), Some("0"), "0 == 'seen nothing yet'");
         assert!(header(&resp, "x-rift-truncated").is_none());
         assert!(requests(resp).await.is_empty());
         let _ = empty.delete_imposter(port_a).await;
 
-        let m = manager_with(port_b, None, &[rec_at("/a", "A"), rec_at("/b", "A")]).await;
+        let (m, port_b) = manager_with(None, &[rec_at("/a", "A"), rec_at("/b", "A")]).await;
         let resp = handle_get_requests(port_b, None, m.clone()).await;
         assert_eq!(next_index(&resp), Some("2"));
         assert!(
@@ -1927,11 +1901,10 @@ mod requests_filter_tests {
 
     // AC12 (#603): `truncated` reaches the wire only when the backend reports a hole, and is
     // absent otherwise — SDKs treat its presence as "your baseline is stale, re-poll".
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_flags_truncated_after_eviction() {
-        let port = free_port();
-        let m = manager_with_journal(
-            port,
+        let (m, port) = manager_with_journal(
             Arc::new(TruncatingJournal::default()),
             &[rec_at("/a", "A"), rec_at("/b", "A")],
         )
@@ -1957,9 +1930,9 @@ mod requests_filter_tests {
     // AC12 (#603), end to end: drive real byte-budget eviction (#1441) through the real
     // recording path and confirm a stale cursor is told it lost data. The double above pins the
     // plumbing; this pins that genuine retention pressure actually reaches the wire.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_truncated_by_real_cap_eviction() {
-        let imposter_port = free_port();
         // Exactly KEPT of these fixed-cost entries fit the manager's journal budget.
         const KEPT: usize = 100;
         let budget = KEPT * crate::imposter::journal::entry_cost(&rec_at("/00000", "A"));
@@ -1968,10 +1941,10 @@ mod requests_filter_tests {
                 .with_journal_max_bytes(std::num::NonZeroUsize::new(budget).expect("non-zero")),
         );
         let config = serde_json::from_value(serde_json::json!({
-            "port": imposter_port, "protocol": "http", "recordRequests": true, "stubs": []
+            "protocol": "http", "recordRequests": true, "stubs": []
         }))
         .expect("config");
-        m.create_imposter(config).await.expect("create");
+        let imposter_port = m.create_imposter(config).await.expect("create");
         let imposter = m.get_imposter(imposter_port).expect("imposter");
         for i in 0..(KEPT + 5) {
             imposter.record_request(rec_at(&format!("/{i:05}"), "A"));
@@ -2040,11 +2013,10 @@ mod requests_filter_tests {
     // serve, so advancing on it would skip them permanently and silently. Withholding the
     // header makes the client re-poll instead — partial data is served, but never at the cost
     // of losing the rest.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn get_requests_withholds_cursor_on_degraded_read() {
-        let port = free_port();
-        let m = manager_with_journal(
-            port,
+        let (m, port) = manager_with_journal(
             Arc::new(DegradedJournal::default()),
             &[rec_at("/a", "A"), rec_at("/b", "A"), rec_at("/c", "A")],
         )
@@ -2094,18 +2066,18 @@ mod verify_tests {
         }
     }
 
-    async fn manager_with(port: u16, recorded: &[RecordedRequest]) -> Arc<ImposterManager> {
+    async fn manager_with(recorded: &[RecordedRequest]) -> (Arc<ImposterManager>, u16) {
         let manager = Arc::new(ImposterManager::new());
         let cfg = serde_json::json!({
-            "port": port, "protocol": "http", "recordRequests": true, "stubs": []
+            "protocol": "http", "recordRequests": true, "stubs": []
         });
         let config = serde_json::from_value(cfg).expect("config");
-        manager.create_imposter(config).await.expect("create");
+        let port = manager.create_imposter(config).await.expect("create");
         let imposter = manager.get_imposter(port).expect("imposter");
         for r in recorded {
             imposter.record_request(r.clone());
         }
-        manager
+        (manager, port)
     }
 
     async fn body_json(resp: Response<Full<Bytes>>) -> serde_json::Value {
@@ -2113,14 +2085,11 @@ mod verify_tests {
         serde_json::from_slice(&bytes).expect("json")
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn verify_counts_matched_and_total() {
-        let port = free_port();
-        let m = manager_with(
-            port,
-            &[rec("GET", "/a"), rec("POST", "/a"), rec("GET", "/b")],
-        )
-        .await;
+        let (m, port) =
+            manager_with(&[rec("GET", "/a"), rec("POST", "/a"), rec("GET", "/b")]).await;
         let body = br#"{"predicates":[{"equals":{"method":"GET"}}]}"#;
         let resp = verify_response(port, body, &m, false);
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2131,10 +2100,10 @@ mod verify_tests {
         let _ = m.delete_imposter(port).await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn verify_include_requests_and_closest() {
-        let port = free_port();
-        let m = manager_with(port, &[rec("GET", "/a"), rec("DELETE", "/z")]).await;
+        let (m, port) = manager_with(&[rec("GET", "/a"), rec("DELETE", "/z")]).await;
         let body = br#"{"predicates":[{"equals":{"method":"GET"}}],"includeRequests":true,"includeClosest":true}"#;
         let resp = verify_response(port, body, &m, false);
         let json = body_json(resp).await;
@@ -2144,10 +2113,10 @@ mod verify_tests {
         let _ = m.delete_imposter(port).await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn verify_rejects_inject_predicate_without_allow_injection() {
-        let port = free_port();
-        let m = manager_with(port, &[rec("GET", "/a")]).await;
+        let (m, port) = manager_with(&[rec("GET", "/a")]).await;
         let body = br#"{"predicates":[{"inject":"function(){return true;}"}]}"#;
         let resp = verify_response(port, body, &m, false);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -2156,10 +2125,10 @@ mod verify_tests {
         let _ = m.delete_imposter(port).await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn verify_bad_json_is_400() {
-        let port = free_port();
-        let m = manager_with(port, &[]).await;
+        let (m, port) = manager_with(&[]).await;
         let resp = verify_response(port, b"not json", &m, false);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let _ = m.delete_imposter(port).await;
@@ -2167,7 +2136,7 @@ mod verify_tests {
 
     #[tokio::test]
     async fn verify_unknown_imposter_is_404() {
-        let port = free_port();
+        let port = UNUSED_PORT;
         let m = Arc::new(ImposterManager::new());
         let resp = verify_response(port, br#"{"predicates":[]}"#, &m, false);
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -2182,14 +2151,12 @@ mod replace_all_tests {
 
     const BASE: &str = "http://localhost:2525";
 
-    async fn manager_with_http(port: u16) -> Arc<ImposterManager> {
+    async fn manager_with_http() -> (Arc<ImposterManager>, u16) {
         let manager = Arc::new(ImposterManager::new());
-        let config = serde_json::from_value(
-            serde_json::json!({"port": port, "protocol": "http", "stubs": []}),
-        )
-        .expect("config");
-        manager.create_imposter(config).await.expect("create");
-        manager
+        let config = serde_json::from_value(serde_json::json!({"protocol": "http", "stubs": []}))
+            .expect("config");
+        let port = manager.create_imposter(config).await.expect("create");
+        (manager, port)
     }
 
     async fn body_json(resp: Response<Full<Bytes>>) -> serde_json::Value {
@@ -2200,15 +2167,15 @@ mod replace_all_tests {
     // Issue #549: a partial apply failure must be surfaced (non-2xx with the failing port in the
     // body), the valid siblings must be applied, and a pre-existing imposter whose config is
     // unchanged must survive — never a silent 200 with a smaller set after a wholesale delete.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn put_partial_failure_reports_and_preserves_survivors() {
-        let port_a = free_port();
-        let port_b = free_port();
-        let manager = manager_with_http(port_a).await;
-        // <port> unchanged; <port> fails at apply time (garbage TLS material).
+        let (manager, port_a) = manager_with_http().await;
+        // <port_a> unchanged; the port-less https imposter fails at apply time (garbage TLS
+        // material), so the report names it as the auto-assign entry.
         let body = serde_json::json!({"imposters": [
             {"port": port_a, "protocol": "http", "stubs": []},
-            {"port": port_b, "protocol": "https", "cert": "not a pem", "key": "not a pem", "stubs": []}
+            {"protocol": "https", "cert": "not a pem", "key": "not a pem", "stubs": []}
         ]})
         .to_string();
         let resp =
@@ -2227,7 +2194,7 @@ mod replace_all_tests {
             .filter_map(|f| f.as_str())
             .collect();
         assert!(
-            failed.iter().any(|f| f.starts_with(&format!("{port_b}:"))),
+            failed.iter().any(|f| f.starts_with("auto-assign:")),
             "the failing port must be identified in the report: {json}"
         );
         assert_eq!(json["errors"][0]["code"], "500");
@@ -2236,8 +2203,9 @@ mod replace_all_tests {
             manager.get_imposter(port_a).is_ok(),
             "the unchanged imposter must survive the partial failure"
         );
-        assert!(
-            manager.get_imposter(port_b).is_err(),
+        assert_eq!(
+            manager.count(),
+            1,
             "the failed imposter must not be running"
         );
         manager.delete_all().await;
@@ -2245,14 +2213,12 @@ mod replace_all_tests {
 
     // Mountebank contract pin: full success keeps the 200 + {"imposters": [...]} shape, the old
     // set is replaced by the new one.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn put_success_replaces_set_with_imposter_list() {
-        let port_a = free_port();
-        let port_b = free_port();
-        let manager = manager_with_http(port_a).await;
+        let (manager, port_a) = manager_with_http().await;
         let body =
-            serde_json::json!({"imposters": [{"port": port_b, "protocol": "http", "stubs": []}]})
-                .to_string();
+            serde_json::json!({"imposters": [{"protocol": "http", "stubs": []}]}).to_string();
         let resp =
             replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
 
@@ -2264,12 +2230,21 @@ mod replace_all_tests {
             .iter()
             .filter_map(|i| i["port"].as_u64())
             .collect();
-        assert_eq!(ports, vec![u64::from(port_b)]);
+        assert_eq!(ports.len(), 1, "{json}");
         for field in ["created", "replaced", "stubPatched", "toggled", "deleted"] {
             assert!(json[field].is_array(), "`{field}` must be an array: {json}");
         }
-        assert!(manager.get_imposter(port_a).is_err(), "old set replaced");
+        // The new imposter is auto-assigned and may reuse the freed port, so the replacement is
+        // pinned by the report rather than by `port_a` being gone.
+        assert_eq!(json["created"], serde_json::json!(ports), "{json}");
+        assert_eq!(
+            json["deleted"],
+            serde_json::json!([port_a]),
+            "old set replaced: {json}"
+        );
+        let port_b = u16::try_from(ports[0]).expect("port");
         assert!(manager.get_imposter(port_b).is_ok());
+        assert_eq!(manager.count(), 1);
         manager.delete_all().await;
     }
 
@@ -2284,30 +2259,32 @@ mod replace_all_tests {
 
     // Issue #1304: the apply report is computed on every PUT; success must carry it beside
     // `imposters` instead of discarding it.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn put_success_body_carries_the_apply_report() {
-        let port_a = free_port();
-        let port_b = free_port();
-        let port_c = free_port();
-        let port_d = free_port();
         let manager = Arc::new(ImposterManager::new());
-        for (port, body) in [(port_a, "a"), (port_b, "b"), (port_c, "d")] {
-            let config = serde_json::from_value(serde_json::json!({
-                "port": port, "protocol": "http",
-                "stubs": [{"responses": [{"is": {"statusCode": 200, "body": body}}]}]
-            }))
-            .expect("config");
-            manager.create_imposter(config).await.expect("create");
-        }
-        let imp = |port: u16, body: &str| {
+        let imp = |body: &str| {
             serde_json::json!({
-                "port": port, "protocol": "http",
+                "protocol": "http",
                 "stubs": [{"responses": [{"is": {"statusCode": 200, "body": body}}]}]
             })
         };
-        let body =
-            serde_json::json!({"imposters": [imp(port_a, "a"), imp(port_b, "b2"), imp(port_d, "c")]})
-                .to_string();
+        let mut ports = Vec::new();
+        for body in ["a", "b", "d"] {
+            let config = serde_json::from_value(imp(body)).expect("config");
+            ports.push(manager.create_imposter(config).await.expect("create"));
+        }
+        let [port_a, port_b, port_c] = ports[..] else {
+            unreachable!("three creates")
+        };
+        let at = |port: u16, body: &str| {
+            let mut config = imp(body);
+            config["port"] = serde_json::json!(port);
+            config
+        };
+        // The fourth imposter is new and port-less: its auto-assigned port is read from `created`.
+        let body = serde_json::json!({"imposters": [at(port_a, "a"), at(port_b, "b2"), imp("c")]})
+            .to_string();
         let resp =
             replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
 
@@ -2320,10 +2297,12 @@ mod replace_all_tests {
             .filter_map(|i| i["port"].as_u64())
             .collect();
         assert_eq!(listed.len(), 3, "{json}");
-        for p in [port_a, port_b, port_d].map(u64::from) {
+        let created = ports_in(&json, "created");
+        assert_eq!(created.len(), 1, "{json}");
+        let port_d = created[0];
+        for p in [u64::from(port_a), u64::from(port_b), port_d] {
             assert!(listed.contains(&p), "{json}");
         }
-        assert_eq!(ports_in(&json, "created"), vec![u64::from(port_d)]);
         assert_eq!(ports_in(&json, "deleted"), vec![u64::from(port_c)]);
         assert_eq!(ports_in(&json, "toggled"), Vec::<u64>::new());
         let changed: Vec<u64> = ["replaced", "stubPatched"]
@@ -2338,10 +2317,10 @@ mod replace_all_tests {
         manager.delete_all().await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn put_success_reports_a_toggle() {
-        let imposter_port = free_port();
-        let manager = manager_with_http(imposter_port).await;
+        let (manager, imposter_port) = manager_with_http().await;
         let body = serde_json::json!({"imposters": [
             {"port": imposter_port, "protocol": "http", "enabled": false, "stubs": []}
         ]})
@@ -2365,13 +2344,14 @@ mod replace_all_tests {
     // The documented semantic delta of the #549 fix: an imposter whose config is unchanged is
     // reconciled as a no-op and keeps its runtime state — under the old wholesale delete+recreate
     // its recorded requests were wiped by every PUT.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn put_unchanged_imposter_keeps_recorded_requests() {
-        let imposter_port = free_port();
         let manager = Arc::new(ImposterManager::new());
-        let cfg = serde_json::json!({"port": imposter_port, "protocol": "http", "recordRequests": true, "stubs": []});
+        let mut cfg = serde_json::json!({"protocol": "http", "recordRequests": true, "stubs": []});
         let config = serde_json::from_value(cfg.clone()).expect("config");
-        manager.create_imposter(config).await.expect("create");
+        let imposter_port = manager.create_imposter(config).await.expect("create");
+        cfg["port"] = serde_json::json!(imposter_port);
         manager
             .get_imposter(imposter_port)
             .expect("imposter")
@@ -2411,14 +2391,13 @@ mod replace_all_tests {
     // Issue #549: a set that fails validation (duplicate port) must be rejected as a client error
     // with the running imposters completely untouched — under the old wholesale pre-delete they
     // were already gone by the time the creates started failing.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn put_invalid_set_rejected_with_imposters_untouched() {
-        let port_a = free_port();
-        let port_b = free_port();
-        let manager = manager_with_http(port_a).await;
+        let (manager, port_a) = manager_with_http().await;
         let body = serde_json::json!({"imposters": [
-            {"port": port_b, "protocol": "http", "stubs": []},
-            {"port": port_b, "protocol": "http", "stubs": []}
+            {"port": UNUSED_PORT, "protocol": "http", "stubs": []},
+            {"port": UNUSED_PORT, "protocol": "http", "stubs": []}
         ]})
         .to_string();
         let resp =
@@ -2433,7 +2412,7 @@ mod replace_all_tests {
             manager.get_imposter(port_a).is_ok(),
             "a rejected set must leave the running imposters untouched"
         );
-        assert!(manager.get_imposter(port_b).is_err());
+        assert_eq!(manager.count(), 1);
         manager.delete_all().await;
     }
 }
@@ -2446,13 +2425,12 @@ mod list_tests {
     // Issue #558: the default list response carries per-imposter stubCount (and enabled) so
     // clients like the TUI can render the list from ONE request instead of an N+1 detail loop
     // whose per-imposter failures were silently dropped.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn list_response_includes_stub_count_and_enabled() {
-        let port_a = free_port();
-        let port_b = free_port();
         let manager = Arc::new(ImposterManager::new());
         let config = serde_json::from_value(serde_json::json!({
-            "port": port_a, "protocol": "http",
+            "protocol": "http",
             "stubs": [
                 {"predicates": [], "responses": [{"is": {"statusCode": 200}}]},
                 {"predicates": [], "responses": [{"is": {"statusCode": 201}}]}
@@ -2474,10 +2452,10 @@ mod list_tests {
 
         // Boundary: a stubless imposter reports 0, not a missing field.
         let empty = serde_json::from_value(serde_json::json!({
-            "port": port_b, "protocol": "http", "stubs": []
+            "protocol": "http", "stubs": []
         }))
         .expect("config");
-        manager.create_imposter(empty).await.expect("create");
+        let port_b = manager.create_imposter(empty).await.expect("create");
         let resp = handle_list(Arc::clone(&manager), None, "http://localhost:2525").await;
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
@@ -2493,21 +2471,20 @@ mod list_tests {
 
     // Issue #584: the list summary must carry recordRequests so the TUI's recording indicator
     // reflects real state instead of always deserializing a missing field to false.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn list_response_includes_record_requests() {
-        let port_a = free_port();
-        let port_b = free_port();
         let manager = Arc::new(ImposterManager::new());
         let recording = serde_json::from_value(serde_json::json!({
-            "port": port_a, "protocol": "http", "recordRequests": true, "stubs": []
+            "protocol": "http", "recordRequests": true, "stubs": []
         }))
         .expect("config");
-        manager.create_imposter(recording).await.expect("create");
+        let port_a = manager.create_imposter(recording).await.expect("create");
         let plain = serde_json::from_value(serde_json::json!({
-            "port": port_b, "protocol": "http", "stubs": []
+            "protocol": "http", "stubs": []
         }))
         .expect("config");
-        manager.create_imposter(plain).await.expect("create");
+        let port_b = manager.create_imposter(plain).await.expect("create");
 
         let resp = handle_list(Arc::clone(&manager), None, "http://localhost:2525").await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2544,27 +2521,20 @@ mod delete_persistence_tests {
 
     /// A datadir that has been replaced by a regular file after the imposter was persisted, so the
     /// unlink fails with ENOTDIR.
-    async fn manager_with_unremovable_file(
-        root: &std::path::Path,
-        ports: &[u16],
-    ) -> Arc<ImposterManager> {
+    async fn manager_with_unremovable_file(root: &std::path::Path) -> (Arc<ImposterManager>, u16) {
         let datadir = root.join("data");
         std::fs::create_dir(&datadir).expect("mkdir");
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        for port in ports {
-            manager
-                .create_imposter(
-                    serde_json::from_value(
-                        serde_json::json!({"port": port, "protocol": "http", "stubs": []}),
-                    )
+        let port = manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({"protocol": "http", "stubs": []}))
                     .expect("config"),
-                )
-                .await
-                .expect("create");
-        }
+            )
+            .await
+            .expect("create");
         std::fs::rename(&datadir, root.join("moved")).expect("move datadir");
         std::fs::write(&datadir, "not a directory").expect("replace with a file");
-        manager
+        (manager, port)
     }
 
     async fn body_json(resp: Response<Full<Bytes>>) -> serde_json::Value {
@@ -2576,7 +2546,7 @@ mod delete_persistence_tests {
     /// `200` with `{}`, not `404`.
     #[tokio::test]
     async fn delete_of_a_missing_imposter_answers_200_with_an_empty_object() {
-        let port = free_port();
+        let port = UNUSED_PORT;
         let manager = Arc::new(ImposterManager::new());
         let resp = handle_delete(port, "http://localhost:2525", manager).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2589,20 +2559,18 @@ mod delete_persistence_tests {
         assert_eq!(body_json(resp).await, serde_json::json!({}));
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn delete_of_a_missing_imposter_touches_no_datadir_file() {
-        let port_a = free_port();
-        let port_b = free_port();
+        let port_b = UNUSED_PORT;
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = Arc::new(ImposterManager::with_datadir(Some(
             dir.path().to_path_buf(),
         )));
-        manager
+        let port_a = manager
             .create_imposter(
-                serde_json::from_value(
-                    serde_json::json!({"port": port_a, "protocol": "http", "stubs": []}),
-                )
-                .expect("config"),
+                serde_json::from_value(serde_json::json!({"protocol": "http", "stubs": []}))
+                    .expect("config"),
             )
             .await
             .expect("create");
@@ -2618,11 +2586,11 @@ mod delete_persistence_tests {
         manager.delete_all().await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn delete_one_answers_503_and_keeps_the_imposter() {
-        let port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
-        let manager = manager_with_unremovable_file(dir.path(), &[port]).await;
+        let (manager, port) = manager_with_unremovable_file(dir.path()).await;
 
         let resp = handle_delete(port, "http://localhost:2525", Arc::clone(&manager)).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -2636,18 +2604,15 @@ mod delete_persistence_tests {
         manager.delete_all().await;
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn delete_all_answers_503_naming_the_port_and_lists_what_was_deleted() {
-        let port_a = free_port();
-        let port_b = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
-        let manager = manager_with_unremovable_file(dir.path(), &[port_a]).await;
-        manager
+        let (manager, port_a) = manager_with_unremovable_file(dir.path()).await;
+        let port_b = manager
             .create_imposter_as(
-                serde_json::from_value(
-                    serde_json::json!({"port": port_b, "protocol": "http", "stubs": []}),
-                )
-                .expect("config"),
+                serde_json::from_value(serde_json::json!({"protocol": "http", "stubs": []}))
+                    .expect("config"),
                 crate::imposter::Persistence::Ephemeral,
             )
             .await
