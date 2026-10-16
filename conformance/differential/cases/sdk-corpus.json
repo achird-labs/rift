@@ -9,7 +9,7 @@
       "dropStubs": [
         {
           "name": "xpath — XML body where //user/@role == 'admin'",
-          "reason": "Mountebank 2.9.1 refuses an XPath selector that evaluates to a string (`string(//user/@role)`); its xpath predicate handles node-sets only, so the imposter is not created at all"
+          "reason": "Mountebank 2.9.5 creates the imposter but fails every request this stub is tried on with a 500 TypeError (`result.map is not a function`): its xpath predicate handles node sets only, and `string(//user/@role)` is a string. Rift's support is documented in differences.md (#1495)"
         }
       ]
     },

@@ -360,6 +360,23 @@ lower case, so `//b` selects `<B>`, `//a/@id` selects `Id="7"`, and
 written, as in Mountebank. See
 [Differences from Mountebank](differences.md#case-insensitive-xpath) for where this differs.
 
+#### What a selected node reads as
+
+A selected node's value is the one Mountebank reads:
+
+- a text node or an attribute: its text;
+- an element: its **first child node**. Text or CDATA gives that text, a comment its text, a
+  processing instruction its data. An element whose first child is an element, or that has no
+  children, reads as the string `undefined`, so `exists: true` holds for an empty element `<a/>`;
+- `/`: the XML declaration's data (`version="1.0"`), a leading comment or processing instruction,
+  else `undefined`.
+
+So `//a` on `<a>x<b/>y</a>` reads `x`, and on a pretty-printed `<order>\n  <id>…` it reads the
+leading whitespace. A run of text and references (`x&amp;y`) is one text node, as in Mountebank,
+and `text()` selects it once. To match an element's whole text, use `string(//a)`. That works in
+Rift only; Mountebank fails the request (see
+[Differences from Mountebank](differences.md#an-xpath-selector-that-returns-a-string)).
+
 ### XPath with Namespaces
 
 ```json

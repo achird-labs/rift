@@ -13,6 +13,15 @@ record.
 
 ### Changed
 
+- **An XPath selector that selects an element now reads its first child node, as Mountebank does**
+  (#1495), rather than all of the element's text. `//a` on `<a>x<b/>y</a>` reads `x`; an element
+  that is empty or starts with an element reads as the string `undefined`, so `exists: true` now
+  holds for `<a/>`; a pretty-printed container reads its leading whitespace. This applies to
+  predicates, `copy`, `lookup` and `predicateGenerators`, so recordings now match Mountebank's. A run
+  of text and references (`x&amp;y`) is one text node and an empty CDATA section none, so `text()`
+  and `count()` see Mountebank's nodes. To match an element's whole text, use `string(//a)` (Rift
+  only; Mountebank fails the request).
+
 - **An auto-assigned imposter port is now picked by the operating system, as in Mountebank**
   (#1501), rather than the lowest free port from 49152. The listener that learned the port serves
   it. On Linux the port comes from `ip_local_port_range` (32768–60999 by default), so it can be

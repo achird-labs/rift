@@ -657,7 +657,7 @@ pub(crate) fn eval_xpath_on(
         Ok(Value::Boolean(b)) => Some(b.to_string()),
         // The node set is a hash set: take the first node in document order, not whichever node
         // iteration happens to yield first (issue #1257).
-        Ok(Value::Nodeset(nodes)) => nodes.document_order_first().map(|n| n.string_value()),
+        Ok(Value::Nodeset(nodes)) => nodes.document_order_first().map(mb_node_value),
         _ => None,
     }
 }
@@ -680,8 +680,8 @@ fn eval_xpath_all_on(
         Ok(Value::Nodeset(nodes)) => Some(
             nodes
                 .document_order()
-                .iter()
-                .map(|n| n.string_value())
+                .into_iter()
+                .map(mb_node_value)
                 .collect(),
         ),
         Err(_) => None,
@@ -720,15 +720,236 @@ pub(crate) fn parse_xml_folding_names(body: &str) -> Option<sxd_document::Packag
     parse_prepared(&fold_xml_names(&prepare_xml(body)?))
 }
 
-/// Parse a [`prepare_xml`]ed text, reading past what follows the root as xmldom does.
+/// Parse a [`prepare_xml`]ed text, reading past what follows the root as xmldom does, into
+/// xmldom's node model (see [`normalize_like_xmldom`]).
 fn parse_prepared(xml: &str) -> Option<sxd_document::Package> {
     match sxd_document::parser::parse(xml) {
-        Ok(package) => Some(package),
+        Ok(package) => {
+            normalize_like_xmldom(&package, xml);
+            Some(package)
+        }
         Err(error) => {
             let trimmed = without_trailing_text(xml, error.location())?;
-            sxd_document::parser::parse(&trimmed).ok()
+            let package = sxd_document::parser::parse(&trimmed).ok()?;
+            normalize_like_xmldom(&package, &trimmed);
+            Some(package)
         }
     }
+}
+
+/// What Mountebank's `xpath.js` `nodeValue` reads from a selected node (issue #1495): a text node
+/// or attribute its text, a comment its text, a PI its data, and any other node its first child's
+/// data — so an element whose first child is an element, or that has none, reads as the string
+/// `"undefined"`. Mountebank does this on purpose, so `exists: true` holds for an empty element.
+fn mb_node_value(node: sxd_xpath::nodeset::Node<'_>) -> String {
+    use sxd_document::dom::{ChildOfElement, ChildOfRoot};
+    use sxd_xpath::nodeset::Node;
+    const UNDEFINED: &str = "undefined";
+    let pi = |value: Option<&str>| value.unwrap_or("").to_string();
+    match node {
+        Node::Text(text) => text.text().to_string(),
+        Node::Attribute(attribute) => attribute.value().to_string(),
+        Node::Comment(comment) => comment.text().to_string(),
+        Node::ProcessingInstruction(instruction) => pi(instruction.value()),
+        Node::Element(element) => match element.children().first() {
+            Some(ChildOfElement::Text(text)) => text.text().to_string(),
+            Some(ChildOfElement::Comment(comment)) => comment.text().to_string(),
+            Some(ChildOfElement::ProcessingInstruction(instruction)) => pi(instruction.value()),
+            Some(ChildOfElement::Element(_)) | None => UNDEFINED.to_string(),
+        },
+        // The XML declaration is a PI here, as in xmldom (see `normalize_like_xmldom`). Whitespace
+        // before the root element is not a node in this DOM, so `/` reads "undefined" where
+        // Mountebank reads that whitespace.
+        Node::Root(root) => match root.children().first() {
+            Some(ChildOfRoot::Comment(comment)) => comment.text().to_string(),
+            Some(ChildOfRoot::ProcessingInstruction(instruction)) => pi(instruction.value()),
+            Some(ChildOfRoot::Element(_)) | None => UNDEFINED.to_string(),
+        },
+        Node::Namespace(_) => UNDEFINED.to_string(),
+    }
+}
+
+/// Give a DOM `sxd_document` parsed from `xml` the node model of Mountebank's xmldom (issue #1495),
+/// so every XPath consumer (`text()`, `count()`, positions, [`mb_node_value`]) sees xmldom's nodes:
+///
+/// - `sxd_document` makes one text node per reference and per run of character data between
+///   references; xmldom makes one for the whole run, so they are merged;
+/// - an empty CDATA section is an empty text node here and no node in xmldom, so it is dropped;
+///   any other CDATA section stays a node of its own, as in xmldom;
+/// - the XML declaration is dropped here and kept as a PI by xmldom, so it is added back.
+///
+/// The children of every element are matched against the pieces of `xml` that made them. A
+/// mismatch cannot happen for a text `sxd_document` accepted; if one did, the DOM is left as
+/// parsed rather than half-rewritten.
+fn normalize_like_xmldom(package: &sxd_document::Package, xml: &str) {
+    use sxd_document::dom::{ChildOfElement, ChildOfRoot, Element};
+
+    struct Frame<'d> {
+        element: Element<'d>,
+        old: Vec<ChildOfElement<'d>>,
+        next: usize,
+        new: Vec<ChildOfElement<'d>>,
+        changed: bool,
+    }
+
+    impl<'d> Frame<'d> {
+        fn open(element: Element<'d>) -> Self {
+            Frame {
+                element,
+                old: element.children(),
+                next: 0,
+                new: Vec::new(),
+                changed: false,
+            }
+        }
+
+        fn take(&mut self) -> Option<ChildOfElement<'d>> {
+            let child = self.old.get(self.next).copied();
+            self.next += 1;
+            child
+        }
+    }
+
+    let document = package.as_document();
+    let mut stack: Vec<Frame<'_>> = Vec::new();
+    let mut plan: Vec<(Element<'_>, Vec<ChildOfElement<'_>>)> = Vec::new();
+    let mut declaration: Option<String> = None;
+    let mut seen_root = false;
+    let mut pos = 0;
+    while pos < xml.len() {
+        let (kind, end, _) = xml_piece(xml, pos);
+        let piece = &xml[pos..end];
+        pos = end;
+        let Some(frame) = stack.last_mut() else {
+            match kind {
+                XmlPiece::StartTag | XmlPiece::EmptyTag if !seen_root => {
+                    seen_root = true;
+                    let Some(element) =
+                        document
+                            .root()
+                            .children()
+                            .into_iter()
+                            .find_map(|c| match c {
+                                ChildOfRoot::Element(e) => Some(e),
+                                _ => None,
+                            })
+                    else {
+                        return;
+                    };
+                    if kind == XmlPiece::StartTag {
+                        stack.push(Frame::open(element));
+                    }
+                }
+                XmlPiece::CommentOrPi if !seen_root => {
+                    if let Some(data) = xml_declaration_data(piece) {
+                        declaration = Some(data.to_string());
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        };
+        match kind {
+            XmlPiece::StartTag | XmlPiece::EmptyTag => {
+                let Some(ChildOfElement::Element(element)) = frame.take() else {
+                    return;
+                };
+                frame.new.push(ChildOfElement::Element(element));
+                if kind == XmlPiece::StartTag {
+                    stack.push(Frame::open(element));
+                }
+            }
+            XmlPiece::EndTag => {
+                let Some(frame) = stack.pop() else { return };
+                if frame.next != frame.old.len() {
+                    return;
+                }
+                if frame.changed {
+                    plan.push((frame.element, frame.new));
+                }
+            }
+            XmlPiece::CommentOrPi => {
+                let Some(
+                    child @ (ChildOfElement::Comment(_) | ChildOfElement::ProcessingInstruction(_)),
+                ) = frame.take()
+                else {
+                    return;
+                };
+                frame.new.push(child);
+            }
+            XmlPiece::CData => {
+                let Some(child @ ChildOfElement::Text(_)) = frame.take() else {
+                    return;
+                };
+                if piece == "<![CDATA[]]>" {
+                    frame.changed = true;
+                } else {
+                    frame.new.push(child);
+                }
+            }
+            XmlPiece::Text => {
+                let mut texts = Vec::new();
+                for _ in 0..text_tokens(piece) {
+                    let Some(ChildOfElement::Text(text)) = frame.take() else {
+                        return;
+                    };
+                    texts.push(text);
+                }
+                match texts.as_slice() {
+                    [] => {}
+                    [one] => frame.new.push(ChildOfElement::Text(*one)),
+                    many => {
+                        let merged: String = many.iter().map(|t| t.text()).collect();
+                        frame
+                            .new
+                            .push(ChildOfElement::Text(document.create_text(&merged)));
+                        frame.changed = true;
+                    }
+                }
+            }
+            XmlPiece::Doctype => return,
+        }
+    }
+    if !stack.is_empty() {
+        return;
+    }
+    for (element, children) in plan {
+        element.replace_children(children);
+    }
+    if let Some(data) = declaration {
+        let root = document.root();
+        let mut children: Vec<ChildOfRoot<'_>> = vec![ChildOfRoot::ProcessingInstruction(
+            document.create_processing_instruction("xml", Some(&data)),
+        )];
+        children.extend(root.children());
+        root.replace_children(children);
+    }
+}
+
+/// The data of an XML declaration (`<?xml version="1.0"?>` reads `version="1.0"`), or `None` for
+/// any other comment or PI.
+fn xml_declaration_data(piece: &str) -> Option<&str> {
+    let rest = piece.strip_prefix("<?xml")?.strip_suffix("?>")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(rest.trim_start())
+}
+
+/// How many text nodes `sxd_document` makes for a run of character data: one per reference and one
+/// per non-empty run between references. [`prepare_xml`] has made every `&` start a reference.
+fn text_tokens(text: &str) -> usize {
+    let mut tokens = 0;
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        tokens += usize::from(at > 0);
+        let Some(close) = rest[at..].find(';') else {
+            return tokens + 1;
+        };
+        tokens += 1;
+        rest = &rest[at + close + 1..];
+    }
+    tokens + usize::from(!rest.is_empty())
 }
 
 /// `xml` ASCII-lowercased as Mountebank lowercases the body of a case-insensitive XPath predicate
@@ -2364,6 +2585,95 @@ mod tests {
             ] {
                 assert_no_document(body);
             }
+        }
+
+        // Issue #1495: a selected node reads as Mountebank's `xpath.js` `nodeValue` reads it, over
+        // xmldom's node model. Expected values are Mountebank 2.9.5's, probed live.
+        #[test]
+        fn an_element_reads_as_its_first_child_node() {
+            assert_reads("<a>xy</a>", "//a", &["xy"]);
+            assert_reads("<a>x<b/>y</a>", "//a", &["x"]);
+            assert_reads("<a>\n  <b>v</b>\n</a>", "//a", &["\n  "]);
+            assert_reads("<a><![CDATA[p]]>q</a>", "//a", &["p"]);
+            assert_reads("<a><!--c-->x</a>", "//a", &["c"]);
+            assert_reads("<a><?pi d?>x</a>", "//a", &["d"]);
+            assert_reads("<a>x&amp;y<b/>z</a>", "//a", &["x&y"]);
+        }
+
+        #[test]
+        fn an_element_with_no_text_first_reads_undefined() {
+            assert_reads("<a><b>in</b>y</a>", "//a", &["undefined"]);
+            assert_reads("<a/>", "//a", &["undefined"]);
+            assert_reads("<a></a>", "//a", &["undefined"]);
+            assert_reads("<a><![CDATA[]]></a>", "//a", &["undefined"]);
+            assert_reads("<r><a>1</a><a/></r>", "//a", &["1", "undefined"]);
+        }
+
+        #[test]
+        fn a_pi_without_data_reads_empty() {
+            let values = |body: &str, selector: &str| {
+                let package = parse_xml_like_mountebank(body).expect("parses");
+                eval_xpath_all_on(&package.as_document(), selector, None).expect("evaluates")
+            };
+            assert_eq!(values("<a><?pi?>x</a>", "//a"), [""]);
+        }
+
+        #[test]
+        fn text_attribute_and_scalar_results_are_unchanged() {
+            assert_reads(r#"<a k="v">t</a>"#, "//a/@k", &["v"]);
+            assert_reads("<a>x<b/>y</a>", "//a/text()", &["x", "y"]);
+            assert_reads("<a>t</a>", "string(//a)", &["t"]);
+            assert_reads("<a>t</a><!--x-->", "count(//a)", &["1"]);
+        }
+
+        #[test]
+        fn a_run_of_text_and_references_is_one_text_node() {
+            assert_reads("<a>x&amp;y</a>", "//a/text()", &["x&y"]);
+            assert_reads("<a>x&#65;y</a>", "//a/text()", &["xAy"]);
+            assert_reads("<a>x&nbsp;y</a>", "//a/text()", &["x&nbsp;y"]);
+            assert_reads("<a>&amp;&amp;</a>", "//a/text()", &["&&"]);
+            assert_reads("<a>x&amp;y</a>", "count(//a/text())", &["1"]);
+        }
+
+        #[test]
+        fn a_cdata_section_is_its_own_node_and_an_empty_one_is_none() {
+            assert_reads("<a>x<![CDATA[p]]>y</a>", "count(//a/text())", &["3"]);
+            assert_reads("<a>x<![CDATA[p]]>y</a>", "//a/text()", &["x", "p", "y"]);
+            assert_reads("<a><![CDATA[]]></a>", "count(//a/text())", &["0"]);
+            assert_reads("<a>x<![CDATA[]]>y</a>", "//a/text()", &["x", "y"]);
+        }
+
+        #[test]
+        fn the_root_reads_as_its_first_node() {
+            assert_reads(r#"<?xml version="1.0"?><r/>"#, "/", &[r#"version="1.0""#]);
+            assert_reads("<!--c--><r/>", "/", &["c"]);
+            assert_reads("<!DOCTYPE r><r/>", "/", &["undefined"]);
+            assert_reads("<r/>", "/", &["undefined"]);
+        }
+
+        #[test]
+        fn a_namespace_node_reads_undefined() {
+            let package = parse_xml_like_mountebank(r#"<a xmlns:p="u">t</a>"#).expect("parses");
+            let values = eval_xpath_all_on(&package.as_document(), "//a/namespace::*", None)
+                .expect("evaluates");
+            assert!(!values.is_empty());
+            assert!(values.iter().all(|v| v == "undefined"), "{values:?}");
+        }
+
+        #[test]
+        fn the_folded_view_gets_the_same_node_model() {
+            let package = parse_xml_folding_names("<A>X&amp;Y<B/>Z</A>").expect("parses");
+            let values = eval_xpath_all_on(&package.as_document(), "//a", None).expect("evaluates");
+            assert_eq!(values, ["x&y"]);
+        }
+
+        #[test]
+        fn text_tokens_counts_sxds_text_nodes() {
+            assert_eq!(text_tokens("xy"), 1);
+            assert_eq!(text_tokens("x&amp;y"), 3);
+            assert_eq!(text_tokens("&amp;&amp;"), 2);
+            assert_eq!(text_tokens("&amp;y"), 2);
+            assert_eq!(text_tokens("x&#65;"), 2);
         }
     }
 }
