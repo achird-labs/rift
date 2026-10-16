@@ -75,9 +75,9 @@ port while the engine listens on IPv4 only. A "fresh imposter" is posted without
 runner reads the one the engine assigned back from the `201`. Only fixtures that name a port (`a
 fresh verbatim imposter`, the corpus's 45xx imposters, the reload and front-door configs) bind a
 fixed one. Feature 21's two imposters "on descending ports" take a fresh port for the first and,
-for the second, the highest port below it that the engine accepts (a `400` saying the port is in
-use moves one lower, and so does the `500` a bind failure is answered with while another process
-holds the port, until #1500 makes it a `400`). Feature 08's `PUT /imposters` scenarios replace the
+for the second, the highest port below it that the engine accepts (a `400` saying the port is in use, whether
+another imposter or another process holds it, moves one lower; a `500` is an engine fault and fails the run).
+Feature 08's `PUT /imposters` scenarios replace the
 shared engine's whole imposter set, which is safe because scenarios run one at a time and each
 one's imposters are deleted after it.
 

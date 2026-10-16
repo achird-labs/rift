@@ -1,0 +1,16 @@
+{
+  "port": {newPort},
+  "protocol": "http",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "is": { "statusCode": 200, "body": "ok" },
+          "_behaviors": {
+            "lookup": [{ "key": { "from": "path", "using": { "method": "regex", "selector": "([" } }, "fromDataSource": { "csv": { "path": "data/mbcompat-index.csv", "keyColumn": "id" } }, "into": "$ROW" }]
+          }
+        }
+      ]
+    }
+  ]
+}

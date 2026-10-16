@@ -241,4 +241,10 @@ Feature: Error-response envelope — the standard {"errors":[{code,message}]} co
       | matches regex under `and`      | create            | POST   | /imposters              | admin-doors/bad-regex-and     | invalid regex `([`             |
       | matches regex on a keyed field | add a stub        | POST   | /imposters/{port}/stubs | admin-doors/stub-bad-regex    | invalid regex `([`             |
       | xpath selector                 | replace the stubs | PUT    | /imposters/{port}/stubs | admin-doors/stubs-bad-xpath   | selector `//*[[`               |
+      # rift#1258: a `copy`/`lookup` `using` selector that does not compile is refused at load. Mountebank
+      # 2.9.5 accepts these and substitutes nothing (a regex fails the request with 500); Rift refuses at
+      # load (docs/mountebank/behaviors.md:79). A documented Rift-only divergence.
+      | copy jsonpath selector         | create            | POST   | /imposters              | admin-doors/bad-copy-jsonpath | `copy` behavior `jsonpath` selector `$[[[bad` |
+      | copy xpath selector            | create            | POST   | /imposters              | admin-doors/bad-copy-xpath    | `copy` behavior `xpath` selector `//*[[` |
+      | lookup regex selector          | create            | POST   | /imposters              | admin-doors/bad-lookup-regex  | `lookup` behavior `regex` selector `([` |
 
