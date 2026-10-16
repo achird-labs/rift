@@ -510,6 +510,9 @@ expression ignores case unless the predicate sets `"caseSensitive": true` — ex
 values are stripped after the body is parsed; Mountebank also strips the raw body text before
 parsing it — see [Differences from Mountebank](differences.md#except-on-a-json-body).
 
+With an `xpath` or `jsonpath` selector, `except` applies to each selected value, not to the whole body as in
+Mountebank — see [Differences from Mountebank](differences.md#except-with-an-xpath-or-jsonpath-selector).
+
 ---
 
 ## Common Patterns

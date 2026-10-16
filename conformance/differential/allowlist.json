@@ -2558,5 +2558,49 @@
     "reason": "Mountebank lowercases the whole body for a case-insensitive XPath predicate, which xmldom refuses for a DOCTYPE; Rift folds only names",
     "mountebank": "",
     "rift": "equals"
+  },
+  {
+    "id": "except-order/xp/status",
+    "case": "targeted: an xpath except that removes a tag stops Mountebank matching, since it strips the body before selecting (#1486)",
+    "location": "step[1].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "An XPath `except` that removes markup still matches in Rift. In Mountebank it never matches:",
+    "reason": "Mountebank strips the XPath except from the whole body before selecting, which leaves no document; Rift strips each selected value",
+    "mountebank": "200",
+    "rift": "201"
+  },
+  {
+    "id": "except-order/xp/body",
+    "case": "targeted: an xpath except that removes a tag stops Mountebank matching, since it strips the body before selecting (#1486)",
+    "location": "step[1].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "An XPath `except` that removes markup still matches in Rift. In Mountebank it never matches:",
+    "reason": "Mountebank strips the XPath except from the whole body before selecting, which leaves no document; Rift strips each selected value",
+    "mountebank": "",
+    "rift": "matched"
+  },
+  {
+    "id": "except-order/jp/status",
+    "case": "targeted: a jsonpath except that removes a key's quotes stops Mountebank matching, since it strips the body before selecting (#1486)",
+    "location": "step[1].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A JSONPath `except` that removes quotes still matches in Rift. In Mountebank it never matches:",
+    "reason": "Mountebank strips the JSONPath except from the whole body before selecting, which leaves unparseable JSON; Rift strips each selected value",
+    "mountebank": "200",
+    "rift": "201"
+  },
+  {
+    "id": "except-order/jp/body",
+    "case": "targeted: a jsonpath except that removes a key's quotes stops Mountebank matching, since it strips the body before selecting (#1486)",
+    "location": "step[1].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A JSONPath `except` that removes quotes still matches in Rift. In Mountebank it never matches:",
+    "reason": "Mountebank strips the JSONPath except from the whole body before selecting, which leaves unparseable JSON; Rift strips each selected value",
+    "mountebank": "",
+    "rift": "matched"
   }
 ]
