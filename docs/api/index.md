@@ -42,6 +42,11 @@ route's methods, sorted, in `Allow` and as a `text/plain` body (`DELETE, GET, HE
 imposter id that is not a port (`/imposters/abc`, `/imposters/70000`) is "no such imposter", answered
 as an absent port is on every `/imposters/:id` route.
 
+A trailing `/` is ignored on every admin route, as Mountebank's Express router ignores it:
+`/imposters/`, `/imposters/4545/` and `/config/` answer exactly as `/imposters`, `/imposters/4545`
+and `/config` do. Only one `/` is dropped, so `/imposters//` is `404`. Gateway paths
+(`/__rift/:port/…`) keep their trailing slash: it is part of the path the imposter matches.
+
 ---
 
 ## Root

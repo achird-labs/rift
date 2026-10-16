@@ -2,8 +2,8 @@
 
 use crate::admin_api::authz;
 use crate::admin_api::handlers::events::{self, box_full};
-use crate::admin_api::router::route_request;
-use crate::admin_api::types::ADMIN_JSON_CONTENT_TYPE;
+use crate::admin_api::router::{self, route_request};
+use crate::admin_api::types::{ADMIN_JSON_CONTENT_TYPE, error_response};
 use crate::config_loader::ConfigSource;
 use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
 use crate::front_door::FrontDoorRoutes;
@@ -645,7 +645,7 @@ async fn accept_loop(
             // preface sniff, so both protocol legs see the same stream.
             let fault_cell = FaultCell::new();
             let stream = FaultIo::new(stream, fault_cell.clone());
-            let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            let service = service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
                 let fault_cell = fault_cell.clone();
                 let manager = Arc::clone(&manager);
                 let api_key = api_key.clone();
@@ -660,6 +660,16 @@ async fn accept_loop(
                     // instead of arming the connection-wide fault (`apply_tcp_fault`).
                     let version = req.version();
                     let is_gateway = req.uri().path().starts_with("/__rift/");
+                    // One trailing `/` is ignored on admin routes, as Mountebank's Express ignores
+                    // it (issue #1481). Rewritten once, here, so the api-key gate, `classify` and
+                    // the router cannot disagree on a path: `classify` answering `None` skips the
+                    // authorizer, so `DELETE /imposters/` must reach it as the delete-all it is.
+                    // The gateway's trailing slash is the stub's own path and is kept.
+                    let normalized = if is_gateway {
+                        Ok(())
+                    } else {
+                        router::normalize_admin_uri(&mut req)
+                    };
                     // Per-request annotation scope + response decorator (issue #318):
                     // every response through this listener — including the `/__rift/`
                     // gateway — is decorated with phase `Admin`.
@@ -681,6 +691,15 @@ async fn accept_loop(
                             if !api_key_matches(auth, key.as_str()) {
                                 return Ok::<_, hyper::Error>(box_full(unauthorized_response()));
                             }
+                        }
+                        // Dropping a `/` from a path hyper accepted cannot make it invalid; if it
+                        // ever did, the request is answered (after authentication), never routed
+                        // under its old spelling.
+                        if let Err(e) = normalized {
+                            return Ok::<_, hyper::Error>(box_full(error_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                &format!("admin path could not be normalized: {e}"),
+                            )));
                         }
                         // Authorization (issue #854), strictly after authentication. Ordering is
                         // load-bearing: moving the api-key gate below this would let an

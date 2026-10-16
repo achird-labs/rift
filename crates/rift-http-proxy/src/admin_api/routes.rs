@@ -390,8 +390,18 @@ mod tests {
         assert_eq!(allowed_methods("/nope"), None);
         assert_eq!(allowed_methods("/imposters/4545/nope"), None);
         assert_eq!(allowed_methods("/__rift/4545/orders"), None);
-        assert_eq!(allowed_methods("/imposters/"), None);
+        // One trailing `/` is ignored, as Express ignores it (issue #1481); an empty id is no route.
+        assert_eq!(
+            allowed_methods("/imposters/"),
+            allowed_methods("/imposters")
+        );
+        assert_eq!(
+            allowed_methods("/imposters/4545/stubs/0/"),
+            allowed_methods("/imposters/4545/stubs/0")
+        );
+        assert_eq!(allowed_methods("/imposters//"), None);
         assert_eq!(allowed_methods("/imposters//stubs"), None);
+        assert_eq!(allowed_methods("/config//"), None);
     }
 
     #[test]

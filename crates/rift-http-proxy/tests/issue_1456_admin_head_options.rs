@@ -499,7 +499,8 @@ async fn the_gateway_passes_head_and_options_to_the_imposter() {
 }
 
 /// An empty id is no imposter route: the unknown-route 404 for every method, and a `DELETE` that
-/// deletes nothing. Mountebank reads `/imposters/` as the collection; that parity is #1481.
+/// deletes nothing. `/imposters/` is not one: its trailing `/` is ignored and it is the collection
+/// (issue #1481, `issue_1481_admin_trailing_slash.rs`).
 #[tokio::test]
 async fn an_empty_imposter_id_is_the_unknown_route_404() {
     let (base, manager, admin) = start(None).await;
@@ -507,7 +508,7 @@ async fn an_empty_imposter_id_is_the_unknown_route_404() {
     create(&manager, port).await;
     let client = reqwest::Client::new();
 
-    for path in ["/imposters/", "/imposters//stubs"] {
+    for path in ["/imposters//", "/imposters//stubs"] {
         for method in ["GET", "DELETE", "OPTIONS", "HEAD", "PUT", "POST"] {
             let response = client
                 .request(
@@ -533,7 +534,7 @@ async fn an_empty_imposter_id_is_the_unknown_route_404() {
     assert_eq!(
         still_there.status(),
         200,
-        "DELETE /imposters/ deleted nothing"
+        "DELETE /imposters// deleted nothing"
     );
     admin.shutdown().await;
 }

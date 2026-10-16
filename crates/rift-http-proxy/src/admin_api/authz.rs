@@ -109,6 +109,9 @@ fn imposter_action(method: &Method) -> &'static str {
 /// authenticated caller can still distinguish a 404 from a 403, so the hook bounds what a
 /// principal can *do*, not what it can learn about which routes exist.
 ///
+/// One trailing `/` is ignored, as the listener ignores it (`/imposters/` classifies as
+/// `/imposters`); repeated slashes are not collapsed.
+///
 /// # Examples
 ///
 /// An embedder fronting the admin API classifies a parameterised route the same way upstream does,
@@ -162,6 +165,10 @@ fn classify_route(method: &Method, path: &str) -> Option<AuthzTarget> {
     if path.starts_with("/__rift/") {
         return None;
     }
+    // A trailing `/` is ignored as the router ignores it (issue #1481). Normalized here as well as
+    // in the listener because embedders call `classify` directly, and an unrecognised path skips
+    // the authorizer: `DELETE /imposters/` must be the delete-all it dispatches as.
+    let path = crate::admin_api::router::admin_path(path);
 
     match path {
         "/" | "/health" | "/config" | "/logs" | "/metrics" => {
@@ -315,6 +322,41 @@ mod tests {
         // catch-all that would otherwise swallow gateway paths.
         assert_eq!(classify(&Method::GET, "/__rift/4545/orders"), None);
         assert_eq!(classify(&Method::POST, "/__rift/4545/orders"), None);
+    }
+
+    /// Issue #1481: the hook is skipped when `classify` answers `None`, so a trailing `/` must
+    /// classify exactly as the path without it, or `DELETE /imposters/` deletes unauthorized.
+    #[test]
+    fn a_trailing_slash_classifies_as_the_path_without_it() {
+        for method in [Method::GET, Method::DELETE, Method::PUT, Method::OPTIONS] {
+            for (slashed, plain) in [
+                ("/imposters/", "/imposters"),
+                ("/imposters/4545/", "/imposters/4545"),
+                ("/imposters/4545/stubs/0/", "/imposters/4545/stubs/0"),
+                (
+                    "/imposters/4545/savedRequests/stream/",
+                    "/imposters/4545/savedRequests/stream",
+                ),
+                ("/events/", "/events"),
+                ("/config/", "/config"),
+                ("//", "/"),
+            ] {
+                assert!(classify(&method, plain).is_some(), "{method} {plain}");
+                assert_eq!(
+                    classify(&method, slashed),
+                    classify(&method, plain),
+                    "{method} {slashed}"
+                );
+            }
+        }
+        assert_eq!(
+            action_of(Method::DELETE, "/imposters/"),
+            Some(actions::IMPOSTER_DELETE)
+        );
+        // Exactly one `/` is dropped; the gateway's own trailing slash is the stub's path.
+        assert_eq!(classify(&Method::DELETE, "/imposters//"), None);
+        assert_eq!(classify(&Method::GET, "/config//"), None);
+        assert_eq!(classify(&Method::GET, "/__rift/4545/orders/"), None);
     }
 
     #[test]
