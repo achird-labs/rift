@@ -27,8 +27,15 @@ async fn create(manager: &ImposterManager, cfg: Value) -> u16 {
 
 /// One client for the whole file: a client per request opens its own pool and TLS roots, and 50
 /// concurrent ones exhaust a 256-descriptor limit (the macOS shell default).
-static CLIENT: std::sync::LazyLock<reqwest::Client> =
-    std::sync::LazyLock::new(reqwest::Client::new);
+/// No connection pool: ports are reused (auto-assign takes the lowest free port, so the next test's
+/// imposter often lands on the one a previous test deleted), and a pooled connection to a deleted
+/// imposter is dead by the time the next request is written on it.
+static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .expect("http client")
+});
 
 /// Held by each 50-way concurrency test: run together they open ~200 sockets at once, past the
 /// 256-descriptor default of a macOS shell. Each still races 50 requests internally.
