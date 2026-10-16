@@ -13,25 +13,28 @@ use rift_http_proxy::admin_api::{ADMIN_ROUTES, AdminApiServer, AdminRoute, Route
 use rift_http_proxy::imposter::ImposterManager;
 use rift_http_proxy::intercept_control::InterceptControl;
 
-/// A port for the sample imposter, written into the config and the request paths before
-/// anything binds it; the same port is re-applied for every table entry.
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind an ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
+/// An imposter port nothing binds: the intercept routes are refused before any port lookup.
+const UNUSED_PORT: u16 = 1;
 
-fn imposter(port: u16) -> serde_json::Value {
+fn imposter() -> serde_json::Value {
     serde_json::json!({
-        "port": port, "protocol": "http",
+        "protocol": "http",
         "_rift": { "flowState": { "ttlSeconds": 300 } },
         "stubs": [
             { "id": "a", "scenarioName": "order", "requiredScenarioState": "Started",
               "responses": [{ "is": { "statusCode": 200 } }] }
         ]
     })
+}
+
+/// Replace whatever the previous request left with one fresh sample imposter, on a port the
+/// manager assigns.
+async fn restore(manager: &ImposterManager) -> u16 {
+    manager.delete_all().await;
+    manager
+        .create_imposter(serde_json::from_value(imposter()).expect("config"))
+        .await
+        .expect("restore the sample imposter")
 }
 
 fn concrete(entry: &AdminRoute, port: u16) -> String {
@@ -80,16 +83,10 @@ async fn every_table_entry_is_dispatched() {
         .expect("admin binds");
     let base = format!("http://{}", admin.local_addr());
     let client = reqwest::Client::new();
-    let port = free_port();
 
     for entry in ADMIN_ROUTES {
         // Several entries delete the imposter or every imposter; each request sees it present.
-        manager
-            .apply_config(vec![
-                serde_json::from_value(imposter(port)).expect("config"),
-            ])
-            .await
-            .expect("restore the sample imposter");
+        let port = restore(&manager).await;
 
         if entry.family == RouteFamily::Events {
             // A stream never ends; its head is the proof it was dispatched.
@@ -133,7 +130,7 @@ async fn intercept_entries_are_404_without_with_intercept() {
         .expect("admin binds");
     let base = format!("http://{}", admin.local_addr());
     let client = reqwest::Client::new();
-    let port = free_port();
+    let port = UNUSED_PORT;
 
     let intercept: Vec<_> = ADMIN_ROUTES
         .iter()
@@ -168,7 +165,6 @@ async fn no_unlisted_method_is_dispatched_on_a_listed_path() {
         .expect("admin binds");
     let base = format!("http://{}", admin.local_addr());
     let client = reqwest::Client::new();
-    let port = free_port();
     let methods = ["GET", "POST", "PUT", "DELETE", "PATCH"];
 
     let mut paths: Vec<&str> = ADMIN_ROUTES.iter().map(|r| r.path).collect();
@@ -182,12 +178,7 @@ async fn no_unlisted_method_is_dispatched_on_a_listed_path() {
             {
                 continue;
             }
-            manager
-                .apply_config(vec![
-                    serde_json::from_value(imposter(port)).expect("config"),
-                ])
-                .await
-                .expect("restore the sample imposter");
+            let port = restore(&manager).await;
             let url = format!("{base}{}", concrete_path(path, port));
             let response = tokio::time::timeout(
                 Duration::from_secs(5),
@@ -224,13 +215,7 @@ async fn head_and_options_follow_the_table() {
         .expect("admin binds");
     let base = format!("http://{}", admin.local_addr());
     let client = reqwest::Client::new();
-    let port = free_port();
-    manager
-        .apply_config(vec![
-            serde_json::from_value(imposter(port)).expect("config"),
-        ])
-        .await
-        .expect("the sample imposter");
+    let port = restore(&manager).await;
 
     let mut paths: Vec<&str> = ADMIN_ROUTES.iter().map(|r| r.path).collect();
     paths.sort_unstable();

@@ -3,7 +3,6 @@
 //! repeated `decorate` or `wait` ran once, element order was ignored, and the fold decided what the
 //! `--allowInjection` gate and the parser saw.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,12 +10,14 @@ use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+/// The port the engine assigned, from a 201 response.
+async fn created_port(response: reqwest::Response) -> u16 {
+    assert_eq!(response.status().as_u16(), 201);
+    let body: Value = response.json().await.expect("json");
+    body["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .expect("assigned port")
 }
 
 struct Admin {
@@ -52,12 +53,11 @@ impl Admin {
 
     /// Create an imposter serving `body` with `behaviors`, and return its port.
     async fn serve(&self, body: &str, behaviors: Value, strict: bool) -> u16 {
-        let port = free_port();
-        let imposter = json!({"port": port, "protocol": "http", "strictBehaviors": strict,
+        let imposter = json!({"protocol": "http", "strictBehaviors": strict,
             "stubs": [{"responses": [{"is": {"body": body}, "behaviors": behaviors}]}]});
         let response = self.post(&imposter).await;
         assert_eq!(response.status().as_u16(), 201, "{imposter}");
-        port
+        created_port(response).await
     }
 
     async fn get(&self, port: u16) -> reqwest::Response {
@@ -239,9 +239,8 @@ async fn a_multi_key_element_runs_in_canonical_order_and_lints_w018() {
 #[tokio::test]
 async fn a_script_wait_followed_by_a_numeric_wait_needs_allow_injection() {
     let admin = Admin::start(false).await;
-    let port = free_port();
     let imposter = |behaviors: Value| {
-        json!({"port": port, "protocol": "http", "stubs": [{"responses": [
+        json!({"protocol": "http", "stubs": [{"responses": [
             {"is": {"body": "x"}, "behaviors": behaviors}
         ]}]})
     };
@@ -258,26 +257,21 @@ async fn a_script_wait_followed_by_a_numeric_wait_needs_allow_injection() {
             json!([{"decorate": append("1")}, {"decorate": null}]),
         ))
         .await;
-    assert_eq!(admitted.status().as_u16(), 201);
-    admin.stop(port).await;
+    admin.stop(created_port(admitted).await).await;
 }
 
 /// Every element is live, so a malformed earlier element is no longer hidden by a later one.
 #[tokio::test]
 async fn a_malformed_earlier_element_is_refused() {
     let admin = Admin::start(true).await;
-    let port = free_port();
     let response = admin
-        .post(
-            &json!({"port": port, "protocol": "http", "stubs": [{"responses": [
-                {"is": {"body": "x"}, "behaviors": [{"wait": true}, {"wait": 5}]}
-            ]}]}),
-        )
+        .post(&json!({"protocol": "http", "stubs": [{"responses": [
+            {"is": {"body": "x"}, "behaviors": [{"wait": true}, {"wait": 5}]}
+        ]}]}))
         .await;
     assert_eq!(response.status().as_u16(), 400);
     let text = response.text().await.expect("body");
     assert!(text.contains("`wait`"), "{text}");
-    admin.stop(port).await;
 }
 
 // ---- what is written back ------------------------------------------------------------------------
@@ -322,14 +316,13 @@ async fn an_object_form_block_is_written_back_in_its_run_order() {
     let admin = Admin::start(true).await;
     let (ca, cb) = (copy_path_into("${A}"), copy_path_into("${B}"));
     let d = append("d");
-    let port = free_port();
-    let imposter = json!({"port": port, "protocol": "http", "stubs": [{"responses": [
+    let imposter = json!({"protocol": "http", "stubs": [{"responses": [
         {"is": {"body": "x"}, "_behaviors": {
             "decorate": d.clone(), "wait": 1, "copy": [ca.clone(), cb.clone()],
             "shellTransform": ["cat"], "repeat": 2
         }}
     ]}]});
-    assert_eq!(admin.post(&imposter).await.status().as_u16(), 201);
+    let port = created_port(admin.post(&imposter).await).await;
     assert_eq!(
         admin.saved_behaviors(port).await,
         json!([{"wait": 1}, {"copy": ca}, {"copy": cb}, {"shellTransform": "cat"}, {"decorate": d}])

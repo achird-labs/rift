@@ -11,9 +11,11 @@ use rift_http_proxy::server::{Cli, ServerBuilder};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// A port that has to be written into the config text before anything binds it.
+/// Fixed port: the intercept rule and the imposter it forwards to are declared in one file read at
+/// boot, so the port is written into the config text before anything binds it. Probes `0.0.0.0`,
+/// the address the imposter binds.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
+    std::net::TcpListener::bind("0.0.0.0:0")
         .expect("bind an ephemeral port")
         .local_addr()
         .expect("local addr")

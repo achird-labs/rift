@@ -7,18 +7,21 @@
 //! the running imposter.
 #![cfg(feature = "javascript")]
 
-use std::net::TcpListener;
 use std::sync::Arc;
 
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+/// Assert a create answered 201, and return the port the engine assigned.
+async fn created_port(response: reqwest::Response) -> u16 {
+    let status = response.status().as_u16();
+    let body = response.text().await.expect("body");
+    assert_eq!(status, 201, "{body}");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("201 body");
+    body["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .expect("assigned port")
 }
 
 fn js_script(body: &str) -> serde_json::Value {
@@ -46,11 +49,9 @@ async fn get(client: &reqwest::Client, url: String) -> (u16, String) {
 #[tokio::test]
 async fn an_engine_less_script_runs_in_the_imposters_default_engine() {
     let (client, admin, manager) = start_admin().await;
-    let port = free_port();
     let created = client
         .post(format!("{admin}/imposters"))
         .json(&serde_json::json!({
-            "port": port,
             "protocol": "http",
             "_rift": { "scriptEngine": { "defaultEngine": "javascript" } },
             "stubs": [{
@@ -61,12 +62,7 @@ async fn an_engine_less_script_runs_in_the_imposters_default_engine() {
         .send()
         .await
         .expect("POST /imposters");
-    assert_eq!(
-        created.status().as_u16(),
-        201,
-        "{}",
-        created.text().await.unwrap_or_default()
-    );
+    let port = created_port(created).await;
 
     assert_eq!(
         get(&client, format!("http://127.0.0.1:{port}/created")).await,
@@ -116,11 +112,9 @@ async fn an_engine_less_script_runs_in_the_imposters_default_engine() {
 #[tokio::test]
 async fn an_unknown_default_fails_only_the_script_that_needs_it() {
     let (client, admin, manager) = start_admin().await;
-    let port = free_port();
     let unused = client
         .post(format!("{admin}/imposters"))
         .json(&serde_json::json!({
-            "port": port,
             "protocol": "http",
             "_rift": { "scriptEngine": { "defaultEngine": "lua" } },
             "stubs": [{ "responses": [{ "_rift": { "script": {
@@ -130,19 +124,12 @@ async fn an_unknown_default_fails_only_the_script_that_needs_it() {
         .send()
         .await
         .expect("POST");
-    assert_eq!(
-        unused.status().as_u16(),
-        201,
-        "{}",
-        unused.text().await.unwrap_or_default()
-    );
+    let port = created_port(unused).await;
     let _ = manager.delete_imposter(port).await;
 
-    let port = free_port();
     let used = client
         .post(format!("{admin}/imposters"))
         .json(&serde_json::json!({
-            "port": port,
             "protocol": "http",
             "_rift": { "scriptEngine": { "defaultEngine": "lua" } },
             "stubs": [{ "responses": [js_script("never")] }]
@@ -157,5 +144,4 @@ async fn an_unknown_default_fails_only_the_script_that_needs_it() {
         body.contains("450"),
         "the existing #450 error names the removal: {body}"
     );
-    let _ = manager.delete_imposter(port).await;
 }

@@ -2,20 +2,11 @@
 //! `proxyOnce` — Mountebank's default — for the replay store and the stub recorder alike. An
 //! unknown mode is refused at the config door instead of silently becoming pass-through.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
-}
 
 async fn start() -> (reqwest::Client, String, Arc<ImposterManager>) {
     let manager = Arc::new(ImposterManager::new());
@@ -39,9 +30,15 @@ async fn post(client: &reqwest::Client, admin: &str, imposter: &Value) -> reqwes
         .expect("POST")
 }
 
-async fn create(client: &reqwest::Client, admin: &str, imposter: Value) {
+/// Create an imposter without a port; return the port the engine assigned.
+async fn create(client: &reqwest::Client, admin: &str, imposter: Value) -> u16 {
     let response = post(client, admin, &imposter).await;
     assert_eq!(response.status().as_u16(), 201, "{imposter}");
+    let body: Value = response.json().await.expect("json");
+    body["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .expect("assigned port")
 }
 
 async fn imposter(client: &reqwest::Client, admin: &str, port: u16) -> Value {
@@ -57,16 +54,14 @@ async fn imposter(client: &reqwest::Client, admin: &str, port: u16) -> Value {
 
 /// An upstream that answers a different body each time, so a replay is visible.
 async fn counting_upstream(client: &reqwest::Client, admin: &str) -> u16 {
-    let port = free_port();
     create(
         client,
         admin,
-        json!({"port": port, "protocol": "http", "recordRequests": true, "stubs": [{"responses": [
+        json!({"protocol": "http", "recordRequests": true, "stubs": [{"responses": [
             {"is": {"body": "one"}}, {"is": {"body": "two"}}, {"is": {"body": "three"}}
         ]}]}),
     )
-    .await;
-    port
+    .await
 }
 
 async fn hits(client: &reqwest::Client, admin: &str, upstream: u16) -> usize {
@@ -90,11 +85,10 @@ async fn body(client: &reqwest::Client, port: u16, path: &str) -> String {
 async fn an_omitted_mode_replays_like_proxy_once() {
     let (client, admin, manager) = start().await;
     let upstream = counting_upstream(&client, &admin).await;
-    let proxy = free_port();
-    create(
+    let proxy = create(
         &client,
         &admin,
-        json!({"port": proxy, "protocol": "http", "stubs": [{"responses": [
+        json!({"protocol": "http", "stubs": [{"responses": [
             {"proxy": {"to": format!("http://127.0.0.1:{upstream}")}}
         ]}]}),
     )
@@ -129,11 +123,10 @@ async fn an_omitted_mode_replays_like_proxy_once() {
 async fn an_omitted_mode_with_generators_records_before_the_proxy_stub() {
     let (client, admin, manager) = start().await;
     let upstream = counting_upstream(&client, &admin).await;
-    let proxy = free_port();
-    create(
+    let proxy = create(
         &client,
         &admin,
-        json!({"port": proxy, "protocol": "http", "stubs": [{"responses": [
+        json!({"protocol": "http", "stubs": [{"responses": [
             {"proxy": {"to": format!("http://127.0.0.1:{upstream}"),
                        "predicateGenerators": [{"matches": {"path": true}}]}}
         ]}]}),
@@ -158,11 +151,10 @@ async fn an_omitted_mode_with_generators_records_before_the_proxy_stub() {
 async fn proxy_always_in_any_casing_appends_after_the_proxy_stub() {
     let (client, admin, manager) = start().await;
     let upstream = counting_upstream(&client, &admin).await;
-    let proxy = free_port();
-    create(
+    let proxy = create(
         &client,
         &admin,
-        json!({"port": proxy, "protocol": "http", "stubs": [{"responses": [
+        json!({"protocol": "http", "stubs": [{"responses": [
             {"proxy": {"to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyalways",
                        "predicateGenerators": [{"matches": {"path": true}}]}}
         ]}]}),
@@ -192,8 +184,7 @@ async fn proxy_always_in_any_casing_appends_after_the_proxy_stub() {
 #[tokio::test]
 async fn an_unknown_proxy_mode_is_refused() {
     let (client, admin, manager) = start().await;
-    let proxy = free_port();
-    let config = json!({"port": proxy, "protocol": "http", "stubs": [{"responses": [
+    let config = json!({"protocol": "http", "stubs": [{"responses": [
         {"proxy": {"to": "http://127.0.0.1:9", "mode": "bogus"}}
     ]}]});
     let response = post(&client, &admin, &config).await;
@@ -232,11 +223,10 @@ async fn default_forward_never_replays_beside_a_proxy_once_stub() {
     let (client, admin, manager) = start().await;
     let upstream = counting_upstream(&client, &admin).await;
     let to = format!("http://127.0.0.1:{upstream}");
-    let proxy = free_port();
-    create(
+    let proxy = create(
         &client,
         &admin,
-        json!({"port": proxy, "protocol": "http", "defaultForward": to, "stubs": [
+        json!({"protocol": "http", "defaultForward": to, "stubs": [
             {"predicates": [{"equals": {"path": "/p"}}], "responses": [{"proxy": {"to": to}}]},
             {"predicates": [{"equals": {"path": "/t"}}],
              "responses": [{"proxy": {"to": to, "mode": "proxyTransparent"}}]}

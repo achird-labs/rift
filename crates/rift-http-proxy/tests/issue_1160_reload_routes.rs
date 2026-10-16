@@ -9,8 +9,10 @@ use std::path::Path;
 use clap::Parser;
 use rift_http_proxy::server::{Cli, RunningServer, ServerBuilder};
 
+// Fixed port: the config file's `routes` must name the imposter's port before the server boots.
+// The probe binds `0.0.0.0`, the family the imposter binds, so it cannot shadow a neighbour (#1485).
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
+    TcpListener::bind("0.0.0.0:0")
         .expect("bind")
         .local_addr()
         .expect("addr")

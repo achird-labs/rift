@@ -15,6 +15,8 @@ use clap::Parser;
 use rift_http_proxy::server::{Cli, ServerBuilder};
 use std::net::{SocketAddr, TcpListener};
 
+/// Fixed port: the test asserts that a refused start left this exact port unbound.
+///
 /// Reserve a port, then release it, so the caller can assert whether something later bound it.
 /// Binding `0.0.0.0` deliberately mirrors the metrics listener's own hardcoded bind address.
 ///

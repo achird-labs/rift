@@ -5,20 +5,11 @@
 //! a complete token had it expanded: `${R}[secret]` served a CSV column the config never exposed,
 //! and `${request.headers.<name>}` reflected a header an ingress added.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
-}
 
 struct Admin {
     client: reqwest::Client,
@@ -44,9 +35,7 @@ impl Admin {
 
     /// Create an imposter serving `response` and return its port.
     async fn serve(&self, response: Value) -> u16 {
-        let port = free_port();
-        let imposter =
-            json!({"port": port, "protocol": "http", "stubs": [{"responses": [response]}]});
+        let imposter = json!({"protocol": "http", "stubs": [{"responses": [response]}]});
         let created = self
             .client
             .post(format!("{}/imposters", self.url))
@@ -55,7 +44,11 @@ impl Admin {
             .await
             .expect("POST");
         assert_eq!(created.status().as_u16(), 201, "{imposter}");
-        port
+        let body: Value = created.json().await.expect("json");
+        body["port"]
+            .as_u64()
+            .and_then(|p| u16::try_from(p).ok())
+            .expect("assigned port")
     }
 
     async fn get(&self, port: u16, path_and_query: &str) -> reqwest::Response {

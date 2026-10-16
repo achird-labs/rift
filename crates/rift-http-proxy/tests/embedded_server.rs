@@ -22,9 +22,10 @@ fn imposter_cfg(body: &str) -> ImposterConfig {
     .expect("test imposter config")
 }
 
-/// A port that must appear in text (a config document) before anything binds it.
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
+/// Fixed port: a probe for a port that must be named before anything binds it (an API that takes
+/// only an address, or a config block seeded at start). Probes `host`, the address the server binds.
+fn free_port(host: &str) -> u16 {
+    std::net::TcpListener::bind((host, 0))
         .expect("bind an ephemeral port")
         .local_addr()
         .expect("local addr")
@@ -156,7 +157,7 @@ async fn run_metrics_server_serves_metrics() {
     // having already recorded one — order-dependent, and it fails under `--exact`.
     rift_http_proxy::extensions::metrics::record_request("GET", 200);
 
-    let port = free_port();
+    let port = free_port("127.0.0.1");
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
     tokio::spawn(run_metrics_server(addr));
     wait_for_http(&format!("http://127.0.0.1:{port}/metrics")).await;
@@ -183,15 +184,17 @@ async fn run_metrics_server_serves_metrics() {
 async fn server_builder_internal_manager_loads_configfile_and_reloads() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("imposters.json");
-    let port = free_port();
-    let cfg = |body: &str| {
+    // The imposter starts port-less, so the engine assigns its port; the rewrite names that port
+    // so the reload reconciles the same imposter rather than creating another.
+    let cfg = |port: Option<u16>, body: &str| {
+        let port = port.map_or(String::new(), |p| format!(r#""port":{p},"#));
         format!(
-            r#"{{"imposters":[{{"port":{port},"protocol":"http","stubs":[
+            r#"{{"imposters":[{{{port}"protocol":"http","stubs":[
                 {{"predicates":[{{"equals":{{"path":"/ping"}}}}],
                  "responses":[{{"is":{{"statusCode":200,"body":"{body}"}}}}]}}]}}]}}"#
         )
     };
-    std::fs::write(&path, cfg("v1")).expect("write config");
+    std::fs::write(&path, cfg(None, "v1")).expect("write config");
 
     let cli = Cli::try_parse_from([
         "rift",
@@ -211,6 +214,16 @@ async fn server_builder_internal_manager_loads_configfile_and_reloads() {
         .await
         .expect("server starts");
     let admin = format!("http://{}", server.admin_addr());
+    let listed: serde_json::Value = reqwest::get(format!("{admin}/imposters"))
+        .await
+        .expect("list imposters")
+        .json()
+        .await
+        .expect("imposters json");
+    let port = listed["imposters"][0]["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .unwrap_or_else(|| panic!("one imposter with a port: {listed}"));
 
     let served = reqwest::get(format!("http://127.0.0.1:{port}/ping"))
         .await
@@ -220,7 +233,7 @@ async fn server_builder_internal_manager_loads_configfile_and_reloads() {
         .expect("body");
     assert_eq!(served, "v1", "configfile imposter loaded by run()");
 
-    std::fs::write(&path, cfg("v2")).expect("rewrite config");
+    std::fs::write(&path, cfg(Some(port), "v2")).expect("rewrite config");
     let resp = reqwest::Client::new()
         .post(format!("{admin}/admin/reload"))
         .send()
@@ -568,7 +581,8 @@ async fn server_builder_start_reports_addrs_and_shuts_down_both() {
 async fn server_builder_start_binds_front_door_and_routes_to_imposter() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("imposters.json");
-    let imposter_port = free_port();
+    // The `routes` block seeded at start must name the imposter's port.
+    let imposter_port = free_port("0.0.0.0");
     std::fs::write(
         &path,
         format!(

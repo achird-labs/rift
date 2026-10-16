@@ -4,20 +4,11 @@
 //! the mode, so a transparent proxy with generators recorded a stub and replayed it, and the
 //! upstream saw one request out of three.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
-}
 
 async fn start() -> (reqwest::Client, String, Arc<ImposterManager>) {
     let manager = Arc::new(ImposterManager::new());
@@ -32,7 +23,8 @@ async fn start() -> (reqwest::Client, String, Arc<ImposterManager>) {
     )
 }
 
-async fn create(client: &reqwest::Client, admin: &str, imposter: Value) {
+/// Create `imposter` without a port and return the one the engine assigned.
+async fn create(client: &reqwest::Client, admin: &str, imposter: Value) -> u16 {
     let response = client
         .post(format!("{admin}/imposters"))
         .json(&imposter)
@@ -40,6 +32,8 @@ async fn create(client: &reqwest::Client, admin: &str, imposter: Value) {
         .await
         .expect("POST");
     assert_eq!(response.status().as_u16(), 201, "{imposter}");
+    let body: Value = response.json().await.expect("json");
+    body["port"].as_u64().expect("assigned port") as u16
 }
 
 async fn imposter(client: &reqwest::Client, admin: &str, port: u16) -> Value {
@@ -56,19 +50,17 @@ async fn imposter(client: &reqwest::Client, admin: &str, port: u16) -> Value {
 #[tokio::test]
 async fn a_transparent_proxy_with_generators_forwards_every_request_and_records_nothing() {
     let (client, admin, manager) = start().await;
-    let upstream = free_port();
-    create(
+    let upstream = create(
         &client,
         &admin,
-        json!({"port": upstream, "protocol": "http", "recordRequests": true,
+        json!({"protocol": "http", "recordRequests": true,
             "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "up"}}]}]}),
     )
     .await;
-    let proxy = free_port();
-    create(
+    let proxy = create(
         &client,
         &admin,
-        json!({"port": proxy, "protocol": "http", "stubs": [{"responses": [{"proxy": {
+        json!({"protocol": "http", "stubs": [{"responses": [{"proxy": {
             "to": format!("http://127.0.0.1:{upstream}"),
             "mode": "proxyTransparent",
             "predicateGenerators": [{"matches": {"path": true}}]

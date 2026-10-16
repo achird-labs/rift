@@ -8,45 +8,13 @@ mod support;
 use reqwest::Client;
 use serde_json::json;
 use std::time::Duration;
-use tokio::time::sleep;
 
 const ADMIN_URL: &str = "http://127.0.0.1";
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Two distinct OS-chosen ports (admin, imposter) for one test. Both probe listeners are held
-/// until both ports are chosen, so they never repeat and concurrent runs never share one.
-fn get_test_ports() -> (u16, u16) {
-    let admin = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
-    let imposter = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
-    (
-        admin.local_addr().expect("local addr").port(),
-        imposter.local_addr().expect("local addr").port(),
-    )
-}
-
-/// Start a Rift server for testing
-async fn start_rift_server(admin_port: u16) -> tokio::process::Child {
-    let child = tokio::process::Command::new(support::server_bin())
-        .args(["--port", &admin_port.to_string(), "--allow-injection"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("Failed to start Rift server");
-
-    let client = Client::new();
-    for _ in 0..50 {
-        if client
-            .get(format!("{ADMIN_URL}:{admin_port}/"))
-            .timeout(Duration::from_millis(200))
-            .send()
-            .await
-            .is_ok()
-        {
-            return child;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    panic!("Rift server failed to start within timeout");
+/// Start a Rift server for testing, returning it with the admin port it bound.
+async fn start_rift_server() -> (tokio::process::Child, u16) {
+    support::spawn_server(&["--allow-injection"]).await
 }
 
 /// Create an imposter via the admin API
@@ -83,12 +51,10 @@ async fn clear_imposters(client: &Client, admin_port: u16) {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_equals_method_path() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [
             {
@@ -102,7 +68,7 @@ async fn test_equals_method_path() {
         ]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // GET should match second stub
     let resp = client
@@ -129,12 +95,10 @@ async fn test_equals_method_path() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_equals_query_parameter() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"equals": {"query": {"status": "active"}}}],
@@ -142,7 +106,7 @@ async fn test_equals_query_parameter() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/users?status=active"))
@@ -168,12 +132,10 @@ async fn test_equals_query_parameter() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_equals_header_default_case_insensitive() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"equals": {"headers": {"X-Custom": "test-value"}}}],
@@ -181,7 +143,7 @@ async fn test_equals_header_default_case_insensitive() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Headers are case-insensitive by default
     let resp = client
@@ -200,12 +162,10 @@ async fn test_equals_header_default_case_insensitive() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_contains_predicate() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"contains": {"body": "search-term"}}],
@@ -213,7 +173,7 @@ async fn test_contains_predicate() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .post(format!("{ADMIN_URL}:{imposter_port}/search"))
@@ -240,12 +200,10 @@ async fn test_contains_predicate() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_starts_with_predicate() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"startsWith": {"path": "/api/"}}],
@@ -253,7 +211,7 @@ async fn test_starts_with_predicate() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/api/users"))
@@ -277,12 +235,10 @@ async fn test_starts_with_predicate() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_ends_with_predicate() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"endsWith": {"path": ".json"}}],
@@ -290,7 +246,7 @@ async fn test_ends_with_predicate() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/data/file.json"))
@@ -307,12 +263,10 @@ async fn test_ends_with_predicate() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_matches_regex_predicate() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"matches": {"path": "^/api/users/\\d+$"}}],
@@ -320,7 +274,7 @@ async fn test_matches_regex_predicate() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/api/users/123"))
@@ -345,12 +299,10 @@ async fn test_matches_regex_predicate() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_case_sensitive_true() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{
@@ -361,7 +313,7 @@ async fn test_case_sensitive_true() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Exact case match
     let resp = client
@@ -389,12 +341,10 @@ async fn test_case_sensitive_true() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_except_regex_exclusion() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{
@@ -405,7 +355,7 @@ async fn test_except_regex_exclusion() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // /api/users -> except removes "/api" -> "/users" matches "/users"
     let resp = client
@@ -428,12 +378,10 @@ async fn test_except_regex_exclusion() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_deep_equals_body_json_key_order() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{
@@ -443,7 +391,7 @@ async fn test_deep_equals_body_json_key_order() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Body with keys in different order should match structurally
     let resp = client
@@ -467,12 +415,10 @@ async fn test_deep_equals_body_json_key_order() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_deep_equals_query_extra_params() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"deepEquals": {"query": {"a": "1"}}}],
@@ -480,7 +426,7 @@ async fn test_deep_equals_query_extra_params() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Exact match
     let resp = client
@@ -510,14 +456,12 @@ async fn test_deep_equals_query_extra_params() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_deep_equals_headers_extra() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Note: deepEquals on headers is tricky because HTTP clients add default headers
     // This test verifies the concept but may need adjustment for real header counts
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [
             {
@@ -531,7 +475,7 @@ async fn test_deep_equals_headers_extra() {
         ]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Extra query param should cause deepEquals to fail
     let resp = client
@@ -556,13 +500,11 @@ async fn test_deep_equals_headers_extra() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_query_multi_valued_params() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Multi-valued params are comma-joined: ?key=first&key=second → "first,second"
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"equals": {"query": {"key": "first,second"}}}],
@@ -570,7 +512,7 @@ async fn test_query_multi_valued_params() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!(
@@ -594,12 +536,10 @@ async fn test_query_multi_valued_params() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_query_bare_param_no_equals() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"exists": {"query": {"flag": true}}}],
@@ -610,7 +550,7 @@ async fn test_query_bare_param_no_equals() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/search?flag"))
@@ -632,12 +572,10 @@ async fn test_query_bare_param_no_equals() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_query_mixed_bare_and_valued() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{
@@ -654,7 +592,7 @@ async fn test_query_mixed_bare_and_valued() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Bug 2: ?a=1&flag&b=2 - "flag" is dropped by parse_query_string
     let resp = client
@@ -676,13 +614,11 @@ async fn test_query_mixed_bare_and_valued() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_query_url_encoded_params() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Already fixed in #70 - verify through integration test
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"equals": {"query": {"name": "hello world"}}}],
@@ -690,7 +626,7 @@ async fn test_query_url_encoded_params() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!(
@@ -709,12 +645,10 @@ async fn test_query_url_encoded_params() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_query_empty_string() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"equals": {"query": {"key": ""}}}],
@@ -722,7 +656,7 @@ async fn test_query_empty_string() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/test?key="))
@@ -744,12 +678,10 @@ async fn test_query_empty_string() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_header_key_case_sensitive_true() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{
@@ -760,7 +692,7 @@ async fn test_header_key_case_sensitive_true() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/test"))
@@ -782,12 +714,10 @@ async fn test_header_key_case_sensitive_true() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_header_value_case_sensitivity() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{
@@ -798,7 +728,7 @@ async fn test_header_value_case_sensitivity() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Exact case match
     let resp = client
@@ -829,12 +759,10 @@ async fn test_header_value_case_sensitivity() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_exists_body() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [
             {
@@ -848,7 +776,7 @@ async fn test_exists_body() {
         ]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Request with body
     let resp = client
@@ -874,12 +802,10 @@ async fn test_exists_body() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_exists_query_param() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"exists": {"query": {"token": true}}}],
@@ -887,7 +813,7 @@ async fn test_exists_query_param() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/test?token=abc123"))
@@ -911,12 +837,10 @@ async fn test_exists_query_param() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_exists_header() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"exists": {"headers": {"authorization": true}}}],
@@ -924,7 +848,7 @@ async fn test_exists_header() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/test"))
@@ -950,12 +874,10 @@ async fn test_exists_header() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_exists_key_case_sensitive() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{
@@ -966,7 +888,7 @@ async fn test_exists_key_case_sensitive() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // keyCaseSensitive=false: predicate "Token" should match query "token"
     let resp = client
@@ -992,12 +914,10 @@ async fn test_exists_key_case_sensitive() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_not_predicate() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"not": {"equals": {"method": "GET"}}}],
@@ -1005,7 +925,7 @@ async fn test_not_predicate() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // POST should match (not GET)
     let resp = client
@@ -1031,12 +951,10 @@ async fn test_not_predicate() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_or_predicate() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{
@@ -1049,7 +967,7 @@ async fn test_or_predicate() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/api/v1"))
@@ -1082,12 +1000,10 @@ async fn test_or_predicate() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_and_predicate() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{
@@ -1100,7 +1016,7 @@ async fn test_and_predicate() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Both conditions met
     let resp = client
@@ -1125,13 +1041,11 @@ async fn test_and_predicate() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_nested_not_and_or() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // not(or(GET, DELETE)) => matches POST, PUT, PATCH, etc.
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{
@@ -1146,7 +1060,7 @@ async fn test_nested_not_and_or() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // POST should match (not GET and not DELETE)
     let resp = client
@@ -1183,12 +1097,10 @@ async fn test_nested_not_and_or() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_is_response_with_headers() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [],
@@ -1205,7 +1117,7 @@ async fn test_is_response_with_headers() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/test"))
@@ -1238,12 +1150,10 @@ async fn test_is_response_with_headers() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_multiple_responses_round_robin() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [],
@@ -1255,7 +1165,7 @@ async fn test_multiple_responses_round_robin() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let expected = ["first", "second", "third", "first", "second", "third"];
     for expected_body in &expected {
@@ -1274,12 +1184,10 @@ async fn test_multiple_responses_round_robin() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_fault_connection_reset() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [],
@@ -1287,7 +1195,7 @@ async fn test_fault_connection_reset() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // The connection should be reset, causing an error
     let result = client
@@ -1307,12 +1215,10 @@ async fn test_fault_connection_reset() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_default_response_empty_stubs() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "defaultResponse": {
             "statusCode": 418,
@@ -1321,7 +1227,7 @@ async fn test_default_response_empty_stubs() {
         "stubs": []
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/anything"))
@@ -1342,12 +1248,10 @@ async fn test_default_response_empty_stubs() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_behavior_wait() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [],
@@ -1358,7 +1262,7 @@ async fn test_behavior_wait() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let start = std::time::Instant::now();
     let resp = client
@@ -1381,12 +1285,10 @@ async fn test_behavior_wait() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_behavior_repeat() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [],
@@ -1400,7 +1302,7 @@ async fn test_behavior_repeat() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // First 3 should return "repeated"
     for _ in 0..3 {
@@ -1431,12 +1333,10 @@ async fn test_behavior_repeat() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_admin_create_and_get_imposter() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "name": "Test Imposter",
         "stubs": [{
@@ -1445,7 +1345,7 @@ async fn test_admin_create_and_get_imposter() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // GET /imposters/:port
     let resp = client
@@ -1468,24 +1368,22 @@ async fn test_admin_create_and_get_imposter() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_admin_list_imposters() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create two imposters
     let config1 = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": []
     });
     let config2 = json!({
-        "port": imposter_port + 10,
         "protocol": "http",
         "stubs": []
     });
 
-    create_imposter(&client, admin_port, config1).await;
-    create_imposter(&client, admin_port, config2).await;
+    let first = create_imposter(&client, admin_port, config1).await;
+    let second = create_imposter(&client, admin_port, config2).await;
+    assert_ne!(first, second);
 
     // GET /imposters
     let resp = client
@@ -1507,17 +1405,15 @@ async fn test_admin_list_imposters() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_admin_delete_single_imposter() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": []
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // DELETE /imposters/:port
     let resp = client
@@ -1545,12 +1441,10 @@ async fn test_admin_delete_single_imposter() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_admin_delete_all_imposters() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": []
     });
@@ -1581,22 +1475,19 @@ async fn test_admin_delete_all_imposters() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_admin_put_overwrite_all_imposters() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create initial imposter
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "old"}}]}]
     });
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // PUT /imposters to overwrite all
     let new_config = json!({
         "imposters": [{
-            "port": imposter_port + 10,
             "protocol": "http",
             "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "new"}}]}]
         }]
@@ -1609,19 +1500,27 @@ async fn test_admin_put_overwrite_all_imposters() {
         .await
         .unwrap();
     assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await.unwrap();
 
-    // Old imposter should be gone
-    let resp = client
-        .get(format!(
-            "{ADMIN_URL}:{admin_port}/imposters/{imposter_port}"
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 404);
+    // Only the new imposter is left. It is auto-assigned, so it may reuse the old one's port;
+    // a single-entry list serving "new" proves the overwrite either way.
+    let imposters = body["imposters"]
+        .as_array()
+        .expect("Expected imposters array");
+    assert_eq!(imposters.len(), 1, "{body}");
+    let new_port = imposters[0]["port"].as_u64().expect("port") as u16;
+    if new_port != imposter_port {
+        let resp = client
+            .get(format!(
+                "{ADMIN_URL}:{admin_port}/imposters/{imposter_port}"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
 
     // New imposter should exist
-    let new_port = imposter_port + 10;
     let resp = client
         .get(format!("{ADMIN_URL}:{new_port}/anything"))
         .send()
@@ -1637,12 +1536,10 @@ async fn test_admin_put_overwrite_all_imposters() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_admin_recorded_requests() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "recordRequests": true,
         "stubs": [{
@@ -1651,7 +1548,7 @@ async fn test_admin_recorded_requests() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Make some requests
     client
@@ -1698,12 +1595,10 @@ async fn test_admin_recorded_requests() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_first_matching_stub_wins() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [
             {
@@ -1717,7 +1612,7 @@ async fn test_first_matching_stub_wins() {
         ]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // First matching stub should win
     let resp = client
@@ -1734,12 +1629,10 @@ async fn test_first_matching_stub_wins() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_catch_all_stub() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [
             {
@@ -1753,7 +1646,7 @@ async fn test_catch_all_stub() {
         ]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/specific"))
@@ -1780,12 +1673,10 @@ async fn test_catch_all_stub() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_form_urlencoded_matching() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{"equals": {"form": {"username": "admin"}}}],
@@ -1793,7 +1684,7 @@ async fn test_form_urlencoded_matching() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .post(format!("{ADMIN_URL}:{imposter_port}/login"))
@@ -1812,12 +1703,10 @@ async fn test_form_urlencoded_matching() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_deep_equals_form_exact_fields() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [
             {
@@ -1831,7 +1720,7 @@ async fn test_deep_equals_form_exact_fields() {
         ]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     // Exact match (only username)
     let resp = client
@@ -1868,12 +1757,10 @@ async fn test_deep_equals_form_exact_fields() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_jsonpath_selector() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{
@@ -1884,7 +1771,7 @@ async fn test_jsonpath_selector() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .post(format!("{ADMIN_URL}:{imposter_port}/check"))
@@ -1913,12 +1800,10 @@ async fn test_jsonpath_selector() {
 #[tokio::test]
 #[ignore = "requires running server"]
 async fn test_xpath_selector() {
-    let (admin_port, imposter_port) = get_test_ports();
-    let mut server = start_rift_server(admin_port).await;
+    let (mut server, admin_port) = start_rift_server().await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     let config = json!({
-        "port": imposter_port,
         "protocol": "http",
         "stubs": [{
             "predicates": [{
@@ -1929,7 +1814,7 @@ async fn test_xpath_selector() {
         }]
     });
 
-    create_imposter(&client, admin_port, config).await;
+    let imposter_port = create_imposter(&client, admin_port, config).await;
 
     let resp = client
         .post(format!("{ADMIN_URL}:{imposter_port}/check"))

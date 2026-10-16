@@ -7,7 +7,6 @@
 //! does. The upstream's journal counts the forwards.
 
 use std::collections::HashMap;
-use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
 use rift_http_proxy::admin_api::AdminApiServer;
@@ -18,12 +17,12 @@ use rift_mock_core::recording::{
 };
 use serde_json::{Value, json};
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+/// The port the engine assigned, from a 201 body.
+fn port_of(body: &Value) -> u16 {
+    body["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .expect("assigned port")
 }
 
 struct Admin {
@@ -46,7 +45,8 @@ impl Admin {
         }
     }
 
-    async fn create(&self, imposter: Value) {
+    /// Create an imposter without a port; return the port the engine assigned.
+    async fn create(&self, imposter: Value) -> u16 {
         let response = self
             .client
             .post(format!("{}/imposters", self.url))
@@ -55,6 +55,7 @@ impl Admin {
             .await
             .expect("POST");
         assert_eq!(response.status().as_u16(), 201, "{imposter}");
+        port_of(&response.json().await.expect("json"))
     }
 
     async fn imposter(&self, port: u16) -> Value {
@@ -83,21 +84,19 @@ impl Admin {
 
     /// A recording upstream answering `upstream_response`, and a proxy in front of it.
     async fn proxy(&self, mode: &str, generator: Value, upstream_response: Value) -> (u16, u16) {
-        let upstream = free_port();
-        self.create(
-            json!({"port": upstream, "protocol": "http", "recordRequests": true,
-            "stubs": [{"responses": [upstream_response]}]}),
-        )
-        .await;
-        let port = free_port();
-        self.create(
-            json!({"port": port, "protocol": "http", "stubs": [{"responses": [{"proxy": {
-                "to": format!("http://127.0.0.1:{upstream}"),
-                "mode": mode,
-                "predicateGenerators": [generator]
-            }}]}]}),
-        )
-        .await;
+        let upstream = self
+            .create(json!({"protocol": "http", "recordRequests": true,
+            "stubs": [{"responses": [upstream_response]}]}))
+            .await;
+        let port = self
+            .create(
+                json!({"protocol": "http", "stubs": [{"responses": [{"proxy": {
+                    "to": format!("http://127.0.0.1:{upstream}"),
+                    "mode": mode,
+                    "predicateGenerators": [generator]
+                }}]}]}),
+            )
+            .await;
         (port, upstream)
     }
 
@@ -406,15 +405,11 @@ async fn concurrent_misses_for_one_identity_record_it_exactly_once() {
 #[tokio::test]
 async fn a_failed_generation_forwards_every_request() {
     let admin = Admin::start(ImposterManager::new()).await;
-    let upstream = free_port();
-    admin
-        .create(
-            json!({"port": upstream, "protocol": "http", "recordRequests": true,
-            "stubs": [{"responses": [up()]}]}),
-        )
+    let upstream = admin
+        .create(json!({"protocol": "http", "recordRequests": true,
+            "stubs": [{"responses": [up()]}]}))
         .await;
-    let port = free_port();
-    let config = serde_json::from_value(json!({"port": port, "protocol": "http",
+    let config = serde_json::from_value(json!({"protocol": "http",
     "stubs": [{"responses": [{"proxy": {
         "to": format!("http://127.0.0.1:{upstream}"),
         "mode": "proxyOnce",
@@ -422,7 +417,7 @@ async fn a_failed_generation_forwards_every_request() {
             "function(config, logger, predicates) { throw new Error('boom'); }"}]
     }}]}]}))
     .expect("imposter config");
-    admin
+    let port = admin
         .manager
         .create_imposter(config)
         .await

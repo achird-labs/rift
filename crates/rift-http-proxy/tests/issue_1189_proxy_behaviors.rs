@@ -4,7 +4,6 @@
 //! recorded stub carries only `addWaitBehavior`/`addDecorateBehavior` (`newIsResponse`), never the
 //! proxy's own behaviors, so nothing is applied twice. Rift ran no behavior on a proxy response.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,12 +11,12 @@ use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+/// The port the engine assigned, from a 201 body.
+fn port_of(body: &Value) -> u16 {
+    body["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .expect("assigned port")
 }
 
 struct Admin {
@@ -74,13 +73,12 @@ impl Admin {
 
     /// An upstream that answers `up` and records what it receives.
     async fn upstream(&self, response: Value) -> u16 {
-        let port = free_port();
-        self.create(
-            json!({"port": port, "protocol": "http", "recordRequests": true,
-            "stubs": [{"responses": [response]}]}),
+        port_of(
+            &self
+                .create(json!({"protocol": "http", "recordRequests": true,
+                "stubs": [{"responses": [response]}]}))
+                .await,
         )
-        .await;
-        port
     }
 
     async fn get(&self, port: u16) -> reqwest::Response {
@@ -102,8 +100,8 @@ const APPEND_X: &str = "function (request, response) { response.body = response.
 const APPEND_Y: &str = "function (request, response) { response.body = response.body + '-Y'; }";
 const THROW: &str = "function (request, response) { throw new Error('boom'); }";
 
-fn proxy_imposter(port: u16, proxy: Value, behaviors: Value) -> Value {
-    json!({"port": port, "protocol": "http", "stubs": [{"responses": [
+fn proxy_imposter(proxy: Value, behaviors: Value) -> Value {
+    json!({"protocol": "http", "stubs": [{"responses": [
         {"proxy": proxy, "_behaviors": behaviors}
     ]}]})
 }
@@ -114,14 +112,13 @@ async fn decorate_rewrites_the_live_proxied_response() {
     let upstream = admin
         .upstream(json!({"is": {"headers": {"x-up": "1"}, "body": "up"}}))
         .await;
-    let port = free_port();
     let created = admin
         .create(proxy_imposter(
-            port,
             json!({"to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyTransparent"}),
             json!({"decorate": APPEND_X}),
         ))
         .await;
+    let port = port_of(&created);
     let response = admin.get(port).await;
     assert_eq!(response.status().as_u16(), 200);
     assert_eq!(response.headers()["x-up"], "1");
@@ -143,14 +140,14 @@ async fn decorate_rewrites_the_live_proxied_response() {
 async fn a_proxy_once_replay_is_decorated_exactly_once() {
     let admin = Admin::start().await;
     let upstream = admin.upstream(json!({"is": {"body": "up"}})).await;
-    let port = free_port();
-    admin
-        .create(proxy_imposter(
-            port,
-            json!({"to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyOnce"}),
-            json!({"decorate": APPEND_X}),
-        ))
-        .await;
+    let port = port_of(
+        &admin
+            .create(proxy_imposter(
+                json!({"to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyOnce"}),
+                json!({"decorate": APPEND_X}),
+            ))
+            .await,
+    );
     let first = admin.get(port).await.text().await.expect("body");
     let second = admin.get(port).await.text().await.expect("body");
     assert_eq!(first, "up-X");
@@ -169,18 +166,18 @@ async fn a_proxy_once_replay_is_decorated_exactly_once() {
 async fn the_recorded_stub_holds_the_decorated_body_and_only_add_decorate_behavior() {
     let admin = Admin::start().await;
     let upstream = admin.upstream(json!({"is": {"body": "up"}})).await;
-    let port = free_port();
-    admin
-        .create(proxy_imposter(
-            port,
-            json!({
-                "to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyOnce",
-                "predicateGenerators": [{"matches": {"path": true}}],
-                "addDecorateBehavior": APPEND_Y
-            }),
-            json!({"decorate": APPEND_X}),
-        ))
-        .await;
+    let port = port_of(
+        &admin
+            .create(proxy_imposter(
+                json!({
+                    "to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyOnce",
+                    "predicateGenerators": [{"matches": {"path": true}}],
+                    "addDecorateBehavior": APPEND_Y
+                }),
+                json!({"decorate": APPEND_X}),
+            ))
+            .await,
+    );
     assert_eq!(admin.get(port).await.text().await.expect("body"), "up-X");
 
     let stubs = admin.imposter(port).await["stubs"].clone();
@@ -205,18 +202,18 @@ async fn a_wait_delays_the_response_but_not_the_recorded_latency() {
     let upstream = admin
         .upstream(json!({"is": {"body": "up"}, "_behaviors": {"wait": 200}}))
         .await;
-    let port = free_port();
-    admin
-        .create(proxy_imposter(
-            port,
-            json!({
-                "to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyOnce",
-                "predicateGenerators": [{"matches": {"path": true}}],
-                "addWaitBehavior": true
-            }),
-            json!({"wait": 600}),
-        ))
-        .await;
+    let port = port_of(
+        &admin
+            .create(proxy_imposter(
+                json!({
+                    "to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyOnce",
+                    "predicateGenerators": [{"matches": {"path": true}}],
+                    "addWaitBehavior": true
+                }),
+                json!({"wait": 600}),
+            ))
+            .await,
+    );
     let start = Instant::now();
     assert_eq!(admin.get(port).await.text().await.expect("body"), "up");
     assert!(
@@ -242,9 +239,7 @@ async fn a_failed_behavior_records_nothing_lenient_or_strict() {
     let admin = Admin::start().await;
     for strict in [false, true] {
         let upstream = admin.upstream(json!({"is": {"body": "up"}})).await;
-        let port = free_port();
         let mut imposter = proxy_imposter(
-            port,
             json!({
                 "to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyOnce",
                 "predicateGenerators": [{"matches": {"path": true}}]
@@ -252,7 +247,7 @@ async fn a_failed_behavior_records_nothing_lenient_or_strict() {
             json!({"decorate": THROW}),
         );
         imposter["strictBehaviors"] = json!(strict);
-        admin.create(imposter).await;
+        let port = port_of(&admin.create(imposter).await);
 
         let first = admin.get(port).await;
         assert_eq!(
@@ -289,14 +284,14 @@ async fn a_failed_behavior_records_nothing_lenient_or_strict() {
 async fn a_failed_behavior_is_not_stored_for_a_proxy_once_replay() {
     let admin = Admin::start().await;
     let upstream = admin.upstream(json!({"is": {"body": "up"}})).await;
-    let port = free_port();
-    admin
-        .create(proxy_imposter(
-            port,
-            json!({"to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyOnce"}),
-            json!({"decorate": THROW}),
-        ))
-        .await;
+    let port = port_of(
+        &admin
+            .create(proxy_imposter(
+                json!({"to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyOnce"}),
+                json!({"decorate": THROW}),
+            ))
+            .await,
+    );
     admin.get(port).await;
     admin.get(port).await;
     assert_eq!(admin.upstream_hits(upstream).await, 2);
@@ -310,14 +305,14 @@ async fn a_binary_upstream_body_survives_the_pipeline_byte_for_byte() {
     let upstream = admin
         .upstream(json!({"is": {"body": "/wD+QQ==", "_mode": "binary"}}))
         .await;
-    let port = free_port();
-    admin
-        .create(proxy_imposter(
-            port,
-            json!({"to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyTransparent"}),
-            json!({"wait": 1}),
-        ))
-        .await;
+    let port = port_of(
+        &admin
+            .create(proxy_imposter(
+                json!({"to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyTransparent"}),
+                json!({"wait": 1}),
+            ))
+            .await,
+    );
     let response = admin.get(port).await;
     assert!(response.headers().get("x-rift-binary-error").is_none());
     let bytes = response.bytes().await.expect("body");
@@ -331,12 +326,11 @@ async fn a_proxy_response_without_behaviors_is_unchanged() {
     let upstream = admin
         .upstream(json!({"is": {"headers": {"x-up": "1"}, "body": "up"}}))
         .await;
-    let port = free_port();
-    admin
-        .create(json!({"port": port, "protocol": "http", "stubs": [{"responses": [
+    let port = port_of(&admin
+        .create(json!({"protocol": "http", "stubs": [{"responses": [
             {"proxy": {"to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyTransparent"}}
         ]}]}))
-        .await;
+        .await);
     let response = admin.get(port).await;
     assert_eq!(response.headers()["x-up"], "1");
     assert_eq!(response.headers()["content-length"], "2");
@@ -350,17 +344,16 @@ async fn a_proxy_response_without_behaviors_is_unchanged() {
 async fn a_repeat_only_block_leaves_the_proxied_response_untouched() {
     let admin = Admin::start().await;
     let upstream = admin.upstream(json!({"is": {"body": "up"}})).await;
-    let port = free_port();
-    admin
-        .create(
-            json!({"port": port, "protocol": "http", "stubs": [{"responses": [
+    let port = port_of(
+        &admin
+            .create(json!({"protocol": "http", "stubs": [{"responses": [
                 {"proxy": {
                     "to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyOnce",
                     "predicateGenerators": [{"matches": {"path": true}}]
                 }, "_behaviors": {"repeat": 2}}
-            ]}]}),
-        )
-        .await;
+            ]}]}))
+            .await,
+    );
     assert_eq!(admin.get(port).await.text().await.expect("body"), "up");
     let stubs = admin.imposter(port).await["stubs"].clone();
     let headers = stubs[0]["responses"][0]["is"]["headers"].clone();

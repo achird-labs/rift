@@ -13,13 +13,8 @@ use rift_http_proxy::admin_api::{ADMIN_ROUTES, AdminApiServer, RouteFamily, Runn
 use rift_http_proxy::imposter::ImposterManager;
 use rift_mock_core::extensions::authz::{AdminAuthorizer, AuthzDecision, AuthzRequest, actions};
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind an ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
+/// A port no test's manager holds an imposter on; nothing binds it.
+const ABSENT_PORT: u16 = 4999;
 
 async fn start(api_key: Option<&str>) -> (String, Arc<ImposterManager>, RunningAdminApi) {
     let manager = Arc::new(ImposterManager::new());
@@ -34,15 +29,16 @@ async fn start(api_key: Option<&str>) -> (String, Arc<ImposterManager>, RunningA
     (format!("http://{}", running.local_addr()), manager, running)
 }
 
-async fn create(manager: &ImposterManager, port: u16) {
+/// Create an imposter without a port; return the port the manager assigned.
+async fn create(manager: &ImposterManager) -> u16 {
     let config = serde_json::json!({
-        "port": port, "protocol": "http",
+        "protocol": "http",
         "stubs": [{ "responses": [{ "is": { "statusCode": 200, "body": "from the imposter" } }] }]
     });
     manager
         .create_imposter(serde_json::from_value(config).expect("config"))
         .await
-        .expect("create imposter");
+        .expect("create imposter")
 }
 
 fn header(response: &reqwest::Response, name: &str) -> Option<String> {
@@ -63,7 +59,7 @@ async fn options(client: &reqwest::Client, url: String) -> reqwest::Response {
 #[tokio::test]
 async fn head_imposters_is_the_get_without_its_body() {
     let (base, manager, admin) = start(None).await;
-    create(&manager, free_port()).await;
+    create(&manager).await;
     let client = reqwest::Client::new();
 
     let get = client
@@ -104,7 +100,7 @@ async fn head_imposters_is_the_get_without_its_body() {
 async fn head_of_an_absent_imposter_is_404() {
     let (base, _manager, admin) = start(None).await;
     let head = reqwest::Client::new()
-        .head(format!("{base}/imposters/{}", free_port()))
+        .head(format!("{base}/imposters/{ABSENT_PORT}"))
         .send()
         .await
         .expect("HEAD");
@@ -216,7 +212,7 @@ async fn a_preflight_gets_the_same_options_answer() {
 async fn a_non_numeric_imposter_id_is_an_absent_imposter() {
     let (base, _manager, admin) = start(None).await;
     let client = reqwest::Client::new();
-    let absent = free_port();
+    let absent = ABSENT_PORT;
 
     let numeric = client
         .get(format!("{base}/imposters/{absent}"))
@@ -264,7 +260,7 @@ async fn a_non_numeric_imposter_id_is_an_absent_imposter() {
 async fn every_per_imposter_route_treats_a_bad_id_as_an_absent_port() {
     let (base, _manager, admin) = start(None).await;
     let client = reqwest::Client::new();
-    let absent = free_port().to_string();
+    let absent = ABSENT_PORT.to_string();
     let body = |path: &str| -> &'static str {
         if path.ends_with("/spaces/{space}/stubs") {
             r#"{"responses":[{"is":{}}]}"#
@@ -431,8 +427,7 @@ async fn head_and_options_are_authorized_as_reads() {
 #[tokio::test]
 async fn head_on_an_event_stream_answers_without_streaming() {
     let (base, manager, admin) = start(None).await;
-    let port = free_port();
-    create(&manager, port).await;
+    let port = create(&manager).await;
     let client = reqwest::Client::new();
 
     for path in [
@@ -470,8 +465,7 @@ async fn head_on_an_event_stream_answers_without_streaming() {
     // The stream's refusal is HEAD's too.
     let absent = client
         .head(format!(
-            "{base}/imposters/{}/savedRequests/stream",
-            free_port()
+            "{base}/imposters/{ABSENT_PORT}/savedRequests/stream"
         ))
         .send()
         .await
@@ -485,8 +479,7 @@ async fn head_on_an_event_stream_answers_without_streaming() {
 #[tokio::test]
 async fn the_gateway_passes_head_and_options_to_the_imposter() {
     let (base, manager, admin) = start(None).await;
-    let port = free_port();
-    create(&manager, port).await;
+    let port = create(&manager).await;
     let response = options(
         &reqwest::Client::new(),
         format!("{base}/__rift/{port}/imposters"),
@@ -504,8 +497,7 @@ async fn the_gateway_passes_head_and_options_to_the_imposter() {
 #[tokio::test]
 async fn an_empty_imposter_id_is_the_unknown_route_404() {
     let (base, manager, admin) = start(None).await;
-    let port = free_port();
-    create(&manager, port).await;
+    let port = create(&manager).await;
     let client = reqwest::Client::new();
 
     for path in ["/imposters//", "/imposters//stubs"] {

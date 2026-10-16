@@ -1,20 +1,11 @@
 //! Issue #1365: a request without a body is recorded with `"body": ""`, as Mountebank records it,
 //! not with the key absent. Declarative `exists` on `body` keeps treating it as absent.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
-}
 
 async fn start() -> (reqwest::Client, String, Arc<ImposterManager>) {
     let manager = Arc::new(ImposterManager::new());
@@ -29,20 +20,24 @@ async fn start() -> (reqwest::Client, String, Arc<ImposterManager>) {
     )
 }
 
+/// The port the engine assigned to an imposter created without one.
+async fn assigned_port(created: reqwest::Response) -> u16 {
+    let body: Value = created.json().await.expect("json");
+    body["port"].as_u64().expect("assigned port") as u16
+}
+
 #[tokio::test]
 async fn a_bodyless_request_is_recorded_with_an_empty_string_body() {
     let (client, admin, manager) = start().await;
-    let port = free_port();
     let created = client
         .post(format!("{admin}/imposters"))
-        .json(
-            &json!({"port": port, "protocol": "http", "recordRequests": true,
-            "stubs": [{"responses": [{"is": {"statusCode": 200}}]}]}),
-        )
+        .json(&json!({"protocol": "http", "recordRequests": true,
+            "stubs": [{"responses": [{"is": {"statusCode": 200}}]}]}))
         .send()
         .await
         .expect("POST");
     assert_eq!(created.status().as_u16(), 201);
+    let port = assigned_port(created).await;
 
     let url = format!("http://127.0.0.1:{port}/r");
     client.get(&url).send().await.expect("GET");
@@ -78,10 +73,9 @@ async fn a_bodyless_request_is_recorded_with_an_empty_string_body() {
 #[tokio::test]
 async fn exists_on_body_still_treats_a_bodyless_request_as_absent() {
     let (client, admin, manager) = start().await;
-    let port = free_port();
     let created = client
         .post(format!("{admin}/imposters"))
-        .json(&json!({"port": port, "protocol": "http", "stubs": [
+        .json(&json!({"protocol": "http", "stubs": [
             {"predicates": [{"exists": {"body": true}}], "responses": [{"is": {"body": "has"}}]},
             {"predicates": [{"exists": {"body": false}}], "responses": [{"is": {"body": "none"}}]}
         ]}))
@@ -89,6 +83,7 @@ async fn exists_on_body_still_treats_a_bodyless_request_as_absent() {
         .await
         .expect("POST");
     assert_eq!(created.status().as_u16(), 201);
+    let port = assigned_port(created).await;
 
     let body = client
         .get(format!("http://127.0.0.1:{port}/e"))

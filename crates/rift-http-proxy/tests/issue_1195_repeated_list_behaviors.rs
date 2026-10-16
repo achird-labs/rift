@@ -2,20 +2,11 @@
 //! them all, in order. Rift folded the array key by key with the last element winning, so a
 //! Mountebank file with two `copy` elements served only the second.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::json;
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
-}
 
 async fn start_admin() -> (reqwest::Client, String) {
     let server = AdminApiServer::new(
@@ -33,11 +24,9 @@ async fn start_admin() -> (reqwest::Client, String) {
 #[tokio::test]
 async fn two_copy_elements_both_run_as_in_mountebank() {
     let (client, admin) = start_admin().await;
-    let port = free_port();
     let created = client
         .post(format!("{admin}/imposters"))
         .json(&json!({
-            "port": port,
             "protocol": "http",
             "stubs": [{ "responses": [{
                 "is": { "body": "A=${A} B=${B}" },
@@ -53,6 +42,8 @@ async fn two_copy_elements_both_run_as_in_mountebank() {
         .await
         .expect("POST /imposters");
     assert_eq!(created.status().as_u16(), 201);
+    let created: serde_json::Value = created.json().await.expect("json");
+    let port = created["port"].as_u64().expect("assigned port");
 
     let body = client
         .get(format!("http://127.0.0.1:{port}/copy"))

@@ -8,7 +8,6 @@
 
 mod support;
 
-use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,18 +15,18 @@ use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+/// The port the engine assigned, from a 201 body.
+fn port_of(body: &Value) -> u16 {
+    body["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .expect("assigned port")
 }
 
 /// One fixture per ignored key, each with the location the linter reports it at.
-fn fixtures(port: u16) -> Vec<(&'static str, Value)> {
+fn fixtures() -> Vec<(&'static str, Value)> {
     let base = |extra: Value| {
-        let mut imposter = json!({"port": port, "protocol": "http", "stubs": [
+        let mut imposter = json!({"protocol": "http", "stubs": [
             {"responses": [{"is": {"statusCode": 200}}]}
         ]});
         for (k, v) in extra.as_object().expect("object") {
@@ -126,8 +125,7 @@ fn ignored_warnings(body: &Value) -> Vec<Value> {
 #[tokio::test]
 async fn the_engine_and_the_linter_report_the_same_ignored_keys() {
     let (client, admin, manager) = start_admin().await;
-    for (location, imposter) in fixtures(free_port()) {
-        let port = imposter["port"].as_u64().expect("port");
+    for (location, imposter) in fixtures() {
         let created = client
             .post(format!("{admin}/imposters"))
             .json(&imposter)
@@ -136,6 +134,7 @@ async fn the_engine_and_the_linter_report_the_same_ignored_keys() {
             .expect("POST");
         assert_eq!(created.status().as_u16(), 201, "{location}");
         let created: Value = created.json().await.expect("json");
+        let port = port_of(&created);
         let from_create = ignored_warnings(&created);
         assert_eq!(from_create.len(), 1, "{location}: {created}");
         let message = from_create[0]["message"].as_str().expect("message");
@@ -160,7 +159,7 @@ async fn the_engine_and_the_linter_report_the_same_ignored_keys() {
             .await
             .expect("json");
         assert_eq!(ignored_warnings(&fetched), from_create, "{location}");
-        let _ = manager.delete_imposter(port as u16).await;
+        let _ = manager.delete_imposter(port).await;
 
         let lint = rift_lint::lint_json(
             &imposter.to_string(),
@@ -176,21 +175,18 @@ async fn the_engine_and_the_linter_report_the_same_ignored_keys() {
 #[tokio::test]
 async fn an_imposter_with_no_ignored_key_gets_no_such_warning() {
     let (client, admin, manager) = start_admin().await;
-    let port = free_port();
     let created: Value = client
         .post(format!("{admin}/imposters"))
-        .json(
-            &json!({"port": port, "protocol": "http", "recordMatches": false,
-            "stubs": [
-                {"responses": [{"is": {"statusCode": 200}}]},
-                // Behaviors run on an `is` response (and on the flat form), so they are not ignored.
-                {"responses": [{"is": {"statusCode": 200}, "_behaviors": {"wait": 1}}]},
-                {"responses": [{"statusCode": 200, "behaviors": [{"wait": 1}]}]},
-                // An empty or null block on a proxy is nothing to report.
-                {"responses": [{"proxy": {"to": "http://127.0.0.1:1"}, "_behaviors": {}}]},
-                {"responses": [{"proxy": {"to": "http://127.0.0.1:1"}, "_behaviors": null}]}
-            ]}),
-        )
+        .json(&json!({"protocol": "http", "recordMatches": false,
+        "stubs": [
+            {"responses": [{"is": {"statusCode": 200}}]},
+            // Behaviors run on an `is` response (and on the flat form), so they are not ignored.
+            {"responses": [{"is": {"statusCode": 200}, "_behaviors": {"wait": 1}}]},
+            {"responses": [{"statusCode": 200, "behaviors": [{"wait": 1}]}]},
+            // An empty or null block on a proxy is nothing to report.
+            {"responses": [{"proxy": {"to": "http://127.0.0.1:1"}, "_behaviors": {}}]},
+            {"responses": [{"proxy": {"to": "http://127.0.0.1:1"}, "_behaviors": null}]}
+        ]}))
         .send()
         .await
         .expect("POST")
@@ -198,7 +194,7 @@ async fn an_imposter_with_no_ignored_key_gets_no_such_warning() {
         .await
         .expect("json");
     assert!(ignored_warnings(&created).is_empty(), "{created}");
-    let _ = manager.delete_imposter(port).await;
+    let _ = manager.delete_imposter(port_of(&created)).await;
 }
 
 /// A generated imposter can put `_rift` on every response; the report stays one entry per shape,
@@ -206,13 +202,12 @@ async fn an_imposter_with_no_ignored_key_gets_no_such_warning() {
 #[tokio::test]
 async fn many_ignored_blocks_collapse_into_one_warning_per_shape() {
     let (client, admin, manager) = start_admin().await;
-    let port = free_port();
     let stubs: Vec<Value> = (0..150)
         .map(|_| json!({"responses": [{"proxy": {"to": "http://127.0.0.1:1"}, "_rift": {}}]}))
         .collect();
     let created: Value = client
         .post(format!("{admin}/imposters"))
-        .json(&json!({"port": port, "protocol": "http", "stubs": stubs}))
+        .json(&json!({"protocol": "http", "stubs": stubs}))
         .send()
         .await
         .expect("POST")
@@ -223,7 +218,7 @@ async fn many_ignored_blocks_collapse_into_one_warning_per_shape() {
     assert_eq!(ignored.len(), 1, "{created}");
     let message = ignored[0]["message"].as_str().expect("message");
     assert!(message.contains("and 140 more"), "{message}");
-    let _ = manager.delete_imposter(port).await;
+    let _ = manager.delete_imposter(port_of(&created)).await;
 }
 
 /// The doors that never see an API response — `--configfile` here — still get a log line, from
@@ -232,20 +227,19 @@ async fn many_ignored_blocks_collapse_into_one_warning_per_shape() {
 fn the_binary_logs_ignored_keys_and_flags() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = dir.path().join("imposters.json");
-    let imposter_port = free_port();
     std::fs::write(
         &config,
-        json!({"imposters": [{"port": imposter_port, "protocol": "http",
+        json!({"imposters": [{"protocol": "http",
             "_rift": {"metrics": {"enabled": true}}, "stubs": []}]})
         .to_string(),
     )
     .expect("write");
     let log = dir.path().join("rift.log");
-    let admin_port = free_port();
+    // Only the log is read, so neither the admin nor the imposter port needs to be known.
     let mut child = std::process::Command::new(support::server_bin())
         .args([
             "--port",
-            &admin_port.to_string(),
+            "0",
             "--host",
             "127.0.0.1",
             "--metrics-port",
@@ -287,14 +281,13 @@ fn the_binary_logs_ignored_keys_and_flags() {
 #[tokio::test]
 async fn many_ignored_behaviors_collapse_into_one_warning_per_shape() {
     let (client, admin, manager) = start_admin().await;
-    let port = free_port();
     let mut stubs: Vec<Value> = vec![json!({"responses": [{"is": {"statusCode": 200}}]})];
     stubs.extend((0..12).map(
         |_| json!({"responses": [{"fault": "CONNECTION_RESET_BY_PEER", "_behaviors": {"wait": 1}}]}),
     ));
     let created: Value = client
         .post(format!("{admin}/imposters"))
-        .json(&json!({"port": port, "protocol": "http", "stubs": stubs}))
+        .json(&json!({"protocol": "http", "stubs": stubs}))
         .send()
         .await
         .expect("POST")
@@ -309,48 +302,48 @@ async fn many_ignored_behaviors_collapse_into_one_warning_per_shape() {
         "A behaviors block on a `fault` response has no effect except `repeat`: the rest do not \
          apply to a fault, as in Mountebank (stubs 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 2 more)"
     );
-    let _ = manager.delete_imposter(port).await;
+    let _ = manager.delete_imposter(port_of(&created)).await;
 }
 
 /// Issue #1181: a scripted behavior on a proxy response is a script surface. Written before Rift ran
 /// it (#1189), so the gate was closed on the day it started to.
 #[tokio::test]
 async fn a_scripted_behavior_on_a_proxy_response_needs_allow_injection() {
-    let imposter = |port: u16, behaviors: Value| {
-        json!({"port": port, "protocol": "http", "stubs": [{"responses": [{
+    let imposter = |behaviors: Value| {
+        json!({"protocol": "http", "stubs": [{"responses": [{
             "proxy": {"to": "http://127.0.0.1:1"}, "_behaviors": behaviors
         }]}]})
     };
     let decorate = json!({"decorate": "function (request, response) { response.body = 'x'; }"});
 
     let (client, admin, manager) = start_admin_with(false).await;
-    let port = free_port();
     let refused = client
         .post(format!("{admin}/imposters"))
-        .json(&imposter(port, decorate.clone()))
+        .json(&imposter(decorate.clone()))
         .send()
         .await
         .expect("POST");
     assert_eq!(refused.status().as_u16(), 400);
     let plain = client
         .post(format!("{admin}/imposters"))
-        .json(&imposter(port, json!({"wait": 500})))
+        .json(&imposter(json!({"wait": 500})))
         .send()
         .await
         .expect("POST");
     assert_eq!(plain.status().as_u16(), 201);
-    let _ = manager.delete_imposter(port).await;
+    let plain: Value = plain.json().await.expect("json");
+    let _ = manager.delete_imposter(port_of(&plain)).await;
 
     let (client, admin, manager) = start_admin_with(true).await;
-    let port = free_port();
     let admitted = client
         .post(format!("{admin}/imposters"))
-        .json(&imposter(port, decorate))
+        .json(&imposter(decorate))
         .send()
         .await
         .expect("POST");
     assert_eq!(admitted.status().as_u16(), 201);
-    let _ = manager.delete_imposter(port).await;
+    let admitted: Value = admitted.json().await.expect("json");
+    let _ = manager.delete_imposter(port_of(&admitted)).await;
 }
 
 /// Issue #1181: each shape says what is true of it — Mountebank ignores behaviors on `fault`, and
@@ -359,7 +352,6 @@ async fn a_scripted_behavior_on_a_proxy_response_needs_allow_injection() {
 #[tokio::test]
 async fn each_ignored_behaviors_shape_has_its_own_message() {
     let (client, admin, manager) = start_admin().await;
-    let port = free_port();
     let with = |response: Value| {
         let mut response = response;
         response["_behaviors"] = json!({"wait": 1});
@@ -375,7 +367,7 @@ async fn each_ignored_behaviors_shape_has_its_own_message() {
     ];
     let created: Value = client
         .post(format!("{admin}/imposters"))
-        .json(&json!({"port": port, "protocol": "http", "stubs": stubs}))
+        .json(&json!({"protocol": "http", "stubs": stubs}))
         .send()
         .await
         .expect("POST")
@@ -399,5 +391,5 @@ async fn each_ignored_behaviors_shape_has_its_own_message() {
             ),
         ]
     );
-    let _ = manager.delete_imposter(port).await;
+    let _ = manager.delete_imposter(port_of(&created)).await;
 }

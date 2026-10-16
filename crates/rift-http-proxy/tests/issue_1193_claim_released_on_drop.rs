@@ -3,21 +3,12 @@
 //! handler future mid-await — left it held for the life of the imposter: every later identical
 //! request was answered `InFlight`, proxied upstream, and never recorded.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
-}
 
 struct Admin {
     client: reqwest::Client,
@@ -40,7 +31,8 @@ impl Admin {
         }
     }
 
-    async fn create(&self, imposter: Value) {
+    /// Create an imposter without a port; return the port the engine assigned.
+    async fn create(&self, imposter: Value) -> u16 {
         let response = self
             .client
             .post(format!("{}/imposters", self.url))
@@ -49,6 +41,11 @@ impl Admin {
             .await
             .expect("POST");
         assert_eq!(response.status().as_u16(), 201, "{imposter}");
+        let body: Value = response.json().await.expect("json");
+        body["port"]
+            .as_u64()
+            .and_then(|p| u16::try_from(p).ok())
+            .expect("assigned port")
     }
 
     async fn upstream_hits(&self, port: u16) -> usize {
@@ -69,22 +66,18 @@ impl Admin {
 /// ordinary requests must see a normal `proxyOnce`: the first records, the rest replay.
 async fn after_an_abandoned_request(upstream_response: Value, proxy_behaviors: Option<Value>) {
     let admin = Admin::start().await;
-    let upstream = free_port();
-    admin
-        .create(
-            json!({"port": upstream, "protocol": "http", "recordRequests": true,
-            "stubs": [{"responses": [upstream_response]}]}),
-        )
+    let upstream = admin
+        .create(json!({"protocol": "http", "recordRequests": true,
+            "stubs": [{"responses": [upstream_response]}]}))
         .await;
-    let port = free_port();
     let mut response = json!({"proxy": {
         "to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyOnce"
     }});
     if let Some(behaviors) = proxy_behaviors {
         response["_behaviors"] = behaviors;
     }
-    admin
-        .create(json!({"port": port, "protocol": "http", "stubs": [{"responses": [response]}]}))
+    let port = admin
+        .create(json!({"protocol": "http", "stubs": [{"responses": [response]}]}))
         .await;
 
     let impatient = reqwest::Client::builder()

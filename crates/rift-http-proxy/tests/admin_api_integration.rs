@@ -3,14 +3,6 @@
 
 use rift_http_proxy::imposter::ImposterManager;
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind an ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
-
 async fn text(c: &reqwest::Client, url: String) -> String {
     c.get(url)
         .send()
@@ -35,13 +27,13 @@ async fn get(c: &reqwest::Client, port: u16, path: &str, space: Option<&str>) ->
     req.send().await.expect("send")
 }
 
-fn order_fsm(port: u16, flow_id_source: Option<&str>) -> serde_json::Value {
+fn order_fsm(flow_id_source: Option<&str>) -> serde_json::Value {
     let mut flow_state = serde_json::json!({ "ttlSeconds": 300 });
     if let Some(src) = flow_id_source {
         flow_state["flowIdSource"] = serde_json::json!(src);
     }
     serde_json::json!({
-        "port": port, "protocol": "http",
+        "protocol": "http",
         "_rift": { "flowState": flow_state },
         "stubs": [
             { "scenarioName": "order", "requiredScenarioState": "Started",
@@ -57,9 +49,9 @@ fn order_fsm(port: u16, flow_id_source: Option<&str>) -> serde_json::Value {
     })
 }
 
-fn correlated_config(port: u16, stubs: serde_json::Value) -> serde_json::Value {
+fn correlated_config(stubs: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
-        "port": port, "protocol": "http", "recordRequests": true,
+        "protocol": "http", "recordRequests": true,
         "_rift": { "flowState": { "ttlSeconds": 300,
             "flowIdSource": "header:X-Mock-Space" } },
         "stubs": stubs
@@ -68,10 +60,9 @@ fn correlated_config(port: u16, stubs: serde_json::Value) -> serde_json::Value {
 
 #[tokio::test]
 async fn scenario_admin_endpoints_arrange_inspect_reset() {
-    let port = free_port();
     let manager = std::sync::Arc::new(ImposterManager::new());
-    let config = serde_json::from_value(order_fsm(port, None)).unwrap();
-    manager.create_imposter(config).await.expect("create");
+    let config = serde_json::from_value(order_fsm(None)).unwrap();
+    let port = manager.create_imposter(config).await.expect("create");
 
     let server = rift_http_proxy::admin_api::AdminApiServer::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -139,10 +130,9 @@ async fn scenario_admin_endpoints_arrange_inspect_reset() {
 // Issue #530: DELETE /admin/imposters/:port/flow-state/:flow_id clears every key in the flow.
 #[tokio::test]
 async fn delete_flow_state_clears_whole_flow() {
-    let imposter_port = free_port();
     let manager = std::sync::Arc::new(ImposterManager::new());
-    let config = serde_json::from_value(order_fsm(imposter_port, None)).unwrap();
-    manager.create_imposter(config).await.expect("create");
+    let config = serde_json::from_value(order_fsm(None)).unwrap();
+    let imposter_port = manager.create_imposter(config).await.expect("create");
 
     let server = rift_http_proxy::admin_api::AdminApiServer::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -242,7 +232,6 @@ async fn create_imposter_with_a_leftover_backend_key_is_accepted() {
 // Issue #530: creating an imposter with flowState.ttlSeconds < 1 is rejected with 400.
 #[tokio::test]
 async fn create_imposter_rejects_non_positive_ttl_seconds() {
-    let imposter_port = free_port();
     let manager = std::sync::Arc::new(ImposterManager::new());
     let server = rift_http_proxy::admin_api::AdminApiServer::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -257,7 +246,7 @@ async fn create_imposter_rejects_non_positive_ttl_seconds() {
         .header("content-type", "application/json")
         .body(
             serde_json::json!({
-                "port": imposter_port, "protocol": "http", "stubs": [],
+                "protocol": "http", "stubs": [],
                 "_rift": { "flowState": { "ttlSeconds": 0 } }
             })
             .to_string(),
@@ -272,7 +261,6 @@ async fn create_imposter_rejects_non_positive_ttl_seconds() {
 // Issue #1304: `PUT /imposters` carries the apply report beside `imposters` on success.
 #[tokio::test]
 async fn put_imposters_success_carries_the_apply_report() {
-    let imposter_port = free_port();
     let manager = std::sync::Arc::new(ImposterManager::new());
     let server = rift_http_proxy::admin_api::AdminApiServer::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -284,15 +272,16 @@ async fn put_imposters_success_carries_the_apply_report() {
     let r = reqwest::Client::new()
         .put(format!("{admin}/imposters"))
         .header("content-type", "application/json")
-        .body(format!(
-            r#"{{"imposters":[{{"port":{imposter_port},"protocol":"http","stubs":[]}}]}}"#
-        ))
+        .body(r#"{"imposters":[{"protocol":"http","stubs":[]}]}"#)
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
     let body: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(body["imposters"][0]["port"], imposter_port, "{body}");
+    let imposter_port = body["imposters"][0]["port"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the assigned port: {body}"));
+    assert_ne!(imposter_port, 0, "{body}");
     assert_eq!(
         body["created"],
         serde_json::json!([imposter_port]),
@@ -337,10 +326,9 @@ async fn oversized_admin_body_is_rejected_with_413() {
 
 #[tokio::test]
 async fn scenario_admin_reset_is_per_flow_with_explicit_flow_id() {
-    let port = free_port();
     let manager = std::sync::Arc::new(ImposterManager::new());
-    let config = serde_json::from_value(order_fsm(port, Some("header:X-Mock-Space"))).unwrap();
-    manager.create_imposter(config).await.expect("create");
+    let config = serde_json::from_value(order_fsm(Some("header:X-Mock-Space"))).unwrap();
+    let port = manager.create_imposter(config).await.expect("create");
 
     let server = rift_http_proxy::admin_api::AdminApiServer::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -395,19 +383,15 @@ async fn scenario_admin_reset_is_per_flow_with_explicit_flow_id() {
 
 #[tokio::test]
 async fn space_teardown_is_isolated() {
-    let port = free_port();
     let manager = std::sync::Arc::new(ImposterManager::new());
-    let config = serde_json::from_value(correlated_config(
-        port,
-        serde_json::json!([
-            { "space": "alpha", "predicates": [{ "equals": { "path": "/data" } }],
-              "responses": [{ "is": { "statusCode": 200, "body": "ALPHA" } }] },
-            { "space": "beta", "predicates": [{ "equals": { "path": "/data" } }],
-              "responses": [{ "is": { "statusCode": 200, "body": "BETA" } }] }
-        ]),
-    ))
+    let config = serde_json::from_value(correlated_config(serde_json::json!([
+        { "space": "alpha", "predicates": [{ "equals": { "path": "/data" } }],
+          "responses": [{ "is": { "statusCode": 200, "body": "ALPHA" } }] },
+        { "space": "beta", "predicates": [{ "equals": { "path": "/data" } }],
+          "responses": [{ "is": { "statusCode": 200, "body": "BETA" } }] }
+    ])))
     .unwrap();
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
 
     let server = rift_http_proxy::admin_api::AdminApiServer::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -478,7 +462,6 @@ async fn space_teardown_is_isolated() {
 
 #[tokio::test]
 async fn space_teardown_resets_scenario_state_and_leaves_others() {
-    let port = free_port();
     let manager = std::sync::Arc::new(ImposterManager::new());
     // Two spaces each running the "order" FSM, declared only on their own scoped stubs.
     let fsm = |space: &str| {
@@ -489,12 +472,12 @@ async fn space_teardown_resets_scenario_state_and_leaves_others() {
             "responses": [{ "is": { "statusCode": 200, "body": "ok" } }]
         })
     };
-    let config = serde_json::from_value(correlated_config(
-        port,
-        serde_json::json!([fsm("alpha"), fsm("beta")]),
-    ))
+    let config = serde_json::from_value(correlated_config(serde_json::json!([
+        fsm("alpha"),
+        fsm("beta")
+    ])))
     .unwrap();
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
 
     let server = rift_http_proxy::admin_api::AdminApiServer::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -550,11 +533,9 @@ async fn space_teardown_resets_scenario_state_and_leaves_others() {
 /// re-reading a stub that was never at fault.
 #[tokio::test]
 async fn a_space_stub_body_that_is_not_a_stub_is_refused() {
-    let imposter_port = free_port();
     let manager = std::sync::Arc::new(ImposterManager::new());
-    let config =
-        serde_json::from_value(correlated_config(imposter_port, serde_json::json!([]))).unwrap();
-    manager.create_imposter(config).await.expect("create");
+    let config = serde_json::from_value(correlated_config(serde_json::json!([]))).unwrap();
+    let imposter_port = manager.create_imposter(config).await.expect("create");
 
     let server = rift_http_proxy::admin_api::AdminApiServer::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -632,10 +613,9 @@ async fn a_space_stub_body_that_is_not_a_stub_is_refused() {
 
 #[tokio::test]
 async fn space_stub_registration_and_inspection_endpoints() {
-    let port = free_port();
     let manager = std::sync::Arc::new(ImposterManager::new());
-    let config = serde_json::from_value(correlated_config(port, serde_json::json!([]))).unwrap();
-    manager.create_imposter(config).await.expect("create");
+    let config = serde_json::from_value(correlated_config(serde_json::json!([]))).unwrap();
+    let port = manager.create_imposter(config).await.expect("create");
 
     let server = rift_http_proxy::admin_api::AdminApiServer::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -694,13 +674,12 @@ async fn space_stub_registration_and_inspection_endpoints() {
 // Issue #202: id-addressed stub operations over the admin HTTP API.
 #[tokio::test]
 async fn stub_by_id_admin_endpoints() {
-    let imposter_port = free_port();
     let manager = std::sync::Arc::new(ImposterManager::new());
     let config = serde_json::from_value(serde_json::json!({
-        "port": imposter_port, "protocol": "http", "stubs": []
+        "protocol": "http", "stubs": []
     }))
     .unwrap();
-    manager.create_imposter(config).await.expect("create");
+    let imposter_port = manager.create_imposter(config).await.expect("create");
 
     let server = rift_http_proxy::admin_api::AdminApiServer::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -962,9 +941,9 @@ mod https {
         (c.cert.pem(), c.signing_key.serialize_pem())
     }
 
-    fn stub_config(port: u16, protocol: &str, cert: Option<(&str, &str)>) -> serde_json::Value {
+    fn stub_config(protocol: &str, cert: Option<(&str, &str)>) -> serde_json::Value {
         let mut cfg = serde_json::json!({
-            "port": port, "protocol": protocol,
+            "protocol": protocol,
             "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "secure-ok"}}]}]
         });
         if let Some((cert, key)) = cert {
@@ -982,20 +961,20 @@ mod https {
             .unwrap()
     }
 
-    async fn serve(manager: &Arc<ImposterManager>, cfg: serde_json::Value) {
-        manager
+    async fn serve(manager: &Arc<ImposterManager>, cfg: serde_json::Value) -> u16 {
+        let port = manager
             .create_imposter(serde_json::from_value(cfg).unwrap())
             .await
             .expect("create imposter");
         tokio::time::sleep(Duration::from_millis(200)).await;
+        port
     }
 
     #[tokio::test]
     async fn https_imposter_with_inline_cert_serves_tls() {
-        let port = free_port();
         let (cert, key) = gen_cert();
         let manager = Arc::new(ImposterManager::new());
-        serve(&manager, stub_config(port, "https", Some((&cert, &key)))).await;
+        let port = serve(&manager, stub_config("https", Some((&cert, &key)))).await;
 
         let body = tls_client()
             .get(format!("https://127.0.0.1:{port}/x"))
@@ -1011,9 +990,8 @@ mod https {
 
     #[tokio::test]
     async fn http_imposter_unchanged() {
-        let port = free_port();
         let manager = Arc::new(ImposterManager::new());
-        serve(&manager, stub_config(port, "http", None)).await;
+        let port = serve(&manager, stub_config("http", None)).await;
         let body = reqwest::get(format!("http://127.0.0.1:{port}/x"))
             .await
             .unwrap()
@@ -1026,10 +1004,9 @@ mod https {
 
     #[tokio::test]
     async fn https_zero_config_uses_self_signed() {
-        let port = free_port();
         // No cert/key, default manager (self-signed enabled) → still serves over TLS.
         let manager = Arc::new(ImposterManager::new());
-        serve(&manager, stub_config(port, "https", None)).await;
+        let port = serve(&manager, stub_config("https", None)).await;
         let body = tls_client()
             .get(format!("https://127.0.0.1:{port}/x"))
             .send()
@@ -1044,7 +1021,6 @@ mod https {
 
     #[tokio::test]
     async fn https_uses_server_default_cert() {
-        let port = free_port();
         // Self-signed DISABLED + a server default cert → the default must be used (proves the
         // default path, not the self-signed fallback).
         let (cert, key) = gen_cert();
@@ -1053,7 +1029,7 @@ mod https {
             default_key: Some(key),
             allow_self_signed: false,
         }));
-        serve(&manager, stub_config(port, "https", None)).await;
+        let port = serve(&manager, stub_config("https", None)).await;
         let body = tls_client()
             .get(format!("https://127.0.0.1:{port}/x"))
             .send()
@@ -1068,14 +1044,13 @@ mod https {
 
     #[tokio::test]
     async fn https_no_cert_and_self_signed_disabled_errors() {
-        let port = free_port();
         let manager = Arc::new(ImposterManager::new().with_tls_defaults(TlsDefaults {
             default_cert: None,
             default_key: None,
             allow_self_signed: false,
         }));
         let result = manager
-            .create_imposter(serde_json::from_value(stub_config(port, "https", None)).unwrap())
+            .create_imposter(serde_json::from_value(stub_config("https", None)).unwrap())
             .await;
         assert!(
             matches!(
@@ -1088,12 +1063,10 @@ mod https {
 
     #[tokio::test]
     async fn https_invalid_cert_errors_not_panics() {
-        let port = free_port();
         let manager = Arc::new(ImposterManager::new());
         let result = manager
             .create_imposter(
                 serde_json::from_value(stub_config(
-                    port,
                     "https",
                     Some((
                         "-----BEGIN CERTIFICATE-----\nnonsense\n-----END CERTIFICATE-----",
@@ -1114,10 +1087,9 @@ mod https {
 
     #[tokio::test]
     async fn https_cert_without_key_errors() {
-        let port = free_port();
         let (cert, _key) = gen_cert();
         let manager = Arc::new(ImposterManager::new());
-        let mut cfg = stub_config(port, "https", None);
+        let mut cfg = stub_config("https", None);
         cfg["cert"] = serde_json::json!(cert); // cert present, key absent
         let result = manager
             .create_imposter(serde_json::from_value(cfg).unwrap())
@@ -1133,7 +1105,6 @@ mod https {
 
     #[tokio::test]
     async fn https_partial_server_default_errors() {
-        let port = free_port();
         // Only a default cert (operator forgot --default-tls-key) must error, NOT silently
         // downgrade to self-signed.
         let (cert, _key) = gen_cert();
@@ -1143,7 +1114,7 @@ mod https {
             allow_self_signed: true,
         }));
         let result = manager
-            .create_imposter(serde_json::from_value(stub_config(port, "https", None)).unwrap())
+            .create_imposter(serde_json::from_value(stub_config("https", None)).unwrap())
             .await;
         assert!(
             matches!(
@@ -1156,7 +1127,6 @@ mod https {
 
     #[tokio::test]
     async fn https_mismatched_valid_pair_never_serves_cleartext() {
-        let imposter_port = free_port();
         // cert from one keypair, key from another — both individually valid. rustls does not
         // cross-validate at build time, so this may bind; the TLS handshake must then fail and the
         // client must NEVER receive a normal response. Either outcome (creation error OR handshake
@@ -1164,7 +1134,7 @@ mod https {
         let (cert_a, _key_a) = gen_cert();
         let (_cert_b, key_b) = gen_cert();
         let manager = Arc::new(ImposterManager::new());
-        let mut cfg = stub_config(imposter_port, "https", None);
+        let mut cfg = stub_config("https", None);
         cfg["cert"] = serde_json::json!(cert_a);
         cfg["key"] = serde_json::json!(key_b);
 
@@ -1196,22 +1166,22 @@ mod tcp_faults {
     use std::sync::Arc;
     use std::time::Duration;
 
-    async fn fault_imposter(port: u16, kind: &str) -> Arc<ImposterManager> {
+    async fn fault_imposter(kind: &str) -> (Arc<ImposterManager>, u16) {
         let manager = Arc::new(ImposterManager::new());
         let config = serde_json::from_value(serde_json::json!({
-            "port": port, "protocol": "http",
+            "protocol": "http",
             "stubs": [{"responses": [{
                 "is": {"statusCode": 200, "body": "should-never-be-seen"},
                 "_rift": {"fault": {"tcp": kind}}
             }]}]
         }))
         .unwrap();
-        manager
+        let port = manager
             .create_imposter(config)
             .await
             .expect("create imposter");
         tokio::time::sleep(Duration::from_millis(200)).await;
-        manager
+        (manager, port)
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -1246,8 +1216,7 @@ mod tcp_faults {
 
     #[tokio::test]
     async fn tcp_fault_reset_is_real() {
-        let port = free_port();
-        let manager = fault_imposter(port, "CONNECTION_RESET_BY_PEER").await;
+        let (manager, port) = fault_imposter("CONNECTION_RESET_BY_PEER").await;
         assert_eq!(
             observe(port).await,
             Observed::SendFailed,
@@ -1258,8 +1227,7 @@ mod tcp_faults {
 
     #[tokio::test]
     async fn tcp_fault_empty_response_is_real() {
-        let port = free_port();
-        let manager = fault_imposter(port, "EMPTY_RESPONSE").await;
+        let (manager, port) = fault_imposter("EMPTY_RESPONSE").await;
         assert_eq!(
             observe(port).await,
             Observed::SendFailed,
@@ -1270,8 +1238,7 @@ mod tcp_faults {
 
     #[tokio::test]
     async fn tcp_fault_malformed_chunk_is_real() {
-        let port = free_port();
-        let manager = fault_imposter(port, "MALFORMED_RESPONSE_CHUNK").await;
+        let (manager, port) = fault_imposter("MALFORMED_RESPONSE_CHUNK").await;
         // Distinct signal: the real status line parses (send succeeds) but the malformed chunked
         // body fails to decode — proves this kind is not collapsed into reset/empty.
         assert_eq!(
@@ -1284,8 +1251,7 @@ mod tcp_faults {
 
     #[tokio::test]
     async fn tcp_fault_random_data_is_real() {
-        let port = free_port();
-        let manager = fault_imposter(port, "RANDOM_DATA_THEN_CLOSE").await;
+        let (manager, port) = fault_imposter("RANDOM_DATA_THEN_CLOSE").await;
         assert_eq!(
             observe(port).await,
             Observed::SendFailed,
@@ -1302,14 +1268,14 @@ mod non_ascii_request_headers {
     use std::sync::Arc;
     use std::time::Duration;
 
-    async fn serve(config: serde_json::Value) -> Arc<ImposterManager> {
+    async fn serve(config: serde_json::Value) -> (Arc<ImposterManager>, u16) {
         let manager = Arc::new(ImposterManager::new());
-        manager
+        let port = manager
             .create_imposter(serde_json::from_value(config).unwrap())
             .await
             .expect("create imposter");
         tokio::time::sleep(Duration::from_millis(200)).await;
-        manager
+        (manager, port)
     }
 
     // The collector is the one decode site every request-side consumer reads, so the unit test
@@ -1319,9 +1285,8 @@ mod non_ascii_request_headers {
     // while the server logged that a valid UTF-8 value was "non-UTF-8".
     #[tokio::test]
     async fn a_non_ascii_utf8_header_matches_a_predicate_and_is_recorded_byte_exact() {
-        let imposter_port = free_port();
-        let manager = serve(serde_json::json!({
-            "port": imposter_port, "protocol": "http", "recordRequests": true,
+        let (manager, imposter_port) = serve(serde_json::json!({
+            "protocol": "http", "recordRequests": true,
             "stubs": [{
                 "predicates": [{"equals": {"headers": {"X-User-Name": "José"}}}],
                 "responses": [{"is": {"statusCode": 200, "body": "matched"}}]
@@ -1380,23 +1345,21 @@ mod non_ascii_request_headers {
     // second, recording imposter, so its own journal is the evidence of what actually arrived.
     #[tokio::test]
     async fn a_non_ascii_utf8_header_is_forwarded_upstream_byte_exact() {
-        let port_a = free_port();
-        let port_b = free_port();
         let manager = Arc::new(ImposterManager::new());
-        manager
+        let port_a = manager
             .create_imposter(
                 serde_json::from_value(serde_json::json!({
-                    "port": port_a, "protocol": "http", "recordRequests": true,
+                    "protocol": "http", "recordRequests": true,
                     "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "upstream"}}]}]
                 }))
                 .unwrap(),
             )
             .await
             .expect("upstream imposter");
-        manager
+        let port_b = manager
             .create_imposter(
                 serde_json::from_value(serde_json::json!({
-                    "port": port_b, "protocol": "http",
+                    "protocol": "http",
                     "stubs": [{"responses": [{"proxy": {
                         "to": format!("http://127.0.0.1:{port_a}"), "mode": "proxyAlways"
                     }}]}]
@@ -1451,22 +1414,23 @@ mod proxy_relays_response_headers_honestly {
     use std::sync::Arc;
     use std::time::Duration;
 
-    async fn serve(config: serde_json::Value) -> Arc<ImposterManager> {
+    async fn serve(config: serde_json::Value) -> (Arc<ImposterManager>, u16) {
         let manager = Arc::new(ImposterManager::new());
-        manager
+        let port = manager
             .create_imposter(serde_json::from_value(config).unwrap())
             .await
             .expect("create imposter");
         tokio::time::sleep(Duration::from_millis(200)).await;
-        manager
+        (manager, port)
     }
 
     /// A raw-socket origin, because no ordinary server will emit a header value that is not valid
     /// UTF-8 — which is precisely the value the relay used to blank. Answers `count` connections
     /// with one fixed response, then exits.
-    fn raw_origin(port: u16, count: usize) -> std::thread::JoinHandle<()> {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind origin");
-        std::thread::spawn(move || {
+    fn raw_origin(count: usize) -> (std::thread::JoinHandle<()>, u16) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind origin");
+        let port = listener.local_addr().expect("origin addr").port();
+        let origin = std::thread::spawn(move || {
             for _ in 0..count {
                 let Ok((mut sock, _)) = listener.accept() else {
                     return;
@@ -1484,18 +1448,16 @@ mod proxy_relays_response_headers_honestly {
                 let _ = sock.write_all(&raw);
                 let _ = sock.flush();
             }
-        })
+        });
+        (origin, port)
     }
 
     #[tokio::test]
     async fn a_proxied_response_drops_undecodable_headers_and_keeps_valid_utf8_ones() {
-        let port_a = free_port();
-        let port_b = free_port();
-        let _origin = raw_origin(port_a, 1);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (_origin, port_a) = raw_origin(1);
 
-        let manager = serve(serde_json::json!({
-            "port": port_b, "protocol": "http",
+        let (manager, port_b) = serve(serde_json::json!({
+            "protocol": "http",
             "stubs": [{"responses": [{"proxy": {
                 "to": format!("http://127.0.0.1:{port_a}"), "mode": "proxyOnce",
                 // `predicateGenerators` is what makes the replay come from the stub
@@ -1582,21 +1544,20 @@ mod multi_value_headers {
     use std::sync::Arc;
     use std::time::Duration;
 
-    async fn serve(config: serde_json::Value) -> Arc<ImposterManager> {
+    async fn serve(config: serde_json::Value) -> (Arc<ImposterManager>, u16) {
         let manager = Arc::new(ImposterManager::new());
-        manager
+        let port = manager
             .create_imposter(serde_json::from_value(config).unwrap())
             .await
             .expect("create imposter");
         tokio::time::sleep(Duration::from_millis(200)).await;
-        manager
+        (manager, port)
     }
 
     #[tokio::test]
     async fn serves_both_values_of_a_response_header() {
-        let imposter_port = free_port();
-        let manager = serve(serde_json::json!({
-            "port": imposter_port, "protocol": "http",
+        let (manager, imposter_port) = serve(serde_json::json!({
+            "protocol": "http",
             "stubs": [{"responses": [{"is": {"statusCode": 200,
                 "headers": {"Set-Cookie": ["a=1", "b=2"]}, "body": "ok"}}]}]
         }))
@@ -1623,10 +1584,9 @@ mod multi_value_headers {
 
     #[tokio::test]
     async fn default_response_serves_both_values_of_a_header() {
-        let imposter_port = free_port();
         // No stub matches → the imposter's defaultResponse is served (a separate emission site).
-        let manager = serve(serde_json::json!({
-            "port": imposter_port, "protocol": "http",
+        let (manager, imposter_port) = serve(serde_json::json!({
+            "protocol": "http",
             "defaultResponse": {"statusCode": 200,
                 "headers": {"Set-Cookie": ["a=1", "b=2"]}, "body": "def"},
             "stubs": []
@@ -1654,9 +1614,8 @@ mod multi_value_headers {
 
     #[tokio::test]
     async fn single_value_response_header_still_works() {
-        let imposter_port = free_port();
-        let manager = serve(serde_json::json!({
-            "port": imposter_port, "protocol": "http",
+        let (manager, imposter_port) = serve(serde_json::json!({
+            "protocol": "http",
             "stubs": [{"responses": [{"is": {"statusCode": 200,
                 "headers": {"X-Custom": "v"}, "body": "ok"}}]}]
         }))
@@ -1671,9 +1630,8 @@ mod multi_value_headers {
 
     #[tokio::test]
     async fn records_both_values_of_a_request_header() {
-        let imposter_port = free_port();
-        let manager = serve(serde_json::json!({
-            "port": imposter_port, "protocol": "http", "recordRequests": true,
+        let (manager, imposter_port) = serve(serde_json::json!({
+            "protocol": "http", "recordRequests": true,
             "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]
         }))
         .await;
@@ -1726,21 +1684,21 @@ mod repeated_request_headers_reach_matching {
     use std::sync::Arc;
     use std::time::Duration;
 
-    async fn serve(config: serde_json::Value) -> Arc<ImposterManager> {
+    async fn serve(config: serde_json::Value) -> (Arc<ImposterManager>, u16) {
         let manager = Arc::new(ImposterManager::new());
-        manager
+        let port = manager
             .create_imposter(serde_json::from_value(config).unwrap())
             .await
             .expect("create imposter");
         tokio::time::sleep(Duration::from_millis(200)).await;
-        manager
+        (manager, port)
     }
 
     /// An imposter whose only stub matches `X-Test: <value>` and answers "hit"; anything else
     /// falls through to the 200 "miss" default.
-    fn matching_on(port: u16, predicate: serde_json::Value) -> serde_json::Value {
+    fn matching_on(predicate: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
-            "port": port, "protocol": "http", "recordRequests": true,
+            "protocol": "http", "recordRequests": true,
             "defaultResponse": {"statusCode": 200, "body": "miss"},
             "stubs": [{
                 "predicates": [predicate],
@@ -1762,10 +1720,8 @@ mod repeated_request_headers_reach_matching {
 
     #[tokio::test]
     async fn a_repeated_header_matches_on_its_first_value() {
-        let port = free_port();
         // THE BUG. Last-wins meant `first` was shadowed by `second` and could never match.
-        let manager = serve(matching_on(
-            port,
+        let (manager, port) = serve(matching_on(
             serde_json::json!({"equals": {"headers": {"X-Test": "first"}}}),
         ))
         .await;
@@ -1779,12 +1735,10 @@ mod repeated_request_headers_reach_matching {
 
     #[tokio::test]
     async fn a_repeated_header_still_matches_on_its_last_value() {
-        let port = free_port();
         // Passes before the fix too, and is here precisely for that reason: without it, an
         // implementation that merely swapped which single value survives would satisfy the test
         // above and still be wrong.
-        let manager = serve(matching_on(
-            port,
+        let (manager, port) = serve(matching_on(
             serde_json::json!({"equals": {"headers": {"X-Test": "second"}}}),
         ))
         .await;
@@ -1798,9 +1752,7 @@ mod repeated_request_headers_reach_matching {
 
     #[tokio::test]
     async fn a_value_the_client_never_sent_does_not_match() {
-        let port = free_port();
-        let manager = serve(matching_on(
-            port,
+        let (manager, port) = serve(matching_on(
             serde_json::json!({"equals": {"headers": {"X-Test": "third"}}}),
         ))
         .await;
@@ -1814,11 +1766,9 @@ mod repeated_request_headers_reach_matching {
 
     #[tokio::test]
     async fn not_no_longer_matches_a_request_carrying_the_shadowed_value() {
-        let port = free_port();
         // The one behaviour change that can surprise a user, so it is pinned rather than left to
         // the CHANGELOG: `first` used to be invisible, which made the negation true.
-        let manager = serve(matching_on(
-            port,
+        let (manager, port) = serve(matching_on(
             serde_json::json!({"not": {"equals": {"headers": {"X-Test": "first"}}}}),
         ))
         .await;
@@ -1832,12 +1782,10 @@ mod repeated_request_headers_reach_matching {
 
     #[tokio::test]
     async fn a_non_utf8_header_value_is_not_offered_to_predicates_as_an_empty_string() {
-        let port = free_port();
         // `v.to_str().unwrap_or("")` made `{"equals":{"headers":{"x-bin":""}}}` match a request
         // that sent raw bytes — a data-path swallow inventing a value the client never sent.
         // Sent over a hand-written socket because reqwest will not build a non-UTF-8 header value.
-        let manager = serve(matching_on(
-            port,
+        let (manager, port) = serve(matching_on(
             serde_json::json!({"equals": {"headers": {"X-Bin": ""}}}),
         ))
         .await;
@@ -1884,13 +1832,11 @@ mod repeated_request_headers_reach_matching {
 
     #[tokio::test]
     async fn a_header_whose_only_value_is_non_utf8_does_not_exist_for_predicates() {
-        let port = free_port();
         // The map-level assertion (`!contains_key`) lives in the collector's unit tests; this is
         // the behavioural half — what `exists` actually answers at the predicate layer for a name
         // the collector emptied. "Present but empty" and "absent" are different answers to
         // `exists`, and only one of them is honest about what the client sent.
-        let manager = serve(matching_on(
-            port,
+        let (manager, port) = serve(matching_on(
             serde_json::json!({"exists": {"headers": {"X-Bin": true}}}),
         ))
         .await;
@@ -1918,27 +1864,25 @@ mod repeated_request_headers_reach_matching {
 
     #[tokio::test]
     async fn a_proxied_request_forwards_both_values_of_a_repeated_header() {
-        let port_a = free_port();
-        let port_b = free_port();
         // AC2's "forwarded" half. `handle_proxy_request` iterated the single-value map, so a
         // proxied request reached the upstream carrying only whichever value used to survive the
         // collapse. Upstream here is a second, recording imposter, so its journal is the evidence
         // of what actually went over the wire.
         let manager = Arc::new(ImposterManager::new());
-        manager
+        let port_a = manager
             .create_imposter(
                 serde_json::from_value(serde_json::json!({
-                    "port": port_a, "protocol": "http", "recordRequests": true,
+                    "protocol": "http", "recordRequests": true,
                     "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "upstream"}}]}]
                 }))
                 .unwrap(),
             )
             .await
             .expect("upstream imposter");
-        manager
+        let port_b = manager
             .create_imposter(
                 serde_json::from_value(serde_json::json!({
-                    "port": port_b, "protocol": "http",
+                    "protocol": "http",
                     "stubs": [{"responses": [{"proxy": {
                         "to": format!("http://127.0.0.1:{port_a}"), "mode": "proxyTransparent"
                     }}]}]
@@ -1998,9 +1942,8 @@ mod repeated_request_headers_reach_matching {
     // of that wiring.
     #[tokio::test]
     async fn behaviors_and_templates_see_the_first_value_and_never_an_emptied_header() {
-        let imposter_port = free_port();
-        let manager = serve(serde_json::json!({
-            "port": imposter_port, "protocol": "http",
+        let (manager, imposter_port) = serve(serde_json::json!({
+            "protocol": "http",
             "stubs": [{"responses": [{
                 "is": {"statusCode": 200,
                        "body": "copied=${ID}|bin=[${BIN}]|tmpl=${request.headers.x-id}"},
@@ -2066,9 +2009,11 @@ mod reload {
     use super::*;
     use rift_http_proxy::config_loader::{ConfigSource, load_configs};
 
-    fn cfg(port: u16, body: &str) -> String {
+    /// One imposter serving `body` on `/p`; `None` leaves the port to the manager.
+    fn cfg(port: Option<u16>, body: &str) -> String {
+        let port = port.map_or(String::new(), |p| format!(r#""port":{p},"#));
         format!(
-            r#"{{"imposters":[{{"port":{port},"protocol":"http","stubs":[
+            r#"{{"imposters":[{{{port}"protocol":"http","stubs":[
                 {{"predicates":[{{"equals":{{"path":"/p"}}}}],
                  "responses":[{{"is":{{"statusCode":200,"body":"{body}"}}}}]}}]}}]}}"#
         )
@@ -2080,6 +2025,17 @@ mod reload {
             .as_str()
             .unwrap()
             .to_string()
+    }
+
+    /// The ports the manager is serving, ascending.
+    fn ports(manager: &ImposterManager) -> Vec<u16> {
+        let mut ports: Vec<u16> = manager
+            .list_imposters()
+            .iter()
+            .filter_map(|i| i.current_config().port)
+            .collect();
+        ports.sort_unstable();
+        ports
     }
 
     async fn start(src: Option<ConfigSource>) -> (std::sync::Arc<ImposterManager>, String) {
@@ -2098,10 +2054,9 @@ mod reload {
 
     #[tokio::test]
     async fn reload_replaces_imposters_from_configfile() {
-        let imposter_port = free_port();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("imposters.json");
-        std::fs::write(&path, cfg(imposter_port, "v1")).unwrap();
+        std::fs::write(&path, cfg(None, "v1")).unwrap();
         let source = ConfigSource::File {
             path: path.clone(),
             no_parse: false,
@@ -2112,10 +2067,13 @@ mod reload {
             .reload(load_configs(&source).unwrap())
             .await
             .unwrap();
+        let [imposter_port] = ports(&manager)[..] else {
+            panic!("one imposter seeded")
+        };
         assert_eq!(stub_body(&manager, imposter_port), "v1");
 
         // change the file on disk, then reload via the admin endpoint
-        std::fs::write(&path, cfg(imposter_port, "v2")).unwrap();
+        std::fs::write(&path, cfg(Some(imposter_port), "v2")).unwrap();
         let resp = reqwest::Client::new()
             .post(format!("{admin}/admin/reload"))
             .send()
@@ -2141,10 +2099,9 @@ mod reload {
 
     #[tokio::test]
     async fn reload_semantic_error_keeps_existing_imposters() {
-        let imposter_port = free_port();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("imposters.json");
-        std::fs::write(&path, cfg(imposter_port, "good")).unwrap();
+        std::fs::write(&path, cfg(None, "good")).unwrap();
         let source = ConfigSource::File {
             path: path.clone(),
             no_parse: false,
@@ -2155,6 +2112,9 @@ mod reload {
             .reload(load_configs(&source).unwrap())
             .await
             .unwrap();
+        let [imposter_port] = ports(&manager)[..] else {
+            panic!("one imposter seeded")
+        };
         assert_eq!(stub_body(&manager, imposter_port), "good");
 
         // parses fine, but the protocol is invalid → must be rejected BEFORE delete_all,
@@ -2181,10 +2141,9 @@ mod reload {
 
     #[tokio::test]
     async fn reload_parse_error_keeps_existing_imposters() {
-        let port = free_port();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("imposters.json");
-        std::fs::write(&path, cfg(port, "good")).unwrap();
+        std::fs::write(&path, cfg(None, "good")).unwrap();
         let source = ConfigSource::File {
             path: path.clone(),
             no_parse: false,
@@ -2195,6 +2154,9 @@ mod reload {
             .reload(load_configs(&source).unwrap())
             .await
             .unwrap();
+        let [port] = ports(&manager)[..] else {
+            panic!("one imposter seeded")
+        };
         assert_eq!(stub_body(&manager, port), "good");
 
         // corrupt the file → reload must 500 and leave the running imposter intact
@@ -2214,13 +2176,17 @@ mod reload {
         let _ = manager.delete_imposter(port).await;
     }
 
-    fn two_imposter_cfg(port_a: u16, port_b: u16, keep_body: &str, sibling_body: &str) -> String {
+    /// `None` leaves both ports to the manager.
+    fn two_imposter_cfg(ports: Option<(u16, u16)>, keep_body: &str, sibling_body: &str) -> String {
+        let (port_a, port_b) = ports.map_or((String::new(), String::new()), |(a, b)| {
+            (format!(r#""port":{a},"#), format!(r#""port":{b},"#))
+        });
         format!(
             r#"{{"imposters":[
-                {{"port":{port_a},"protocol":"http","recordRequests":true,"stubs":[
+                {{{port_a}"protocol":"http","recordRequests":true,"stubs":[
                     {{"predicates":[{{"equals":{{"path":"/p"}}}}],
                      "responses":[{{"is":{{"statusCode":200,"body":"{keep_body}"}}}}]}}]}},
-                {{"port":{port_b},"protocol":"http","stubs":[
+                {{{port_b}"protocol":"http","stubs":[
                     {{"predicates":[{{"equals":{{"path":"/p"}}}}],
                      "responses":[{{"is":{{"statusCode":200,"body":"{sibling_body}"}}}}]}}]}}]}}"#
         )
@@ -2230,11 +2196,9 @@ mod reload {
     // runtime state (recorded requests, listener) while a sibling is modified.
     #[tokio::test]
     async fn reload_preserves_untouched_imposter_state() {
-        let port_a = free_port();
-        let port_b = free_port();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("imposters.json");
-        std::fs::write(&path, two_imposter_cfg(port_a, port_b, "keep", "v1")).unwrap();
+        std::fs::write(&path, two_imposter_cfg(None, "keep", "v1")).unwrap();
         let source = ConfigSource::File {
             path: path.clone(),
             no_parse: false,
@@ -2245,6 +2209,16 @@ mod reload {
             .apply_config(load_configs(&source).unwrap())
             .await
             .unwrap();
+        // The manager assigned both ports; tell them apart by what they serve. The rewrite below
+        // names them, so the reload reconciles these two imposters rather than creating others.
+        let [first, second] = ports(&manager)[..] else {
+            panic!("two imposters seeded")
+        };
+        let (port_a, port_b) = if stub_body(&manager, first) == "keep" {
+            (first, second)
+        } else {
+            (second, first)
+        };
 
         // Drive the untouched imposter so it accrues runtime state.
         let served = reqwest::get(format!("http://127.0.0.1:{port_a}/p"))
@@ -2258,7 +2232,11 @@ mod reload {
         assert_eq!(before.get_recorded_requests().len(), 1);
 
         // Change only the sibling on disk, then reload via the admin endpoint.
-        std::fs::write(&path, two_imposter_cfg(port_a, port_b, "keep", "v2")).unwrap();
+        std::fs::write(
+            &path,
+            two_imposter_cfg(Some((port_a, port_b)), "keep", "v2"),
+        )
+        .unwrap();
         let resp = reqwest::Client::new()
             .post(format!("{admin}/admin/reload"))
             .send()
@@ -2299,8 +2277,6 @@ mod reload {
     // unlinked its `{port}.json`, which also lost it across a restart.
     #[tokio::test]
     async fn reload_with_configfile_and_datadir_keeps_persisted_imposters() {
-        let from_file = free_port();
-        let from_api = free_port();
         use rift_http_proxy::imposter::Persistence;
         use rift_http_proxy::sources::{FileSource, SourceRef, SourceRegistry, SourceSet};
         use std::sync::Arc;
@@ -2309,21 +2285,24 @@ mod reload {
         let datadir = dir.path().join("data");
         std::fs::create_dir(&datadir).unwrap();
         let path = dir.path().join("imposters.json");
-        std::fs::write(&path, cfg(from_file, "file")).unwrap();
+        std::fs::write(&path, cfg(None, "file")).unwrap();
 
         let manager = std::sync::Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
         // What startup does for a `--configfile` imposter.
-        for config in load_configs(&ConfigSource::File {
+        let [config]: [_; 1] = load_configs(&ConfigSource::File {
             path: path.clone(),
             no_parse: false,
         })
         .unwrap()
-        {
-            manager
-                .create_imposter_as(config, Persistence::Ephemeral)
-                .await
-                .unwrap();
-        }
+        .try_into()
+        .expect("one config-file imposter");
+        let from_file = manager
+            .create_imposter_as(config, Persistence::Ephemeral)
+            .await
+            .unwrap();
+        // Name the assigned port in the file, so a reload reconciles this imposter instead of
+        // recreating a port-less one.
+        std::fs::write(&path, cfg(Some(from_file), "file")).unwrap();
 
         let mut registry = SourceRegistry::new();
         registry.register(Arc::new(FileSource::new(false))).unwrap();
@@ -2342,11 +2321,16 @@ mod reload {
         let client = reqwest::Client::new();
         let created = client
             .post(format!("{admin}/imposters"))
-            .json(&serde_json::json!({"port": from_api, "protocol": "http", "stubs": []}))
+            .json(&serde_json::json!({"protocol": "http", "stubs": []}))
             .send()
             .await
             .unwrap();
         assert_eq!(created.status(), 201);
+        let created: serde_json::Value = created.json().await.unwrap();
+        let from_api = created["port"]
+            .as_u64()
+            .and_then(|p| u16::try_from(p).ok())
+            .unwrap_or_else(|| panic!("the assigned port: {created}"));
         let api_file = datadir.join(format!("{from_api}.json"));
         assert!(api_file.exists(), "an admin-API create is persisted");
 
@@ -2420,12 +2404,11 @@ mod date_templates {
 
     #[tokio::test]
     async fn served_is_body_resolves_date_template() {
-        let imposter_port = free_port();
         let manager = Arc::new(ImposterManager::new());
-        manager
+        let imposter_port = manager
             .create_imposter(
                 serde_json::from_value(serde_json::json!({
-                    "port": imposter_port, "protocol": "http",
+                    "protocol": "http",
                     "stubs": [{"responses": [{"is": {"statusCode": 200,
                         "body": "{\"exp\":\"{{DAYS+5}}\",\"now\":\"{{NOW}}\"}"}}]}]
                 }))
@@ -2458,12 +2441,11 @@ mod date_templates {
 
     #[tokio::test]
     async fn served_default_response_resolves_date_template() {
-        let imposter_port = free_port();
         let manager = Arc::new(ImposterManager::new());
-        manager
+        let imposter_port = manager
             .create_imposter(
                 serde_json::from_value(serde_json::json!({
-                    "port": imposter_port, "protocol": "http",
+                    "protocol": "http",
                     "defaultResponse": {"statusCode": 200, "body": "{\"d\":\"{{DAYS+3}}\"}"},
                     "stubs": []
                 }))
@@ -2492,13 +2474,14 @@ mod gateway {
     use super::*;
     use std::sync::Arc;
 
-    /// Start an imposter (with the given stubs) + an AdminApiServer; returns (manager, admin_base).
-    async fn setup(imposter_port: u16, stubs: serde_json::Value) -> (Arc<ImposterManager>, String) {
+    /// Start an imposter (with the given stubs) + an AdminApiServer; returns
+    /// (manager, admin_base, imposter_port).
+    async fn setup(stubs: serde_json::Value) -> (Arc<ImposterManager>, String, u16) {
         let manager = Arc::new(ImposterManager::new());
-        manager
+        let imposter_port = manager
             .create_imposter(
                 serde_json::from_value(serde_json::json!({
-                    "port": imposter_port, "protocol": "http", "stubs": stubs
+                    "protocol": "http", "stubs": stubs
                 }))
                 .unwrap(),
             )
@@ -2510,19 +2493,15 @@ mod gateway {
             None,
         );
         let admin = bind_admin(server).await;
-        (manager, admin)
+        (manager, admin, imposter_port)
     }
 
     #[tokio::test]
     async fn gateway_routes_to_imposter() {
-        let imposter_port = free_port();
-        let (manager, admin) = setup(
-            imposter_port,
-            serde_json::json!([{
-                "predicates": [{"equals": {"path": "/api/data"}}],
-                "responses": [{"is": {"statusCode": 200, "body": "routed"}}]
-            }]),
-        )
+        let (manager, admin, imposter_port) = setup(serde_json::json!([{
+            "predicates": [{"equals": {"path": "/api/data"}}],
+            "responses": [{"is": {"statusCode": 200, "body": "routed"}}]
+        }]))
         .await;
 
         // Hit the imposter through the admin port — the imposter must see path /api/data.
@@ -2536,14 +2515,10 @@ mod gateway {
 
     #[tokio::test]
     async fn gateway_preserves_method_and_query() {
-        let port = free_port();
-        let (manager, admin) = setup(
-            port,
-            serde_json::json!([{
-                "predicates": [{"equals": {"method": "POST", "path": "/submit", "query": {"q": "1"}}}],
-                "responses": [{"is": {"statusCode": 201, "body": "posted"}}]
-            }]),
-        )
+        let (manager, admin, port) = setup(serde_json::json!([{
+            "predicates": [{"equals": {"method": "POST", "path": "/submit", "query": {"q": "1"}}}],
+            "responses": [{"is": {"statusCode": 201, "body": "posted"}}]
+        }]))
         .await;
 
         let resp = reqwest::Client::new()
@@ -2558,12 +2533,9 @@ mod gateway {
 
     #[tokio::test]
     async fn gateway_unknown_port_404() {
-        let imposter_port = free_port();
-        let (manager, admin) = setup(
-            imposter_port,
-            serde_json::json!([{"responses": [{"is": {"statusCode": 200, "body": "x"}}]}]),
-        )
-        .await;
+        let (manager, admin, imposter_port) =
+            setup(serde_json::json!([{"responses": [{"is": {"statusCode": 200, "body": "x"}}]}]))
+                .await;
         let resp = reqwest::get(format!("{admin}/__rift/59999/anything"))
             .await
             .unwrap();
@@ -2573,14 +2545,10 @@ mod gateway {
 
     #[tokio::test]
     async fn gateway_forwards_post_body() {
-        let port = free_port();
-        let (manager, admin) = setup(
-            port,
-            serde_json::json!([{
-                "predicates": [{"equals": {"method": "POST", "path": "/echo", "body": "hello-body"}}],
-                "responses": [{"is": {"statusCode": 200, "body": "got-body"}}]
-            }]),
-        )
+        let (manager, admin, port) = setup(serde_json::json!([{
+            "predicates": [{"equals": {"method": "POST", "path": "/echo", "body": "hello-body"}}],
+            "responses": [{"is": {"statusCode": 200, "body": "got-body"}}]
+        }]))
         .await;
         let resp = reqwest::Client::new()
             .post(format!("{admin}/__rift/{port}/echo"))
@@ -2598,14 +2566,10 @@ mod gateway {
 
     #[tokio::test]
     async fn gateway_no_subpath_routes_to_root() {
-        let port = free_port();
-        let (manager, admin) = setup(
-            port,
-            serde_json::json!([{
-                "predicates": [{"equals": {"path": "/"}}],
-                "responses": [{"is": {"statusCode": 200, "body": "root"}}]
-            }]),
-        )
+        let (manager, admin, port) = setup(serde_json::json!([{
+            "predicates": [{"equals": {"path": "/"}}],
+            "responses": [{"is": {"statusCode": 200, "body": "root"}}]
+        }]))
         .await;
         let resp = reqwest::get(format!("{admin}/__rift/{port}"))
             .await
@@ -2620,12 +2584,9 @@ mod gateway {
 
     #[tokio::test]
     async fn gateway_non_numeric_port_400() {
-        let imposter_port = free_port();
-        let (manager, admin) = setup(
-            imposter_port,
-            serde_json::json!([{"responses": [{"is": {"statusCode": 200, "body": "x"}}]}]),
-        )
-        .await;
+        let (manager, admin, imposter_port) =
+            setup(serde_json::json!([{"responses": [{"is": {"statusCode": 200, "body": "x"}}]}]))
+                .await;
         let resp = reqwest::get(format!("{admin}/__rift/notaport/x"))
             .await
             .unwrap();
@@ -2639,14 +2600,13 @@ mod gateway {
 
     #[tokio::test]
     async fn gateway_not_gated_by_admin_apikey() {
-        let imposter_port = free_port();
         // The gateway is data-plane imposter traffic: it must work WITHOUT the admin key, even
         // when --apikey is set (otherwise the app-under-test would need the admin key).
         let manager = Arc::new(ImposterManager::new());
-        manager
+        let imposter_port = manager
             .create_imposter(
                 serde_json::from_value(serde_json::json!({
-                    "port": imposter_port, "protocol": "http",
+                    "protocol": "http",
                     "stubs": [{"predicates": [{"equals": {"path": "/x"}}],
                               "responses": [{"is": {"statusCode": 200, "body": "open"}}]}]
                 }))
@@ -2687,12 +2647,11 @@ mod gateway {
 // flowIdSource), with anything beyond the allowlist redacted.
 #[tokio::test]
 async fn get_imposter_exposes_flowstate_redacted() {
-    let imposter_port = free_port();
     let manager = std::sync::Arc::new(ImposterManager::new());
     // a leftover `redis` block (written before the backend was removed) still decodes into the
     // flattened extras — include one with a credentialed URL to prove the GET projection strips it.
     let config = serde_json::from_value(serde_json::json!({
-        "port": imposter_port, "protocol": "http",
+        "protocol": "http",
         "_rift": { "flowState": { "ttlSeconds": 300,
             "redis": { "url": "redis://user:topsecret@host:6379" },
             "flowIdSource": "header:X-Mock-Space" } },
@@ -2700,7 +2659,7 @@ async fn get_imposter_exposes_flowstate_redacted() {
             "responses": [{ "is": { "statusCode": 200, "body": "ok" } }] }]
     }))
     .unwrap();
-    manager.create_imposter(config).await.expect("create");
+    let imposter_port = manager.create_imposter(config).await.expect("create");
 
     let server = rift_http_proxy::admin_api::AdminApiServer::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -2793,10 +2752,9 @@ mod mutual_tls {
             .expect("bare client")
     }
 
-    fn cfg(port: u16, extra: serde_json::Value) -> serde_json::Value {
+    fn cfg(extra: serde_json::Value) -> serde_json::Value {
         let (cert, key) = server_cert();
         let mut c = serde_json::json!({
-            "port": port,
             "protocol": "https",
             "cert": cert,
             "key": key,
@@ -2808,19 +2766,19 @@ mod mutual_tls {
         c
     }
 
-    async fn serve(manager: &Arc<ImposterManager>, c: serde_json::Value) {
-        manager
+    async fn serve(manager: &Arc<ImposterManager>, c: serde_json::Value) -> u16 {
+        let port = manager
             .create_imposter(serde_json::from_value(c).expect("config"))
             .await
             .expect("create imposter");
         tokio::time::sleep(Duration::from_millis(200)).await;
+        port
     }
 
     #[tokio::test]
     async fn mutual_auth_rejects_a_client_with_no_certificate() {
-        let port = free_port();
         let manager = Arc::new(ImposterManager::new());
-        serve(&manager, cfg(port, serde_json::json!({"mutualAuth": true}))).await;
+        let port = serve(&manager, cfg(serde_json::json!({"mutualAuth": true}))).await;
 
         // The refusal is at the TLS handshake, not an HTTP status — which is the whole point:
         // a real mTLS gateway never lets a cert-less client reach the application.
@@ -2838,10 +2796,9 @@ mod mutual_tls {
 
     #[tokio::test]
     async fn mutual_auth_accepts_any_presented_certificate() {
-        let port = free_port();
         let (_ca, client_cert, client_key) = ca_and_client_cert();
         let manager = Arc::new(ImposterManager::new());
-        serve(&manager, cfg(port, serde_json::json!({"mutualAuth": true}))).await;
+        let port = serve(&manager, cfg(serde_json::json!({"mutualAuth": true}))).await;
 
         let resp = client_presenting(&client_cert, &client_key)
             .get(format!("https://localhost:{port}/"))
@@ -2855,15 +2812,11 @@ mod mutual_tls {
 
     #[tokio::test]
     async fn reject_unauthorized_accepts_a_certificate_from_the_ca() {
-        let port = free_port();
         let (ca, client_cert, client_key) = ca_and_client_cert();
         let manager = Arc::new(ImposterManager::new());
-        serve(
+        let port = serve(
             &manager,
-            cfg(
-                port,
-                serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true, "ca": ca}),
-            ),
+            cfg(serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true, "ca": ca})),
         )
         .await;
 
@@ -2878,17 +2831,13 @@ mod mutual_tls {
 
     #[tokio::test]
     async fn reject_unauthorized_refuses_a_certificate_from_another_ca() {
-        let port = free_port();
         let (ca, _, _) = ca_and_client_cert();
         // A second, unrelated CA — the imposter trusts only the first.
         let (_other_ca, other_cert, other_key) = ca_and_client_cert();
         let manager = Arc::new(ImposterManager::new());
-        serve(
+        let port = serve(
             &manager,
-            cfg(
-                port,
-                serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true, "ca": ca}),
-            ),
+            cfg(serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true, "ca": ca})),
         )
         .await;
 
@@ -2903,15 +2852,13 @@ mod mutual_tls {
 
     #[tokio::test]
     async fn mutual_auth_works_on_the_self_signed_fallback() {
-        let imposter_port = free_port();
         // No inline cert/key: the imposter generates its own server cert, and client auth must
         // still apply — the derivation happens before the cert precedence, so it cannot be skipped.
         let (_ca, client_cert, client_key) = ca_and_client_cert();
         let manager = Arc::new(ImposterManager::new());
-        manager
+        let imposter_port = manager
             .create_imposter(
                 serde_json::from_value(serde_json::json!({
-                    "port": imposter_port,
                     "protocol": "https",
                     "mutualAuth": true,
                     "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "mtls-ok"}}]}]
@@ -2941,12 +2888,10 @@ mod mutual_tls {
 
     #[tokio::test]
     async fn reject_unauthorized_without_ca_is_a_creation_error() {
-        let port = free_port();
         let manager = Arc::new(ImposterManager::new());
         let err = manager
             .create_imposter(
                 serde_json::from_value(cfg(
-                    port,
                     serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true}),
                 ))
                 .expect("config"),
@@ -2961,12 +2906,10 @@ mod mutual_tls {
 
     #[tokio::test]
     async fn mutual_auth_on_http_is_a_creation_error() {
-        let imposter_port = free_port();
         let manager = Arc::new(ImposterManager::new());
         let err = manager
             .create_imposter(
                 serde_json::from_value(serde_json::json!({
-                    "port": imposter_port,
                     "protocol": "http",
                     "mutualAuth": true,
                     "stubs": []
@@ -2987,12 +2930,10 @@ mod mutual_tls {
     // would not learn it does nothing. That is the pre-#977 bug wearing a different hat.
     #[tokio::test]
     async fn reject_unauthorized_without_mutual_auth_is_a_creation_error() {
-        let port = free_port();
         let manager = Arc::new(ImposterManager::new());
         let err = manager
             .create_imposter(
                 serde_json::from_value(cfg(
-                    port,
                     serde_json::json!({"rejectUnauthorized": true, "ca": "PEM"}),
                 ))
                 .expect("config"),
@@ -3007,16 +2948,12 @@ mod mutual_tls {
 
     #[tokio::test]
     async fn ca_without_reject_unauthorized_is_a_creation_error() {
-        let port = free_port();
         let (ca, _, _) = ca_and_client_cert();
         let manager = Arc::new(ImposterManager::new());
         let err = manager
             .create_imposter(
-                serde_json::from_value(cfg(
-                    port,
-                    serde_json::json!({"mutualAuth": true, "ca": ca}),
-                ))
-                .expect("config"),
+                serde_json::from_value(cfg(serde_json::json!({"mutualAuth": true, "ca": ca})))
+                    .expect("config"),
             )
             .await
             .expect_err("supplying a CA that would never be consulted must not be accepted");
@@ -3028,12 +2965,10 @@ mod mutual_tls {
 
     #[tokio::test]
     async fn an_empty_ca_array_is_a_creation_error_naming_ca() {
-        let port = free_port();
         let manager = Arc::new(ImposterManager::new());
         let err = manager
             .create_imposter(
                 serde_json::from_value(cfg(
-                    port,
                     serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true, "ca": []}),
                 ))
                 .expect("config"),
@@ -3048,18 +2983,14 @@ mod mutual_tls {
 
     #[tokio::test]
     async fn a_ca_pem_with_no_certificate_is_a_creation_error() {
-        let port = free_port();
         // A private key instead of a certificate — the classic wrong-half-of-the-pair mistake.
         let key_only = rcgen::KeyPair::generate().expect("key").serialize_pem();
         let manager = Arc::new(ImposterManager::new());
         let err = manager
             .create_imposter(
-                serde_json::from_value(cfg(
-                    port,
-                    serde_json::json!({
-                        "mutualAuth": true, "rejectUnauthorized": true, "ca": key_only
-                    }),
-                ))
+                serde_json::from_value(cfg(serde_json::json!({
+                    "mutualAuth": true, "rejectUnauthorized": true, "ca": key_only
+                })))
                 .expect("config"),
             )
             .await
@@ -3072,14 +3003,12 @@ mod mutual_tls {
 
     #[tokio::test]
     async fn mutual_auth_false_on_http_is_accepted() {
-        let imposter_port = free_port();
         // `"mutualAuth": false` on an http imposter appears in our own documentation example, so it
         // must keep working — only `true` is protocol-constrained.
         let manager = Arc::new(ImposterManager::new());
-        manager
+        let imposter_port = manager
             .create_imposter(
                 serde_json::from_value(serde_json::json!({
-                    "port": imposter_port,
                     "protocol": "http",
                     "mutualAuth": false,
                     "stubs": []
@@ -3105,11 +3034,9 @@ mod mutual_tls {
         let admin = bind_admin(server).await;
         let c = reqwest::Client::new();
 
-        let mut https_cfg = cfg(
-            0,
-            serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true, "ca": ca}),
-        );
-        https_cfg.as_object_mut().expect("object").remove("port");
+        let https_cfg = cfg(serde_json::json!({
+            "mutualAuth": true, "rejectUnauthorized": true, "ca": ca
+        }));
         let (cert, key) = (https_cfg["cert"].clone(), https_cfg["key"].clone());
         let created: serde_json::Value = c
             .post(format!("{admin}/imposters"))

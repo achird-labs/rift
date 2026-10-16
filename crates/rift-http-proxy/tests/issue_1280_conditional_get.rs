@@ -10,8 +10,10 @@ use clap::Parser;
 use rift_http_proxy::server::{Cli, RunningServer, ServerBuilder};
 use serde_json::json;
 
+// Fixed port: a reload matches the edited imposter to the running one by the port its file names.
+// The probe binds `0.0.0.0`, the family the imposter binds, so it cannot shadow a neighbour (#1485).
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
+    TcpListener::bind("0.0.0.0:0")
         .expect("bind")
         .local_addr()
         .expect("addr")
@@ -156,19 +158,17 @@ async fn get_imposters_echoes_conditional_exactly_as_declared() {
         .iter()
         .map(|shape| json!({ "responses": [{ "is": { "body": "x" }, "_rift": { "conditional": shape } }] }))
         .collect();
-    let port = free_port();
     let created = reqwest::Client::new()
         .post(format!("http://{admin}/imposters"))
-        .json(&json!({ "port": port, "protocol": "http", "stubs": stubs }))
+        .json(&json!({ "protocol": "http", "stubs": stubs }))
         .send()
         .await
         .expect("create");
-    assert_eq!(
-        created.status(),
-        201,
-        "{}",
-        created.text().await.unwrap_or_default()
-    );
+    let status = created.status();
+    let created = created.text().await.expect("body");
+    assert_eq!(status, 201, "{created}");
+    let created: serde_json::Value = serde_json::from_str(&created).expect("201 body");
+    let port = created["port"].as_u64().expect("assigned port");
 
     let echoed: serde_json::Value = reqwest::get(format!("http://{admin}/imposters/{port}"))
         .await
@@ -185,11 +185,9 @@ async fn get_imposters_echoes_conditional_exactly_as_declared() {
 
     let refused = reqwest::Client::new()
         .post(format!("http://{admin}/imposters"))
-        .json(
-            &json!({ "port": free_port(), "protocol": "http", "stubs": [{ "responses": [
+        .json(&json!({ "protocol": "http", "stubs": [{ "responses": [
             { "is": { "body": "x" }, "_rift": { "conditional": { "lastModified": "yesterday" } } }
-        ] }] }),
-        )
+        ] }] }))
         .send()
         .await
         .expect("create");

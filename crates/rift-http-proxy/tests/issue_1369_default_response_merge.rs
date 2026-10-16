@@ -4,9 +4,8 @@
 //! specify (`statusCode`, `headers`, `body`, `_mode`) is taken from `defaultResponse`. Rift read
 //! `defaultResponse` only when no stub matched.
 //!
-//! Every imposter here binds a free port, so none of these tests owns a fixed port.
+//! Every imposter here takes an engine-assigned port, so none of these tests owns a fixed port.
 
-use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,18 +13,12 @@ use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
 use serde_json::{Value, json};
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
-}
-
-async fn create(manager: &ImposterManager, cfg: Value) {
+/// Create an imposter without a port; return the port the manager assigned.
+async fn create(manager: &ImposterManager, cfg: Value) -> u16 {
     let config = serde_json::from_value(cfg).expect("config");
-    manager.create_imposter(config).await.expect("create");
+    let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
+    port
 }
 
 async fn get(port: u16, path: &str) -> reqwest::Response {
@@ -51,11 +44,10 @@ fn default_response() -> Value {
 #[tokio::test]
 async fn default_response_completes_stub_responses() {
     let manager = ImposterManager::new();
-    let port = free_port();
-    create(
+    let port = create(
         &manager,
         json!({
-            "port": port, "protocol": "http",
+            "protocol": "http",
             "defaultResponse": default_response(),
             "stubs": [
                 stub("/empty", json!({ "is": {} })),
@@ -117,11 +109,10 @@ async fn default_response_completes_stub_responses() {
 #[tokio::test]
 async fn default_response_merge_reaches_the_prepared_fast_path() {
     let manager = ImposterManager::new();
-    let port = free_port();
-    create(
+    let port = create(
         &manager,
         json!({
-            "port": port, "protocol": "http",
+            "protocol": "http",
             "defaultResponse": default_response(),
             "stubs": [stub("/p", json!({ "is": {} }))]
         }),
@@ -137,11 +128,10 @@ async fn default_response_merge_reaches_the_prepared_fast_path() {
 #[tokio::test]
 async fn no_default_response_keeps_fast_path_and_old_answer() {
     let manager = ImposterManager::new();
-    let port = free_port();
-    create(
+    let port = create(
         &manager,
         json!({
-            "port": port, "protocol": "http",
+            "protocol": "http",
             "stubs": [stub("/p", json!({ "is": {} }))]
         }),
     )
@@ -157,20 +147,18 @@ async fn no_default_response_keeps_fast_path_and_old_answer() {
 #[tokio::test]
 async fn proxy_response_is_not_completed_by_default_response() {
     let manager = ImposterManager::new();
-    let upstream = free_port();
-    create(
+    let upstream = create(
         &manager,
         json!({
-            "port": upstream, "protocol": "http",
+            "protocol": "http",
             "stubs": [stub("/up", json!({ "is": { "statusCode": 200 } }))]
         }),
     )
     .await;
-    let front = free_port();
-    create(
+    let front = create(
         &manager,
         json!({
-            "port": front, "protocol": "http",
+            "protocol": "http",
             "defaultResponse": default_response(),
             "stubs": [stub("/up", json!({ "proxy": {
                 "to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyTransparent"
@@ -195,12 +183,10 @@ async fn default_response_proxy_round_trips_and_warns() {
     let running = server.bind().await.expect("admin API binds");
     let admin = format!("http://{}", running.local_addr());
     let client = reqwest::Client::new();
-    let port = free_port();
-
     let created = client
         .post(format!("{admin}/imposters"))
         .json(&json!({
-            "port": port, "protocol": "http", "stubs": [],
+            "protocol": "http", "stubs": [],
             "defaultResponse": { "proxy": { "to": "http://127.0.0.1:1" } }
         }))
         .send()
@@ -208,6 +194,7 @@ async fn default_response_proxy_round_trips_and_warns() {
         .expect("POST");
     assert_eq!(created.status().as_u16(), 201);
     let created: Value = created.json().await.expect("json");
+    let port = u16::try_from(created["port"].as_u64().expect("port")).expect("u16");
     assert_eq!(
         created["defaultResponse"],
         json!({ "proxy": { "to": "http://127.0.0.1:1" } }),
@@ -250,11 +237,10 @@ async fn default_response_proxy_round_trips_and_warns() {
 #[tokio::test]
 async fn a_204_completed_by_a_default_body_is_served_without_one() {
     let manager = ImposterManager::new();
-    let port = free_port();
-    create(
+    let port = create(
         &manager,
         json!({
-            "port": port, "protocol": "http",
+            "protocol": "http",
             "defaultResponse": { "statusCode": 404, "headers": { "Content-Type": "application/json" },
                                  "body": { "error": "not found" } },
             "stubs": [stub("/gone", json!({ "is": { "statusCode": 204 } }))]
@@ -277,11 +263,10 @@ async fn a_204_completed_by_a_default_body_is_served_without_one() {
 #[tokio::test]
 async fn an_inject_numeric_string_status_code_is_not_replaced_by_the_default() {
     let manager = ImposterManager::new();
-    let port = free_port();
-    create(
+    let port = create(
         &manager,
         json!({
-            "port": port, "protocol": "http",
+            "protocol": "http",
             "defaultResponse": default_response(),
             "stubs": [stub("/s", json!({ "inject": "function(config) { return { statusCode: '201' }; }" }))]
         }),
@@ -298,20 +283,18 @@ async fn an_inject_numeric_string_status_code_is_not_replaced_by_the_default() {
 #[tokio::test]
 async fn a_recorded_empty_upstream_body_is_not_filled_by_the_default_on_replay() {
     let manager = ImposterManager::new();
-    let upstream = free_port();
-    create(
+    let upstream = create(
         &manager,
         json!({
-            "port": upstream, "protocol": "http",
+            "protocol": "http",
             "stubs": [stub("/up", json!({ "is": { "statusCode": 200 } }))]
         }),
     )
     .await;
-    let front = free_port();
-    create(
+    let front = create(
         &manager,
         json!({
-            "port": front, "protocol": "http",
+            "protocol": "http",
             "defaultResponse": { "statusCode": 404, "body": { "error": "x" } },
             "stubs": [{ "responses": [{ "proxy": {
                 "to": format!("http://127.0.0.1:{upstream}"), "mode": "proxyOnce",
