@@ -3872,6 +3872,7 @@ dependencies = [
  "serde_norway",
  "serial_test",
  "similar",
+ "socket2",
  "subtle",
  "sxd-document",
  "sxd-xpath",

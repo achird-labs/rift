@@ -98,7 +98,13 @@ fn main() -> Result<(), anyhow::Error> {
     // server's PID file with the probe's own — but since #827 the PID file is written only on the
     // serving path, so a transient subcommand can no longer touch it.)
     if let Some(Commands::Healthcheck { url, timeout }) = cli.command.clone() {
-        return healthcheck::dispatch(url, &cli.host, cli.port, timeout, cli.api_key.as_deref());
+        return healthcheck::dispatch(
+            url,
+            cli.connect_host(),
+            cli.port,
+            timeout,
+            cli.api_key.as_deref(),
+        );
     }
 
     // `--debug` is the server-flag spelling of debug mode (issue #360 Item 3); `RIFT_DEBUG` is
@@ -162,7 +168,7 @@ fn main() -> Result<(), anyhow::Error> {
             remove_proxies,
         }) => {
             return save_imposters(
-                &cli.host,
+                cli.connect_host(),
                 cli.port,
                 savefile,
                 *remove_proxies,
@@ -185,7 +191,7 @@ fn main() -> Result<(), anyhow::Error> {
         Some(Commands::Healthcheck { url, timeout }) => {
             return healthcheck::dispatch(
                 url.clone(),
-                &cli.host,
+                cli.connect_host(),
                 cli.port,
                 *timeout,
                 cli.api_key.as_deref(),

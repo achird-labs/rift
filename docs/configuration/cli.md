@@ -169,13 +169,13 @@ rift [OPTIONS] [COMMAND]
 
 Server options:
       --port <PORT>                Admin API port [default: 2525]
-      --host <HOST>                IP address to bind the admin API to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`) [default: 0.0.0.0]
+      --host <HOST>                IP address to bind the admin API to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`) [default: every interface, IPv6 and IPv4]
       --configfile <FILE>          Load imposters from a JSON/YAML file on startup (sugar for --imposters file:<FILE>)
       --imposters <URI[,URI...]>   Load imposters from one or more source URIs: file:<path>, a bare path, or https://… (see Imposter Sources below)
       --datadir <DIR>              Directory for persistent imposter storage
       --scripts-dir <DIR>          Root directory for admin-API `file:`/`ref:` script resolution; references that escape it are rejected (unset ⇒ file-backed scripts via the admin API are refused)
       --allow-injection            Enable JavaScript injection in responses (alias: --allowInjection)
-      --local-only                 Only accept connections from localhost (binds both the admin API and /metrics to loopback)
+      --local-only                 Only accept connections from localhost (binds both the admin API and /metrics to `127.0.0.1` and `::1`)
       --require-admin-auth         Refuse to start when the admin API would bind a non-loopback address with no --api-key (default: warn)
       --loglevel <LEVEL>           Log level: trace, debug, info, warn, error (an unrecognised value is refused) [default: info]
       --runtime <MODE>             Runtime topology: work-stealing (default) or per-core[=N] (RFC-712; experimental, Linux-first — macOS falls back with a warning, Windows rejects it)
@@ -241,7 +241,7 @@ What does work inside Rift:
 
 | Goal | Use |
 |:-----|:----|
-| Refuse connections from other hosts | `--local-only` (binds loopback; covers `/metrics` too since 0.17.0) |
+| Refuse connections from other hosts | `--local-only` (binds `127.0.0.1` and `::1`; covers `/metrics` too since 0.17.0) |
 | Require a credential on the admin API | `--api-key <token>` |
 | Fail startup if the admin plane is exposed and keyless | `--require-admin-auth` |
 
@@ -356,25 +356,26 @@ curl -H "Authorization: s3cr3t" http://localhost:2525/imposters
 
 ### Unauthenticated admin plane on a public interface
 
-`--host` defaults to `0.0.0.0`, so a bare `rift` with no `--api-key` already serves the
+With no `--host` the admin API listens on every interface, IPv6 and IPv4 (`[::]` dual-stack;
+`0.0.0.0` on a host without IPv6), so a bare `rift` with no `--api-key` already serves the
 full admin API — which can create imposters and drive the TLS intercept proxy — on every interface
 with no authentication. Since 0.17.0 that posture is stated at startup instead of being silent:
 
 ```
-WARN the admin API is bound to 0.0.0.0:2525, which is reachable from outside this host, with no
+WARN the admin API is bound to [::]:2525, which is reachable from outside this host, with no
      API key — anyone who can reach that address can create imposters and drive the TLS intercept
      proxy. Set `--api-key <token>` (`MB_APIKEY`), or restrict the bind with `--local-only` or
      `--host 127.0.0.1`. Set `--require-admin-auth` (`RIFT_REQUIRE_ADMIN_AUTH`) to make this a
      startup failure instead of a warning.
 ```
 
-The default is a **warning, not a refusal**: containers require `0.0.0.0` (binding loopback inside
+The default is a **warning, not a refusal**: containers require every interface (binding loopback inside
 Docker makes the published port unreachable), so refusing would break the no-argument invocation
 and every keyless quickstart. Fleets that want fail-closed opt in:
 
 ```bash
 # Refuse to start unless the admin plane is authenticated or loopback-only
-rift --require-admin-auth                    # errors: 0.0.0.0 with no key
+rift --require-admin-auth                    # errors: every interface with no key
 rift --require-admin-auth --api-key s3cr3t   # ok — authenticated
 rift --require-admin-auth --local-only       # ok — not reachable off-host
 ```
@@ -501,7 +502,7 @@ wins over the built-in default (and over an `--rcfile` value — see [RC file](#
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `MB_PORT` | Admin API port | `2525` |
-| `MB_HOST` | Admin API bind IP address (IPv4, or IPv6 `::1` / `[::1]`) | `0.0.0.0` |
+| `MB_HOST` | Admin API bind IP address (IPv4, or IPv6 `::1` / `[::1]`) | every interface, IPv6 and IPv4 (`[::]` dual-stack; `0.0.0.0` on a host without IPv6) |
 | `MB_CONFIGFILE` | Imposter config file | |
 | `RIFT_IMPOSTERS` | Imposter source URIs (env alias of `--imposters`) | |
 | `MB_DATADIR` | Persistent storage directory | |
@@ -872,8 +873,8 @@ needs no shell and no `curl`, which is what lets the `-static` image be `FROM sc
 
 With no arguments it probes `/health` on the admin API, reading `--host`/`--port` (and therefore
 `MB_HOST`/`MB_PORT`, and an `--rcfile` that sets them) exactly as the server does — so inside a
-container `rift healthcheck` needs no configuration. A bind-any host (`0.0.0.0`, `::`) is probed on
-loopback, since that is where a server bound to every interface answers.
+container `rift healthcheck` needs no configuration. With no `--host`, or a bind-any host (`0.0.0.0`,
+`::`), it probes `127.0.0.1`, since that is where a server bound to every interface answers.
 
 ```bash
 rift healthcheck                                        # probes http://127.0.0.1:2525/health

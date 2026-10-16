@@ -226,6 +226,8 @@ println!("admin bound to {}", running.local_addr());
 | `with_intercept` | `fn with_intercept(self, control: InterceptControl) -> Self` | Serve the `/intercept*` routes against this shared control slot. Without it every `/intercept*` route answers `404`. See [Intercept proxy]({{ site.baseurl }}/features/intercept-proxy/). |
 | `with_scripts_dir` | `fn with_scripts_dir(self, dir: PathBuf) -> Self` | Root that `_rift.script` `file:` references resolve under for imposters created through this API (issue #356). Without it such references are rejected. |
 | `with_reported_admin_port` | `fn with_reported_admin_port(self, port: u16) -> Self` | Report `port` from `GET /config` instead of the port this server bound (issue #1135). For a host that fronts the admin API with its own public listener and binds the core to an ephemeral loopback port — without it, `options.port` advertises the *private* port to Mountebank-compat clients that read it to build URLs. Unset reports the bound port; `0` is a configured `0`, not "unset". `ServerBuilder::reported_admin_port` is the builder spelling. |
+| `listen` | `fn listen(self, addr: ListenAddr) -> Self` | Listen on `addr` instead of the exact address given to `new` (issue #1528): `ListenAddr::Any(port)` for `[::]` dual-stack with a `0.0.0.0` fallback, `ListenAddr::Loopback(port)` for `127.0.0.1` and `[::1]`, `ListenAddr::Exact(addr)` for one address. `new(addr, …)` alone is `Exact(addr)`; an IPv6 address is dual-stack. |
+| `with_reported_host` | `fn with_reported_host(self, host: Option<String>) -> Self` | The `--host` flag `GET /config` reports as `options.host` (issue #1528): the flag, `null` when unset, never the bound address. |
 | `with_require_admin_auth` | `fn with_require_admin_auth(self, require: bool) -> Self` | Make `bind` **fail** when this server would be reachable off-host with no `api_key`, instead of warning (issue #863). The embedder spelling of `--require-admin-auth`. |
 | `bind` | `async fn bind(self) -> anyhow::Result<RunningAdminApi>` | Bind and start serving; returns once bound. |
 | `run` | `async fn run(self) -> anyhow::Result<()>` | Bind and serve until the accept loop exits. |
@@ -237,21 +239,23 @@ out loud. `with_require_admin_auth(true)` turns that warning into a startup erro
 before the listener binds, so a refusal never leaves a socket behind. It gates on *authentication*,
 not on the address: a real `api_key` satisfies it on any bind, and loopback satisfies it with none.
 
-`RunningAdminApi`: `local_addr(&self) -> SocketAddr`, `shutdown(&self)`, `join(self) -> anyhow::Result<()>`,
-`wait(&self) -> anyhow::Result<()>` (the non-consuming form of `join`, as above).
+`RunningAdminApi`: `local_addr(&self) -> SocketAddr` (the first bound address), `local_addrs(&self) -> &[SocketAddr]`
+(every bound address: `127.0.0.1` and `[::1]` under `ListenAddr::Loopback`, issue #1528), `shutdown(&self)`,
+`join(self) -> anyhow::Result<()>`, `wait(&self) -> anyhow::Result<()>` (the non-consuming form of `join`, as above).
 
 #### Computing `addr` the way the CLI does
 
-If your binary parses rift's `Cli`, derive the admin address with `server::admin_bind_addr` rather
-than reading `--host`/`--port` yourself — `--local-only` pins loopback and outranks `--host`, and a
-private copy of that rule can disagree with the exposure check about *which address is being judged*
-(issue #1131):
+If your binary parses rift's `Cli`, derive the admin address with `server::admin_listen_addr` rather
+than reading `--host`/`--port` yourself — `--local-only` pins loopback and outranks `--host`, no
+`--host` listens on every interface, and a private copy of that rule can disagree with the exposure
+check about *which address is being judged* (issues #1131, #1528):
 
 ```rust
-use rift_http_proxy::server::admin_bind_addr;
+use rift_http_proxy::server::{admin_bind_addr, admin_listen_addr};
 
-let addr = admin_bind_addr(&cli)?;          // --local-only pins 127.0.0.1, else --host, on --port
-let running = AdminApiServer::new(addr, manager, cli.api_key.clone())
+let listen = admin_listen_addr(&cli)?;      // Loopback, Any (no --host) or Exact(--host), on --port
+let running = AdminApiServer::new(admin_bind_addr(&cli)?, manager, cli.api_key.clone())
+    .listen(listen)
     .with_require_admin_auth(cli.require_admin_auth)
     .with_local_only(cli.local_only)
     .bind()
@@ -266,7 +270,10 @@ metrics listener it must not have to unwind; an embedder binding the admin plane
 
 | Item | Signature | Purpose |
 |:-----|:----------|:--------|
-| `admin_bind_addr` | `fn admin_bind_addr(cli: &Cli) -> anyhow::Result<SocketAddr>` | The address the admin plane binds under this CLI: `--local-only` pins loopback, otherwise `--host`, on `--port`. The same value the exposure check is handed. `ServerBuilder::start` calls it too, so the rule has one definition. Accepts an IPv4 literal or an IPv6 literal, bare (`::1`) or bracketed (`[::1]`); errors when `--host` is not an IP literal (a DNS name is not resolved). |
+| `Cli::connect_host` | `fn connect_host(&self) -> &str` | The host a local client (`rift healthcheck`, `rift save`) connects to: `--host`, or `127.0.0.1` when it is unset (issue #1528). `Cli::host` is an `Option<String>` since #1528, `None` when no `--host`/`MB_HOST` was given. |
+| `admin_listen_addr` | `fn admin_listen_addr(cli: &Cli) -> anyhow::Result<ListenAddr>` | Where the admin plane listens under this CLI (issue #1528): `Loopback(port)` under `--local-only`, `Any(port)` with no `--host`, otherwise `Exact(--host:port)`. Same errors as `admin_bind_addr`. |
+| `ListenAddr` | `enum ListenAddr { Any(u16), Loopback(u16), Exact(SocketAddr) }` | Where a server-level listener binds (issue #1528). `judged()` is the address the exposure check is handed (`[::]:port`, `127.0.0.1:port`, or the exact address); `bind()` returns every std listener it needs (one, or two under `Loopback`). |
+| `admin_bind_addr` | `fn admin_bind_addr(cli: &Cli) -> anyhow::Result<SocketAddr>` | The address the admin plane is judged by under this CLI: `--local-only` pins loopback, otherwise `--host`, on `--port`; with no `--host`, `[::]:port` (issue #1528). It is `admin_listen_addr(cli)?.judged()`, the same value the exposure check is handed. `ServerBuilder::start` calls it too, so the rule has one definition. Accepts an IPv4 literal or an IPv6 literal, bare (`::1`) or bracketed (`[::1]`); errors when `--host` is not an IP literal (a DNS name is not resolved). |
 
 `ConfigSource` (from `rift-http-proxy`) is either `File { path, no_parse }` (a single `--configfile`,
 with optional EJS preprocessing) or `Dir(PathBuf)` (a `--datadir` of one-imposter-per-file configs).
@@ -285,7 +292,9 @@ metrics.shutdown().await;
 |:------------------|:----------|:--------|
 | `run_metrics_server` | `async fn run_metrics_server(addr: SocketAddr) -> anyhow::Result<()>` | Serve metrics forever on a fixed address. |
 | `bind_metrics_server` | `async fn bind_metrics_server(addr: SocketAddr) -> anyhow::Result<RunningMetrics>` | Bind (supports `:0`) and return a handle. |
-| `RunningMetrics::local_addr` | `fn local_addr(&self) -> SocketAddr` | The bound metrics address. |
+| `bind_metrics_listeners` | `async fn bind_metrics_listeners(addr: ListenAddr) -> anyhow::Result<RunningMetrics>` | `bind_metrics_server` on every listener a `ListenAddr` needs (issue #1528); `ServerBuilder::start` binds `Any` or, under `--local-only`, `Loopback`. |
+| `RunningMetrics::local_addr` | `fn local_addr(&self) -> SocketAddr` | The first bound metrics address. |
+| `RunningMetrics::local_addrs` | `fn local_addrs(&self) -> &[SocketAddr]` | Every bound metrics address (two under `ListenAddr::Loopback`). |
 | `RunningMetrics::shutdown` | `async fn shutdown(&self)` | Stop the metrics server. |
 | `RunningMetrics::join` | `async fn join(self) -> anyhow::Result<()>` | Await until it exits. |
 

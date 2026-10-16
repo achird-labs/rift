@@ -33,6 +33,9 @@ pub use network::{DEFAULT_HTTP_MAX_BUF, HttpTuning};
 // The one rule for turning an operator's bind host into an address (issue #1137), shared by every
 // bind door in the workspace: the admin plane, the intercept listener, the FFI, and imposters.
 pub use network::{bind_addr, bind_host};
+// Node's no-host listen and the server-listener socket builder, shared with rift-http-proxy's admin,
+// metrics, front-door and intercept listeners (issue #1528).
+pub use network::{bind_server_listener, bind_unspecified};
 // Accept-error handling shared by every listener in the workspace: the imposter serve loop
 // (issue #750) and the admin API accept loop (issue #826), which must classify-and-retry rather
 // than let one transient accept failure end the server.

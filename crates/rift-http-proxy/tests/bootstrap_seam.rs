@@ -77,7 +77,7 @@ fn rcfile_fills_fields_left_at_defaults() {
     bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile).expect("rcfile applies");
 
     assert_eq!(parsed.port, 4321);
-    assert_eq!(parsed.host, "127.0.0.1");
+    assert_eq!(parsed.host.as_deref(), Some("127.0.0.1"));
     assert_eq!(parsed.loglevel, "debug");
     assert!(parsed.allow_injection);
     assert!(parsed.local_only);
@@ -110,7 +110,8 @@ fn rcfile_never_overrides_an_explicit_flag() {
         "explicit --port must win over the rcfile"
     );
     assert_eq!(
-        parsed.host, "192.168.0.1",
+        parsed.host.as_deref(),
+        Some("192.168.0.1"),
         "explicit --host must win over the rcfile"
     );
 }

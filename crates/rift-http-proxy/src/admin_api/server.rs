@@ -10,6 +10,7 @@ use crate::front_door::FrontDoorRoutes;
 use crate::gateway::apply_tcp_fault;
 use crate::imposter::ImposterManager;
 use crate::intercept_control::InterceptControl;
+use crate::listen::{ListenAddr, ListenerSet, http_urls};
 use crate::sources::{ReloadSource, SourceSet};
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -29,7 +30,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
-use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -71,7 +71,12 @@ const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 /// Admin API server for Rift
 pub struct AdminApiServer {
-    addr: SocketAddr,
+    listen: ListenAddr,
+    /// Listeners `ServerBuilder::start` bound ahead of [`bind`](Self::bind), so the intercept
+    /// listener can follow the address the admin plane really got (issue #1528).
+    bound: Option<Vec<std::net::TcpListener>>,
+    /// `--host` as supplied, reported verbatim by `GET /config` (issue #1528); `None` when unset.
+    reported_host: Option<Arc<str>>,
     manager: Arc<ImposterManager>,
     api_key: Option<Arc<String>>,
     config_source: Option<ReloadSource>,
@@ -94,10 +99,13 @@ pub struct AdminApiServer {
 }
 
 impl AdminApiServer {
-    /// Create a new admin API server
+    /// Create a new admin API server listening on exactly `addr` (an IPv6 address is dual-stack).
+    /// [`listen`](Self::listen) replaces it with a dual-stack default or a two-address loopback.
     pub fn new(addr: SocketAddr, manager: Arc<ImposterManager>, api_key: Option<String>) -> Self {
         Self {
-            addr,
+            listen: ListenAddr::Exact(addr),
+            bound: None,
+            reported_host: None,
             manager,
             api_key: api_key.map(Arc::new),
             config_source: None,
@@ -110,6 +118,29 @@ impl AdminApiServer {
             reported_admin_port: None,
             exposure: Some(AdminExposurePolicy::default()),
         }
+    }
+
+    /// Listen on `addr` instead of the address given to [`new`](Self::new) (issue #1528): `Any` for
+    /// `[::]` dual-stack with an IPv4 fallback, `Loopback` for `127.0.0.1` and `[::1]`.
+    #[must_use]
+    pub fn listen(mut self, addr: ListenAddr) -> Self {
+        self.listen = addr;
+        self
+    }
+
+    /// Serve on listeners already bound for this server's [`ListenAddr`] (issue #1528).
+    #[must_use]
+    pub(crate) fn with_bound_listeners(mut self, listeners: Vec<std::net::TcpListener>) -> Self {
+        self.bound = Some(listeners);
+        self
+    }
+
+    /// Record `--host` for `GET /config` to report (issue #1528): the flag, `null` when unset, not
+    /// the address that was bound.
+    #[must_use]
+    pub fn with_reported_host(mut self, host: Option<String>) -> Self {
+        self.reported_host = host.map(Arc::from);
+        self
     }
 
     /// Record `--local-only` for `GET /config` to report (issue #879). Threaded explicitly, like
@@ -252,16 +283,22 @@ impl AdminApiServer {
         // warns once.
         if let Some(policy) = self.exposure {
             check_admin_exposure(
-                self.addr,
+                self.listen.judged(),
                 self.api_key.as_deref().map(String::as_str),
                 policy,
             )?;
         }
-        let listener = TcpListener::bind(self.addr).await?;
-        let local_addr = listener.local_addr()?;
+        let listeners = match self.bound {
+            Some(listeners) => listeners,
+            None => self.listen.bind()?,
+        };
+        let listeners = ListenerSet::from_std(listeners)?;
+        let local_addrs = listeners.local_addrs()?;
+        // `from_std` refuses an empty set, so there is always a first address.
+        let local_addr = local_addrs[0];
         info!(
-            "Rift Admin API (Mountebank-compatible) listening on http://{}",
-            local_addr
+            "Rift Admin API (Mountebank-compatible) listening on {}",
+            http_urls(&local_addrs, "")
         );
 
         // Stated either way (issue #863): logging only the authenticated case made the riskier
@@ -293,7 +330,7 @@ impl AdminApiServer {
                 shutdown_requested: release_cancel,
             };
             let result = accept_loop(
-                listener,
+                listeners,
                 self.manager,
                 self.api_key,
                 self.config_source,
@@ -307,6 +344,7 @@ impl AdminApiServer {
                         .reported_admin_port
                         .unwrap_or_else(|| local_addr.port()),
                     local_only: self.local_only,
+                    host: self.reported_host,
                 },
                 loop_cancel,
                 loop_tracker,
@@ -324,7 +362,7 @@ impl AdminApiServer {
         });
 
         Ok(RunningAdminApi {
-            local_addr,
+            local_addrs,
             cancel,
             tracker,
             task: Mutex::new(Some(task)),
@@ -374,7 +412,8 @@ impl Drop for ReleaseWaiters {
 /// A bound, running admin API server (issue #342). Reports its listening address and offers a
 /// graceful shutdown that does not require dropping the runtime.
 pub struct RunningAdminApi {
-    local_addr: SocketAddr,
+    /// Every bound address, in bind order; never empty.
+    local_addrs: Vec<SocketAddr>,
     cancel: CancellationToken,
     tracker: TaskTracker,
     task: Mutex<Option<JoinHandle<()>>>,
@@ -422,7 +461,7 @@ impl RunningAdminApi {
         });
 
         Self {
-            local_addr: "127.0.0.1:0".parse().expect("test addr"),
+            local_addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
             cancel,
             tracker: TaskTracker::new(),
             task: Mutex::new(Some(task)),
@@ -430,9 +469,16 @@ impl RunningAdminApi {
             outcome,
         }
     }
-    /// The actual bound address (a `:0` request resolves to the OS-assigned port here).
+    /// The first bound address (a `:0` request resolves to the OS-assigned port here): `127.0.0.1`
+    /// under a two-address loopback, otherwise the one address bound.
     pub fn local_addr(&self) -> SocketAddr {
-        self.local_addr
+        self.local_addrs[0]
+    }
+
+    /// Every bound address (issue #1528): `127.0.0.1` and `[::1]` under `ListenAddr::Loopback` on a
+    /// host with IPv6 loopback, otherwise the one address bound.
+    pub fn local_addrs(&self) -> &[SocketAddr] {
+        &self.local_addrs
     }
 
     /// Stop accepting new connections, give in-flight connections a bounded grace, then return.
@@ -510,7 +556,7 @@ fn take_task<T>(slot: &Mutex<Option<JoinHandle<T>>>) -> Option<JoinHandle<T>> {
 /// so `shutdown` can wait for in-flight requests to drain.
 #[allow(clippy::too_many_arguments)]
 async fn accept_loop(
-    listener: TcpListener,
+    mut listener: ListenerSet,
     manager: Arc<ImposterManager>,
     api_key: Option<Arc<String>>,
     config_source: Option<ReloadSource>,
@@ -634,6 +680,7 @@ async fn accept_loop(
         let intercept = intercept.clone();
         let authorizer = authorizer.clone();
         let scripts_dir = scripts_dir.clone();
+        let config_snapshot = config_snapshot.clone();
         let conn_cancel = cancel.clone();
 
         tracker.spawn(async move {
@@ -654,6 +701,7 @@ async fn accept_loop(
                 let intercept = intercept.clone();
                 let authorizer = authorizer.clone();
                 let scripts_dir = scripts_dir.clone();
+                let config_snapshot = config_snapshot.clone();
                 let stream_cancel = stream_cancel.clone();
                 async move {
                     // Read before the request is consumed: an HTTP/2 carrier resets its stream
@@ -960,8 +1008,8 @@ pub fn validate_admin_api_key(api_key: Option<&str>) -> anyhow::Result<()> {
 /// What to do when the admin plane would be reachable off-host with no API key (issue #863).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AdminExposurePolicy {
-    /// Log a warning and continue. The default, and deliberately so: `--host` defaults to
-    /// `0.0.0.0` and containers need it (binding loopback inside Docker makes the published port
+    /// Log a warning and continue. The default, and deliberately so: with no `--host` the admin
+    /// plane listens on every interface and containers need it (binding loopback inside Docker makes the published port
     /// unreachable), so refusing here would break the no-argument invocation, every quickstart and
     /// every CI sandbox. A refusal everyone opts out of immediately is worse than a warning read
     /// once — the opt-out ends up permanent in the base image.

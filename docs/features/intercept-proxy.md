@@ -238,8 +238,9 @@ RIFT_INTERCEPT_CA_CERT_PEM="$(cat ca.pem)" RIFT_INTERCEPT_CA_KEY_PEM="$(cat ca.k
   rift --intercept-port 8443
 ```
 
-The flag binds the listener on the admin server's `--host`, which defaults to `0.0.0.0` — so a
-bare `--intercept-port` is reachable off-host, and warns unless `--intercept-auth` is set. Pass
+The flag binds the listener on the address the admin server bound: with no `--host` that is every
+interface (`[::]` dual-stack, or `0.0.0.0` on a host without IPv6) — so a bare `--intercept-port`
+is reachable off-host, and warns unless `--intercept-auth` is set. Pass
 `--host 127.0.0.1` for a loopback-only rig, or use the config-file block, which names its own host.
 
 (Equivalently `RIFT_INTERCEPT_PORT` / `RIFT_INTERCEPT_CA_CERT` / `RIFT_INTERCEPT_CA_KEY`, or the

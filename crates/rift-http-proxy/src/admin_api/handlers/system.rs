@@ -59,7 +59,7 @@ pub async fn handle_metrics(manager: Arc<ImposterManager>) -> Response<Full<Byte
 /// A struct rather than two more positional parameters: the router would otherwise thread three
 /// adjacent unlabelled scalars into one call, where a transposition compiles silently and makes
 /// `/config` report one setting as another.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ConfigSnapshot {
     /// The port the admin plane actually bound. Was hardcoded to `DEFAULT_ADMIN_PORT`, so
     /// `--port 3000` (or the `:0` every embedder test uses) reported `2525`.
@@ -69,12 +69,15 @@ pub struct ConfigSnapshot {
     ///
     /// Deriving it from the bound address reads as more truthful and is worse. `--host 127.0.0.1`
     /// without `--local-only` binds the admin plane to loopback while `/metrics` and every imposter
-    /// port stay on `0.0.0.0` (pinned by `without_local_only_metrics_still_binds_every_interface`),
+    /// port stay on every interface (pinned by `without_local_only_metrics_still_binds_every_interface`),
     /// so a bind-derived `true` would tell an operator nothing is reachable off-host while two
     /// listener families are. The old hardcoded `false` understated; that would *overstate*, which
     /// is the direction that gets someone hurt. The flag is also what Mountebank's `/config`
     /// echoes, so this keeps the compat endpoint compatible.
     pub local_only: bool,
+    /// `--host` as supplied, `None` when unset (issue #1528) — the flag, for the reason given on
+    /// `local_only`: with no `--host` the bind is `[::]` or, without IPv6, `0.0.0.0`.
+    pub host: Option<std::sync::Arc<str>>,
 }
 
 /// GET /config - Mountebank-compatible config endpoint
@@ -91,6 +94,7 @@ pub fn handle_config(allow_injection: bool, snapshot: ConfigSnapshot) -> Respons
         "commit": option_env!("RIFT_COMMIT"),
         "options": {
             "port": snapshot.admin_port,
+            "host": snapshot.host.as_deref(),
             "allowInjection": allow_injection,
             "localOnly": snapshot.local_only,
             // Accurate rather than aspirational (issue #879): `--ip-whitelist` is accepted and
@@ -504,6 +508,7 @@ mod tests {
             ConfigSnapshot {
                 admin_port: 2525,
                 local_only: false,
+                host: None,
             },
         );
         assert_eq!(resp.status(), StatusCode::OK);
@@ -519,6 +524,7 @@ mod tests {
             ConfigSnapshot {
                 admin_port: 2525,
                 local_only: false,
+                host: None,
             },
         );
         let bytes = tokio::runtime::Runtime::new()
@@ -558,6 +564,7 @@ mod tests {
                 ConfigSnapshot {
                     admin_port: 2525,
                     local_only: false,
+                    host: None,
                 },
             );
             let bytes = tokio::runtime::Runtime::new()

@@ -15,11 +15,12 @@ fn cli(argv: &[&str]) -> Cli {
     Cli::parse_from(argv)
 }
 
-// AC3 + AC4: the documented default — every interface, the Mountebank admin port.
+// AC3 + AC4: the documented default — every interface, the Mountebank admin port. Judged as the
+// IPv6 wildcard since #1528: the bind is `[::]` dual-stack, `0.0.0.0` only on a host without IPv6.
 #[test]
 fn the_default_cli_binds_all_interfaces_on_2525() {
     let addr = admin_bind_addr(&cli(&["rift"])).expect("the default CLI must resolve");
-    assert_eq!(addr, "0.0.0.0:2525".parse::<SocketAddr>().expect("literal"));
+    assert_eq!(addr, "[::]:2525".parse::<SocketAddr>().expect("literal"));
 }
 
 // AC2: `--local-only` pins loopback and outranks an explicit `--host`. This is the half of the
@@ -57,7 +58,7 @@ fn an_explicit_host_and_port_are_used_verbatim() {
 #[test]
 fn port_zero_resolves_to_an_ephemeral_bind() {
     let addr = admin_bind_addr(&cli(&["rift", "--port", "0"])).expect("port 0 must resolve");
-    assert_eq!(addr, "0.0.0.0:0".parse::<SocketAddr>().expect("literal"));
+    assert_eq!(addr, "[::]:0".parse::<SocketAddr>().expect("literal"));
 }
 
 // AC5: a non-literal host (a DNS name) is refused, and the refusal names the flag an operator
