@@ -718,6 +718,40 @@ fn a_proxy_always_recording_is_appended_at_the_end() {
     );
 }
 
+/// #1503: a `proxyAlways` append to a recording whose cycle has wrapped is served after the
+/// responses already there, as Mountebank's rotating queue serves it: the first answer once the
+/// proxy is gone is the recording's first response, not one picked by its lifetime answer count.
+#[test]
+fn a_proxy_always_append_after_a_wrapped_cycle_is_served_last() {
+    run(
+        &[Spec::Proxy {
+            pred: ops::Pred::default(),
+            mode: ops::Mode::Once,
+            gen_body: false,
+        }],
+        &[
+            get("/b"),
+            get("/b"),
+            get("/b"),
+            Op::AddStub {
+                index: 0,
+                spec: Spec::Proxy {
+                    pred: ops::Pred {
+                        path: Some("/b"),
+                        ..ops::Pred::default()
+                    },
+                    mode: ops::Mode::Always,
+                    gen_body: false,
+                },
+            },
+            get("/b"),
+            get("/b"),
+            Op::DeleteStub(0),
+            get("/b"),
+        ],
+    );
+}
+
 /// #1386: deleting a `proxyOnce` recording forgets its claim, so the next request for that
 /// identity is forwarded and recorded again, as in Mountebank, where the stub is the recording.
 #[test]
