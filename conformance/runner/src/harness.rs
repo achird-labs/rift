@@ -140,6 +140,9 @@ impl Mode {
             (Self::Container, "intercept-ws") => Some(
                 "starts an intercept engine of its own that dials an origin on the host's loopback, which a container cannot reach",
             ),
+            (Self::Container, "intercept-upstream-trust") => Some(
+                "starts an intercept engine of its own trusting the test CA upstream, which this harness doesn't start in a container",
+            ),
             (Self::Embedded, "tls-flags") => Some(
                 "starts an engine with a TLS CLI flag or environment variable, which an in-process engine cannot take per scenario",
             ),
@@ -1876,12 +1879,13 @@ mod tests {
         assert!(Mode::Container.excludes("admin-isolated").is_some());
     }
 
-    const CONTAINER_TAGS: [&str; 14] = [
+    const CONTAINER_TAGS: [&str; 15] = [
         "rift-debug-env",
         "tls-flags",
         "intercept-runtime",
         "intercept-auth",
         "intercept-ws",
+        "intercept-upstream-trust",
         "admin-isolated",
         "reload-engine",
         "upstream-trust",
@@ -1922,6 +1926,7 @@ mod tests {
             "intercept-runtime",
             "intercept-auth",
             "intercept-ws",
+            "intercept-upstream-trust",
         ] {
             assert!(Mode::External.excludes(tag).is_none(), "{tag}");
             assert!(Mode::Embedded.excludes(tag).is_none(), "{tag}");

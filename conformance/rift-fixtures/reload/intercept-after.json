@@ -1,0 +1,10 @@
+{
+  "imposters": [],
+  "intercept": {
+    "port": 0,
+    "rules": [
+      { "host": "reload.example.com", "action": { "serve": { "statusCode": 200, "body": "v2" } } },
+      { "host": "reload-two.example.com", "action": { "serve": { "statusCode": 200, "body": "second" } } }
+    ]
+  }
+}
