@@ -8,7 +8,8 @@ use std::path::PathBuf;
 /// Embedded mode leaves out `@upstream-trust` (09), `@front-door` (11, 16), `@rift-debug-env` (05,
 /// 19) and `@tls-flags` (20); container mode those, `@admin-isolated` (21), `@full-corpus-verify`
 /// (01), `@reload-engine` (11), `@connect-refused` (08, 21), `@host-port` (08), `@loopback-client`
-/// (22), `@tcp-rst` (03) and `@intercept-runtime`, `@intercept-auth` and `@intercept-ws` (12): see
+/// (22), `@tcp-rst` (03) and `@intercept-runtime`, `@intercept-auth`, `@intercept-ws` and
+/// `@intercept-upstream-trust` (12): see
 /// `harness::Mode::excludes`.
 pub const PORTED_FEATURES: &[&str] = &[
     "00-smoke.feature",

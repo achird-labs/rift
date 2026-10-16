@@ -1,0 +1,6 @@
+[
+  {
+    "host": "keep.example.com",
+    "action": { "forward": { "port": 0 } }
+  }
+]

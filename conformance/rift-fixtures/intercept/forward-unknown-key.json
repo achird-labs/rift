@@ -1,0 +1,4 @@
+{
+  "host": "typo.example.com",
+  "action": { "forward": { "port": 8080, "hots": "127.0.0.1" } }
+}

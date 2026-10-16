@@ -354,3 +354,66 @@ Feature: Intercept / TLS-MITM forward-proxy (rift#413) — CONNECT interception 
     When a WebSocket upgrade to the echo origin is sent through that engine's intercept listener
     Then the response status is 200
     And the response body is "rule-wins"
+
+  # Rift-only (no Mountebank counterpart). Hosts are unique to each scenario; the generic admin step
+  # marks the shared listener's rules for the clear after the scenario.
+  @intercept-http
+  Scenario: PUT /intercept/rules replaces the whole rule set (rift#1272)
+    Given an intercept rule serves 200 "old" for host "swap.example.com" path "/"
+    When the client sends admin "PUT" "/intercept/rules" with payload "intercept/replace-rules"
+    Then the response status is 200
+    And the response is a JSON array of 1 elements
+    When an HTTPS GET to "swap.example.com" "/" through the intercept proxy
+    Then the response body is "new"
+    And the intercept rules count is 1
+
+  @intercept-http
+  Scenario: a refused PUT /intercept/rules leaves the old set in place (rift#1272)
+    Given an intercept rule serves 200 "old" for host "keep.example.com" path "/"
+    When the client sends admin "PUT" "/intercept/rules" with payload "intercept/forward-port-zero"
+    Then the response status is 400
+    And the error envelope message contains "forward port must be 1-65535"
+    When an HTTPS GET to "keep.example.com" "/" through the intercept proxy
+    Then the response body is "old"
+    And the intercept rules count is 1
+
+  @intercept-http
+  Scenario: a forward delivers the SUT's own Host to the upstream (rift#1278)
+    Given an upstream imposter from fixture "intercept/upstream-recording"
+    And an intercept rule forwards host "api.example.com" to the current imposter
+    When an HTTPS GET to "api.example.com" "/svc" through the intercept proxy
+    Then the response status is 200
+    And the upstream imposter's last recorded request has header "Host" with value "api.example.com"
+
+  @intercept-http
+  Scenario: a forward naming a host and the http scheme reaches that host (rift#1273)
+    Given an upstream imposter from fixture "intercept/upstream-recording"
+    When the client sends admin "POST" "/intercept/rules" with payload "intercept/forward-named-host"
+    Then the response status is 201
+    When an HTTPS GET to "named.example.com" "/svc" through the intercept proxy
+    Then the response status is 200
+    And the response body is "upstream-ok"
+
+  @intercept-http
+  Scenario: an unknown forward key is refused with a 400 and installs nothing (rift#1273)
+    When the client sends admin "POST" "/intercept/rules" with payload "intercept/forward-unknown-key"
+    Then the response status is 400
+    And the response is a rift error envelope
+    And the error envelope message contains "unknown field `hots`"
+    And the intercept rules count is 0
+
+  # An `https` forward dials with the listener's `--upstream-ca-file` trust, so this needs an engine
+  # of its own that trusts the test CA, which signed the upstream imposter's leaf.
+  @intercept-upstream-trust
+  Scenario: a forward to an https target dials with the listener's upstream trust (rift#1273)
+    Given an intercept engine that trusts the test CA upstream
+    And an HTTPS upstream imposter from fixture "tls/upstream"
+    And an intercept rule on that engine forwards host "tls-fwd.example.com" to the HTTPS upstream at host "localhost" with scheme "https"
+    When an HTTPS GET to "tls-fwd.example.com" "/up" through that engine's intercept listener
+    Then the response status is 200
+    And the response body is "upstream-tls-ok"
+
+  @intercept-raw
+  Scenario: a minted leaf names the intercept CA's key as its Authority Key Identifier (rift#1277)
+    When a raw HTTPS GET to "aki.example.com" "/" through the intercept tunnel
+    Then the tunnel's leaf certificate names the intercept CA's key as its Authority Key Identifier
