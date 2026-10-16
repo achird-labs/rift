@@ -185,6 +185,17 @@ impl Imposter {
         })
     }
 
+    /// Give every stub a fresh response cycle (issue #1518), keeping its content, load stamp and
+    /// recorded claim, as a Mountebank recreate does. A sequencer keyed by the old slots is the
+    /// caller's to reset.
+    pub(crate) fn restart_cycles(&self) {
+        self.mutate_stubs(|stubs| {
+            for state in stubs.iter_mut() {
+                *state = Arc::new(state.with_fresh_cycle());
+            }
+        });
+    }
+
     /// The imposter's config carrying the stubs it serves *now*. `config.stubs` is only what it
     /// was created with, so anything exporting the imposter — a replayable view, a delete's
     /// response (issues #1219, #1229) — reads this instead, or loses every stub added, replaced

@@ -34,7 +34,8 @@ an imposter in a file and reloading no longer tears every imposter down.
 - The reload is **incremental** (issue #319): each port is diffed and only the delta is applied.
   Unchanged imposters — and unchanged stubs within a changed imposter — **keep their runtime
   state**: recorded requests, scenario state, and response cyclers (`repeat`) all survive the
-  reload.
+  reload. `PUT /imposters` resets that state for every imposter in its body, as Mountebank does,
+  unless `?reconcile=true` is set.
 
 ```bash
 rift --configfile ./imposters.json      # start with a config source

@@ -13,6 +13,14 @@ record.
 
 ### Changed
 
+- **`PUT /imposters` now resets the runtime state of every imposter in the body, as Mountebank's
+  delete-and-recreate does** (#1518): response cycles, recorded requests and `numberOfRequests`,
+  injection state, scenario and flow state, and saved `proxyOnce` responses. The reset is in place,
+  after the reconcile, so listeners stay bound and a port that fails still leaves the rest applied.
+  Pass `?reconcile=true` to keep the previous behaviour, which leaves unchanged imposters' state
+  alone; older engines ignore the parameter and reconcile, so a client can send it unconditionally.
+  `POST /admin/reload` and `rift_apply_config` are unchanged.
+
 - **An imposter without `host` now listens dual-stack on `::`, as Mountebank does** (#1514),
   falling back to `0.0.0.0` on a host without IPv6. It answers on `::1` too, so a `localhost`
   client that resolves `::1` first reaches it, and a port an IPv6-only listener holds is now a
