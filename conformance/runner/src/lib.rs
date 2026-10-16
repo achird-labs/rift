@@ -15,6 +15,9 @@
 //! - [`raw`]: what the HTTP client cannot show: bytes read off a bare socket, a two-stream h2c
 //!   exchange, an over-cap body sent while the answer is read, a bare TCP connect.
 //! - [`spec`]: where the specification lives and which features this runner has ported.
+//! - [`tls`]: TLS clients trusting one test CA, and the chain and ALPN a handshake settled.
+//! - [`wire`]: HTTP/1.1 and HTTP/2 framed by hand over one connection, for what a feature asserts
+//!   about the wire itself.
 
 pub mod build_info;
 pub mod error;
@@ -23,6 +26,8 @@ pub mod http;
 pub mod prom;
 pub mod raw;
 pub mod spec;
+pub mod tls;
 pub mod tools;
+pub mod wire;
 
 pub use error::HarnessError;

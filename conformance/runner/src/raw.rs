@@ -287,7 +287,7 @@ fn indexed_status(index: u8) -> Option<u16> {
     }
 }
 
-fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> anyhow::Result<Vec<u8>> {
     let len = u32::try_from(payload.len()).context("frame payload length")?;
     if len >= 1 << 24 {
         bail!("frame payload of {len} bytes is over HTTP/2's 24-bit length");
@@ -314,9 +314,33 @@ fn literal(index: u8, value: &str) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// `:method GET` (2) and `:scheme http` (6) indexed, then `:path` (4) and `:authority` (1).
-fn request_headers(path: &str, authority: &str) -> anyhow::Result<Vec<u8>> {
-    let mut block = vec![0x82, 0x86];
+/// `:scheme http`, indexed (static-table entry 6).
+pub(crate) const SCHEME_HTTP: u8 = 0x86;
+/// `:scheme https`, indexed (static-table entry 7).
+pub(crate) const SCHEME_HTTPS: u8 = 0x87;
+
+/// The `:status` a HEADERS block opens with, when HPACK sent it as one indexed byte. Dynamic-table
+/// size updates (`001xxxxx`, RFC 7541 §6.3) may come first and are skipped; anything else leaves
+/// the status unknown, which fails an assertion rather than guessing.
+pub(crate) fn indexed_status_of(block: &[u8]) -> Option<u16> {
+    let mut rest = block;
+    while let Some((&b, tail)) = rest.split_first() {
+        if b & 0xe0 != 0x20 {
+            return (b & 0x80 != 0).then(|| indexed_status(b & 0x7f)).flatten();
+        }
+        rest = tail;
+        // A 5-bit prefix of all ones continues in 7-bit groups while the high bit is set.
+        if b & 0x1f == 0x1f {
+            let continued = rest.iter().position(|&c| c & 0x80 == 0)?;
+            rest = &rest[continued + 1..];
+        }
+    }
+    None
+}
+
+/// `:method GET` (2) and `scheme` indexed, then `:path` (4) and `:authority` (1).
+pub(crate) fn request_headers(scheme: u8, path: &str, authority: &str) -> anyhow::Result<Vec<u8>> {
+    let mut block = vec![0x82, scheme];
     block.extend(literal(4, path)?);
     block.extend(literal(1, authority)?);
     Ok(block)
@@ -341,14 +365,41 @@ pub fn h2c_two_streams(
     sock.write_all(&frame(4, 0, 0, &[])?)
         .context("writing SETTINGS")?;
     sock.flush().context("flushing the preface")?;
-    let a = h2_exchange(&mut sock, 1, &request_headers(first, authority)?)?;
+    let a = h2_exchange(
+        &mut sock,
+        1,
+        &request_headers(SCHEME_HTTP, first, authority)?,
+    )?;
     let b = match a {
         H2Outcome::ConnectionLost(_) => {
             H2Outcome::ConnectionLost("connection already lost".to_string())
         }
-        _ => h2_exchange(&mut sock, 3, &request_headers(second, authority)?)?,
+        _ => h2_exchange(
+            &mut sock,
+            3,
+            &request_headers(SCHEME_HTTP, second, authority)?,
+        )?,
     };
     Ok((a, b))
+}
+
+/// One prior-knowledge h2c `GET path` (feature 20): the preface, an empty SETTINGS and one HEADERS
+/// frame, then frames until stream 1 ends.
+pub fn h2c_get(host: &str, port: u16, authority: &str, path: &str) -> anyhow::Result<H2Outcome> {
+    let mut sock =
+        connect(host, port, RAW_TIMEOUT).with_context(|| format!("connecting to {host}:{port}"))?;
+    sock.set_read_timeout(Some(RAW_TIMEOUT))
+        .context("setting the read timeout")?;
+    sock.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        .context("writing the h2c preface")?;
+    sock.write_all(&frame(4, 0, 0, &[])?)
+        .context("writing SETTINGS")?;
+    sock.flush().context("flushing the preface")?;
+    h2_exchange(
+        &mut sock,
+        1,
+        &request_headers(SCHEME_HTTP, path, authority)?,
+    )
 }
 
 /// Send one request on `stream` and read frames until that stream ends. An I/O failure while
@@ -395,10 +446,7 @@ fn h2_exchange(sock: &mut TcpStream, stream: u32, headers: &[u8]) -> anyhow::Res
                 bail!("frame type {kind}/flags {flags} not handled");
             }
             if kind == 1 {
-                status = payload
-                    .first()
-                    .filter(|&&b| b & 0x80 != 0)
-                    .and_then(|&b| indexed_status(b & 0x7f));
+                status = indexed_status_of(&payload);
             }
             if kind == 0 {
                 body.extend_from_slice(&payload);
@@ -658,6 +706,14 @@ mod tests {
             Some(false)
         );
         assert_eq!(cap(b"", true, None).shows("teapot"), None);
+    }
+
+    #[test]
+    fn the_status_is_read_past_a_table_size_update() {
+        assert_eq!(indexed_status_of(&[0x88]), Some(200));
+        assert_eq!(indexed_status_of(&[0x3f, 0xe1, 0x1f, 0x88]), Some(200));
+        assert_eq!(indexed_status_of(&[0x20, 0x8d]), Some(404));
+        assert_eq!(indexed_status_of(&[0x48, 0x03]), None);
     }
 
     #[test]

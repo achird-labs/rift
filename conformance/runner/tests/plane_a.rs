@@ -34,7 +34,9 @@ use rift_conformance_runner::http::{
 use rift_conformance_runner::prom::{self, PromText, Series};
 use rift_conformance_runner::raw::{self, H2_INTERNAL_ERROR, H2Outcome, RawCapture};
 use rift_conformance_runner::spec::{PORTED_FEATURES, features_dir, fixtures_dir};
+use rift_conformance_runner::tls;
 use rift_conformance_runner::tools::{CORPUS_VERIFY_ARGS, binary_version};
+use rift_conformance_runner::wire::{self, RawRead};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -144,6 +146,10 @@ struct PlaneA {
     /// Each listener's exposition when the scenario snapshotted it (feature 17's deltas).
     snapshots: BTreeMap<String, PromText>,
     burst: Option<Burst>,
+    /// The last feature 20 HTTPS exchange's chain and negotiated version.
+    tls: Option<TlsExchange>,
+    /// The last single-stream h2c GET (feature 20).
+    h2c_get: Option<H2Outcome>,
 }
 
 /// A concurrent burst left running, joined by the step that asserts on it.
@@ -3787,6 +3793,493 @@ async fn assigned_port_floor(w: &mut PlaneA) -> Step {
     w.ensure(port >= AUTO_PORT_FLOOR, || {
         format!("expected an auto-assigned port >= {AUTO_PORT_FLOOR}, got {port}")
     })
+}
+
+// ── TLS termination and HTTP/2 negotiation (feature 20, #197) ────────────────────────────────
+
+/// What a feature 20 HTTPS exchange settled: the chain the imposter presented and the HTTP version
+/// ALPN chose, named as the JDK's `HttpClient.Version` is (`HTTP_2`, `HTTP_1_1`).
+#[derive(Debug)]
+struct TlsExchange {
+    chain: Vec<rustls::pki_types::CertificateDer<'static>>,
+    version: &'static str,
+}
+
+/// The one stub every feature 20 imposter answers `/` with.
+fn plain_tls_stub() -> Value {
+    serde_json::json!({"responses": [{"is": {"statusCode": 200, "body": "tls-ok"}}]})
+}
+
+/// A stub on `path` only, so the plain stub still answers `/`.
+fn stub_on_path(path: &str, response: Value) -> Value {
+    serde_json::json!({"predicates": [{"equals": {"path": path}}], "responses": [response]})
+}
+
+fn tls_stubs(kind: &str) -> anyhow::Result<Vec<Value>> {
+    Ok(match kind {
+        "a plain stub" => vec![plain_tls_stub()],
+        "a _rift.fault.tcp stub" => vec![
+            stub_on_path(
+                "/fault",
+                serde_json::json!({"is": {"statusCode": 200}, "_rift": {"fault": {"tcp": "reset"}}}),
+            ),
+            plain_tls_stub(),
+        ],
+        "a _rift.script stub" => vec![
+            stub_on_path(
+                "/script",
+                serde_json::json!({"_rift": {"script": {"engine": "rhai", "code": "fn respond(ctx) { http(200, #{}) }"}}}),
+            ),
+            plain_tls_stub(),
+        ],
+        other => bail!("unknown stub kind '{other}'"),
+    })
+}
+
+/// An imposter of `protocol` with `fields` and `stubs`, without a port: the engine assigns one.
+fn tls_imposter(
+    protocol: &str,
+    fields: Vec<(&str, Value)>,
+    stubs: Vec<Value>,
+) -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    map.insert("protocol".to_string(), protocol.into());
+    map.insert("stubs".to_string(), Value::Array(stubs));
+    for (k, v) in fields {
+        map.insert(k.to_string(), v);
+    }
+    map
+}
+
+fn tls_fixture(name: &str) -> anyhow::Result<String> {
+    let path = fixtures_dir().join("tls").join(name);
+    std::fs::read_to_string(&path).with_context(|| format!("TLS fixture {}", path.display()))
+}
+
+fn test_ca_path() -> PathBuf {
+    fixtures_dir().join("intercept").join("ca-cert.pem")
+}
+
+fn test_ca_pem() -> anyhow::Result<String> {
+    let path = test_ca_path();
+    std::fs::read_to_string(&path).with_context(|| format!("the test CA {}", path.display()))
+}
+
+fn cert_key(cert: &str, key: &str) -> anyhow::Result<Vec<(&'static str, Value)>> {
+    Ok(vec![
+        ("cert", tls_fixture(cert)?.into()),
+        ("key", tls_fixture(key)?.into()),
+    ])
+}
+
+/// Create an imposter on the shared engine, requiring a 201: for the setup steps, where a refusal
+/// is a broken scenario. It becomes the scenario's target.
+async fn create_tls_imposter(w: &mut PlaneA, map: serde_json::Map<String, Value>) -> Step {
+    let json = Value::Object(map).to_string();
+    let port = post_at_engine_port(&harness().admin_url, &json, "the HTTPS imposter").await?;
+    w.tracked.push(port);
+    w.current = Some(port);
+    Ok(())
+}
+
+/// The scenario's `@tls-flags` engine.
+fn flag_admin(w: &PlaneA) -> anyhow::Result<String> {
+    w.side_engine
+        .as_ref()
+        .map(|e| e.admin_url.clone())
+        .ok_or_else(|| anyhow!("no TLS-flag engine was started in this scenario"))
+}
+
+/// Create an imposter on the `@tls-flags` engine, requiring a 201. Not tracked: the engine and its
+/// imposters are stopped after the scenario.
+async fn create_on_flag_engine(w: &mut PlaneA, map: serde_json::Map<String, Value>) -> Step {
+    let admin = flag_admin(w)?;
+    let port = post_assigned(
+        &admin,
+        &Value::Object(map).to_string(),
+        "the HTTPS imposter",
+    )
+    .await?;
+    w.current = Some(port);
+    Ok(())
+}
+
+/// POST an imposter and keep the answer as the last response, whatever it is. In container mode it
+/// goes out on a pool port; a regression that accepts it has its port tracked.
+async fn post_kept(w: &mut PlaneA, admin: &str, mut map: serde_json::Map<String, Value>) -> Step {
+    let shared = admin == harness().admin_url;
+    if shared && let Some(pool) = harness().imposter_port_pool() {
+        let port = pool.next_port();
+        w.tracked.push(port);
+        map.insert("port".to_string(), port.into());
+    }
+    let json = Value::Object(map).to_string();
+    let url = format!("{admin}/imposters");
+    w.send_with(
+        &clients().verifying,
+        "POST",
+        &url,
+        &json_content_type(),
+        Some(&json),
+    )
+    .await?;
+    let resp = w.last()?;
+    if resp.status == 201 {
+        let port = declared_port(&resp.body, "the 201 for an imposter")?;
+        if shared {
+            w.tracked.push(port);
+        }
+        w.current = Some(port);
+    }
+    Ok(())
+}
+
+#[given(regex = r#"^an HTTPS imposter serving "((?:\\.|[^"\\])*)" with key "((?:\\.|[^"\\])*)"$"#)]
+async fn https_imposter(w: &mut PlaneA, cert: String, key: String) -> Step {
+    let fields = cert_key(&unescape(&cert), &unescape(&key))?;
+    create_tls_imposter(w, tls_imposter("https", fields, vec![plain_tls_stub()])).await
+}
+
+#[given(
+    regex = r#"^an HTTPS imposter serving the chain "((?:\\.|[^"\\])*)" then "((?:\\.|[^"\\])*)" with key "((?:\\.|[^"\\])*)"$"#
+)]
+async fn https_imposter_chain(
+    w: &mut PlaneA,
+    leaf: String,
+    intermediate: String,
+    key: String,
+) -> Step {
+    let chain = tls_fixture(&unescape(&leaf))? + tls_fixture(&unescape(&intermediate))?.as_str();
+    let fields = vec![
+        ("cert", chain.into()),
+        ("key", tls_fixture(&unescape(&key))?.into()),
+    ];
+    create_tls_imposter(w, tls_imposter("https", fields, vec![plain_tls_stub()])).await
+}
+
+#[given(
+    regex = r#"^an HTTPS imposter serving "((?:\\.|[^"\\])*)" with key "((?:\\.|[^"\\])*)" and "((?:\\.|[^"\\])*)"$"#
+)]
+async fn https_imposter_with_stubs(
+    w: &mut PlaneA,
+    cert: String,
+    key: String,
+    stubs: String,
+) -> Step {
+    let fields = cert_key(&unescape(&cert), &unescape(&key))?;
+    let stubs = tls_stubs(&unescape(&stubs))?;
+    create_tls_imposter(w, tls_imposter("https", fields, stubs)).await
+}
+
+/// GET `/` on the target imposter over HTTPS, offering `h2` then `http/1.1` and trusting only the
+/// test CA. HTTP/2 is framed by hand (reqwest exposes neither the chain nor ALPN), so an `h2`
+/// answer carries its status and body, not its headers.
+async fn https_get_trusting_test_ca(w: &mut PlaneA) -> Step {
+    let port = w.current()?;
+    let host = harness().imposter_host();
+    let config = tls::client_config(
+        &tls::certs_from_pem(test_ca_pem()?.as_bytes())?,
+        tls::ALPN_H2_FIRST,
+    )?;
+    w.curl.push(format!(
+        "curl -sv --cacert {} --resolve localhost:{port}:{host} https://localhost:{port}/",
+        test_ca_path().display()
+    ));
+    let tcp = wire::connect(host, port).await?;
+    // `localhost`: every fixture leaf is issued for it, and the chain leaf for nothing else.
+    let mut conn = tls::handshake(Box::new(tcp), "localhost", config).await?;
+    let authority = format!("localhost:{port}");
+    let (response, version) = if conn.alpn() == Some(b"h2".as_slice()) {
+        match conn.h2_get("/", &authority).await? {
+            H2Outcome::Answered {
+                status: Some(status),
+                body,
+            } => (
+                Response {
+                    status,
+                    body,
+                    headers: BTreeMap::new(),
+                },
+                "HTTP_2",
+            ),
+            other => {
+                return Err(anyhow!("the HTTP/2 GET / did not complete: {other:?}").into());
+            }
+        }
+    } else {
+        match conn
+            .exchange(&wire::request("GET", &authority, "/", &[], b""))
+            .await?
+        {
+            RawRead::Response(r) => (r.to_response(), "HTTP_1_1"),
+            RawRead::Closed => {
+                return Err(
+                    anyhow!("the imposter closed the connection without answering GET /").into(),
+                );
+            }
+        }
+    };
+    w.tls = Some(TlsExchange {
+        chain: conn.peer_certificates().to_vec(),
+        version,
+    });
+    w.last = Some(response);
+    Ok(())
+}
+
+#[when(regex = r"^an HTTPS GET trusting only the test CA is sent to the imposter$")]
+async fn https_get(w: &mut PlaneA) -> Step {
+    https_get_trusting_test_ca(w).await
+}
+
+#[when(
+    regex = r"^an HTTP/2-preferring HTTPS GET trusting only the test CA is sent to the imposter$"
+)]
+async fn https_get_h2(w: &mut PlaneA) -> Step {
+    https_get_trusting_test_ca(w).await
+}
+
+impl PlaneA {
+    fn tls(&self) -> anyhow::Result<&TlsExchange> {
+        self.tls
+            .as_ref()
+            .ok_or_else(|| anyhow!("no HTTPS exchange yet in this scenario"))
+    }
+}
+
+#[then(regex = r#"^the peer certificate subject is "((?:\\.|[^"\\])*)"$"#)]
+async fn peer_subject(w: &mut PlaneA, expected: String) -> Step {
+    let expected = unescape(&expected);
+    let got = w.tls()?.chain.first().map(tls::subject).transpose()?;
+    w.ensure(got.as_deref() == Some(expected.as_str()), || {
+        format!("expected peer subject '{expected}', got {got:?}")
+    })
+}
+
+#[then(
+    regex = r#"^the peer certificate chain has (\d+) certificates, the first with subject "((?:\\.|[^"\\])*)"$"#
+)]
+async fn peer_chain(w: &mut PlaneA, n: usize, expected: String) -> Step {
+    let expected = unescape(&expected);
+    let subjects = w
+        .tls()?
+        .chain
+        .iter()
+        .map(tls::subject)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    w.ensure(
+        subjects.len() == n && subjects.first() == Some(&expected),
+        || format!("expected {n} certificates led by '{expected}', got {subjects:?}"),
+    )
+}
+
+#[then(regex = r#"^the response was served over "((?:\\.|[^"\\])*)"$"#)]
+async fn served_over(w: &mut PlaneA, expected: String) -> Step {
+    let expected = unescape(&expected);
+    let got = w.tls()?.version;
+    w.ensure(got == expected, || {
+        format!("expected {expected}, got {got}")
+    })
+}
+
+#[when(regex = r#"^an imposter with "((?:\\.|[^"\\])*)" is posted$"#)]
+async fn imposter_with_case(w: &mut PlaneA, kind: String) -> Step {
+    let ca: Value = test_ca_pem()?.into();
+    let yes = Value::Bool(true);
+    let (protocol, fields) = match unescape(&kind).as_str() {
+        "a key that does not match the cert" => {
+            ("https", cert_key("server-leaf.pem", "chain-leaf.key")?)
+        }
+        "a cert without a key" => (
+            "https",
+            vec![("cert", tls_fixture("server-leaf.pem")?.into())],
+        ),
+        "rejectUnauthorized without mutualAuth" => {
+            ("https", vec![("rejectUnauthorized", yes), ("ca", ca)])
+        }
+        "ca without rejectUnauthorized" => ("https", vec![("mutualAuth", yes), ("ca", ca)]),
+        "rejectUnauthorized without ca" => (
+            "https",
+            vec![("mutualAuth", yes.clone()), ("rejectUnauthorized", yes)],
+        ),
+        "an empty ca list" => (
+            "https",
+            vec![
+                ("mutualAuth", yes.clone()),
+                ("rejectUnauthorized", yes),
+                ("ca", Value::Array(Vec::new())),
+            ],
+        ),
+        "a ca with no certificate" => (
+            "https",
+            vec![
+                ("mutualAuth", yes.clone()),
+                ("rejectUnauthorized", yes),
+                ("ca", "no cert".into()),
+            ],
+        ),
+        "mutualAuth on an http imposter" => ("http", vec![("mutualAuth", yes)]),
+        "mutualAuth false on an http imposter" => {
+            ("http", vec![("mutualAuth", Value::Bool(false))])
+        }
+        other => return Err(anyhow!("unknown imposter case '{other}'").into()),
+    };
+    let admin = harness().admin_url.clone();
+    post_kept(
+        w,
+        &admin,
+        tls_imposter(protocol, fields, vec![plain_tls_stub()]),
+    )
+    .await
+}
+
+#[given(regex = r#"^a plain-HTTP imposter answering 200 "((?:\\.|[^"\\])*)"$"#)]
+async fn plain_http_imposter(w: &mut PlaneA, body: String) -> Step {
+    let stub =
+        serde_json::json!({"responses": [{"is": {"statusCode": 200, "body": unescape(&body)}}]});
+    create_tls_imposter(w, tls_imposter("http", Vec::new(), vec![stub])).await
+}
+
+#[when(regex = r"^an h2c prior-knowledge GET is sent to the imposter$")]
+async fn h2c_prior_knowledge_get(w: &mut PlaneA) -> Step {
+    let port = w.current()?;
+    let host = harness().imposter_host();
+    w.curl.push(format!(
+        "curl -sv --http2-prior-knowledge http://{host}:{port}/"
+    ));
+    let outcome = tokio::task::spawn_blocking(move || raw::h2c_get(host, port, "localhost", "/"))
+        .await
+        .context("the h2c task")??;
+    w.h2c_get = Some(outcome);
+    Ok(())
+}
+
+#[then(regex = r#"^the h2c response has status (\d+) and body "((?:\\.|[^"\\])*)"$"#)]
+async fn h2c_response(w: &mut PlaneA, status: u16, body: String) -> Step {
+    let want = H2Outcome::Answered {
+        status: Some(status),
+        body: unescape(&body),
+    };
+    let got = w
+        .h2c_get
+        .as_ref()
+        .ok_or_else(|| anyhow!("no h2c exchange yet in this scenario"))?;
+    w.ensure(*got == want, || {
+        format!("expected an HTTP/2 {want:?}, got {got:?}")
+    })
+}
+
+/// Start the scenario's `@tls-flags` engine, replacing any it already has.
+async fn start_tls_flag_engine(w: &mut PlaneA, flags: &[String], env: &[(String, String)]) -> Step {
+    if let Some(old) = w.side_engine.take() {
+        old.stop().await?;
+    }
+    w.side_engine = Some(harness().spawn_flag_engine_with_env(flags, env).await?);
+    Ok(())
+}
+
+#[given(
+    regex = r#"^an engine started with the default TLS cert "((?:\\.|[^"\\])*)" and key "((?:\\.|[^"\\])*)"$"#
+)]
+async fn engine_with_default_tls(w: &mut PlaneA, cert: String, key: String) -> Step {
+    let tls_dir = fixtures_dir().join("tls");
+    let flags = [
+        "--default-tls-cert".to_string(),
+        tls_dir.join(unescape(&cert)).display().to_string(),
+        "--default-tls-key".to_string(),
+        tls_dir.join(unescape(&key)).display().to_string(),
+    ];
+    start_tls_flag_engine(w, &flags, &[]).await
+}
+
+#[given(regex = r#"^an engine started with "((?:\\.|[^"\\])*)"$"#)]
+async fn engine_with_flag(w: &mut PlaneA, flag: String) -> Step {
+    start_tls_flag_engine(w, &[unescape(&flag)], &[]).await
+}
+
+#[given(
+    regex = r#"^an engine started with the environment "((?:\\.|[^"\\])*)" set to "((?:\\.|[^"\\])*)"$"#
+)]
+async fn engine_with_env(w: &mut PlaneA, name: String, value: String) -> Step {
+    start_tls_flag_engine(w, &[], &[(unescape(&name), unescape(&value))]).await
+}
+
+#[given(regex = r"^an HTTPS imposter with no cert on that engine$")]
+async fn https_no_cert_on_flag_engine(w: &mut PlaneA) -> Step {
+    create_on_flag_engine(w, tls_imposter("https", Vec::new(), vec![plain_tls_stub()])).await
+}
+
+#[given(
+    regex = r#"^an HTTPS imposter serving "((?:\\.|[^"\\])*)" with key "((?:\\.|[^"\\])*)" on that engine$"#
+)]
+async fn https_imposter_on_flag_engine(w: &mut PlaneA, cert: String, key: String) -> Step {
+    let fields = cert_key(&unescape(&cert), &unescape(&key))?;
+    create_on_flag_engine(w, tls_imposter("https", fields, vec![plain_tls_stub()])).await
+}
+
+#[when(regex = r"^an HTTPS imposter with no cert is posted to that engine$")]
+async fn post_https_no_cert_to_flag_engine(w: &mut PlaneA) -> Step {
+    let admin = flag_admin(w)?;
+    post_kept(
+        w,
+        &admin,
+        tls_imposter("https", Vec::new(), vec![plain_tls_stub()]),
+    )
+    .await
+}
+
+// Stricter than the Scala runner, which only saw the start fail: the engine must exit with 1 over
+// the missing file without ever reporting a listener.
+#[then(
+    regex = r"^an engine started with a default TLS cert file that does not exist exits before serving$"
+)]
+async fn missing_default_cert_exits(w: &mut PlaneA) -> Step {
+    let missing = harness().config.log_dir.join("no-such-default-cert.pem");
+    if missing.exists() {
+        return Err(anyhow!(
+            "{} exists, so it cannot stand for a missing file",
+            missing.display()
+        )
+        .into());
+    }
+    let flags = [
+        "--default-tls-cert".to_string(),
+        missing.display().to_string(),
+        "--default-tls-key".to_string(),
+        fixtures_dir()
+            .join("tls/server-leaf.key")
+            .display()
+            .to_string(),
+    ];
+    w.curl.push(format!("rift {}", flags.join(" ")));
+    let boot = harness().boot_engine(&flags, false).await?;
+    let tail: Vec<&str> = boot.output.lines().rev().take(5).collect();
+    w.ensure(
+        boot.exit_code == Some(1)
+            && boot.output.contains("No such file or directory")
+            && !boot.output.contains("listening on"),
+        || {
+            format!(
+                "expected the engine to exit with code 1 over the missing file before serving, got exit {:?}, output tail:\n{}",
+                boot.exit_code,
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            )
+        },
+    )
+}
+
+/// On a dedicated engine started with `flag`. The imposter is not tracked: the whole engine is
+/// killed after the scenario.
+#[when(
+    regex = r#"^a proxy imposter to the HTTPS upstream is created on an engine started with "((?:\\.|[^"\\])*)"$"#
+)]
+async fn proxy_to_upstream_on_flag_engine(w: &mut PlaneA, flag: String) -> Step {
+    let json = proxy_to_upstream_json(w)?;
+    start_tls_flag_engine(w, &[unescape(&flag)], &[]).await?;
+    let admin = flag_admin(w)?;
+    let port = post_assigned(&admin, &json, "proxy to the HTTPS upstream (flag engine)").await?;
+    w.current = Some(port);
+    Ok(())
 }
 
 // ── the run ──────────────────────────────────────────────────────────────────────────────────

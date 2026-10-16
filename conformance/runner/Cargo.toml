@@ -21,6 +21,11 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", 
 # The platform verifier it brings is the "cert-verifying client" of feature 09.
 reqwest = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# The hand-framed TLS clients (`tls`, `wire`): feature 20 reads the peer's chain and ALPN, which
+# reqwest does not expose. Same ring-only features as the engine's.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# A peer certificate's subject, printed as the JDK does (feature 20).
+x509-parser = "0.18"
 regex = "1.11"
 tempfile = "3.8"
 # Embedded mode (RIFT_MODE=embedded): the engine runs in this process through the same C-ABI

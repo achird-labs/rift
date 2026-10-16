@@ -123,6 +123,12 @@ impl Mode {
             (Self::Container, "admin-isolated") => Some(
                 "starts a second engine of its own, which this harness doesn't start in a container",
             ),
+            (Self::Embedded, "tls-flags") => Some(
+                "starts an engine with a TLS CLI flag or environment variable, which an in-process engine cannot take per scenario",
+            ),
+            (Self::Container, "tls-flags") => Some(
+                "starts an engine of its own with a TLS CLI flag or environment variable, which this harness doesn't start in a container",
+            ),
             _ => None,
         }
     }
@@ -268,7 +274,9 @@ impl Harness {
         let build_info = BuildInfo::load(&config.build_dir)?;
         let tools = Tools::from_build_dir(&config.build_dir);
         let engine = match config.mode {
-            Mode::External => Engine::External(spawn_with_retry(&config, &[], false).await?),
+            Mode::External => {
+                Engine::External(spawn_with_retry(&config, &SpawnOptions::default()).await?)
+            }
             Mode::Embedded => Engine::Embedded(EmbeddedEngine::start(&config, None).await?),
             Mode::Container => {
                 let image = config.image.as_deref().ok_or_else(missing_image)?;
@@ -339,23 +347,99 @@ impl Harness {
                 mode: self.config.mode.name(),
             });
         }
-        let args = vec![
-            "--upstream-ca-file".to_string(),
-            ca_file.display().to_string(),
-        ];
-        spawn_with_retry(&self.config, &args, false).await
+        let opts = SpawnOptions {
+            args: vec![
+                "--upstream-ca-file".to_string(),
+                ca_file.display().to_string(),
+            ],
+            ..SpawnOptions::default()
+        };
+        spawn_with_retry(&self.config, &opts).await
     }
 
     /// Start a dedicated engine with the extra CLI `flags` (features 05 and 19 `@rift-debug-env`:
     /// `--debug`). The caller owns it; dropping it kills the process.
     pub async fn spawn_flag_engine(&self, flags: &[String]) -> Result<SpawnedEngine, HarnessError> {
+        self.spawn_flag_engine_with_env(flags, &[]).await
+    }
+
+    /// [`Harness::spawn_flag_engine`] with `env` set in the engine's environment too (feature 20
+    /// `@tls-flags`: `RIFT_DISABLE_HTTP2`).
+    pub async fn spawn_flag_engine_with_env(
+        &self,
+        flags: &[String],
+        env: &[(String, String)],
+    ) -> Result<SpawnedEngine, HarnessError> {
         if self.config.mode != Mode::External {
             return Err(HarnessError::Unsupported {
                 what: "an engine started with extra flags",
                 mode: self.config.mode.name(),
             });
         }
-        spawn_with_retry(&self.config, flags, false).await
+        let opts = SpawnOptions {
+            args: flags.to_vec(),
+            env: env.to_vec(),
+            ..SpawnOptions::default()
+        };
+        spawn_with_retry(&self.config, &opts).await
+    }
+
+    /// Boot an engine with `flags` (and `--front-door 0` when `front_door`) once, and wait up to
+    /// the readiness budget for it to exit: for the scenarios asserting that a configuration stops
+    /// the engine at startup (feature 16's invalid route tables, feature 20's missing TLS file). An
+    /// engine still running then is killed and reported with no exit code: it booted.
+    pub async fn boot_engine(
+        &self,
+        flags: &[String],
+        front_door: bool,
+    ) -> Result<EngineBoot, HarnessError> {
+        if self.config.mode != Mode::External {
+            return Err(HarnessError::Unsupported {
+                what: "a boot-only engine",
+                mode: self.config.mode.name(),
+            });
+        }
+        let opts = SpawnOptions {
+            args: flags.to_vec(),
+            front_door,
+            ..SpawnOptions::default()
+        };
+        let (mut child, log) = spawn_engine(&self.config, &opts)?;
+        let deadline = Instant::now() + READINESS_BUDGET;
+        let exit_code = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status.code().unwrap_or(-1)),
+                Ok(None) if Instant::now() >= deadline => break None,
+                Ok(None) => tokio::time::sleep(READINESS_SPACING).await,
+                Err(source) => {
+                    return Err(HarnessError::Io {
+                        action: "waiting on the engine logging to",
+                        path: log,
+                        source,
+                    });
+                }
+            }
+        };
+        if exit_code.is_none() {
+            SpawnedEngine::from_child(child, log.clone()).stop().await?;
+        }
+        let output = std::fs::read_to_string(&log).map_err(|source| HarnessError::Io {
+            action: "reading",
+            path: log.clone(),
+            source,
+        })?;
+        Ok(EngineBoot { exit_code, output })
+    }
+
+    /// Write `contents` to a fresh file in the run's log directory and return its path: a config
+    /// file or a certificate an engine is started with.
+    pub fn scratch_file(&self, stem: &str, contents: &str) -> Result<PathBuf, HarnessError> {
+        let path = self.config.log_dir.join(format!(
+            "{stem}-{}",
+            SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        write_file(&path, contents)?;
+        Ok(path)
     }
 
     /// Start a second, empty engine of the run's kind (feature 21 `@admin-isolated`), for admin
@@ -363,9 +447,9 @@ impl Harness {
     /// in-process engine. The caller owns it and stops it after the scenario.
     pub async fn start_isolated_engine(&self) -> Result<IsolatedEngine, HarnessError> {
         let engine = match self.config.mode {
-            Mode::External => {
-                OwnedEngine::Spawned(spawn_with_retry(&self.config, &[], false).await?)
-            }
+            Mode::External => OwnedEngine::Spawned(
+                spawn_with_retry(&self.config, &SpawnOptions::default()).await?,
+            ),
             Mode::Embedded => {
                 OwnedEngine::Embedded(EmbeddedEngine::start(&self.config, None).await?)
             }
@@ -396,11 +480,15 @@ impl Harness {
         write_file(&config_path, json)?;
         let (engine, admin_url) = match self.config.mode {
             Mode::External => {
-                let args = vec![
-                    "--configfile".to_string(),
-                    config_path.display().to_string(),
-                ];
-                let e = spawn_with_retry(&self.config, &args, front_door).await?;
+                let opts = SpawnOptions {
+                    args: vec![
+                        "--configfile".to_string(),
+                        config_path.display().to_string(),
+                    ],
+                    front_door,
+                    ..SpawnOptions::default()
+                };
+                let e = spawn_with_retry(&self.config, &opts).await?;
                 let url = e.admin_url.clone();
                 (OwnedEngine::Spawned(e), url)
             }
@@ -487,14 +575,32 @@ pub struct SpawnedEngine {
     pub log: PathBuf,
 }
 
+/// How an engine of this run's own is started, beyond the flags every one gets.
+#[derive(Debug, Clone, Default)]
+struct SpawnOptions {
+    /// Extra CLI arguments.
+    args: Vec<String>,
+    /// Extra environment variables.
+    env: Vec<(String, String)>,
+    /// Also start the front door, on a port the engine picks.
+    front_door: bool,
+}
+
+/// How a boot-only engine ([`Harness::boot_engine`]) ended: its exit code (`None` when it was still
+/// running, so it booted, and was killed) and everything it wrote.
+#[derive(Debug, Clone)]
+pub struct EngineBoot {
+    pub exit_code: Option<i32>,
+    pub output: String,
+}
+
 async fn spawn_with_retry(
     config: &Config,
-    extra: &[String],
-    front_door: bool,
+    opts: &SpawnOptions,
 ) -> Result<SpawnedEngine, HarnessError> {
     let mut failures = Vec::new();
     for _ in 0..SPAWN_ATTEMPTS {
-        match SpawnedEngine::start(config, extra, front_door).await {
+        match SpawnedEngine::start(config, opts).await {
             Ok(engine) => return Ok(engine),
             Err(e) => failures.push(e.to_string()),
         }
@@ -507,6 +613,62 @@ async fn spawn_with_retry(
 
 /// Names each spawned engine's log file, since its ports are not known until it has started.
 static ENGINE_SEQ: AtomicUsize = AtomicUsize::new(0);
+/// Names each [`Harness::scratch_file`].
+static SCRATCH_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// Spawn `rift --port 0 --nologfile --metrics-port 0 --allow-injection <args>` (plus `--front-door
+/// 0` when asked) in the corpus root, output to a fresh log file, and return the child and that log.
+/// Port 0 throughout: a probed port could be taken before the engine bound it, or answered by a
+/// neighbour's loopback socket while the engine holds the wildcard (#1485).
+fn spawn_engine(config: &Config, opts: &SpawnOptions) -> Result<(Child, PathBuf), HarnessError> {
+    let front_door_args: &[&str] = if opts.front_door {
+        &["--front-door", "0"]
+    } else {
+        &[]
+    };
+    let log = config.log_dir.join(format!(
+        "engine-{}-{}.log",
+        std::process::id(),
+        ENGINE_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let log_file = std::fs::File::create(&log).map_err(|source| HarnessError::Io {
+        action: "creating",
+        path: log.clone(),
+        source,
+    })?;
+    let log_err = log_file.try_clone().map_err(|source| HarnessError::Io {
+        action: "duplicating",
+        path: log.clone(),
+        source,
+    })?;
+    let binary = config.build_dir.join("rift");
+    let mut command = Command::new(&binary);
+    command
+        .args(["--port", "0", "--nologfile", "--metrics-port", "0"])
+        .arg("--allow-injection")
+        .args(&opts.args)
+        .args(front_door_args)
+        .env("NO_COLOR", "1")
+        .envs(opts.env.iter().map(|(k, v)| (k, v)));
+    // A level set in this environment would also hide the info lines the ports are read from,
+    // so they are added back to whatever filter it asks for.
+    if let Some(filter) = listening_filter() {
+        command.env("RUST_LOG", filter);
+    }
+    let child = command
+        .current_dir(&config.corpus_root)
+        .stdin(Stdio::null())
+        .stdout(log_file)
+        .stderr(log_err)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|source| HarnessError::Io {
+            action: "spawning",
+            path: binary,
+            source,
+        })?;
+    Ok((child, log))
+}
 
 /// The log targets of the three startup lines a spawned engine's ports are read from.
 const LISTENING_TARGETS: [&str; 3] = [
@@ -516,69 +678,22 @@ const LISTENING_TARGETS: [&str; 3] = [
 ];
 
 impl SpawnedEngine {
-    /// Spawn `rift --port 0 --nologfile --metrics-port 0 --allow-injection <extra>` (plus
-    /// `--front-door 0` when asked) in the corpus root, output to a log file, read the ports it
-    /// bound from its startup lines, and wait until its admin and metrics listeners answer and the
-    /// front door accepts. Port 0 throughout: a probed port could be taken before the engine bound
-    /// it, or answered by a neighbour's loopback socket while the engine holds the wildcard (#1485).
-    async fn start(
-        config: &Config,
-        extra: &[String],
-        front_door: bool,
-    ) -> Result<Self, HarnessError> {
-        let front_door_args: &[&str] = if front_door {
-            &["--front-door", "0"]
-        } else {
-            &[]
-        };
-        let log = config.log_dir.join(format!(
-            "engine-{}-{}.log",
-            std::process::id(),
-            ENGINE_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let log_file = std::fs::File::create(&log).map_err(|source| HarnessError::Io {
-            action: "creating",
-            path: log.clone(),
-            source,
-        })?;
-        let log_err = log_file.try_clone().map_err(|source| HarnessError::Io {
-            action: "duplicating",
-            path: log.clone(),
-            source,
-        })?;
-        let binary = config.build_dir.join("rift");
-        let mut command = Command::new(&binary);
-        command
-            .args(["--port", "0", "--nologfile", "--metrics-port", "0"])
-            .arg("--allow-injection")
-            .args(extra)
-            .args(front_door_args)
-            .env("NO_COLOR", "1");
-        // A level set in this environment would also hide the info lines the ports are read from,
-        // so they are added back to whatever filter it asks for.
-        if let Some(filter) = listening_filter() {
-            command.env("RUST_LOG", filter);
-        }
-        let child = command
-            .current_dir(&config.corpus_root)
-            .stdin(Stdio::null())
-            .stdout(log_file)
-            .stderr(log_err)
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|source| HarnessError::Io {
-                action: "spawning",
-                path: binary,
-                source,
-            })?;
-        let mut engine = Self {
+    fn from_child(child: Child, log: PathBuf) -> Self {
+        Self {
             child,
             admin_url: String::new(),
             metrics_url: String::new(),
             front_door_port: None,
             log,
-        };
-        let ready = match engine.read_bound_ports(front_door).await {
+        }
+    }
+
+    /// [`spawn_engine`], then read the ports it bound from its startup lines and wait until its
+    /// admin and metrics listeners answer and the front door accepts.
+    async fn start(config: &Config, opts: &SpawnOptions) -> Result<Self, HarnessError> {
+        let (child, log) = spawn_engine(config, opts)?;
+        let mut engine = Self::from_child(child, log);
+        let ready = match engine.read_bound_ports(opts.front_door).await {
             Ok(()) => engine.await_ready().await,
             Err(e) => Err(e),
         };
@@ -1410,8 +1525,9 @@ mod tests {
         assert!(Mode::Container.excludes("admin-isolated").is_some());
     }
 
-    const CONTAINER_TAGS: [&str; 10] = [
+    const CONTAINER_TAGS: [&str; 11] = [
         "rift-debug-env",
+        "tls-flags",
         "admin-isolated",
         "reload-engine",
         "upstream-trust",
@@ -1440,6 +1556,17 @@ mod tests {
         }
         for tag in ["full-corpus", "metrics-port", "no-config-source", "rift"] {
             assert!(Mode::Container.excludes(tag).is_none(), "{tag}");
+        }
+    }
+
+    #[test]
+    fn tls_flag_engines_run_only_in_external_mode() {
+        assert!(Mode::External.excludes("tls-flags").is_none());
+        assert!(Mode::Embedded.excludes("tls-flags").is_some());
+        assert!(Mode::Container.excludes("tls-flags").is_some());
+        // Feature 20's untagged scenarios drive the shared engine in every mode.
+        for mode in [Mode::External, Mode::Embedded, Mode::Container] {
+            assert!(mode.excludes("tls").is_none(), "{mode}");
         }
     }
 
