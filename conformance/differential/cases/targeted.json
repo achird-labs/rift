@@ -4235,6 +4235,600 @@
           "path": "/imposters"
         }
       ]
+    },
+    {
+      "name": "targeted: an xpath equals reads a stray less-than, ]]>, a stray root end tag, character references, prolog text and DOCTYPE comments as Mountebank's xmldom does (#1479)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "1 < 2"
+                    },
+                    "caseSensitive": true,
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "lt"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "x]]>y"
+                    },
+                    "caseSensitive": true,
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "cdata-close"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "v"
+                    },
+                    "caseSensitive": true,
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "v"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "\ud83d\ude00"
+                    },
+                    "caseSensitive": true,
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "pair"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "\ufffd"
+                    },
+                    "caseSensitive": true,
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "replacement"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "&nbsp;"
+                    },
+                    "caseSensitive": true,
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "nbsp"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "x <b"
+                    },
+                    "caseSensitive": true,
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "lt-name"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>1 < 2</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>x]]>y</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>v</a></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>&#55357;&#56832;</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>&#xD800;</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>&#99999999999;</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<?xml version=\"1.0\"?>\ufeff<a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "x<a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!DOCTYPE a [<!-- it's --> ]><a>&nbsp;</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>x <b</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>v</a></a><b/>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a></a></x>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "x<b/><a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!--c--><!DOCTYPE a><!DOCTYPE a><a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!DOCTYPE a [<!--x->]><a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!DOCTYPE a [<?pi ]><a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!DOCTYPE a [<!-- --> <!ENTITY x \"]\">]><a>v</a>"
+        }
+      ]
+    },
+    {
+      "name": "targeted: an xpath exists reads a stray less-than, ]]>, a stray root end tag, character references, prolog text and DOCTYPE comments as Mountebank's xmldom does (#1479)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "body": true
+                    },
+                    "caseSensitive": true,
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "exists"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>1 < 2</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>x]]>y</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>v</a></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>&#55357;&#56832;</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>&#xD800;</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>&#99999999999;</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<?xml version=\"1.0\"?>\ufeff<a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "x<a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!DOCTYPE a [<!-- it's --> ]><a>&nbsp;</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>x <b</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>v</a></a><b/>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a></a></x>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "x<b/><a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!--c--><!DOCTYPE a><!DOCTYPE a><a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!DOCTYPE a [<!--x->]><a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!DOCTYPE a [<?pi ]><a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!DOCTYPE a [<!-- --> <!ENTITY x \"]\">]><a>v</a>"
+        }
+      ]
+    },
+    {
+      "name": "targeted: an xpath copy reads a stray less-than, ]]>, a stray root end tag, character references, prolog text and DOCTYPE comments as Mountebank's xmldom does (#1479)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "[$A]"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$A",
+                          "using": {
+                            "method": "xpath",
+                            "selector": "//a"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>1 < 2</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>x]]>y</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>v</a></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>&#55357;&#56832;</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>&#xD800;</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>&#99999999999;</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<?xml version=\"1.0\"?>\ufeff<a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "x<a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!DOCTYPE a [<!-- it's --> ]><a>&nbsp;</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>x <b</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>v</a></a><b/>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a></a></x>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "x<b/><a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!--c--><!DOCTYPE a><!DOCTYPE a><a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!DOCTYPE a [<!--x->]><a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!DOCTYPE a [<?pi ]><a>v</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<!DOCTYPE a [<!-- --> <!ENTITY x \"]\">]><a>v</a>"
+        }
+      ]
     }
   ]
 }

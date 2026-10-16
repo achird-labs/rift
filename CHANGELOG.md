@@ -87,6 +87,16 @@ record.
 
 ### Fixed
 
+- **XPath reads seven more kinds of malformed XML the way Mountebank's xmldom recovers them**
+  (#1479). Text before the root element is ignored, as is one stray end tag naming the root after
+  it; a `<` that opens no tag (`1 < 2`) and a `]]>` read as text; a character reference pair to a
+  surrogate pair (`&#55357;&#56832;`) reads as the one character it encodes, and a reference to a
+  lone surrogate or past U+10FFFF as U+FFFD; and a comment or PI inside a DOCTYPE's internal subset
+  no longer ends the DOCTYPE early. Each used to mean no document, so no `xpath` predicate matched
+  and no `copy` substituted. A second DOCTYPE after a comment is now refused, as Mountebank does; it
+  used to parse, as did an unterminated comment or PI inside a DOCTYPE's internal subset. The
+  recoveries Rift does not copy are listed in
+  [Differences from Mountebank](docs/mountebank/differences.md#malformed-xml-for-xpath).
 - **A trailing `/` on an admin route is ignored, as Mountebank's Express does** (#1481).
   `/imposters/`, `/imposters/4545/`, `/imposters/4545/stubs/0/`, `/config/` and every other admin
   route with one trailing `/` answer exactly as without it, on every method; they used to be `404`.

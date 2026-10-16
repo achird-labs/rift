@@ -698,18 +698,18 @@ pub(crate) fn xpath_selection_in(
     xpath_selection(&package.as_document(), selector, ns)
 }
 
-/// The DOM an XPath selector sees, parsed the way Mountebank's xmldom 0.9 reads the body (issue
-/// #1455). Every XPath parse goes through here.
+/// The DOM an XPath selector sees, parsed the way Mountebank's xmldom 0.9 reads the body (issues
+/// #1455, #1479). Every XPath parse goes through here.
 ///
-/// xmldom reports three things as non-fatal that `sxd_document` refuses outright, so they are
-/// prepared away first: a leading BOM is ignored, an `&` that starts no reference XML defines
-/// (`&nbsp;`, a bare `&`) is kept as literal text, and text after the root element is ignored.
-/// What xmldom treats as fatal — an unclosed or mismatched tag, an undeclared prefix, a second
-/// element after the root — still yields `None`, as it does in Mountebank 2.9.2+.
+/// xmldom reports several things as non-fatal that `sxd_document` refuses outright, so they are
+/// prepared away first (see [`prepare_xml`]), and text after the root element is ignored (see
+/// [`without_trailing_text`]). What xmldom treats as fatal — an unclosed or mismatched tag, an
+/// undeclared prefix, a second element after the root, a second DOCTYPE — still yields `None`,
+/// as it does in Mountebank 2.9.2+.
 pub(crate) fn parse_xml_like_mountebank(body: &str) -> Option<sxd_document::Package> {
     #[cfg(test)]
     counters::bump_dom_parse();
-    let xml = prepare_xml(body);
+    let xml = prepare_xml(body)?;
     match sxd_document::parser::parse(&xml) {
         Ok(package) => Some(package),
         Err(error) => {
@@ -757,7 +757,7 @@ fn xml_piece(xml: &str, start: usize) -> (XmlPiece, usize, bool) {
         [b'<', c, ..] if c.is_ascii_alphabetic() || matches!(c, b'_' | b':') || !c.is_ascii() => {
             XmlPiece::StartTag
         }
-        // A `<` that opens nothing is text, as xmldom reads it after the root.
+        // A `<` that opens nothing is text, as xmldom reads it.
         _ => {
             // Search bytes, not `rest[1..]`: the piece may open with a multi-byte character.
             let end = bytes
@@ -769,13 +769,28 @@ fn xml_piece(xml: &str, start: usize) -> (XmlPiece, usize, bool) {
         }
     };
     // A tag (or DOCTYPE) ends at the first `>` outside a quoted value — and, for a DOCTYPE,
-    // outside its internal subset's brackets.
+    // outside its internal subset's brackets, where a comment or PI is skipped whole: its text
+    // is neither a quote nor a bracket.
     let mut quote = None;
     let mut brackets = 0usize;
-    for (i, &b) in bytes.iter().enumerate().skip(1) {
+    let mut i = 1;
+    while i < bytes.len() {
+        let b = bytes[i];
         match (quote, b) {
             (Some(q), _) if b == q => quote = None,
             (Some(_), _) => {}
+            (None, b'<')
+                if brackets > 0
+                    && kind == XmlPiece::Doctype
+                    && (rest[i..].starts_with("<!--") || rest[i..].starts_with("<?")) =>
+            {
+                let (_, end, terminated) = xml_piece(xml, start + i);
+                if !terminated {
+                    return (kind, xml.len(), false);
+                }
+                i = end - start;
+                continue;
+            }
             (None, b'"' | b'\'') => quote = Some(b),
             (None, b'[') => brackets += 1,
             (None, b']') => brackets = brackets.saturating_sub(1),
@@ -789,110 +804,265 @@ fn xml_piece(xml: &str, start: usize) -> (XmlPiece, usize, bool) {
             }
             _ => {}
         }
+        i += 1;
     }
     (kind, xml.len(), false)
 }
 
-/// `body` as `sxd_document` must see it to read what xmldom reads:
+/// `body` as `sxd_document` must see it to read what xmldom reads, or `None` when xmldom finds
+/// it fatal in a way `sxd_document` does not check: a second DOCTYPE, or an unterminated DOCTYPE
+/// or comment or PI inside its internal subset.
 ///
 /// - every `&` that starts no reference XML defines becomes `&amp;`, so it reads back as the
 ///   literal text xmldom keeps (`x&nbsp;y`, `a & b`, and an entity a DOCTYPE declares, which
 ///   xmldom does not expand either). Only character data and tags (attribute values) are
 ///   touched: a comment, PI, CDATA section or DOCTYPE holds no references;
+/// - a character reference to a surrogate pair becomes the one character the pair encodes, and
+///   one to a lone surrogate or past U+10FFFF becomes U+FFFD: xmldom yields a JavaScript string
+///   for it that a Rust string cannot hold;
+/// - in character data, a `<` that opens no tag becomes `&lt;` and a `]]>` becomes `]]&gt;`,
+///   which xmldom both keep as text;
+/// - text before the root element becomes one space, as xmldom ignores it — never a tag, CDATA
+///   or declaration there, which stay fatal;
 /// - a leading BOM becomes the whitespace that may precede the document, so a BOM before an XML
 ///   declaration still fails, as it does in xmldom;
 /// - a DOCTYPE that opens the body gets a space before it: `sxd_document` accepts one only after
-///   some other prolog item. Not when a second DOCTYPE follows: sxd never checks for one, and
-///   xmldom refuses it.
-fn prepare_xml(body: &str) -> Cow<'_, str> {
+///   some other prolog item.
+fn prepare_xml(body: &str) -> Option<Cow<'_, str>> {
     let lead = body
         .find(|c: char| !matches!(c, '\u{FEFF}' | ' ' | '\t' | '\r' | '\n'))
         .unwrap_or(body.len());
-    let mut copied = 0;
-    let mut out = if body[..lead].contains('\u{FEFF}') {
-        copied = lead;
-        Some(body[..lead].replace('\u{FEFF}', " "))
-    } else if lead == 0 && body.starts_with("<!DOCTYPE") && !has_second_doctype(body) {
-        Some(" ".to_string())
-    } else {
-        None
-    };
-    if body.contains('&') {
-        let mut pos = lead;
-        while pos < body.len() {
-            let (kind, end, _) = xml_piece(body, pos);
-            if matches!(
-                kind,
-                XmlPiece::Text | XmlPiece::StartTag | XmlPiece::EndTag | XmlPiece::EmptyTag
-            ) {
-                for (i, _) in body[pos..end].match_indices('&') {
-                    let at = pos + i;
-                    if !starts_xml_reference(&body.as_bytes()[at + 1..]) {
-                        let s = out.get_or_insert_with(|| String::with_capacity(body.len() + 16));
-                        s.push_str(&body[copied..=at]);
-                        s.push_str("amp;");
-                        copied = at + 1;
-                    }
+    let mut out = Rewrite::new(body);
+    if body[..lead].contains('\u{FEFF}') {
+        out.replace(0, lead, &body[..lead].replace('\u{FEFF}', " "));
+    } else if lead == 0 && body.starts_with("<!DOCTYPE") {
+        out.replace(0, 0, " ");
+    }
+    let mut in_prolog = true;
+    let mut doctypes = 0;
+    let mut pos = lead;
+    while pos < body.len() {
+        let (kind, end, terminated) = xml_piece(body, pos);
+        match kind {
+            XmlPiece::Doctype if in_prolog && body[pos..].starts_with("<!DOCTYPE") => {
+                doctypes += 1;
+                if doctypes > 1 || !terminated {
+                    return None;
+                }
+                for (start, end) in subset_comments_and_pis(&body[pos..end])? {
+                    out.replace(pos + start, pos + end, " ");
                 }
             }
-            pos = end;
-        }
-    }
-    match out {
-        Some(mut s) => {
-            s.push_str(&body[copied..]);
-            Cow::Owned(s)
-        }
-        None => Cow::Borrowed(body),
-    }
-}
-
-/// Whether a second DOCTYPE follows the one `xml` opens with, before the root element.
-fn has_second_doctype(xml: &str) -> bool {
-    let (_, mut pos, _) = xml_piece(xml, 0);
-    while pos < xml.len() {
-        let (kind, end, _) = xml_piece(xml, pos);
-        match kind {
-            XmlPiece::Doctype if xml[pos..].starts_with("<!DOCTYPE") => return true,
-            XmlPiece::StartTag | XmlPiece::EmptyTag | XmlPiece::EndTag => return false,
-            _ => {}
+            XmlPiece::Text if in_prolog => {
+                if !body[pos..end]
+                    .bytes()
+                    .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                {
+                    out.replace(pos, end, " ");
+                }
+            }
+            XmlPiece::Text => rewrite_character_data(body, pos, end, true, &mut out),
+            XmlPiece::StartTag | XmlPiece::EndTag | XmlPiece::EmptyTag => {
+                in_prolog = false;
+                rewrite_character_data(body, pos, end, false, &mut out);
+            }
+            XmlPiece::CommentOrPi | XmlPiece::CData | XmlPiece::Doctype => {}
         }
         pos = end;
     }
-    false
+    Some(out.finish())
 }
 
-/// Whether the text after an `&` completes a reference the parser resolves: one of XML's five
-/// predefined entities, or a decimal or hex character reference.
-fn starts_xml_reference(after_amp: &[u8]) -> bool {
+/// The byte ranges of the comments and PIs inside a DOCTYPE's internal subset, or `None` when one
+/// is unterminated. Neither parser reads the subset, but `sxd_document` ends it at the first `]`,
+/// even one inside a comment.
+fn subset_comments_and_pis(doctype: &str) -> Option<Vec<(usize, usize)>> {
+    let bytes = doctype.as_bytes();
+    let mut ranges = Vec::new();
+    let mut quote = None;
+    let mut brackets = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match (quote, bytes[i]) {
+            (Some(q), b) if b == q => quote = None,
+            (Some(_), _) => {}
+            (None, b'<')
+                if brackets > 0
+                    && (doctype[i..].starts_with("<!--") || doctype[i..].starts_with("<?")) =>
+            {
+                let (_, end, terminated) = xml_piece(doctype, i);
+                if !terminated {
+                    return None;
+                }
+                ranges.push((i, end));
+                i = end;
+                continue;
+            }
+            (None, q @ (b'"' | b'\'')) => quote = Some(q),
+            (None, b'[') => brackets += 1,
+            (None, b']') => brackets = brackets.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(ranges)
+}
+
+/// A copy of a borrowed text made only once the first edit lands: edits go in increasing order.
+struct Rewrite<'a> {
+    source: &'a str,
+    copied: usize,
+    out: Option<String>,
+}
+
+impl<'a> Rewrite<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            copied: 0,
+            out: None,
+        }
+    }
+
+    /// Replace `source[start..end]` with `with`; `start` is at or after the previous edit's end.
+    fn replace(&mut self, start: usize, end: usize, with: &str) {
+        let out = self
+            .out
+            .get_or_insert_with(|| String::with_capacity(self.source.len() + 16));
+        out.push_str(&self.source[self.copied..start]);
+        out.push_str(with);
+        self.copied = end;
+    }
+
+    fn finish(self) -> Cow<'a, str> {
+        match self.out {
+            Some(mut out) => {
+                out.push_str(&self.source[self.copied..]);
+                Cow::Owned(out)
+            }
+            None => Cow::Borrowed(self.source),
+        }
+    }
+}
+
+/// Rewrite the references in `body[start..end]` — a text piece when `text`, else a tag — and, in
+/// a text piece, the `<` and `]]>` xmldom keeps as text (see [`prepare_xml`]).
+fn rewrite_character_data(body: &str, start: usize, end: usize, text: bool, out: &mut Rewrite) {
+    let bytes = &body.as_bytes()[..end];
+    let mut i = start;
+    while i < end {
+        match bytes[i] {
+            b'<' if text => {
+                out.replace(i, i + 1, "&lt;");
+                i += 1;
+            }
+            b']' if text && bytes[i..].starts_with(b"]]>") => {
+                out.replace(i + 2, i + 3, "&gt;");
+                i += 3;
+            }
+            b'&' => i = rewrite_reference(bytes, i, out),
+            _ => i += 1,
+        }
+    }
+}
+
+/// Rewrite the `&` at `bytes[at]` as [`prepare_xml`] describes; returns where scanning resumes.
+fn rewrite_reference(bytes: &[u8], at: usize, out: &mut Rewrite) -> usize {
+    const REPLACEMENT: &str = "&#xFFFD;";
+    let Some((reference, len)) = xml_reference(&bytes[at + 1..]) else {
+        out.replace(at + 1, at + 1, "amp;");
+        return at + 1;
+    };
+    let next = at + 1 + len;
+    match reference {
+        XmlReference::Entity => next,
+        XmlReference::Char(Some(c)) if char::from_u32(c).is_some() => next,
+        XmlReference::Char(Some(high @ 0xD800..=0xDBFF)) => {
+            let low = if bytes.get(next) == Some(&b'&') {
+                xml_reference(&bytes[next + 1..])
+            } else {
+                None
+            };
+            match low {
+                Some((XmlReference::Char(Some(low @ 0xDC00..=0xDFFF)), low_len)) => {
+                    let c = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+                    let pair_end = next + 1 + low_len;
+                    out.replace(at, pair_end, &format!("&#x{c:X};"));
+                    pair_end
+                }
+                _ => {
+                    out.replace(at, next, REPLACEMENT);
+                    next
+                }
+            }
+        }
+        XmlReference::Char(_) => {
+            out.replace(at, next, REPLACEMENT);
+            next
+        }
+    }
+}
+
+/// A reference the parser resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XmlReference {
+    /// One of XML's five predefined entities.
+    Entity,
+    /// A decimal or hex character reference to this code point; `None` when it overflows `u32`.
+    Char(Option<u32>),
+}
+
+/// The reference the text after an `&` completes, and its length through the `;`: one of XML's
+/// five predefined entities, or a decimal or hex character reference. `None` for anything else.
+fn xml_reference(after_amp: &[u8]) -> Option<(XmlReference, usize)> {
     let len = after_amp
         .iter()
         .position(|b| !(b.is_ascii_alphanumeric() || *b == b'#'))
         .unwrap_or(after_amp.len());
     if after_amp.get(len) != Some(&b';') {
-        return false;
+        return None;
     }
-    match &after_amp[..len] {
-        b"lt" | b"gt" | b"amp" | b"quot" | b"apos" => true,
-        [b'#', b'x', hex @ ..] => !hex.is_empty() && hex.iter().all(u8::is_ascii_hexdigit),
-        [b'#', dec @ ..] => !dec.is_empty() && dec.iter().all(u8::is_ascii_digit),
-        _ => false,
-    }
+    // The digits are ASCII, so the text is UTF-8; an overflowing value parses to `None`.
+    let code = |digits: &[u8], radix| {
+        std::str::from_utf8(digits)
+            .ok()
+            .and_then(|d| u32::from_str_radix(d, radix).ok())
+    };
+    let reference = match &after_amp[..len] {
+        b"lt" | b"gt" | b"amp" | b"quot" | b"apos" => XmlReference::Entity,
+        [b'#', b'x', hex @ ..] if !hex.is_empty() && hex.iter().all(u8::is_ascii_hexdigit) => {
+            XmlReference::Char(code(hex, 16))
+        }
+        [b'#', dec @ ..] if !dec.is_empty() && dec.iter().all(u8::is_ascii_digit) => {
+            XmlReference::Char(code(dec, 10))
+        }
+        _ => return None,
+    };
+    Some((reference, len + 1))
 }
 
 /// `xml` cut back to its root element plus the comments and PIs after it, when the parse failed
-/// (at byte `error_at`) only on text or CDATA after the root — which xmldom reads past. `None`
-/// when there is no closed root, the error lies inside it, or anything else follows it: another
-/// tag, a DOCTYPE or an unterminated construct, all of which xmldom treats as fatal.
+/// (at byte `error_at`) only on text or CDATA after the root — which xmldom reads past — or on
+/// one stray end tag naming the root, which xmldom also ignores. `None` when there is no closed
+/// root, the error lies inside it, or anything else follows it: another tag, a DOCTYPE or an
+/// unterminated construct, all of which xmldom treats as fatal.
 fn without_trailing_text(xml: &str, error_at: usize) -> Option<String> {
     let mut depth = 0usize;
     let mut pos = 0;
+    let mut root = "";
     let root_end = loop {
         if pos >= xml.len() {
             return None;
         }
         let (kind, end, _) = xml_piece(xml, pos);
         match kind {
+            XmlPiece::StartTag | XmlPiece::EmptyTag if depth == 0 => {
+                root = tag_name(&xml[pos..end]);
+                if kind == XmlPiece::EmptyTag {
+                    break end;
+                }
+                depth = 1;
+            }
             XmlPiece::StartTag => depth += 1,
             XmlPiece::EndTag => {
                 depth = depth.checked_sub(1)?;
@@ -900,7 +1070,6 @@ fn without_trailing_text(xml: &str, error_at: usize) -> Option<String> {
                     break end;
                 }
             }
-            XmlPiece::EmptyTag if depth == 0 => break end,
             _ => {}
         }
         pos = end;
@@ -909,6 +1078,7 @@ fn without_trailing_text(xml: &str, error_at: usize) -> Option<String> {
         return None;
     }
     let mut kept = xml[..root_end].to_string();
+    let mut stray_end_tag = false;
     pos = root_end;
     while pos < xml.len() {
         let (kind, end, terminated) = xml_piece(xml, pos);
@@ -916,6 +1086,11 @@ fn without_trailing_text(xml: &str, error_at: usize) -> Option<String> {
             _ if !terminated => return None,
             XmlPiece::CommentOrPi => kept.push_str(&xml[pos..end]),
             XmlPiece::Text | XmlPiece::CData => {}
+            // xmldom's recovery from any further markup after a stray end tag is a TypeError it
+            // happens to survive, not a rule (a documented difference).
+            XmlPiece::EndTag if !stray_end_tag && ends_element(&xml[pos..end], root) => {
+                stray_end_tag = true;
+            }
             XmlPiece::StartTag | XmlPiece::EndTag | XmlPiece::EmptyTag | XmlPiece::Doctype => {
                 return None;
             }
@@ -923,6 +1098,21 @@ fn without_trailing_text(xml: &str, error_at: usize) -> Option<String> {
         pos = end;
     }
     Some(kept)
+}
+
+/// The name a start or empty tag opens: what follows its `<` up to whitespace, `/` or `>`.
+fn tag_name(tag: &str) -> &str {
+    let name = &tag[1..];
+    name.find([' ', '\t', '\r', '\n', '/', '>'])
+        .map_or(name, |at| &name[..at])
+}
+
+/// Whether `end_tag` is exactly `</name>`, with optional whitespace before the `>`.
+fn ends_element(end_tag: &str, name: &str) -> bool {
+    end_tag
+        .strip_prefix("</")
+        .and_then(|rest| rest.strip_prefix(name))
+        .is_some_and(|rest| rest.trim_start_matches([' ', '\t', '\r', '\n']) == ">")
 }
 
 /// Parse-once-per-request primitive for the XML DOM (issue #711).
@@ -1809,6 +1999,121 @@ mod tests {
             assert_reads("<!DOCTYPE a><a><b>1</b></a>", "//b", &["1"]);
         }
 
+        // Issue #1479: the recoveries xmldom reports through `onError` rather than a throw, so
+        // Mountebank's `xpath.select` yields a value for each. Expected values are what
+        // Mountebank 2.9.5's own `xpath.select` returns, except where a test says otherwise.
+        #[test]
+        fn a_less_than_that_opens_no_tag_reads_as_text() {
+            assert_reads("<a>1 < 2</a>", "//a", &["1 < 2"]);
+            assert_reads("<r><a>1 < 2</a><b>ok</b></r>", "//b", &["ok"]);
+            assert_reads("<a>x<</a>", "//a", &["x<"]);
+            assert_reads("<a>1 &lt; 2 < 3</a>", "//a", &["1 < 2 < 3"]);
+            assert_reads("<a>x <= y & z</a>", "//a", &["x <= y & z"]);
+        }
+
+        #[test]
+        fn a_cdata_close_in_text_reads_as_text() {
+            assert_reads("<a>x]]>y</a>", "//a", &["x]]>y"]);
+            assert_reads("<a>]]]></a>", "//a", &["]]]>"]);
+        }
+
+        #[test]
+        fn one_stray_end_tag_naming_the_root_is_ignored() {
+            assert_reads("<a>v</a></a>", "//a", &["v"]);
+            assert_reads("<a>v</a></a>x", "//a", &["v"]);
+            assert_reads("<a>v</a>x</a>", "//a", &["v"]);
+            assert_reads("<a>v</a></a ><?pi?><!--c-->", "//a", &["v"]);
+            assert_reads("<r><a>v</a></r></r>", "//a", &["v"]);
+            assert_reads("<a><b>1</b></a></a>", "//b", &["1"]);
+            assert!(LazyXmlDom::new("<a></a></a>").document().is_some());
+        }
+
+        #[test]
+        fn a_surrogate_pair_of_references_is_one_character() {
+            assert_reads("<a>&#55357;&#56832;</a>", "//a", &["😀"]);
+            assert_reads("<a>&#xD83D;&#xDE00;</a>", "//a", &["😀"]);
+            assert_reads("<a>&#xd800;&#xdc00;</a>", "//a", &["\u{10000}"]);
+        }
+
+        // Not Mountebank's value: it yields a lone surrogate (or garbage past U+10FFFF), which a
+        // Rust string cannot hold. U+FFFD is Rift's documented deviation.
+        #[test]
+        fn a_lone_surrogate_or_out_of_range_reference_reads_as_a_replacement_character() {
+            assert_reads("<a>&#xD800;</a>", "//a", &["\u{FFFD}"]);
+            assert_reads("<a>&#xDE00;&#xD83D;</a>", "//a", &["\u{FFFD}\u{FFFD}"]);
+            assert_reads("<a>&#xD83D;x&#xDE00;</a>", "//a", &["\u{FFFD}x\u{FFFD}"]);
+            assert_reads("<a>&#99999999999;</a>", "//a", &["\u{FFFD}"]);
+            assert_reads("<a>&#x110000;</a>", "//a", &["\u{FFFD}"]);
+            assert_reads(r#"<a b="&#xD800;">v</a>"#, "//a/@b", &["\u{FFFD}"]);
+            assert_reads("<a>&lt;&#xD800;</a>", "//a", &["<\u{FFFD}"]);
+        }
+
+        #[test]
+        fn text_before_the_root_is_ignored() {
+            assert_reads("<?xml version=\"1.0\"?>\u{FEFF}<a>v</a>", "//a", &["v"]);
+            assert_reads("<?xml version=\"1.0\"?>x<a>v</a>", "//a", &["v"]);
+            assert_reads("x<a>v</a>", "//a", &["v"]);
+            assert_reads("<!--c-->x<a>v</a>", "//a", &["v"]);
+            assert_reads("<!DOCTYPE a>x<a>v</a>", "//a", &["v"]);
+            assert_reads("x<!DOCTYPE a><a>v</a>", "//a", &["v"]);
+            assert_reads("x <!--c--> y<a>v</a>", "//a", &["v"]);
+            assert_reads("1 < 2<a>v</a>", "//a", &["v"]);
+            assert_reads("x&nbsp;<a>v</a>", "//a", &["v"]);
+            assert_reads("x]]><a>v</a>", "//a", &["v"]);
+        }
+
+        #[test]
+        fn a_doctype_subset_skips_its_comments_and_pis() {
+            assert_reads(
+                "<!DOCTYPE a [<!-- it's --> ]><a>&nbsp;</a>",
+                "//a",
+                &["&nbsp;"],
+            );
+            assert_reads("<!DOCTYPE a [<!-- ] > --> ]><a>&amp;</a>", "//a", &["&"]);
+            assert_reads(
+                "<!DOCTYPE a [<?pi it's?> ]><a>&nbsp;</a>",
+                "//a",
+                &["&nbsp;"],
+            );
+            assert_reads("<!DOCTYPE a [<?pi ] > ?>]><a>v</a>", "//a", &["v"]);
+        }
+
+        #[test]
+        fn what_xmldom_recovers_by_accident_stays_fatal() {
+            for body in [
+                // A `<` that starts a name but parses as no tag: documented, not copied.
+                "<a>x <b</a>",
+                "<a>if (i<n)</a>",
+                // Markup after a stray end tag: documented, not copied.
+                "<a></a></a><b>",
+                "<a>v</a></a><b/>",
+                "<a>v</a></a></a>",
+                // A stray end tag that does not name the root is fatal in xmldom too.
+                "<a></a></x>",
+                "<a>v</a></b>",
+                "<a>v</a></ a>",
+                "<a>v</a></a x=\"1\">",
+                // The prolog drops text, never a tag, CDATA, a declaration or a second DOCTYPE.
+                "x<b/><a>v</a>",
+                "x</b><a>v</a>",
+                "x<?xml version=\"1.0\"?><a>v</a>",
+                "<![CDATA[x]]><a>v</a>",
+                "x<![CDATA[x]]><a>v</a>",
+                "x<!DOCTYPE a><!DOCTYPE a><a>v</a>",
+                "<!--c--><!DOCTYPE a><!DOCTYPE a><a>v</a>",
+                "\u{FEFF}<?xml version=\"1.0\"?><a>v</a>",
+                r#"<a b="1 < 2"/>"#,
+                "<a>x<!y</a>",
+                // An unterminated comment or PI inside a DOCTYPE's internal subset.
+                "<!DOCTYPE a [<!--x->]><a>v</a>",
+                "<!DOCTYPE a [<?pi ]><a>v</a>",
+                // A `]` quoted in the internal subset: sxd ends the subset there. Documented.
+                r#"<!DOCTYPE a [<!-- --> <!ENTITY x "]">]><a>v</a>"#,
+            ] {
+                assert_no_document(body);
+            }
+        }
+
         fn xml_token() -> impl proptest::strategy::Strategy<Value = &'static str> {
             proptest::sample::select(vec![
                 "<",
@@ -1839,6 +2144,17 @@ mod tests {
                 "&nbsp;",
                 "&#x41;",
                 "<?",
+                "</a >",
+                "<a/>",
+                "&#xD83D;",
+                "&#xDE00;",
+                "&#55357;",
+                "&#99999999999;",
+                "&#x110000;",
+                "&#",
+                "<?xml version=\"1.0\"?>",
+                "1 < 2",
+                "text",
             ])
         }
 
@@ -1860,8 +2176,8 @@ mod tests {
         #[test]
         fn a_body_needing_no_preparation_is_not_copied() {
             assert!(matches!(
-                prepare_xml("<a><b x='1'>&amp;&#65;</b><!-- & --></a>"),
-                Cow::Borrowed(_)
+                prepare_xml("<a><b x='1'>&amp;&#65;&#x1F600;</b><!-- & -->\n<![CDATA[<]]></a>"),
+                Some(Cow::Borrowed(_))
             ));
         }
 
