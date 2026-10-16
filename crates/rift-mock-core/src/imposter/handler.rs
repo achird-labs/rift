@@ -57,7 +57,9 @@ fn proxy_body<'a>(raw: Option<&'a Bytes>, text: Option<&'a str>) -> Option<Proxy
 
 /// The `413` and `503` doors for a body the limits refuse (issue #1439). Both close the
 /// connection: the client may still be writing a body this listener will not read, and leaving it
-/// unread on a kept-alive connection would be parsed as the next request.
+/// unread on a kept-alive connection would be parsed as the next request. Both ask for a lingering
+/// close ([`LingerOnClose`](super::fault_io::LingerOnClose), issue #1460), so that close does not
+/// reset the connection under the answer.
 fn body_refused_response(e: &BodyReadError) -> Response<Full<Bytes>> {
     let (status, retry_after) = match e {
         BodyReadError::BudgetExhausted => {
@@ -82,6 +84,10 @@ fn body_refused_response(e: &BodyReadError) -> Response<Full<Bytes>> {
             hyper::header::HeaderValue::from_static("1"),
         );
     }
+    // The close must not discard this answer while the client is still sending (issue #1460).
+    response
+        .extensions_mut()
+        .insert(super::fault_io::LingerOnClose);
     response
 }
 
@@ -2705,11 +2711,24 @@ mod body_collect_tests {
         assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(too_large.headers()["connection"], "close");
         assert!(!too_large.headers().contains_key("retry-after"));
+        // Issue #1460: both ask the listener to drain the unread body before closing.
+        assert!(
+            too_large
+                .extensions()
+                .get::<super::super::fault_io::LingerOnClose>()
+                .is_some()
+        );
 
         let exhausted = body_refused_response(&BodyReadError::BudgetExhausted);
         assert_eq!(exhausted.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(exhausted.headers()["connection"], "close");
         assert_eq!(exhausted.headers()["retry-after"], "1");
+        assert!(
+            exhausted
+                .extensions()
+                .get::<super::super::fault_io::LingerOnClose>()
+                .is_some()
+        );
         let body = exhausted
             .into_body()
             .collect()

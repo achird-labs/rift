@@ -14,7 +14,8 @@
 //! socket becomes a request-smuggling primitive the moment the connection is reused. All three
 //! now assert against each other in one place, which is the point —
 //! `a_413_does_not_leak_its_unread_body_into_the_next_request` is #995's clause tested under
-//! #993's connection semantics, and neither issue could have expressed it alone.
+//! #993's connection semantics. Since #1460 a `413` is the one response that does not keep the
+//! tunnel alive: it says `connection: close` and the leak tests pin that the tunnel closes.
 
 use clap::Parser;
 use rift_http_proxy::server::{Cli, ServerBuilder};
@@ -517,6 +518,45 @@ async fn a_body_at_the_cap_is_still_served() {
         .expect("intercepted");
     assert_eq!(resp.status(), 200, "a body exactly at the cap is accepted");
     assert_eq!(resp.text().await.expect("body"), "accepted");
+    server.shutdown().await;
+}
+
+// The declared-length precheck (#1460) refuses only what is over the cap: a request declaring
+// exactly the cap is read and served, and one byte more is refused from the header alone.
+#[tokio::test]
+async fn the_length_precheck_admits_exactly_the_cap() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","action":{"serve":{"statusCode":200,"body":"accepted"}}}"#,
+    )
+    .await;
+
+    let at_cap = format!(
+        "POST /upload HTTP/1.1\r\nHost: cdn.example.com\r\ncontent-length: {MAX_BODY_BYTES}\r\n\r\n{}",
+        "x".repeat(MAX_BODY_BYTES)
+    );
+    let response = raw_tunnel_one_response(intercept, &ca, "cdn.example.com", &at_cap).await;
+    assert!(
+        response.starts_with("HTTP/1.1 200") && response.ends_with("accepted"),
+        "a declared length of exactly the cap is not refused: {}",
+        response.chars().take(200).collect::<String>()
+    );
+
+    // Head only: the refusal must not wait for a body it has already decided against.
+    let over = format!(
+        "POST /upload HTTP/1.1\r\nHost: cdn.example.com\r\ncontent-length: {}\r\n\r\n",
+        MAX_BODY_BYTES + 1
+    );
+    let response = raw_tunnel_one_response(intercept, &ca, "cdn.example.com", &over).await;
+    assert!(
+        response.starts_with("HTTP/1.1 413"),
+        "one byte over the cap is refused from the declared length: {}",
+        response.chars().take(200).collect::<String>()
+    );
     server.shutdown().await;
 }
 
@@ -1417,17 +1457,13 @@ async fn an_oversize_body_is_never_matched_against_a_body_predicate() {
 // keep-alive it is a request-smuggling primitive: if the connection were reused with those bytes
 // still buffered, the attacker chooses what the server parses as the *next* request.
 //
-// hyper is what makes this safe, not the refusal itself, and it has TWO branches — measured, not
-// assumed. `Conn::poll_drain_or_close_read` attempts one drain read when the body receiver is
-// dropped: if that consumes the remainder the tunnel is reused from a clean boundary; if it does
-// not, hyper calls `close_read()` and will never read another head. This test pins the REUSE
-// branch by leaving only a small remainder; `a_413_with_a_large_unread_remainder_closes_the_tunnel`
-// pins the close branch. Neither is "the" behaviour, which is why both are here.
+// Before #1460 hyper was what made this safe, by one drain read that either reused the tunnel from
+// a clean boundary or closed it. Since #1460 the 413 itself closes the tunnel (`connection:
+// close`, then a lingering close), and an over-cap declared length is refused before the body is
+// read, so the tail is never reachable as a request. The chunked test below and
+// `a_413_with_a_large_unread_remainder_closes_the_tunnel` pin the same property for the framings
+// whose refusal comes mid-body.
 //
-// On the assertions: `!contains("smuggled")` is the obvious one but the weaker one, since a
-// misaligned parse yields a 400 rather than the forged response. The load-bearing assertion is
-// `contains("legit")` — any leftover byte shifts the framing, so the reply to the next request
-// stops being that request's reply. Both are kept; only their relative strength is worth knowing.
 // The oversize body is deliberately made of a repeated forgery of a complete HTTP request, so a
 // server that framed the tail as a request would answer with `smuggled` and nothing else would.
 #[tokio::test]
@@ -1485,21 +1521,19 @@ async fn a_413_does_not_leak_its_unread_body_into_the_next_request() {
         .await;
     let after = read_one_response(&mut tls).await;
 
-    let after = after.expect(
-        "hyper keeps the tunnel alive after a 413 — measured, 8/8 runs. If a future hyper closes \
-         here instead that is also safe (a closed connection can frame nothing), but it is a \
-         behaviour change that should be accepted deliberately rather than by relaxing this test",
-    );
+    // Since #1460 the 413 closes the tunnel (`connection: close`, then a lingering close), a
+    // deliberate change from the keep-alive this once pinned: the refusal is now decided from the
+    // declared length, before the body is read, so the tail is never in a state to reuse. A
+    // closed connection frames nothing, which is the safety property.
     assert!(
-        !after.contains("smuggled"),
-        "SECURITY: the unread tail of the over-cap body was framed as a request. This is the \
-         smuggling primitive #995 warned about, now reachable because the tunnel is keep-alive: {}",
-        after.chars().take(200).collect::<String>()
-    );
-    assert!(
-        after.contains("legit"),
-        "the reused tunnel answers the request the CLIENT actually sent: {}",
-        after.chars().take(200).collect::<String>()
+        after.is_none(),
+        "SECURITY: the tunnel answered again after refusing an over-cap body, so the unread tail \
+         could be framed as a request (the smuggling primitive #995 warned about): {}",
+        after
+            .unwrap_or_default()
+            .chars()
+            .take(200)
+            .collect::<String>()
     );
     server.shutdown().await;
 }
@@ -1557,25 +1591,25 @@ async fn a_chunked_413_does_not_leak_its_unread_body_into_the_next_request() {
     let _ = tls
         .write_all(b"GET /legit HTTP/1.1\r\nHost: cdn.example.com\r\n\r\n")
         .await;
-    match read_one_response(&mut tls).await {
-        // Unlike the content-length case this one is NOT pinned to a single outcome: closing after
-        // an aborted chunk decode is a legitimate thing for hyper to do, and asserting reuse here
-        // would pin an implementation detail rather than the safety property.
-        None => {}
-        Some(after) => assert!(
-            !after.contains("smuggled") && after.contains("legit"),
-            "SECURITY: the unread tail of the chunked over-cap body was framed as a request: {}",
-            after.chars().take(200).collect::<String>()
-        ),
-    }
+    // The 413 says `connection: close` (#1460), so the tunnel closes and frames nothing more.
+    let after = read_one_response(&mut tls).await;
+    assert!(
+        after.is_none(),
+        "SECURITY: the tunnel answered again after refusing a chunked over-cap body, so its unread \
+         tail could be framed as a request: {}",
+        after
+            .unwrap_or_default()
+            .chars()
+            .take(200)
+            .collect::<String>()
+    );
     server.shutdown().await;
 }
 
-// The other half of `poll_drain_or_close_read`, and the branch a real user is more likely to hit:
-// a 1 MiB cap is usually tripped by a genuinely large upload, not by one that overshoots by a few
-// kilobytes. hyper's single drain read cannot swallow megabytes, so it closes the read side
-// instead — which is equally safe and is why the guarantee is stated as "the tail is never framed
-// as a request" rather than as "the connection is reused".
+// The case a real user is more likely to hit: a 1 MiB cap is usually tripped by a genuinely large
+// upload, not by one that overshoots by a few kilobytes. The 413 closes the tunnel
+// (`connection: close`, #1460) and the lingering close discards the megabytes still in flight, so
+// the tail is never framed as a request.
 #[tokio::test]
 async fn a_413_with_a_large_unread_remainder_closes_the_tunnel() {
     let server = start_intercept().await;
@@ -1593,8 +1627,7 @@ async fn a_413_with_a_large_unread_remainder_closes_the_tunnel() {
     )
     .await;
 
-    // 8x the cap, so ~7 MiB is still unread when the refusal is written — far past what one drain
-    // read can take.
+    // 8x the cap, so ~7 MiB is still unread when the refusal is written.
     let smuggled = "GET /smuggled HTTP/1.1\r\nHost: cdn.example.com\r\n\r\n";
     let body = format!("{}{smuggled}", "x".repeat(MAX_BODY_BYTES * 8));
 
@@ -1619,8 +1652,8 @@ async fn a_413_with_a_large_unread_remainder_closes_the_tunnel() {
         .await;
     assert!(
         read_one_response(&mut tls).await.is_none(),
-        "with megabytes still unread hyper closes the read side rather than draining, so no \
-         further request is answered on this tunnel — and the leftover bytes die with it"
+        "the 413 closes the tunnel, so no further request is answered on it — and the leftover \
+         bytes are discarded, never parsed"
     );
     server.shutdown().await;
 }

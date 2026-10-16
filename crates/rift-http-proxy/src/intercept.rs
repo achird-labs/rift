@@ -27,6 +27,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use rift_mock_core::proxy::HttpTuning;
 use rift_mock_core::proxy::intercept_ca::SniCertResolver;
+use rift_mock_core::{FaultCell, FaultIo};
 use rustls::ServerConfig;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -321,7 +322,7 @@ fn build_tls_acceptor(resolver: Arc<SniCertResolver>) -> anyhow::Result<TlsAccep
 // its own — the repo takes the same view at `stub_matches`.
 #[allow(clippy::too_many_arguments)]
 async fn handle_connection(
-    mut stream: TcpStream,
+    stream: TcpStream,
     tls: TlsAcceptor,
     rules: InterceptRules,
     forward_client: reqwest::Client,
@@ -331,6 +332,10 @@ async fn handle_connection(
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
     shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> anyhow::Result<()> {
+    // No fault is ever armed here; the cell carries the lingering close a 413 asks for (issue
+    // #1460). Beneath TLS, so the drain reads the raw socket.
+    let close = FaultCell::new();
+    let mut stream = FaultIo::new(stream, close.clone());
     let head = timeout(IO_TIMEOUT, read_connect_head(&mut stream))
         .await
         .map_err(|_| anyhow::anyhow!("timed out reading CONNECT head"))??;
@@ -385,7 +390,7 @@ async fn handle_connection(
         origin_tls,
         _permit: permit,
     });
-    serve_tunnel(tls_stream, ctx, http_tuning, shutdown_rx).await;
+    serve_tunnel(tls_stream, ctx, close, http_tuning, shutdown_rx).await;
     Ok(())
 }
 
@@ -402,6 +407,7 @@ async fn handle_connection(
 async fn serve_tunnel<I>(
     io: I,
     ctx: Arc<TunnelCtx>,
+    close: FaultCell,
     http_tuning: HttpTuning,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) where
@@ -417,10 +423,14 @@ async fn serve_tunnel<I>(
     let service = service_fn(move |req: Request<Incoming>| {
         let ctx = Arc::clone(&ctx);
         let relay_shutdown = relay_shutdown.resubscribe();
+        let close = close.clone();
         // Infallible: every failure below becomes a *response*, so a bad request never collapses
         // into a bare connection reset the client cannot interpret.
         async move {
-            Ok::<_, std::convert::Infallible>(handle_tunnel_request(req, ctx, relay_shutdown).await)
+            let version = req.version();
+            let response = handle_tunnel_request(req, ctx, relay_shutdown).await;
+            rift_mock_core::arm_linger_if_requested(&response, version, &close);
+            Ok::<_, std::convert::Infallible>(response)
         }
     });
 
@@ -430,13 +440,10 @@ async fn serve_tunnel<I>(
     // start of the next request — a smuggling primitive. That reader is gone: bodies are read
     // through `Limited` and an over-cap one is refused with 413 before any rule sees it.
     //
-    // What keeps the *tail* safe is hyper, via `Conn::poll_drain_or_close_read`. When the body
-    // receiver is dropped it attempts exactly one drain read; if that consumes the remainder the
-    // connection is reused from a clean framing boundary, and if it does not hyper calls
-    // `close_read()`, which disables keep-alive and stops it ever reading another head. Which
-    // branch you get depends on how much was left, so neither is "the" behaviour — but on both of
-    // them the leftover bytes are unreachable as a request. The two
-    // `*_does_not_leak_its_unread_body_into_the_next_request` tests pin one branch each.
+    // What keeps the *tail* safe: the 413 says `connection: close` (issue #1460), so hyper never
+    // reads another head on that connection, and the bytes left in the socket are only ever
+    // discarded by the lingering close. The two `*_does_not_leak_its_unread_body_into_the_next_
+    // request` tests pin that.
 
     // The two builders are different types yielding a Connection with the same drive and
     // graceful-shutdown shape, so the select is shared by macro rather than written twice — the
@@ -583,13 +590,24 @@ async fn handle_tunnel_request(
         headers.insert("host".to_string(), vec![authority.as_str().to_string()]);
     }
 
-    // The cap is enforced by reading through `Limited`, deliberately NOT by pre-checking the
-    // declared `content-length`. Refusing before the read looks cheaper, but it closes the socket
-    // while the client is still sending, so the client gets a broken pipe instead of the status —
-    // measured: a body one byte over the cap never sees its own 413. Reading to the cap first
-    // costs a bounded 1 MiB and is what makes the refusal deliverable. It also needs no trust in
-    // a header a malicious client controls.
-    let body_bytes = match read_limited_body(incoming).await {
+    // A declared length over the cap is refused before any of the body is read. Reading through
+    // `Limited` stays the real bound — a chunked body declares nothing and a header can lie — so
+    // the precheck only saves reading a megabyte that would be refused anyway. Either way the
+    // refusal is written with the body still arriving, which is why it asks for a lingering
+    // close: closing on unread data resets the connection, and the client would see that instead
+    // of its 413 (issue #1460).
+    let declared = parts
+        .headers
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    let over_cap = declared.is_some_and(|len| len > MAX_BODY_BYTES as u64);
+    let read = if over_cap {
+        Err(BodyReadError::TooLarge)
+    } else {
+        read_limited_body(incoming).await
+    };
+    let body_bytes = match read {
         Ok(bytes) if framed_body || !bytes.is_empty() => Some(bytes),
         Ok(_) => None,
         Err(BodyReadError::TooLarge) => {
@@ -598,7 +616,7 @@ async fn handle_tunnel_request(
                 cap = MAX_BODY_BYTES,
                 "intercepted request body exceeds cap; refusing with 413"
             );
-            return status_response(StatusCode::PAYLOAD_TOO_LARGE);
+            return body_refused_response();
         }
         Err(BodyReadError::Timeout) => {
             tracing::debug!(
@@ -918,6 +936,19 @@ fn collect_request_headers(headers: &hyper::HeaderMap) -> HashMap<String, Vec<St
     rift_mock_core::imposter::headers::collect_request_headers(headers, str::to_string)
 }
 
+/// The `413` for an over-cap body: bodyless like the other refusals, but it closes the connection,
+/// since the rest of the body is never read, and closes it with a lingering close (issue #1460).
+fn body_refused_response() -> Response<Full<Bytes>> {
+    let mut response = status_response(StatusCode::PAYLOAD_TOO_LARGE);
+    response
+        .headers_mut()
+        .insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
+    response
+        .extensions_mut()
+        .insert(rift_mock_core::LingerOnClose);
+    response
+}
+
 /// A bodyless response carrying only a status — the shape `502` has always had, reused for the
 /// other refusals so none of them invent a body a client would have to parse.
 fn status_response(status: StatusCode) -> Response<Full<Bytes>> {
@@ -1096,7 +1127,10 @@ fn is_hop_by_hop(name: &str) -> bool {
 /// Read the `CONNECT` request head one byte at a time, stopping exactly at the terminating
 /// `\r\n\r\n`. Reading byte-by-byte avoids consuming any TLS ClientHello bytes that follow — the
 /// client sends those only after our `200` response, but a buffered read could still over-read.
-async fn read_connect_head(stream: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
+async fn read_connect_head<S>(stream: &mut S) -> anyhow::Result<Vec<u8>>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
     while !buf.ends_with(b"\r\n\r\n") {

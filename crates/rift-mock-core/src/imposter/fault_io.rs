@@ -11,13 +11,24 @@
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, ready};
+use std::time::Duration;
 
-use hyper::Response;
+use hyper::{Response, Version};
 use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::time::{Instant, Sleep};
 use tracing::debug;
+
+// Lingering-close bounds (issue #1460): total drain time, the longest silence between reads, and
+// the most a client may send before the listener stops discarding it. Time, not size, is the real
+// bound: draining costs bandwidth, never memory.
+const LINGER_DEADLINE: Duration = Duration::from_secs(2);
+const LINGER_IDLE: Duration = Duration::from_secs(1);
+const LINGER_MAX_BYTES: usize = 64 * 1024 * 1024;
+const LINGER_SCRATCH: usize = 16 * 1024;
 
 /// The four WireMock-equivalent connection faults.
 ///
@@ -126,8 +137,16 @@ pub fn tcp_fault_carrier<B>(response: &Response<B>) -> Option<&'static str> {
 /// fault (issue #1234): wrap the accepted stream in [`FaultIo::new`] with a fresh cell, then arm
 /// the cell from the service (`rift_http_proxy::gateway::apply_tcp_fault` does both halves of the
 /// decision). A newtype so the lock type stays out of the public API. Cloning shares the slot.
+///
+/// It also carries the connection's lingering-close request (issue #1460, [`Self::arm_linger`]).
 #[derive(Clone, Debug, Default)]
-pub struct FaultCell(Arc<Mutex<Option<TcpFaultKind>>>);
+pub struct FaultCell(Arc<CellState>);
+
+#[derive(Debug, Default)]
+struct CellState {
+    fault: Mutex<Option<TcpFaultKind>>,
+    linger: AtomicBool,
+}
 
 impl FaultCell {
     /// An empty (un-armed) slot.
@@ -142,12 +161,57 @@ impl FaultCell {
     /// On HTTP/2 the next write may belong to another stream, and the abort would take down every
     /// stream on the connection.
     pub fn arm(&self, kind: TcpFaultKind) {
-        *self.0.lock() = Some(kind);
+        *self.0.fault.lock() = Some(kind);
+    }
+
+    /// Ask for a lingering close: when hyper shuts this connection down, [`FaultIo`] shuts the
+    /// write side, then reads and discards whatever the client is still sending — for at most 2 s,
+    /// 1 s of silence or 64 MiB — before letting it close.
+    ///
+    /// The drain is timed with `tokio::time`, so the connection must be driven on a Tokio runtime
+    /// with its time driver enabled (a disarmed `FaultIo` needs none). It can hold a graceful
+    /// shutdown or imposter delete for up to the 2 s deadline.
+    ///
+    /// For a response refused with the request body unread (issue #1460). Closing a socket with
+    /// unread data makes the kernel send a RST, and a client still writing that body then sees
+    /// "connection reset" instead of the refusal. Only arm it on HTTP/1, where the close follows
+    /// this response; [`arm_linger_if_requested`] makes that decision from the response.
+    pub fn arm_linger(&self) {
+        self.0.linger.store(true, Ordering::Relaxed);
+    }
+
+    fn linger_armed(&self) -> bool {
+        self.0.linger.load(Ordering::Relaxed)
     }
 
     /// Take (not just read) the armed fault so it fires exactly once. `FaultIo` only.
     fn take(&self) -> Option<TcpFaultKind> {
-        self.0.lock().take()
+        self.0.fault.lock().take()
+    }
+}
+
+/// Response extension: the listener should close this connection with a lingering close
+/// (issue #1460, [`FaultCell::arm_linger`]).
+///
+/// Set on a refusal written while the request body is still unread — the `413`/`503` body-limit
+/// doors. The response also says `connection: close`; this marker is what tells the listener the
+/// close must not discard the answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LingerOnClose;
+
+/// Arm `cell`'s lingering close if `response` carries [`LingerOnClose`] and the connection is
+/// HTTP/1. Each listener that wraps its connections in [`FaultIo`] calls this on every response.
+///
+/// HTTP/2 is left alone: a refused stream is reset on its own while the connection carries on, so
+/// there is no close to linger on.
+pub fn arm_linger_if_requested<B>(response: &Response<B>, version: Version, cell: &FaultCell) {
+    if response.extensions().get::<LingerOnClose>().is_some()
+        && matches!(
+            version,
+            Version::HTTP_09 | Version::HTTP_10 | Version::HTTP_11
+        )
+    {
+        cell.arm_linger();
     }
 }
 
@@ -192,10 +256,77 @@ pub fn is_injected_fault(err: &(dyn std::error::Error + 'static)) -> bool {
 /// A `TcpStream` wrapper that, when its [`FaultCell`] is armed, applies a connection fault on the
 /// next write instead of forwarding hyper's response. Reads and (un-armed) writes pass straight
 /// through, so it can wrap every accepted connection at no cost to ordinary traffic.
+///
+/// It also performs the cell's lingering close (issue #1460) in `poll_shutdown`.
 #[derive(Debug)]
 pub struct FaultIo {
     inner: TcpStream,
     fault: FaultCell,
+    linger: Linger,
+}
+
+/// Where an armed lingering close has got to. Created on the first armed `poll_shutdown`.
+enum Linger {
+    NotStarted,
+    /// Write side being shut down: the client is to see the response, then a FIN.
+    ShuttingWrite,
+    Draining(Box<Drain>),
+    Done,
+}
+
+struct Drain {
+    deadline: Pin<Box<Sleep>>,
+    idle: Pin<Box<Sleep>>,
+    discarded: usize,
+    scratch: Box<[u8; LINGER_SCRATCH]>,
+}
+
+impl std::fmt::Debug for Linger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotStarted => f.write_str("NotStarted"),
+            Self::ShuttingWrite => f.write_str("ShuttingWrite"),
+            Self::Draining(drain) => write!(f, "Draining({} bytes)", drain.discarded),
+            Self::Done => f.write_str("Done"),
+        }
+    }
+}
+
+impl Drain {
+    fn new() -> Self {
+        Self {
+            deadline: Box::pin(tokio::time::sleep(LINGER_DEADLINE)),
+            idle: Box::pin(tokio::time::sleep(LINGER_IDLE)),
+            discarded: 0,
+            scratch: Box::new([0; LINGER_SCRATCH]),
+        }
+    }
+
+    /// Read and discard until EOF, a read error, the byte backstop or a timer. Never fails: the
+    /// connection is closing either way, and a read error only means it closed sooner.
+    fn poll(&mut self, inner: &mut TcpStream, cx: &mut Context<'_>) -> Poll<()> {
+        loop {
+            if self.deadline.as_mut().poll(cx).is_ready() || self.idle.as_mut().poll(cx).is_ready()
+            {
+                return Poll::Ready(());
+            }
+            let mut buf = ReadBuf::new(&mut self.scratch[..]);
+            match ready!(Pin::new(&mut *inner).poll_read(cx, &mut buf)) {
+                Ok(()) if !buf.filled().is_empty() => {
+                    self.discarded += buf.filled().len();
+                    if self.discarded >= LINGER_MAX_BYTES {
+                        return Poll::Ready(());
+                    }
+                    self.idle.as_mut().reset(Instant::now() + LINGER_IDLE);
+                }
+                Ok(()) => return Poll::Ready(()),
+                Err(e) => {
+                    debug!("lingering close: read ended the drain: {e}");
+                    return Poll::Ready(());
+                }
+            }
+        }
+    }
 }
 
 impl FaultIo {
@@ -203,7 +334,11 @@ impl FaultIo {
     /// the raw socket.
     #[must_use]
     pub fn new(inner: TcpStream, fault: FaultCell) -> Self {
-        Self { inner, fault }
+        Self {
+            inner,
+            fault,
+            linger: Linger::NotStarted,
+        }
     }
 
     /// Apply the fault to the raw socket. Returns the error used to abort the hyper connection so
@@ -265,7 +400,26 @@ impl AsyncWrite for FaultIo {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        let this = &mut *self;
+        if matches!(this.linger, Linger::NotStarted) {
+            if !this.fault.linger_armed() {
+                return Pin::new(&mut this.inner).poll_shutdown(cx);
+            }
+            this.linger = Linger::ShuttingWrite;
+        }
+        loop {
+            match &mut this.linger {
+                Linger::NotStarted | Linger::ShuttingWrite => {
+                    ready!(Pin::new(&mut this.inner).poll_shutdown(cx))?;
+                    this.linger = Linger::Draining(Box::new(Drain::new()));
+                }
+                Linger::Draining(drain) => {
+                    ready!(drain.poll(&mut this.inner, cx));
+                    this.linger = Linger::Done;
+                }
+                Linger::Done => return Poll::Ready(Ok(())),
+            }
+        }
     }
 }
 
@@ -463,6 +617,86 @@ mod tests {
         cell.arm(TcpFaultKind::RandomData);
         assert_eq!(other.take(), Some(TcpFaultKind::RandomData));
         assert_eq!(cell.take(), None);
+    }
+
+    async fn connected_pair() -> (TcpStream, TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let client = TcpStream::connect(listener.local_addr().expect("addr"))
+            .await
+            .expect("connect");
+        let (server, _) = listener.accept().await.expect("accept");
+        (server, client)
+    }
+
+    #[test]
+    fn linger_is_armed_through_any_clone_and_only_for_http1() {
+        let mut response = Response::new(());
+        response.extensions_mut().insert(LingerOnClose);
+        let h2 = FaultCell::new();
+        arm_linger_if_requested(&response, Version::HTTP_2, &h2);
+        assert!(!h2.linger_armed(), "HTTP/2 has no close to linger on");
+
+        let cell = FaultCell::new();
+        arm_linger_if_requested(&Response::new(()), Version::HTTP_11, &cell);
+        assert!(!cell.linger_armed(), "only a response that asks arms it");
+        arm_linger_if_requested(&response, Version::HTTP_11, &cell.clone());
+        assert!(cell.linger_armed());
+    }
+
+    /// Issue #1460: an armed shutdown sends the FIN first, then discards what the peer sends until
+    /// it closes, so nothing is left unread to turn the close into a RST.
+    #[tokio::test]
+    async fn an_armed_shutdown_sends_fin_then_drains_to_eof() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (server, mut client) = connected_pair().await;
+        let cell = FaultCell::new();
+        cell.arm_linger();
+        let mut io = FaultIo::new(server, cell);
+        let shutdown = tokio::spawn(async move { io.shutdown().await });
+
+        let mut sink = [0u8; 1];
+        assert_eq!(
+            client.read(&mut sink).await.expect("read"),
+            0,
+            "the FIN comes before the drain"
+        );
+        client
+            .write_all(&[b'x'; 256 * 1024])
+            .await
+            .expect("drained");
+        client.shutdown().await.expect("client FIN");
+        let result = tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .expect("EOF ends the drain at once")
+            .expect("task");
+        assert!(result.is_ok());
+    }
+
+    /// The drain is bounded by its idle timer when the peer goes quiet without closing.
+    #[tokio::test(start_paused = true)]
+    async fn an_armed_shutdown_stops_draining_a_silent_peer() {
+        use tokio::io::AsyncWriteExt;
+        let (server, _client) = connected_pair().await;
+        let cell = FaultCell::new();
+        cell.arm_linger();
+        let mut io = FaultIo::new(server, cell);
+        let started = Instant::now();
+        io.shutdown().await.expect("shutdown");
+        assert!(started.elapsed() >= LINGER_IDLE);
+        assert!(started.elapsed() < LINGER_DEADLINE);
+    }
+
+    /// Unarmed, shutdown is the plain socket shutdown: it never waits on the peer.
+    #[tokio::test(start_paused = true)]
+    async fn an_unarmed_shutdown_does_not_wait_for_the_peer() {
+        use tokio::io::AsyncWriteExt;
+        let (server, _client) = connected_pair().await;
+        let mut io = FaultIo::new(server, FaultCell::new());
+        let started = Instant::now();
+        io.shutdown().await.expect("shutdown");
+        assert_eq!(started.elapsed(), Duration::ZERO);
     }
 
     /// Body-agnostic: an embedder classifies whatever body type it is holding, so classification

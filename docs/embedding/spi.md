@@ -480,8 +480,12 @@ response through `rift_http_proxy::gateway::apply_tcp_fault(response, request_ve
 HTTP/1 that arms the cell and `FaultIo` aborts the socket on the write. On HTTP/2 it returns
 `Err(InjectedFault)`, which your service returns so hyper resets that one stream. `is_injected_fault`
 recognises the resulting connection error anywhere in an error's source chain, so it need not be
-logged as a failure. `FaultCell`, `FaultIo`, `InjectedFault` and `is_injected_fault` are exported
-from both `rift_mock_core` and `rift_http_proxy`. See
+logged as a failure. Pass each response through `arm_linger_if_requested(&response, request_version,
+&cell)` too: a `413`/`503` body refusal carries `LingerOnClose`, and on HTTP/1 this makes `FaultIo`
+drain the unread body before closing, so the client gets the refusal instead of a reset (issue
+#1460). The drain is timed with `tokio::time`, so an armed `FaultIo` must be driven on a Tokio
+runtime with its time driver enabled, and it can hold a graceful shutdown for up to 2 s. `FaultCell`, `FaultIo`, `InjectedFault`, `is_injected_fault`, `LingerOnClose` and
+`arm_linger_if_requested` are exported from both `rift_mock_core` and `rift_http_proxy`. See
 [Fault injection → Serving from your own listener]({{ site.baseurl }}/features/fault-injection/#serving-from-your-own-listener).
 
 ## Observing front-door route dispatches

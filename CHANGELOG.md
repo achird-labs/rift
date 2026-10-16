@@ -87,6 +87,17 @@ record.
 
 ### Fixed
 
+- **A body over `--max-body-size` (or the memory budget) now reliably gets its `413`/`503`**
+  (#1460). The refusal is written while the client is still sending the body (before any of it is
+  read when the length is declared, mid-body for a chunked one), and closing the connection on
+  that unread body made the kernel send a reset: about 40% of HTTP/1.1 clients still writing the body
+  saw "connection reset by peer" instead of the status. Rift now closes with a lingering close: it
+  sends the refusal, shuts its side, and discards the rest of the body for at most 2 s (1 s of
+  silence, 64 MiB) before closing. This covers imposters (plain and HTTPS), the admin API, its
+  `/__rift/` gateway, the front door and the intercept listener, which also refuses a declared
+  length over its 1 MiB cap without reading the body again and now closes the tunnel after a
+  `413`. Embedders wrapping their own listener in `FaultIo` get it by calling
+  `arm_linger_if_requested` on each response; responses that ask for it carry `LingerOnClose`.
 - **The admin API answers `HEAD` and `OPTIONS` on every route** (#1456), as Mountebank 2.9.5's
   Express 5 server does; both answered `404`. `HEAD` is the `GET` with every header, including
   its `Content-Length`, and no body; on an event stream it answers the stream's headers without

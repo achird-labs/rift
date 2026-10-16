@@ -20,7 +20,7 @@ use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode, Uri};
-use rift_mock_core::{FaultCell, FaultIo, is_injected_fault};
+use rift_mock_core::{FaultCell, FaultIo, arm_linger_if_requested, is_injected_fault};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -299,6 +299,7 @@ async fn front_door_accept_loop(
                             Ok(response) => response,
                             Err(never) => match never {},
                         };
+                    arm_linger_if_requested(&response, version, &fault_cell);
                     apply_tcp_fault(response, version, &fault_cell)
                 }
             });

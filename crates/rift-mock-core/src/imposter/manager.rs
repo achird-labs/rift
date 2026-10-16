@@ -86,11 +86,13 @@ async fn run_http1<I>(
         let fault_cell = fault_cell.clone();
         let decorator = decorator.clone();
         async move {
+            let version = req.version();
             let response =
                 handle_imposter_request_decorated(req, imposter, addr, port, decorator).await?;
             if let Some(kind) = response.extensions().get::<TcpFaultKind>().copied() {
                 fault_cell.arm(kind);
             }
+            super::fault_io::arm_linger_if_requested(&response, version, &fault_cell);
             Ok::<_, std::convert::Infallible>(response)
         }
     });

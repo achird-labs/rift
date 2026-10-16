@@ -136,8 +136,11 @@ async fn oversize_body_door_uses_the_default_table() {
     let port = manager.create_imposter(config).await.expect("create");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    // One byte past the ceiling, with a known length: the refusal comes before the body is read,
-    // so the 413 arrives rather than a reset (#1420, #1439).
+    // One byte past the ceiling, with a known length: the refusal comes before the body is read.
+    // That alone used to *cause* a reset, not prevent one: closing on the unread body made the
+    // kernel send a RST, and about 40% of h1 clients saw it instead of the 413. The lingering
+    // close (#1460) drains the body before closing, which is what delivers the 413
+    // (`issue_1460_lingering_close.rs` pins it deterministically).
     let huge = "x".repeat(1024 * 1024 + 1);
     let resp = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/x"))

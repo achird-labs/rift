@@ -361,7 +361,7 @@ request's HTTP version:
 
 ```rust
 use rift_http_proxy::gateway::{apply_tcp_fault, dispatch_to_port};
-use rift_http_proxy::{FaultCell, FaultIo};
+use rift_http_proxy::{FaultCell, FaultIo, arm_linger_if_requested};
 
 let cell = FaultCell::new();
 let io = TokioIo::new(FaultIo::new(stream, cell.clone()));
@@ -370,6 +370,8 @@ let service = service_fn(move |req| {
     async move {
         let version = req.version();
         let response = dispatch_to_port(&manager, port, req).await;
+        // A body refusal closes cleanly instead of resetting under the 413 (issue #1460).
+        arm_linger_if_requested(&response, version, &cell);
         apply_tcp_fault(response, version, &cell) // Result<_, InjectedFault>
     }
 });
