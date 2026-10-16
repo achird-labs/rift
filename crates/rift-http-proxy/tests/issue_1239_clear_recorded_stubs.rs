@@ -89,6 +89,40 @@ impl Admin {
             .expect("GET")
     }
 
+    /// The body `port` answers for `path`, with `x-rec: 1` when `record` is set.
+    async fn send(&self, port: u16, path: &str, record: bool) -> String {
+        let mut request = self.client.get(format!("http://127.0.0.1:{port}{path}"));
+        if record {
+            request = request.header("x-rec", "1");
+        }
+        request
+            .send()
+            .await
+            .expect("GET")
+            .text()
+            .await
+            .expect("body")
+    }
+
+    async fn sends(&self, port: u16, path: &str, times: usize) -> Vec<String> {
+        let mut bodies = Vec::with_capacity(times);
+        for _ in 0..times {
+            bodies.push(self.send(port, path, false).await);
+        }
+        bodies
+    }
+
+    async fn replayable(&self, port: u16) -> Value {
+        self.client
+            .get(format!("{}/imposters/{port}?replayable=true", self.url))
+            .send()
+            .await
+            .expect("GET")
+            .json()
+            .await
+            .expect("json")
+    }
+
     async fn drop_all(&self, ports: &[u16]) {
         for port in ports {
             let _ = self.manager.delete_imposter(*port).await;
@@ -186,6 +220,179 @@ async fn clearing_with_nothing_recorded_keeps_every_stub() {
     let before = admin.stubs(port).await;
     admin.clear_saved_proxy_responses(port).await;
     assert_eq!(admin.stubs(port).await, before);
+
+    admin.drop_all(&[port, upstream]).await;
+}
+
+/// Each stub's `is` bodies, in display order; a non-`is` response prints as its type.
+fn bodies(stubs: &[Value]) -> Vec<Vec<String>> {
+    stubs
+        .iter()
+        .map(|stub| {
+            stub["responses"]
+                .as_array()
+                .map(|responses| {
+                    responses
+                        .iter()
+                        .map(|r| match r.pointer("/is/body") {
+                            Some(Value::String(body)) => body.clone(),
+                            _ => r
+                                .as_object()
+                                .and_then(|o| o.keys().next())
+                                .cloned()
+                                .unwrap_or_default(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// Issue #1519, the issue's probe: a `proxyAlways` recording appended to a stub the author wrote
+/// is stripped by the clear, the stub it would leave empty goes, and every remaining stub starts
+/// its cycle over. The expectations are what Mountebank 2.9.5 answers to the same steps.
+#[tokio::test]
+async fn clearing_strips_appended_responses_and_restarts_every_cycle() {
+    let admin = Admin::start().await;
+    let upstream = admin.upstream(json!({"is": {"body": "up"}})).await;
+    let port = port_of(
+        &admin
+            .create(json!({"protocol": "http", "stubs": [
+                {"predicates": [{"equals": {"headers": {"x-rec": "1"}}}],
+                 "responses": [{"proxy": {
+                     "to": format!("http://127.0.0.1:{upstream}"),
+                     "mode": "proxyAlways",
+                     "predicateGenerators": [{"matches": {"path": true}}]
+                 }}]},
+                {"predicates": [{"deepEquals": {"path": "/b"}}],
+                 "responses": [{"is": {"body": "A"}}, {"is": {"body": "B"}}]},
+                {"predicates": [{"equals": {"path": "/z"}}],
+                 "responses": [{"is": {"body": "Z1"}}, {"is": {"body": "Z2"}}, {"is": {"body": "Z3"}}]}
+            ]}))
+            .await,
+    );
+
+    assert_eq!(admin.send(port, "/b", true).await, "up");
+    assert_eq!(admin.send(port, "/c", true).await, "up");
+    let before = admin.stubs(port).await;
+    assert_eq!(
+        bodies(&before),
+        vec![
+            strings(&["proxy"]),
+            strings(&["A", "B", "up"]),
+            strings(&["Z1", "Z2", "Z3"]),
+            strings(&["up"])
+        ],
+        "{before:?}"
+    );
+    for recorded in [&before[1]["responses"][2], &before[3]["responses"][0]] {
+        assert!(
+            recorded["is"]["_proxyResponseTime"].is_u64(),
+            "a recording carries its round trip: {recorded}"
+        );
+    }
+    assert_eq!(admin.sends(port, "/z", 2).await, ["Z1", "Z2"]);
+    assert_eq!(admin.sends(port, "/b", 1).await, ["A"]);
+    let requests = admin.imposter(port).await["numberOfRequests"].clone();
+
+    admin.clear_saved_proxy_responses(port).await;
+    assert_eq!(
+        bodies(&admin.stubs(port).await),
+        vec![
+            strings(&["proxy"]),
+            strings(&["A", "B"]),
+            strings(&["Z1", "Z2", "Z3"])
+        ]
+    );
+    assert_eq!(
+        admin.imposter(port).await["numberOfRequests"],
+        requests,
+        "recorded requests are kept"
+    );
+    assert_eq!(admin.sends(port, "/z", 3).await, ["Z1", "Z2", "Z3"]);
+    assert_eq!(admin.sends(port, "/b", 3).await, ["A", "B", "A"]);
+
+    admin.drop_all(&[port, upstream]).await;
+}
+
+/// Mountebank restarts every stub's cycle on the clear, whether or not anything was recorded.
+#[tokio::test]
+async fn clearing_with_nothing_recorded_restarts_every_cycle() {
+    let admin = Admin::start().await;
+    let port = port_of(
+        &admin
+            .create(json!({"protocol": "http", "stubs": [{"responses": [
+                {"is": {"body": "A"}}, {"is": {"body": "B"}}, {"is": {"body": "C"}}
+            ]}]}))
+            .await,
+    );
+    assert_eq!(admin.sends(port, "/", 2).await, ["A", "B"]);
+    admin.clear_saved_proxy_responses(port).await;
+    assert_eq!(admin.sends(port, "/", 3).await, ["A", "B", "C"]);
+    admin.drop_all(&[port]).await;
+}
+
+/// The mark is what counts, not who wrote it: an imported `_proxyResponseTime` (an `mb save`
+/// without `--replayable`, a copied datadir) is kept, printed, and cleared like a recording.
+#[tokio::test]
+async fn an_imported_mark_is_kept_and_cleared_like_a_recording() {
+    let admin = Admin::start().await;
+    let port = port_of(
+        &admin
+            .create(json!({"protocol": "http", "stubs": [
+                {"predicates": [{"equals": {"path": "/i"}}],
+                 "responses": [{"is": {"body": "IMP", "_proxyResponseTime": 5}}]},
+                {"predicates": [{"equals": {"path": "/m"}}],
+                 "responses": [{"is": {"body": "M1"}}, {"is": {"body": "M2", "_proxyResponseTime": 3}}]},
+                {"predicates": [{"equals": {"path": "/n"}}], "responses": [{"is": {"body": "N"}}]}
+            ]}))
+            .await,
+    );
+    let stored = admin.stubs(port).await;
+    assert_eq!(stored[0]["responses"][0]["is"]["_proxyResponseTime"], 5);
+    let replayable = admin.replayable(port).await;
+    assert!(
+        replayable["stubs"][0]["responses"][0]["is"]
+            .get("_proxyResponseTime")
+            .is_none(),
+        "the replayable form drops it, as Mountebank's does: {replayable}"
+    );
+
+    admin.clear_saved_proxy_responses(port).await;
+    assert_eq!(
+        bodies(&admin.stubs(port).await),
+        vec![strings(&["M1"]), strings(&["N"])]
+    );
+    admin.drop_all(&[port]).await;
+}
+
+/// A `proxyOnce` recording carries the mark on the stub it records, and the replayable form drops it.
+#[tokio::test]
+async fn a_proxy_once_recording_carries_the_mark() {
+    let admin = Admin::start().await;
+    let upstream = admin.upstream(json!({"is": {"body": "up"}})).await;
+    let port = port_of(&admin.create(recording_proxy(upstream, "proxyOnce")).await);
+
+    assert_eq!(admin.get(port).await.text().await.expect("body"), "up");
+    let stubs = admin.stubs(port).await;
+    let recorded = stubs
+        .iter()
+        .find(|s| s.get("recordedFrom").is_some())
+        .expect("a recorded stub");
+    assert!(
+        recorded["responses"][0]["is"]["_proxyResponseTime"].is_u64(),
+        "{recorded}"
+    );
+    let replayable = admin.replayable(port).await;
+    assert!(
+        !replayable.to_string().contains("_proxyResponseTime"),
+        "{replayable}"
+    );
 
     admin.drop_all(&[port, upstream]).await;
 }

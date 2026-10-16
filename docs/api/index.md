@@ -662,11 +662,19 @@ removed.
 
 ### DELETE /imposters/{port}/savedProxyResponses
 
-Clear responses recorded by proxy stubs (`proxyOnce` / `proxyAlways`), leaving the imposter's other
-state intact. Every stub a proxy recorded (one that carries `recordedFrom`, as a proxy with
-`predicateGenerators`, `addWaitBehavior` or `addDecorateBehavior` records) is removed, as
-Mountebank's `deleteSavedProxyResponses` does, so the next request reaches the upstream again. The
-stubs you declared are kept. Answers `200` with the imposter, as `GET /imposters/{port}` does.
+Clear responses recorded by proxy stubs (`proxyOnce` / `proxyAlways`), as Mountebank's
+`deleteSavedProxyResponses` does, so the next request reaches the upstream again:
+
+- Every response a proxy recorded is removed: one whose `is` carries a numeric
+  `_proxyResponseTime`. That includes the responses a `proxyAlways` proxy added to a stub you wrote,
+  and a marked response you posted yourself.
+- A stub left with no responses is removed.
+- Every remaining stub starts its response cycle over.
+- Recorded requests are kept.
+- A stub recorded by an earlier release carries `recordedFrom` but no `_proxyResponseTime`, and
+  is removed whole.
+
+Answers `200` with the imposter, as `GET /imposters/{port}` does.
 
 ---
 

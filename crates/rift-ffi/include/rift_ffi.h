@@ -181,8 +181,10 @@ int32_t rift_delete_stub(RiftHandle *h, uint16_t port, const char *ref_json);
 int32_t rift_clear_recorded(RiftHandle *h, uint16_t port);
 
 /**
- * Clear saved proxy responses for `port`. Returns `0` on success, `-1` on any error (null handle
- * or unknown port).
+ * Clear saved proxy responses for `port`, as Mountebank's `DELETE …/savedProxyResponses` does:
+ * every response a proxy recorded (a numeric `_proxyResponseTime`) is removed, a stub left with
+ * none is removed, and every remaining stub starts its response cycle over. Recorded requests are
+ * kept. Returns `0` on success, `-1` on any error (null handle or unknown port).
  *
  * # Safety
  * `h` must be a live handle (or null).

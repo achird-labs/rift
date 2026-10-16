@@ -361,7 +361,8 @@ See [Behaviors]({{ site.baseurl }}/mountebank/behaviors/#repeat) for more on the
 ### Cycling State
 
 - Cycling state is **per-stub** - each stub maintains its own position
-- State **resets** when the imposter is deleted and recreated
+- State **resets** when the imposter is deleted and recreated, when its stubs are replaced as a
+  whole, and on `DELETE /imposters/{port}/savedProxyResponses`, which restarts every stub's cycle
 - State is **not persisted** - restarting Rift resets all cycling positions
 
 ### Mixed Response Types

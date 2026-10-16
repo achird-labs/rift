@@ -11,7 +11,18 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **Recorded proxy responses carry `_proxyResponseTime`** (ms), as Mountebank's do, and an imported
+  one is kept instead of dropped (#1519). `?replayable=true` and `rift save` leave it out, as
+  Mountebank's replayable form does.
+
 ### Changed
+
+- **`DELETE /imposters/:port/savedProxyResponses` now also removes responses a `proxyAlways` proxy
+  added to existing stubs, and restarts every remaining stub's response cycle**, as Mountebank does
+  (#1519). Any `is` response carrying a numeric `_proxyResponseTime` is removed, whoever wrote it,
+  and a stub left with no responses goes. Recorded requests are kept.
 
 - **An imposter without `host` now listens dual-stack on `::`, as Mountebank does** (#1514),
   falling back to `0.0.0.0` on a host without IPv6. It answers on `::1` too, so a `localhost`

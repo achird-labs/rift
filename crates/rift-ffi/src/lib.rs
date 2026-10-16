@@ -989,8 +989,10 @@ pub unsafe extern "C" fn rift_clear_recorded(h: *mut RiftHandle, port: u16) -> i
     })
 }
 
-/// Clear saved proxy responses for `port`. Returns `0` on success, `-1` on any error (null handle
-/// or unknown port).
+/// Clear saved proxy responses for `port`, as Mountebank's `DELETE …/savedProxyResponses` does:
+/// every response a proxy recorded (a numeric `_proxyResponseTime`) is removed, a stub left with
+/// none is removed, and every remaining stub starts its response cycle over. Recorded requests are
+/// kept. Returns `0` on success, `-1` on any error (null handle or unknown port).
 ///
 /// # Safety
 /// `h` must be a live handle (or null).
