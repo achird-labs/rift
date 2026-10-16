@@ -1087,6 +1087,13 @@ request describes an imposter that cannot be created:
 }
 ```
 
+The same `400` / `bad data` answers a port another process already holds (the message reads
+`Port 4545 is already in use: Address already in use (os error 48)`), a `host` that is not an
+address of this machine, one the process may not bind, and one that does not resolve (`Failed to
+bind port 4545: ...`). `PUT /imposters` answers `400` when every failed imposter is of this kind and
+keeps the `created` / `deleted` / `failed` report in the body. A bind that fails for any other
+reason, such as running out of file descriptors, stays `500`.
+
 ### 413 Payload Too Large
 
 The request body exceeds `--max-body-size` (default 512 MiB, Mountebank's own breaking point). The

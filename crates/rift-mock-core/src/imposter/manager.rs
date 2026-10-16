@@ -11,7 +11,7 @@ use super::reconcile::{
     ApplyReport, DeleteAllReport, DesiredImposter, EventContext, ImposterEvent,
     ImposterEventListener, Persistence, StubReconcile,
 };
-use super::types::{ImposterConfig, ImposterError, Stub, StubResponse};
+use super::types::{ImposterConfig, ImposterError, Stub, StubResponse, UnresolvableHost};
 use crate::behaviors::ResponseSequencer;
 use crate::extensions::decorate::ResponseDecorator;
 use crate::extensions::exchange_inspector::ExchangeInspectorProvider;
@@ -1111,9 +1111,16 @@ impl ImposterManager {
         }
         tokio::net::lookup_host((bind_host, port))
             .await
-            .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?
+            .map_err(|e| {
+                ImposterError::BindError(port, anyhow::Error::new(e).context(UnresolvableHost))
+            })?
             .next()
-            .ok_or_else(|| ImposterError::BindError(port, anyhow::anyhow!("no socket address")))
+            .ok_or_else(|| {
+                ImposterError::BindError(
+                    port,
+                    anyhow::anyhow!("no socket address").context(UnresolvableHost),
+                )
+            })
     }
 
     /// Spawn one accept loop per listener and **return** their handles.

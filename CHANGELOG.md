@@ -24,6 +24,12 @@ record.
   list position. The stub's `responses` list still shows append order. Embedders get the same
   order through the new `ImposterManager::append_stub_responses_by_id`; a `ResponseSequencer` is
   handed cycle positions after such an append (see `docs/embedding/spi.md`).
+- **Creating an imposter on an address another process holds answered 500; it now answers 400**
+  (#1500), as Mountebank does. `POST /imposters` and `PUT /imposters` return `400` / `bad data` when
+  the requested port is held by another process, the `host` is not a local address, the process
+  may not bind it, or the host does not resolve. `PUT` keeps its `created` / `failed` report and
+  stays `500` if any failure is an engine fault. `/admin/reload`, `--configfile` startup and the FFI
+  are unchanged.
 
 ## [0.22.0] - 2026-10-16
 

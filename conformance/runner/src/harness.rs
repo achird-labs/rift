@@ -1515,17 +1515,11 @@ impl PortPool {
     }
 }
 
-/// The engine refused an imposter because its port is taken: `PortInUse` ("Port N is already in
-/// use"), a 400, or a bind that another process's listener failed ("Failed to bind port N: Address
-/// already in use"), which the engine answers 500 until rift#1500 makes it the 400 Mountebank
-/// answers. Any other 500 is an engine fault, never a port to walk past.
+/// The engine refused an imposter because its port is taken: a 400 naming "already in use", whether
+/// another imposter or another process holds it. A 500 is an engine fault, never a port to walk past.
 #[must_use]
 pub fn port_taken(status: u16, body: &str) -> bool {
-    match status {
-        400 => body.contains("already in use"),
-        500 => body.contains("Failed to bind port") && body.contains("already in use"),
-        _ => false,
-    }
+    status == 400 && body.contains("already in use")
 }
 
 /// Feature 11's per-scenario engine and the config file it reloads from.
@@ -2035,15 +2029,10 @@ mod tests {
             400,
             "bind: address already in use (os error 48)"
         ));
-        // rift#1500: another process's listener fails the bind, answered 500 today.
-        assert!(port_taken(
-            500,
-            r#"{"errors":[{"code":"500","message":"Failed to bind port 4880: Address already in use (os error 48)"}]}"#
-        ));
         assert!(!port_taken(500, "Port 4880 is already in use"));
         assert!(!port_taken(
             500,
-            "Failed to bind port 4880: Permission denied"
+            "Failed to bind port 4880: Address already in use (os error 48)"
         ));
         assert!(!port_taken(400, "invalid imposter"));
     }

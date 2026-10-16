@@ -57,6 +57,9 @@ pub enum Step {
     /// Each engine exports `GET /imposters?replayable=true`, deletes everything and re-imports
     /// its own export with `PUT /imposters`.
     Reimport,
+    /// Another process takes `port` on 127.0.0.1 (each engine's mapped port) until the case ends,
+    /// so an imposter created on it meets an address that is already held.
+    Hold { port: u16 },
 }
 
 /// The fields of a `send` / `concurrent` step.
@@ -136,6 +139,9 @@ impl Case {
                     }
                 }
                 Step::Reimport => {}
+                Step::Hold { port } => {
+                    ports.insert(*port);
+                }
             }
         }
         ports

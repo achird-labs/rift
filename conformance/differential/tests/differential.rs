@@ -76,7 +76,7 @@ fn every_case_parses_and_names_are_unique() {
             let method = match step {
                 Step::Admin { method, .. } => method,
                 Step::Send(send) | Step::Concurrent(send) => &send.method,
-                Step::Reimport => continue,
+                Step::Reimport | Step::Hold { .. } => continue,
             };
             assert!(
                 reqwest::Method::from_bytes(method.as_bytes()).is_ok(),

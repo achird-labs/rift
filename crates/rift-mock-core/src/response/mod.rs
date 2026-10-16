@@ -191,6 +191,20 @@ impl From<ImposterError> for Response<Full<Bytes>> {
                 StatusCode::NOT_FOUND,
                 &format!("Imposter not found on port {p}"),
             ),
+            // The caller named an address that is taken, not local, not permitted or does not
+            // resolve; Mountebank answers these 400 (issue #1500).
+            ref bind @ ImposterError::BindError(p, ref e) if bind.is_caller_address_error() => {
+                tracing::warn!(port = p, error = %format_args!("{e:#}"), "imposter address cannot be bound");
+                let in_use = e
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse);
+                let message = if in_use {
+                    format!("Port {p} is already in use: {e:#}")
+                } else {
+                    format!("Failed to bind port {p}: {e:#}")
+                };
+                error_response(StatusCode::BAD_REQUEST, &message)
+            }
             ImposterError::BindError(p, e) => {
                 tracing::error!(port = p, error = %format_args!("{e:#}"), "failed to bind imposter port");
                 error_response(
@@ -253,6 +267,61 @@ mod tests {
     fn explicit_port_required_maps_to_400() {
         let response: Response<Full<Bytes>> = ImposterError::ExplicitPortRequired.into();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // Issue #1500: a bind that fails because of the address the caller named is a 400 like
+    // Mountebank's; an engine-side bind fault stays a 500.
+    async fn bind_response(source: anyhow::Error) -> (StatusCode, serde_json::Value) {
+        let response: Response<Full<Bytes>> = ImposterError::BindError(4545, source).into();
+        let status = response.status();
+        let body = http_body_util::BodyExt::collect(response)
+            .await
+            .expect("collect")
+            .to_bytes();
+        (status, serde_json::from_slice(&body).expect("json"))
+    }
+
+    fn io_kind(kind: std::io::ErrorKind) -> anyhow::Error {
+        anyhow::Error::new(std::io::Error::from(kind))
+    }
+
+    #[tokio::test]
+    async fn a_taken_address_is_a_400_bad_data_naming_already_in_use() {
+        let (status, body) = bind_response(io_kind(std::io::ErrorKind::AddrInUse)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["errors"][0]["type"], "bad data");
+        let message = body["errors"][0]["message"].as_str().expect("message");
+        assert!(message.contains("already in use"), "{message}");
+        assert!(message.contains("4545"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_non_local_or_forbidden_address_is_a_400() {
+        for kind in [
+            std::io::ErrorKind::AddrNotAvailable,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let (status, body) = bind_response(io_kind(kind)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{kind:?}");
+            assert_eq!(body["errors"][0]["type"], "bad data", "{kind:?}");
+            let message = body["errors"][0]["message"].as_str().expect("message");
+            assert!(
+                message.starts_with("Failed to bind port 4545: "),
+                "{message}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_engine_side_bind_fault_stays_a_500() {
+        for source in [
+            anyhow::anyhow!("no socket address"),
+            io_kind(std::io::ErrorKind::OutOfMemory),
+        ] {
+            let (status, body) = bind_response(source).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body["errors"][0]["type"], "internal error");
+        }
     }
 
     #[test]
