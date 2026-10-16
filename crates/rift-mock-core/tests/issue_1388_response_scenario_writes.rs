@@ -10,7 +10,15 @@ use rift_mock_core::imposter::ImposterManager;
 use serde_json::{Value, json};
 use std::sync::LazyLock;
 
-static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+/// No connection pool: ports are reused (auto-assign takes the lowest free port, so the next test's
+/// imposter often lands on the one a previous test deleted), and a pooled connection to a deleted
+/// imposter is dead by the time the next request is written on it.
+static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .expect("http client")
+});
 
 const SESSION: &str = "s-1388";
 

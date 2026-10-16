@@ -161,6 +161,11 @@ Never learn the next auto-assigned port and then pass it explicitly: that reopen
 manager closes. A number in the block that is not a port (a duration, a size) is written with a
 separator, `20_000`, which the guard skips.
 
+A test client that talks to imposters should not pool connections
+(`reqwest::Client::builder().pool_max_idle_per_host(0)`): a deleted imposter's port is the next
+auto-assigned one, and a pooled connection to it is dead. See
+`crates/rift-mock-core/tests/model/main.rs:38`.
+
 ## The Plane A specification
 
 [`conformance/features/`](conformance/features/) holds the scenarios Rift must satisfy, and the

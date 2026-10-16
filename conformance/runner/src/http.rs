@@ -69,6 +69,8 @@ impl Clients {
 fn base() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .no_proxy()
+        // A deleted imposter's port is reused by the next one; a pooled connection to it is dead.
+        .pool_max_idle_per_host(0)
         .timeout(REQUEST_TIMEOUT)
         .tls_backend_rustls()
 }
