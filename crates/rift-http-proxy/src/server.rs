@@ -7,7 +7,7 @@
 use crate::admin_api::{AdminApiServer, DEFAULT_ADMIN_PORT, RunningAdminApi};
 use crate::config_loader::ConfigSource;
 use crate::extensions::metrics;
-use crate::front_door::{CompiledRoutes, RouteTable, RunningFrontDoor, bind_front_door};
+use crate::front_door::{CompiledRoutes, RouteTable, RunningFrontDoor, bind_front_door_at};
 use crate::imposter::{
     ImposterConfig, ImposterManager, Persistence, ScriptBaseDir, TlsDefaults, resolve_scripts,
 };
@@ -15,6 +15,8 @@ use crate::injection_gate::GATED_SCRIPT_SURFACES;
 use crate::intercept_control::{
     InterceptAuth, InterceptControl, InterceptOrigin, InterceptStartOptions,
 };
+pub use crate::listen::ListenAddr;
+use crate::listen::ListenerSet;
 use crate::sources::{
     self, FileSource, HttpSource, ImposterSource, SourceRef, SourceRegistry, SourceSet,
 };
@@ -27,7 +29,6 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -58,15 +59,13 @@ pub struct Cli {
     #[arg(long, default_value_t = DEFAULT_ADMIN_PORT, env = "MB_PORT", global = true, help_heading = "Server options")]
     pub port: u16,
 
-    /// IP address to bind the admin API to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`)
-    #[arg(
-        long,
-        default_value = "0.0.0.0",
-        env = "MB_HOST",
-        global = true,
-        help_heading = "Server options"
-    )]
-    pub host: String,
+    /// IP address to bind the admin API to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`) [default: every interface, IPv6 and IPv4]
+    //
+    // Unset, the admin API listens on `[::]` dual-stack, or `0.0.0.0` on a host without IPv6, as
+    // Mountebank does (issue #1528). `None` is that absence, so an rcfile `host` can tell it apart
+    // from an explicit `--host 0.0.0.0`.
+    #[arg(long, env = "MB_HOST", global = true, help_heading = "Server options")]
+    pub host: Option<String>,
 
     /// Load imposters from a config file on startup (JSON or EJS format)
     #[arg(
@@ -125,7 +124,7 @@ pub struct Cli {
     )]
     pub allow_injection: bool,
 
-    /// Only accept requests from localhost
+    /// Only accept requests from localhost: the admin API and /metrics listen on `127.0.0.1` and `::1`
     #[arg(
         long,
         env = "MB_LOCAL_ONLY",
@@ -135,8 +134,8 @@ pub struct Cli {
     pub local_only: bool,
 
     /// Refuse to start when the admin API would bind a non-loopback address with no `--api-key`
-    /// (issue #863). Off by default: `--host` defaults to `0.0.0.0` and containers need it, so the
-    /// default is a startup warning instead.
+    /// (issue #863). Off by default: with no `--host` the admin API listens on every interface and
+    /// containers need it, so the default is a startup warning instead.
     #[arg(
         long,
         env = "RIFT_REQUIRE_ADMIN_AUTH",
@@ -226,7 +225,7 @@ pub struct Cli {
 
     /// Bind the front door (issue #19 / U-11): one listener serving every imposter, routed by
     /// host/path/header/method instead of by port. Accepts `HOST:PORT` (e.g. `0.0.0.0:8080`) or a
-    /// bare port, which binds every interface like `--metrics-port` does. Off when unset — the
+    /// bare port, which binds every interface, IPv6 and IPv4, like `--metrics-port` does. Off when unset — the
     /// single-port gateway and per-imposter ports are unaffected either way.
     #[arg(
         long,
@@ -462,6 +461,16 @@ pub struct Cli {
         conflicts_with = "intercept_ca_key"
     )]
     pub intercept_ca_key_pem: Option<String>,
+}
+
+impl Cli {
+    /// The host a local client (`rift healthcheck`, `rift save`) connects to: `--host`, or
+    /// `127.0.0.1` when it is unset (issue #1528). Loopback answers on the dual-stack bind and on
+    /// its `0.0.0.0` fallback alike, so the client never depends on which one happened.
+    #[must_use]
+    pub fn connect_host(&self) -> &str {
+        self.host.as_deref().unwrap_or("127.0.0.1")
+    }
 }
 
 /// Hand-written so that no credential a `Cli` carries ever reaches a log line: `api_key` (the admin
@@ -874,9 +883,10 @@ impl ServerBuilder {
         //     the metrics listener, which binds further down;
         //   * the `SocketAddr` parse itself — a malformed `--host` used to fail *after* the metrics
         //     server was already up.
-        // The `--intercept-port` listener inherits this address's IP further down, so the host is
+        // The `--intercept-port` listener inherits the bound admin IP further down, so the host is
         // parsed exactly once (issue #1137).
-        let admin_addr = admin_bind_addr(&cli)?;
+        let admin_listen = admin_listen_addr(&cli)?;
+        let admin_addr = admin_listen.judged();
         crate::admin_api::check_admin_exposure(
             admin_addr,
             cli.api_key.as_deref(),
@@ -1017,13 +1027,12 @@ impl ServerBuilder {
         // while leaving `/metrics` on every interface — the same class of surprise as #863, one
         // listener over. `--host` deliberately still does NOT move metrics: that would relocate it
         // for anyone who binds the admin plane to a specific interface, which is a separate call.
-        let metrics_ip = if cli.local_only {
-            [127, 0, 0, 1]
+        let metrics_addr = if cli.local_only {
+            ListenAddr::Loopback(cli.metrics_port)
         } else {
-            [0, 0, 0, 0]
+            ListenAddr::Any(cli.metrics_port)
         };
-        let metrics_addr = SocketAddr::from((metrics_ip, cli.metrics_port));
-        let metrics = match bind_metrics_server(metrics_addr).await {
+        let metrics = match bind_metrics_listeners(metrics_addr).await {
             Ok(running) => Some(running),
             Err(e) => {
                 error!("Metrics server error: {e:#}");
@@ -1048,7 +1057,7 @@ impl ServerBuilder {
                 let table = routes_block.unwrap_or_default();
                 let routes = Arc::new(ArcSwap::from_pointee(CompiledRoutes::new(&table)));
                 front_door_routes = Some(Arc::clone(&routes));
-                match bind_front_door(addr, Arc::clone(&manager), routes).await {
+                match bind_front_door_at(addr, Arc::clone(&manager), routes, None).await {
                     Ok(running) => Some(running),
                     Err(e) => {
                         if let Some(metrics) = metrics {
@@ -1066,9 +1075,30 @@ impl ServerBuilder {
             }
         };
 
+        // Bound here, before the intercept listener starts, so `--intercept-port` follows the
+        // address the admin plane really got: `0.0.0.0` on a host where `[::]` fell back (#1528).
+        let bound = admin_listen.bind().and_then(|listeners| {
+            let addrs = listeners
+                .iter()
+                .map(std::net::TcpListener::local_addr)
+                .collect::<std::io::Result<Vec<_>>>()?;
+            Ok((listeners, addrs))
+        });
+        let (admin_listeners, admin_bound) = match bound {
+            Ok(bound) => bound,
+            Err(e) => {
+                if let Some(front_door) = &front_door {
+                    front_door.shutdown().await;
+                }
+                if let Some(metrics) = metrics {
+                    metrics.shutdown().await;
+                }
+                return Err(e.into());
+            }
+        };
         info!(
-            "Rift Admin API (Mountebank-compatible) starting on http://{}",
-            admin_addr
+            "Rift Admin API (Mountebank-compatible) starting on {}",
+            crate::listen::http_urls(&admin_bound, "")
         );
 
         if cli.allow_injection {
@@ -1113,6 +1143,9 @@ impl ServerBuilder {
         // `with_exposure_checked`: the issue #863 check already ran above, before the metrics
         // bind. Without this the same startup would log the warning twice.
         let mut server = AdminApiServer::new(admin_addr, manager, cli.api_key)
+            .listen(admin_listen)
+            .with_bound_listeners(admin_listeners)
+            .with_reported_host(cli.host)
             .with_allow_injection(cli.allow_injection)
             .with_local_only(cli.local_only)
             .with_exposure_checked();
@@ -1156,7 +1189,14 @@ impl ServerBuilder {
         // rules (issue #1271); the two cannot both be set, which `intercept_block` refuses above.
         let start_options = match (intercept_block, intercept_flag_opts) {
             (Some(block), _) => Some((block, InterceptOrigin::ConfigFile)),
-            (None, Some(flags)) => Some((flags, InterceptOrigin::Flags)),
+            (None, Some(mut flags)) => {
+                // The address the admin plane bound, not the judged one: with no `--host` that is
+                // `[::]`, or `0.0.0.0` where the host has no IPv6 (issue #1528).
+                if let Some(bound) = admin_bound.first() {
+                    flags.host = Some(rift_mock_core::proxy::bind_host(bound));
+                }
+                Some((flags, InterceptOrigin::Flags))
+            }
             (None, None) => None,
         };
         if let Some((options, origin)) = start_options {
@@ -1319,17 +1359,6 @@ pub async fn run_metrics_server(addr: SocketAddr) -> anyhow::Result<()> {
     bind_metrics_server(addr).await?.join().await
 }
 
-/// The host the admin API binds: `--local-only` pins loopback, otherwise `--host` (default
-/// `0.0.0.0`). One definition so the issue #863 exposure check and the actual bind can never
-/// disagree about which address is being judged.
-fn admin_bind_host(cli: &Cli) -> &str {
-    if cli.local_only {
-        "127.0.0.1"
-    } else {
-        &cli.host
-    }
-}
-
 /// The intercept listener's address on the admin interface — the admin address with the intercept
 /// port (issue #1150).
 ///
@@ -1376,9 +1405,35 @@ pub fn intercept_flag_options(
         })
 }
 
-/// The address the admin plane binds under this CLI: `--local-only` pins loopback, otherwise
-/// `--host`, on `--port` — resolved to the literal [`SocketAddr`] that [`ServerBuilder::start`]
-/// binds and hands [`check_admin_exposure`](crate::admin_api::check_admin_exposure).
+/// Where the admin plane listens under this CLI (issue #1528): `--local-only` pins loopback
+/// (`127.0.0.1` and `[::1]`), an explicit `--host` is bound exactly, and no `--host` listens on
+/// every interface, `[::]` dual-stack with a `0.0.0.0` fallback, as Mountebank does.
+///
+/// # Errors
+/// If `--host` is not an IP literal; see [`admin_bind_addr`].
+pub fn admin_listen_addr(cli: &Cli) -> anyhow::Result<ListenAddr> {
+    if cli.local_only {
+        return Ok(ListenAddr::Loopback(cli.port));
+    }
+    let Some(host) = cli.host.as_deref() else {
+        return Ok(ListenAddr::Any(cli.port));
+    };
+    rift_mock_core::proxy::bind_addr(host, cli.port)
+        .map(ListenAddr::Exact)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--host {host} is not an IP literal, so the admin plane has no address to bind on \
+                 port {}. Use an IPv4 literal (`127.0.0.1`, `0.0.0.0`) or an IPv6 literal (`::1`, \
+                 `[::]`); a DNS name is not resolved here.",
+                cli.port
+            )
+        })
+}
+
+/// The address the admin plane is judged by under this CLI: `--local-only` pins loopback, otherwise
+/// `--host`, on `--port`, and with no `--host` the IPv6 wildcard `[::]` — the
+/// [`ListenAddr::judged`] address of [`admin_listen_addr`], which [`ServerBuilder::start`] hands
+/// [`check_admin_exposure`](crate::admin_api::check_admin_exposure).
 ///
 /// Public because an embedder that composes its own admin listener on top of [`ServerBuilder`]
 /// must judge and bind the *same* address (issue #1131). `start` calls it too, so the rule still
@@ -1391,23 +1446,25 @@ pub fn intercept_flag_options(
 /// attempted: the exposure check classifies a literal address, and a name that resolves differently
 /// there than at bind time is the disagreement this seam removes.
 pub fn admin_bind_addr(cli: &Cli) -> anyhow::Result<SocketAddr> {
-    let host = admin_bind_host(cli);
-    rift_mock_core::proxy::bind_addr(host, cli.port).ok_or_else(|| {
-        anyhow::anyhow!(
-            "--host {host} is not an IP literal, so the admin plane has no address to bind on port \
-             {}. Use an IPv4 literal (`127.0.0.1`, `0.0.0.0`) or an IPv6 literal (`::1`, `[::]`); \
-             a DNS name is not resolved here.",
-            cli.port
-        )
-    })
+    Ok(admin_listen_addr(cli)?.judged())
 }
 
-/// Bind the metrics listener (`:0` is fine) and start serving, returning a handle that reports
-/// the bound address and can be shut down gracefully (issue #342).
+/// Bind the metrics listener on exactly `addr` (`:0` is fine; an IPv6 address is dual-stack) and
+/// start serving, returning a handle that reports the bound address and can be shut down
+/// gracefully (issue #342).
 pub async fn bind_metrics_server(addr: SocketAddr) -> anyhow::Result<RunningMetrics> {
-    let listener = TcpListener::bind(addr).await?;
-    let local_addr = listener.local_addr()?;
-    info!("Metrics server listening on http://{}/metrics", local_addr);
+    bind_metrics_listeners(ListenAddr::Exact(addr)).await
+}
+
+/// [`bind_metrics_server`] on every listener `addr` needs (issue #1528): `[::]` dual-stack with an
+/// IPv4 fallback for `Any`, `127.0.0.1` and `[::1]` for `Loopback`.
+pub async fn bind_metrics_listeners(addr: ListenAddr) -> anyhow::Result<RunningMetrics> {
+    let listener = ListenerSet::from_std(addr.bind()?)?;
+    let local_addrs = listener.local_addrs()?;
+    info!(
+        "Metrics server listening on {}",
+        crate::listen::http_urls(&local_addrs, "/metrics")
+    );
 
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
@@ -1423,7 +1480,7 @@ pub async fn bind_metrics_server(addr: SocketAddr) -> anyhow::Result<RunningMetr
     });
 
     Ok(RunningMetrics {
-        local_addr,
+        local_addrs,
         cancel,
         tracker,
         task: Mutex::new(Some(task)),
@@ -1432,16 +1489,23 @@ pub async fn bind_metrics_server(addr: SocketAddr) -> anyhow::Result<RunningMetr
 
 /// A bound, running metrics server (issue #342).
 pub struct RunningMetrics {
-    local_addr: SocketAddr,
+    /// Every bound address, in bind order; never empty.
+    local_addrs: Vec<SocketAddr>,
     cancel: CancellationToken,
     tracker: TaskTracker,
     task: Mutex<Option<JoinHandle<anyhow::Result<()>>>>,
 }
 
 impl RunningMetrics {
-    /// The actual bound address (a `:0` request resolves to the OS-assigned port here).
+    /// The first bound address (a `:0` request resolves to the OS-assigned port here): `127.0.0.1`
+    /// under a two-address loopback, otherwise the one address bound.
     pub fn local_addr(&self) -> SocketAddr {
-        self.local_addr
+        self.local_addrs[0]
+    }
+
+    /// Every bound address (issue #1528); two under `ListenAddr::Loopback` on a host with IPv6.
+    pub fn local_addrs(&self) -> &[SocketAddr] {
+        &self.local_addrs
     }
 
     /// Stop accepting new connections, give in-flight connections a bounded grace, then return.
@@ -1489,7 +1553,7 @@ impl RunningMetrics {
 }
 
 async fn metrics_accept_loop(
-    listener: TcpListener,
+    mut listener: ListenerSet,
     cancel: CancellationToken,
     tracker: TaskTracker,
 ) -> anyhow::Result<()> {
@@ -1761,16 +1825,17 @@ fn partition_gated_datadir(
     (servable, gated)
 }
 
-/// Parse `--front-door`'s value as a bind address: `HOST:PORT` (e.g. `0.0.0.0:8080`), or a bare
-/// port, which binds every interface — the same convenience `--metrics-port`/`--intercept-port`
-/// offer by being port-only flags to begin with. A value that is neither is a startup error naming
-/// what was rejected, never a silent default (issue #19 / U-11).
-fn parse_front_door_addr(value: &str) -> anyhow::Result<SocketAddr> {
+/// Parse `--front-door`'s value as a bind address: `HOST:PORT` (e.g. `0.0.0.0:8080`), bound
+/// exactly, or a bare port, which binds every interface, `[::]` dual-stack with a `0.0.0.0`
+/// fallback (issue #1528) — the same convenience `--metrics-port`/`--intercept-port` offer by being
+/// port-only flags to begin with. A value that is neither is a startup error naming what was
+/// rejected, never a silent default (issue #19 / U-11).
+fn parse_front_door_addr(value: &str) -> anyhow::Result<ListenAddr> {
     if let Ok(addr) = value.parse::<SocketAddr>() {
-        return Ok(addr);
+        return Ok(ListenAddr::Exact(addr));
     }
     if let Ok(port) = value.parse::<u16>() {
-        return Ok(SocketAddr::from(([0, 0, 0, 0], port)));
+        return Ok(ListenAddr::Any(port));
     }
     anyhow::bail!(
         "--front-door '{value}' is not a valid bind address; use HOST:PORT (e.g. 0.0.0.0:8080) \
@@ -2211,6 +2276,76 @@ mod tests {
 
     /// A port that is refused before any bind, so nothing ever binds it.
     const UNUSED_PORT: u16 = 1;
+
+    // ---- issue #1528: where the server listeners bind ------------------------------------
+
+    fn listen_of(argv: &[&str]) -> anyhow::Result<ListenAddr> {
+        admin_listen_addr(&Cli::parse_from(argv))
+    }
+
+    #[test]
+    fn no_host_listens_on_every_interface() {
+        assert_eq!(
+            listen_of(&["rift"]).expect("resolve"),
+            ListenAddr::Any(2525)
+        );
+    }
+
+    #[test]
+    fn an_explicit_host_is_exact() {
+        assert_eq!(
+            listen_of(&["rift", "--host", "::1"]).expect("resolve"),
+            ListenAddr::Exact("[::1]:2525".parse().expect("addr"))
+        );
+    }
+
+    #[test]
+    fn local_only_is_loopback_whatever_the_host() {
+        assert_eq!(
+            listen_of(&["rift", "--local-only", "--host", "10.0.0.1"]).expect("resolve"),
+            ListenAddr::Loopback(2525)
+        );
+    }
+
+    #[test]
+    fn a_dns_host_is_still_refused() {
+        let err = listen_of(&["rift", "--host", "example.com"]).expect_err("not a literal");
+        assert!(
+            err.to_string()
+                .contains("--host example.com is not an IP literal"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_default_admin_bind_is_judged_exposed() {
+        let judged = admin_bind_addr(&Cli::parse_from(["rift"])).expect("resolve");
+        assert_eq!(judged, "[::]:2525".parse::<SocketAddr>().expect("addr"));
+        crate::admin_api::check_admin_exposure(
+            judged,
+            None,
+            crate::admin_api::AdminExposurePolicy::Warn,
+        )
+        .expect("the default posture warns");
+        crate::admin_api::check_admin_exposure(
+            judged,
+            None,
+            crate::admin_api::AdminExposurePolicy::Refuse,
+        )
+        .expect_err("[::] with no key is refused under --require-admin-auth");
+    }
+
+    #[test]
+    fn a_bare_front_door_port_listens_on_every_interface() {
+        assert_eq!(
+            parse_front_door_addr("8080").expect("port"),
+            ListenAddr::Any(8080)
+        );
+        assert_eq!(
+            parse_front_door_addr("127.0.0.1:8080").expect("addr"),
+            ListenAddr::Exact("127.0.0.1:8080".parse().expect("addr"))
+        );
+    }
 
     /// Issue #1369: a persisted `is: {}` must not come back as an explicit `statusCode`/`headers`,
     /// or a `--datadir` restart would silently lose the `defaultResponse` merge.

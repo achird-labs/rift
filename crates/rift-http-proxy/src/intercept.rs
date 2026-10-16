@@ -148,7 +148,8 @@ impl InterceptListener {
         auth: Option<InterceptAuth>,
         outbound_tls: rift_mock_core::proxy::OutboundTls,
     ) -> anyhow::Result<Self> {
-        let listener = TcpListener::bind(addr).await?;
+        // Dual-stack on an IPv6 address, as the admin plane it follows is (issue #1528).
+        let listener = TcpListener::from_std(rift_mock_core::proxy::bind_server_listener(addr)?)?;
         let local_addr = listener.local_addr()?;
         let tls = build_tls_acceptor(resolver)?;
 

@@ -116,6 +116,21 @@ PID 1 (issue #1155), so the default `terminationGracePeriodSeconds` is ample —
 shutdown is bounded at about three seconds. It exits `0` and leaves any `--datadir` state on its
 volume. No init process and no shortened grace period are needed.
 
+### IPv6 and dual-stack clusters
+
+No flag is needed. With no `--host` (and no `MB_HOST`), the admin API and `/metrics` listen on every
+interface, IPv6 and IPv4 (`[::]` dual-stack, falling back to `0.0.0.0` on a node without IPv6), as
+Mountebank does. On an IPv6 single-stack or dual-stack cluster the kubelet's `httpGet` probes reach
+the pod's IPv6 address and Prometheus can scrape `/metrics`, so the manifests above work as written.
+
+Setting `--host 0.0.0.0` (or `MB_HOST=0.0.0.0`) explicitly makes the pod IPv4-only: an explicit
+`--host` binds exactly that address. Images before this change set `MB_HOST=0.0.0.0` themselves;
+unset it if you pin one of them on an IPv6 cluster.
+
+A Service on an IPv6 cluster needs nothing from Rift. `ipFamilyPolicy` and `ipFamilies` matter only
+when you want a dual-stack Service; see the Kubernetes
+[IPv4/IPv6 dual-stack](https://kubernetes.io/docs/concepts/services-networking/dual-stack/) docs.
+
 ---
 
 ## Configuration with ConfigMap

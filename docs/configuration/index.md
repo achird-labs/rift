@@ -170,11 +170,11 @@ Configure Rift behavior via environment variables:
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `MB_PORT` | Admin API port | `2525` |
-| `MB_HOST` | Admin API bind IP address (IPv4, or IPv6 `::1` / `[::1]`) | `0.0.0.0` |
+| `MB_HOST` | Admin API bind IP address (IPv4, or IPv6 `::1` / `[::1]`) | every interface, IPv6 and IPv4 (`[::]` dual-stack; `0.0.0.0` on a host without IPv6) |
 | `MB_CONFIGFILE` | Imposter config file | |
 | `MB_DATADIR` | Persistent storage directory | |
 | `MB_ALLOW_INJECTION` | Enable JavaScript injection | `false` |
-| `MB_LOCAL_ONLY` | Localhost only | `false` |
+| `MB_LOCAL_ONLY` | Localhost only: the admin API and `/metrics` listen on `127.0.0.1` and `::1` | `false` |
 | `MB_LOGLEVEL` | Log level: `trace`, `debug`, `info`, `warn`, `error` | `info` |
 | `MB_APIKEY` | Admin API key | |
 | `RIFT_METRICS_PORT` | Prometheus metrics port | `9090` |
@@ -197,12 +197,12 @@ rift [OPTIONS]
 
 Options:
       --port <PORT>          Admin API port [default: 2525]
-      --host <HOST>          Admin API bind IP address (IPv4, or IPv6 `::1` / `[::1]`) [default: 0.0.0.0]
+      --host <HOST>          Admin API bind IP address (IPv4, or IPv6 `::1` / `[::1]`) [default: every interface, IPv6 and IPv4]
       --configfile <FILE>    Load imposters from a JSON or YAML file
       --imposters <URI,...>  Load imposters from file: paths or https:// URLs
       --datadir <DIR>        Persist admin-API imposters as <DIR>/<port>.json
       --allow-injection      Enable JavaScript injection and scripts
-      --local-only           Bind the admin API and /metrics to loopback
+      --local-only           Bind the admin API and /metrics to loopback (`127.0.0.1` and `::1`)
       --api-key <TOKEN>      Require this token on every admin API request
       --rcfile <FILE>        Read defaults from a Mountebank-style JSON rcfile
       --loglevel <LEVEL>     trace, debug, info, warn, error [default: info]

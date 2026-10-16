@@ -144,8 +144,10 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 ENV MB_PORT=2525
 # Admin API port (--port)
 
-ENV MB_HOST=0.0.0.0
-# IP address to bind the admin API to (--host; IPv4, or IPv6 `::1` / `[::1]`)
+# MB_HOST is deliberately unset: the admin API and /metrics then listen on every interface, IPv6
+# and IPv4 ([::] dual-stack; 0.0.0.0 on a host without IPv6), so IPv6 and dual-stack Kubernetes
+# clusters work without flags. Setting MB_HOST=0.0.0.0 makes the container IPv4-only.
+# (--host; IPv4, or IPv6 `::1` / `[::1]`)
 
 ENV MB_LOGLEVEL=info
 # Log level: debug, info, warn, error (--loglevel)
@@ -221,7 +223,7 @@ ENV RIFT_METRICS_PORT=9090
 #
 # CLI Reference (all flags work as environment variables with MB_ or RIFT_ prefix):
 #   --port <PORT>           Admin API port [env: MB_PORT] [default: 2525]
-#   --host <HOST>           Admin API bind IP address [env: MB_HOST] [default: 0.0.0.0]
+#   --host <HOST>           Admin API bind IP address [env: MB_HOST] [default: every interface, IPv6 and IPv4]
 #   --configfile <FILE>     Load imposters from file [env: MB_CONFIGFILE]
 #   --datadir <DIR>         Persistent storage directory [env: MB_DATADIR]
 #   --allow-injection       Enable JS injection [env: MB_ALLOW_INJECTION]

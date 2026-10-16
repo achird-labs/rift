@@ -386,7 +386,10 @@ pub fn create_reusable_listener(addr: SocketAddr) -> std::io::Result<TcpListener
 /// falls back on any error from the IPv6 bind; "address in use" never reaches it, because libuv
 /// defers `EADDRINUSE` to `listen()`, so here it is the caller's conflict and is returned rather
 /// than retried on IPv4, which would hand `localhost` clients to the holder.
-pub(crate) fn bind_unspecified<T>(
+///
+/// `bind` is the socket builder to use, so imposters ([`create_reusable_listener`]) and the server
+/// listeners ([`bind_server_listener`], issue #1528) share the one fallback rule.
+pub fn bind_unspecified<T>(
     port: u16,
     mut bind: impl FnMut(SocketAddr) -> std::io::Result<T>,
 ) -> std::io::Result<T> {
@@ -441,6 +444,22 @@ pub fn create_reusable_listener_tuned(
     addr: SocketAddr,
     tuning: &SocketTuning,
 ) -> std::io::Result<TcpListener> {
+    TcpListener::from_std(create_listener(addr, tuning, true)?)
+}
+
+/// A server-level listener (admin API, `/metrics`, front door, intercept; issue #1528): dual-stack
+/// on every IPv6 address, like an imposter, but without `SO_REUSEPORT`, so no second process can
+/// share the admin port. Returned nonblocking, ready for `tokio::net::TcpListener::from_std`.
+pub fn bind_server_listener(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+    create_listener(addr, &SocketTuning::default(), false)
+}
+
+/// The one socket builder behind [`create_reusable_listener_tuned`] and [`bind_server_listener`].
+fn create_listener(
+    addr: SocketAddr,
+    tuning: &SocketTuning,
+    reuse_port: bool,
+) -> std::io::Result<std::net::TcpListener> {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
     } else {
@@ -455,12 +474,16 @@ pub fn create_reusable_listener_tuned(
         socket.set_only_v6(false)?;
     }
 
-    socket.set_reuse_address(true)?;
+    // A server listener keeps what `tokio::net::TcpListener::bind` did before #1528: `SO_REUSEADDR`
+    // on Unix only, since on Windows it lets another socket take the port over.
+    if reuse_port || cfg!(not(windows)) {
+        socket.set_reuse_address(true)?;
+    }
 
     // Set SO_REUSEPORT on Unix (macOS, Linux, BSD)
     // On macOS, SO_REUSEPORT is available but through setsockopt
     #[cfg(target_os = "linux")]
-    {
+    if reuse_port {
         use std::os::fd::AsRawFd;
         unsafe {
             let optval: libc::c_int = 1;
@@ -478,7 +501,7 @@ pub fn create_reusable_listener_tuned(
     }
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    {
+    if reuse_port {
         use std::os::fd::AsRawFd;
         unsafe {
             let optval: libc::c_int = 1;
@@ -498,10 +521,7 @@ pub fn create_reusable_listener_tuned(
 
     socket.bind(&addr.into())?;
     socket.listen(tuning.backlog)?;
-
-    // Convert to tokio TcpListener
-    let std_listener: std::net::TcpListener = socket.into();
-    TcpListener::from_std(std_listener)
+    Ok(socket.into())
 }
 
 /// Apply per-connection tuning to a freshly accepted stream.
@@ -753,6 +773,28 @@ mod tests {
                 .only_v6()
                 .expect("IPV6_V6ONLY")
         );
+    }
+
+    // ---- issue #1528: server-level listeners ---------------------------------------------
+
+    #[test]
+    fn a_server_listener_is_dual_stack_on_the_ipv6_wildcard() {
+        let Ok(listener) = bind_server_listener("[::]:0".parse().expect("addr")) else {
+            return; // no IPv6 on this host
+        };
+        assert!(
+            !socket2::SockRef::from(&listener)
+                .only_v6()
+                .expect("IPV6_V6ONLY")
+        );
+    }
+
+    #[test]
+    fn a_server_listener_does_not_share_its_port() {
+        let first = bind_server_listener("127.0.0.1:0".parse().expect("addr")).expect("bind");
+        let addr = first.local_addr().expect("addr");
+        let second = bind_server_listener(addr).expect_err("no SO_REUSEPORT on a server listener");
+        assert_eq!(second.kind(), std::io::ErrorKind::AddrInUse);
     }
 
     // ---- issue #1501: the holder checks behind auto-assign ------------------------------

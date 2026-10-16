@@ -46,6 +46,17 @@ record.
   it. On Linux the port comes from `ip_local_port_range` (32768–60999 by default), so it can be
   below 49152.
 
+- **With no `--host`, the admin API, `/metrics` and a bare-port `--front-door` now listen on every
+  IPv6 and IPv4 interface (`[::]` dual-stack), as Mountebank does** (#1528), falling back to
+  `0.0.0.0` on a host without IPv6. Rift now works on IPv6 and dual-stack Kubernetes clusters
+  without flags. `--local-only` listens on `::1` as well as `127.0.0.1`. An explicit `--host` binds
+  exactly that address, and an IPv6 `--host` is now dual-stack on every OS. The container images no
+  longer set `MB_HOST=0.0.0.0`. `GET /config` reports the `--host` flag as `options.host` (`null`
+  when unset), and an rcfile `host` no longer overrides an explicit `--host 0.0.0.0`. For embedders,
+  `Cli::host` is now `Option<String>` and `admin_bind_addr` returns `[::]:port` when it is unset;
+  `ListenAddr`, `admin_listen_addr`, `AdminApiServer::listen` and `RunningAdminApi::local_addrs` are
+  new.
+
 ### Fixed
 
 - **An explicit `"host": "::"` is dual-stack on every platform** (#1514), including Windows and

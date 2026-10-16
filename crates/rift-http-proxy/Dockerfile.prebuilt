@@ -56,7 +56,8 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Environment variables
 ENV MB_PORT=2525
-ENV MB_HOST=0.0.0.0
+# MB_HOST is deliberately unset: every interface, IPv6 and IPv4 ([::] dual-stack; 0.0.0.0 on a
+# host without IPv6). Setting MB_HOST=0.0.0.0 makes the container IPv4-only.
 ENV MB_LOGLEVEL=info
 ENV RIFT_METRICS_PORT=9090
 

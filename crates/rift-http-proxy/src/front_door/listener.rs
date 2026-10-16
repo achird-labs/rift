@@ -14,6 +14,7 @@ use crate::front_door::observer::RouteObserver;
 use crate::front_door::route_table::{CompiledRoutes, Route};
 use crate::gateway::apply_tcp_fault;
 use crate::imposter::ImposterManager;
+use crate::listen::{ListenAddr, ListenerSet, http_urls};
 use crate::response::{ErrorKind, error_response_typed};
 use arc_swap::ArcSwap;
 use http_body_util::Full;
@@ -25,7 +26,6 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -69,9 +69,22 @@ pub async fn bind_front_door_with_observer(
     routes: Arc<ArcSwap<CompiledRoutes>>,
     observer: Option<Arc<dyn RouteObserver>>,
 ) -> anyhow::Result<RunningFrontDoor> {
-    let listener = TcpListener::bind(addr).await?;
-    let local_addr = listener.local_addr()?;
-    info!("Front door listening on http://{}", local_addr);
+    bind_front_door_at(ListenAddr::Exact(addr), manager, routes, observer).await
+}
+
+/// [`bind_front_door_with_observer`] on every listener `addr` needs: `--front-door` with a bare
+/// port is `ListenAddr::Any`, `[::]` dual-stack with an IPv4 fallback (issue #1528).
+pub(crate) async fn bind_front_door_at(
+    addr: ListenAddr,
+    manager: Arc<ImposterManager>,
+    routes: Arc<ArcSwap<CompiledRoutes>>,
+    observer: Option<Arc<dyn RouteObserver>>,
+) -> anyhow::Result<RunningFrontDoor> {
+    let listener = ListenerSet::from_std(addr.bind()?)?;
+    let local_addrs = listener.local_addrs()?;
+    // `from_std` refuses an empty set, so there is always a first address.
+    let local_addr = local_addrs[0];
+    info!("Front door listening on {}", http_urls(&local_addrs, ""));
 
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
@@ -161,7 +174,7 @@ impl RunningFrontDoor {
 }
 
 async fn front_door_accept_loop(
-    listener: TcpListener,
+    mut listener: ListenerSet,
     manager: Arc<ImposterManager>,
     routes: Arc<ArcSwap<CompiledRoutes>>,
     observer: Option<Arc<dyn RouteObserver>>,
