@@ -36,6 +36,10 @@ pub struct SequenceKey<'a> {
 /// treated as a backend error (500), never silently served. `peek` may be called several
 /// times per request (response-type dispatch peeks before the single advancing `next`) —
 /// remote backends should expect a few round-trips per request.
+///
+/// `response_count` and the returned index are cycle positions. They equal response indices
+/// except after a `proxyAlways` recording was appended to a stub mid-cycle (#1513): the stub then
+/// cycles in Mountebank's queue order, handed here as that order's length with every repeat 1.
 pub trait ResponseSequencer: Send + Sync {
     /// Atomically advance and return the response index, honoring per-response repeats.
     fn next(&self, key: SequenceKey<'_>, response_count: usize, repeats: &[u32]) -> Result<usize>;

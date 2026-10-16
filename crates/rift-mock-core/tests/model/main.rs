@@ -752,6 +752,48 @@ fn a_proxy_always_append_after_a_wrapped_cycle_is_served_last() {
     );
 }
 
+/// #1513: a `proxyAlways` append to a recording in the middle of its cycle joins the tail of
+/// Mountebank's rotating queue. The recording `[#0, #1, #2]` has served `#0` when `#3` is
+/// appended, so it serves `#1 #2 #0 #3`, where the list order would give `#1 #2 #3 #0`.
+#[test]
+fn a_proxy_always_append_mid_cycle_joins_the_queue_tail() {
+    let always_b = || Op::AddStub {
+        index: 0,
+        spec: Spec::Proxy {
+            pred: ops::Pred {
+                path: Some("/b"),
+                ..ops::Pred::default()
+            },
+            mode: ops::Mode::Always,
+            gen_body: false,
+        },
+    };
+    run(
+        &[Spec::Proxy {
+            pred: ops::Pred::default(),
+            mode: ops::Mode::Once,
+            gen_body: false,
+        }],
+        &[
+            get("/b"),
+            get("/b"),
+            get("/b"),
+            always_b(),
+            get("/b"),
+            get("/b"),
+            Op::DeleteStub(0),
+            get("/b"),
+            always_b(),
+            get("/b"),
+            Op::DeleteStub(0),
+            get("/b"),
+            get("/b"),
+            get("/b"),
+            get("/b"),
+        ],
+    );
+}
+
 /// #1386: deleting a `proxyOnce` recording forgets its claim, so the next request for that
 /// identity is forwarded and recorded again, as in Mountebank, where the stub is the recording.
 #[test]

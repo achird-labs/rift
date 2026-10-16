@@ -49,24 +49,59 @@ impl Imposter {
             stub_key: &stub_key,
             scope: stub_state.stub.space.as_deref().unwrap_or(""),
         };
-        let repeats: Vec<u32> = responses
-            .iter()
-            .map(|r| r.get_repeat().unwrap_or(1).max(1))
-            .collect();
+        // After a mid-cycle `proxyAlways` append (#1513) the sequencer counts positions in the
+        // stub's cycle, every one a single answer, and each position maps to a response.
+        let cycle = stub_state.cycle();
+        let (count, repeats) = sequence_shape(stub_state);
         let index = if advance {
-            sequencer.next(key, responses.len(), &repeats)?
+            sequencer.next(key, count, &repeats)?
         } else {
-            sequencer.peek(key, responses.len(), &repeats)?
+            sequencer.peek(key, count, &repeats)?
+        };
+        let response = match cycle {
+            None => responses.get(index),
+            Some(cycle) => cycle.get(index).and_then(|&i| responses.get(i as usize)),
         };
         // An out-of-range index is a sequencer contract violation; surfacing it beats
         // silently falling through to the no-match default response (issue #313).
-        let Some(response) = responses.get(index) else {
+        let Some(response) = response else {
             anyhow::bail!(
-                "sequencer returned out-of-range index {index} for stub {stub_key} ({} responses)",
-                responses.len()
+                "sequencer returned out-of-range index {index} for stub {stub_key} ({count} responses)"
             );
         };
         Ok(Some(response))
+    }
+
+    /// `stub_state` with `extra` appended as a `proxyAlways` recording appends them (#1513):
+    /// joining the tail of its current cycle. Without a sequencer, at the embedded cycler's cursor,
+    /// which keeps pointing at the queue's head. With one, at its `peek` (the SPI has no repeat
+    /// index, so the start of that response's repeat run), with the head at position 0: the
+    /// sequencer's key changes with the content, so its cursor is restarted, by
+    /// [`mutate_stubs`](Self::mutate_stubs), rather than relied on to carry over. A sequencer that
+    /// cannot answer leaves the append at the cycle's start, the display order, and is logged: the
+    /// recording itself must not be lost.
+    pub(crate) fn appended(&self, stub_state: &StubState, extra: Vec<StubResponse>) -> StubState {
+        let Some(sequencer) = &self.sequencer else {
+            return stub_state.with_appended(extra, stub_state.cursor(), true);
+        };
+        let stub_key = stub_state.sequence_key();
+        let key = crate::behaviors::SequenceKey {
+            port: self.config.port.unwrap_or(0),
+            slot: stub_state.slot,
+            stub_key: &stub_key,
+            scope: stub_state.stub.space.as_deref().unwrap_or(""),
+        };
+        let (count, repeats) = sequence_shape(stub_state);
+        let cursor = match sequencer.peek(key, count, &repeats) {
+            Ok(index) => (u32::try_from(index).unwrap_or(u32::MAX), 0),
+            Err(e) => {
+                tracing::error!(
+                    "sequencer peek failed for stub {stub_key}; proxyAlways append served in display order: {e:#}"
+                );
+                (0, 0)
+            }
+        };
+        stub_state.with_appended(extra, cursor, false)
     }
 
     /// Get all stubs info for debug purposes (Rift extension)
@@ -151,5 +186,22 @@ impl Imposter {
                 )
             },
         ))
+    }
+}
+
+/// The `(response_count, repeats)` a sequencer is handed for `stub_state`: the display list with
+/// its `repeat`s, or the positions of a mid-cycle order with every repeat 1 (#1513).
+fn sequence_shape(stub_state: &StubState) -> (usize, Vec<u32>) {
+    match stub_state.cycle() {
+        Some(cycle) => (cycle.len(), vec![1; cycle.len()]),
+        None => (
+            stub_state.stub.responses.len(),
+            stub_state
+                .stub
+                .responses
+                .iter()
+                .map(|r| r.get_repeat().unwrap_or(1).max(1))
+                .collect(),
+        ),
     }
 }

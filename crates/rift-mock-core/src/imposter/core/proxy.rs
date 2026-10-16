@@ -726,17 +726,17 @@ impl Imposter {
 
                 if let Some(idx) = matching {
                     // Append responses to the existing stub. States live behind `Arc` (issue #287),
-                    // so rebuild the entry from a stub with the extended responses while reusing the
-                    // slot's cycler + slot token.
-                    let mut merged = stubs[idx].stub.clone();
-                    merged.responses.extend(stub.responses);
-                    let total = merged.responses.len();
+                    // so rebuild the entry with the extended responses while reusing the slot's
+                    // cycler + slot token. The append joins the tail of the stub's current cycle,
+                    // as in Mountebank's rotating queue (issue #1513).
+                    let merged = self.appended(&stubs[idx], stub.responses);
+                    let total = merged.stub.responses.len();
                     // Recording stays on the wall clock, not the load clock (issue #1301): it builds
                     // a state per proxied request, and one stamp each would push the clock a second
                     // ahead per request. But never stamp earlier than the stub already served — an
                     // admin change may have left that stamp ahead of the wall clock.
                     let at = stubs[idx].loaded_at().max(chrono::Utc::now());
-                    stubs[idx] = Arc::new(stubs[idx].with_stub(merged).with_loaded_at(at));
+                    stubs[idx] = Arc::new(merged.with_loaded_at(at));
                     debug!(
                         "Appended response to existing stub at index {idx} (proxyAlways mode, {total} total responses)"
                     );

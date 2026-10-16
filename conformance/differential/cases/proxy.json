@@ -1020,6 +1020,528 @@
           "path": "/p"
         }
       ]
+    },
+    {
+      "name": "proxy: a proxyAlways append mid-cycle joins the tail of the stub's rotating queue (#1513)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "U0"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "U1"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "U2"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "headers": {
+                        "x-rec": "1"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyAlways",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "path": true
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "path": "/b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "A"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "B"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "C"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "times": 1
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "headers": [
+            [
+              "x-rec",
+              "1"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "times": 5
+        }
+      ]
+    },
+    {
+      "name": "proxy: a proxyAlways append inside a repeat run splits the run (#1513)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "U0"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "U1"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "U2"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "headers": {
+                        "x-rec": "1"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyAlways",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "path": true
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "path": "/b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "A"
+                    },
+                    "_behaviors": {
+                      "repeat": 2
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "B"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "times": 1
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "headers": [
+            [
+              "x-rec",
+              "1"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "times": 8
+        }
+      ]
+    },
+    {
+      "name": "proxy: consecutive proxyAlways appends mid-cycle queue in append order (#1513)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "U0"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "U1"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "U2"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "headers": {
+                        "x-rec": "1"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyAlways",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "path": true
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "path": "/b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "A"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "B"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "C"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "times": 1
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "headers": [
+            [
+              "x-rec",
+              "1"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "times": 1
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "headers": [
+            [
+              "x-rec",
+              "1"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "times": 6
+        }
+      ]
+    },
+    {
+      "name": "proxy: a proxyAlways append at the start of a cycle is served last (#1513)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "U0"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "U1"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "U2"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "headers": {
+                        "x-rec": "1"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyAlways",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "path": true
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "path": "/b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "A"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "B"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "C"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "times": 3
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "headers": [
+            [
+              "x-rec",
+              "1"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b",
+          "times": 5
+        }
+      ]
     }
   ]
 }

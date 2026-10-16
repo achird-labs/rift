@@ -261,6 +261,9 @@ supplies its closing character. See
 
 When a stub has multiple responses, they cycle through in round-robin order. Each request returns the next response in the sequence, wrapping back to the first after reaching the end.
 
+A `proxyAlways` recording appended to a stub mid-cycle joins the end of its current cycle; see
+[Where recordings go]({{ site.baseurl }}/mountebank/proxy/#where-recordings-go).
+
 ### Basic Cycling
 
 ```json

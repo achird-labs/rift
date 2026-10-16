@@ -44,6 +44,17 @@ impl RuleCycler {
         resp_idx.min(response_count.saturating_sub(1))
     }
 
+    /// The raw `(response index, repeat index)` cursor, unclamped.
+    #[must_use]
+    pub fn peek_position(&self) -> (u32, u32) {
+        split(self.0.load(Ordering::SeqCst))
+    }
+
+    /// Point the cursor at `resp_idx`, at the start of its repeat run.
+    pub fn set(&self, resp_idx: u32) {
+        self.0.store(join(resp_idx, 0), Ordering::SeqCst);
+    }
+
     pub fn reset(&self) {
         self.0.store(0, Ordering::SeqCst);
     }
