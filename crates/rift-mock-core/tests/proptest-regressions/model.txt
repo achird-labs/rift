@@ -13,3 +13,6 @@ cc 110ba276c2b24b450d987857ac58b81b60f9940e16b92662aee4664bc6887435 # shrinks to
 # #1389 (recording placed by the first proxy stub, proxyAlways inserted behind it): shrinks to
 # a proxyAlways recording that must go last.
 cc 4629074515b9a14d2c3fadcf4f11322b193f89a5b6c0d16595701a09cc48a16b # shrinks to ([], [Recreate([Insert(0, Proxy { pred: Pred { method: None, path: None, query: false, body: None }, mode: Always, gen_body: true })]), Request(Shape { method: Post, path: "/a", query: false, body: None, flow: "f1" }), Request(Shape { method: Get, path: "/b", query: false, body: None, flow: "f1" })])
+# #1503 (model cursor counted answers, not a wrapped index): shrinks to a proxyAlways append to a
+# recording whose cycle had wrapped.
+cc 431afe6ee6bef249ed2fb0712c873f860adead2f6082c3ad00567a890034edf5

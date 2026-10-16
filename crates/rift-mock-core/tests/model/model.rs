@@ -78,7 +78,10 @@ impl Kind {
 #[derive(Clone, Debug)]
 pub struct Slot {
     pub kind: Kind,
-    /// How many times this slot has answered: its next response is `cursor % responses`.
+    /// The index of its next response, wrapped at each answer as Mountebank's rotating queue and
+    /// Rift's `RuleCycler` do, so a `proxyAlways` append lands after it (#1503). An append in the
+    /// middle of a cycle is where mb's queue and this index part ways; the model follows the
+    /// engine there until #1513 settles it.
     cursor: usize,
     /// The `proxyOnce` claim this slot was recorded under. It travels with the slot (moves,
     /// reload survivors) and ends with it: when the slot goes, or its content changes, so does
@@ -182,8 +185,13 @@ impl Model {
             return Served::plain(String::new(), false);
         };
         let slot = &mut self.stubs[i];
+        let len = match &slot.kind {
+            Kind::Authored(Spec::Is { responses, .. }) => *responses,
+            Kind::Recorded { responses, .. } => responses.len(),
+            Kind::Authored(Spec::Proxy { .. }) => 1,
+        };
         let turn = slot.cursor;
-        slot.cursor += 1;
+        slot.cursor = (turn + 1) % len;
         // Cloned so the arms below can mutate `self` (transitions, recordings).
         match slot.kind.clone() {
             Kind::Authored(Spec::Is {
