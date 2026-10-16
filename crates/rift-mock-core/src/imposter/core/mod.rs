@@ -198,6 +198,47 @@ pub(crate) fn first_divergence<'a>(
     k
 }
 
+/// The cycle after Mountebank's `addResponse` pushes response `new` onto the tail of a stub's
+/// rotating queue (issue #1513). `cycle` is the current order (`None`: `responses` with their
+/// `repeat`s) and `(r, q)` the in-range cursor, whose next answer is the queue's head.
+///
+/// Returns `None` when the cursor is at the start of a display-order cycle: the queue is then the
+/// display order plus `new`, so no order is needed and record-then-replay never builds one. Else
+/// the queue `Q` (head first), rotated right by `r` when `keep_cursor` so that `order[r] == Q[0]`
+/// and the cursor already points at the head; unrotated otherwise, for a cursor restarted at 0.
+fn cycle_after_append(
+    cycle: Option<Vec<u32>>,
+    responses: &[StubResponse],
+    (r, q): (u32, u32),
+    new: u32,
+    keep_cursor: bool,
+) -> Option<Vec<u32>> {
+    let (r, q) = (r as usize, q as usize);
+    let mut queue: Vec<u32> = match cycle {
+        Some(order) => {
+            let mut queue = order[r..].to_vec();
+            queue.extend_from_slice(&order[..r]);
+            queue
+        }
+        None if responses.is_empty() || (r, q) == (0, 0) => return None,
+        None => {
+            let repeat = |i: usize| responses[i].get_repeat().unwrap_or(1).max(1) as usize;
+            let expanded: Vec<u32> = (0..responses.len())
+                .flat_map(|i| std::iter::repeat_n(i as u32, repeat(i)))
+                .collect();
+            let head = (0..r).map(repeat).sum::<usize>() + q.min(repeat(r) - 1);
+            let mut queue = expanded[head..].to_vec();
+            queue.extend_from_slice(&expanded[..head]);
+            queue
+        }
+    };
+    queue.push(new);
+    if keep_cursor {
+        queue.rotate_right(r);
+    }
+    Some(queue)
+}
+
 #[derive(Debug, Clone)]
 pub struct StubState {
     pub(crate) stub: Stub,
@@ -220,6 +261,11 @@ pub struct StubState {
     /// (a move, a restamp, a reconcile that keeps it) and gone with any new content, so the claim
     /// lives exactly as long as the recording; see [`Imposter::forget_orphaned_claims`].
     pub(crate) recorded_claim: Option<Arc<RequestSignature>>,
+    /// The stub's cycle once a `proxyAlways` append landed mid-cycle (issue #1513): position ->
+    /// index into `stub.responses`, repeat-expanded, so the cursor counts positions with every
+    /// repeat 1. `None` is the display order with `repeat`. Runtime only: not in `Stub`, the
+    /// content hash or any stored form, and dropped by any new content.
+    cycle: Option<Arc<[u32]>>,
 }
 
 impl StubState {
@@ -232,6 +278,7 @@ impl StubState {
             content_hash: OnceLock::new(),
             loaded_at: chrono::Utc::now(),
             recorded_claim: None,
+            cycle: None,
         }
     }
 
@@ -274,6 +321,12 @@ impl StubState {
         if responses.is_empty() {
             return None;
         }
+        if let Some(cycle) = &self.cycle {
+            let pos = self
+                .cycler
+                .get_response_index_advance(cycle.len() as u32, |_| None);
+            return self.response_at(cycle, pos);
+        }
 
         let repeat_for_response = |idx| responses.get(idx as usize).and_then(|r| r.get_repeat());
         let response_idx = self
@@ -284,16 +337,51 @@ impl StubState {
 
     #[must_use]
     pub fn peek_response(&self) -> Option<&StubResponse> {
+        if let Some(cycle) = &self.cycle {
+            let pos = self.cycler.peek_response_index(cycle.len() as u32);
+            return self.response_at(cycle, pos);
+        }
         let responses = &self.stub.responses;
         let response_idx = self.cycler.peek_response_index(responses.len() as u32);
         self.stub.responses.get(response_idx as usize)
     }
 
+    fn response_at(&self, cycle: &[u32], pos: u32) -> Option<&StubResponse> {
+        let index = *cycle.get(pos as usize)?;
+        self.stub.responses.get(index as usize)
+    }
+
+    /// The cycle a sequencer counts over: `None` for the display order with `repeat`, else the
+    /// positions of the mid-cycle order (see the `cycle` field).
+    pub(crate) fn cycle(&self) -> Option<&[u32]> {
+        self.cycle.as_deref()
+    }
+
+    /// The local cursor, `(response index, repeat index)`, or `(position, 0)` under a cycle.
+    pub(crate) fn cursor(&self) -> (u32, u32) {
+        self.cycler.peek_position()
+    }
+
     /// A copy carrying `stub` but preserving this slot's response-cycling state (the shared
     /// `cycler`) and `slot`. Used by the reconcile/replace paths to swap stub content in place
     /// now that states live behind `Arc` and cannot be mutated through a shared reference.
+    ///
+    /// New content drops a mid-cycle order (#1513), as Mountebank's `wrap()` resets the queue. So
+    /// the cursor, a position in that order, is moved to the response it named, keeping "the
+    /// cursor survives an in-place replace" in display terms.
     #[must_use]
     pub(crate) fn with_stub(&self, stub: Stub) -> Self {
+        if let Some(cycle) = &self.cycle {
+            let pos = self.cycler.peek_response_index(cycle.len() as u32);
+            if let Some(&index) = cycle.get(pos as usize) {
+                self.cycler.set(index);
+            }
+        }
+        self.rebuilt(stub)
+    }
+
+    /// This slot (cycler and slot token) carrying `stub` as new content, in display order.
+    fn rebuilt(&self, stub: Stub) -> Self {
         Self {
             stub,
             cycler: Arc::clone(&self.cycler),
@@ -301,6 +389,57 @@ impl StubState {
             content_hash: OnceLock::new(),
             loaded_at: chrono::Utc::now(),
             recorded_claim: None,
+            cycle: None,
+        }
+    }
+
+    /// A `proxyAlways` recording appended to this stub (issue #1513). Mountebank serves a stub from
+    /// a rotating queue and pushes an appended response onto its tail, so an append in the middle
+    /// of a cycle is served after the rest of the current cycle, not at its list position. The
+    /// display list stays append order, as Mountebank's `toJSON` shows it.
+    ///
+    /// `cursor` is where the stub's next answer comes from, read under the same write lock: the
+    /// local cycler's [`cursor`](Self::cursor), or a sequencer's `peek` with a repeat index of 0.
+    /// With `keep_cursor` (the local cycler) the order is built so that position `cursor.0` holds
+    /// the queue's head, so the shared cycler is never rewritten. A request already running on the
+    /// old snapshot can advance it between the read and the swap and serve one element out of
+    /// Mountebank's order, the same window the display-order cycler has always had. Without it (a
+    /// sequencer, whose key may change with the content) the head is position 0 and the caller
+    /// restarts the sequencer's cursor; see [`Imposter::mutate_stubs`].
+    #[must_use]
+    pub(crate) fn with_appended(
+        &self,
+        extra: Vec<StubResponse>,
+        cursor: (u32, u32),
+        keep_cursor: bool,
+    ) -> Self {
+        let mut stub = self.stub.clone();
+        let mut cycle: Option<Vec<u32>> = self.cycle.as_deref().map(<[u32]>::to_vec);
+        let len = cycle.as_ref().map_or(stub.responses.len(), Vec::len) as u32;
+        // A cursor past the end (the stub shrank under it) serves the last response, as the
+        // cycler clamps it; the order must start there too, and the cycler must say so.
+        let in_range = if len == 0 {
+            (0, 0)
+        } else if cursor.0 >= len {
+            (len - 1, 0)
+        } else {
+            cursor
+        };
+        if in_range != cursor && keep_cursor {
+            self.cycler.set(in_range.0);
+        }
+        let mut cursor = in_range;
+        for response in extra {
+            let new = stub.responses.len() as u32;
+            cycle = cycle_after_append(cycle, &stub.responses, cursor, new, keep_cursor);
+            stub.responses.push(response);
+            if !keep_cursor && cycle.is_some() {
+                cursor = (0, 0);
+            }
+        }
+        Self {
+            cycle: cycle.map(Into::into),
+            ..self.rebuilt(stub)
         }
     }
 
@@ -595,7 +734,39 @@ impl Imposter {
             (result, before, after)
         };
         self.forget_orphaned_claims(before.stubs(), after.stubs());
+        self.restart_reordered_sequences(before.stubs(), after.stubs());
         result
+    }
+
+    /// Restart a sequencer's cursor for each slot whose cycle order an edit built, changed or
+    /// dropped (issue #1513). The sequencer counts positions in that order, and a slot's key moves
+    /// with its content, so its old cursor means nothing under the new order: a `proxyAlways`
+    /// append builds the order with the queue's head at 0, and new content restarts at the first
+    /// response, as Mountebank's `wrap()` does. Without a sequencer the embedded cycler is kept in
+    /// step by [`StubState::with_appended`] and [`StubState::with_stub`] instead. Like the claims,
+    /// after the swap: a request in between can be served one answer from the old cursor.
+    fn restart_reordered_sequences(&self, before: &[Arc<StubState>], after: &[Arc<StubState>]) {
+        let Some(sequencer) = &self.sequencer else {
+            return;
+        };
+        if before.iter().chain(after).all(|s| s.cycle.is_none()) {
+            return;
+        }
+        // The order is shared by `Arc` across clones (a restamp, a move), so only a new order or
+        // none-for-some counts as a change.
+        let same = |a: &Option<Arc<[u32]>>, b: &Option<Arc<[u32]>>| match (a, b) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        let port = self.config.port.unwrap_or(0);
+        for new in after {
+            if let Some(old) = before.iter().find(|o| o.slot == new.slot)
+                && !same(&old.cycle, &new.cycle)
+            {
+                sequencer.reset_scope(port, Some(&old.sequence_key()));
+            }
+        }
     }
 
     /// Forget the `proxyOnce` claims of the recordings an edit removed (issue #1386): those held
@@ -2199,6 +2370,403 @@ mod tests {
                 "an in-place replace must not keep the old stub's hash"
             );
             assert_eq!(StubState::with_hash(first, 42).content_hash(), 42);
+        }
+    }
+
+    /// Issue #1513: a `proxyAlways` append joins the tail of the stub's rotating queue, as in
+    /// Mountebank's default (in-memory) repository. Expected sequences are mb 2.9.5's, probed live.
+    mod proxy_always_queue {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::VecDeque;
+
+        fn response(label: &str, repeat: u32) -> StubResponse {
+            let mut value = json!({ "is": { "statusCode": 200, "body": label } });
+            if repeat > 1 {
+                value["_behaviors"] = json!({ "repeat": repeat });
+            }
+            serde_json::from_value(value).expect("response")
+        }
+
+        fn state(responses: &[(&str, u32)]) -> StubState {
+            let stub: Stub =
+                serde_json::from_value(json!({ "responses": [{ "is": {} }] })).expect("stub");
+            let mut state = StubState::new(stub);
+            state.stub.responses = responses.iter().map(|(l, r)| response(l, *r)).collect();
+            state
+        }
+
+        fn append(state: &StubState, label: &str) -> StubState {
+            state.with_appended(vec![response(label, 1)], state.cursor(), true)
+        }
+
+        fn labels(state: &StubState) -> Vec<String> {
+            state
+                .stub
+                .responses
+                .iter()
+                .map(|r| serde_json::to_value(r).expect("serialize")["is"]["body"].to_string())
+                .map(|s| s.trim_matches('"').to_string())
+                .collect()
+        }
+
+        /// Run `script` (`"+"` appends `U<n>`, anything else is one GET) and return what was
+        /// served, `+` marking each append, as the probe table writes it.
+        fn run(start: &[(&str, u32)], script: &str) -> (StubState, String) {
+            let mut state = state(start);
+            let mut out = Vec::new();
+            let mut appended = 0;
+            for step in script.split_whitespace() {
+                if step == "+" {
+                    state = append(&state, &format!("U{appended}"));
+                    appended += 1;
+                    out.push("+".to_string());
+                } else {
+                    out.push(served_body(&state));
+                }
+            }
+            (state, out.join(" "))
+        }
+
+        #[test]
+        fn s1_mid_cycle_append_joins_the_queue_tail() {
+            let (state, served) = run(&[("A", 1), ("B", 1), ("C", 1)], "g + g g g g g");
+            assert_eq!(served, "A + B C A U0 B");
+            assert_eq!(
+                labels(&state),
+                ["A", "B", "C", "U0"],
+                "display stays append order"
+            );
+        }
+
+        #[test]
+        fn s2_append_inside_a_repeat_run_splits_it() {
+            let (_, served) = run(&[("A", 2), ("B", 1)], "g + g g g g g g g g");
+            assert_eq!(served, "A + A B A U0 A B A U0");
+        }
+
+        #[test]
+        fn s3_append_mid_repeat_of_a_later_response() {
+            let (_, served) = run(&[("A", 1), ("B", 3), ("C", 1)], "g g g + g g g g g g g g");
+            assert_eq!(served, "A B B + B C A B B U0 B C");
+        }
+
+        #[test]
+        fn s4_consecutive_appends() {
+            let (state, served) = run(&[("A", 1), ("B", 1), ("C", 1)], "g + g + g g g g g g");
+            assert_eq!(served, "A + B + C A U0 B U1 C");
+            assert_eq!(labels(&state), ["A", "B", "C", "U0", "U1"]);
+        }
+
+        #[test]
+        fn s5_append_at_the_start_of_a_cycle_keeps_the_display_order() {
+            let (state, served) = run(&[("A", 1), ("B", 1), ("C", 1)], "g g g + g g g g g");
+            assert_eq!(served, "A B C + A B C U0 A");
+            assert!(state.cycle().is_none(), "no order for an append at (0, 0)");
+        }
+
+        #[test]
+        fn record_then_replay_never_builds_an_order() {
+            let (state, served) = run(&[("A", 1)], "+ + g g g");
+            assert_eq!(served, "+ + A U0 U1");
+            assert!(state.cycle().is_none());
+        }
+
+        #[test]
+        fn new_content_drops_the_order_and_keeps_the_next_response() {
+            // After S1's append and one more GET the queue is C A U0 B: the next answer is C.
+            let (state, _) = run(&[("A", 1), ("B", 1), ("C", 1)], "g + g");
+            assert!(state.cycle().is_some());
+            let replaced = state.with_stub(state.stub.clone());
+            assert!(replaced.cycle().is_none());
+            let served: Vec<String> = (0..4).map(|_| served_body(&replaced)).collect();
+            assert_eq!(served, ["C", "U0", "A", "B"], "display order from C on");
+        }
+
+        #[test]
+        fn a_cursor_past_the_end_appends_after_the_last_response() {
+            // The stub shrank under its cursor: the cycler clamps, serving the last response.
+            let state = state(&[("A", 1), ("B", 1)]);
+            state.cycler.set(5);
+            let appended = append(&state, "U0");
+            let served: Vec<String> = (0..4).map(|_| served_body(&appended)).collect();
+            assert_eq!(served, ["B", "A", "U0", "B"]);
+        }
+
+        /// Delegates to `LocalSequencer`, recording each `next`'s `(response_count, repeats)`.
+        #[derive(Default)]
+        struct Counting {
+            inner: crate::behaviors::LocalSequencer,
+            shapes: parking_lot::Mutex<Vec<(usize, Vec<u32>)>>,
+        }
+
+        impl crate::behaviors::ResponseSequencer for Counting {
+            fn next(
+                &self,
+                key: crate::behaviors::SequenceKey<'_>,
+                count: usize,
+                repeats: &[u32],
+            ) -> anyhow::Result<usize> {
+                self.shapes.lock().push((count, repeats.to_vec()));
+                self.inner.next(key, count, repeats)
+            }
+            fn peek(
+                &self,
+                key: crate::behaviors::SequenceKey<'_>,
+                count: usize,
+                repeats: &[u32],
+            ) -> anyhow::Result<usize> {
+                self.inner.peek(key, count, repeats)
+            }
+            fn reset_scope(&self, port: u16, stub_key: Option<&str>) {
+                self.inner.reset_scope(port, stub_key);
+            }
+        }
+
+        #[test]
+        fn a_sequencer_serves_the_queue_order_over_cycle_positions() {
+            let sequencer = Arc::new(Counting::default());
+            let cfg = serde_json::from_value(json!({
+                "port": 0, "protocol": "http",
+                "stubs": [
+                    {
+                        "predicates": [{ "equals": { "headers": { "x-rec": "1" } } }],
+                        "responses": [{ "proxy": { "to": "http://up", "mode": "proxyAlways" } }]
+                    },
+                    {
+                        "predicates": [{ "deepEquals": { "path": "/b" } }],
+                        "responses": [
+                            { "is": { "body": "A" } },
+                            { "is": { "body": "B" } },
+                            { "is": { "body": "C" } }
+                        ]
+                    }
+                ]
+            }))
+            .expect("config");
+            let imposter = Imposter::new_with_hooks(cfg, None, Some(Arc::clone(&sequencer) as _))
+                .expect("imposter");
+            let next = || {
+                let snapshot = imposter.snapshot();
+                let response = imposter
+                    .next_stub_response(&snapshot.stubs()[1])
+                    .expect("sequencer")
+                    .expect("a response");
+                serde_json::to_value(response).expect("serialize")["is"]["body"]
+                    .as_str()
+                    .expect("body")
+                    .to_string()
+            };
+            let recording = serde_json::from_value(json!({
+                "predicates": [{ "deepEquals": { "path": "/b" } }],
+                "responses": [{ "is": { "body": "U0" } }]
+            }))
+            .expect("recording");
+
+            let mut served = vec![next()];
+            imposter.insert_or_append_proxy_stub(recording, "http://up", "proxyAlways", None, None);
+            served.extend((0..5).map(|_| next()));
+            assert_eq!(served, ["A", "B", "C", "A", "U0", "B"]);
+            assert_eq!(
+                sequencer.shapes.lock().last(),
+                Some(&(4, vec![1, 1, 1, 1])),
+                "after the append the sequencer counts cycle positions"
+            );
+        }
+
+        /// A sequencer keyed by `stub_key` alone, as a cross-node backend keys it; repeats ignored.
+        #[derive(Default)]
+        struct ByStubKey {
+            cursors: parking_lot::Mutex<HashMap<String, usize>>,
+        }
+
+        impl crate::behaviors::ResponseSequencer for ByStubKey {
+            fn next(
+                &self,
+                key: crate::behaviors::SequenceKey<'_>,
+                count: usize,
+                _repeats: &[u32],
+            ) -> anyhow::Result<usize> {
+                let mut cursors = self.cursors.lock();
+                let cursor = cursors.entry(key.stub_key.to_string()).or_insert(0);
+                let index = *cursor % count;
+                *cursor = (index + 1) % count;
+                Ok(index)
+            }
+            fn peek(
+                &self,
+                key: crate::behaviors::SequenceKey<'_>,
+                count: usize,
+                _repeats: &[u32],
+            ) -> anyhow::Result<usize> {
+                Ok(self.cursors.lock().get(key.stub_key).copied().unwrap_or(0) % count)
+            }
+            fn reset_scope(&self, _port: u16, stub_key: Option<&str>) {
+                match stub_key {
+                    Some(key) => self.cursors.lock().remove(key),
+                    None => {
+                        self.cursors.lock().clear();
+                        None
+                    }
+                };
+            }
+        }
+
+        /// An imposter whose stub 1 (`id` "s", `[A, B, C]`) is merged into by a `proxyAlways`
+        /// recording of `/b`, and a `next` that serves stub 1.
+        fn sequenced(sequencer: Arc<dyn crate::behaviors::ResponseSequencer>) -> (Imposter, Stub) {
+            let cfg = serde_json::from_value(json!({
+                "port": 0, "protocol": "http",
+                "stubs": [
+                    {
+                        "predicates": [{ "equals": { "headers": { "x-rec": "1" } } }],
+                        "responses": [{ "proxy": { "to": "http://up", "mode": "proxyAlways" } }]
+                    },
+                    {
+                        "id": "s",
+                        "predicates": [{ "deepEquals": { "path": "/b" } }],
+                        "responses": [
+                            { "is": { "body": "A" } },
+                            { "is": { "body": "B" } },
+                            { "is": { "body": "C" } }
+                        ]
+                    }
+                ]
+            }))
+            .expect("config");
+            let recording = serde_json::from_value(json!({
+                "predicates": [{ "deepEquals": { "path": "/b" } }],
+                "responses": [{ "is": { "body": "U0" } }]
+            }))
+            .expect("recording");
+            (
+                Imposter::new_with_hooks(cfg, None, Some(sequencer)).expect("imposter"),
+                recording,
+            )
+        }
+
+        fn next_of(imposter: &Imposter) -> String {
+            let snapshot = imposter.snapshot();
+            let response = imposter
+                .next_stub_response(&snapshot.stubs()[1])
+                .expect("sequencer")
+                .expect("a response");
+            serde_json::to_value(response).expect("serialize")["is"]["body"]
+                .as_str()
+                .expect("body")
+                .to_string()
+        }
+
+        #[test]
+        fn a_stub_key_sequencer_serves_the_queue_order_after_an_append() {
+            // The recording changes the stub's content, so its `stub_key`: the queue's head must
+            // be where a fresh cursor starts.
+            let (imposter, recording) = sequenced(Arc::new(ByStubKey::default()));
+            let mut served = vec![next_of(&imposter)];
+            imposter.insert_or_append_proxy_stub(recording, "http://up", "proxyAlways", None, None);
+            served.extend((0..5).map(|_| next_of(&imposter)));
+            assert_eq!(served, ["A", "B", "C", "A", "U0", "B"]);
+        }
+
+        #[test]
+        fn new_content_restarts_a_sequencer_cursor_over_an_order() {
+            let (imposter, recording) =
+                sequenced(Arc::new(crate::behaviors::LocalSequencer::default()));
+            next_of(&imposter);
+            imposter.insert_or_append_proxy_stub(recording, "http://up", "proxyAlways", None, None);
+            assert_eq!([next_of(&imposter), next_of(&imposter)], ["B", "C"]);
+            let replacement = serde_json::from_value(json!({
+                "predicates": [{ "deepEquals": { "path": "/b" } }],
+                "responses": [
+                    { "is": { "body": "P" } },
+                    { "is": { "body": "Q" } },
+                    { "is": { "body": "R" } },
+                    { "is": { "body": "S" } }
+                ]
+            }))
+            .expect("replacement");
+            assert!(imposter.replace_stub_by_id("s", replacement));
+            // The sequencer stood at position 3 of the order; read as an index it would be `S`.
+            assert_eq!([next_of(&imposter), next_of(&imposter)], ["P", "Q"]);
+        }
+
+        #[test]
+        fn a_clamped_cursor_on_one_response_is_moved_to_it() {
+            let state = state(&[("A", 1)]);
+            state.cycler.set(2);
+            let appended = append(&state, "U0");
+            assert!(appended.cycle().is_none());
+            let served: Vec<String> = (0..3).map(|_| served_body(&appended)).collect();
+            assert_eq!(served, ["A", "U0", "A"]);
+        }
+
+        #[test]
+        fn appending_several_to_an_empty_stub_does_not_panic() {
+            let mut state = state(&[("A", 1)]);
+            state.stub.responses.clear();
+            state.cycler.set(2);
+            let appended = state.with_appended(
+                vec![response("X", 1), response("Y", 1)],
+                state.cursor(),
+                true,
+            );
+            let served: Vec<String> = (0..3).map(|_| served_body(&appended)).collect();
+            assert_eq!(served, ["X", "Y", "X"]);
+        }
+
+        /// A literal model of Mountebank's `inMemoryImpostersRepository`: the display list and
+        /// the rotating queue (`shift` + `push` per answer, `push` per append).
+        struct Mountebank {
+            responses: Vec<String>,
+            queue: VecDeque<String>,
+        }
+
+        impl Mountebank {
+            fn new(start: &[(String, u32)]) -> Self {
+                Mountebank {
+                    responses: start.iter().map(|(l, _)| l.clone()).collect(),
+                    queue: start
+                        .iter()
+                        .flat_map(|(l, r)| std::iter::repeat_n(l.clone(), *r as usize))
+                        .collect(),
+                }
+            }
+            fn get(&mut self) -> String {
+                let head = self.queue.pop_front().expect("non-empty queue");
+                self.queue.push_back(head.clone());
+                head
+            }
+            fn append(&mut self, label: &str) {
+                self.responses.push(label.to_string());
+                self.queue.push_back(label.to_string());
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn serve_and_display_order_match_mountebank(
+                repeats in proptest::collection::vec(1u32..=3, 1..=4),
+                trace in proptest::collection::vec(prop_oneof![3 => Just(false), 1 => Just(true)], 40),
+            ) {
+                let start: Vec<(String, u32)> = repeats
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (format!("R{i}"), *r))
+                    .collect();
+                let borrowed: Vec<(&str, u32)> = start.iter().map(|(l, r)| (l.as_str(), *r)).collect();
+                let mut mb = Mountebank::new(&start);
+                let mut rift = state(&borrowed);
+                for (step, is_append) in trace.into_iter().enumerate() {
+                    if is_append {
+                        let label = format!("U{step}");
+                        mb.append(&label);
+                        rift = append(&rift, &label);
+                    } else {
+                        prop_assert_eq!(served_body(&rift), mb.get(), "step {}", step);
+                    }
+                    prop_assert_eq!(labels(&rift), mb.responses.clone());
+                }
+            }
         }
     }
 }

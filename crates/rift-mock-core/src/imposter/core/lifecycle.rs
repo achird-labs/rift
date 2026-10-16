@@ -106,6 +106,25 @@ impl Imposter {
         })
     }
 
+    /// Append `responses` to the stub with `id` as a `proxyAlways` recording appends them: they
+    /// join the tail of its current response cycle, as Mountebank's rotating queue does (issue
+    /// #1513), and its slot and cursor are kept. For an embedder that places recordings itself and
+    /// would otherwise replay the merge as a replace, which serves them in display order. Returns
+    /// `false` if no such id.
+    #[must_use]
+    pub fn append_stub_responses_by_id(&self, id: &str, responses: Vec<StubResponse>) -> bool {
+        self.mutate_stubs(|stubs| {
+            let Some(i) = stubs.iter().position(|s| s.stub.id.as_deref() == Some(id)) else {
+                return false;
+            };
+            // Stamped like the engine's own recording (issue #1301): wall clock, never earlier
+            // than the stub already served.
+            let at = stubs[i].loaded_at().max(chrono::Utc::now());
+            stubs[i] = Arc::new(self.appended(&stubs[i], responses).with_loaded_at(at));
+            true
+        })
+    }
+
     /// After removing the stub at `i`, stamp the stubs that moved up into its place: they may now
     /// answer requests it answered (issue #1303). Nothing behind the last stub, nothing stamped.
     fn restamp_exposed(&self, stubs: &mut [Arc<StubState>], i: usize) {

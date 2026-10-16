@@ -19,6 +19,11 @@ record.
   answered success and kept nothing; the same happened to scenario stubs added later through an
   in-place `PUT/POST /imposters/:port/stubs`. Every imposter now gets a default in-memory store
   (300 s TTL). #514 had fixed only the scenario-route case of this.
+- **A `proxyAlways` recording appended to a stub in the middle of its response cycle is served
+  where Mountebank serves it** (#1513): at the end of the stub's rotating queue, rather than at its
+  list position. The stub's `responses` list still shows append order. Embedders get the same
+  order through the new `ImposterManager::append_stub_responses_by_id`; a `ResponseSequencer` is
+  handed cycle positions after such an append (see `docs/embedding/spi.md`).
 
 ## [0.22.0] - 2026-10-16
 

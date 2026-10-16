@@ -104,6 +104,13 @@ As in Mountebank, a recorded stub is placed relative to the proxy stub that answ
   written after the proxy. It answers only once the proxy stops matching, for example after
   `mb replay` or when the proxy stub is removed.
 
+  A response added to an existing stub joins the **end of that stub's current cycle**, as in
+  Mountebank's rotating response queue: if the stub has served `A` from `[A, B, C]`, the new
+  response `U` is served after `B`, `C` and `A`, not straight after `C`. The stub's `responses` list
+  still shows append order (`[A, B, C, U]`). Added in the middle of a `repeat` run, the response
+  splits that run for good: `[A×2, B]` that has served one `A` cycles `A B A U` from then on. Any
+  later edit of the stub returns it to list order, from the response that was due next.
+
 A `proxyAlways` recording made without `predicateGenerators` (with `addWaitBehavior` or
 `addDecorateBehavior`) has no predicates. It therefore merges into the first stub after the proxy
 that has none, including a catch-all stub you wrote, as in Mountebank.

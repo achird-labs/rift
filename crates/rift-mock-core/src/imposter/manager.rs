@@ -11,7 +11,7 @@ use super::reconcile::{
     ApplyReport, DeleteAllReport, DesiredImposter, EventContext, ImposterEvent,
     ImposterEventListener, Persistence, StubReconcile,
 };
-use super::types::{ImposterConfig, ImposterError, Stub};
+use super::types::{ImposterConfig, ImposterError, Stub, StubResponse};
 use crate::behaviors::ResponseSequencer;
 use crate::extensions::decorate::ResponseDecorator;
 use crate::extensions::exchange_inspector::ExchangeInspectorProvider;
@@ -2058,6 +2058,24 @@ impl ImposterManager {
     ) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
         if !imposter.replace_stub_by_id(id, stub) {
+            return Err(ImposterError::StubNotFound(id.to_string()));
+        }
+        self.emit(ImposterEvent::StubsChanged(port));
+        self.persist_imposter_checked(&imposter).await
+    }
+
+    /// Append `responses` to the stub addressed by `id` as a `proxyAlways` recording does (issue
+    /// #1513): they join the tail of its current response cycle and its cursor is kept, where
+    /// [`replace_stub_by_id`](Self::replace_stub_by_id) with the extended list would serve them in
+    /// display order.
+    pub async fn append_stub_responses_by_id(
+        &self,
+        port: u16,
+        id: &str,
+        responses: Vec<StubResponse>,
+    ) -> Result<(), ImposterError> {
+        let imposter = self.get_imposter(port)?;
+        if !imposter.append_stub_responses_by_id(id, responses) {
             return Err(ImposterError::StubNotFound(id.to_string()));
         }
         self.emit(ImposterEvent::StubsChanged(port));

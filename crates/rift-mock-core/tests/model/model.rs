@@ -8,7 +8,7 @@
 //! name; a reload patches the stub set in place unless more than half of it changes, and then
 //! replaces the imposter and its state).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use serde_json::{Value, json};
 
@@ -78,11 +78,11 @@ impl Kind {
 #[derive(Clone, Debug)]
 pub struct Slot {
     pub kind: Kind,
-    /// The index of its next response, wrapped at each answer as Mountebank's rotating queue and
-    /// Rift's `RuleCycler` do, so a `proxyAlways` append lands after it (#1503). An append in the
-    /// middle of a cycle is where mb's queue and this index part ways; the model follows the
-    /// engine there until #1513 settles it.
+    /// An authored stub's next response index, wrapped at each answer (#1503).
     cursor: usize,
+    /// A recording's response order: Mountebank's rotating queue, `shift` + `push` per answer
+    /// and `push` per `proxyAlways` append, so an append mid-cycle joins the tail (#1513).
+    queue: VecDeque<usize>,
     /// The `proxyOnce` claim this slot was recorded under. It travels with the slot (moves,
     /// reload survivors) and ends with it: when the slot goes, or its content changes, so does
     /// the claim (#1386).
@@ -91,9 +91,14 @@ pub struct Slot {
 
 impl Slot {
     fn new(kind: Kind) -> Self {
+        let queue = match &kind {
+            Kind::Recorded { responses, .. } => (0..responses.len()).collect(),
+            Kind::Authored(_) => VecDeque::new(),
+        };
         Slot {
             kind,
             cursor: 0,
+            queue,
             claim: None,
         }
     }
@@ -185,13 +190,22 @@ impl Model {
             return Served::plain(String::new(), false);
         };
         let slot = &mut self.stubs[i];
-        let len = match &slot.kind {
-            Kind::Authored(Spec::Is { responses, .. }) => *responses,
-            Kind::Recorded { responses, .. } => responses.len(),
-            Kind::Authored(Spec::Proxy { .. }) => 1,
+        let turn = match &slot.kind {
+            Kind::Recorded { .. } => {
+                let head = slot.queue.pop_front().expect("a recording has a response");
+                slot.queue.push_back(head);
+                head
+            }
+            Kind::Authored(spec) => {
+                let len = match spec {
+                    Spec::Is { responses, .. } => *responses,
+                    Spec::Proxy { .. } => 1,
+                };
+                let turn = slot.cursor;
+                slot.cursor = (turn + 1) % len;
+                turn
+            }
         };
-        let turn = slot.cursor;
-        slot.cursor = (turn + 1) % len;
         // Cloned so the arms below can mutate `self` (transitions, recordings).
         match slot.kind.clone() {
             Kind::Authored(Spec::Is {
@@ -214,9 +228,7 @@ impl Model {
                     last_modified: conditional && r.method == Method::Get,
                 }
             }
-            Kind::Recorded { responses, .. } => {
-                Served::plain(responses[turn % responses.len()].clone(), false)
-            }
+            Kind::Recorded { responses, .. } => Served::plain(responses[turn].clone(), false),
             Kind::Authored(Spec::Proxy { mode, gen_body, .. }) => {
                 let key = (r.method, r.path, r.query, gen_body.then_some(r.body));
                 if mode == Mode::Once
@@ -281,8 +293,10 @@ impl Model {
                     Some(Slot {
                         kind: Kind::Recorded { responses, .. },
                         claim,
+                        queue,
                         ..
                     }) => {
+                        queue.push_back(responses.len());
                         responses.push(response);
                         *claim = None;
                     }

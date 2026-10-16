@@ -90,6 +90,19 @@ pub trait ResponseSequencer: Send + Sync {
 
 Inject with `.with_sequencer(Arc<dyn ResponseSequencer>)`.
 
+`response_count` and the returned index are **cycle positions**. They equal response indices
+except after a `proxyAlways` recording was appended to a stub in the middle of its cycle (#1513):
+the stub then cycles in Mountebank's queue order, and Rift hands the sequencer that order's length
+with every repeat `1` and maps the position it returns to a response. The order starts at the
+queue's head, and Rift calls `reset_scope(port, Some(<old stub_key>))` whenever a stub's order is
+built, changed or dropped, so the cursor restarts there whether the backend keys by slot or by
+`stub_key`. A sequencer that only cycles opaque indices needs no change. The append itself reads
+the cursor with `peek` and assumes the
+start of a repeat run, so an append in the middle of an authored `repeat` run under a custom
+sequencer splits it one answer later than Mountebank would. Embedders that place recordings
+themselves append with `ImposterManager::append_stub_responses_by_id` to get this order; a
+`replace_stub_by_id` with the extended list serves it in list order.
+
 ## `RequestJournal` — custom recorded-requests store
 
 Backs `recordRequests`, `numberOfRequests`, and the `savedRequests` admin surface.
