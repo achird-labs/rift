@@ -26,6 +26,11 @@ record.
 
 ### Fixed
 
+- **`--intercept-ca-cert-pem` and `--intercept-ca-key-pem` accept the PEM as a separate argument**
+  (#1506). `--intercept-ca-cert-pem "$(cat ca.pem)"` was refused with exit 2, because the value
+  starts with `-----` and was read as a flag; only `--flag=value` and the environment variables
+  worked.
+
 - **On macOS an auto-assigned imposter could share its port with another process's loopback
   listener and lose its traffic to it** (#1501). The old scan probed each port with
   `SO_REUSEADDR`, which macOS lets succeed next to a `127.0.0.1` listener that then keeps every
