@@ -7,7 +7,7 @@
 
 use bytes::Bytes;
 use http_body_util::{
-    BodyExt, Full,
+    BodyExt, Empty, Full,
     channel::{Channel, Sender},
     combinators::BoxBody,
 };
@@ -70,15 +70,10 @@ pub(crate) fn handle_stream(
     forced_port: Option<u16>,
     cancel: CancellationToken,
 ) -> Response<AdminBody> {
-    let params = match parse_params(query, forced_port) {
+    let params = match admit(manager, query, forced_port) {
         Ok(p) => p,
-        Err((code, msg)) => return box_full(error_response(code, &msg)),
+        Err(refusal) => return *refusal,
     };
-    if let Some(port) = params.port
-        && let Err(e) = manager.get_imposter(port)
-    {
-        return box_full(e.into());
-    }
 
     let bus = Arc::clone(manager.event_bus());
     let mut rx = bus.subscribe();
@@ -120,14 +115,51 @@ pub(crate) fn handle_stream(
         }
     });
 
+    stream_head()
+        .body(body.boxed())
+        .expect("SSE response builds from a static status + headers")
+}
+
+/// `HEAD` on a stream (issue #1456): the stream's status and headers, or its refusal, without
+/// subscribing to the bus or starting a forwarder. A stream never ends, so answering `HEAD` by
+/// opening one and dropping the body would hold nothing back; this never opens one at all.
+pub(crate) fn handle_stream_head(
+    manager: &Arc<ImposterManager>,
+    query: Option<&str>,
+    forced_port: Option<u16>,
+) -> Response<AdminBody> {
+    match admit(manager, query, forced_port) {
+        Ok(_) => stream_head()
+            .body(Empty::new().map_err(|never| match never {}).boxed())
+            .expect("SSE response builds from a static status + headers"),
+        Err(refusal) => *refusal,
+    }
+}
+
+/// The checks a stream request passes before a stream opens: its parameters, and that a named
+/// imposter exists.
+fn admit(
+    manager: &ImposterManager,
+    query: Option<&str>,
+    forced_port: Option<u16>,
+) -> Result<StreamParams, Box<Response<AdminBody>>> {
+    let params = parse_params(query, forced_port)
+        .map_err(|(code, msg)| Box::new(box_full(error_response(code, &msg))))?;
+    if let Some(port) = params.port
+        && let Err(e) = manager.get_imposter(port)
+    {
+        return Err(Box::new(box_full(e.into())));
+    }
+    Ok(params)
+}
+
+fn stream_head() -> hyper::http::response::Builder {
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "text/event-stream")
         .header("Cache-Control", "no-cache")
         // Defeat proxy/response buffering so events reach the client immediately.
         .header("X-Accel-Buffering", "no")
-        .body(body.boxed())
-        .expect("SSE response builds from a static status + headers")
 }
 
 /// Send one SSE frame, abandoning it if the server is shutting down. `send_data` blocks when a

@@ -155,6 +155,9 @@ async fn intercept_entries_are_404_without_with_intercept() {
 /// The other direction: every method the table does *not* list on a listed path is the router's
 /// 404. This is what catches a method added to an existing route without a table entry — and it is
 /// what showed the event streams answering every method, before they were made `GET`-only.
+///
+/// `HEAD` and `OPTIONS` are never listed: every path answers them (issue #1456), and
+/// `head_and_options_follow_the_table` below checks those answers instead.
 #[tokio::test]
 async fn no_unlisted_method_is_dispatched_on_a_listed_path() {
     let manager = Arc::new(ImposterManager::new());
@@ -166,7 +169,7 @@ async fn no_unlisted_method_is_dispatched_on_a_listed_path() {
     let base = format!("http://{}", admin.local_addr());
     let client = reqwest::Client::new();
     let port = free_port();
-    let methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
+    let methods = ["GET", "POST", "PUT", "DELETE", "PATCH"];
 
     let mut paths: Vec<&str> = ADMIN_ROUTES.iter().map(|r| r.path).collect();
     paths.sort_unstable();
@@ -199,16 +202,78 @@ async fn no_unlisted_method_is_dispatched_on_a_listed_path() {
             .unwrap_or_else(|_| panic!("{method} {path} never answered"))
             .unwrap_or_else(|e| panic!("{method} {path}: {e}"));
             let status = response.status();
-            // `HEAD` has no body to carry the message, so its status alone is the evidence.
-            let routed_away = if method == "HEAD" {
-                status == reqwest::StatusCode::NOT_FOUND
-            } else {
-                is_router_404(response).await
-            };
             assert!(
-                routed_away,
+                is_router_404(response).await,
                 "{method} {path} is dispatched ({status}) but not listed"
             );
+        }
+    }
+    admin.shutdown().await;
+}
+
+/// Every listed path answers `OPTIONS` with exactly its listed methods plus `HEAD` where `GET` is
+/// listed, and `HEAD` with the `GET`'s status, or the 404 Express gives a path with no `GET`.
+/// A stream's `GET` never ends, but its head arrives, so its status is still there to compare.
+#[tokio::test]
+async fn head_and_options_follow_the_table() {
+    let manager = Arc::new(ImposterManager::new());
+    let admin = AdminApiServer::new("127.0.0.1:0".parse().expect("addr"), manager.clone(), None)
+        .with_intercept(InterceptControl::default())
+        .bind()
+        .await
+        .expect("admin binds");
+    let base = format!("http://{}", admin.local_addr());
+    let client = reqwest::Client::new();
+    let port = free_port();
+    manager
+        .apply_config(vec![
+            serde_json::from_value(imposter(port)).expect("config"),
+        ])
+        .await
+        .expect("the sample imposter");
+
+    let mut paths: Vec<&str> = ADMIN_ROUTES.iter().map(|r| r.path).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    for path in paths {
+        let url = format!("{base}{}", concrete_path(path, port));
+        let mut listed: Vec<&str> = ADMIN_ROUTES
+            .iter()
+            .filter(|r| r.path == path)
+            .map(|r| r.method.as_str())
+            .collect();
+        let has_get = listed.contains(&"GET");
+        if has_get {
+            listed.push("HEAD");
+        }
+        listed.sort_unstable();
+
+        let options = client
+            .request(reqwest::Method::OPTIONS, &url)
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("OPTIONS {path}: {e}"));
+        assert_eq!(options.status(), 200, "OPTIONS {path}");
+        let allow = options
+            .headers()
+            .get("allow")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(allow, listed.join(", "), "OPTIONS {path}");
+
+        let head = tokio::time::timeout(Duration::from_secs(5), client.head(&url).send())
+            .await
+            .unwrap_or_else(|_| panic!("HEAD {path} never answered"))
+            .unwrap_or_else(|e| panic!("HEAD {path}: {e}"));
+        if has_get {
+            let get = tokio::time::timeout(Duration::from_secs(5), client.get(&url).send())
+                .await
+                .unwrap_or_else(|_| panic!("GET {path} never answered"))
+                .unwrap_or_else(|e| panic!("GET {path}: {e}"));
+            assert_eq!(head.status(), get.status(), "HEAD {path}");
+        } else {
+            assert_eq!(head.status(), 404, "HEAD {path}");
         }
     }
     admin.shutdown().await;

@@ -34,6 +34,16 @@ curl -H "Authorization: <TOKEN>" http://localhost:2525/imposters
 
 ---
 
+## HEAD, OPTIONS and imposter ids
+
+Every admin route answers `HEAD` and `OPTIONS`, as Mountebank's Express server does: `HEAD` is the
+`GET` without its body (a route with no `GET` answers `404`), and `OPTIONS` is `200` with the
+route's methods, sorted, in `Allow` and as a `text/plain` body (`DELETE, GET, HEAD, POST, PUT`). An
+imposter id that is not a port (`/imposters/abc`, `/imposters/70000`) is "no such imposter", answered
+as an absent port is on every `/imposters/:id` route.
+
+---
+
 ## Root
 
 ### GET /

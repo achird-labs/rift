@@ -606,9 +606,13 @@ async fn refusals_answer_the_errors_envelope() {
             404,
             "no such resource",
         ),
-        // Not a stream target at all (`stream_target` rejects the port), so the router answers it.
-        // Already the envelope before #1226; pinned so the two paths stay in agreement.
-        ("/imposters/abc/savedRequests/stream", 400, "bad data"),
+        // Not a stream target at all (`stream_target` rejects the port), so the router answers it:
+        // an id that is not a port is an absent imposter (#1456). Pinned so the two paths agree.
+        (
+            "/imposters/abc/savedRequests/stream",
+            404,
+            "no such resource",
+        ),
     ];
     for (path, status, error_type) in cases {
         let resp = reqwest::get(format!("http://{addr}{path}"))

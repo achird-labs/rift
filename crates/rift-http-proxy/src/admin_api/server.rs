@@ -734,16 +734,26 @@ async fn accept_loop(
                         //
                         // `GET` only (issue #1145): a stream is a read, and every other method used
                         // to open one too, which made the set of served routes wider than anything
-                        // documented. Other methods fall through to the router's 404.
-                        if req.method() == hyper::Method::GET
-                            && let Some(forced_port) = events::stream_target(req.uri().path())
-                        {
-                            return Ok::<_, hyper::Error>(events::handle_stream(
-                                &manager,
-                                req.uri().query(),
-                                forced_port,
-                                stream_cancel,
-                            ));
+                        // documented. Other methods fall through to the router, which answers
+                        // `OPTIONS` and 404s the rest.
+                        //
+                        // `HEAD` answers the stream's headers without opening one (issue #1456).
+                        if let Some(forced_port) = events::stream_target(req.uri().path()) {
+                            if req.method() == hyper::Method::GET {
+                                return Ok::<_, hyper::Error>(events::handle_stream(
+                                    &manager,
+                                    req.uri().query(),
+                                    forced_port,
+                                    stream_cancel,
+                                ));
+                            }
+                            if req.method() == hyper::Method::HEAD {
+                                return Ok::<_, hyper::Error>(events::handle_stream_head(
+                                    &manager,
+                                    req.uri().query(),
+                                    forced_port,
+                                ));
+                            }
                         }
                         // Only the router mutates, so the attribution scope wraps just this call —
                         // the SSE stream above is read-only and returns before it (issue #855).

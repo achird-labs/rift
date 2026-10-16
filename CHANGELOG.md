@@ -87,6 +87,15 @@ record.
 
 ### Fixed
 
+- **The admin API answers `HEAD` and `OPTIONS` on every route** (#1456), as Mountebank 2.9.5's
+  Express 5 server does; both answered `404`. `HEAD` is the `GET` with every header, including
+  its `Content-Length`, and no body; on an event stream it answers the stream's headers without
+  opening one. `OPTIONS` is `200` with the route's methods sorted in `Allow` and as a `text/plain`
+  body. Both pass the api key and an installed authorizer like any request, `OPTIONS` as a read.
+  The `/__rift/` gateway still hands both to the imposter. An imposter id that is not a port
+  (`/imposters/abc`, `/imposters/70000`) is now answered as an absent imposter on every
+  `/imposters/:id` route (`GET` `404`, `DELETE` `200 {}`) instead of `400 Invalid port number`.
+
 - **XPath reads XML the way Mountebank's xmldom 0.9 does** (#1455). A body with a leading BOM,
   text after the root element, or an entity XML does not define (`&nbsp;`, `&copy;`) was refused
   whole, so every XPath predicate (including `exists: false`) and `copy` treated it as no
