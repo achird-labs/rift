@@ -476,3 +476,75 @@ fn export_takes_the_password_from_the_environment() {
     assert!(pfx.verify_mac("from-env"));
     assert!(!pfx.verify_mac("changeit"));
 }
+
+/// A CA minted out of band, as `(cert PEM, key PEM)`.
+fn minted_pair() -> (String, String) {
+    let ca = rift_mock_core::proxy::intercept_ca::CertificateAuthority::generate().expect("CA");
+    (ca.ca_cert_pem().to_string(), ca.ca_key_pem())
+}
+
+async fn served_ca(admin: u16) -> String {
+    let response = reqwest::get(format!("http://127.0.0.1:{admin}/intercept/ca.pem"))
+        .await
+        .expect("GET /intercept/ca.pem");
+    assert_eq!(response.status().as_u16(), 200);
+    response.text().await.expect("body")
+}
+
+// Issue #1506 (ported from rift-conformance's InterceptStartupSpec): the inline-PEM environment
+// variables, the documented vehicle, reach the listener's CA through the real binary.
+#[tokio::test]
+async fn inline_pem_environment_variables_load_the_ca_for_export() {
+    let (cert, key) = minted_pair();
+    let (mut child, admin) = support::spawn_server_with_env(
+        &["--host", "127.0.0.1", "--intercept-port", "0"],
+        &[
+            ("RIFT_INTERCEPT_CA_CERT_PEM", &cert),
+            ("RIFT_INTERCEPT_CA_KEY_PEM", &key),
+        ],
+    )
+    .await;
+    assert_eq!(served_ca(admin).await.trim(), cert.trim());
+    child.kill().await.expect("stop server");
+}
+
+// Issue #1506: the same through `--intercept-ca-{cert,key}-pem=<PEM>` (the `=` form: a PEM starts
+// with `-----`, so the separate-argument form is not accepted).
+#[tokio::test]
+async fn inline_pem_flags_load_the_ca_for_export() {
+    let (cert, key) = minted_pair();
+    let cert_flag = format!("--intercept-ca-cert-pem={cert}");
+    let key_flag = format!("--intercept-ca-key-pem={key}");
+    let (mut child, admin) = support::spawn_server(&[
+        "--host",
+        "127.0.0.1",
+        "--intercept-port",
+        "0",
+        &cert_flag,
+        &key_flag,
+    ])
+    .await;
+    assert_eq!(served_ca(admin).await.trim(), cert.trim());
+    child.kill().await.expect("stop server");
+}
+
+/// #1506: a PEM passed as a separate argument (`--intercept-ca-cert-pem "$(cat ca.pem)"`) starts
+/// with `-----`, which clap refused as an unknown flag (exit 2) until the two PEM flags allowed
+/// hyphen values.
+#[tokio::test]
+async fn inline_pem_flags_take_a_separate_argument() {
+    let (cert, key) = minted_pair();
+    let (mut child, admin) = support::spawn_server(&[
+        "--host",
+        "127.0.0.1",
+        "--intercept-port",
+        "0",
+        "--intercept-ca-cert-pem",
+        &cert,
+        "--intercept-ca-key-pem",
+        &key,
+    ])
+    .await;
+    assert_eq!(served_ca(admin).await.trim(), cert.trim());
+    child.kill().await.expect("stop server");
+}

@@ -139,3 +139,111 @@ fn rift_start_with_flags_after_the_subcommand_boots_and_serves_health() {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+fn stub(path: &str, body: &str) -> serde_json::Value {
+    serde_json::json!({
+        "predicates": [{"equals": {"path": path}}],
+        "responses": [{"is": {"statusCode": 200, "body": body}}]
+    })
+}
+
+async fn text(client: &reqwest::Client, url: String) -> (u16, String) {
+    let response = client.get(&url).send().await.expect(&url);
+    (
+        response.status().as_u16(),
+        response.text().await.expect("body"),
+    )
+}
+
+// Issue #1506 (ported from rift-conformance's RiftCliLifecycleSpec): `save` writes the live stubs
+// and `replay --configfile` serves that file, end to end through the real binary.
+#[tokio::test]
+async fn replay_serves_the_file_that_save_wrote() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let saved = dir.path().join("saved.json");
+    let saved_arg = saved.to_str().expect("utf-8 path");
+    let client = reqwest::Client::new();
+
+    let (mut first, admin) = support::spawn_server(&["--host", "127.0.0.1"]).await;
+    let created = client
+        .post(format!("http://127.0.0.1:{admin}/imposters"))
+        .json(&serde_json::json!({"protocol": "http", "stubs": [stub("/first", "first")]}))
+        .send()
+        .await
+        .expect("create imposter");
+    assert_eq!(created.status().as_u16(), 201);
+    let port = created.json::<serde_json::Value>().await.expect("json")["port"]
+        .as_u64()
+        .expect("assigned port");
+    let added = client
+        .post(format!("http://127.0.0.1:{admin}/imposters/{port}/stubs"))
+        .json(&serde_json::json!({"stub": stub("/added", "added-live")}))
+        .send()
+        .await
+        .expect("add stub");
+    assert!(added.status().is_success(), "add stub: {}", added.status());
+
+    let admin_arg = admin.to_string();
+    let save = Command::new(support::server_bin())
+        .args(["--port", &admin_arg, "save", "--savefile", saved_arg])
+        .output()
+        .expect("run rift save");
+    assert_eq!(
+        save.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&save.stderr)
+    );
+    first.kill().await.expect("stop the first server");
+
+    let (mut replayed, admin) =
+        support::spawn_server(&["--host", "127.0.0.1", "replay", "--configfile", saved_arg]).await;
+    // The replay engine's own admin view is deterministic even if another process co-binds the port.
+    let (status, listed) = text(
+        &client,
+        format!("http://127.0.0.1:{admin}/imposters/{port}"),
+    )
+    .await;
+    assert_eq!(status, 200, "{listed}");
+    assert!(listed.contains("\"/first\""), "got: {listed}");
+    assert!(listed.contains("added-live"), "got: {listed}");
+    assert_eq!(
+        text(&client, format!("http://127.0.0.1:{port}/first")).await,
+        (200, "first".to_string())
+    );
+    assert_eq!(
+        text(&client, format!("http://127.0.0.1:{port}/added")).await,
+        (200, "added-live".to_string())
+    );
+    replayed.kill().await.expect("stop the replay server");
+}
+
+// Issue #1506: a bare `replay` has nothing to serve and says so (exit 1, not a parse error).
+#[test]
+fn replay_without_a_configfile_exits_1() {
+    let output = Command::new(support::server_bin())
+        .args(["--port", "0", "replay"])
+        .output()
+        .expect("run rift replay");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("rift replay needs --configfile <file>"),
+        "stderr: {stderr}"
+    );
+}
+
+// Issue #1506: exit 2 is "the command line could not be parsed" (clap), distinct from 1.
+#[test]
+fn an_unknown_flag_is_a_parse_error_with_exit_2() {
+    let output = Command::new(support::server_bin())
+        .arg("--no-such-flag")
+        .output()
+        .expect("run rift");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected argument '--no-such-flag'"),
+        "stderr: {stderr}"
+    );
+}
