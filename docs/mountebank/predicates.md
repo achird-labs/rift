@@ -341,6 +341,12 @@ The `xpath` selector sits next to the operator, the same way `jsonpath` does:
 }
 ```
 
+The body is read the way Mountebank's XML parser (xmldom 0.9) reads it: a leading byte-order mark
+(unless an XML declaration follows it, as in Mountebank) and text after the root element are
+ignored, and an entity XML does not define (`&nbsp;`, `&copy;`) or an `&` that starts no reference
+is kept as literal text (`x&nbsp;y`); an unclosed or mismatched tag, an undeclared namespace prefix
+or a second element after the root still means no document.
+
 ### XPath with Namespaces
 
 ```json

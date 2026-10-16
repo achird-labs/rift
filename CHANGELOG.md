@@ -87,6 +87,15 @@ record.
 
 ### Fixed
 
+- **XPath reads XML the way Mountebank's xmldom 0.9 does** (#1455). A body with a leading BOM,
+  text after the root element, or an entity XML does not define (`&nbsp;`, `&copy;`) was refused
+  whole, so every XPath predicate (including `exists: false`) and `copy` treated it as no
+  document. The BOM (unless an XML declaration follows it, as in Mountebank) and trailing text
+  are now ignored and the entity is kept as literal text (`x&nbsp;y`), as in Mountebank; fatal
+  errors (an unclosed tag, an undeclared prefix, a second element after the root) still mean no
+  document. A DOCTYPE opening the body no longer fails the
+  parse either.
+
 - **Script log capture no longer drops lines in an embedder without a `tracing` subscriber**
   (#1447). The debug-mode `x-rift-script-trace` captures `ctx.logger` with a thread-scoped
   subscriber. With no other subscriber installed, a logger line first reached on another thread
