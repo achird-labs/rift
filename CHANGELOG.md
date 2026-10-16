@@ -113,6 +113,14 @@ record.
   normalized before authentication, authorization and routing, so `DELETE /imposters/` is
   authorized as the delete-all it is; `authz::classify` normalizes its input the same way, so an
   embedder's authorizer now gets a real action for a trailing-slash path instead of `None`.
+- **Admin route names are case-insensitive, as Mountebank's Express does** (#1484). `/IMPOSTERS`,
+  `/Imposters/4545/Stubs/0`, `/CONFIG` and `/imposters/4545/SavedRequests/Stream` answer exactly as
+  their table spelling, on every method; they used to be `404`. Only the route's own names fold: an
+  imposter id, stub id, space or scenario name or flow-state key is data and keeps its case, so the
+  space `Alpha` is not the space `alpha`. The `/__rift/` gateway prefix is Rift's own and stays
+  exact-case. The path is respelled before authentication, authorization and routing, so `DELETE
+  /IMPOSTERS` is authorized as the delete-all it is; `authz::classify` respells its input the same
+  way, so an embedder's authorizer now gets a real action for a mixed-case path instead of `None`.
 - **A body over `--max-body-size` (or the memory budget) now reliably gets its `413`/`503`**
   (#1460). The refusal is written while the client is still sending the body (before any of it is
   read when the length is declared, mid-body for a chunked one), and closing the connection on

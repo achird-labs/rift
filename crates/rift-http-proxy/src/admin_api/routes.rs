@@ -404,6 +404,65 @@ mod tests {
         assert_eq!(allowed_methods("/config//"), None);
     }
 
+    /// `sample(path)` with each literal segment respelled by `spell`; the values are untouched.
+    fn respelled(path: &str, spell: fn(&str) -> String) -> String {
+        let template: Vec<String> = path
+            .split('/')
+            .map(|segment| {
+                if segment.starts_with('{') {
+                    segment.to_string()
+                } else {
+                    spell(segment)
+                }
+            })
+            .collect();
+        sample(&template.join("/"))
+    }
+
+    fn alternating(segment: &str) -> String {
+        segment
+            .chars()
+            .enumerate()
+            .map(|(i, c)| {
+                if i % 2 == 0 {
+                    c.to_ascii_uppercase()
+                } else {
+                    c.to_ascii_lowercase()
+                }
+            })
+            .collect()
+    }
+
+    /// Issue #1484, generated from the table so a new route is covered: a route name in any case
+    /// resolves and classifies exactly as its table spelling. `classify` answering `None` skips the
+    /// authorizer, so a spelling the router dispatched but `classify` missed would be unauthorized.
+    #[test]
+    fn a_mixed_case_route_resolves_and_classifies_as_its_table_spelling() {
+        use crate::admin_api::router::{admin_path, allowed_methods};
+        for entry in ADMIN_ROUTES {
+            let plain = sample(entry.path);
+            for spell in [str::to_ascii_uppercase, alternating] {
+                let mixed = respelled(entry.path, spell);
+                for spelling in [mixed.clone(), format!("{mixed}/")] {
+                    assert_eq!(admin_path(&spelling), plain, "{spelling}");
+                    for method in [entry.method.clone(), Method::OPTIONS] {
+                        assert!(classify(&method, &plain).is_some(), "{method} {plain}");
+                        assert_eq!(
+                            classify(&method, &spelling),
+                            classify(&method, &plain),
+                            "{method} {spelling}"
+                        );
+                    }
+                    assert_eq!(
+                        allowed_methods(&spelling),
+                        allowed_methods(&plain),
+                        "{spelling}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn no_route_is_listed_twice() {
         let mut seen = HashSet::new();
