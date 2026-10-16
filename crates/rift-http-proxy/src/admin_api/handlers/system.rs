@@ -460,12 +460,29 @@ fn report_body(report: &ApplyReport, message: &str) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    // Fixed port: a datadir file must name its port before the reload binds it. Probed on the
+    // wildcard address the imposter binds, so a concurrent `127.0.0.1` listener cannot shadow it.
     fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
+        std::net::TcpListener::bind("0.0.0.0:0")
             .expect("bind an ephemeral port")
             .local_addr()
             .expect("local addr")
             .port()
+    }
+
+    /// A port no imposter in a test's fresh manager holds. Nothing binds it.
+    const UNUSED_PORT: u16 = 1;
+
+    /// A port `manager` already serves, held by a placeholder imposter, so a config file can name
+    /// it before the reload; the reload then replaces the placeholder in place.
+    async fn held_port(manager: &ImposterManager) -> u16 {
+        manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({"protocol": "http", "stubs": []}))
+                    .expect("placeholder config"),
+            )
+            .await
+            .expect("placeholder imposter")
     }
 
     #[test]
@@ -568,7 +585,7 @@ mod tests {
     /// reload replaces a table the embedder populated, rather than leaving it or merging into it.
     #[tokio::test]
     async fn a_legacy_reload_replaces_a_wired_front_door_table() {
-        let imposter_port = free_port();
+        let imposter_port = UNUSED_PORT;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         std::fs::write(
@@ -619,20 +636,20 @@ mod tests {
         assert_eq!(route_for("old.test"), None);
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn test_handle_reload_partial_failure_returns_report() {
-        let port_a = free_port();
-        let port_b = free_port();
         use http_body_util::BodyExt;
 
+        // Both imposters are port-less, so the failure is reported as the auto-assign entry.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         std::fs::write(
             &path,
-            format!(r#"{{"imposters":[
-                {{"port":{port_a},"protocol":"http","stubs":[]}},
-                {{"port":{port_b},"protocol":"https","cert":"not a pem","key":"not a pem","stubs":[]}}
-            ]}}"#),
+            r#"{"imposters":[
+                {"protocol":"http","stubs":[]},
+                {"protocol":"https","cert":"not a pem","key":"not a pem","stubs":[]}
+            ]}"#,
         )
         .expect("write config");
         let source = crate::sources::ReloadSource::Legacy(Arc::new(
@@ -652,17 +669,18 @@ mod tests {
             body["errors"][0]["message"]
                 .as_str()
                 .unwrap_or_default()
-                .starts_with(&format!("Reload partially failed: {port_b}:")),
+                .starts_with("Reload partially failed: auto-assign:"),
             "got: {body}"
         );
-        assert_eq!(
-            body["created"],
-            serde_json::json!([port_a]),
-            "sibling applied"
-        );
+        let created = body["created"].as_array().expect("created array");
+        assert_eq!(created.len(), 1, "sibling applied: {body}");
+        let port_a = created[0]
+            .as_u64()
+            .and_then(|p| u16::try_from(p).ok())
+            .expect("port");
         assert_eq!(body["toggled"], serde_json::json!([]), "got: {body}");
         assert!(manager.get_imposter(port_a).is_ok());
-        assert!(manager.get_imposter(port_b).is_err());
+        assert_eq!(manager.count(), 1, "the failed imposter is not running");
 
         manager.delete_all().await;
     }
@@ -671,9 +689,9 @@ mod tests {
     // content — the resolve-scripts pass has to re-run on every reload (it does, since reload
     // re-reads the config source from scratch via `config_loader::load_configs`, which resolves
     // scripts as part of parsing), not just once at startup.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn test_handle_reload_picks_up_edited_file_referenced_script() {
-        let imposter_port = free_port();
         use crate::imposter::StubResponse;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -681,6 +699,8 @@ mod tests {
         std::fs::write(&script_path, r#"fn respond(ctx) { http(503, "first") }"#)
             .expect("write script (first version)");
 
+        let manager = Arc::new(ImposterManager::new());
+        let imposter_port = held_port(&manager).await;
         let config_path = dir.path().join("imposter.json");
         std::fs::write(
             &config_path,
@@ -695,9 +715,7 @@ mod tests {
             },
         ));
 
-        let manager = Arc::new(ImposterManager::new());
-
-        // Initial reload creates the imposter with the first script version resolved.
+        // Initial reload replaces the placeholder with the first script version resolved.
         let resp = handle_reload(manager.clone(), Some(source.clone()), None, None, true).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let script_code = |manager: &ImposterManager| {
@@ -746,11 +764,13 @@ mod tests {
     // ===== Issue #612: POST /admin/reload is the third config door and must gate too =====
 
     /// Reload from `path`, then read back whether the imposter's stub carries a decorate behavior.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn test_handle_reload_rejects_injection_when_flag_off() {
-        let imposter_port = free_port();
         use http_body_util::BodyExt;
 
+        let manager = Arc::new(ImposterManager::new());
+        let imposter_port = held_port(&manager).await;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         std::fs::write(
@@ -769,7 +789,6 @@ mod tests {
             },
         ));
 
-        let manager = Arc::new(ImposterManager::new());
         let resp = handle_reload(manager.clone(), Some(source.clone()), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::OK, "clean config reloads");
         assert!(manager.get_imposter(imposter_port).is_ok());
@@ -818,9 +837,11 @@ mod tests {
     }
 
     // AC8: with the flag set, the same scripted reload applies.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn test_handle_reload_applies_injection_when_flag_set() {
-        let imposter_port = free_port();
+        let manager = Arc::new(ImposterManager::new());
+        let imposter_port = held_port(&manager).await;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         std::fs::write(
@@ -840,7 +861,6 @@ mod tests {
             },
         ));
 
-        let manager = Arc::new(ImposterManager::new());
         let resp = handle_reload(manager.clone(), Some(source), None, None, true).await;
         assert_eq!(
             resp.status(),
@@ -894,10 +914,11 @@ mod tests {
         serde_json::from_slice(&bytes).expect("json body")
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn reload_refuses_a_port_declared_by_a_source_and_by_the_datadir() {
-        let port_a = free_port();
-        let port_b = free_port();
+        // The refusal comes before any bind, so port_a is never bound.
+        let port_a = UNUSED_PORT;
         let dir = tempfile::tempdir().expect("tempdir");
         let (file, datadir) = two_stores(
             dir.path(),
@@ -910,12 +931,9 @@ mod tests {
         .expect("write datadir file");
 
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        manager
+        let port_b = manager
             .create_imposter(
-                serde_json::from_str(&format!(
-                    r#"{{"port":{port_b},"protocol":"http","stubs":[]}}"#
-                ))
-                .expect("config"),
+                serde_json::from_str(r#"{"protocol":"http","stubs":[]}"#).expect("config"),
             )
             .await
             .expect("running imposter");
@@ -1017,9 +1035,11 @@ mod tests {
 
     // Issue #1304: `toggled` is a port array on every reload reply, and lists a port whose only
     // change is the `enabled` flag.
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn reload_reports_a_toggled_port() {
-        let imposter_port = free_port();
+        let manager = Arc::new(ImposterManager::new());
+        let imposter_port = held_port(&manager).await;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         let write = |enabled: bool| {
@@ -1037,7 +1057,6 @@ mod tests {
                 no_parse: false,
             },
         ));
-        let manager = Arc::new(ImposterManager::new());
         write(true);
         let resp = handle_reload(manager.clone(), Some(source.clone()), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1092,18 +1111,15 @@ mod tests {
         }
     }
 
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn reload_with_a_malformed_datadir_file_leaves_imposters_unchanged() {
-        let imposter_port = free_port();
         let dir = tempfile::tempdir().expect("tempdir");
         let (file, datadir) = two_stores(dir.path(), r#"{"imposters":[]}"#);
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        manager
+        let imposter_port = manager
             .create_imposter(
-                serde_json::from_str(&format!(
-                    r#"{{"port":{imposter_port},"protocol":"http","stubs":[]}}"#
-                ))
-                .expect("config"),
+                serde_json::from_str(r#"{"protocol":"http","stubs":[]}"#).expect("config"),
             )
             .await
             .expect("running imposter");
@@ -1131,7 +1147,8 @@ mod tests {
 
     #[tokio::test]
     async fn reload_refuses_a_scripted_datadir_file_without_allow_injection() {
-        let imposter_port = free_port();
+        // Refused before any bind, so the port is never bound.
+        let imposter_port = UNUSED_PORT;
         let dir = tempfile::tempdir().expect("tempdir");
         let (file, datadir) = two_stores(dir.path(), r#"{"imposters":[]}"#);
         std::fs::write(
@@ -1188,7 +1205,8 @@ mod tests {
     // Issue #1125: both reload shapes that read a datadir refuse a file that names no port.
     #[tokio::test]
     async fn reload_refuses_a_port_less_datadir_file() {
-        let imposter_port = free_port();
+        // Refused before any bind, so the port is never bound.
+        let imposter_port = UNUSED_PORT;
         let dir = tempfile::tempdir().expect("tempdir");
         let (file, datadir) = two_stores(dir.path(), r#"{"imposters":[]}"#);
         std::fs::write(
@@ -1225,7 +1243,8 @@ mod tests {
     // Issue #1128: both reload shapes that read a datadir refuse a file not named after its port.
     #[tokio::test]
     async fn reload_refuses_a_datadir_file_not_named_after_its_port() {
-        let imposter_port = free_port();
+        // Refused before any bind, so the port is never bound.
+        let imposter_port = UNUSED_PORT;
         let dir = tempfile::tempdir().expect("tempdir");
         let (file, datadir) = two_stores(dir.path(), r#"{"imposters":[]}"#);
         std::fs::write(
