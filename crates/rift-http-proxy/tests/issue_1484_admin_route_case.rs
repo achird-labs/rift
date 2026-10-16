@@ -252,13 +252,11 @@ async fn mixed_case_mutations_mutate() {
 async fn space_names_and_flow_state_keys_stay_case_sensitive() {
     let (base, admin) = start().await;
     let client = reqwest::Client::new();
-    // A flow store, so a flow-state write is kept.
     let port = create_from(
         &client,
         &base,
         serde_json::json!({
             "protocol": "http",
-            "_rift": { "flowState": { "ttlSeconds": 300 } },
             "stubs": [{ "responses": [{ "is": { "statusCode": 200, "body": "ok" } }] }]
         }),
     )

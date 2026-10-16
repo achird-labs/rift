@@ -55,9 +55,11 @@ An explicit `flowState` block that can't be honored **fails imposter creation** 
   write the instant it lands (or errors on the first write, on a networked store), so it's caught up front rather
   than misbehaving later.
 
-Only imposters with genuinely **no state surface** stay on the silent no-op store: no `flowState`
-block, no scenario stubs, no `_rift.script` stub, and no `_rift.stateOps`. Such an imposter never
-touches the store, so there is nothing to auto-provision.
+Every imposter without a `flowState` block gets an in-memory store at the default TTL (300 s), so
+the admin flow-state and scenario routes and the FFI always persist what they are given, even on an
+imposter with no scenario, script or `stateOps` stub (and on stubs added later in place). Script and
+`stateOps` stubs still log a warning that this state does not survive a restart, and `rift-lint`'s
+`W014` still applies.
 
 ### No `flowState`, but a script, scenario, or `stateOps` stub — auto-provisioned in-memory
 
@@ -256,8 +258,8 @@ are scenario transitions, and move `Last-Modified` on a conditional stub the sce
 ### Auto-provisioning and `rift-lint`
 
 Like a `_rift.script` stub, a `stateOps` block gets a real in-memory store auto-provisioned when no
-`_rift.flowState` is configured (see "auto-provisioned in-memory" above) — it does not silently fall
-through to the no-op store. `rift-lint`'s `W014` flags the same condition statically, so it's a
+`_rift.flowState` is configured (see "auto-provisioned in-memory" above) — it is never left on a store that
+discards writes. `rift-lint`'s `W014` flags the same condition statically, so it's a
 deliberate choice rather than a surprise at scale.
 
 ---
@@ -280,9 +282,9 @@ curl -X DELETE http://localhost:2525/admin/imposters/4506/flow-state/t1/attempts
 curl -X DELETE http://localhost:2525/admin/imposters/4506/flow-state/t1
 ```
 
-Note: an imposter gets a real store when `_rift.flowState` is configured, or it declares scenario
-stubs, or it has a `_rift.script` stub, or a `_rift.stateOps` block (auto-provisioned in-memory);
-only an imposter with none of those uses a no-op store where values never persist.
+Note: every imposter has a real store. `_rift.flowState` configures it; without that block an
+in-memory store at the default 300 s TTL is used, so values persist even on an imposter with no
+scenario, script or `stateOps` stub.
 
 > **Embedding over the C-ABI (non-Rust)**: a non-Rust host can read, write, delete, and clear flow-state
 > keys with zero loopback HTTP via [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#admin-long-tail-over-ffi) —

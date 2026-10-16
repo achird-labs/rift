@@ -1196,6 +1196,39 @@ fn ffi_serve_admin_retry_after_partial_failure_is_idempotent() {
     }
 }
 
+/// Issue #1504: an imposter with no `_rift.flowState` and no scenario/script/stateOps stub still
+/// keeps what `rift_flow_state_put` writes.
+#[test]
+fn ffi_flow_state_persists_on_a_plain_imposter() {
+    unsafe {
+        let h = rift_start();
+        assert!(!h.is_null());
+        let config = cstr(
+            r#"{ "protocol": "http",
+                 "stubs": [{ "responses": [{ "is": { "statusCode": 200 } }] }] }"#,
+        );
+        let port = rift_create_imposter(h, config.as_ptr());
+        assert_ne!(port, 0, "auto-assigned port");
+        let flow = cstr("t1");
+        let key = cstr("k");
+        let val = cstr("42");
+        assert_eq!(
+            rift_flow_state_put(h, port, flow.as_ptr(), key.as_ptr(), val.as_ptr()),
+            0
+        );
+        let got: serde_json::Value = serde_json::from_str(&take_json(rift_flow_state_get(
+            h,
+            port,
+            flow.as_ptr(),
+            key.as_ptr(),
+        )))
+        .unwrap();
+        assert_eq!(got["found"], true);
+        assert_eq!(got["value"], 42);
+        rift_stop(h);
+    }
+}
+
 /// Issue #411: the admin long tail — scenario/flow-state and correlated spaces — over direct
 /// C-ABI, with the same wire fidelity as the admin-HTTP handlers.
 #[test]

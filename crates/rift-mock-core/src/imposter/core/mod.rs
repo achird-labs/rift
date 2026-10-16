@@ -16,7 +16,7 @@ use super::types::{
 };
 use crate::backends::InMemoryFlowStore;
 use crate::behaviors::{HasRepeatBehavior, RuleCycler};
-use crate::extensions::flow_state::{FlowStore, NoOpFlowStore};
+use crate::extensions::flow_state::FlowStore;
 use crate::recording::{
     ClaimOutcome, LocalProxyStore, ProxyMode, ProxyRecordingStore, RecordedResponse,
     RequestSignature,
@@ -693,16 +693,11 @@ impl Imposter {
     /// Create the flow store: a [`FlowStoreProvider`](crate::extensions::flow_state::FlowStoreProvider) store if one is installed and supplies one,
     /// otherwise an in-memory store sized by `_rift.flowState` (issue #1463 removed the named
     /// `backend` selector; a leftover `backend` key decodes into `extra` and selects nothing).
-    /// Falls back to a default in-memory store (not NoOp) when stubs declare the scenario FSM or
-    /// carry a `_rift.script` that might call `ctx.state` (issue #358), so both work out of the
-    /// box without explicit `_rift.flowState`. Only an imposter with neither surface gets the
-    /// silent `NoOpFlowStore` — such an imposter never touches the store anyway.
-    ///
-    /// Note: the store is chosen at construction. Scenario/script stubs added later via an
-    /// in-place `PUT /imposters/:port/stubs` to an imposter that started with neither (and no
-    /// `_rift.flowState`) will hit the NoOp store and not persist — declare them at creation,
-    /// configure `_rift.flowState`, use `PUT /imposters` (which recreates), or set a
-    /// manager-scoped `FlowStoreProvider` returning a shared store (issue #312).
+    /// Every other imposter gets a default in-memory store too (issue #1504): the admin
+    /// flow-state and scenario routes and the FFI write the store outside request matching, and
+    /// stubs can gain scenarios or scripts later via an in-place `PUT/POST /imposters/:port/stubs`,
+    /// so no imposter can be known to never touch it. The scenario, script and `stateOps`
+    /// branches remain only to log what an operator relying on the default should know.
     fn create_flow_store(
         config: &ImposterConfig,
         provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
@@ -781,7 +776,9 @@ impl Imposter {
             )));
         }
 
-        Ok(Arc::new(NoOpFlowStore))
+        Ok(Arc::new(InMemoryFlowStore::new(
+            DEFAULT_FLOW_STATE_TTL_SECS,
+        )))
     }
 
     /// Whether any `is` response carries `_rift.stateOps` (issue #969) — such a stub writes the
@@ -1369,24 +1366,23 @@ mod tests {
         assert_eq!(imp.flow_store.increment("f", "attempts").expect("incr"), 2);
     }
 
-    // An imposter with neither a scenario stub nor a script stub keeps the silent NoOp — it never
-    // touches the store, so provisioning a real one would be pure waste.
+    // Issue #1504: the admin API and FFI write the store outside request matching, so even an
+    // imposter with no state surface needs a real store.
     #[test]
-    fn plain_stub_without_flow_state_stays_noop() {
+    fn plain_stub_without_flow_state_gets_in_memory_store() {
         let cfg = serde_json::from_value(json!({
             "port": 0, "protocol": "http",
             "stubs": [{ "responses": [{ "is": { "statusCode": 200 } }] }]
         }))
         .expect("valid imposter config");
         let imp = Imposter::new(cfg).expect("test imposter");
-        // NoOpFlowStore.increment always returns 1 — it never persists.
         assert_eq!(imp.flow_store.increment("f", "attempts").expect("incr"), 1);
-        assert_eq!(imp.flow_store.increment("f", "attempts").expect("incr"), 1);
+        assert_eq!(imp.flow_store.increment("f", "attempts").expect("incr"), 2);
     }
 
     #[test]
-    fn implicit_noop_construction_succeeds_silently() {
-        // No _rift.flowState and no scenario stubs: the implicit NoOp store must not be an error.
+    fn implicit_store_construction_succeeds_silently() {
+        // No _rift.flowState and no scenario stubs: the implicit store must not be an error.
         let cfg = serde_json::from_value(json!({ "port": 0, "protocol": "http", "stubs": [] }))
             .expect("valid imposter config");
         assert!(Imposter::new_with_hooks_and_journal(cfg, None, None, None).is_ok());

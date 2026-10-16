@@ -11,6 +11,15 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Flow-state and scenario writes to a plain imposter were silently discarded** (#1504). An
+  imposter with no `_rift.flowState` and no scenario, script or `stateOps` stub sat on a no-op
+  store, so `PUT .../flow-state/...`, scenario set-state and reset, and `rift_flow_state_put` all
+  answered success and kept nothing; the same happened to scenario stubs added later through an
+  in-place `PUT/POST /imposters/:port/stubs`. Every imposter now gets a default in-memory store
+  (300 s TTL). #514 had fixed only the scenario-route case of this.
+
 ## [0.22.0] - 2026-10-16
 
 ### Added
