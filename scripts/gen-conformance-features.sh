@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Package rift-conformance-<version>.tar.gz (issue #1339): the Plane A specification — the Gherkin
-# features and the fixtures they load — that the rift-conformance runner executes against a rift
-# build when `RIFT_FEATURES_DIR` points at it. The tarball unpacks to a single versioned root
+# features and the fixtures they load — that the Plane A runner (conformance/runner) executes
+# against a rift build when `RIFT_FEATURES_DIR` points at it. The tarball unpacks to a single versioned root
 # `rift-conformance-<version>/` containing README.md, manifest.json (with the real engineVersion
 # stamped in — the checked-in copy carries a `0.0.0-dev` placeholder), features/, rift-fixtures/,
 # rift-lint-fixtures/ and rift-scripts/. conformance/differential/ (the Mountebank oracle) is not

@@ -87,8 +87,8 @@ impl Mode {
     }
 
     /// Why this mode cannot run a scenario carrying `tag`, or `None` when it can. The tag
-    /// vocabulary is the Scala runner's (`build.sbt`'s per-mode exclusions), so a feature file
-    /// means the same thing to both runners.
+    /// vocabulary is the one the Scala runner's `build.sbt` excluded per mode, kept so the feature
+    /// files did not change in the move.
     #[must_use]
     pub fn excludes(self, tag: &str) -> Option<&'static str> {
         match (self, tag) {

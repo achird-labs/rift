@@ -182,6 +182,95 @@ jobs:
           done
 
   # =============================================================================
+  # Plane A conformance against the image just published (issue #1350, #1467's container leg).
+  #
+  # The pull-request leg (conformance.yml) runs container mode against an image it builds itself
+  # from the PR's binary; this one runs the same Rust runner against the image a user pulls, so a
+  # packaging fault in the published image (its Dockerfile, its entrypoint, the multi-arch index)
+  # fails here. It never runs on a pull request: this workflow is only called by release.yml and by
+  # hand. The tools (rift-lint, rift-verify) and the runner come from the release tag, the engine
+  # from the image.
+  # =============================================================================
+  conformance-container:
+    name: Plane A conformance (published image)
+    needs: build-rift-proxy
+    # 22.04, as release.yml builds the linux-gnu binaries this job stages for the tools.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      RIFT_MAX_BODY_SIZE: "10485760"
+      RIFT_CONFORMANCE_REQUIRE: "1"
+      RIFT_MODE: container
+    steps:
+      - name: Determine version
+        id: vars
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            VERSION="${{ inputs.tag }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="edge"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # The runner and the specification of exactly this release.
+      - name: Checkout the release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.vars.outputs.VERSION }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      # The released binaries, staged with the BUILD_INFO feature 01 checks them against, as the
+      # pull-request leg stages its own build.
+      - name: Stage the released binaries and BUILD_INFO
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          dir="$RUNNER_TEMP/rift-build"
+          mkdir -p "$dir"
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${VERSION}/rift-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" | \
+            tar --wildcards -xzf - -C "$dir" --strip-components=2 "*/bin/rift" "*/bin/rift-lint" "*/bin/rift-verify"
+          binaries='{}'
+          versions='{}'
+          for name in rift rift-lint rift-verify; do
+            sha="$(sha256sum "$dir/$name" | cut -d' ' -f1)"
+            ver="$("$dir/$name" --version | head -1)"
+            binaries="$(jq --arg n "$name" --arg s "$sha" '. + {($n): $s}' <<<"$binaries")"
+            versions="$(jq --arg n "$name" --arg v "$ver" '. + {($n): $v}' <<<"$versions")"
+          done
+          jq -n --arg commit "$(git rev-parse HEAD)" --arg branch "$VERSION" \
+            --arg builtAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson binaries "$binaries" --argjson versions "$versions" \
+            '{commit: $commit, branch: $branch, builtAt: $builtAt, binaries: $binaries, versions: $versions}' \
+            > "$dir/BUILD_INFO"
+          cat "$dir/BUILD_INFO"
+          echo "RIFT_BUILD_DIR=$dir" >> "$GITHUB_ENV"
+
+      # Pulled before the run, so a missing or unpublished image fails here rather than as a
+      # harness start-up error.
+      - name: Pull the published image
+        run: |
+          set -euo pipefail
+          IMAGE="${{ env.REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy:${{ steps.vars.outputs.VERSION }}"
+          docker pull "$IMAGE"
+          echo "RIFT_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Run the Plane A features (container mode)
+        run: cargo test -p rift-conformance-runner --test plane_a
+
+  # =============================================================================
   # Build and push the static (scratch) rift-proxy flavor — issue #664.
   #
   # Uses the musl release binaries, which release.yml already builds with `cross`. They are

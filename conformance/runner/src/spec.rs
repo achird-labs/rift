@@ -2,10 +2,8 @@
 
 use std::path::PathBuf;
 
-/// The feature files this runner runs. Each one ported here is also listed in the Scala runner's
-/// `conformance/ported.txt` (EtaCassiopeia/rift-conformance#244), which drops it from that runner's
-/// external, embedded and lint legs, so every feature has exactly one runner during the move.
-/// Batch 1 (#1346) is 00, 01, 02 and 09, batch 2 (#1347) 06, 07, 11, 14, 17 and 18, batch 3 (#1348)
+/// The feature files this runner runs: every one in `manifest.json`. They came over from the Scala
+/// runner in rift-conformance in five batches, now retired with it. Batch 1 (#1346) is 00, 01, 02 and 09, batch 2 (#1347) 06, 07, 11, 14, 17 and 18, batch 3 (#1348)
 /// 03, 05, 10, 19 and 21, batch 4 (#1349) 04, 08, 13 and 22, batch 5 (#1350) 20, 16 and 12.
 /// Embedded mode leaves out `@upstream-trust` (09), `@front-door` (11, 16), `@rift-debug-env` (05,
 /// 19) and `@tls-flags` (20); container mode those, `@admin-isolated` (21), `@full-corpus-verify`
@@ -43,7 +41,7 @@ pub const PORTED_FEATURES: &[&str] = &[
 
 /// The conformance tree: `features/`, `rift-fixtures/`, `rift-lint-fixtures/`, `rift-scripts/`.
 /// `RIFT_FEATURES_DIR` points it elsewhere (an unpacked `rift-conformance-<ver>.tar.gz`, say), with
-/// the same meaning it has for the Scala runner; by default it is this repository's `conformance/`.
+/// the same meaning it had for the Scala runner; by default it is this repository's `conformance/`.
 #[must_use]
 pub fn conformance_root() -> PathBuf {
     match std::env::var_os("RIFT_FEATURES_DIR") {

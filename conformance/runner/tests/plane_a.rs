@@ -1,5 +1,5 @@
-//! Plane A conformance (issue #1346): the features in `conformance/features/rift/` that this runner
-//! has ported (`spec::PORTED_FEATURES`), run against a real engine.
+//! Plane A conformance (issue #1346): the features in `conformance/features/rift/`
+//! (`spec::PORTED_FEATURES`, every one since #1350), run against a real engine.
 //!
 //! - `RIFT_BUILD_DIR` (required): `rift`, `rift-lint`, `rift-verify` and `BUILD_INFO`, staged as
 //!   `.github/workflows/conformance.yml` does. Unset, the run prints why and passes, unless
@@ -12,8 +12,8 @@
 //! cucumber's own flags still work after `--`: `--name <regex>`, `--tags <expr>`, `--fail-fast`.
 //! They narrow the ported set; they never widen it past it or past what the mode can run.
 //!
-//! Step text is byte-identical to the Scala runner's (`RiftConformanceSupport.scala`), so a feature
-//! file means the same thing to both while features move from one runner to the other.
+//! Step text is byte-identical to the retired Scala runner's (`RiftConformanceSupport.scala` and
+//! the per-feature suites), so the feature files did not change in the move.
 
 mod common;
 
