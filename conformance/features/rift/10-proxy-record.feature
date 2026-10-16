@@ -233,6 +233,52 @@ Feature: Proxy record/replay — proxyOnce, proxyTransparent, proxyAlways chains
     Then the response JSON at "stubs.0.predicates.1.equals.query.q" is the string "rust"
     And the response JSON at "stubs.0.predicates.1.equals.query.ts" is absent
 
+  # rift#1329 / rift#1333: Mountebank parity (both engines agree). `except` is persisted on the recorded
+  # predicate and applied at match time; a whole-query generator records `deepEquals`, which refuses an
+  # extra parameter; a request that missed every recording is forwarded and recorded (here keyed on body).
+  Scenario: an except predicateGenerator replays a different id from the recording (rift#1329)
+    Given an upstream imposter from fixture "proxy/options/upstream"
+    And a fresh imposter from fixture "proxy/options/once-except" proxying to the upstream
+    When the client sends "GET" "/users/123"
+    Then the upstream imposter has recorded 1 requests
+    When the client sends "GET" "/users/456"
+    Then the response body is "up"
+    And the response has no header "x-rift-proxy"
+    And the upstream imposter has recorded 1 requests
+    When the client sends admin "GET" "/imposters/{port}" with payload "-"
+    Then the response JSON at "stubs.0.predicates.0.except" is the string "\\d+"
+
+  Scenario: a recorded query predicate is deepEquals, so an extra parameter is forwarded again (rift#1329)
+    Given an upstream imposter from fixture "proxy/options/upstream"
+    And a fresh imposter from fixture "proxy/options/once-query" proxying to the upstream
+    When the client sends "GET" "/q?a=1"
+    Then the upstream imposter has recorded 1 requests
+    When the client sends "GET" "/q?a=1"
+    Then the upstream imposter has recorded 1 requests
+    When the client sends "GET" "/q?a=1&b=2"
+    Then the upstream imposter has recorded 2 requests
+    And the response header "x-rift-proxy" is "true"
+    When the client sends admin "GET" "/imposters/{port}" with payload "-"
+    Then the response JSON at "stubs" has 3 elements
+
+  Scenario: a body predicateGenerator records on a miss and replays a repeat (rift#1333)
+    Given an upstream imposter from fixture "proxy/options/upstream"
+    And a fresh imposter from fixture "proxy/options/once-body" proxying to the upstream
+    When the request body is "one"
+    And the client sends "POST" "/b"
+    Then the upstream imposter has recorded 1 requests
+    When the request body is "two"
+    And the client sends "POST" "/b"
+    Then the upstream imposter has recorded 2 requests
+    And the response header "x-rift-proxy" is "true"
+    And the response body is "up"
+    When the request body is "two"
+    And the client sends "POST" "/b"
+    Then the upstream imposter has recorded 2 requests
+    And the response has no header "x-rift-proxy"
+    When the client sends admin "GET" "/imposters/{port}" with payload "-"
+    Then the response JSON at "stubs" has 3 elements
+
   # ── rift-lint ───────────────────────────────────────────────────────────────────────────────────
   # W020/W021 have unit coverage in rift-lint's validator tests; these rows pin the released binary.
 
