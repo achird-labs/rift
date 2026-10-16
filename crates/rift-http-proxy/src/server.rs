@@ -59,11 +59,12 @@ pub struct Cli {
     #[arg(long, default_value_t = DEFAULT_ADMIN_PORT, env = "MB_PORT", global = true, help_heading = "Server options")]
     pub port: u16,
 
-    /// IP address to bind the admin API to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`) [default: every interface, IPv6 and IPv4]
+    /// IP address to bind the admin API and host-less imposters to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`) [default: every interface, IPv6 and IPv4]
     //
     // Unset, the admin API listens on `[::]` dual-stack, or `0.0.0.0` on a host without IPv6, as
     // Mountebank does (issue #1528). `None` is that absence, so an rcfile `host` can tell it apart
-    // from an explicit `--host 0.0.0.0`.
+    // from an explicit `--host 0.0.0.0`. Imposters created without a `host` inherit it (issue #1517,
+    // Mountebank `imposter.js:194`) through `ImposterManager::with_default_host`.
     #[arg(long, env = "MB_HOST", global = true, help_heading = "Server options")]
     pub host: Option<String>,
 
@@ -988,7 +989,12 @@ impl ServerBuilder {
                     default_key,
                     allow_self_signed: !cli.no_self_signed_tls,
                 };
+                // Host-less imposters inherit `--host`, as Mountebank's do (issue #1517). Only on
+                // the manager built here: an injected one belongs to an embedder that may have
+                // re-pointed `--host` at its own admin (rift-cluster pins it to loopback).
+                // `--local-only` does not narrow imposter binds; Mountebank's filters connections.
                 let mut built = ImposterManager::with_datadir(cli.datadir.clone())
+                    .with_default_host(cli.host.clone())
                     .with_tls_defaults(tls_defaults)
                     .with_accept_runtimes(self.accept_runtimes)
                     .with_body_limits(body_limits)

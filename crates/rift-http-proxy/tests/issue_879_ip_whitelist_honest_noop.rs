@@ -103,11 +103,12 @@ async fn get_config_reports_the_real_bind_posture() {
 }
 
 // The discriminating case, and the reason `localOnly` reports the FLAG rather than "did the admin
-// plane bind loopback". `--host 127.0.0.1` without `--local-only` binds the admin plane to loopback
-// — but `/metrics` and every imposter port stay on `0.0.0.0`. A bind-derived `true` here would tell
-// an operator nothing is reachable off-host while two listener families are, which overstates the
-// restriction. The old hardcoded `false` understated; overstating is the direction that gets someone
-// hurt, so the flag is what gets reported.
+// plane bind loopback". `--host 127.0.0.1` without `--local-only` binds the admin plane and every
+// host-less imposter to loopback (#1517) — but `/metrics` stays on every interface, and an imposter
+// that names its own `host` binds that. A bind-derived `true` here would tell an operator nothing is
+// reachable off-host while a listener still is, which overstates the restriction. The old hardcoded
+// `false` understated; overstating is the direction that gets someone hurt, so the flag is what gets
+// reported.
 #[tokio::test]
 async fn a_loopback_host_without_the_flag_does_not_claim_local_only() {
     let server = ServerBuilder::from_cli(Cli::parse_from([
@@ -131,8 +132,8 @@ async fn a_loopback_host_without_the_flag_does_not_claim_local_only() {
         .expect("json");
     assert_eq!(
         config["options"]["localOnly"], false,
-        "--host 127.0.0.1 narrows only the admin plane; metrics and imposter ports stay off-host, \
-         so reporting localOnly: true would overstate the restriction"
+        "--host 127.0.0.1 narrows the admin plane and host-less imposters, but metrics stays \
+         off-host, so reporting localOnly: true would overstate the restriction"
     );
 
     server.shutdown().await;

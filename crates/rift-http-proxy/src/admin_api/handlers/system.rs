@@ -68,10 +68,11 @@ pub struct ConfigSnapshot {
     /// loopback".
     ///
     /// Deriving it from the bound address reads as more truthful and is worse. `--host 127.0.0.1`
-    /// without `--local-only` binds the admin plane to loopback while `/metrics` and every imposter
-    /// port stay on every interface (pinned by `without_local_only_metrics_still_binds_every_interface`),
-    /// so a bind-derived `true` would tell an operator nothing is reachable off-host while two
-    /// listener families are. The old hardcoded `false` understated; that would *overstate*, which
+    /// without `--local-only` binds the admin plane and host-less imposters to loopback (#1517)
+    /// while `/metrics` stays on every interface (pinned by
+    /// `without_local_only_metrics_still_binds_every_interface`) and an imposter naming its own
+    /// `host` binds that, so a bind-derived `true` would tell an operator nothing is reachable
+    /// off-host while a listener still is. The old hardcoded `false` understated; that would *overstate*, which
     /// is the direction that gets someone hurt. The flag is also what Mountebank's `/config`
     /// echoes, so this keeps the compat endpoint compatible.
     pub local_only: bool,

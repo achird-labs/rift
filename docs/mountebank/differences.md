@@ -246,6 +246,14 @@ the same imposter.
 - The imposter list carries `recordRequests` for each imposter, next to Rift's `stubCount` and `enabled`. Mountebank prints `recordRequests` only in an imposter's detail.
 - The `?replayable=true` export keeps the imposter's `host`, so a re-posted export binds where the original did. Mountebank 2.9.1's export leaves `host` out.
 
+## An inherited `--host` is not stored with the imposter
+
+An imposter created without a `host` binds the server's `--host` in both engines, and neither
+prints that inherited host. Mountebank writes it into the imposter's `imposter.json` in its
+`--datadir`, so the imposter keeps that host when a server with a different `--host` loads it. Rift
+stores only what was posted, so a Rift datadir imposter without a `host` follows the `--host` of the
+server that loads it.
+
 ## `PUT /imposters` that fails part-way
 
 Rift does not delete the running set before a `PUT /imposters`. A port that fails to bind is
