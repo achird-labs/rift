@@ -382,6 +382,43 @@ pub fn create_reusable_listener(addr: SocketAddr) -> std::io::Result<TcpListener
     create_reusable_listener_tuned(addr, &SocketTuning::from_env())
 }
 
+/// Whether an IPv6-only listener holds `port` on the IPv6 wildcard (issue #1501): a plain
+/// `IPV6_V6ONLY` bind of `[::]:port` is refused with `AddrInUse`. Any other failure (no IPv6 on
+/// the host, an address the stack does not offer) is not a holder, so the answer is `false`.
+pub(crate) fn ipv6_only_listener_holds(port: u16) -> bool {
+    let probe = || -> std::io::Result<()> {
+        let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+        socket.set_only_v6(true)?;
+        let addr = SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), port);
+        socket.bind(&addr.into())
+    };
+    matches!(probe(), Err(e) if e.kind() == std::io::ErrorKind::AddrInUse)
+}
+
+/// Whether another socket listens on `127.0.0.1:port` beside our reusable wildcard listener (issue
+/// #1501). On macOS and the BSDs a wildcard bind with `SO_REUSEADDR` succeeds next to a loopback
+/// listener, which then keeps every `127.0.0.1` connection, and the kernel's port-0 search does not
+/// look past the wildcard either. A loopback bind with `SO_REUSEADDR` alone succeeds next to our own
+/// wildcard listener and is refused with `AddrInUse` by a loopback holder. Any other failure is not
+/// a holder. Linux refuses the wildcard bind itself, and this probe would collide with our own
+/// listener there, so it is only compiled for the BSD family.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
+pub(crate) fn loopback_listener_holds(port: u16) -> bool {
+    let probe = || -> std::io::Result<()> {
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+        socket.set_reuse_address(true)?;
+        let addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+        socket.bind(&addr.into())
+    };
+    matches!(probe(), Err(e) if e.kind() == std::io::ErrorKind::AddrInUse)
+}
+
 /// Create a TCP listener with an explicit [`SocketTuning`] (backlog).
 pub fn create_reusable_listener_tuned(
     addr: SocketAddr,
@@ -626,6 +663,60 @@ impl AcceptErrorLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- issue #1501: the holder checks behind auto-assign ------------------------------
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    #[test]
+    fn a_loopback_holder_is_seen_beside_our_own_wildcard_listener() {
+        let _rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("runtime");
+        let _guard = _rt.enter();
+        let ours = create_reusable_listener(SocketAddr::from(([0, 0, 0, 0], 0))).expect("ours");
+        let port = ours.local_addr().expect("local addr").port();
+        assert!(
+            !loopback_listener_holds(port),
+            "our own wildcard listener is not a loopback holder"
+        );
+
+        let holder = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).expect("socket");
+        holder.set_reuse_address(true).expect("SO_REUSEADDR");
+        holder
+            .bind(&SocketAddr::from(([127, 0, 0, 1], port)).into())
+            .expect("a loopback listener binds beside the wildcard");
+        holder.listen(4).expect("listen");
+        assert!(loopback_listener_holds(port));
+    }
+
+    #[test]
+    fn an_ipv6_only_holder_is_seen_and_a_free_port_is_not() {
+        let Ok(socket) = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP)) else {
+            return; // no IPv6 on this host
+        };
+        socket.set_only_v6(true).expect("IPV6_V6ONLY");
+        let any: SocketAddr = SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0);
+        if socket.bind(&any.into()).is_err() {
+            return;
+        }
+        socket.listen(4).expect("listen");
+        let port = socket
+            .local_addr()
+            .expect("local addr")
+            .as_socket()
+            .expect("inet")
+            .port();
+        assert!(ipv6_only_listener_holds(port));
+        drop(socket);
+        assert!(!ipv6_only_listener_holds(port), "released ports are free");
+    }
 
     // ---- issue #716: HTTP connection-builder tuning knobs -------------------------------
 

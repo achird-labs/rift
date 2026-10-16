@@ -8,7 +8,7 @@ use std::ffi::{CStr, CString, c_char};
 
 // Fixed port: a test that re-binds a port it released, or that must name the port in a file the
 // engine reads before it starts. Probed on the wildcard family imposters bind (#1485), and random,
-// so concurrent auto-assigned creates (lowest free port first) do not race for it.
+// so concurrent auto-assigned creates do not race for it.
 fn free_port() -> u16 {
     std::net::TcpListener::bind("0.0.0.0:0")
         .expect("bind an ephemeral port")

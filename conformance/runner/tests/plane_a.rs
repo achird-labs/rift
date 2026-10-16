@@ -3783,9 +3783,6 @@ async fn post_bytes(w: &mut PlaneA, hex: String, path: String) -> Step {
     })
 }
 
-/// The engine assigns a port-less imposter the first free port at or above this (#199).
-const AUTO_PORT_FLOOR: u16 = 49152;
-
 #[when(regex = r#"^the client creates a port-less imposter from fixture "((?:\\.|[^"\\])*)"$"#)]
 async fn create_port_less(w: &mut PlaneA, name: String) -> Step {
     let name = unescape(&name);
@@ -3809,7 +3806,7 @@ async fn replace_all_port_less(w: &mut PlaneA, name: String) -> Step {
     let declared = batch_ports(&raw, &what)?;
     replace_all(w, &raw, &what).await?;
     // Declared ports first, so a failure below still tears them down.
-    w.tracked.extend(declared);
+    w.tracked.extend(declared.iter().copied());
     let listed = get(&format!("{}/imposters", w.admin_url())).await?;
     let json: Value = serde_json::from_str(&listed.body)
         .with_context(|| format!("invalid admin JSON (body={})", listed.body))?;
@@ -3822,10 +3819,11 @@ async fn replace_all_port_less(w: &mut PlaneA, name: String) -> Step {
         .map(|p| u16::try_from(p).with_context(|| format!("listed port {p}")))
         .collect::<anyhow::Result<_>>()?;
     w.tracked.extend(ports.iter().copied());
+    // The OS picks an auto-assigned port (#1501): it is the one no fixture declared.
     let auto: Vec<u16> = ports
         .iter()
         .copied()
-        .filter(|p| *p >= AUTO_PORT_FLOOR)
+        .filter(|p| !declared.contains(p))
         .collect();
     w.ensure(auto.len() == 1, || {
         format!("expected one auto-assigned port, got imposters {ports:?}")
@@ -3834,11 +3832,17 @@ async fn replace_all_port_less(w: &mut PlaneA, name: String) -> Step {
     Ok(())
 }
 
-#[then(regex = r"^the assigned port is at least 49152$")]
-async fn assigned_port_floor(w: &mut PlaneA) -> Step {
+/// The OS picks an auto-assigned port (#1501), so all that can be asserted is that one was given
+/// and that no other imposter the scenario created holds it.
+#[then(regex = r"^the assigned port is a non-zero port that no explicit fixture uses$")]
+async fn assigned_port_is_auto(w: &mut PlaneA) -> Step {
     let port = w.current()?;
-    w.ensure(port >= AUTO_PORT_FLOOR, || {
-        format!("expected an auto-assigned port >= {AUTO_PORT_FLOOR}, got {port}")
+    let others = w.tracked.iter().filter(|p| **p == port).count();
+    w.ensure(port != 0 && others == 1, || {
+        format!(
+            "expected an OS-assigned port held by no fixture, got {port} (tracked {:?})",
+            w.tracked
+        )
     })
 }
 

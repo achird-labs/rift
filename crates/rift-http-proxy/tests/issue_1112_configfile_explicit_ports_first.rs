@@ -1,5 +1,6 @@
-//! Issue #1112: `--configfile` startup created imposters in file order, and an auto-assigned port is
-//! the lowest free one from 49152. A port-less imposter listed first could take the port the next
+//! Issue #1112: `--configfile` startup created imposters in file order, and an auto-assigned port was
+//! the lowest free one from 49152 (the kernel picks it since #1501, which can still reissue a
+//! just-freed port). A port-less imposter listed first could take the port the next
 //! explicit imposter names, and that one then failed with `PortInUse` and was skipped.
 //!
 //! Its own test binary, because the test learns the next auto-assigned port and needs it to stay

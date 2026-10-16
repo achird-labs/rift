@@ -11,7 +11,21 @@ record.
 
 ## [Unreleased]
 
+### Changed
+
+- **An auto-assigned imposter port is now picked by the operating system, as in Mountebank**
+  (#1501), rather than the lowest free port from 49152. The listener that learned the port serves
+  it. On Linux the port comes from `ip_local_port_range` (32768–60999 by default), so it can be
+  below 49152.
+
 ### Fixed
+
+- **On macOS an auto-assigned imposter could share its port with another process's loopback
+  listener and lose its traffic to it** (#1501). The old scan probed each port with
+  `SO_REUSEADDR`, which macOS lets succeed next to a `127.0.0.1` listener that then keeps every
+  loopback connection. An auto-assigned port is also never one an IPv6-only listener holds, which
+  `localhost` clients would reach. Under per-core accept fan-out the probe listener now joins the
+  `SO_REUSEPORT` group instead of being dropped and rebound.
 
 - **Flow-state and scenario writes to a plain imposter were silently discarded** (#1504). An
   imposter with no `_rift.flowState` and no scenario, script or `stateOps` stub sat on a no-op
