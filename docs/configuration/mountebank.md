@@ -39,7 +39,7 @@ No field is strictly required.
 |:------|:-----|:--------|:------------|
 | `port` | number | auto-assigned | Port to listen on. Omitted or `0` means "pick a free port"; imposters that name a port are created first. A `--datadir` file must name one |
 | `protocol` | string | `http` | `http` or `https`; anything else (`tcp`, `smtp`) is rejected |
-| `host` | string | `0.0.0.0` | Address to bind the imposter to |
+| `host` | string | all interfaces, dual-stack (`::`) | Address to bind the imposter to. Omitted, the imposter listens dual-stack as in Mountebank, falling back to `0.0.0.0` on a host without IPv6; an explicit `0.0.0.0` is IPv4 only |
 
 ### Optional Fields
 

@@ -2263,28 +2263,6 @@
     "location": "step[1].body"
   },
   {
-    "case": "targeted: proxyOnce with an ip predicateGenerator replays to the same client (#1446)",
-    "kind": "documented",
-    "doc": "docs/mountebank/proxy.md",
-    "quote": "Mountebank's dual-stack listener reports an IPv4 client as `::ffff:127.0.0.1` and records that",
-    "reason": "a recorded `ip` is the client address as each engine's listener reports it",
-    "id": "generator-ip-form/stored",
-    "location": "stored[4545]/stubs/0/predicates/0/deepEquals/ip",
-    "mountebankMatches": "\"(?:::ffff:)?127\\.0\\.0\\.1\"",
-    "rift": "\"127.0.0.1\""
-  },
-  {
-    "case": "targeted: proxyOnce with an ip predicateGenerator replays to the same client (#1446)",
-    "kind": "documented",
-    "doc": "docs/mountebank/proxy.md",
-    "quote": "Mountebank's dual-stack listener reports an IPv4 client as `::ffff:127.0.0.1` and records that",
-    "reason": "a recorded `ip` is the client address as each engine's listener reports it",
-    "id": "generator-ip-form/replayable",
-    "location": "replayable[4545]/stubs/0/predicates/0/deepEquals/ip",
-    "mountebankMatches": "\"(?:::ffff:)?127\\.0\\.0\\.1\"",
-    "rift": "\"127.0.0.1\""
-  },
-  {
     "case": "targeted: proxyOnce with a form predicateGenerator and a formless first request (#1446)",
     "kind": "documented",
     "doc": "docs/mountebank/proxy.md",

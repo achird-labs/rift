@@ -13,6 +13,14 @@ record.
 
 ### Changed
 
+- **An imposter without `host` now listens dual-stack on `::`, as Mountebank does** (#1514),
+  falling back to `0.0.0.0` on a host without IPv6. It answers on `::1` too, so a `localhost`
+  client that resolves `::1` first reaches it, and a port an IPv6-only listener holds is now a
+  conflict (400) rather than a silent IPv4-only bind. It reports an IPv4 client as
+  `::ffff:127.0.0.1`, as Mountebank does: an `ip` predicate written `127.0.0.1` against such an
+  imposter must become `::ffff:127.0.0.1`, or the imposter must set `"host": "0.0.0.0"` (still IPv4
+  only). The printed and stored imposter still carries no `host`.
+
 - **An XPath selector that selects an element now reads its first child node, as Mountebank does**
   (#1495), rather than all of the element's text. `//a` on `<a>x<b/>y</a>` reads `x`; an element
   that is empty or starts with an element reads as the string `undefined`, so `exists: true` now
@@ -34,6 +42,9 @@ record.
   below 49152.
 
 ### Fixed
+
+- **An explicit `"host": "::"` is dual-stack on every platform** (#1514), including Windows and
+  Linux with `net.ipv6.bindv6only=1`, where it used to accept IPv6 clients only.
 
 - **`--intercept-ca-cert-pem` and `--intercept-ca-key-pem` accept the PEM as a separate argument**
   (#1506). `--intercept-ca-cert-pem "$(cat ca.pem)"` was refused with exit 2, because the value

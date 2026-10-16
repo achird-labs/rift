@@ -59,11 +59,11 @@ Title-Cased name.
 
 ## Client address
 
-With the default bind address (`0.0.0.0`), Rift reports an IPv4 client as `127.0.0.1`.
-Mountebank's dual-stack listener reports it as `::ffff:127.0.0.1`, and `requestFrom` as
-`::ffff:127.0.0.1:<port>`. An imposter bound to `"host": "::"` listens on a dual-stack socket too,
-so Rift then reports an IPv4 client as `::ffff:127.0.0.1` as Mountebank does, with `requestFrom`
-written `[::ffff:127.0.0.1]:<port>`.
+An imposter with no `host` listens dual-stack, as in Mountebank, so both engines report an IPv4
+client as `::ffff:127.0.0.1`. `requestFrom` is spelled differently: Mountebank writes
+`::ffff:127.0.0.1:<port>`, Rift `[::ffff:127.0.0.1]:<port>`. An imposter bound to
+`"host": "0.0.0.0"` listens on IPv4 only, in both engines, and Rift then reports the client as
+`127.0.0.1`.
 
 Each engine uses its own value everywhere: the `ip` and `requestFrom` predicates, recorded
 requests, generated predicates ([Proxy](proxy.md#predicate-generators)) and the `request.ip` /

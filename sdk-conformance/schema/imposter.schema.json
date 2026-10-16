@@ -1746,7 +1746,7 @@
       "type": "boolean"
     },
     "host": {
-      "description": "Host/IP address to bind the imposter to. Defaults to \"0.0.0.0\" (all interfaces).\nUse \"127.0.0.1\" or \"localhost\" for local-only access.",
+      "description": "Host/IP address to bind the imposter to. Defaults to all interfaces, dual-stack (\"::\",\nreporting IPv4 clients as IPv4-mapped addresses), or IPv4 \"0.0.0.0\" on a host without\nIPv6, as Mountebank does. An explicit \"0.0.0.0\" is IPv4-only. Use \"127.0.0.1\" or\n\"localhost\" for local-only access.",
       "type": [
         "string",
         "null"

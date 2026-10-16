@@ -3,8 +3,9 @@ Feature: Mountebank compatibility — predicates, imposter options and response 
 
   # rift docs/mountebank/{predicates,imposters,responses,behaviors}.md (#203). The corpus LOADS most of
   # these but its `_verify` asserts none of them; each row here pins one literally. Runs on every
-  # leg. Tags: `@loopback-client` rows match the client address 127.0.0.1, which a Docker-published
-  # port rewrites (excluded in container). The lookup rows read a CSV under `corpus/data`, which every
+  # leg. Tags: `@loopback-client` rows match the client address 127.0.0.1, which a host-less
+  # imposter reports IPv4-mapped (`::ffff:127.0.0.1`) as Mountebank's dual-stack listener does (#1514),
+  # and which a Docker-published port rewrites (excluded in container). The lookup rows read a CSV under `corpus/data`, which every
   # mode reaches (the container mounts it at its workdir, #206); `@shell` rows need `sh` in the engine's
   # environment (the debian-slim image has it).
 
