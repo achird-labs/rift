@@ -441,6 +441,8 @@ pub struct Cli {
         help_heading = "Server options",
         value_name = "PEM",
         env = "RIFT_INTERCEPT_CA_CERT_PEM",
+        // A PEM starts with `-----BEGIN`, which clap would read as a flag (#1506).
+        allow_hyphen_values = true,
         conflicts_with = "intercept_ca_cert",
         conflicts_with = "intercept_ca_key"
     )]
@@ -454,6 +456,8 @@ pub struct Cli {
         help_heading = "Server options",
         value_name = "PEM",
         env = "RIFT_INTERCEPT_CA_KEY_PEM",
+        // A PEM starts with `-----BEGIN`, which clap would read as a flag (#1506).
+        allow_hyphen_values = true,
         conflicts_with = "intercept_ca_cert",
         conflicts_with = "intercept_ca_key"
     )]
