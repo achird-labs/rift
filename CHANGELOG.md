@@ -11,6 +11,8 @@ record.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-16
+
 ### Added
 
 - **A Rust Plane A runner** (#1346 to #1350). `conformance/runner/` (`rift-conformance-runner`,
@@ -4642,7 +4644,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/achird-labs/rift/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/achird-labs/rift/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/achird-labs/rift/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/achird-labs/rift/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/achird-labs/rift/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/achird-labs/rift/compare/v0.18.1...v0.19.0
