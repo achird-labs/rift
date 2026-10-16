@@ -11,6 +11,14 @@ record.
 
 ## [Unreleased]
 
+### Changed
+
+- **The admin API's own 404 is Express's HTML page, as in Mountebank** (#1493). A request no route
+  takes (an unknown path, or a known path with a method it lacks, such as `POST /config`) used to
+  answer the JSON error envelope; it now answers `finalhandler`'s `Cannot POST /config` page with
+  its `Content-Security-Policy` and `X-Content-Type-Options` headers. The status is unchanged, and
+  a handler's own 404 (`GET /imposters/9999`) stays JSON.
+
 ### Fixed
 
 - **Flow-state and scenario writes to a plain imposter were silently discarded** (#1504). An

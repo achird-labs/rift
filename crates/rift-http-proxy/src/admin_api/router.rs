@@ -4,7 +4,9 @@
 
 use crate::admin_api::handlers::{imposters, intercept, scenarios, stubs, system};
 use crate::admin_api::routes::ADMIN_ROUTES;
-use crate::admin_api::types::{error_response, get_base_url, json_response, not_found};
+use crate::admin_api::types::{
+    error_response, express_not_found, get_base_url, json_response, not_found,
+};
 use crate::front_door::FrontDoorRoutes;
 use crate::imposter::ImposterManager;
 use crate::intercept_control::InterceptControl;
@@ -285,6 +287,11 @@ fn without_body(response: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
     Response::from_parts(parts, Full::new(Bytes::new()))
 }
 
+/// The request path as the client sent it, recorded before `normalize_admin_uri` respells the URI,
+/// so Express's 404 page can echo it.
+#[derive(Clone, Debug)]
+pub(crate) struct ReceivedPath(pub(crate) String);
+
 /// Main request router
 #[allow(clippy::too_many_arguments)]
 pub async fn route_request(
@@ -299,6 +306,18 @@ pub async fn route_request(
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let mut method = req.method().clone();
     let raw_path = req.uri().path();
+    let received_path = req
+        .extensions()
+        .get::<ReceivedPath>()
+        .map_or_else(|| raw_path.to_owned(), |received| received.0.clone());
+    let not_found_page = move |method: &Method| {
+        let page = express_not_found(method, &received_path);
+        if *method == Method::HEAD {
+            without_body(page)
+        } else {
+            page
+        }
+    };
     // The gateway is matched on the raw path below, before anything is normalized.
     let path = if raw_path.starts_with("/__rift/") {
         raw_path.to_string()
@@ -319,19 +338,19 @@ pub async fn route_request(
 
     let is_intercept = path == "/intercept" || path.starts_with("/intercept/");
     if is_intercept && intercept.is_none() {
-        return Ok(not_found());
+        return Ok(not_found_page(&method));
     }
 
     // Express answers `HEAD` and `OPTIONS` on every route by itself (issue #1456), and nothing is
     // dispatched that the route table does not list.
     let Some(allowed) = allowed_methods(&path) else {
-        return Ok(not_found());
+        return Ok(not_found_page(&method));
     };
     if method == Method::OPTIONS {
         return Ok(options_response(&allowed));
     }
     if !allowed.contains(&method) {
-        return Ok(not_found());
+        return Ok(not_found_page(&method));
     }
     let head = method == Method::HEAD;
     if head {

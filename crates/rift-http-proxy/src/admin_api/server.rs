@@ -670,6 +670,8 @@ async fn accept_loop(
                     let normalized = if is_gateway {
                         Ok(())
                     } else {
+                        let received = router::ReceivedPath(req.uri().path().to_owned());
+                        req.extensions_mut().insert(received);
                         router::normalize_admin_uri(&mut req)
                     };
                     // Per-request annotation scope + response decorator (issue #318):
