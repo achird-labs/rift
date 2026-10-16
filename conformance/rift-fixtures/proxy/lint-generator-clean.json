@@ -1,0 +1,26 @@
+{
+  "port": 4990,
+  "protocol": "http",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:4991",
+            "mode": "proxyOnce",
+            "predicateGenerators": [
+              {
+                "matches": {
+                  "body": true
+                },
+                "jsonpath": {
+                  "selector": "$.id"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

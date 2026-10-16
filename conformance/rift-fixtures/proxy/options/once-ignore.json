@@ -1,0 +1,27 @@
+{
+  "protocol": "http",
+  "name": "proxy options \u00b7 once-ignore",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:UPSTREAM_PORT",
+            "mode": "proxyOnce",
+            "predicateGenerators": [
+              {
+                "matches": {
+                  "path": true,
+                  "query": true
+                },
+                "ignore": {
+                  "query": "ts"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

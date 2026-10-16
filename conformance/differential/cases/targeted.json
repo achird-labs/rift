@@ -6317,6 +6317,113 @@
           "path": "/imposters/9999"
         }
       ]
+    },
+    {
+      "name": "targeted: copy and lookup resolve an xpath prefix through ns by namespace URI (#1490)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/copy"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=$X"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$X",
+                          "using": {
+                            "method": "xpath",
+                            "selector": "//a:id",
+                            "ns": {
+                              "a": "urn:a"
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/lookup"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "n=${ROW}[name]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": "body",
+                            "using": {
+                              "method": "xpath",
+                              "selector": "//a:id",
+                              "ns": {
+                                "a": "urn:a"
+                              }
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "../../conformance/differential/data/duplicate-keys.csv",
+                              "keyColumn": "id"
+                            }
+                          },
+                          "into": "${ROW}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/copy",
+          "body": "<r xmlns:a=\"urn:a\"><a:id>9</a:id></r>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/copy",
+          "body": "<r xmlns:z=\"urn:a\"><z:id>8</z:id></r>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/lookup",
+          "body": "<r xmlns:a=\"urn:a\"><a:id>2</a:id></r>"
+        }
+      ]
     }
   ]
 }
