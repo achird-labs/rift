@@ -131,6 +131,29 @@ fn imposter_action(method: &Method) -> &'static str {
 /// ```
 #[must_use]
 pub fn classify(method: &Method, path: &str) -> Option<AuthzTarget> {
+    let mut target = classify_route(method, path)?;
+    // `OPTIONS` runs no handler; it reports which methods the route answers (issue #1456). That is
+    // a read of the route's family, whatever the route's own methods do.
+    if method == Method::OPTIONS {
+        target.action = read_action(target.action);
+    }
+    Some(target)
+}
+
+/// The read action of the family `action` belongs to. An action this does not know stays as it
+/// is: the stricter answer.
+fn read_action(action: &'static str) -> &'static str {
+    match action {
+        actions::SYSTEM_WRITE => actions::SYSTEM_READ,
+        actions::INTERCEPT_WRITE => actions::INTERCEPT_READ,
+        actions::IMPOSTER_WRITE | actions::IMPOSTER_DELETE | actions::IMPOSTER_VERIFY => {
+            actions::IMPOSTER_READ
+        }
+        other => other,
+    }
+}
+
+fn classify_route(method: &Method, path: &str) -> Option<AuthzTarget> {
     // Belt-and-braces, and deliberately kept as such: `/__rift/...` matches none of the branches
     // below, so today it would fall through to `None` without this. It is here so that a future
     // catch-all or broadened branch cannot silently start authorizing gateway traffic — that is
@@ -448,6 +471,26 @@ mod tests {
             action_of(Method::PUT, "/intercept/rules"),
             Some(actions::INTERCEPT_WRITE)
         );
+    }
+
+    #[test]
+    fn options_is_a_read_of_the_routes_family() {
+        let cases = [
+            ("/imposters", actions::IMPOSTER_READ),
+            ("/imposters/4545", actions::IMPOSTER_READ),
+            ("/imposters/4545/enable", actions::IMPOSTER_READ),
+            ("/imposters/4545/verify", actions::IMPOSTER_READ),
+            ("/imposters/4545/scenarios/s/state", actions::IMPOSTER_READ),
+            ("/admin/reload", actions::SYSTEM_READ),
+            ("/intercept/rules", actions::INTERCEPT_READ),
+            ("/events", actions::EVENTS_READ),
+        ];
+        for (path, action) in cases {
+            assert_eq!(action_of(Method::OPTIONS, path), Some(action), "{path}");
+        }
+        let scoped = classify(&Method::OPTIONS, "/imposters/4545/stubs/0").unwrap();
+        assert_eq!(scoped.port, Some(4545));
+        assert!(scoped.params.contains(&("stubIndex", "0".to_string())));
     }
 
     #[test]

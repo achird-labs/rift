@@ -38,7 +38,8 @@ pub enum RouteFamily {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AdminRoute {
-    /// The one method this entry dispatches. No route is dispatched for `HEAD`.
+    /// The one method this entry dispatches. `HEAD` and `OPTIONS` are never listed: every path
+    /// answers them, derived from this table — `HEAD` wherever `GET` is listed (issue #1456).
     pub method: Method,
     /// The path, with each parameter in braces under the name [`super::authz::classify`] reports its
     /// value by in `AuthzTarget::params`: `{port}`, `{space}`, `{stubIndex}`, `{stubId}`,
@@ -358,6 +359,39 @@ mod tests {
             actions::INTERCEPT_WRITE,
         ]);
         assert_eq!(reached, every_action);
+    }
+
+    /// The drift test (issue #1456): every path in the table resolves, through the router's own
+    /// parsers, to exactly the methods listed for it, plus `HEAD` wherever `GET` is listed.
+    ///
+    /// What it does not catch, and what does: a dispatch arm with no table entry is unreachable,
+    /// because dispatch refuses any method `allowed_methods` does not return, so it answers 404
+    /// (fails safe) rather than serving an unlisted route. A table entry with no arm fails
+    /// `every_table_entry_is_dispatched` in `tests/admin_routes.rs`. A new `ImposterRoute` variant
+    /// does not compile until `ImposterRoute::template` names it.
+    #[test]
+    fn every_table_path_allows_exactly_its_listed_methods() {
+        use crate::admin_api::router::allowed_methods;
+        for entry in ADMIN_ROUTES {
+            let mut listed: Vec<&str> = ADMIN_ROUTES
+                .iter()
+                .filter(|r| r.path == entry.path)
+                .map(|r| r.method.as_str())
+                .collect();
+            if listed.contains(&"GET") {
+                listed.push("HEAD");
+            }
+            listed.sort_unstable();
+            let allowed = allowed_methods(&sample(entry.path))
+                .unwrap_or_else(|| panic!("{} does not resolve", entry.path));
+            let allowed: Vec<&str> = allowed.iter().map(Method::as_str).collect();
+            assert_eq!(allowed, listed, "{}", entry.path);
+        }
+        assert_eq!(allowed_methods("/nope"), None);
+        assert_eq!(allowed_methods("/imposters/4545/nope"), None);
+        assert_eq!(allowed_methods("/__rift/4545/orders"), None);
+        assert_eq!(allowed_methods("/imposters/"), None);
+        assert_eq!(allowed_methods("/imposters//stubs"), None);
     }
 
     #[test]

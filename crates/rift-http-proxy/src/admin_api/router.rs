@@ -3,14 +3,16 @@
 //! This module provides routing
 
 use crate::admin_api::handlers::{imposters, intercept, scenarios, stubs, system};
-use crate::admin_api::types::{error_response, get_base_url, not_found};
+use crate::admin_api::routes::ADMIN_ROUTES;
+use crate::admin_api::types::{error_response, get_base_url, json_response, not_found};
 use crate::front_door::FrontDoorRoutes;
 use crate::imposter::ImposterManager;
 use crate::intercept_control::InterceptControl;
 use crate::sources::ReloadSource;
 use bytes::Bytes;
 use http_body_util::Full;
-use hyper::body::Incoming;
+use hyper::body::{Body, Incoming};
+use hyper::header::{ALLOW, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, X_CONTENT_TYPE_OPTIONS};
 use hyper::{Method, Request, Response, StatusCode};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -69,12 +71,128 @@ impl ImposterRoute {
             _ => None,
         }
     }
+
+    /// The [`ADMIN_ROUTES`] path this route is listed under. No wildcard: a new variant does not
+    /// compile until it names its entry, and `allowed_methods` then reads its methods from there.
+    fn template(&self) -> &'static str {
+        match self {
+            ImposterRoute::Root => "/imposters/{port}",
+            ImposterRoute::Stubs => "/imposters/{port}/stubs",
+            ImposterRoute::StubByIndex(_) => "/imposters/{port}/stubs/{stubIndex}",
+            ImposterRoute::StubById(_) => "/imposters/{port}/stubs/by-id/{stubId}",
+            // `/requests` is listed with the same methods as this spelling; a routes test pins that.
+            ImposterRoute::SavedRequests => "/imposters/{port}/savedRequests",
+            ImposterRoute::Verify => "/imposters/{port}/verify",
+            ImposterRoute::SavedProxyResponses => "/imposters/{port}/savedProxyResponses",
+            ImposterRoute::Enable => "/imposters/{port}/enable",
+            ImposterRoute::Disable => "/imposters/{port}/disable",
+            ImposterRoute::Scenarios => "/imposters/{port}/scenarios",
+            ImposterRoute::ScenarioState(_) => "/imposters/{port}/scenarios/{scenario}/state",
+            ImposterRoute::ScenariosReset => "/imposters/{port}/scenarios/reset",
+            ImposterRoute::Space(_) => "/imposters/{port}/spaces/{space}",
+            ImposterRoute::SpaceStubs(_) => "/imposters/{port}/spaces/{space}/stubs",
+        }
+    }
+}
+
+/// The [`ADMIN_ROUTES`] path a request path names, resolved by the same parsers dispatch uses.
+fn template_of(path: &str) -> Option<&'static str> {
+    if let Some(entry) = ADMIN_ROUTES
+        .iter()
+        .find(|r| r.path == path && !r.path.contains('{'))
+    {
+        return Some(entry.path);
+    }
+    if let Some(rest) = path.strip_prefix("/admin/imposters/") {
+        // Filtered exactly as `route_admin_flow_state` filters.
+        let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        return match segments.as_slice() {
+            [port, "flow-state", _] if port.parse::<u16>().is_ok() => {
+                Some("/admin/imposters/{port}/flow-state/{space}")
+            }
+            [port, "flow-state", _, _] if port.parse::<u16>().is_ok() => {
+                Some("/admin/imposters/{port}/flow-state/{space}/{key}")
+            }
+            _ => None,
+        };
+    }
+    let rest = path.strip_prefix("/imposters/")?;
+    // Split exactly as `route_imposter` does. The id is not parsed: any id names the route, and
+    // one that is not a port names an absent imposter.
+    let segments: Vec<&str> = rest.split('/').collect();
+    // An empty id (`/imposters/`, `/imposters//stubs`) names no imposter route. Mountebank reads
+    // `/imposters/` as the collection; that trailing-slash parity is #1481. Until then it is the
+    // unknown-route 404, never a per-imposter answer (a silent `DELETE` `200 {}`).
+    if segments[0].is_empty() {
+        return None;
+    }
+    if segments[1..] == ["savedRequests", "stream"] {
+        return Some("/imposters/{port}/savedRequests/stream");
+    }
+    ImposterRoute::parse(&segments[1..]).map(|route| route.template())
+}
+
+/// The methods a path answers, sorted, with `HEAD` wherever `GET` is listed: Express's automatic
+/// `HEAD`, and the set its automatic `OPTIONS` reports (issue #1456). `None` when no route matches.
+///
+/// Read from [`ADMIN_ROUTES`], and [`route_request`] dispatches nothing outside it, so the table
+/// and what the listener serves cannot drift apart.
+pub(crate) fn allowed_methods(path: &str) -> Option<Vec<Method>> {
+    let template = template_of(path)?;
+    let mut methods: Vec<Method> = ADMIN_ROUTES
+        .iter()
+        .filter(|r| r.path == template)
+        .map(|r| r.method.clone())
+        .collect();
+    if methods.contains(&Method::GET) {
+        methods.push(Method::HEAD);
+    }
+    methods.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+    Some(methods)
+}
+
+/// Express 5's automatic `OPTIONS` answer, as Mountebank 2.9.5 sends it.
+fn options_response(methods: &[Method]) -> Response<Full<Bytes>> {
+    let allow = methods
+        .iter()
+        .map(Method::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Method names are header-safe tokens, so this fails only if the table holds a broken one.
+    let allow_header = match HeaderValue::from_str(&allow) {
+        Ok(value) => value,
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("route table method list {allow:?} is not a header value: {e}"),
+            );
+        }
+    };
+    let mut response = Response::new(Full::new(Bytes::from(allow)));
+    let headers = response.headers_mut();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(ALLOW, allow_header);
+    response
+}
+
+/// A `GET` answer as `HEAD` sends it: every header, `Content-Length` the body's length, no body.
+fn without_body(response: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
+    let (mut parts, body) = response.into_parts();
+    if let Some(length) = body.size_hint().exact()
+        && !parts.headers.contains_key(CONTENT_LENGTH)
+    {
+        parts
+            .headers
+            .insert(CONTENT_LENGTH, HeaderValue::from(length));
+    }
+    Response::from_parts(parts, Full::new(Bytes::new()))
 }
 
 /// Main request router
 #[allow(clippy::too_many_arguments)]
 pub async fn route_request(
-    req: Request<Incoming>,
+    mut req: Request<Incoming>,
     manager: Arc<ImposterManager>,
     config_source: Option<ReloadSource>,
     front_door_routes: Option<FrontDoorRoutes>,
@@ -83,24 +201,90 @@ pub async fn route_request(
     scripts_dir: Option<Arc<PathBuf>>,
     config_snapshot: system::ConfigSnapshot,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
-    let method = req.method().clone();
+    let mut method = req.method().clone();
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(|s| s.to_string());
     let base_url = get_base_url(&req);
 
     debug!("Admin API: {} {}", method, path);
 
+    // Single-port gateway (issue #212): `/__rift/:port/<path>` dispatches to that imposter, so a
+    // containerized Rift only needs the one admin port published. It is data-plane traffic, so its
+    // `HEAD` and `OPTIONS` belong to the imposter's stubs, not to the automatic answers below.
+    if let Some(rest) = path.strip_prefix("/__rift/") {
+        return Ok(handle_gateway(rest, query.as_deref(), req, manager).await);
+    }
+
+    let is_intercept = path == "/intercept" || path.starts_with("/intercept/");
+    if is_intercept && intercept.is_none() {
+        return Ok(not_found());
+    }
+
+    // Express answers `HEAD` and `OPTIONS` on every route by itself (issue #1456), and nothing is
+    // dispatched that the route table does not list.
+    let Some(allowed) = allowed_methods(&path) else {
+        return Ok(not_found());
+    };
+    if method == Method::OPTIONS {
+        return Ok(options_response(&allowed));
+    }
+    if !allowed.contains(&method) {
+        return Ok(not_found());
+    }
+    let head = method == Method::HEAD;
+    if head {
+        method = Method::GET;
+        *req.method_mut() = Method::GET;
+    }
+    let response = dispatch(
+        &method,
+        &path,
+        query.as_deref(),
+        req,
+        &base_url,
+        manager,
+        config_source,
+        front_door_routes,
+        allow_injection,
+        intercept,
+        scripts_dir,
+        config_snapshot,
+    )
+    .await;
+    Ok(if head {
+        without_body(response)
+    } else {
+        response
+    })
+}
+
+/// Dispatch a request whose method the route table allows on its path.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch(
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    req: Request<Incoming>,
+    base_url: &str,
+    manager: Arc<ImposterManager>,
+    config_source: Option<ReloadSource>,
+    front_door_routes: Option<FrontDoorRoutes>,
+    allow_injection: bool,
+    intercept: Option<InterceptControl>,
+    scripts_dir: Option<Arc<PathBuf>>,
+    config_snapshot: system::ConfigSnapshot,
+) -> Response<Full<Bytes>> {
     // Intercept routes (epic #394 slice 4 + runtime lifecycle #493): reachable whenever the server
     // was built `with_intercept(...)`. The lifecycle verbs (`POST`/`GET`/`DELETE /intercept`)
     // operate on the shared control slot listener-or-not; the rule/CA sub-routes 404 until a
     // listener is running. Nothing else in `route_by_path` handles `/intercept`, so an unmatched
     // sub-path/method or a control-less server both fall through to the ordinary 404.
     if path == "/intercept" || path.starts_with("/intercept/") {
-        let resp = match intercept.as_ref() {
+        return match intercept.as_ref() {
             Some(control) => intercept::route(
-                &method,
-                &path,
-                query.as_deref(),
+                method,
+                path,
+                query,
                 req,
                 control,
                 allow_injection,
@@ -110,15 +294,14 @@ pub async fn route_request(
             .unwrap_or_else(not_found),
             None => not_found(),
         };
-        return Ok(resp);
     }
 
-    let response = route_by_path(
-        &method,
-        &path,
-        query.as_deref(),
+    route_by_path(
+        method,
+        path,
+        query,
         req,
-        &base_url,
+        base_url,
         manager,
         config_source,
         front_door_routes,
@@ -127,8 +310,7 @@ pub async fn route_request(
         scripts_dir,
         config_snapshot,
     )
-    .await;
-    Ok(response)
+    .await
 }
 
 /// Dispatch a `/__rift/:port/<path>` gateway request to the imposter on `:port` (issue #212).
@@ -160,12 +342,6 @@ async fn route_by_path(
     scripts_dir: Option<Arc<PathBuf>>,
     config_snapshot: system::ConfigSnapshot,
 ) -> Response<Full<Bytes>> {
-    // Single-port gateway (issue #212): `/__rift/:port/<path>` dispatches to that imposter,
-    // so a containerized Rift only needs the one admin port published.
-    if let Some(rest) = path.strip_prefix("/__rift/") {
-        return handle_gateway(rest, query, req, manager).await;
-    }
-
     // Fast path for common routes
     match (method, path) {
         (&Method::GET, "/") => return system::handle_root(base_url),
@@ -285,13 +461,18 @@ async fn route_imposter(
         return not_found();
     }
 
-    // Parse port
-    let port: u16 = match segments[0].parse() {
-        Ok(p) => p,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid port number"),
+    // An id that is not a port (`abc`, `70000`) cannot name an imposter, so it is answered as one
+    // that is absent, as Mountebank answers it (issue #1456) — before any handler or body parse.
+    // `route_request` has already resolved the rest of the path to a route that takes `method`.
+    let Ok(port) = segments[0].parse::<u16>() else {
+        // `allowed_methods` refuses an empty id, but this must not depend on being reached
+        // only through it.
+        if segments[0].is_empty() {
+            return not_found();
+        }
+        return absent_imposter(method, &segments[1..], segments[0]);
     };
 
-    // Parse remaining route
     let Some(route) = ImposterRoute::parse(&segments[1..]) else {
         return not_found();
     };
@@ -414,6 +595,18 @@ async fn route_imposter(
         }
 
         _ => not_found(),
+    }
+}
+
+/// What every per-imposter handler answers for a port with no imposter on it: `DELETE
+/// /imposters/:id` is `200 {}`, every other route the `404` an absent port gets.
+fn absent_imposter(method: &Method, rest: &[&str], id: &str) -> Response<Full<Bytes>> {
+    match (method, rest) {
+        (&Method::DELETE, []) => json_response(StatusCode::OK, &serde_json::json!({})),
+        _ => error_response(
+            StatusCode::NOT_FOUND,
+            &format!("Imposter not found on port {id}"),
+        ),
     }
 }
 
