@@ -126,6 +126,24 @@ larger than the whole budget (possible only with a budget set lower) is recorded
 and flagged `"_bodyOmitted": true`, never dropped.
 A cursor read past evicted entries reports it with `x-rift-truncated`.
 
+## Malformed XML for XPath
+
+Rift reads an XML body for `xpath` the way Mountebank's parser, xmldom 0.9, recovers from it (see
+[Predicates](predicates.md#xpath-predicates)), except in these cases:
+
+- A `<` followed by a letter that does not parse as a tag (`<a>x <b</a>`, `if (i<n)`) means no
+  document in Rift. Mountebank recovers it as text; Rift does not copy that, because reading a tag
+  that fails to parse as text would also turn a truncated or mismatched tag into a match.
+- After a stray end tag naming the root, any further tag (`<a></a></a><b/>`) means no document in
+  Rift. Mountebank yields the root there by surviving an internal TypeError, not by a rule; Rift
+  ignores only the stray end tag followed by text, comments and processing instructions.
+- A character reference to a lone surrogate or past U+10FFFF (`&#xD800;`, `&#99999999999;`) reads
+  as U+FFFD in Rift. Mountebank yields a lone surrogate, or garbage for an out-of-range number, which
+  a Rust string cannot hold; `exists` and `matches` agree, and an `equals` cannot target
+  Mountebank's value.
+- A `]` inside a quoted value in a DOCTYPE's internal subset (`<!DOCTYPE a [<!ENTITY x "]">]>`)
+  means no document in Rift, whose parser ends the subset there. Mountebank reads past it.
+
 ## keyCaseSensitive is honoured as written
 
 Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`. Three consequences:
