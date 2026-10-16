@@ -2470,5 +2470,93 @@
     "reason": "sxd_document ends a DOCTYPE's internal subset at a quoted `]`; Mountebank reads past it",
     "mountebank": "[v]",
     "rift": "[$A]"
+  },
+  {
+    "id": "xpath-case-fold/cdata/exists/status",
+    "case": "targeted: a case-insensitive xpath predicate still reads a CDATA or DOCTYPE body, which Mountebank's lowercasing makes unreadable (#1478)",
+    "location": "step[1].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A body with a CDATA section still matches a case-insensitive XPath predicate in Rift. In Mountebank it never matches: the lowercased `<![cdata[` is no document to xmldom.",
+    "reason": "Mountebank lowercases the whole body for a case-insensitive XPath predicate, which xmldom refuses for a CDATA section; Rift folds only names",
+    "mountebank": "200",
+    "rift": "201"
+  },
+  {
+    "id": "xpath-case-fold/cdata/exists/body",
+    "case": "targeted: a case-insensitive xpath predicate still reads a CDATA or DOCTYPE body, which Mountebank's lowercasing makes unreadable (#1478)",
+    "location": "step[1].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A body with a CDATA section still matches a case-insensitive XPath predicate in Rift. In Mountebank it never matches: the lowercased `<![cdata[` is no document to xmldom.",
+    "reason": "Mountebank lowercases the whole body for a case-insensitive XPath predicate, which xmldom refuses for a CDATA section; Rift folds only names",
+    "mountebank": "",
+    "rift": "exists"
+  },
+  {
+    "id": "xpath-case-fold/cdata/equals/status",
+    "case": "targeted: a case-insensitive xpath predicate still reads a CDATA or DOCTYPE body, which Mountebank's lowercasing makes unreadable (#1478)",
+    "location": "step[2].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A body with a CDATA section still matches a case-insensitive XPath predicate in Rift. In Mountebank it never matches: the lowercased `<![cdata[` is no document to xmldom.",
+    "reason": "Mountebank lowercases the whole body for a case-insensitive XPath predicate, which xmldom refuses for a CDATA section; Rift folds only names",
+    "mountebank": "200",
+    "rift": "201"
+  },
+  {
+    "id": "xpath-case-fold/cdata/equals/body",
+    "case": "targeted: a case-insensitive xpath predicate still reads a CDATA or DOCTYPE body, which Mountebank's lowercasing makes unreadable (#1478)",
+    "location": "step[2].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A body with a CDATA section still matches a case-insensitive XPath predicate in Rift. In Mountebank it never matches: the lowercased `<![cdata[` is no document to xmldom.",
+    "reason": "Mountebank lowercases the whole body for a case-insensitive XPath predicate, which xmldom refuses for a CDATA section; Rift folds only names",
+    "mountebank": "",
+    "rift": "equals"
+  },
+  {
+    "id": "xpath-case-fold/doctype/exists/status",
+    "case": "targeted: a case-insensitive xpath predicate still reads a CDATA or DOCTYPE body, which Mountebank's lowercasing makes unreadable (#1478)",
+    "location": "step[3].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A body with a DOCTYPE still matches a case-insensitive XPath predicate in Rift. In Mountebank it never matches: the lowercased `<!doctype` is no document to xmldom.",
+    "reason": "Mountebank lowercases the whole body for a case-insensitive XPath predicate, which xmldom refuses for a DOCTYPE; Rift folds only names",
+    "mountebank": "200",
+    "rift": "201"
+  },
+  {
+    "id": "xpath-case-fold/doctype/exists/body",
+    "case": "targeted: a case-insensitive xpath predicate still reads a CDATA or DOCTYPE body, which Mountebank's lowercasing makes unreadable (#1478)",
+    "location": "step[3].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A body with a DOCTYPE still matches a case-insensitive XPath predicate in Rift. In Mountebank it never matches: the lowercased `<!doctype` is no document to xmldom.",
+    "reason": "Mountebank lowercases the whole body for a case-insensitive XPath predicate, which xmldom refuses for a DOCTYPE; Rift folds only names",
+    "mountebank": "",
+    "rift": "exists"
+  },
+  {
+    "id": "xpath-case-fold/doctype/equals/status",
+    "case": "targeted: a case-insensitive xpath predicate still reads a CDATA or DOCTYPE body, which Mountebank's lowercasing makes unreadable (#1478)",
+    "location": "step[4].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A body with a DOCTYPE still matches a case-insensitive XPath predicate in Rift. In Mountebank it never matches: the lowercased `<!doctype` is no document to xmldom.",
+    "reason": "Mountebank lowercases the whole body for a case-insensitive XPath predicate, which xmldom refuses for a DOCTYPE; Rift folds only names",
+    "mountebank": "200",
+    "rift": "201"
+  },
+  {
+    "id": "xpath-case-fold/doctype/equals/body",
+    "case": "targeted: a case-insensitive xpath predicate still reads a CDATA or DOCTYPE body, which Mountebank's lowercasing makes unreadable (#1478)",
+    "location": "step[4].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A body with a DOCTYPE still matches a case-insensitive XPath predicate in Rift. In Mountebank it never matches: the lowercased `<!doctype` is no document to xmldom.",
+    "reason": "Mountebank lowercases the whole body for a case-insensitive XPath predicate, which xmldom refuses for a DOCTYPE; Rift folds only names",
+    "mountebank": "",
+    "rift": "equals"
   }
 ]

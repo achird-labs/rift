@@ -4829,6 +4829,343 @@
           "body": "<!DOCTYPE a [<!-- --> <!ENTITY x \"]\">]><a>v</a>"
         }
       ]
+    },
+    {
+      "name": "targeted: a case-insensitive xpath predicate matches element and attribute names without regard to case, as Mountebank does; matches does not (#1478)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/equals"
+                    }
+                  },
+                  {
+                    "equals": {
+                      "body": "1"
+                    },
+                    "xpath": {
+                      "selector": "//b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "equals"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/exists"
+                    }
+                  },
+                  {
+                    "exists": {
+                      "body": true
+                    },
+                    "xpath": {
+                      "selector": "//b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "exists"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/contains"
+                    }
+                  },
+                  {
+                    "contains": {
+                      "body": "1"
+                    },
+                    "xpath": {
+                      "selector": "//b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "contains"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/matches"
+                    }
+                  },
+                  {
+                    "matches": {
+                      "body": "1"
+                    },
+                    "xpath": {
+                      "selector": "//b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "matches"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/attr"
+                    }
+                  },
+                  {
+                    "equals": {
+                      "body": "7"
+                    },
+                    "xpath": {
+                      "selector": "//a/@id"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "attr"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/ns"
+                    }
+                  },
+                  {
+                    "equals": {
+                      "body": "1"
+                    },
+                    "xpath": {
+                      "selector": "//x:B",
+                      "ns": {
+                        "x": "urn:X"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "ns"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/soap"
+                    }
+                  },
+                  {
+                    "exists": {
+                      "body": true
+                    },
+                    "xpath": {
+                      "selector": "//*[local-name()='Envelope']/*[local-name()='Body']"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "soap"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/equals",
+          "body": "<A><B>1</B></A>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/exists",
+          "body": "<A><B>1</B></A>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/contains",
+          "body": "<A><B>1</B></A>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/matches",
+          "body": "<A><B>1</B></A>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/attr",
+          "body": "<a Id=\"7\"/>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/ns",
+          "body": "<x:A xmlns:x=\"urn:X\"><x:B>1</x:B></x:A>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/soap",
+          "body": "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><GetPrice>1</GetPrice></soap:Body></soap:Envelope>"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a case-insensitive xpath predicate still reads a CDATA or DOCTYPE body, which Mountebank's lowercasing makes unreadable (#1478)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/exists"
+                    }
+                  },
+                  {
+                    "exists": {
+                      "body": true
+                    },
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "exists"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/equals"
+                    }
+                  },
+                  {
+                    "equals": {
+                      "body": "xy"
+                    },
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "equals"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/exists",
+          "body": "<a><![CDATA[xy]]></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/equals",
+          "body": "<a><![CDATA[xy]]></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/exists",
+          "body": "<!DOCTYPE a><a>xy</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/equals",
+          "body": "<!DOCTYPE a><a>xy</a>"
+        }
+      ]
     }
   ]
 }

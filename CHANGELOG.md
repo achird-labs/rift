@@ -87,6 +87,14 @@ record.
 
 ### Fixed
 
+- **A case-insensitive XPath predicate ignores the case of names, as in Mountebank** (#1478).
+  With `caseSensitive` false (the default), `equals`, `deepEquals`, `contains`, `startsWith`,
+  `endsWith` and `exists` select from a lowercased view of the body with a lowercased selector and
+  `ns` map, as Mountebank does, so `//b` now selects `<B>` and `//a/@id` selects `Id="7"`; they used
+  to select nothing. `matches`, `copy`, `lookup` and `caseSensitive: true` select from the body as
+  written. Mountebank's lowercasing makes a CDATA or DOCTYPE body unreadable to it; Rift keeps those
+  markers and still reads them, and also lowercases `ns` prefixes, as listed in
+  [Differences from Mountebank](docs/mountebank/differences.md#case-insensitive-xpath).
 - **XPath reads seven more kinds of malformed XML the way Mountebank's xmldom recovers them**
   (#1479). Text before the root element is ignored, as is one stray end tag naming the root after
   it; a `<` that opens no tag (`1 < 2`) and a `]]>` read as text; a character reference pair to a

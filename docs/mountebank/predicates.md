@@ -353,6 +353,13 @@ stray end tag still means no document. See
 [Differences from Mountebank](differences.md#malformed-xml-for-xpath) for the recoveries Rift does
 not copy.
 
+Unless the predicate sets `"caseSensitive": true`, an XPath predicate ignores case, as in
+Mountebank: the body, the selector (string literals included) and the `ns` map are compared in
+lower case, so `//b` selects `<B>`, `//a/@id` selects `Id="7"`, and
+`//*[local-name()='Envelope']` selects `<soap:Envelope>`. `matches` selects from the body as
+written, as in Mountebank. See
+[Differences from Mountebank](differences.md#case-insensitive-xpath) for where this differs.
+
 ### XPath with Namespaces
 
 ```json

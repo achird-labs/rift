@@ -37,7 +37,7 @@ pub use extraction::{
     extract_xpath_with_ns,
 };
 pub(crate) use extraction::{
-    LazyJson, LazyXmlDom, Selection, json_node_text, jsonpath_selection,
+    LazyJson, LazyXmlDom, Selection, fold_xpath_selector, json_node_text, jsonpath_selection,
     validate_jsonpath_selector, validate_xpath_selector, xpath_selection, xpath_selection_in,
 };
 pub(crate) use lookup::apply_lookup_spliced;
