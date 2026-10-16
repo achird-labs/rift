@@ -6424,6 +6424,161 @@
           "body": "<r xmlns:a=\"urn:a\"><a:id>2</a:id></r>"
         }
       ]
+    },
+    {
+      "name": "targeted: a recorded deepEquals query predicate refuses an extra parameter, so the request is forwarded again (#1329)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "function (config) { return { statusCode: 200, body: 'upstream saw ' + config.request.method + ' ' + config.request.path + ' ' + config.request.body }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "path": true,
+                            "query": true
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/q?a=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/q?a=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/q?a=1&b=2"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/q?a=1&b=2"
+        }
+      ]
+    },
+    {
+      "name": "targeted: proxyOnce with a body predicateGenerator records on a miss and replays a repeat (#1333)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "function (config) { return { statusCode: 200, body: 'upstream saw ' + config.request.method + ' ' + config.request.path + ' ' + config.request.body }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "body": true
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/b",
+          "body": "one"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/b",
+          "body": "two"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/b",
+          "body": "two"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/b",
+          "body": "one"
+        }
+      ]
     }
   ]
 }
