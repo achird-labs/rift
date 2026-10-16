@@ -163,9 +163,9 @@ pub trait FlowStoreProvider: Send + Sync {
 
 /// No-op flow store that does nothing
 ///
-/// This is used when flow_state is not configured but scripts are enabled.
-/// Scripts that attempt to use flow state operations will get empty/default values.
-/// Note: This is intentionally stateless - it's meant for scripts that don't rely on state.
+/// A test/standalone double: `set` keeps nothing and `get` finds nothing. It is never selected
+/// for an imposter (issue #1504) because the admin API and FFI write the store directly; it stays
+/// public for embedders and scripting tests that need a store with no state.
 #[derive(Debug)]
 pub struct NoOpFlowStore;
 

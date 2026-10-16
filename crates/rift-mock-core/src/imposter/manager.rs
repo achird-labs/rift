@@ -5090,10 +5090,10 @@ mod tests {
             manager.delete_all().await;
         }
 
-        // AC4: with no provider, a NoOp-eligible plain imposter is still NoOp — the caveat
-        // stands without a provider, i.e. behavior is byte-for-byte unchanged.
+        // Issue #1504: with no provider, a plain imposter still gets a real default in-memory
+        // store, so a scenario stub added later advances (it used to stay stuck on a no-op store).
         #[tokio::test]
-        async fn no_provider_leaves_late_added_scenario_stuck() {
+        async fn no_provider_late_added_scenario_advances_on_default_store() {
             let manager = ImposterManager::new();
             let port_0 = manager
                 .create_imposter(imposter_cfg(json!({
@@ -5118,8 +5118,8 @@ mod tests {
                 .expect("transition");
             assert_eq!(
                 imposter.scenario_state("f", "order").expect("state"),
-                "Started",
-                "without a provider the NoOp caveat is preserved (unchanged behavior)"
+                "paid",
+                "without a provider the default in-memory store lets a late-added scenario advance"
             );
 
             manager.delete_all().await;

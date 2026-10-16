@@ -54,9 +54,8 @@ removed, so it selects nothing.
 
 **Fail-loud errors**: a non-positive `ttlSeconds` fails imposter creation with `400 Bad Request`. See
 [Flow State → Invalid flowState is fail-loud]({{ site.baseurl }}/features/flow-state/#invalid-flowstate-is-fail-loud)
-for details. With no `flowState` block, an imposter that has a script, scenario or `stateOps` stub
-gets an in-memory store auto-provisioned (with a warning); only an imposter with no state surface at
-all uses a no-op store.
+for details. With no `flowState` block, every imposter gets an in-memory store at the default TTL
+(300 s); a script or `stateOps` stub also logs a warning that the state does not survive a restart.
 
 ---
 
