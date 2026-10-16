@@ -541,9 +541,11 @@ impl ImposterManager {
     /// Without one, imposters keep the embedded per-stub cycler (today's hot path,
     /// untouched). `reset_scope` fires on stub delete — direct or via an `apply_config`
     /// patch — (that stub's key), bulk stub replace, and imposter teardown (port-wide,
-    /// the GC hook). A single in-place stub replace deliberately does NOT reset: the slot
-    /// survives, so slot-keyed cursors keep cycling; a `stub_key`-keyed backend whose key
-    /// changed with the content keeps the old key's cursor until port teardown reclaims it.
+    /// the GC hook) — and on a stub replace by index (that stub's old key), which restarts the
+    /// stub's cycle as Mountebank's `overwriteAtIndex` does (#1515). A replace by id deliberately
+    /// does NOT reset: the slot survives, so slot-keyed cursors keep cycling; a `stub_key`-keyed
+    /// backend whose key changed with the content keeps the old key's cursor until port teardown
+    /// reclaims it.
     #[must_use]
     pub fn with_sequencer(mut self, sequencer: Arc<dyn ResponseSequencer>) -> Self {
         self.sequencer = Some(sequencer);
@@ -2163,7 +2165,19 @@ impl ImposterManager {
         stub: Stub,
     ) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
+        // An index-addressed replace restarts the stub's cycle, as Mountebank's
+        // `overwriteAtIndex` does (#1515); the old key's cursor goes with it, as on a delete.
+        let replaced_key = if self.sequencer.is_some() {
+            imposter
+                .get_stub(index)
+                .map(|stub| crate::imposter::reconcile::stub_key(&stub, 0))
+        } else {
+            None
+        };
         imposter.replace_stub(index, stub)?;
+        if let (Some(sequencer), Some(key)) = (&self.sequencer, replaced_key) {
+            sequencer.reset_scope(port, Some(&key));
+        }
         self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
@@ -5436,6 +5450,71 @@ mod tests {
                     {"is": {"statusCode": 200, "body": "two"}}
                 ]
             })
+        }
+
+        fn stub_from(value: serde_json::Value) -> Stub {
+            serde_json::from_value(value).expect("stub")
+        }
+
+        async fn cycle_bodies(port: u16, n: usize) -> Vec<String> {
+            let mut bodies = Vec::new();
+            for _ in 0..n {
+                bodies.push(
+                    reqwest::get(format!("http://127.0.0.1:{port}/cycle"))
+                        .await
+                        .expect("request")
+                        .text()
+                        .await
+                        .expect("body"),
+                );
+            }
+            bodies
+        }
+
+        // #1515: a replace by index restarts the stub's cycle through the sequencer too: it
+        // resets the old key's scope, and the new slot starts from the first response.
+        #[tokio::test]
+        async fn replace_stub_by_index_resets_the_sequencer_scope() {
+            let (recorder, manager) = manager_with_recorder();
+            let port = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "stubs": [cycling_stub_json()]
+                })))
+                .await
+                .expect("create");
+            assert_eq!(cycle_bodies(port, 2).await, ["one", "one"]);
+            manager
+                .replace_stub(port, 0, stub_from(cycling_stub_json()))
+                .await
+                .expect("replace");
+            assert!(
+                recorder
+                    .resets
+                    .lock()
+                    .contains(&(port, Some("s1".to_string()))),
+                "the old key's scope is reset"
+            );
+            assert_eq!(cycle_bodies(port, 3).await, ["one", "one", "two"]);
+            manager.delete_all().await;
+        }
+
+        #[tokio::test]
+        async fn replace_stub_by_id_keeps_the_sequencer_scope() {
+            let (recorder, manager) = manager_with_recorder();
+            let port = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "stubs": [cycling_stub_json()]
+                })))
+                .await
+                .expect("create");
+            assert_eq!(cycle_bodies(port, 2).await, ["one", "one"]);
+            manager
+                .replace_stub_by_id(port, "s1", stub_from(cycling_stub_json()))
+                .await
+                .expect("replace");
+            assert!(recorder.resets.lock().is_empty(), "no reset by id");
+            assert_eq!(cycle_bodies(port, 1).await, ["two"]);
+            manager.delete_all().await;
         }
 
         // AC2: an injected sequencer receives the correct key parts and repeats, and its

@@ -443,6 +443,23 @@ impl StubState {
         }
     }
 
+    /// This stub with a fresh response cycle (#1515): the same content, content hash, load stamp
+    /// and recorded claim, but a new cycler and a new slot, so neither the embedded cursor nor a
+    /// sequencer keyed by slot carries over. In-flight requests holding the old state advance the
+    /// old cycler, never the new one.
+    #[must_use]
+    pub(crate) fn with_fresh_cycle(&self) -> Self {
+        Self {
+            stub: self.stub.clone(),
+            cycler: Arc::new(RuleCycler::new()),
+            slot: NEXT_STUB_SLOT.fetch_add(1, Ordering::Relaxed),
+            content_hash: self.content_hash.clone(),
+            loaded_at: self.loaded_at,
+            recorded_claim: self.recorded_claim.clone(),
+            cycle: None,
+        }
+    }
+
     /// [`with_stub`](Self::with_stub) for a stub whose content hash the caller already computed.
     #[must_use]
     pub(crate) fn with_stub_hashed(&self, stub: Stub, hash: u64) -> Self {
@@ -1611,9 +1628,9 @@ mod tests {
     }
 
     #[test]
-    fn replace_stub_preserves_response_cursor() {
-        // Gate for #287: the index-based in-place replace reuses the slot's cycler (via
-        // `with_stub`), so the response cursor survives a content swap rather than resetting.
+    fn replace_stub_restarts_the_response_cycle() {
+        // #1515: a replace by index is Mountebank's `overwriteAtIndex`, which rewraps the stub, so
+        // the new content starts its cycle over (it used to inherit the old cursor, #287).
         let cfg = serde_json::from_value(json!({
             "port": 0, "protocol": "http",
             "stubs": [{
@@ -1638,9 +1655,43 @@ mod tests {
         imp.replace_stub(0, new).expect("index in bounds");
         assert_eq!(
             served_body(&imp.snapshot().stubs()[0]),
-            "D",
-            "cursor (index 1) preserved and content swapped"
+            "C",
+            "cycle restarted"
         );
+    }
+
+    #[test]
+    fn replace_stub_with_identical_content_restarts_the_cycle() {
+        let stub = json!({
+            "predicates": [{ "equals": { "path": "/c" } }],
+            "responses": [
+                { "is": { "statusCode": 200, "body": "A" } },
+                { "is": { "statusCode": 200, "body": "B" } },
+                { "is": { "statusCode": 200, "body": "C" } }
+            ]
+        });
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http", "stubs": [stub.clone()]
+        }))
+        .unwrap();
+        let imp = Imposter::new(cfg).expect("test imposter");
+        let before = imp.snapshot().stubs()[0].clone();
+        assert_eq!(served_body(&before), "A");
+        assert_eq!(served_body(&before), "B");
+        imp.replace_stub(0, serde_json::from_value(stub).unwrap())
+            .expect("index in bounds");
+        let after = imp.snapshot().stubs()[0].clone();
+        assert_ne!(
+            after.slot, before.slot,
+            "a new slot, so slot-keyed cursors restart"
+        );
+        assert_eq!(
+            after.loaded_at(),
+            before.loaded_at(),
+            "#1294: identical content keeps its stamp"
+        );
+        let served: Vec<String> = (0..3).map(|_| served_body(&after)).collect();
+        assert_eq!(served, ["A", "B", "C"], "Mountebank: `A B · A B C`");
     }
 
     #[test]

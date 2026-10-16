@@ -864,7 +864,8 @@ pub unsafe extern "C" fn rift_get_stub(
 }
 
 /// Update (replace) a stub addressed by ref (`{"index":N}` or `{"id":"..."}`) with `stub_json`.
-/// Returns `0` on success, `-1` on any error.
+/// Returns `0` on success, `-1` on any error. `{"index":N}` restarts the stub's response cycle,
+/// even when the new stub is identical, as Mountebank does; `{"id":"..."}` keeps it.
 ///
 /// # Safety
 /// `h` must be a live handle (or null); `ref_json`/`stub_json` must be null or valid C strings.
