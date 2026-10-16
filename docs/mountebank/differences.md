@@ -176,6 +176,14 @@ the document stays readable (see [Predicates](predicates.md#xpath-predicates)). 
 - Rift lowercases ASCII letters only, as every case-insensitive comparison in Rift does; Mountebank
   lowercases any letter.
 
+## An XPath selector that returns a string
+
+An XPath selector that evaluates to a string, such as `string(//a)`, works in Rift's predicates and `copy`. Mountebank fails the request with a `500` `TypeError` (`result.map is not a function`): its XPath code handles node sets only.
+
+Rift keeps it because it is the way to read an element's whole text: a selector that selects an
+element reads, as in Mountebank, only the element's first child node (see
+[XPath predicates](predicates.md#xpath-predicates)).
+
 ## keyCaseSensitive is honoured as written
 
 Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`. Three consequences:

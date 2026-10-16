@@ -93,3 +93,63 @@ fn script_run_fail_twice_attempts_1_fails_with_503() {
     assert!(stdout.contains("http(503)"), "stdout: {stdout}");
     assert!(stdout.contains("attempts"), "state dump missing: {stdout}");
 }
+
+fn run_script(args: &[&str]) -> (bool, String, String) {
+    let output = Command::new(support::server_bin())
+        .args(["script", "run"])
+        .args(args)
+        .output()
+        .expect("run rift script run");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+// Issue #1506: `--flow-id` names the flow the script runs under: `ctx.flowId`, and the id the
+// `--state` seed is read back under.
+#[test]
+fn script_run_flow_id_sets_ctx_flow_id() {
+    let flow = fixture("flow-id.rhai");
+    let (ok, stdout, stderr) = run_script(&[flow.to_str().expect("utf-8"), "--flow-id", "f9"]);
+    assert!(ok, "stdout: {stdout}, stderr: {stderr}");
+    assert!(stdout.contains("body=\"flow=f9\""), "stdout: {stdout}");
+}
+
+#[test]
+fn script_run_flow_id_reads_the_seeded_state_under_that_flow() {
+    let script = fixture("incr-state.rhai");
+    let (ok, stdout, stderr) = run_script(&[
+        script.to_str().expect("utf-8"),
+        "--state",
+        "n=5",
+        "--flow-id",
+        "f9",
+    ]);
+    assert!(ok, "stdout: {stdout}, stderr: {stderr}");
+    assert!(stdout.contains("body=\"n=6\""), "stdout: {stdout}");
+    assert!(stdout.contains("n = 6"), "stdout: {stdout}");
+}
+
+// Issue #1506: a file whose extension names no engine is refused until `--engine` says which.
+#[test]
+fn script_run_unknown_extension_needs_engine() {
+    let script = fixture("js-body.txt");
+    let script = script.to_str().expect("utf-8");
+    let (ok, stdout, stderr) = run_script(&[script]);
+    assert!(!ok, "expected non-zero exit, stdout: {stdout}");
+    assert!(
+        stderr.contains("cannot infer script engine"),
+        "stderr: {stderr}"
+    );
+}
+
+#[cfg(feature = "javascript")]
+#[test]
+fn script_run_engine_js_runs_a_file_with_no_engine_extension() {
+    let script = fixture("js-body.txt");
+    let (ok, stdout, stderr) = run_script(&[script.to_str().expect("utf-8"), "--engine", "js"]);
+    assert!(ok, "stdout: {stdout}, stderr: {stderr}");
+    assert!(stdout.contains("body=\"js-engine\""), "stdout: {stdout}");
+}

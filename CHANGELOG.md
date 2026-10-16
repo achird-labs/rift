@@ -13,6 +13,15 @@ record.
 
 ### Changed
 
+- **An XPath selector that selects an element now reads its first child node, as Mountebank does**
+  (#1495), rather than all of the element's text. `//a` on `<a>x<b/>y</a>` reads `x`; an element
+  that is empty or starts with an element reads as the string `undefined`, so `exists: true` now
+  holds for `<a/>`; a pretty-printed container reads its leading whitespace. This applies to
+  predicates, `copy`, `lookup` and `predicateGenerators`, so recordings now match Mountebank's. A run
+  of text and references (`x&amp;y`) is one text node and an empty CDATA section none, so `text()`
+  and `count()` see Mountebank's nodes. To match an element's whole text, use `string(//a)` (Rift
+  only; Mountebank fails the request).
+
 - **The admin API's own 404 is Express's HTML page, as in Mountebank** (#1493). A request no route
   takes (an unknown path, or a known path with a method it lacks, such as `POST /config`) used to
   answer the JSON error envelope; it now answers `finalhandler`'s `Cannot POST /config` page with
@@ -25,6 +34,11 @@ record.
   below 49152.
 
 ### Fixed
+
+- **`--intercept-ca-cert-pem` and `--intercept-ca-key-pem` accept the PEM as a separate argument**
+  (#1506). `--intercept-ca-cert-pem "$(cat ca.pem)"` was refused with exit 2, because the value
+  starts with `-----` and was read as a flag; only `--flag=value` and the environment variables
+  worked.
 
 - **On macOS an auto-assigned imposter could share its port with another process's loopback
   listener and lose its traffic to it** (#1501). The old scan probed each port with

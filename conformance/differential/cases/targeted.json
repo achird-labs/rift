@@ -5698,6 +5698,557 @@
       ]
     },
     {
+      "name": "targeted: an XPath predicate reads an element as its first child node, \"undefined\" when it has none (#1495)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/empty"
+                    }
+                  },
+                  {
+                    "equals": {
+                      "body": "undefined"
+                    },
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "empty-undefined"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/exists"
+                    }
+                  },
+                  {
+                    "exists": {
+                      "body": true
+                    },
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "exists"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/mixed"
+                    }
+                  },
+                  {
+                    "equals": {
+                      "body": "x"
+                    },
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "mixed-first-text"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/contains"
+                    }
+                  },
+                  {
+                    "contains": {
+                      "body": "y"
+                    },
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "contains-y"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/deep"
+                    }
+                  },
+                  {
+                    "deepEquals": {
+                      "body": [
+                        "1",
+                        "undefined"
+                      ]
+                    },
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "deep"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/ref-cs"
+                    }
+                  },
+                  {
+                    "equals": {
+                      "body": "x&y"
+                    },
+                    "xpath": {
+                      "selector": "//a"
+                    },
+                    "caseSensitive": true
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ref-cs"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/ref"
+                    }
+                  },
+                  {
+                    "equals": {
+                      "body": "x&y"
+                    },
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ref"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/nested"
+                    }
+                  },
+                  {
+                    "equals": {
+                      "body": "undefined"
+                    },
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "nested-undefined"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/empty",
+          "body": "<a/>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/exists",
+          "body": "<a/>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/mixed",
+          "body": "<a>x<b/>y</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/contains",
+          "body": "<a>x<b/>y</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/deep",
+          "body": "<r><a>1</a><a/></r>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/ref-cs",
+          "body": "<a>x&amp;y</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/ref",
+          "body": "<a>x&amp;y</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/nested",
+          "body": "<a><b/>y</a>"
+        }
+      ]
+    },
+    {
+      "name": "targeted: copy reads an XPath-selected element as its first child node (#1495)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/first"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "[$V]"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$V",
+                          "using": {
+                            "method": "xpath",
+                            "selector": "//a"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/indexed"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "[$V[0]][$V[1]]"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$V",
+                          "using": {
+                            "method": "xpath",
+                            "selector": "//a"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/text"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "[$V]"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "$V",
+                          "using": {
+                            "method": "xpath",
+                            "selector": "//a/text()"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/first",
+          "body": "<r><a>1</a><a/></r>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/first",
+          "body": "<r><a/><a>1</a></r>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/indexed",
+          "body": "<r><a>1</a><a/></r>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/first",
+          "body": "<a>x<b/>y</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/first",
+          "body": "<a>\n  <b>v</b>\n</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/first",
+          "body": "<a><!--c-->x</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/text",
+          "body": "<a>x&amp;y</a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/first",
+          "body": "<a><![CDATA[p]]>q</a>"
+        },
+          {
+            "do": "send",
+            "port": 4545,
+            "method": "POST",
+            "path": "/text",
+            "body": "<a>x<![CDATA[]]>y</a>"
+          }
+      ]
+    },
+    {
+      "name": "targeted: an XPath predicateGenerator records Mountebank's node value, \"undefined\" for an empty element (#1495)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "up"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyAlways",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "body": true
+                          },
+                          "xpath": {
+                            "selector": "//a"
+                          }
+                        },
+                        {
+                          "matches": {
+                            "body": true
+                          },
+                          "xpath": {
+                            "selector": "//b"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<r><a>xy</a><b/></r>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<r><a>k<c/></a><b>\n <c/>\n</b></r>"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a string() XPath selector works in Rift, where Mountebank fails the request with a TypeError (#1495)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "t"
+                    },
+                    "xpath": {
+                      "selector": "string(//a)"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a>t</a>"
+        }
+      ]
+    },
+    {
       "name": "targeted: a request no admin route takes gets Express's finalhandler 404 page, a handler 404 stays JSON (#1493)",
       "steps": [
         {
