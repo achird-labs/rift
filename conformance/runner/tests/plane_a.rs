@@ -26,7 +26,8 @@ use futures::FutureExt as _;
 use regex::Regex;
 use rift_conformance_runner::HarnessError;
 use rift_conformance_runner::harness::{
-    Config, Harness, IsolatedEngine, ReloadEngine, SpawnedEngine, free_port, log_tail, port_taken,
+    Config, EngineBoot, Harness, IsolatedEngine, ReloadEngine, SpawnedEngine, free_port, log_tail,
+    port_taken,
 };
 use rift_conformance_runner::http::{
     Clients, FailureKind, Response, classify_failure, install_crypto_provider,
@@ -150,6 +151,8 @@ struct PlaneA {
     tls: Option<TlsExchange>,
     /// The last single-stream h2c GET (feature 20).
     h2c_get: Option<H2Outcome>,
+    /// How the last boot-only engine ended (features 16 and 20).
+    boot: Option<EngineBoot>,
 }
 
 /// A concurrent burst left running, joined by the step that asserts on it.
@@ -1950,16 +1953,30 @@ async fn send_through_front_door(
     path: String,
     host: String,
 ) -> Step {
-    let port = reload_engine(w)?
+    front_door_send(w, &method, &unescape(&path), &unescape(&host), Vec::new()).await
+}
+
+/// The scenario's front door port.
+fn front_door_port(w: &PlaneA) -> anyhow::Result<u16> {
+    reload_engine(w)?
         .front_door_port
-        .ok_or_else(|| anyhow!("no front-door engine started in this scenario"))?;
-    let url = format!(
-        "http://{}:{port}{}",
-        harness().imposter_host(),
-        unescape(&path)
-    );
-    let headers = vec![("Host".to_string(), unescape(&host))];
-    w.send_with(&clients().verifying, &method, &url, &headers, None)
+        .ok_or_else(|| anyhow!("no front-door engine started in this scenario"))
+}
+
+/// `headers` go out in order after `Host`, a repeated name as separate lines: the headers clause
+/// compares the first value only.
+async fn front_door_send(
+    w: &mut PlaneA,
+    method: &str,
+    path: &str,
+    host: &str,
+    headers: Vec<(String, String)>,
+) -> Step {
+    let port = front_door_port(w)?;
+    let url = format!("http://{}:{port}{path}", harness().imposter_host());
+    let mut all = vec![("Host".to_string(), host.to_string())];
+    all.extend(headers);
+    w.send_with(&clients().verifying, method, &url, &all, None)
         .await
 }
 
@@ -2990,8 +3007,22 @@ async fn capture(
     path: String,
     tls: bool,
 ) -> Step {
+    let host_header = host.clone();
+    capture_with_host(w, host, port, method, path, host_header, tls).await
+}
+
+/// [`capture`] with a `Host` header other than the host connected to (the front door routes on it).
+async fn capture_with_host(
+    w: &mut PlaneA,
+    host: String,
+    port: u16,
+    method: String,
+    path: String,
+    host_header: String,
+    tls: bool,
+) -> Step {
     w.curl.push(format!(
-        "printf '{method} {path} HTTP/1.1\\r\\nHost: {host}\\r\\n\\r\\n' | {}",
+        "printf '{method} {path} HTTP/1.1\\r\\nHost: {host_header}\\r\\n\\r\\n' | {}",
         if tls {
             format!("openssl s_client -quiet -connect {host}:{port}")
         } else {
@@ -2999,7 +3030,7 @@ async fn capture(
         }
     ));
     let cap = tokio::task::spawn_blocking(move || {
-        raw::raw_capture(&host, port, &method, &path, &host, tls)
+        raw::raw_capture(&host, port, &method, &path, &host_header, tls)
     })
     .await
     .context("the raw capture task")??;
@@ -3793,6 +3824,240 @@ async fn assigned_port_floor(w: &mut PlaneA) -> Step {
     w.ensure(port >= AUTO_PORT_FLOOR, || {
         format!("expected an auto-assigned port >= {AUTO_PORT_FLOOR}, got {port}")
     })
+}
+
+// ── front door and gateway dispatch (feature 16, #187) ───────────────────────────────────────
+
+#[given(
+    regex = r#"^the engine is started with the front door and routes fixture "((?:\\.|[^"\\])*)"$"#
+)]
+async fn start_with_front_door_fixture(w: &mut PlaneA, name: String) -> Step {
+    let json = load_fixture(&unescape(&name))?;
+    start_reload_engine(w, &json, true).await
+}
+
+/// `"x-t: a; x-t: b"` as `[(x-t, a), (x-t, b)]`, order kept.
+fn header_list(spec: &str) -> anyhow::Result<Vec<(String, String)>> {
+    spec.split(';')
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(|h| {
+            h.split_once(':')
+                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                .ok_or_else(|| anyhow!("header '{h}' is not 'name: value'"))
+        })
+        .collect()
+}
+
+#[when(
+    regex = r#"^the client sends "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the front door with host "((?:\\.|[^"\\])*)" and headers "((?:\\.|[^"\\])*)"$"#
+)]
+async fn send_through_front_door_with_headers(
+    w: &mut PlaneA,
+    method: String,
+    path: String,
+    host: String,
+    headers: String,
+) -> Step {
+    let headers = header_list(&unescape(&headers))?;
+    front_door_send(w, &method, &unescape(&path), &unescape(&host), headers).await
+}
+
+#[then(regex = r#"^the front door answered "((?:\\.|[^"\\])*)"$"#)]
+async fn front_door_answered(w: &mut PlaneA, outcome: String) -> Step {
+    let outcome = unescape(&outcome);
+    let r = w.last()?;
+    let marker = r.header_values("x-rift-front-door").to_vec();
+    if outcome == "no-route" {
+        w.ensure(r.status == 404 && marker == ["no-route"], || {
+            format!(
+                "expected 404 + x-rift-front-door: no-route, got {} marker={marker:?}: {}",
+                r.status, r.body
+            )
+        })
+    } else {
+        w.ensure(
+            r.status == 200 && r.body == outcome && marker.is_empty(),
+            || {
+                format!(
+                    "expected 200 '{outcome}' from a routed imposter, got {} marker={marker:?}: {}",
+                    r.status, r.body
+                )
+            },
+        )
+    }
+}
+
+/// The last entry of `GET {admin}/imposters/{port}`'s `requests`, on the scenario's engine.
+async fn last_recorded_request(
+    w: &PlaneA,
+    port: u16,
+) -> anyhow::Result<serde_json::Map<String, Value>> {
+    let url = format!("{}/imposters/{port}", w.admin_url());
+    let resp = get(&url).await?;
+    if resp.status != 200 {
+        bail!("GET {url} -> {} (expected 200): {}", resp.status, resp.body);
+    }
+    let json: Value = serde_json::from_str(&resp.body)
+        .with_context(|| format!("invalid admin JSON (body={})", resp.body))?;
+    match json
+        .get("requests")
+        .and_then(Value::as_array)
+        .and_then(|r| r.last())
+    {
+        Some(Value::Object(fields)) => Ok(fields.clone()),
+        _ => bail!("imposter {port} recorded no request: {}", resp.body),
+    }
+}
+
+#[then(
+    regex = r#"^imposter (\d+) last recorded path "((?:\\.|[^"\\])*)" with query "((?:\\.|[^"\\])*)" equal to "((?:\\.|[^"\\])*)"$"#
+)]
+async fn last_recorded_path_and_query(
+    w: &mut PlaneA,
+    port: u16,
+    path: String,
+    key: String,
+    value: String,
+) -> Step {
+    let (path, key, value) = (unescape(&path), unescape(&key), unescape(&value));
+    let req = last_recorded_request(w, port).await?;
+    let got_path = req.get("path").and_then(Value::as_str);
+    let got_value = req
+        .get("query")
+        .and_then(Value::as_object)
+        .and_then(|q| q.get(&key))
+        .and_then(Value::as_str);
+    w.ensure(
+        got_path == Some(path.as_str()) && got_value == Some(value.as_str()),
+        || {
+            format!(
+                "expected imposter {port} to record path '{path}' with query {key}={value}, got path={got_path:?} query.{key}={got_value:?}"
+            )
+        },
+    )
+}
+
+#[then(
+    regex = r#"^imposter (\d+) last recorded header "((?:\\.|[^"\\])*)" equal to "((?:\\.|[^"\\])*)"$"#
+)]
+async fn last_recorded_header(w: &mut PlaneA, port: u16, header: String, value: String) -> Step {
+    let (header, value) = (unescape(&header), unescape(&value));
+    let req = last_recorded_request(w, port).await?;
+    let got = req
+        .get("headers")
+        .and_then(Value::as_object)
+        .and_then(|hs| {
+            hs.iter()
+                .find(|(k, v)| k.eq_ignore_ascii_case(&header) && v.is_string())
+        })
+        .and_then(|(_, v)| v.as_str());
+    w.ensure(got == Some(value.as_str()), || {
+        format!("expected imposter {port} to record header {header}: {value}, got {got:?}")
+    })
+}
+
+#[when(
+    regex = r#"^the client sends a raw "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the front door with host "((?:\\.|[^"\\])*)"$"#
+)]
+async fn send_raw_through_front_door(
+    w: &mut PlaneA,
+    method: String,
+    path: String,
+    host: String,
+) -> Step {
+    let port = front_door_port(w)?;
+    let addr = harness().imposter_host().to_string();
+    capture_with_host(
+        w,
+        addr,
+        port,
+        unescape(&method),
+        unescape(&path),
+        unescape(&host),
+        false,
+    )
+    .await
+}
+
+#[when(
+    regex = r#"^an h2c client sends "((?:\\.|[^"\\])*)" then "((?:\\.|[^"\\])*)" on one connection through the front door with host "((?:\\.|[^"\\])*)"$"#
+)]
+async fn h2c_through_front_door(
+    w: &mut PlaneA,
+    first: String,
+    second: String,
+    authority: String,
+) -> Step {
+    let port = front_door_port(w)?;
+    let host = harness().imposter_host().to_string();
+    let (first, second, authority) = (unescape(&first), unescape(&second), unescape(&authority));
+    w.curl.push(format!(
+        "curl -sv --http2-prior-knowledge -H 'Host: {authority}' http://{host}:{port}{first} http://{host}:{port}{second}"
+    ));
+    let streams = tokio::task::spawn_blocking(move || {
+        raw::h2c_two_streams(&host, port, &authority, &first, &second)
+    })
+    .await
+    .context("the h2c task")??;
+    w.h2c = Some(streams);
+    Ok(())
+}
+
+#[when(
+    regex = r#"^an engine is booted with the front door and routes fixture "((?:\\.|[^"\\])*)"$"#
+)]
+async fn boot_front_door_engine(w: &mut PlaneA, name: String) -> Step {
+    let name = unescape(&name);
+    let json = load_fixture(&name)?;
+    let config = harness().scratch_file("boot-config.json", &json)?;
+    let flags = ["--configfile".to_string(), config.display().to_string()];
+    w.curl.push(format!(
+        "rift --front-door 0 --configfile {}   # fixture {name}; expected to refuse to boot",
+        config.display()
+    ));
+    w.boot = Some(harness().boot_engine(&flags, true).await?);
+    Ok(())
+}
+
+#[then(
+    regex = r#"^the engine refused to boot with output naming "((?:\\.|[^"\\])*)" and "((?:\\.|[^"\\])*)"$"#
+)]
+async fn engine_refused_to_boot(w: &mut PlaneA, route: String, rule: String) -> Step {
+    let (route, rule) = (unescape(&route), unescape(&rule));
+    let boot = w
+        .boot
+        .as_ref()
+        .ok_or_else(|| anyhow!("no engine boot attempted in this scenario"))?;
+    let tail: Vec<&str> = boot.output.lines().collect();
+    let tail = tail[tail.len().saturating_sub(5)..].join("\n");
+    let refused = boot.exit_code.is_some_and(|c| c != 0)
+        && boot.output.contains(&route)
+        && boot.output.contains(&rule);
+    let exit = boot.exit_code;
+    w.ensure(refused, || {
+        format!(
+            "expected the boot to fail naming [{route}] and [{rule}], got exit={exit:?}:\n{tail}"
+        )
+    })
+}
+
+#[when(regex = r#"^the client sends "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" to the admin port$"#)]
+async fn send_to_admin_port(w: &mut PlaneA, method: String, path: String) -> Step {
+    let url = format!("{}{}", harness().admin_url, unescape(&path));
+    w.send_with(&clients().verifying, &method, &url, &[], None)
+        .await
+}
+
+#[when(
+    regex = r#"^the client sends "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" via the gateway to a port with no imposter$"#
+)]
+async fn send_via_gateway_to_unknown_port(w: &mut PlaneA, method: String, path: String) -> Step {
+    let admin = harness().admin_url.clone();
+    let port = unknown_port(w, &admin).await?;
+    let url = format!("{admin}/__rift/{port}{}", unescape(&path));
+    w.send_with(&clients().verifying, &method, &url, &[], None)
+        .await
 }
 
 // ── TLS termination and HTTP/2 negotiation (feature 20, #197) ────────────────────────────────
