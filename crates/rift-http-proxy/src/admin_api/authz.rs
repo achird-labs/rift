@@ -109,8 +109,11 @@ fn imposter_action(method: &Method) -> &'static str {
 /// authenticated caller can still distinguish a 404 from a 403, so the hook bounds what a
 /// principal can *do*, not what it can learn about which routes exist.
 ///
-/// One trailing `/` is ignored, as the listener ignores it (`/imposters/` classifies as
-/// `/imposters`); repeated slashes are not collapsed.
+/// The path is resolved by the listener's own normalization first, so it classifies as the router
+/// dispatches it: one trailing `/` is ignored (`/imposters/` classifies as `/imposters`) and
+/// repeated slashes are not collapsed; route names match in any case (`/IMPOSTERS/4545/Stubs`
+/// classifies as `/imposters/4545/stubs`), while the values in them — ids, space and scenario
+/// names, keys — are reported exactly as sent.
 ///
 /// # Examples
 ///
@@ -165,10 +168,12 @@ fn classify_route(method: &Method, path: &str) -> Option<AuthzTarget> {
     if path.starts_with("/__rift/") {
         return None;
     }
-    // A trailing `/` is ignored as the router ignores it (issue #1481). Normalized here as well as
-    // in the listener because embedders call `classify` directly, and an unrecognised path skips
-    // the authorizer: `DELETE /imposters/` must be the delete-all it dispatches as.
+    // The router's own normalization: one trailing `/` dropped (issue #1481), route names spelled
+    // as the table spells them (issue #1484). Applied here as well as in the listener because
+    // embedders call `classify` directly, and an unrecognised path skips the authorizer:
+    // `DELETE /imposters/` and `DELETE /IMPOSTERS` must be the delete-all they dispatch as.
     let path = crate::admin_api::router::admin_path(path);
+    let path = path.as_ref();
 
     match path {
         "/" | "/health" | "/config" | "/logs" | "/metrics" => {
@@ -357,6 +362,57 @@ mod tests {
         assert_eq!(classify(&Method::DELETE, "/imposters//"), None);
         assert_eq!(classify(&Method::GET, "/config//"), None);
         assert_eq!(classify(&Method::GET, "/__rift/4545/orders/"), None);
+    }
+
+    /// Issue #1484: route names fold case, as the router folds them, and the values in a route do
+    /// not. `DELETE /IMPOSTERS` that classified as `None` would delete every imposter unauthorized.
+    #[test]
+    fn route_names_classify_in_any_case_but_values_keep_theirs() {
+        assert_eq!(
+            action_of(Method::DELETE, "/IMPOSTERS"),
+            Some(actions::IMPOSTER_DELETE)
+        );
+        assert_eq!(
+            action_of(Method::PUT, "/Imposters/"),
+            Some(actions::IMPOSTER_DELETE)
+        );
+        let one = classify(&Method::DELETE, "/IMPOSTERS/4545").expect("classifies");
+        assert_eq!(
+            (one.action, one.port),
+            (actions::IMPOSTER_DELETE, Some(4545))
+        );
+        assert_eq!(
+            action_of(Method::POST, "/admin/RELOAD"),
+            Some(actions::SYSTEM_WRITE)
+        );
+        assert_eq!(
+            action_of(Method::GET, "/EVENTS"),
+            Some(actions::EVENTS_READ)
+        );
+
+        let space = classify(&Method::POST, "/Imposters/4545/SPACES/Alpha/Stubs").expect("space");
+        assert_eq!(space.space.as_deref(), Some("Alpha"));
+        let flow = classify(&Method::GET, "/ADMIN/imposters/4545/FLOW-STATE/Flow/Key")
+            .expect("flow-state");
+        assert_eq!(flow.space.as_deref(), Some("Flow"));
+        assert!(flow.params.contains(&("key", "Key".to_string())));
+        let scenario =
+            classify(&Method::PUT, "/IMPOSTERS/4545/SCENARIOS/Checkout/STATE").expect("scenario");
+        assert!(
+            scenario
+                .params
+                .contains(&("scenario", "Checkout".to_string()))
+        );
+        let by_id = classify(&Method::DELETE, "/imposters/4545/STUBS/BY-ID/AbC").expect("by-id");
+        assert!(by_id.params.contains(&("stubId", "AbC".to_string())));
+        // A value that spells a route name is still a value.
+        let named_stubs = classify(&Method::GET, "/imposters/4545/spaces/STUBS").expect("space");
+        assert_eq!(named_stubs.space.as_deref(), Some("STUBS"));
+
+        // `/__rift/` is Rift's own prefix and stays exact-case: `/__RIFT/…` is neither the
+        // gateway nor an admin route.
+        assert_eq!(classify(&Method::GET, "/__RIFT/4545/orders"), None);
+        assert_eq!(classify(&Method::DELETE, "/IMPOSTERS/4545/NOPE"), None);
     }
 
     #[test]

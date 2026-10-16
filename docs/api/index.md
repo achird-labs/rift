@@ -47,6 +47,11 @@ A trailing `/` is ignored on every admin route, as Mountebank's Express router i
 and `/config` do. Only one `/` is dropped, so `/imposters//` is `404`. Gateway paths
 (`/__rift/:port/…`) keep their trailing slash: it is part of the path the imposter matches.
 
+Route names are case-insensitive, as in Mountebank: `/IMPOSTERS`, `/Imposters/4545/Stubs/0` and
+`/CONFIG` answer exactly as `/imposters`, `/imposters/4545/stubs/0` and `/config` do. Ids, keys and
+names in a path are not: the space `Alpha` is not the space `alpha`, and a flow-state key `Key` is
+not `key`. The gateway prefix `/__rift/` matches only in lowercase.
+
 ---
 
 ## Root

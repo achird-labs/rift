@@ -4175,6 +4175,107 @@
       ]
     },
     {
+      "name": "targeted: admin route names are case-insensitive, as Express 5 compiles them (#1484)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "ok"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/IMPOSTERS"
+        },
+        {
+          "do": "admin",
+          "method": "HEAD",
+          "path": "/Imposters/"
+        },
+        {
+          "do": "admin",
+          "method": "OPTIONS",
+          "path": "/IMPOSTERS"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/Imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "OPTIONS",
+          "path": "/Imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "HEAD",
+          "path": "/CONFIG"
+        },
+        {
+          "do": "admin",
+          "method": "OPTIONS",
+          "path": "/CONFIG"
+        },
+        {
+          "do": "admin",
+          "method": "OPTIONS",
+          "path": "/imposters/4545/SAVEDPROXYRESPONSES"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/Imposters/4545/Stubs/0",
+          "body": {
+            "responses": [
+              {
+                "is": {
+                  "statusCode": 201,
+                  "body": "replaced"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545/SAVEDREQUESTS"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/IMPOSTERS/4545/savedproxyresponses"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/IMPOSTERS/4545"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545"
+        }
+      ]
+    },
+    {
       "name": "targeted: DELETE /imposters/ deletes every imposter, as DELETE /imposters does (#1481)",
       "steps": [
         {

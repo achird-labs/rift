@@ -660,11 +660,13 @@ async fn accept_loop(
                     // instead of arming the connection-wide fault (`apply_tcp_fault`).
                     let version = req.version();
                     let is_gateway = req.uri().path().starts_with("/__rift/");
-                    // One trailing `/` is ignored on admin routes, as Mountebank's Express ignores
-                    // it (issue #1481). Rewritten once, here, so the api-key gate, `classify` and
-                    // the router cannot disagree on a path: `classify` answering `None` skips the
-                    // authorizer, so `DELETE /imposters/` must reach it as the delete-all it is.
-                    // The gateway's trailing slash is the stub's own path and is kept.
+                    // One trailing `/` is ignored on admin routes and route names match in any
+                    // case, as Mountebank's Express allows (issues #1481, #1484). Rewritten once,
+                    // here, so the api-key gate, `classify` and the router cannot disagree on a
+                    // path: `classify` answering `None` skips the authorizer, so `DELETE
+                    // /imposters/` and `DELETE /IMPOSTERS` must reach it as the delete-all they
+                    // are. The gateway's path is the stub's own and is kept; its `/__rift/` prefix
+                    // is Rift's, not Mountebank's, and matches only in that exact case.
                     let normalized = if is_gateway {
                         Ok(())
                     } else {
@@ -692,7 +694,8 @@ async fn accept_loop(
                                 return Ok::<_, hyper::Error>(box_full(unauthorized_response()));
                             }
                         }
-                        // Dropping a `/` from a path hyper accepted cannot make it invalid; if it
+                        // Dropping a `/` from a path hyper accepted, or respelling its route names
+                        // in other ASCII letters, cannot make it invalid; if it
                         // ever did, the request is answered (after authentication), never routed
                         // under its old spelling.
                         if let Err(e) = normalized {

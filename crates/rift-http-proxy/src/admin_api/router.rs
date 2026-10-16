@@ -14,6 +14,7 @@ use http_body_util::Full;
 use hyper::body::{Body, Incoming};
 use hyper::header::{ALLOW, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, X_CONTENT_TYPE_OPTIONS};
 use hyper::{Method, Request, Response, StatusCode};
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::debug;
@@ -95,13 +96,26 @@ impl ImposterRoute {
     }
 }
 
-/// An admin path as the routes see it, with one trailing `/` dropped, as Mountebank's Express 5
-/// router allows without `strict` (issue #1481). A route matches at most one trailing `/`, so a
-/// path ending in `//` names none and is left as it is (except `//`, which Express answers as `/`).
-/// Repeated slashes are never collapsed. Idempotent: the listener and `classify` both apply it.
+/// An admin path as the routes see it: the one spelling every consumer matches on.
 ///
-/// The `/__rift/` gateway never comes through here: its trailing slash is the stub's own path.
-pub(crate) fn admin_path(path: &str) -> &str {
+/// This is the shared matcher. The listener rewrites the request with it once
+/// ([`normalize_admin_uri`]), before the api-key gate, `authz::classify`, the SSE streams and the
+/// router; `classify` and [`template_of`] apply it again for callers that bypass the listener. It is
+/// idempotent, and everything downstream of it matches exact-case, so no two consumers can resolve
+/// one request to different routes. Mountebank's Express 5 router makes two allowances:
+///
+/// - **One trailing `/` is dropped**, as Express allows without `strict` (issue #1481). A route
+///   matches at most one trailing `/`, so a path ending in `//` names none and is left as it is
+///   (except `//`, which Express answers as `/`). Repeated slashes are never collapsed.
+/// - **Route names are case-insensitive**, as Express allows without `caseSensitive` (issue
+///   #1484): see [`with_route_names_as_listed`]. The values in a route are not.
+///
+/// The `/__rift/` gateway never comes through here: its path is the stub's own.
+pub(crate) fn admin_path(path: &str) -> Cow<'_, str> {
+    with_route_names_as_listed(without_trailing_slash(path))
+}
+
+fn without_trailing_slash(path: &str) -> &str {
     if path == "//" {
         return "/";
     }
@@ -111,12 +125,59 @@ pub(crate) fn admin_path(path: &str) -> &str {
     }
 }
 
+/// `path` with its route-name segments spelled as [`ADMIN_ROUTES`] spells them (issue #1484).
+///
+/// A path names a table route when it has the route's segment count and each of the route's
+/// literal segments (`imposters`, `stubs`, `savedRequests`, `flow-state`, …) equals the path's
+/// segment ignoring ASCII case. A `{param}` segment matches any segment, the empty one included, and
+/// is copied through byte for byte: ids, stub ids, space and scenario names and flow-state keys are
+/// data, and folding one would name a different resource. A path that names no route is returned
+/// unchanged, so it reaches the exact-case parsers as before and is the same unknown route there.
+///
+/// Unambiguous because no two table paths can name one path: a router test pins that every pair of
+/// equally long templates differs in a literal at the same position.
+fn with_route_names_as_listed(path: &str) -> Cow<'_, str> {
+    let segments: Vec<&str> = path.split('/').collect();
+    let Some(template) = ADMIN_ROUTES
+        .iter()
+        .map(|r| r.path)
+        .find(|template| names_template(template, &segments))
+    else {
+        return Cow::Borrowed(path);
+    };
+    let respelled: Vec<&str> = template
+        .split('/')
+        .zip(&segments)
+        .map(|(literal, segment)| if is_param(literal) { *segment } else { literal })
+        .collect();
+    let respelled = respelled.join("/");
+    if respelled == path {
+        Cow::Borrowed(path)
+    } else {
+        Cow::Owned(respelled)
+    }
+}
+
+fn is_param(template_segment: &str) -> bool {
+    template_segment.starts_with('{')
+}
+
+fn names_template(template: &str, segments: &[&str]) -> bool {
+    let literals: Vec<&str> = template.split('/').collect();
+    literals.len() == segments.len()
+        && literals
+            .iter()
+            .zip(segments)
+            .all(|(literal, segment)| is_param(literal) || literal.eq_ignore_ascii_case(segment))
+}
+
 /// Rewrites `req`'s path with [`admin_path`], keeping its query, so every consumer of the path —
 /// the api-key gate, `authz::classify`, the SSE streams and the router — sees one spelling.
 pub(crate) fn normalize_admin_uri<B>(req: &mut Request<B>) -> Result<(), hyper::http::Error> {
     let path = req.uri().path();
     let normalized = admin_path(path);
-    if normalized.len() == path.len() {
+    // Compared by content: respelling a route name keeps the length.
+    if normalized == path {
         return Ok(());
     }
     let path_and_query = match req.uri().query() {
@@ -132,6 +193,7 @@ pub(crate) fn normalize_admin_uri<B>(req: &mut Request<B>) -> Result<(), hyper::
 /// The [`ADMIN_ROUTES`] path a request path names, resolved by the same parsers dispatch uses.
 fn template_of(path: &str) -> Option<&'static str> {
     let path = admin_path(path);
+    let path = path.as_ref();
     if let Some(entry) = ADMIN_ROUTES
         .iter()
         .find(|r| r.path == path && !r.path.contains('{'))
@@ -241,7 +303,7 @@ pub async fn route_request(
     let path = if raw_path.starts_with("/__rift/") {
         raw_path.to_string()
     } else {
-        admin_path(raw_path).to_string()
+        admin_path(raw_path).into_owned()
     };
     let query = req.uri().query().map(|s| s.to_string());
     let base_url = get_base_url(&req);
@@ -707,13 +769,81 @@ mod tests {
         assert_eq!(admin_path("/imposters//"), "/imposters//");
         assert_eq!(admin_path("///"), "///");
         for path in ["//", "/imposters/", "/imposters//", "/config/", "///"] {
-            assert_eq!(admin_path(admin_path(path)), admin_path(path), "{path}");
+            assert_eq!(admin_path(&admin_path(path)), admin_path(path), "{path}");
         }
         assert_eq!(
             admin_path("/imposters/4545/stubs/0/"),
             "/imposters/4545/stubs/0"
         );
         assert_eq!(admin_path(""), "");
+    }
+
+    /// Issue #1484: route names are respelled as the table spells them; values never are.
+    #[test]
+    fn admin_path_folds_route_names_only() {
+        assert_eq!(
+            admin_path("/IMPOSTERS/4545/Spaces/Alpha/STUBS/"),
+            "/imposters/4545/spaces/Alpha/stubs"
+        );
+        assert_eq!(
+            admin_path("/Imposters/4545/savedrequests/STREAM"),
+            "/imposters/4545/savedRequests/stream"
+        );
+        assert_eq!(
+            admin_path("/ADMIN/Imposters/4545/FLOW-STATE/Flow/Key"),
+            "/admin/imposters/4545/flow-state/Flow/Key"
+        );
+        assert_eq!(
+            admin_path("/imposters/4545/STUBS/BY-ID/AbC"),
+            "/imposters/4545/stubs/by-id/AbC"
+        );
+        assert_eq!(admin_path("/imposters/AbC/STUBS"), "/imposters/AbC/stubs");
+        assert_eq!(admin_path("/INTERCEPT/CA.PEM"), "/intercept/ca.pem");
+        // No route: left exactly as sent.
+        assert_eq!(admin_path("/IMPOSTERS/4545/NOPE"), "/IMPOSTERS/4545/NOPE");
+        assert_eq!(admin_path("/__RIFT/4545/Orders"), "/__RIFT/4545/Orders");
+        assert_eq!(admin_path("/IMPOSTERS//"), "/IMPOSTERS//");
+        for path in [
+            "/IMPOSTERS/",
+            "/Imposters/4545/Stubs/0",
+            "/imposters/4545/spaces/STUBS",
+        ] {
+            assert_eq!(admin_path(&admin_path(path)), admin_path(path), "{path}");
+        }
+    }
+
+    /// What makes [`with_route_names_as_listed`] unambiguous: no path can name two table routes, so
+    /// which one it finds first cannot change the spelling. Every pair of equally long templates
+    /// must differ, ignoring case, in a literal both have at the same position.
+    #[test]
+    fn no_path_names_two_table_routes() {
+        let mut templates: Vec<&str> = ADMIN_ROUTES.iter().map(|r| r.path).collect();
+        templates.sort_unstable();
+        templates.dedup();
+        for (i, a) in templates.iter().enumerate() {
+            for b in &templates[i + 1..] {
+                let (a_segments, b_segments): (Vec<&str>, Vec<&str>) =
+                    (a.split('/').collect(), b.split('/').collect());
+                if a_segments.len() != b_segments.len() {
+                    continue;
+                }
+                let disjoint = a_segments
+                    .iter()
+                    .zip(&b_segments)
+                    .any(|(x, y)| !is_param(x) && !is_param(y) && !x.eq_ignore_ascii_case(y));
+                assert!(disjoint, "a path can name both {a} and {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn normalize_admin_uri_folds_route_names_and_keeps_the_query() {
+        let mut req = Request::get("/IMPOSTERS/4545/SPACES/Alpha?x=Y")
+            .body(())
+            .expect("request");
+        normalize_admin_uri(&mut req).expect("normalizes");
+        assert_eq!(req.uri().path(), "/imposters/4545/spaces/Alpha");
+        assert_eq!(req.uri().query(), Some("x=Y"));
     }
 
     #[test]
