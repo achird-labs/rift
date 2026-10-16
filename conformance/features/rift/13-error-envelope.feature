@@ -247,4 +247,7 @@ Feature: Error-response envelope — the standard {"errors":[{code,message}]} co
       | copy jsonpath selector         | create            | POST   | /imposters              | admin-doors/bad-copy-jsonpath | `copy` behavior `jsonpath` selector `$[[[bad` |
       | copy xpath selector            | create            | POST   | /imposters              | admin-doors/bad-copy-xpath    | `copy` behavior `xpath` selector `//*[[` |
       | lookup regex selector          | create            | POST   | /imposters              | admin-doors/bad-lookup-regex  | `lookup` behavior `regex` selector `([` |
+      # `using.ns` that is not an object of prefix -> URI strings is refused at load; Mountebank 2.9.5
+      # accepts it (201). Decode stays lenient so a stored config replays. A Rift-only divergence.
+      | copy xpath ns                  | create            | POST   | /imposters              | admin-doors/bad-copy-ns       | `using.ns` must be an object |
 

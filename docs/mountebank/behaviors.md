@@ -354,8 +354,10 @@ from that value:
 
 A namespaced XML source needs `ns`, as in Mountebank: `"using": { "method": "xpath", "selector":
 "//mb:name", "ns": { "mb": "http://example.com/mb" } }`. A prefix the selector uses without a
-binding selects nothing. `ns` must be an object of strings and is only accepted with `method:
-xpath`; anything else is refused when the imposter is loaded (`rift-lint` `E051`). Releases up to
+binding selects nothing, so the token stays in place and the request is answered normally;
+Mountebank 2.9.5 fails that request with `500` "malformed xpath predicate selector". `ns` must be
+an object of strings and is only accepted with `method: xpath`; anything else is refused when the
+imposter is loaded (`rift-lint` `E051`), where Mountebank 2.9.5 accepts it. Releases up to
 0.21.0 accepted `ns` and ignored it, so a prefixed selector extracted nothing — and an unbound
 prefix failed the request without a response.
 

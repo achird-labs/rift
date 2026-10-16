@@ -1,0 +1,29 @@
+{
+  "protocol": "http",
+  "name": "proxy options \u00b7 once-xpath-ns",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:UPSTREAM_PORT",
+            "mode": "proxyOnce",
+            "predicateGenerators": [
+              {
+                "matches": {
+                  "body": true
+                },
+                "xpath": {
+                  "selector": "//a:id",
+                  "ns": {
+                    "a": "urn:a"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

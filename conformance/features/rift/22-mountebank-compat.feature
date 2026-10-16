@@ -223,6 +223,32 @@ Feature: Mountebank compatibility — predicates, imposter options and response 
     And the client sends "POST" "/copy-xpath"
     Then the response body is "v=9"
 
+  # Mountebank parity: copy/lookup resolve a prefix through `using.ns` by namespace URI, not prefix text.
+  Scenario: copy using xpath resolves a prefix through ns by URI
+    Given a fresh imposter from fixture "mbcompat/behaviors"
+    When the request body is "<r xmlns:a=\"urn:a\"><a:id>9</a:id></r>"
+    And the client sends "POST" "/copy-xpath-ns"
+    Then the response body is "v=9"
+    When the request body is "<r xmlns:z=\"urn:a\"><z:id>8</z:id></r>"
+    And the client sends "POST" "/copy-xpath-ns"
+    Then the response body is "v=8"
+
+  Scenario: lookup keyed by an xpath resolves a prefix through ns
+    Given a fresh imposter from fixture "mbcompat/behaviors"
+    When the request body is "<r xmlns:a=\"urn:a\"><a:id>cd</a:id></r>"
+    And the client sends "POST" "/lookup-xpath-ns"
+    Then the response body is "n=second"
+
+  # Rift-only divergence: a selector prefix with no `ns` binding selects nothing, so the token stays
+  # (as #1402 does for an empty selection) and the request is answered 200. Mountebank 2.9.5 fails the
+  # request with 500 "malformed xpath predicate selector".
+  Scenario: copy using xpath with an unbound prefix leaves the token
+    Given a fresh imposter from fixture "mbcompat/behaviors"
+    When the request body is "<r xmlns:a=\"urn:a\"><a:id>9</a:id></r>"
+    And the client sends "POST" "/copy-xpath-unbound"
+    Then the response status is 200
+    And the response body is "v=$X"
+
   # The regex returns the first capture group (a documented Mountebank divergence: MB returns the
   # whole match), and options.ignoreCase lets /COPY-REGEX/ match /copy-regex/.
   Scenario: copy using regex with ignoreCase yields the first capture group

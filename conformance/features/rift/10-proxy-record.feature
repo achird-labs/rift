@@ -183,3 +183,65 @@ Feature: Proxy record/replay — proxyOnce, proxyTransparent, proxyAlways chains
     And the response JSON at "stubs.0.responses.0.proxy.cert" is absent
     And the response JSON at "stubs.0.responses.0.proxy.passphrase" is absent
     And the response JSON at "stubs.0.responses.0.proxy.ciphers" is absent
+
+  # ── predicateGenerators: jsonpath / xpath / ignore (#1327, #1333) ──────────────────────────────
+  # Rift-only (documented in docs/mountebank/proxy.md): Mountebank copies `jsonpath`/`xpath` onto
+  # every generated predicate, so its recordings never match and it forwards every request; for
+  # `ignore` it records `deepEquals` without the ignored key and does not persist `ignore`, so its
+  # recording never matches either. Rift records `equals` over the selected value / kept query names.
+  Scenario: a jsonpath predicateGenerator replays on the selected value only
+    Given an upstream imposter from fixture "proxy/options/upstream"
+    And a fresh imposter from fixture "proxy/options/once-jsonpath" proxying to the upstream
+    When the request body is "{\"id\":1,\"ts\":\"a\"}"
+    And the client sends "POST" "/j"
+    Then the upstream imposter has recorded 1 requests
+    When the request body is "{\"id\":1,\"ts\":\"b\"}"
+    And the client sends "POST" "/j"
+    Then the upstream imposter has recorded 1 requests
+    And the response has no header "x-rift-proxy"
+    When the request body is "{\"id\":2,\"ts\":\"a\"}"
+    And the client sends "POST" "/j"
+    Then the upstream imposter has recorded 2 requests
+    When the client sends admin "GET" "/imposters/{port}" with payload "-"
+    Then the response JSON at "stubs.0.predicates.0.jsonpath.selector" is the string "$.id"
+
+  Scenario: an xpath predicateGenerator with ns replays on the selected element only
+    Given an upstream imposter from fixture "proxy/options/upstream"
+    And a fresh imposter from fixture "proxy/options/once-xpath-ns" proxying to the upstream
+    When the request body is "<r xmlns:a=\"urn:a\"><a:id>7</a:id><ts>a</ts></r>"
+    And the client sends "POST" "/x"
+    Then the upstream imposter has recorded 1 requests
+    When the request body is "<r xmlns:a=\"urn:a\"><a:id>7</a:id><ts>b</ts></r>"
+    And the client sends "POST" "/x"
+    Then the upstream imposter has recorded 1 requests
+    And the response has no header "x-rift-proxy"
+    When the request body is "<r xmlns:a=\"urn:a\"><a:id>8</a:id><ts>a</ts></r>"
+    And the client sends "POST" "/x"
+    Then the upstream imposter has recorded 2 requests
+
+  Scenario: ignore.query keeps a varying query name from splitting the recording
+    Given an upstream imposter from fixture "proxy/options/upstream"
+    And a fresh imposter from fixture "proxy/options/once-ignore" proxying to the upstream
+    When the client sends "GET" "/i?q=rust&ts=1"
+    Then the upstream imposter has recorded 1 requests
+    When the client sends "GET" "/i?q=rust&ts=2"
+    Then the upstream imposter has recorded 1 requests
+    And the response has no header "x-rift-proxy"
+    When the client sends "GET" "/i?q=go&ts=3"
+    Then the upstream imposter has recorded 2 requests
+    When the client sends admin "GET" "/imposters/{port}" with payload "-"
+    Then the response JSON at "stubs.0.predicates.1.equals.query.q" is the string "rust"
+    And the response JSON at "stubs.0.predicates.1.equals.query.ts" is absent
+
+  # ── rift-lint ───────────────────────────────────────────────────────────────────────────────────
+  # W020/W021 have unit coverage in rift-lint's validator tests; these rows pin the released binary.
+
+  Scenario: rift-lint reports W020 for a predicateGenerator key the engine does not read
+    Then rift-lint reports "W020" for fixture "proxy/lint-generator-unread-key"
+
+  Scenario: rift-lint reports W021 for a predicateGenerator jsonpath that is not an object
+    Then rift-lint reports "W021" for fixture "proxy/lint-generator-bad-jsonpath"
+
+  Scenario: rift-lint raises no W020 or W021 for Mountebank's jsonpath generator form
+    Then rift-lint reports no "W020" for fixture "proxy/lint-generator-clean"
+    And rift-lint reports no "W021" for fixture "proxy/lint-generator-clean"

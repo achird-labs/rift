@@ -199,5 +199,110 @@
         }
       ]
     }
+,
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/copy-xpath-ns"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "v=$X"
+          },
+          "_behaviors": {
+            "copy": [
+              {
+                "from": "body",
+                "into": "$X",
+                "using": {
+                  "method": "xpath",
+                  "selector": "//a:id",
+                  "ns": {
+                    "a": "urn:a"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/copy-xpath-unbound"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "v=$X"
+          },
+          "_behaviors": {
+            "copy": [
+              {
+                "from": "body",
+                "into": "$X",
+                "using": {
+                  "method": "xpath",
+                  "selector": "//b:id",
+                  "ns": {
+                    "a": "urn:a"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/lookup-xpath-ns"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "n=${row}[name]"
+          },
+          "_behaviors": {
+            "lookup": [
+              {
+                "key": {
+                  "from": "body",
+                  "using": {
+                    "method": "xpath",
+                    "selector": "//a:id",
+                    "ns": {
+                      "a": "urn:a"
+                    }
+                  }
+                },
+                "fromDataSource": {
+                  "csv": {
+                    "path": "data/mbcompat-index.csv",
+                    "keyColumn": "id"
+                  }
+                },
+                "into": "${row}"
+              }
+            ]
+          }
+        }
+      ]
+    }
   ]
 }
