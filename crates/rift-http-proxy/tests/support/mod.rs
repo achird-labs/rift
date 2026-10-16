@@ -65,6 +65,15 @@ fn is_executable(_meta: &std::fs::Metadata) -> bool {
 /// stays silent past the 10 s deadline.
 #[allow(dead_code)] // each suite compiles this module; not all of them spawn through it
 pub async fn spawn_server(args: &[&str]) -> (tokio::process::Child, u16) {
+    spawn_server_with_env(args, &[]).await
+}
+
+/// [`spawn_server`] with `envs` set in the child's environment.
+#[allow(dead_code)] // each suite compiles this module; not all of them spawn through it
+pub async fn spawn_server_with_env(
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> (tokio::process::Child, u16) {
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
@@ -85,6 +94,7 @@ pub async fn spawn_server(args: &[&str]) -> (tokio::process::Child, u16) {
         .args(["--port", "0"])
         .args(args)
         .env("NO_COLOR", "1")
+        .envs(envs.iter().copied())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)

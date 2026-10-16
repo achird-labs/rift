@@ -1792,3 +1792,104 @@ async fn http_source_304_keeps_the_cached_intercept_and_routes_blocks() {
         "the cached routes block is served"
     );
 }
+
+// ===== Issue #1492: ported from rift-conformance's ImposterSources198 spec =====
+
+/// Start a server on `--host 127.0.0.1 --port 0` plus `args`, or return its rendered startup error.
+async fn start_or_error(args: &[&str]) -> Result<rift_http_proxy::server::RunningServer, String> {
+    let mut argv = vec!["--host", "127.0.0.1", "--port", "0"];
+    argv.extend_from_slice(args);
+    ServerBuilder::from_cli(cli(&argv))
+        .start()
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// The status and body the server's only imposter answers on `/`.
+async fn serve_only_imposter(admin: std::net::SocketAddr) -> (u16, String) {
+    let listed: serde_json::Value = reqwest::get(format!("http://{admin}/imposters"))
+        .await
+        .expect("list imposters")
+        .json()
+        .await
+        .expect("imposters json");
+    let imposters = listed["imposters"].as_array().expect("imposters array");
+    assert_eq!(imposters.len(), 1, "{listed}");
+    let port = imposters[0]["port"].as_u64().expect("port");
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/"))
+        .await
+        .expect("imposter serves");
+    (resp.status().as_u16(), resp.text().await.expect("body"))
+}
+
+/// An `--imposters` URI whose scheme no source is registered for fails startup, and the error
+/// lists the schemes that are registered.
+#[tokio::test]
+async fn an_unregistered_scheme_is_a_startup_error_listing_the_registered_ones() {
+    let msg = match start_or_error(&["--imposters", "ftp:x"]).await {
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("an unregistered scheme must not boot");
+        }
+        Err(msg) => msg,
+    };
+    assert!(
+        msg.contains(
+            "no imposter source is registered for the `ftp:` scheme (from `ftp:x`); \
+             known schemes: file, http, https"
+        ),
+        "{msg}"
+    );
+}
+
+/// A YAML document whose root is a bare sequence of imposters is served through the engine.
+#[tokio::test]
+async fn a_yaml_bare_sequence_is_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seq.yaml");
+    std::fs::write(
+        &path,
+        "- protocol: http\n  stubs:\n    - responses:\n        - is:\n            statusCode: 200\n            body: yaml-ok\n",
+    )
+    .unwrap();
+    let server = start_or_error(&["--configfile", path.to_str().unwrap()])
+        .await
+        .expect("a YAML sequence boots");
+    assert_eq!(
+        serve_only_imposter(server.admin_addr()).await,
+        (200, "yaml-ok".to_owned())
+    );
+    server.shutdown().await;
+}
+
+/// A YAML mapping root (`imposters:`) is refused: the YAML form is a bare sequence.
+#[tokio::test]
+async fn a_yaml_mapping_root_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("map.yaml");
+    std::fs::write(&path, "imposters:\n  - protocol: http\n").unwrap();
+    let msg = match start_or_error(&["--configfile", path.to_str().unwrap()]).await {
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("a YAML mapping root must not boot");
+        }
+        Err(msg) => msg,
+    };
+    assert!(msg.contains("expected a sequence"), "{msg}");
+}
+
+/// Format detection is by content: a `.yaml`-named file holding JSON loads as JSON.
+#[tokio::test]
+async fn a_yaml_named_file_holding_json_loads_as_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("actually-json.yaml");
+    std::fs::write(&path, portless_imposter_doc("json-in-yaml")).unwrap();
+    let server = start_or_error(&["--configfile", path.to_str().unwrap()])
+        .await
+        .expect("JSON content in a .yaml file boots");
+    assert_eq!(
+        serve_only_imposter(server.admin_addr()).await,
+        (200, "json-in-yaml".to_owned())
+    );
+    server.shutdown().await;
+}
