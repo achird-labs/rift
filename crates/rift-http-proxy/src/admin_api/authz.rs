@@ -261,6 +261,9 @@ fn classify_imposter(method: &Method, rest: &str) -> Option<AuthzTarget> {
     // Split exactly as `route_imposter` does — no `filter`. Hyper does not normalise `//` or a
     // trailing `/`, so an empty segment reaches here and must reach the router's parser too.
     let segments: Vec<&str> = rest.split('/').collect();
+    // A non-port id (`/imposters/abc`) is not classified, so the authorizer is skipped; the router
+    // answers it with `absent_imposter`, which mutates nothing. A handler that acts on a non-port
+    // id must classify it here first.
     let port: u16 = segments.first()?.parse().ok()?;
     let route = ImposterRoute::parse(&segments[1..])?;
 

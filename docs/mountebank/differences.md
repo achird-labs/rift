@@ -34,8 +34,7 @@ saved response's `headers`, like any other upstream header.
 ## The admin API serves JSON only
 
 Rift's admin API has no HTML views, so it does not negotiate on `Accept`: it sends no `Vary: Accept`
-header, and a route it does not have answers a JSON error envelope where Mountebank answers an HTML
-error page.
+header.
 
 ## Error envelopes
 

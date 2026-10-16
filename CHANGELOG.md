@@ -13,6 +13,12 @@ record.
 
 ### Changed
 
+- **The admin API's own 404 is Express's HTML page, as in Mountebank** (#1493). A request no route
+  takes (an unknown path, or a known path with a method it lacks, such as `POST /config`) used to
+  answer the JSON error envelope; it now answers `finalhandler`'s `Cannot POST /config` page with
+  its `Content-Security-Policy` and `X-Content-Type-Options` headers. The status is unchanged, and
+  a handler's own 404 (`GET /imposters/9999`) stays JSON.
+
 - **An auto-assigned imposter port is now picked by the operating system, as in Mountebank**
   (#1501), rather than the lowest free port from 49152. The listener that learned the port serves
   it. On Linux the port comes from `ip_local_port_range` (32768–60999 by default), so it can be

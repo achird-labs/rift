@@ -215,7 +215,7 @@ Feature: Error-response envelope — the standard {"errors":[{code,message}]} co
       | clear requests of an unknown imposter  | DELETE | /imposters/{unknownPort}/savedRequests    | -                                   | 404    | no such resource |
       | clear requests with a bad match clause | DELETE | /imposters/{port}/savedRequests?match=bad | -                                   | 400    | bad data         |
       | verify with non-JSON                   | POST   | /imposters/{port}/verify                  | admin-doors/not-json                | 400    | bad data         |
-      | get an unknown flow-state key          | GET    | /imposters/{port}/flow-state/f/missing    | -                                   | 404    | no such resource |
+      | get an unknown flow-state key          | GET    | /admin/imposters/{port}/flow-state/f/missing | -                                   | 404    | no such resource |
 
   # rift#1220 (a rift#181 regression) and rift#1221, fixed in 0.18.1: a stub whose `jsonpath`/`xpath`
   # selector or `matches` regex does not compile is refused at every door that parses a stub, with

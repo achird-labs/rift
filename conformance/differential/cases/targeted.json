@@ -5696,6 +5696,76 @@
           "body": "<users><user><name>alice</name></user><user><name>bob</name></user></users>"
         }
       ]
+    },
+    {
+      "name": "targeted: a request no admin route takes gets Express's finalhandler 404 page, a handler 404 stays JSON (#1493)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/nope"
+        },
+        {
+          "do": "admin",
+          "method": "HEAD",
+          "path": "/nope"
+        },
+        {
+          "do": "admin",
+          "method": "OPTIONS",
+          "path": "/nope"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/nope?x=1"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/NoPe/"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/a'%22&b"
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/config"
+        },
+        {
+          "do": "admin",
+          "method": "PATCH",
+          "path": "/imposters"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters//"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters//"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/config//"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/logs/x"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/9999"
+        }
+      ]
     }
   ]
 }

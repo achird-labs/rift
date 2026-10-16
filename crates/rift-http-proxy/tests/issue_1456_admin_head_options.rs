@@ -513,8 +513,11 @@ async fn an_empty_imposter_id_is_the_unknown_route_404() {
             assert_eq!(response.status(), 404, "{method} {path}");
             assert_eq!(header(&response, "allow"), None, "{method} {path}");
             if method != "HEAD" {
-                let body: serde_json::Value = response.json().await.expect("json");
-                assert_eq!(body["errors"][0]["message"], "Not Found", "{method} {path}");
+                let body = response.text().await.expect("body");
+                assert!(
+                    body.contains(&format!("<pre>Cannot {method} {path}</pre>")),
+                    "{method} {path}: {body}"
+                );
             }
         }
     }
