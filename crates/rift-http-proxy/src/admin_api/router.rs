@@ -95,8 +95,43 @@ impl ImposterRoute {
     }
 }
 
+/// An admin path as the routes see it, with one trailing `/` dropped, as Mountebank's Express 5
+/// router allows without `strict` (issue #1481). A route matches at most one trailing `/`, so a
+/// path ending in `//` names none and is left as it is (except `//`, which Express answers as `/`).
+/// Repeated slashes are never collapsed. Idempotent: the listener and `classify` both apply it.
+///
+/// The `/__rift/` gateway never comes through here: its trailing slash is the stub's own path.
+pub(crate) fn admin_path(path: &str) -> &str {
+    if path == "//" {
+        return "/";
+    }
+    match path.strip_suffix('/') {
+        Some(stripped) if !stripped.is_empty() && !stripped.ends_with('/') => stripped,
+        _ => path,
+    }
+}
+
+/// Rewrites `req`'s path with [`admin_path`], keeping its query, so every consumer of the path —
+/// the api-key gate, `authz::classify`, the SSE streams and the router — sees one spelling.
+pub(crate) fn normalize_admin_uri<B>(req: &mut Request<B>) -> Result<(), hyper::http::Error> {
+    let path = req.uri().path();
+    let normalized = admin_path(path);
+    if normalized.len() == path.len() {
+        return Ok(());
+    }
+    let path_and_query = match req.uri().query() {
+        Some(query) => format!("{normalized}?{query}"),
+        None => normalized.to_string(),
+    };
+    let mut parts = req.uri().clone().into_parts();
+    parts.path_and_query = Some(path_and_query.parse()?);
+    *req.uri_mut() = hyper::Uri::from_parts(parts)?;
+    Ok(())
+}
+
 /// The [`ADMIN_ROUTES`] path a request path names, resolved by the same parsers dispatch uses.
 fn template_of(path: &str) -> Option<&'static str> {
+    let path = admin_path(path);
     if let Some(entry) = ADMIN_ROUTES
         .iter()
         .find(|r| r.path == path && !r.path.contains('{'))
@@ -120,9 +155,8 @@ fn template_of(path: &str) -> Option<&'static str> {
     // Split exactly as `route_imposter` does. The id is not parsed: any id names the route, and
     // one that is not a port names an absent imposter.
     let segments: Vec<&str> = rest.split('/').collect();
-    // An empty id (`/imposters/`, `/imposters//stubs`) names no imposter route. Mountebank reads
-    // `/imposters/` as the collection; that trailing-slash parity is #1481. Until then it is the
-    // unknown-route 404, never a per-imposter answer (a silent `DELETE` `200 {}`).
+    // An empty id (`/imposters//stubs`) names no route: Express's `:id` matches only
+    // a non-empty segment, so Mountebank answers the unknown-route 404 on every method.
     if segments[0].is_empty() {
         return None;
     }
@@ -202,7 +236,13 @@ pub async fn route_request(
     config_snapshot: system::ConfigSnapshot,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let mut method = req.method().clone();
-    let path = req.uri().path().to_string();
+    let raw_path = req.uri().path();
+    // The gateway is matched on the raw path below, before anything is normalized.
+    let path = if raw_path.starts_with("/__rift/") {
+        raw_path.to_string()
+    } else {
+        admin_path(raw_path).to_string()
+    };
     let query = req.uri().query().map(|s| s.to_string());
     let base_url = get_base_url(&req);
 
@@ -656,5 +696,39 @@ mod tests {
         // Invalid routes
         assert!(ImposterRoute::parse(&["unknown"]).is_none());
         assert!(ImposterRoute::parse(&["stubs", "invalid"]).is_none());
+    }
+
+    #[test]
+    fn admin_path_drops_exactly_one_trailing_slash() {
+        assert_eq!(admin_path("/"), "/");
+        assert_eq!(admin_path("//"), "/");
+        assert_eq!(admin_path("/imposters"), "/imposters");
+        assert_eq!(admin_path("/imposters/"), "/imposters");
+        assert_eq!(admin_path("/imposters//"), "/imposters//");
+        assert_eq!(admin_path("///"), "///");
+        for path in ["//", "/imposters/", "/imposters//", "/config/", "///"] {
+            assert_eq!(admin_path(admin_path(path)), admin_path(path), "{path}");
+        }
+        assert_eq!(
+            admin_path("/imposters/4545/stubs/0/"),
+            "/imposters/4545/stubs/0"
+        );
+        assert_eq!(admin_path(""), "");
+    }
+
+    #[test]
+    fn normalize_admin_uri_keeps_the_query() {
+        let mut req = Request::get("/imposters/?replayable=true")
+            .body(())
+            .expect("request");
+        normalize_admin_uri(&mut req).expect("normalizes");
+        assert_eq!(req.uri().path(), "/imposters");
+        assert_eq!(req.uri().query(), Some("replayable=true"));
+
+        let mut req = Request::get("http://localhost:2525/config/")
+            .body(())
+            .expect("request");
+        normalize_admin_uri(&mut req).expect("normalizes");
+        assert_eq!(req.uri().to_string(), "http://localhost:2525/config");
     }
 }

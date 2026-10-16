@@ -87,6 +87,14 @@ record.
 
 ### Fixed
 
+- **A trailing `/` on an admin route is ignored, as Mountebank's Express does** (#1481).
+  `/imposters/`, `/imposters/4545/`, `/imposters/4545/stubs/0/`, `/config/` and every other admin
+  route with one trailing `/` answer exactly as without it, on every method; they used to be `404`.
+  Exactly one `/` is dropped and repeated slashes are not collapsed, so `/imposters//` is still
+  `404`. The `/__rift/` gateway keeps its trailing slash, which is the stub's own path. The path is
+  normalized before authentication, authorization and routing, so `DELETE /imposters/` is
+  authorized as the delete-all it is; `authz::classify` normalizes its input the same way, so an
+  embedder's authorizer now gets a real action for a trailing-slash path instead of `None`.
 - **A body over `--max-body-size` (or the memory budget) now reliably gets its `413`/`503`**
   (#1460). The refusal is written while the client is still sending the body (before any of it is
   read when the length is declared, mid-body for a chunked one), and closing the connection on
