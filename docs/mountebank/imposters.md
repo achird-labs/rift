@@ -109,8 +109,9 @@ removing a fault or script stub through the admin API changes what the *next* co
 
 ### Auto-Port Assignment
 
-If you omit the `port` field (or set it to `null` or `0`), Rift assigns the first free port from the
-dynamic range (49152-65535). This holds at every door — `POST /imposters`, `PUT /imposters`,
+If you omit the `port` field (or set it to `null` or `0`), Rift asks the operating system for a free
+port, as Mountebank does. The port comes from the OS's ephemeral range: 49152–65535 on macOS, and
+`net.ipv4.ip_local_port_range` on Linux (32768–60999 by default). This holds at every door — `POST /imposters`, `PUT /imposters`,
 `--configfile`, reload and the C-ABI — so a document may hold several port-less imposters:
 
 ```bash
@@ -125,7 +126,7 @@ curl -X POST http://localhost:2525/imposters \
 
 # Response includes the assigned port:
 {
-  "port": 49152,
+  "port": 54713,
   "protocol": "http",
   ...
 }

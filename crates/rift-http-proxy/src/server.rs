@@ -1919,8 +1919,8 @@ fn resolve_source_set(
 /// Every refusal comes before the first create: the sources' injection gating and intercept-source
 /// conflict abort startup, and a datadir that cannot be listed aborts it too, so a rejected
 /// document cannot half-load. Then both stores are created in one pass with explicit ports first
-/// (issue #1120): an auto-assigned port is the lowest free one, so a port-less imposter created
-/// before a datadir file's imposter could take the port that file names.
+/// (issue #1120): the kernel picks an auto-assigned port (#1501) and can hand out the one a
+/// datadir file names, so a port-less imposter created first could take it.
 async fn load_startup_imposters(
     manager: &Arc<ImposterManager>,
     sources: Option<&SourceSet>,
@@ -3183,8 +3183,8 @@ mod tests {
             .map(|_| ())
     }
 
-    /// The port the next port-less create will be given, learned rather than hardcoded: fixed test
-    /// ports live below the 49152 auto-assign floor.
+    /// A port a port-less create was just given, learned rather than hardcoded: fixed test ports
+    /// live below the kernel's ephemeral range, where auto-assigned ports come from.
     async fn next_auto_assigned_port() -> u16 {
         let probe = ImposterManager::new();
         let port = probe
@@ -3577,21 +3577,40 @@ mod tests {
         manager.delete_all().await;
     }
 
+    /// Records the ports in the order `Created` fires.
+    #[derive(Default)]
+    struct CreationOrder(std::sync::Mutex<Vec<u16>>);
+
+    impl rift_mock_core::imposter::ImposterEventListener for CreationOrder {
+        fn on_event(
+            &self,
+            event: &rift_mock_core::imposter::ImposterEvent,
+            _ctx: &rift_mock_core::imposter::EventContext,
+        ) {
+            if let rift_mock_core::imposter::ImposterEvent::Created(port) = event {
+                self.0.lock().expect("lock").push(*port);
+            }
+        }
+    }
+
     // The ordering itself, independent of how a filesystem lists a directory: a port-less entry
     // handed over first must still be created after the entry that names the port it would take.
-    // Serial: it learns the next auto-assigned port, which any parallel port-less create can take.
+    // Since #1501 the kernel picks auto-assigned ports and rarely reissues the learned one, so the
+    // creation order is what is asserted. Serial: it learns a port auto-assign just handed out.
     #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn the_startup_create_pass_creates_explicit_ports_first() {
         let port = next_auto_assigned_port().await;
+        let order = Arc::new(CreationOrder::default());
         let dir = tempfile::tempdir().expect("tempdir");
         let config = |value: serde_json::Value| -> ImposterConfig {
             serde_json::from_value(value).expect("config")
         };
 
-        let manager = Arc::new(ImposterManager::with_datadir(Some(
-            dir.path().to_path_buf(),
-        )));
+        let manager = Arc::new(
+            ImposterManager::with_datadir(Some(dir.path().to_path_buf()))
+                .with_event_listener(order.clone()),
+        );
         let skipped = create_startup_imposters(
             &manager,
             vec![
@@ -3617,6 +3636,8 @@ mod tests {
             skipped.iter().map(|s| &s.reason).collect::<Vec<_>>()
         );
         assert_eq!(manager.count(), 2);
+        let created = order.0.lock().expect("lock").clone();
+        assert_eq!(created.first(), Some(&port), "explicit first: {created:?}");
         assert_eq!(
             manager
                 .get_imposter(port)

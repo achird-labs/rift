@@ -59,8 +59,8 @@ the ones created through the admin API to the directory. `--imposters` behaves t
 keeps its own imposters:
 
 - At startup both stores are created in one pass, every imposter with a port before any imposter
-  without one. An imposter without a port is given the lowest free port from 49152, so this is what
-  stops it taking a port a file in the data directory declares.
+  without one. An imposter without a port is given a free port by the operating system, which could be one
+  a file in the data directory declares, so this is what stops it taking that port.
 - An imposter from the config file is **never written to the data directory**, at startup or on
   reload. Neither are changes made to it at runtime, through the stub endpoints or a
   `PUT /imposters` that repeats it. The file is where it is re-read from. An imposter without a port
