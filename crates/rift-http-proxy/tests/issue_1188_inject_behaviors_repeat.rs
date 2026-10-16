@@ -56,7 +56,15 @@ fn ignored_warnings(body: &Value) -> Vec<Value> {
 }
 
 /// The bodies of `n` sequential GETs; a request the imposter refused (a fault) reads as `"<error>"`.
-async fn bodies(client: &reqwest::Client, port: u16, n: usize) -> Vec<String> {
+///
+/// Uses a client that never pools: a keep-alive connection to an imposter that is later deleted can
+/// be checked out for the next imposter on the same port, and the request written to that dead
+/// socket is lost (#1509). Admin calls keep the pooled client; the admin listener is never deleted.
+async fn bodies(port: u16, n: usize) -> Vec<String> {
+    let client = reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .expect("client");
     let mut out = Vec::new();
     for _ in 0..n {
         let body = match client.get(format!("http://127.0.0.1:{port}/")).send().await {
@@ -66,6 +74,21 @@ async fn bodies(client: &reqwest::Client, port: u16, n: usize) -> Vec<String> {
         out.push(body);
     }
     out
+}
+
+/// Requests the imposter itself counted; a lost or extra hit shows here, not as a shifted cycle.
+async fn request_count(client: &reqwest::Client, admin: &str, port: u16) -> u64 {
+    let fetched: Value = client
+        .get(format!("{admin}/imposters/{port}"))
+        .send()
+        .await
+        .expect("GET imposter")
+        .json()
+        .await
+        .expect("json");
+    fetched["numberOfRequests"]
+        .as_u64()
+        .expect("numberOfRequests")
 }
 
 const INJECT: &str =
@@ -261,11 +284,8 @@ async fn repeat_in_the_block_cycles_every_response_type() {
             Vec::<Value>::new(),
             "{shape}: {body}"
         );
-        assert_eq!(
-            bodies(&client, port, 3).await,
-            vec![first, first, "next"],
-            "{shape}"
-        );
+        assert_eq!(bodies(port, 3).await, vec![first, first, "next"], "{shape}");
+        assert_eq!(request_count(&client, &admin, port).await, 3, "{shape}");
         let _ = manager.delete_imposter(port).await;
     }
     let _ = manager.delete_imposter(upstream).await;
@@ -286,7 +306,7 @@ async fn top_level_repeat_cycles_an_is_response() {
         )
         .await,
     );
-    assert_eq!(bodies(&client, port, 4).await, vec!["a", "a", "b", "a"]);
+    assert_eq!(bodies(port, 4).await, vec!["a", "a", "b", "a"]);
 
     let fetched: Value = client
         .get(format!("{admin}/imposters/{port}"))
@@ -325,10 +345,11 @@ async fn top_level_repeat_cycles_an_inject_and_a_fault_response() {
         let port = port_of(&body);
         assert_eq!(ignored_warnings(&body), Vec::<Value>::new(), "{response}");
         assert_eq!(
-            bodies(&client, port, 3).await,
+            bodies(port, 3).await,
             vec![first, first, "next"],
             "{response}"
         );
+        assert_eq!(request_count(&client, &admin, port).await, 3, "{response}");
         let fetched: Value = client
             .get(format!("{admin}/imposters/{port}"))
             .send()
@@ -361,7 +382,7 @@ async fn top_level_repeat_wins_over_the_block() {
         )
         .await,
     );
-    assert_eq!(bodies(&client, port, 4).await, vec!["a", "a", "a", "b"]);
+    assert_eq!(bodies(port, 4).await, vec!["a", "a", "a", "b"]);
     let _ = manager.delete_imposter(port).await;
 }
 
@@ -426,7 +447,7 @@ async fn a_null_top_level_repeat_is_absent() {
         )
         .await,
     );
-    assert_eq!(bodies(&client, port, 3).await, vec!["a", "a", "b"]);
+    assert_eq!(bodies(port, 3).await, vec!["a", "a", "b"]);
     let _ = manager.delete_imposter(port).await;
 }
 
@@ -516,5 +537,36 @@ fn the_linter_validates_a_top_level_repeat_like_the_engine() {
             vec!["stubs[0].responses[0].repeat".to_string()],
             "{bad}"
         );
+    }
+}
+
+/// #1509: a delete followed by a create that may reuse the port must not lose the first request to
+/// a stale keep-alive connection; every iteration sees the full cycle and a matching hit count.
+#[tokio::test]
+async fn recreating_an_imposter_never_loses_a_request_to_a_stale_connection() {
+    let (client, admin, manager) = start_admin().await;
+    for i in 0..20 {
+        let port = port_of(
+            &created(
+                &client,
+                &admin,
+                &json!({"protocol": "http", "stubs": [{"responses": [
+                    {"is": {"body": "b"}, "repeat": 2},
+                    {"is": {"body": "next"}}
+                ]}]}),
+            )
+            .await,
+        );
+        assert_eq!(
+            bodies(port, 3).await,
+            vec!["b", "b", "next"],
+            "iteration {i}"
+        );
+        assert_eq!(
+            request_count(&client, &admin, port).await,
+            3,
+            "iteration {i}"
+        );
+        let _ = manager.delete_imposter(port).await;
     }
 }
