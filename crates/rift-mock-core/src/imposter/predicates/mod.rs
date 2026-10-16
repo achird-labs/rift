@@ -4,8 +4,8 @@
 //! Also supports requestFrom, ip, and form fields.
 
 use crate::behaviors::{
-    LazyJson, LazyXmlDom, Selection, json_node_text, jsonpath_selection, xpath_selection,
-    xpath_selection_in,
+    LazyJson, LazyXmlDom, Selection, fold_xpath_selector, json_node_text, jsonpath_selection,
+    xpath_selection,
 };
 use crate::imposter::types::{Predicate, PredicateOperation, PredicateSelector};
 use crate::util::FastMap;
@@ -427,13 +427,40 @@ where
         Some(PredicateSelector::XPath {
             selector,
             namespaces,
-        }) => Some(
-            match xml_dom.and_then(LazyXmlDom::document) {
-                Some(document) => xpath_selection(&document, selector, namespaces.as_ref()),
-                None => xpath_selection_in(body_str, selector, namespaces.as_ref()),
-            }
-            .unwrap_or(Selection::One(String::new())),
-        ),
+        }) => {
+            let own_dom;
+            let dom = match xml_dom {
+                Some(dom) => dom,
+                None => {
+                    own_dom = LazyXmlDom::new(body_str);
+                    &own_dom
+                }
+            };
+            // Mountebank lowercases the body, the selector and the `ns` URIs for a case-insensitive
+            // predicate other than `matches` (issue #1478, see `fold_xml_names`). The prefixes are
+            // lowercased too, which Mountebank does not do, so an upper-case prefix still binds
+            // once the selector is folded.
+            let selection = if !case_sensitive && folds_xpath_names(&predicate.operation) {
+                let namespaces = namespaces.as_ref().map(|ns| {
+                    ns.iter()
+                        .map(|(prefix, uri)| {
+                            (prefix.to_ascii_lowercase(), uri.to_ascii_lowercase())
+                        })
+                        .collect::<HashMap<_, _>>()
+                });
+                dom.folded_document().and_then(|document| {
+                    xpath_selection(
+                        &document,
+                        &fold_xpath_selector(selector),
+                        namespaces.as_ref(),
+                    )
+                })
+            } else {
+                dom.document()
+                    .and_then(|document| xpath_selection(&document, selector, namespaces.as_ref()))
+            };
+            Some(selection.unwrap_or(Selection::One(String::new())))
+        }
         None => None,
     };
 
@@ -690,6 +717,21 @@ pub(crate) mod regex_cache;
 use fields::{check_predicate_fields, check_predicate_fields_regex};
 use json::check_exists_predicate;
 use regex_cache::cached_regex;
+
+/// Whether a case-insensitive XPath predicate with this operator selects from the name-folded
+/// document (issue #1478). Mountebank evaluates `matches` case-sensitively, so it selects from the
+/// body as written.
+pub(crate) fn folds_xpath_names(operation: &PredicateOperation) -> bool {
+    matches!(
+        operation,
+        PredicateOperation::Equals(_)
+            | PredicateOperation::DeepEquals(_)
+            | PredicateOperation::Contains(_)
+            | PredicateOperation::StartsWith(_)
+            | PredicateOperation::EndsWith(_)
+            | PredicateOperation::Exists(_)
+    )
+}
 
 /// The operators that compare request fields, as opposed to `not`/`and`/`or`/`inject`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -709,13 +709,67 @@ pub(crate) fn xpath_selection_in(
 pub(crate) fn parse_xml_like_mountebank(body: &str) -> Option<sxd_document::Package> {
     #[cfg(test)]
     counters::bump_dom_parse();
-    let xml = prepare_xml(body)?;
-    match sxd_document::parser::parse(&xml) {
+    parse_prepared(&prepare_xml(body)?)
+}
+
+/// [`parse_xml_like_mountebank`] on the name-folded view a case-insensitive XPath predicate selects
+/// from (issue #1478): see [`fold_xml_names`].
+pub(crate) fn parse_xml_folding_names(body: &str) -> Option<sxd_document::Package> {
+    #[cfg(test)]
+    counters::bump_dom_parse();
+    parse_prepared(&fold_xml_names(&prepare_xml(body)?))
+}
+
+/// Parse a [`prepare_xml`]ed text, reading past what follows the root as xmldom does.
+fn parse_prepared(xml: &str) -> Option<sxd_document::Package> {
+    match sxd_document::parser::parse(xml) {
         Ok(package) => Some(package),
         Err(error) => {
-            let trimmed = without_trailing_text(&xml, error.location())?;
+            let trimmed = without_trailing_text(xml, error.location())?;
             sxd_document::parser::parse(&trimmed).ok()
         }
+    }
+}
+
+/// `xml` ASCII-lowercased as Mountebank lowercases the body of a case-insensitive XPath predicate
+/// (issue #1478) — names, prefixes, attribute values, text, CDATA contents, comments and PI data —
+/// except for what keeps the document readable: the `<![CDATA[` and `]]>` markers, a PI's target
+/// (`<?xml`) and the whole DOCTYPE. Mountebank lowercases those too, so xmldom refuses a body with a
+/// CDATA section or a DOCTYPE; Rift still reads it (a documented difference).
+fn fold_xml_names(xml: &str) -> Cow<'_, str> {
+    let mut out = Rewrite::new(xml);
+    let mut pos = 0;
+    while pos < xml.len() {
+        let (kind, end, _) = xml_piece(xml, pos);
+        let folded_from = match kind {
+            XmlPiece::Doctype => None,
+            XmlPiece::CData => Some(pos + "<![CDATA[".len()),
+            XmlPiece::CommentOrPi if xml[pos..].starts_with("<?") => Some(
+                xml[pos + 2..end]
+                    .find(|c: char| c.is_whitespace() || c == '?')
+                    .map_or(end, |at| pos + 2 + at),
+            ),
+            _ => Some(pos),
+        };
+        if let Some(from) = folded_from.filter(|&from| {
+            from < end && xml.as_bytes()[from..end].iter().any(u8::is_ascii_uppercase)
+        }) {
+            // The markers kept as written all lie before `from`; a closing `]]>` or `?>` has no
+            // letter to fold.
+            out.replace(from, end, &xml[from..end].to_ascii_lowercase());
+        }
+        pos = end;
+    }
+    out.finish()
+}
+
+/// A case-insensitive XPath selector as Mountebank folds it: wholly lowercased, string literals
+/// included, to compare against the folded document of [`fold_xml_names`].
+pub(crate) fn fold_xpath_selector(selector: &str) -> Cow<'_, str> {
+    if selector.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(selector.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(selector)
     }
 }
 
@@ -1126,6 +1180,9 @@ fn ends_element(end_tag: &str, name: &str) -> bool {
 pub(crate) struct LazyXmlDom<'a> {
     body: &'a str,
     parsed: OnceCell<Option<sxd_document::Package>>,
+    /// The name-folded view case-insensitive predicates select from (issue #1478), built on first
+    /// use and then shared the same way.
+    folded: OnceCell<Option<sxd_document::Package>>,
 }
 
 impl<'a> LazyXmlDom<'a> {
@@ -1133,6 +1190,7 @@ impl<'a> LazyXmlDom<'a> {
         Self {
             body,
             parsed: OnceCell::new(),
+            folded: OnceCell::new(),
         }
     }
 
@@ -1141,6 +1199,14 @@ impl<'a> LazyXmlDom<'a> {
     pub(crate) fn document(&self) -> Option<sxd_document::dom::Document<'_>> {
         self.parsed
             .get_or_init(|| parse_xml_like_mountebank(self.body))
+            .as_ref()
+            .map(sxd_document::Package::as_document)
+    }
+
+    /// [`Self::document`] for the name-folded view (see [`parse_xml_folding_names`]).
+    pub(crate) fn folded_document(&self) -> Option<sxd_document::dom::Document<'_>> {
+        self.folded
+            .get_or_init(|| parse_xml_folding_names(self.body))
             .as_ref()
             .map(sxd_document::Package::as_document)
     }
@@ -2170,6 +2236,105 @@ mod tests {
                 tokens in proptest::collection::vec(xml_token(), 0..40)
             ) {
                 let _ = parse_xml_like_mountebank(&tokens.concat());
+            }
+
+            #[test]
+            fn folding_any_text_never_panics_and_is_idempotent(
+                tokens in proptest::collection::vec(xml_token(), 0..40)
+            ) {
+                let body = tokens.concat();
+                let _ = parse_xml_folding_names(&body);
+                if let Some(prepared) = prepare_xml(&body) {
+                    let once = fold_xml_names(&prepared).into_owned();
+                    proptest::prop_assert_eq!(fold_xml_names(&once).into_owned(), once);
+                }
+                let once = fold_xml_names(&body).into_owned();
+                proptest::prop_assert_eq!(fold_xml_names(&once).into_owned(), once);
+            }
+        }
+
+        #[test]
+        fn folding_lowercases_names_values_text_cdata_comments_and_pi_data() {
+            assert_eq!(
+                fold_xml_names(
+                    r#"<?xml version="1.0" encoding="UTF-8"?><?Target Data?><X:Root xmlns:X="urn:Up" Id="V"><!-- Note --><Child A='B'>Text &amp; More<![CDATA[<B>Raw</B>]]></Child></X:Root >"#
+                ),
+                r#"<?xml version="1.0" encoding="utf-8"?><?Target data?><x:root xmlns:x="urn:up" id="v"><!-- note --><child a='b'>text &amp; more<![CDATA[<b>raw</b>]]></child></x:root >"#
+            );
+        }
+
+        #[test]
+        fn folding_keeps_the_markers_and_the_doctype_readable() {
+            let doctype = "<!DOCTYPE A [<!ENTITY E 'X'>]>";
+            let folded = fold_xml_names(&format!("{doctype}<A><![CDATA[Q]]></A>")).into_owned();
+            assert_eq!(folded, format!("{doctype}<a><![CDATA[q]]></a>"));
+            assert!(matches!(fold_xml_names("<a b='c'>d</a>"), Cow::Borrowed(_)));
+            let package =
+                parse_xml_folding_names("<!DOCTYPE A><A><![CDATA[XY]]></A>").expect("parses");
+            assert_eq!(
+                eval_xpath_all_on(&package.as_document(), "//a", None),
+                Some(vec!["xy".to_string()])
+            );
+        }
+
+        #[test]
+        fn folding_is_idempotent() {
+            for body in [
+                "<A><B>1</B></A>",
+                r#"<X:A xmlns:X="urn:X"><X:B Id='Q'>T</X:B></X:A>"#,
+                "<!DOCTYPE A><A><![CDATA[Q]]></A>",
+            ] {
+                let once = fold_xml_names(body).into_owned();
+                assert_eq!(fold_xml_names(&once), once);
+            }
+        }
+
+        #[test]
+        fn folded_names_collide_as_in_mountebank() {
+            let package = parse_xml_folding_names("<r><a>1</a><A>2</A></r>").expect("parses");
+            assert_eq!(
+                eval_xpath_all_on(&package.as_document(), "//a", None),
+                Some(vec!["1".to_string(), "2".to_string()])
+            );
+        }
+
+        #[test]
+        fn the_shared_dom_folds_once() {
+            let dom = LazyXmlDom::new("<A><B>1</B></A>");
+            counters::reset();
+            for _ in 0..3 {
+                let doc = dom.folded_document().expect("parses");
+                assert_eq!(
+                    eval_xpath_all_on(&doc, "//b", None),
+                    Some(vec!["1".to_string()])
+                );
+            }
+            assert!(dom.document().is_some());
+            assert_eq!(
+                counters::dom_parses(),
+                2,
+                "one raw parse and one folded parse"
+            );
+        }
+
+        #[test]
+        fn a_case_insensitive_selector_folds_literals_too() {
+            assert_eq!(
+                fold_xpath_selector("//X:B[@Id='Q' or text()=\"Mixed\"]/COUNT"),
+                "//x:b[@id='q' or text()=\"mixed\"]/count"
+            );
+            assert!(matches!(fold_xpath_selector("//a"), Cow::Borrowed(_)));
+        }
+
+        #[test]
+        fn a_folded_selector_naming_an_operator_still_compiles() {
+            for selector in ["//DIV", "//a/MOD", "//AND/OR", "//a[@DIV]"] {
+                assert_eq!(validate_xpath_selector(selector), Ok(()), "{selector}");
+                assert_eq!(
+                    validate_xpath_selector(&fold_xpath_selector(selector)),
+                    Ok(()),
+                    "{selector}"
+                );
             }
         }
 

@@ -661,8 +661,24 @@ fn validate_predicate(predicate: &Predicate) -> Result<(), String> {
     match &predicate.parameters.selector {
         Some(PredicateSelector::JsonPath { selector }) => validate_jsonpath_selector(selector)
             .map_err(|e| format!("predicate `jsonpath` selector `{selector}` is invalid: {e}"))?,
-        Some(PredicateSelector::XPath { selector, .. }) => validate_xpath_selector(selector)
-            .map_err(|e| format!("predicate `xpath` selector `{selector}` is invalid: {e}"))?,
+        Some(PredicateSelector::XPath { selector, .. }) => {
+            validate_xpath_selector(selector)
+                .map_err(|e| format!("predicate `xpath` selector `{selector}` is invalid: {e}"))?;
+            // A case-insensitive predicate runs the lowercased selector (issue #1478). One that
+            // compiles only as written is warned about, not refused: refusing it would make a
+            // stored config that an engine already admitted undecodable.
+            let folds = !predicate.parameters.case_sensitive.unwrap_or(false)
+                && crate::imposter::predicates::folds_xpath_names(&predicate.operation);
+            if folds
+                && let Some(e) =
+                    validate_xpath_selector(&crate::behaviors::fold_xpath_selector(selector)).err()
+            {
+                tracing::warn!(
+                    "predicate `xpath` selector `{selector}` does not compile once lowercased for \
+                     a case-insensitive match ({e}); it selects nothing"
+                );
+            }
+        }
         None => {}
     }
     match &predicate.operation {

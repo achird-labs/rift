@@ -144,6 +144,21 @@ Rift reads an XML body for `xpath` the way Mountebank's parser, xmldom 0.9, reco
 - A `]` inside a quoted value in a DOCTYPE's internal subset (`<!DOCTYPE a [<!ENTITY x "]">]>`)
   means no document in Rift, whose parser ends the subset there. Mountebank reads past it.
 
+## Case-insensitive XPath
+
+With `caseSensitive` false (the default), Mountebank lowercases the whole body and the selector
+before an XPath predicate selects, for every operator but `matches`. Rift does the same, except that
+it keeps the `<![CDATA[` marker, a processing instruction's target and the DOCTYPE as written, so
+the document stays readable (see [Predicates](predicates.md#xpath-predicates)). So:
+
+- A body with a CDATA section still matches a case-insensitive XPath predicate in Rift. In Mountebank it never matches: the lowercased `<![cdata[` is no document to xmldom.
+- A body with a DOCTYPE still matches a case-insensitive XPath predicate in Rift. In Mountebank it never matches: the lowercased `<!doctype` is no document to xmldom.
+- Rift lowercases the prefixes of `ns` as well as its URIs; Mountebank lowercases only the URIs, so
+  in Mountebank an upper-case prefix (`"ns": {"SOAP": …}` with `//SOAP:Body`) is left unbound once
+  the selector is lowercased and selects nothing.
+- Rift lowercases ASCII letters only, as every case-insensitive comparison in Rift does; Mountebank
+  lowercases any letter.
+
 ## keyCaseSensitive is honoured as written
 
 Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mountebank applies it only to turn key matching off under `caseSensitive: true`. Three consequences:
