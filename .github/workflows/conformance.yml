@@ -1,10 +1,11 @@
 name: Conformance
 
 # Issue #1340: run the Plane A specification (conformance/features, #1339) against THIS pull
-# request's own binaries, with the rift-conformance runner. Before this, the runner only ever saw
-# released engines, so a PR that broke a specified behaviour went green here and red there a
-# release later. A behaviour change now has to change its scenario in the same diff, or this job
-# fails — that is the point.
+# request's own binaries. Before this, the runner only ever saw released engines, so a PR that
+# broke a specified behaviour went green here and red there a release later. A behaviour change now
+# has to change its scenario in the same diff, or this job fails — that is the point. Since #1350
+# the runner is the in-tree Rust one (conformance/runner) and runs every feature; the Scala runner
+# in rift-conformance is retired.
 #
 # `conformance-plane-a` is a required check in the protect-master ruleset, so the workflow runs on
 # every pull request: a `paths` filter would leave a docs-only PR waiting forever on a check that
@@ -56,22 +57,20 @@ jobs:
             echo "relevant=false" >> "$GITHUB_OUTPUT"
           fi
 
-  # Issue #1346: the Rust Plane A runner (conformance/runner, cucumber-rs) runs the features it has
-  # ported (rift_conformance_runner::spec::PORTED_FEATURES) against this PR's binaries, in external
-  # mode (the staged `rift`), embedded mode (rift-ffi in-process) and container mode (an image built
-  # from the staged `rift` with Dockerfile.prebuilt). The Scala job below keeps
-  # running every feature not yet ported; the two lists are disjoint (EtaCassiopeia/rift-conformance
-  # conformance/ported.txt, #244), so each feature runs under exactly one runner per mode.
-  # RIFT_CONFORMANCE_REQUIRE turns a missing RIFT_BUILD_DIR into a failure rather than the skip a
-  # plain `cargo test --workspace` gets.
-  runner-rust:
-    name: conformance-plane-a (rust runner)
+  # The Rust Plane A runner (conformance/runner, cucumber-rs, #1346) runs every feature
+  # (rift_conformance_runner::spec::PORTED_FEATURES) against this PR's binaries, in external mode
+  # (the staged `rift`), embedded mode (rift-ffi in-process) and container mode (an image built from
+  # the staged `rift` with Dockerfile.prebuilt). RIFT_CONFORMANCE_REQUIRE turns a missing
+  # RIFT_BUILD_DIR into a failure rather than the skip a plain `cargo test --workspace` gets. The
+  # job keeps the name the protect-master ruleset requires, which the retired Scala job reported.
+  conformance-plane-a:
+    name: conformance-plane-a
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' && !contains(github.event.pull_request.labels.*.name, 'conformance-exempt') }}
     # 22.04 (glibc 2.35), as release.yml builds: the container step runs this job's binary in the
     # debian bookworm image (glibc 2.36), which a build on ubuntu-latest (2.39) cannot start in.
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       RIFT_MAX_BODY_SIZE: "10485760"
       RIFT_CONFORMANCE_REQUIRE: "1"
@@ -98,7 +97,8 @@ jobs:
       - name: Build rift, rift-lint and rift-verify
         run: cargo build --release -p rift-http-proxy -p rift-lint --bins
 
-      # Same staging as the Scala job: the three binaries plus BUILD_INFO (feature 01).
+      # The three binaries plus the BUILD_INFO a released build carries: feature 01 compares each
+      # binary's live `--version` with what it recorded.
       - name: Stage binaries and BUILD_INFO
         run: |
           set -euo pipefail
@@ -122,13 +122,13 @@ jobs:
           cat "$dir/BUILD_INFO"
           echo "RIFT_BUILD_DIR=$dir" >> "$GITHUB_ENV"
 
-      - name: Run the ported features (external mode)
+      - name: Run the Plane A features (external mode)
         run: cargo test -p rift-conformance-runner --test plane_a
         env:
           RIFT_MODE: external
 
       # Same test binary, the engine linked in-process through rift-ffi instead of spawned.
-      - name: Run the ported features (embedded mode)
+      - name: Run the Plane A features (embedded mode)
         run: cargo test -p rift-conformance-runner --test plane_a
         env:
           RIFT_MODE: embedded
@@ -144,116 +144,8 @@ jobs:
           docker build -f crates/rift-http-proxy/Dockerfile.prebuilt -t rift-proxy:pr "$ctx"
 
       # Same test binary, the engine in that image with the imposter ranges published 1:1.
-      - name: Run the ported features (container mode)
+      - name: Run the Plane A features (container mode)
         run: cargo test -p rift-conformance-runner --test plane_a
         env:
           RIFT_MODE: container
           RIFT_IMAGE: rift-proxy:pr
-
-  conformance-plane-a:
-    name: conformance-plane-a
-    needs: changes
-    if: ${{ needs.changes.outputs.relevant == 'true' && !contains(github.event.pull_request.labels.*.name, 'conformance-exempt') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v6
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-conformance-${{ hashFiles('**/Cargo.lock') }}
-
-      # Release profile: the runner's suites were written against released binaries, and several
-      # assert on timing (timeouts, `wait` behaviours) that a debug build can miss.
-      - name: Build rift, rift-lint and rift-verify
-        run: cargo build --release -p rift-http-proxy -p rift-lint --bins
-
-      # The runner needs `rift`, `rift-lint` and `rift-verify` in RIFT_BUILD_DIR, plus the BUILD_INFO
-      # a released build gets from its scripts/build-rift.sh: the consistency gate (feature 01)
-      # compares each binary's live `--version` with what BUILD_INFO recorded. Same shape, with
-      # this commit and branch in place of a release tag.
-      - name: Stage binaries and BUILD_INFO
-        run: |
-          set -euo pipefail
-          dir="$RUNNER_TEMP/rift-build"
-          mkdir -p "$dir"
-          cp target/release/rift-http-proxy "$dir/rift"
-          cp target/release/rift-lint target/release/rift-verify "$dir/"
-          binaries='{}'
-          versions='{}'
-          for name in rift rift-lint rift-verify; do
-            sha="$(sha256sum "$dir/$name" | cut -d' ' -f1)"
-            ver="$("$dir/$name" --version | head -1)"
-            binaries="$(jq --arg n "$name" --arg s "$sha" '. + {($n): $s}' <<<"$binaries")"
-            versions="$(jq --arg n "$name" --arg v "$ver" '. + {($n): $v}' <<<"$versions")"
-          done
-          jq -n --arg commit "$GITHUB_SHA" --arg branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
-            --arg builtAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --argjson binaries "$binaries" --argjson versions "$versions" \
-            '{commit: $commit, branch: $branch, builtAt: $builtAt, binaries: $binaries, versions: $versions}' \
-            > "$dir/BUILD_INFO"
-          cat "$dir/BUILD_INFO"
-          echo "RIFT_BUILD_DIR=$dir" >> "$GITHUB_ENV"
-
-      - name: Read the runner ref
-        id: runner
-        run: echo "ref=$(tr -d '[:space:]' < conformance/RUNNER_REF)" >> "$GITHUB_OUTPUT"
-
-      # The runner repository is public, so the default token is enough.
-      - name: Check out the rift-conformance runner at ${{ steps.runner.outputs.ref }}
-        uses: actions/checkout@v7
-        with:
-          repository: EtaCassiopeia/rift-conformance
-          ref: ${{ steps.runner.outputs.ref }}
-          path: runner
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: sbt
-
-      - name: Set up sbt
-        uses: sbt/setup-sbt@v1
-
-      # Step matching first (no engine): a scenario using a step the runner does not know fails here
-      # with the step named, rather than as a confusing runtime failure.
-      - name: Lint features (dry-run step matching)
-        working-directory: runner
-        run: sbt -batch lintFeatures
-        env:
-          RIFT_FEATURES_DIR: ${{ github.workspace }}/conformance
-
-      # The features and fixtures come from this PR (RIFT_FEATURES_DIR replaces the runner's own
-      # copy); the JSON corpus stays the runner's vendored one, which these suites were written
-      # against.
-      - name: Run Plane A conformance
-        working-directory: runner
-        run: sbt -batch engineConformance
-        env:
-          RIFT_FEATURES_DIR: ${{ github.workspace }}/conformance
-          RIFT_MODE: external
-          RIFT_CORPUS_ROOT: ${{ github.workspace }}/runner/corpus
-          # The size-cap scenarios (features 13 and 21) test the 413 at a 10 MiB ceiling rather than
-          # sending bodies past the 512 MiB default; the spawned engine inherits this.
-          RIFT_MAX_BODY_SIZE: "10485760"
-
-      - name: Upload test reports
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: conformance-plane-a-reports
-          path: runner/target/test-reports/
-          if-no-files-found: ignore

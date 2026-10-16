@@ -5,8 +5,12 @@
 //! metrics URLs are fixed for the run. Scenarios that need an engine started with different flags
 //! (feature 09 `@upstream-trust`, features 05 and 19 `@rift-debug-env`) spawn a [`SpawnedEngine`]
 //! of their own beside it, feature 11's reload scenarios start a [`ReloadEngine`] serving a config
-//! file of their own, and feature 21's `@admin-isolated` ones an empty [`IsolatedEngine`]. Container
-//! mode starts none of them: [`Mode::excludes`] leaves those scenarios out.
+//! file of their own, feature 21's `@admin-isolated` ones an empty [`IsolatedEngine`], and feature
+//! 12's an [`IsolatedEngine`] with no intercept listener or an [`InterceptEngine`] with one of its
+//! own. Container mode starts none of them: [`Mode::excludes`] leaves those scenarios out.
+//!
+//! The shared engine runs an intercept listener in every mode (feature 12), seeded with the
+//! committed test CA (`rift-fixtures/intercept/`), so the CA it exports is that one.
 
 use crate::HarnessError;
 use crate::build_info::BuildInfo;
@@ -30,6 +34,10 @@ const SPAWN_ATTEMPTS: usize = 5;
 /// ports (a developer machine often has Mountebank on 2525); the imposter ranges 1:1.
 const CONTAINER_ADMIN_PORT: u16 = 2525;
 const CONTAINER_METRICS_PORT: u16 = 4790;
+/// The intercept listener inside the container, published on a free host port like admin.
+const CONTAINER_INTERCEPT_PORT: u16 = 8443;
+/// Where the test CA directory is mounted in the container.
+const CONTAINER_CA_DIR: &str = "/intercept-ca";
 /// Published 1:1 because fixtures and the corpus name ports in them and the engine reports the port
 /// it bound: 4500-4599 the corpus (4501-4521), 4800-4899 the fixtures' fixed ports (4800-4829,
 /// 4870-4879) and the pool.
@@ -79,8 +87,8 @@ impl Mode {
     }
 
     /// Why this mode cannot run a scenario carrying `tag`, or `None` when it can. The tag
-    /// vocabulary is the Scala runner's (`build.sbt`'s per-mode exclusions), so a feature file
-    /// means the same thing to both runners.
+    /// vocabulary is the one the Scala runner's `build.sbt` excluded per mode, kept so the feature
+    /// files did not change in the move.
     #[must_use]
     pub fn excludes(self, tag: &str) -> Option<&'static str> {
         match (self, tag) {
@@ -122,6 +130,21 @@ impl Mode {
             ),
             (Self::Container, "admin-isolated") => Some(
                 "starts a second engine of its own, which this harness doesn't start in a container",
+            ),
+            (Self::Container, "intercept-runtime") => Some(
+                "starts an engine of its own with no intercept listener, which this harness doesn't start in a container",
+            ),
+            (Self::Container, "intercept-auth") => Some(
+                "starts an engine of its own whose intercept listener requires proxy auth, which this harness doesn't start in a container",
+            ),
+            (Self::Container, "intercept-ws") => Some(
+                "starts an intercept engine of its own that dials an origin on the host's loopback, which a container cannot reach",
+            ),
+            (Self::Embedded, "tls-flags") => Some(
+                "starts an engine with a TLS CLI flag or environment variable, which an in-process engine cannot take per scenario",
+            ),
+            (Self::Container, "tls-flags") => Some(
+                "starts an engine of its own with a TLS CLI flag or environment variable, which this harness doesn't start in a container",
             ),
             _ => None,
         }
@@ -250,6 +273,8 @@ pub struct Harness {
     pub config: Config,
     pub admin_url: String,
     pub metrics_url: String,
+    /// The shared engine's intercept listener, on [`Harness::imposter_host`].
+    pub intercept_port: u16,
     pub tools: Tools,
     pub build_info: BuildInfo,
     engine: tokio::sync::Mutex<Option<Engine>>,
@@ -268,17 +293,35 @@ impl Harness {
         let build_info = BuildInfo::load(&config.build_dir)?;
         let tools = Tools::from_build_dir(&config.build_dir);
         let engine = match config.mode {
-            Mode::External => Engine::External(spawn_with_retry(&config, &[], false).await?),
-            Mode::Embedded => Engine::Embedded(EmbeddedEngine::start(&config, None).await?),
+            Mode::External => {
+                let opts = SpawnOptions {
+                    intercept: true,
+                    ..SpawnOptions::default()
+                };
+                Engine::External(spawn_with_retry(&config, &opts).await?)
+            }
+            Mode::Embedded => {
+                let e = EmbeddedEngine::start(&config, &EmbeddedOptions::default()).await?;
+                Engine::Embedded(e.with_test_ca_intercept(None).await?)
+            }
             Mode::Container => {
                 let image = config.image.as_deref().ok_or_else(missing_image)?;
                 Engine::Container(ContainerEngine::start(&config, image).await?)
             }
         };
-        let (admin_url, metrics_url) = match &engine {
-            Engine::External(e) => (e.admin_url.clone(), e.metrics_url.clone()),
-            Engine::Embedded(e) => (e.admin_url.clone(), e.metrics_url.clone()),
-            Engine::Container(e) => (e.admin_url.clone(), e.metrics_url.clone()),
+        let (admin_url, metrics_url, intercept_port) = match &engine {
+            Engine::External(e) => (e.admin_url.clone(), e.metrics_url.clone(), e.intercept_port),
+            Engine::Embedded(e) => (e.admin_url.clone(), e.metrics_url.clone(), e.intercept_port),
+            Engine::Container(e) => (
+                e.admin_url.clone(),
+                e.metrics_url.clone(),
+                Some(e.intercept_port),
+            ),
+        };
+        let Some(intercept_port) = intercept_port else {
+            return Err(HarnessError::NotReady(
+                "the shared engine started without its intercept listener".to_string(),
+            ));
         };
         let port_pool = match config.mode {
             Mode::Container => Some(PortPool::new(CONTAINER_POOL.0, CONTAINER_POOL.1)),
@@ -288,6 +331,7 @@ impl Harness {
             config,
             admin_url,
             metrics_url,
+            intercept_port,
             tools,
             build_info,
             engine: tokio::sync::Mutex::new(Some(engine)),
@@ -339,35 +383,130 @@ impl Harness {
                 mode: self.config.mode.name(),
             });
         }
-        let args = vec![
-            "--upstream-ca-file".to_string(),
-            ca_file.display().to_string(),
-        ];
-        spawn_with_retry(&self.config, &args, false).await
+        let opts = SpawnOptions {
+            args: vec![
+                "--upstream-ca-file".to_string(),
+                ca_file.display().to_string(),
+            ],
+            ..SpawnOptions::default()
+        };
+        spawn_with_retry(&self.config, &opts).await
     }
 
     /// Start a dedicated engine with the extra CLI `flags` (features 05 and 19 `@rift-debug-env`:
     /// `--debug`). The caller owns it; dropping it kills the process.
     pub async fn spawn_flag_engine(&self, flags: &[String]) -> Result<SpawnedEngine, HarnessError> {
+        self.spawn_flag_engine_with_env(flags, &[]).await
+    }
+
+    /// [`Harness::spawn_flag_engine`] with `env` set in the engine's environment too (feature 20
+    /// `@tls-flags`: `RIFT_DISABLE_HTTP2`).
+    pub async fn spawn_flag_engine_with_env(
+        &self,
+        flags: &[String],
+        env: &[(String, String)],
+    ) -> Result<SpawnedEngine, HarnessError> {
         if self.config.mode != Mode::External {
             return Err(HarnessError::Unsupported {
                 what: "an engine started with extra flags",
                 mode: self.config.mode.name(),
             });
         }
-        spawn_with_retry(&self.config, flags, false).await
+        let opts = SpawnOptions {
+            args: flags.to_vec(),
+            env: env.to_vec(),
+            ..SpawnOptions::default()
+        };
+        spawn_with_retry(&self.config, &opts).await
+    }
+
+    /// Boot an engine with `flags` (and `--front-door 0` when `front_door`) once, and wait up to
+    /// the readiness budget for it to exit: for the scenarios asserting that a configuration stops
+    /// the engine at startup (feature 16's invalid route tables, feature 20's missing TLS file). An
+    /// engine still running then is killed and reported with no exit code: it booted.
+    pub async fn boot_engine(
+        &self,
+        flags: &[String],
+        front_door: bool,
+    ) -> Result<EngineBoot, HarnessError> {
+        if self.config.mode != Mode::External {
+            return Err(HarnessError::Unsupported {
+                what: "a boot-only engine",
+                mode: self.config.mode.name(),
+            });
+        }
+        let opts = SpawnOptions {
+            args: flags.to_vec(),
+            front_door,
+            ..SpawnOptions::default()
+        };
+        let (mut child, log) = spawn_engine(&self.config, &opts)?;
+        let deadline = Instant::now() + READINESS_BUDGET;
+        let exit_code = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status.code().unwrap_or(-1)),
+                Ok(None) if Instant::now() >= deadline => break None,
+                Ok(None) => tokio::time::sleep(READINESS_SPACING).await,
+                Err(source) => {
+                    return Err(HarnessError::Io {
+                        action: "waiting on the engine logging to",
+                        path: log,
+                        source,
+                    });
+                }
+            }
+        };
+        if exit_code.is_none() {
+            SpawnedEngine::from_child(child, log.clone()).stop().await?;
+        }
+        let output = std::fs::read_to_string(&log).map_err(|source| HarnessError::Io {
+            action: "reading",
+            path: log.clone(),
+            source,
+        })?;
+        Ok(EngineBoot { exit_code, output })
+    }
+
+    /// Write `contents` to a fresh file in the run's log directory and return its path: a config
+    /// file or a certificate an engine is started with.
+    pub fn scratch_file(&self, stem: &str, contents: &str) -> Result<PathBuf, HarnessError> {
+        let path = self.config.log_dir.join(format!(
+            "{stem}-{}",
+            SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        write_file(&path, contents)?;
+        Ok(path)
     }
 
     /// Start a second, empty engine of the run's kind (feature 21 `@admin-isolated`), for admin
     /// calls that would wipe the shared engine: a spawned `rift`, or in embedded mode a second
     /// in-process engine. The caller owns it and stops it after the scenario.
     pub async fn start_isolated_engine(&self) -> Result<IsolatedEngine, HarnessError> {
+        self.start_plain_engine(true).await
+    }
+
+    /// Start a second engine of the run's kind with no intercept listener (feature 12
+    /// `@intercept-runtime`: the listener is started and stopped over its admin API), without
+    /// `--allow-injection` unless `allow_injection`. The caller owns it and stops it after the
+    /// scenario.
+    pub async fn start_plain_engine(
+        &self,
+        allow_injection: bool,
+    ) -> Result<IsolatedEngine, HarnessError> {
         let engine = match self.config.mode {
             Mode::External => {
-                OwnedEngine::Spawned(spawn_with_retry(&self.config, &[], false).await?)
+                let opts = SpawnOptions {
+                    no_injection: !allow_injection,
+                    ..SpawnOptions::default()
+                };
+                OwnedEngine::Spawned(spawn_with_retry(&self.config, &opts).await?)
             }
             Mode::Embedded => {
-                OwnedEngine::Embedded(EmbeddedEngine::start(&self.config, None).await?)
+                let opts = EmbeddedOptions {
+                    no_injection: !allow_injection,
+                    ..EmbeddedOptions::default()
+                };
+                OwnedEngine::Embedded(EmbeddedEngine::start(&self.config, &opts).await?)
             }
             Mode::Container => {
                 return Err(HarnessError::Unsupported {
@@ -383,6 +522,64 @@ impl Harness {
         Ok(IsolatedEngine { engine, admin_url })
     }
 
+    /// Start a second engine of the run's kind whose intercept listener is seeded with the test CA,
+    /// as the shared one's is (feature 12): requiring `Proxy-Authorization` for `auth` (`user:pass`,
+    /// `@intercept-auth`), and trusting `upstream_ca` for outbound TLS (`@intercept-ws`, whose
+    /// WebSocket relay dials a TLS origin that CA signed). The caller owns it.
+    pub async fn start_intercept_engine(
+        &self,
+        auth: Option<&str>,
+        upstream_ca: Option<&Path>,
+    ) -> Result<InterceptEngine, HarnessError> {
+        let (engine, intercept_port) = match self.config.mode {
+            Mode::External => {
+                let mut args = Vec::new();
+                if let Some(credentials) = auth {
+                    args.extend(["--intercept-auth".to_string(), credentials.to_string()]);
+                }
+                if let Some(ca) = upstream_ca {
+                    args.extend(["--upstream-ca-file".to_string(), ca.display().to_string()]);
+                }
+                let opts = SpawnOptions {
+                    args,
+                    intercept: true,
+                    ..SpawnOptions::default()
+                };
+                let e = spawn_with_retry(&self.config, &opts).await?;
+                let port = e.intercept_port;
+                (OwnedEngine::Spawned(e), port)
+            }
+            Mode::Embedded => {
+                let opts = EmbeddedOptions {
+                    upstream_ca_file: upstream_ca.map(Path::to_path_buf),
+                    ..EmbeddedOptions::default()
+                };
+                let e = EmbeddedEngine::start(&self.config, &opts).await?;
+                let e = e.with_test_ca_intercept(auth).await?;
+                let port = e.intercept_port;
+                (OwnedEngine::Embedded(e), port)
+            }
+            Mode::Container => {
+                return Err(HarnessError::Unsupported {
+                    what: "an intercept engine of a scenario's own",
+                    mode: self.config.mode.name(),
+                });
+            }
+        };
+        let admin_url = match &engine {
+            OwnedEngine::Spawned(e) => e.admin_url.clone(),
+            OwnedEngine::Embedded(e) => e.admin_url.clone(),
+        };
+        let intercept_port = intercept_port.ok_or_else(|| {
+            HarnessError::NotReady("the intercept engine has no intercept listener".to_string())
+        })?;
+        Ok(InterceptEngine {
+            engine,
+            admin_url,
+            intercept_port,
+        })
+    }
+
     /// Start a dedicated engine serving `json` from a config file it reloads from (feature 11): a
     /// spawned `rift --configfile`, or in embedded mode a second in-process engine given the file as
     /// `configFile`. `front_door` also starts the front door, which only a spawned engine has. The
@@ -396,16 +593,24 @@ impl Harness {
         write_file(&config_path, json)?;
         let (engine, admin_url) = match self.config.mode {
             Mode::External => {
-                let args = vec![
-                    "--configfile".to_string(),
-                    config_path.display().to_string(),
-                ];
-                let e = spawn_with_retry(&self.config, &args, front_door).await?;
+                let opts = SpawnOptions {
+                    args: vec![
+                        "--configfile".to_string(),
+                        config_path.display().to_string(),
+                    ],
+                    front_door,
+                    ..SpawnOptions::default()
+                };
+                let e = spawn_with_retry(&self.config, &opts).await?;
                 let url = e.admin_url.clone();
                 (OwnedEngine::Spawned(e), url)
             }
             Mode::Embedded if !front_door => {
-                let e = EmbeddedEngine::start(&self.config, Some(&config_path)).await?;
+                let opts = EmbeddedOptions {
+                    config_file: Some(config_path.clone()),
+                    ..EmbeddedOptions::default()
+                };
+                let e = EmbeddedEngine::start(&self.config, &opts).await?;
                 let url = e.admin_url.clone();
                 (OwnedEngine::Embedded(e), url)
             }
@@ -484,17 +689,52 @@ pub struct SpawnedEngine {
     pub metrics_url: String,
     /// `--front-door`'s port, when it was started with one.
     pub front_door_port: Option<u16>,
+    /// The intercept listener's port, when it was started with one.
+    pub intercept_port: Option<u16>,
     pub log: PathBuf,
+}
+
+/// How an engine of this run's own is started, beyond the flags every one gets.
+#[derive(Debug, Clone, Default)]
+struct SpawnOptions {
+    /// Extra CLI arguments.
+    args: Vec<String>,
+    /// Extra environment variables.
+    env: Vec<(String, String)>,
+    /// Also start the front door, on a port the engine picks.
+    front_door: bool,
+    /// Also start an intercept listener seeded with the test CA, on a port the engine picks.
+    intercept: bool,
+    /// Leave out `--allow-injection`.
+    no_injection: bool,
+}
+
+/// The committed test intercept CA's directory (rift-conformance#55).
+fn test_ca_dir() -> PathBuf {
+    crate::spec::fixtures_dir().join("intercept")
+}
+
+/// The test CA's certificate and key files.
+fn test_ca_files() -> (PathBuf, PathBuf) {
+    let dir = test_ca_dir();
+    (dir.join("ca-cert.pem"), dir.join("ca-key.pem"))
+}
+
+/// How a boot-only engine ([`Harness::boot_engine`]) ended: its exit code (`None` when it was still
+/// running, so it booted, and was killed) and everything it wrote.
+#[derive(Debug, Clone)]
+pub struct EngineBoot {
+    pub exit_code: Option<i32>,
+    pub output: String,
 }
 
 async fn spawn_with_retry(
     config: &Config,
-    extra: &[String],
-    front_door: bool,
+    opts: &SpawnOptions,
 ) -> Result<SpawnedEngine, HarnessError> {
     let mut failures = Vec::new();
     for _ in 0..SPAWN_ATTEMPTS {
-        match SpawnedEngine::start(config, extra, front_door).await {
+        match SpawnedEngine::start(config, opts).await {
             Ok(engine) => return Ok(engine),
             Err(e) => failures.push(e.to_string()),
         }
@@ -507,6 +747,72 @@ async fn spawn_with_retry(
 
 /// Names each spawned engine's log file, since its ports are not known until it has started.
 static ENGINE_SEQ: AtomicUsize = AtomicUsize::new(0);
+/// Names each [`Harness::scratch_file`].
+static SCRATCH_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// Spawn `rift --port 0 --nologfile --metrics-port 0 --allow-injection <args>` (plus `--front-door
+/// 0` when asked) in the corpus root, output to a fresh log file, and return the child and that log.
+/// Port 0 throughout: a probed port could be taken before the engine bound it, or answered by a
+/// neighbour's loopback socket while the engine holds the wildcard (#1485).
+fn spawn_engine(config: &Config, opts: &SpawnOptions) -> Result<(Child, PathBuf), HarnessError> {
+    let front_door_args: &[&str] = if opts.front_door {
+        &["--front-door", "0"]
+    } else {
+        &[]
+    };
+    let log = config.log_dir.join(format!(
+        "engine-{}-{}.log",
+        std::process::id(),
+        ENGINE_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let log_file = std::fs::File::create(&log).map_err(|source| HarnessError::Io {
+        action: "creating",
+        path: log.clone(),
+        source,
+    })?;
+    let log_err = log_file.try_clone().map_err(|source| HarnessError::Io {
+        action: "duplicating",
+        path: log.clone(),
+        source,
+    })?;
+    let binary = config.build_dir.join("rift");
+    let mut command = Command::new(&binary);
+    command.args(["--port", "0", "--nologfile", "--metrics-port", "0"]);
+    if !opts.no_injection {
+        command.arg("--allow-injection");
+    }
+    if opts.intercept {
+        let (cert, key) = test_ca_files();
+        command
+            .args(["--intercept-port", "0", "--intercept-ca-cert"])
+            .arg(cert)
+            .arg("--intercept-ca-key")
+            .arg(key);
+    }
+    command
+        .args(&opts.args)
+        .args(front_door_args)
+        .env("NO_COLOR", "1")
+        .envs(opts.env.iter().map(|(k, v)| (k, v)));
+    // A level set in this environment would also hide the info lines the ports are read from,
+    // so they are added back to whatever filter it asks for.
+    if let Some(filter) = listening_filter() {
+        command.env("RUST_LOG", filter);
+    }
+    let child = command
+        .current_dir(&config.corpus_root)
+        .stdin(Stdio::null())
+        .stdout(log_file)
+        .stderr(log_err)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|source| HarnessError::Io {
+            action: "spawning",
+            path: binary,
+            source,
+        })?;
+    Ok((child, log))
+}
 
 /// The log targets of the three startup lines a spawned engine's ports are read from.
 const LISTENING_TARGETS: [&str; 3] = [
@@ -516,71 +822,39 @@ const LISTENING_TARGETS: [&str; 3] = [
 ];
 
 impl SpawnedEngine {
-    /// Spawn `rift --port 0 --nologfile --metrics-port 0 --allow-injection <extra>` (plus
-    /// `--front-door 0` when asked) in the corpus root, output to a log file, read the ports it
-    /// bound from its startup lines, and wait until its admin and metrics listeners answer and the
-    /// front door accepts. Port 0 throughout: a probed port could be taken before the engine bound
-    /// it, or answered by a neighbour's loopback socket while the engine holds the wildcard (#1485).
-    async fn start(
-        config: &Config,
-        extra: &[String],
-        front_door: bool,
-    ) -> Result<Self, HarnessError> {
-        let front_door_args: &[&str] = if front_door {
-            &["--front-door", "0"]
-        } else {
-            &[]
-        };
-        let log = config.log_dir.join(format!(
-            "engine-{}-{}.log",
-            std::process::id(),
-            ENGINE_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let log_file = std::fs::File::create(&log).map_err(|source| HarnessError::Io {
-            action: "creating",
-            path: log.clone(),
-            source,
-        })?;
-        let log_err = log_file.try_clone().map_err(|source| HarnessError::Io {
-            action: "duplicating",
-            path: log.clone(),
-            source,
-        })?;
-        let binary = config.build_dir.join("rift");
-        let mut command = Command::new(&binary);
-        command
-            .args(["--port", "0", "--nologfile", "--metrics-port", "0"])
-            .arg("--allow-injection")
-            .args(extra)
-            .args(front_door_args)
-            .env("NO_COLOR", "1");
-        // A level set in this environment would also hide the info lines the ports are read from,
-        // so they are added back to whatever filter it asks for.
-        if let Some(filter) = listening_filter() {
-            command.env("RUST_LOG", filter);
-        }
-        let child = command
-            .current_dir(&config.corpus_root)
-            .stdin(Stdio::null())
-            .stdout(log_file)
-            .stderr(log_err)
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|source| HarnessError::Io {
-                action: "spawning",
-                path: binary,
-                source,
-            })?;
-        let mut engine = Self {
+    fn from_child(child: Child, log: PathBuf) -> Self {
+        Self {
             child,
             admin_url: String::new(),
             metrics_url: String::new(),
             front_door_port: None,
+            intercept_port: None,
             log,
-        };
-        let ready = match engine.read_bound_ports(front_door).await {
+        }
+    }
+
+    /// [`spawn_engine`], then read the ports it bound from its startup lines and wait until its
+    /// admin and metrics listeners answer and the front door accepts.
+    async fn start(config: &Config, opts: &SpawnOptions) -> Result<Self, HarnessError> {
+        let (child, log) = spawn_engine(config, opts)?;
+        let mut engine = Self::from_child(child, log);
+        let ready = match engine.read_bound_ports(opts.front_door).await {
             Ok(()) => engine.await_ready().await,
             Err(e) => Err(e),
+        };
+        let ready = match ready {
+            Ok(()) if opts.intercept => {
+                let deadline = Instant::now() + READINESS_BUDGET;
+                let mut liveness = Liveness::Child(&mut engine.child, &engine.log);
+                match await_intercept(&engine.admin_url, &mut liveness, deadline).await {
+                    Ok(port) => {
+                        engine.intercept_port = Some(port);
+                        await_tcp(port, &mut liveness, deadline).await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            other => other,
         };
         match ready {
             Ok(()) => Ok(engine),
@@ -777,6 +1051,74 @@ async fn await_listeners(
     Ok(())
 }
 
+/// Poll `GET {admin}/intercept` until it answers 200, and return the `interceptPort` it reports: the
+/// port the engine bound for an intercept listener asked for on port 0.
+async fn await_intercept(
+    admin_url: &str,
+    engine: &mut Liveness<'_>,
+    deadline: Instant,
+) -> Result<u16, HarnessError> {
+    let probe = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(HarnessError::Client)?;
+    let url = format!("{admin_url}/intercept");
+    loop {
+        if let Some(why) = engine.stopped().await? {
+            return Err(HarnessError::NotReady(format!(
+                "{why} before its intercept listener ran"
+            )));
+        }
+        let last = match probe.get(&url).send().await {
+            Ok(r) if r.status().is_success() => {
+                let body = r.text().await.map_err(HarnessError::Client)?;
+                return serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("interceptPort")?.as_u64())
+                    .and_then(|p| u16::try_from(p).ok())
+                    .ok_or_else(|| {
+                        HarnessError::NotReady(format!("{url} reported no interceptPort: {body}"))
+                    });
+            }
+            Ok(r) => format!("HTTP {}", r.status()),
+            Err(e) => e.to_string(),
+        };
+        if Instant::now() >= deadline {
+            return Err(HarnessError::NotReady(format!(
+                "{url} did not answer 200 within {READINESS_BUDGET:?} (last: {last})"
+            )));
+        }
+        tokio::time::sleep(READINESS_SPACING).await;
+    }
+}
+
+/// Wait until `port` on the loopback accepts a TCP connection: a listener that answers no GET (the
+/// intercept listener speaks CONNECT, the front door 404s an unrouted probe).
+async fn await_tcp(
+    port: u16,
+    engine: &mut Liveness<'_>,
+    deadline: Instant,
+) -> Result<(), HarnessError> {
+    loop {
+        if let Some(why) = engine.stopped().await? {
+            return Err(HarnessError::NotReady(format!(
+                "{why} before port {port} accepted"
+            )));
+        }
+        let last = match tokio::net::TcpStream::connect((LOOPBACK, port)).await {
+            Ok(_) => return Ok(()),
+            Err(e) => e.to_string(),
+        };
+        if Instant::now() >= deadline {
+            return Err(HarnessError::NotReady(format!(
+                "port {port} did not accept within {READINESS_BUDGET:?} (last: {last})"
+            )));
+        }
+        tokio::time::sleep(READINESS_SPACING).await;
+    }
+}
+
 /// The port in the first `<prefix> http://<host>:<port>[/...]` line of `log`, colour codes ignored.
 fn listening_port(log: &str, prefix: &str) -> Option<u16> {
     let marker = format!("{prefix} http://");
@@ -881,6 +1223,8 @@ struct ContainerEngine {
     name: String,
     admin_url: String,
     metrics_url: String,
+    /// The host port the intercept listener is published on.
+    intercept_port: u16,
     log: PathBuf,
 }
 
@@ -892,6 +1236,7 @@ impl ContainerEngine {
     async fn start(config: &Config, image: &str) -> Result<Self, HarnessError> {
         let admin_port = free_port()?;
         let metrics_port = free_port()?;
+        let intercept_port = free_port()?;
         let name = format!(
             "rift-conf-{}-{}",
             std::process::id(),
@@ -911,6 +1256,8 @@ impl ContainerEngine {
             &format!("127.0.0.1:{admin_port}:{CONTAINER_ADMIN_PORT}"),
             "-p",
             &format!("127.0.0.1:{metrics_port}:{CONTAINER_METRICS_PORT}"),
+            "-p",
+            &format!("127.0.0.1:{intercept_port}:{CONTAINER_INTERCEPT_PORT}"),
         ]
         .map(String::from)
         .to_vec();
@@ -923,6 +1270,12 @@ impl ContainerEngine {
             "{}:{IMAGE_WORKDIR}/data:ro",
             config.corpus_root.join("data").display()
         ));
+        // Docker wants the bind source absolute, which the fixtures dir's `..` is not.
+        args.push("-v".to_string());
+        args.push(format!(
+            "{}:{CONTAINER_CA_DIR}:ro",
+            absolute(test_ca_dir())?.display()
+        ));
         args.push(image.to_string());
         args.extend(
             [
@@ -931,6 +1284,12 @@ impl ContainerEngine {
                 "--allow-injection",
                 "--metrics-port",
                 &CONTAINER_METRICS_PORT.to_string(),
+                "--intercept-port",
+                &CONTAINER_INTERCEPT_PORT.to_string(),
+                "--intercept-ca-cert",
+                &format!("{CONTAINER_CA_DIR}/ca-cert.pem"),
+                "--intercept-ca-key",
+                &format!("{CONTAINER_CA_DIR}/ca-key.pem"),
             ]
             .map(String::from),
         );
@@ -944,6 +1303,7 @@ impl ContainerEngine {
         let engine = Self {
             admin_url: format!("http://{LOOPBACK}:{admin_port}"),
             metrics_url: format!("http://{LOOPBACK}:{metrics_port}"),
+            intercept_port,
             name,
             log,
         };
@@ -962,13 +1322,24 @@ impl ContainerEngine {
                 )),
             });
         }
-        let ready = await_listeners(
+        let deadline = Instant::now() + READINESS_BUDGET;
+        let mut liveness = Liveness::Container(&engine.name);
+        let ready = match await_listeners(
             &engine.admin_url,
             &engine.metrics_url,
-            &mut Liveness::Container(&engine.name),
-            Instant::now() + READINESS_BUDGET,
+            &mut liveness,
+            deadline,
         )
-        .await;
+        .await
+        {
+            // The port the engine reports is the one inside the container; the host reaches the
+            // published one.
+            Ok(()) => match await_intercept(&engine.admin_url, &mut liveness, deadline).await {
+                Ok(_) => await_tcp(engine.intercept_port, &mut liveness, deadline).await,
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        };
         match ready {
             Ok(()) => Ok(engine),
             Err(e) => {
@@ -1227,6 +1598,26 @@ impl IsolatedEngine {
     }
 }
 
+/// Feature 12's intercept engine of a scenario's own: its admin API and intercept listener.
+#[derive(Debug)]
+pub struct InterceptEngine {
+    engine: OwnedEngine,
+    pub admin_url: String,
+    pub intercept_port: u16,
+}
+
+impl InterceptEngine {
+    /// The spawned engine's log; an embedded engine logs into this process.
+    #[must_use]
+    pub fn log(&self) -> Option<&Path> {
+        self.engine.log()
+    }
+
+    pub async fn stop(self) -> Result<(), HarnessError> {
+        self.engine.stop().await
+    }
+}
+
 fn write_file(path: &Path, contents: &str) -> Result<(), HarnessError> {
     std::fs::write(path, contents).map_err(|source| HarnessError::Io {
         action: "writing",
@@ -1253,6 +1644,19 @@ struct EmbeddedEngine {
     handle: HandlePtr,
     admin_url: String,
     metrics_url: String,
+    /// The intercept listener `rift_start_intercept` started, if one was.
+    intercept_port: Option<u16>,
+}
+
+/// `rift_serve_admin` options beyond the ones every embedded engine gets.
+#[derive(Debug, Default)]
+struct EmbeddedOptions {
+    /// Loaded, and the engine's reload source.
+    config_file: Option<PathBuf>,
+    /// `allowInjection: false`.
+    no_injection: bool,
+    /// `upstreamCaFile`: trusted for outbound TLS.
+    upstream_ca_file: Option<PathBuf>,
 }
 
 /// `rift_start`'s opaque handle. Every C-ABI entry point takes it from any thread (the SDKs call
@@ -1268,6 +1672,18 @@ impl HandlePtr {
     fn into_raw(self) -> *mut rift_ffi::RiftHandle {
         self.0
     }
+
+    /// The same handle again, for a call made while the engine owning it is still running and
+    /// awaited before that engine can be stopped.
+    fn alias(&self) -> Self {
+        Self(self.0)
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartInterceptReply {
+    intercept_port: u16,
 }
 
 #[derive(serde::Deserialize)]
@@ -1278,19 +1694,21 @@ struct ServeAdminReply {
 }
 
 impl EmbeddedEngine {
-    /// `config_file`, when given, is loaded and becomes the engine's reload source.
-    async fn start(config: &Config, config_file: Option<&Path>) -> Result<Self, HarnessError> {
+    async fn start(config: &Config, opts: &EmbeddedOptions) -> Result<Self, HarnessError> {
         let mut options = serde_json::json!({
             "host": "127.0.0.1",
             "port": 0,
             "metricsPort": 0,
-            "allowInjection": true,
+            "allowInjection": !opts.no_injection,
         });
         if let Some(max) = config.max_body_size {
             options["maxBodySize"] = max.into();
         }
-        if let Some(path) = config_file {
+        if let Some(path) = &opts.config_file {
             options["configFile"] = path.display().to_string().into();
+        }
+        if let Some(path) = &opts.upstream_ca_file {
+            options["upstreamCaFile"] = path.display().to_string().into();
         }
         let options = CString::new(options.to_string())
             .map_err(|e| HarnessError::Embedded(format!("options JSON: {e}")))?;
@@ -1338,7 +1756,61 @@ impl EmbeddedEngine {
             handle,
             admin_url: reply.admin_url,
             metrics_url: format!("http://127.0.0.1:{metrics_port}"),
+            intercept_port: None,
         })
+    }
+
+    /// Start this engine's intercept listener with `rift_start_intercept`, on a loopback port it
+    /// picks, seeded with the test CA, requiring `auth` (`user:pass`) when given. Its admin plane
+    /// shares the listener, so the `/intercept*` admin routes see it. A failure stops the engine.
+    async fn with_test_ca_intercept(mut self, auth: Option<&str>) -> Result<Self, HarnessError> {
+        let (cert, key) = test_ca_files();
+        let mut options = serde_json::json!({
+            "host": "127.0.0.1",
+            "port": 0,
+            "caCertPath": cert.display().to_string(),
+            "caKeyPath": key.display().to_string(),
+        });
+        if let Some(credentials) = auth {
+            let (username, password) = credentials.split_once(':').ok_or_else(|| {
+                HarnessError::Embedded(format!("intercept auth {credentials:?} is not user:pass"))
+            })?;
+            options["auth"] = serde_json::json!({"username": username, "password": password});
+        }
+        let started = match CString::new(options.to_string()) {
+            Ok(options) => {
+                let handle = self.handle.alias();
+                tokio::task::spawn_blocking(move || {
+                    // SAFETY: the handle is live (its engine is awaiting this task) and `options` is
+                    // a NUL-terminated string that outlives the call.
+                    let reply = unsafe {
+                        rift_ffi::rift_start_intercept(handle.into_raw(), options.as_ptr())
+                    };
+                    if reply.is_null() {
+                        return Err(format!("rift_start_intercept: {}", last_error()));
+                    }
+                    // SAFETY: a non-null reply is a NUL-terminated string rift-ffi allocated; it is
+                    // copied here and then freed exactly once.
+                    let text = unsafe { CStr::from_ptr(reply) }
+                        .to_string_lossy()
+                        .into_owned();
+                    unsafe { rift_ffi::rift_free(reply) };
+                    serde_json::from_str::<StartInterceptReply>(&text)
+                        .map(|r| r.intercept_port)
+                        .map_err(|e| format!("rift_start_intercept reply {text:?}: {e}"))
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("rift_start_intercept task: {e}")))
+            }
+            Err(e) => Err(format!("intercept options JSON: {e}")),
+        };
+        match started {
+            Ok(port) => {
+                self.intercept_port = Some(port);
+                Ok(self)
+            }
+            Err(why) => Err(with_stop_outcome(why, self.stop().await)),
+        }
     }
 
     async fn stop(self) -> Result<(), HarnessError> {
@@ -1410,8 +1882,12 @@ mod tests {
         assert!(Mode::Container.excludes("admin-isolated").is_some());
     }
 
-    const CONTAINER_TAGS: [&str; 10] = [
+    const CONTAINER_TAGS: [&str; 14] = [
         "rift-debug-env",
+        "tls-flags",
+        "intercept-runtime",
+        "intercept-auth",
+        "intercept-ws",
         "admin-isolated",
         "reload-engine",
         "upstream-trust",
@@ -1440,6 +1916,40 @@ mod tests {
         }
         for tag in ["full-corpus", "metrics-port", "no-config-source", "rift"] {
             assert!(Mode::Container.excludes(tag).is_none(), "{tag}");
+        }
+    }
+
+    #[test]
+    fn every_intercept_tag_runs_in_process_and_only_the_own_engine_ones_leave_the_container() {
+        for tag in [
+            "intercept-http",
+            "intercept-caller-ca",
+            "intercept-raw",
+            "intercept-runtime",
+            "intercept-auth",
+            "intercept-ws",
+        ] {
+            assert!(Mode::External.excludes(tag).is_none(), "{tag}");
+            assert!(Mode::Embedded.excludes(tag).is_none(), "{tag}");
+        }
+        for tag in [
+            "intercept-http",
+            "intercept-caller-ca",
+            "intercept-raw",
+            "intercept",
+        ] {
+            assert!(Mode::Container.excludes(tag).is_none(), "{tag}");
+        }
+    }
+
+    #[test]
+    fn tls_flag_engines_run_only_in_external_mode() {
+        assert!(Mode::External.excludes("tls-flags").is_none());
+        assert!(Mode::Embedded.excludes("tls-flags").is_some());
+        assert!(Mode::Container.excludes("tls-flags").is_some());
+        // Feature 20's untagged scenarios drive the shared engine in every mode.
+        for mode in [Mode::External, Mode::Embedded, Mode::Container] {
+            assert!(mode.excludes("tls").is_none(), "{mode}");
         }
     }
 

@@ -1,14 +1,13 @@
-//! Every feature in the specification parses with the runner's parser (issue #1466), not just the
-//! ones `spec::PORTED_FEATURES` lists today. gherkin-rs is stricter than zio-bdd and official
-//! Gherkin (a table cell accepts only the escapes `\n`, `\|` and `\\`), so a feature written
-//! against the Scala runner can parse there and fail here; this catches it on the PR that adds it.
+//! Every feature file in the specification parses with the runner's parser (issue #1466), and the
+//! runner runs every one (#1350). gherkin-rs is stricter than official Gherkin (a table cell accepts
+//! only the escapes `\n`, `\|` and `\\`); this catches a file it cannot read, or one nobody added
+//! to `spec::PORTED_FEATURES`, on the PR that adds it.
 
 mod common;
 
-use rift_conformance_runner::spec::features_dir;
+use rift_conformance_runner::spec::{PORTED_FEATURES, features_dir};
 
-#[test]
-fn every_feature_parses_with_the_runner_parser() {
+fn feature_files() -> Vec<std::path::PathBuf> {
     let dir = features_dir();
     let mut paths: Vec<_> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
@@ -16,6 +15,27 @@ fn every_feature_parses_with_the_runner_parser() {
         .filter(|p| p.extension().is_some_and(|ext| ext == "feature"))
         .collect();
     paths.sort();
+    paths
+}
+
+#[test]
+fn the_runner_runs_every_feature_on_disk() {
+    let on_disk: Vec<String> = feature_files()
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    let mut ported: Vec<String> = PORTED_FEATURES.iter().map(|f| (*f).to_string()).collect();
+    ported.sort();
+    assert_eq!(
+        ported, on_disk,
+        "spec::PORTED_FEATURES must list exactly the feature files under features/rift"
+    );
+}
+
+#[test]
+fn every_feature_parses_with_the_runner_parser() {
+    let dir = features_dir();
+    let paths = feature_files();
     assert!(
         !paths.is_empty(),
         "no .feature files under {}",

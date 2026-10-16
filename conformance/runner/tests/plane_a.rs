@@ -1,5 +1,5 @@
-//! Plane A conformance (issue #1346): the features in `conformance/features/rift/` that this runner
-//! has ported (`spec::PORTED_FEATURES`), run against a real engine.
+//! Plane A conformance (issue #1346): the features in `conformance/features/rift/`
+//! (`spec::PORTED_FEATURES`, every one since #1350), run against a real engine.
 //!
 //! - `RIFT_BUILD_DIR` (required): `rift`, `rift-lint`, `rift-verify` and `BUILD_INFO`, staged as
 //!   `.github/workflows/conformance.yml` does. Unset, the run prints why and passes, unless
@@ -12,8 +12,8 @@
 //! cucumber's own flags still work after `--`: `--name <regex>`, `--tags <expr>`, `--fail-fast`.
 //! They narrow the ported set; they never widen it past it or past what the mode can run.
 //!
-//! Step text is byte-identical to the Scala runner's (`RiftConformanceSupport.scala`), so a feature
-//! file means the same thing to both while features move from one runner to the other.
+//! Step text is byte-identical to the retired Scala runner's (`RiftConformanceSupport.scala` and
+//! the per-feature suites), so the feature files did not change in the move.
 
 mod common;
 
@@ -26,7 +26,8 @@ use futures::FutureExt as _;
 use regex::Regex;
 use rift_conformance_runner::HarnessError;
 use rift_conformance_runner::harness::{
-    Config, Harness, IsolatedEngine, ReloadEngine, SpawnedEngine, free_port, log_tail, port_taken,
+    Config, EngineBoot, Harness, InterceptEngine, IsolatedEngine, ReloadEngine, SpawnedEngine,
+    free_port, log_tail, port_taken,
 };
 use rift_conformance_runner::http::{
     Clients, FailureKind, Response, classify_failure, install_crypto_provider,
@@ -35,6 +36,8 @@ use rift_conformance_runner::prom::{self, PromText, Series};
 use rift_conformance_runner::raw::{self, H2_INTERNAL_ERROR, H2Outcome, RawCapture};
 use rift_conformance_runner::spec::{PORTED_FEATURES, features_dir, fixtures_dir};
 use rift_conformance_runner::tools::{CORPUS_VERIFY_ARGS, binary_version};
+use rift_conformance_runner::wire::{self, RawConnection, RawRead};
+use rift_conformance_runner::{intercept, tls};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -144,6 +147,28 @@ struct PlaneA {
     /// Each listener's exposition when the scenario snapshotted it (feature 17's deltas).
     snapshots: BTreeMap<String, PromText>,
     burst: Option<Burst>,
+    /// The last feature 20 HTTPS exchange's chain and negotiated version.
+    tls: Option<TlsExchange>,
+    /// The last single-stream h2c GET (feature 20).
+    h2c_get: Option<H2Outcome>,
+    /// How the last boot-only engine ended (features 16 and 20).
+    boot: Option<EngineBoot>,
+    /// Whether this scenario added rules to the shared intercept listener, cleared after it.
+    intercept_rules_added: bool,
+    /// The open raw tunnel through an intercept listener, and the host it was opened to.
+    tunnel: Option<(String, RawConnection)>,
+    /// A plaintext connection to an intercept listener, kept to observe its close.
+    listener_conn: Option<RawConnection>,
+    /// The last response read off a raw tunnel or listener connection.
+    raw_response: Option<wire::RawResponse>,
+    /// Feature 12's `@intercept-runtime` engine (no intercept listener at start), stopped after it.
+    runtime_engine: Option<IsolatedEngine>,
+    /// The listener `POST /intercept` started on it.
+    runtime_listener: Option<RuntimeListener>,
+    /// Feature 12's `@intercept-auth` or `@intercept-ws` engine, stopped after the scenario.
+    intercept_engine: Option<InterceptEngine>,
+    /// Feature 12's WebSocket echo origin, stopped after the scenario.
+    ws_origin: Option<intercept::WsEchoOrigin>,
 }
 
 /// A concurrent burst left running, joined by the step that asserts on it.
@@ -1944,16 +1969,30 @@ async fn send_through_front_door(
     path: String,
     host: String,
 ) -> Step {
-    let port = reload_engine(w)?
+    front_door_send(w, &method, &unescape(&path), &unescape(&host), Vec::new()).await
+}
+
+/// The scenario's front door port.
+fn front_door_port(w: &PlaneA) -> anyhow::Result<u16> {
+    reload_engine(w)?
         .front_door_port
-        .ok_or_else(|| anyhow!("no front-door engine started in this scenario"))?;
-    let url = format!(
-        "http://{}:{port}{}",
-        harness().imposter_host(),
-        unescape(&path)
-    );
-    let headers = vec![("Host".to_string(), unescape(&host))];
-    w.send_with(&clients().verifying, &method, &url, &headers, None)
+        .ok_or_else(|| anyhow!("no front-door engine started in this scenario"))
+}
+
+/// `headers` go out in order after `Host`, a repeated name as separate lines: the headers clause
+/// compares the first value only.
+async fn front_door_send(
+    w: &mut PlaneA,
+    method: &str,
+    path: &str,
+    host: &str,
+    headers: Vec<(String, String)>,
+) -> Step {
+    let port = front_door_port(w)?;
+    let url = format!("http://{}:{port}{path}", harness().imposter_host());
+    let mut all = vec![("Host".to_string(), host.to_string())];
+    all.extend(headers);
+    w.send_with(&clients().verifying, method, &url, &all, None)
         .await
 }
 
@@ -2984,8 +3023,22 @@ async fn capture(
     path: String,
     tls: bool,
 ) -> Step {
+    let host_header = host.clone();
+    capture_with_host(w, host, port, method, path, host_header, tls).await
+}
+
+/// [`capture`] with a `Host` header other than the host connected to (the front door routes on it).
+async fn capture_with_host(
+    w: &mut PlaneA,
+    host: String,
+    port: u16,
+    method: String,
+    path: String,
+    host_header: String,
+    tls: bool,
+) -> Step {
     w.curl.push(format!(
-        "printf '{method} {path} HTTP/1.1\\r\\nHost: {host}\\r\\n\\r\\n' | {}",
+        "printf '{method} {path} HTTP/1.1\\r\\nHost: {host_header}\\r\\n\\r\\n' | {}",
         if tls {
             format!("openssl s_client -quiet -connect {host}:{port}")
         } else {
@@ -2993,7 +3046,7 @@ async fn capture(
         }
     ));
     let cap = tokio::task::spawn_blocking(move || {
-        raw::raw_capture(&host, port, &method, &path, &host, tls)
+        raw::raw_capture(&host, port, &method, &path, &host_header, tls)
     })
     .await
     .context("the raw capture task")??;
@@ -3789,7 +3842,2182 @@ async fn assigned_port_floor(w: &mut PlaneA) -> Step {
     })
 }
 
+// ── intercept / TLS-MITM forward proxy (feature 12, rift#413) ────────────────────────────────
+
+/// The password the shared intercept truststore is exported under.
+const TRUST_PASSWORD: &str = "changeit";
+/// The `--intercept-auth` credential of the `@intercept-auth` engine.
+const INTERCEPT_AUTH: &str = "u:p";
+
+/// A listener `POST /intercept` started on the `@intercept-runtime` engine: its port, and the CA
+/// PEM the 201 handed back (`returnCaKey`).
+#[derive(Debug)]
+struct RuntimeListener {
+    port: u16,
+    returned_ca: Option<String>,
+}
+
+/// An admin request whose answer the step keeps or asserts itself. `Content-Type: application/json`
+/// on every one, as the Scala runner's `adminSend` sent it.
+async fn intercept_admin(
+    w: &mut PlaneA,
+    admin: &str,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> anyhow::Result<Response> {
+    let url = format!("{admin}{path}");
+    let headers = json_content_type();
+    w.record_curl(method, &url, &headers, body);
+    let (resp, _) = exchange(&clients().verifying, method, &url, &headers, body)
+        .await?
+        .with_context(|| format!("transport failure on {method} {url}"))?;
+    Ok(resp)
+}
+
+/// `GET url`'s status, headers and raw body bytes (a truststore is binary).
+async fn get_bytes(url: &str) -> anyhow::Result<(u16, reqwest::header::HeaderMap, Vec<u8>)> {
+    let resp = clients()
+        .verifying
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    let body = resp
+        .bytes()
+        .await
+        .with_context(|| format!("reading GET {url}"))?;
+    Ok((status, headers, body.to_vec()))
+}
+
+fn header_str(headers: &reqwest::header::HeaderMap, name: &str) -> String {
+    headers
+        .get(name)
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .unwrap_or_default()
+}
+
+/// Add one rule to the shared listener, requiring a 201. Rules accumulate on the shared listener,
+/// so the scenario is marked for the rule clear after it before the rule goes out.
+async fn add_shared_rule(w: &mut PlaneA, rule: &Value) -> Step {
+    w.intercept_rules_added = true;
+    let admin = harness().admin_url.clone();
+    let body = rule.to_string();
+    let r = intercept_admin(w, &admin, "POST", "/intercept/rules", Some(&body)).await?;
+    w.ensure(r.status == 201, || {
+        format!(
+            "POST /intercept/rules -> {} (expected 201): {}",
+            r.status, r.body
+        )
+    })
+}
+
+/// A serve rule for any path on `host` answering 200 with `body`.
+fn serve_rule(host: &str, body: &str) -> Value {
+    serde_json::json!({"host": host, "action": {"serve": {"statusCode": 200, "body": body}}})
+}
+
+/// What a client trusting the shared listener's exported `truststore.p12` trusts.
+async fn shared_truststore_roots() -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>>
+{
+    let url = format!(
+        "{}/intercept/truststore.p12?password={TRUST_PASSWORD}",
+        harness().admin_url
+    );
+    let (status, _, bytes) = get_bytes(&url).await?;
+    if status != 200 {
+        bail!("GET {url} -> {status} (expected 200)");
+    }
+    intercept::pkcs12_certificates(&bytes, TRUST_PASSWORD)
+}
+
+fn test_ca_roots() -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    tls::certs_from_pem(test_ca_pem()?.as_bytes())
+}
+
+/// The scenario's open raw tunnel to `host` through the shared listener, or a fresh one trusting
+/// its exported truststore. Every raw step to the same host rides it, so a second exchange proves
+/// the tunnel was kept alive.
+async fn tunnel_to<'a>(w: &'a mut PlaneA, host: &str) -> anyhow::Result<&'a mut RawConnection> {
+    if w.tunnel.as_ref().is_none_or(|(h, _)| h != host) {
+        let port = harness().intercept_port;
+        let proxy = harness().imposter_host();
+        w.curl.push(format!(
+            "curl -sv --http1.1 --proxy http://{proxy}:{port} --cacert <truststore CA> https://{host}/"
+        ));
+        let roots = shared_truststore_roots().await?;
+        let conn =
+            intercept::tunnel(proxy, port, host, 443, &roots, tls::ALPN_HTTP1, &[], None).await?;
+        w.tunnel = Some((host.to_string(), conn));
+    }
+    match w.tunnel.as_mut() {
+        Some((_, conn)) => Ok(conn),
+        None => bail!("no raw tunnel to {host}"),
+    }
+}
+
+/// The scenario's tunnel to `host`, which must already be open: a step using it proves reuse.
+fn open_tunnel_to<'a>(w: &'a mut PlaneA, host: &str) -> anyhow::Result<&'a mut RawConnection> {
+    match w.tunnel.as_mut() {
+        Some((h, conn)) if h == host => Ok(conn),
+        Some((h, _)) => bail!("no open raw tunnel to {host} (have one to {h})"),
+        None => bail!("no open raw tunnel to {host}"),
+    }
+}
+
+impl PlaneA {
+    /// Keep a raw answer as the last response; a close before any answer fails the step.
+    fn keep_raw(&mut self, read: RawRead, host: &str) -> Step {
+        match read {
+            RawRead::Response(r) => {
+                self.last = Some(r.to_response());
+                self.raw_response = Some(r);
+                Ok(())
+            }
+            RawRead::Closed => {
+                Err(anyhow!("the intercept connection for {host} closed without answering").into())
+            }
+        }
+    }
+
+    fn raw_response(&self) -> anyhow::Result<&wire::RawResponse> {
+        self.raw_response
+            .as_ref()
+            .ok_or_else(|| anyhow!("no raw tunnel response yet in this scenario"))
+    }
+}
+
+/// Send `request` on the shared tunnel to `host` and keep the answer.
+async fn raw_exchange(w: &mut PlaneA, host: &str, request: &[u8]) -> Step {
+    let read = tunnel_to(w, host).await?.exchange(request).await?;
+    w.keep_raw(read, host)
+}
+
+/// `GET path` on `conn`, kept: a tunnel the scenario does not reuse.
+async fn raw_get_on(w: &mut PlaneA, mut conn: RawConnection, host: &str, path: &str) -> Step {
+    let read = conn
+        .exchange(&wire::request("GET", host, path, &[], b""))
+        .await?;
+    w.keep_raw(read, host)
+}
+
+async fn ca_pem_of(w: &mut PlaneA, admin: &str) -> anyhow::Result<Response> {
+    intercept_admin(w, admin, "GET", "/intercept/ca.pem", None).await
+}
+
+#[then(regex = r"^the intercept CA PEM is exported$")]
+async fn intercept_ca_exported(w: &mut PlaneA) -> Step {
+    let admin = harness().admin_url.clone();
+    let r = ca_pem_of(w, &admin).await?;
+    w.ensure(
+        r.status == 200 && r.body.contains("BEGIN CERTIFICATE"),
+        || {
+            let head: String = r.body.chars().take(40).collect();
+            format!("GET /intercept/ca.pem -> {}, body head='{head}'", r.status)
+        },
+    )
+}
+
+#[then(regex = r#"^the intercept truststore is exported with password "((?:\\.|[^"\\])*)"$"#)]
+async fn intercept_truststore_exported(w: &mut PlaneA, password: String) -> Step {
+    let password = unescape(&password);
+    let url = format!(
+        "{}/intercept/truststore.p12?password={password}",
+        harness().admin_url
+    );
+    w.record_curl("GET", &url, &[], None);
+    let (status, headers, body) = get_bytes(&url).await?;
+    let echoed = header_str(&headers, "x-truststore-password");
+    w.ensure(
+        status == 200 && !body.is_empty() && echoed == password,
+        || {
+            format!(
+                "truststore.p12 -> {status}, {} bytes, x-truststore-password='{echoed}' (expected '{password}')",
+                body.len()
+            )
+        },
+    )
+}
+
+#[then(regex = r"^the exported intercept CA is the caller-provided test CA$")]
+async fn intercept_ca_is_test_ca(w: &mut PlaneA) -> Step {
+    let expected = test_ca_pem()?;
+    let admin = harness().admin_url.clone();
+    let r = ca_pem_of(w, &admin).await?;
+    w.ensure(
+        r.status == 200 && r.body.trim() == expected.trim(),
+        || {
+            format!(
+                "exported /intercept/ca.pem ({}) should byte-equal the provided test CA, proving the engine loaded the caller CA rather than minting an ephemeral one",
+                r.status
+            )
+        },
+    )
+}
+
+#[given(
+    regex = r#"^an intercept rule serves (\d+) "((?:\\.|[^"\\])*)" for host "((?:\\.|[^"\\])*)" path "((?:\\.|[^"\\])*)"$"#
+)]
+async fn intercept_rule_serves_path(
+    w: &mut PlaneA,
+    status: u16,
+    body: String,
+    host: String,
+    path: String,
+) -> Step {
+    let rule = serde_json::json!({
+        "host": unescape(&host),
+        "predicates": [{"equals": {"path": unescape(&path)}}],
+        "action": {"serve": {"statusCode": status, "headers": {"content-type": "text/plain"}, "body": unescape(&body)}}
+    });
+    add_shared_rule(w, &rule).await
+}
+
+#[given(regex = r#"^an intercept rule forwards host "((?:\\.|[^"\\])*)" to the current imposter$"#)]
+async fn intercept_rule_forwards(w: &mut PlaneA, host: String) -> Step {
+    let port = w.current()?;
+    let rule = serde_json::json!({"host": unescape(&host), "action": {"forward": {"port": port}}});
+    add_shared_rule(w, &rule).await
+}
+
+#[given(
+    regex = r#"^an intercept rule serves (\d+) "((?:\\.|[^"\\])*)" for host "((?:\\.|[^"\\])*)" when the body equals "((?:\\.|[^"\\])*)"$"#
+)]
+async fn intercept_rule_on_body(
+    w: &mut PlaneA,
+    status: u16,
+    body: String,
+    host: String,
+    expected: String,
+) -> Step {
+    let rule = serde_json::json!({
+        "host": unescape(&host),
+        "predicates": [{"equals": {"body": unescape(&expected)}}],
+        "action": {"serve": {"statusCode": status, "body": unescape(&body)}}
+    });
+    add_shared_rule(w, &rule).await
+}
+
+#[given(
+    regex = r#"^an intercept rule serves (\d+) "((?:\\.|[^"\\])*)" for host "((?:\\.|[^"\\])*)" when header "((?:\\.|[^"\\])*)" equals "((?:\\.|[^"\\])*)"$"#
+)]
+async fn intercept_rule_on_header(
+    w: &mut PlaneA,
+    status: u16,
+    body: String,
+    host: String,
+    header: String,
+    value: String,
+) -> Step {
+    let mut headers = serde_json::Map::new();
+    headers.insert(unescape(&header), unescape(&value).into());
+    let rule = serde_json::json!({
+        "host": unescape(&host),
+        "predicates": [{"equals": {"headers": headers}}],
+        "action": {"serve": {"statusCode": status, "body": unescape(&body)}}
+    });
+    add_shared_rule(w, &rule).await
+}
+
+/// A GET through the shared listener trusting its exported truststore, offering `h2` then
+/// `http/1.1` as an HTTP/2-preferring client does. The version ALPN settled on is kept.
+async fn https_via_intercept(w: &mut PlaneA, host: &str, path: &str) -> Step {
+    let port = harness().intercept_port;
+    let proxy = harness().imposter_host();
+    w.curl.push(format!(
+        "curl -sv --proxy http://{proxy}:{port} --cacert <truststore CA> https://{host}{path}"
+    ));
+    let roots = shared_truststore_roots().await?;
+    let mut conn = intercept::tunnel(
+        proxy,
+        port,
+        host,
+        443,
+        &roots,
+        tls::ALPN_H2_FIRST,
+        &[],
+        None,
+    )
+    .await?;
+    let (response, version) = if conn.alpn() == Some(b"h2".as_slice()) {
+        match conn.h2_get(path, host).await? {
+            H2Outcome::Answered {
+                status: Some(status),
+                body,
+            } => (
+                Response {
+                    status,
+                    body,
+                    headers: BTreeMap::new(),
+                },
+                "HTTP_2",
+            ),
+            other => {
+                return Err(anyhow!("the HTTP/2 GET {path} did not complete: {other:?}").into());
+            }
+        }
+    } else {
+        match conn
+            .exchange(&wire::request("GET", host, path, &[], b""))
+            .await?
+        {
+            RawRead::Response(r) => (r.to_response(), "HTTP_1_1"),
+            RawRead::Closed => {
+                return Err(anyhow!("the tunnel to {host} closed without answering").into());
+            }
+        }
+    };
+    w.tls = Some(TlsExchange {
+        chain: conn.peer_certificates().to_vec(),
+        version,
+    });
+    w.last = Some(response);
+    Ok(())
+}
+
+#[when(
+    regex = r#"^an HTTPS GET to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the intercept proxy$"#
+)]
+async fn https_get_via_intercept(w: &mut PlaneA, host: String, path: String) -> Step {
+    https_via_intercept(w, &unescape(&host), &unescape(&path)).await
+}
+
+#[when(
+    regex = r#"^an HTTP/2 HTTPS GET to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the intercept proxy$"#
+)]
+async fn h2_get_via_intercept(w: &mut PlaneA, host: String, path: String) -> Step {
+    https_via_intercept(w, &unescape(&host), &unescape(&path)).await
+}
+
+#[then(regex = r"^the response was served over HTTP/2$")]
+async fn served_over_h2(w: &mut PlaneA) -> Step {
+    let got = w
+        .tls
+        .as_ref()
+        .ok_or_else(|| anyhow!("no HTTP/2 exchange was made in this scenario"))?
+        .version;
+    w.ensure(got == "HTTP_2", || {
+        format!("expected ALPN to negotiate HTTP/2 through the tunnel, got {got}")
+    })
+}
+
+/// The shared listener's rules, from `GET /intercept/rules` on `admin`, which must answer 200: a
+/// failure never reads as "no rules".
+async fn listed_rules(w: &mut PlaneA, admin: &str) -> anyhow::Result<Vec<Value>> {
+    let r = intercept_admin(w, admin, "GET", "/intercept/rules", None).await?;
+    if r.status != 200 {
+        let head: String = r.body.chars().take(80).collect();
+        bail!("GET /intercept/rules -> {}: {head}", r.status);
+    }
+    match serde_json::from_str::<Value>(&r.body)
+        .with_context(|| format!("GET /intercept/rules is not JSON: {}", r.body))?
+    {
+        Value::Array(rules) => Ok(rules),
+        other => bail!("GET /intercept/rules is not an array: {other}"),
+    }
+}
+
+#[then(regex = r"^the intercept rules count is (\d+)$")]
+async fn intercept_rules_count(w: &mut PlaneA, n: usize) -> Step {
+    let admin = harness().admin_url.clone();
+    let got = listed_rules(w, &admin).await?.len();
+    w.ensure(got == n, || {
+        format!("expected {n} intercept rule(s), got {got}")
+    })
+}
+
+/// `DELETE /intercept/rules`: 404 is nothing to clear; any other refusal is a real admin fault.
+async fn clear_rules(admin: &str) -> anyhow::Result<()> {
+    let url = format!("{admin}/intercept/rules");
+    let resp = clients()
+        .verifying
+        .delete(&url)
+        .send()
+        .await
+        .with_context(|| format!("DELETE {url}"))?;
+    let status = resp.status().as_u16();
+    if status >= 300 && status != 404 {
+        bail!("DELETE {url} -> {status}");
+    }
+    Ok(())
+}
+
+#[when(regex = r"^the intercept rules are cleared$")]
+async fn intercept_rules_cleared(w: &mut PlaneA) -> Step {
+    let admin = harness().admin_url.clone();
+    w.record_curl("DELETE", &format!("{admin}/intercept/rules"), &[], None);
+    clear_rules(&admin).await?;
+    Ok(())
+}
+
+// ── @intercept-runtime: the listener started and stopped over the admin API (rift#493) ──
+
+async fn start_runtime_engine(w: &mut PlaneA, allow_injection: bool) -> Step {
+    if let Some(old) = w.runtime_engine.take() {
+        old.stop().await?;
+    }
+    w.runtime_engine = Some(harness().start_plain_engine(allow_injection).await?);
+    Ok(())
+}
+
+fn runtime_admin(w: &PlaneA) -> anyhow::Result<String> {
+    w.runtime_engine
+        .as_ref()
+        .map(|e| e.admin_url.clone())
+        .ok_or_else(|| anyhow!("no runtime-intercept engine was started in this scenario"))
+}
+
+/// `method path` on the runtime engine, kept as the last response. A POST carries `body`.
+async fn runtime_send(w: &mut PlaneA, method: &str, path: &str, body: &str) -> Step {
+    let admin = runtime_admin(w)?;
+    let body = (method == "POST").then_some(body);
+    let r = intercept_admin(w, &admin, method, path, body).await?;
+    w.last = Some(r);
+    Ok(())
+}
+
+/// `POST /intercept` with `body` on the runtime engine, kept as the last response; a 201's listener
+/// port (and returned CA) is kept for the tunnel steps.
+async fn start_runtime_listener(w: &mut PlaneA, body: &str) -> Step {
+    runtime_send(w, "POST", "/intercept", body).await?;
+    let r = w.last()?;
+    if r.status == 201 {
+        let json: Value = serde_json::from_str(&r.body)
+            .with_context(|| format!("POST /intercept 201 is not JSON: {}", r.body))?;
+        let port = json
+            .get("interceptPort")
+            .and_then(Value::as_u64)
+            .and_then(|p| u16::try_from(p).ok())
+            .ok_or_else(|| anyhow!("POST /intercept 201 has no interceptPort: {}", r.body))?;
+        let returned_ca = json
+            .get("caCertPem")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        w.runtime_listener = Some(RuntimeListener { port, returned_ca });
+    }
+    Ok(())
+}
+
+#[given(regex = r"^a rift server started without an intercept listener$")]
+async fn runtime_engine(w: &mut PlaneA) -> Step {
+    start_runtime_engine(w, true).await
+}
+
+#[given(regex = r"^a rift server started without an intercept listener or --allow-injection$")]
+async fn runtime_engine_without_injection(w: &mut PlaneA) -> Step {
+    start_runtime_engine(w, false).await
+}
+
+#[when(regex = r"^the intercept listener is queried over the admin API$")]
+async fn runtime_query(w: &mut PlaneA) -> Step {
+    runtime_send(w, "GET", "/intercept", "").await
+}
+
+#[when(regex = r"^the intercept listener is started over the admin API$")]
+async fn runtime_start(w: &mut PlaneA) -> Step {
+    runtime_send(w, "POST", "/intercept", "{}").await
+}
+
+#[when(regex = r"^the intercept listener is stopped over the admin API$")]
+async fn runtime_stop(w: &mut PlaneA) -> Step {
+    runtime_send(w, "DELETE", "/intercept", "").await
+}
+
+#[when(
+    regex = r#"^the intercept listener is started over the admin API seeding a serve rule "((?:\\.|[^"\\])*)" for host "((?:\\.|[^"\\])*)"$"#
+)]
+async fn runtime_start_seeded(w: &mut PlaneA, body: String, host: String) -> Step {
+    let options = serde_json::json!({"rules": [serve_rule(&unescape(&host), &unescape(&body))]});
+    start_runtime_listener(w, &options.to_string()).await
+}
+
+#[when(regex = r"^the intercept listener is started over the admin API with returnCaKey$")]
+async fn runtime_start_return_ca_key(w: &mut PlaneA) -> Step {
+    start_runtime_listener(w, r#"{"returnCaKey":true}"#).await
+}
+
+fn test_ca_key_pem() -> anyhow::Result<String> {
+    let path = fixtures_dir().join("intercept").join("ca-key.pem");
+    std::fs::read_to_string(&path).with_context(|| format!("the test CA key {}", path.display()))
+}
+
+#[when(
+    regex = r"^the intercept listener is started over the admin API with the test CA as inline PEM$"
+)]
+async fn runtime_start_inline_ca(w: &mut PlaneA) -> Step {
+    let options = serde_json::json!({"caCertPem": test_ca_pem()?, "caKeyPem": test_ca_key_pem()?});
+    start_runtime_listener(w, &options.to_string()).await
+}
+
+#[when(
+    regex = r#"^the intercept listener is started over the admin API with the "((?:\\.|[^"\\])*)" options$"#
+)]
+async fn runtime_start_with_options(w: &mut PlaneA, options: String) -> Step {
+    let body = match unescape(&options).as_str() {
+        "returnCaKey with a supplied CA" => serde_json::json!({
+            "returnCaKey": true, "caCertPem": test_ca_pem()?, "caKeyPem": test_ca_key_pem()?
+        })
+        .to_string(),
+        "half PEM pair" => serde_json::json!({"caCertPem": test_ca_pem()?}).to_string(),
+        "DNS host" => r#"{"host":"localhost"}"#.to_string(),
+        "unknown field" => r#"{"bogus":1}"#.to_string(),
+        other => return Err(anyhow!("unknown start-options case '{other}'").into()),
+    };
+    start_runtime_listener(w, &body).await
+}
+
+#[then(regex = r"^the runtime intercept rules count is (\d+)$")]
+async fn runtime_rules_count(w: &mut PlaneA, n: usize) -> Step {
+    let admin = runtime_admin(w)?;
+    let got = listed_rules(w, &admin).await?.len();
+    w.ensure(got == n, || {
+        format!("expected {n} runtime intercept rule(s), got {got}")
+    })
+}
+
+#[then(regex = r"^the runtime intercept CA PEM is the test CA$")]
+async fn runtime_ca_is_test_ca(w: &mut PlaneA) -> Step {
+    let admin = runtime_admin(w)?;
+    let expected = test_ca_pem()?;
+    let r = ca_pem_of(w, &admin).await?;
+    w.ensure(r.status == 200 && r.body.trim() == expected.trim(), || {
+        let head: String = r.body.chars().take(80).collect();
+        format!(
+            "GET /intercept/ca.pem ({}) should equal the inline test CA, got '{head}'",
+            r.status
+        )
+    })
+}
+
+/// A tunnel through the runtime listener trusting `ca_pem`, then `GET path` on it.
+async fn runtime_listener_get(w: &mut PlaneA, host: &str, path: &str, ca_pem: &str) -> Step {
+    let port = w
+        .runtime_listener
+        .as_ref()
+        .map(|l| l.port)
+        .ok_or_else(|| anyhow!("no runtime listener was started in this scenario"))?;
+    let roots = tls::certs_from_pem(ca_pem.as_bytes())?;
+    w.curl.push(format!(
+        "curl -sv --http1.1 --proxy http://127.0.0.1:{port} --cacert <the listener's CA> https://{host}{path}"
+    ));
+    let conn = intercept::tunnel(
+        "127.0.0.1",
+        port,
+        host,
+        443,
+        &roots,
+        tls::ALPN_HTTP1,
+        &[],
+        None,
+    )
+    .await?;
+    raw_get_on(w, conn, host, path).await
+}
+
+#[when(
+    regex = r#"^a raw HTTPS GET to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the runtime intercept listener$"#
+)]
+async fn raw_get_runtime(w: &mut PlaneA, host: String, path: String) -> Step {
+    let admin = runtime_admin(w)?;
+    let ca = ca_pem_of(w, &admin).await?;
+    if ca.status != 200 {
+        return Err(anyhow!("GET /intercept/ca.pem -> {}: {}", ca.status, ca.body).into());
+    }
+    runtime_listener_get(w, &unescape(&host), &unescape(&path), &ca.body).await
+}
+
+#[when(
+    regex = r#"^a raw HTTPS GET to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the runtime intercept listener trusting the returned CA$"#
+)]
+async fn raw_get_runtime_returned_ca(w: &mut PlaneA, host: String, path: String) -> Step {
+    let ca = w
+        .runtime_listener
+        .as_ref()
+        .ok_or_else(|| anyhow!("no runtime listener was started in this scenario"))?
+        .returned_ca
+        .clone()
+        .ok_or_else(|| anyhow!("the start response carried no caCertPem"))?;
+    runtime_listener_get(w, &unescape(&host), &unescape(&path), &ca).await
+}
+
+#[when(
+    regex = r"^a clean serve rule and a rule with an inject predicate nested under not are posted as one runtime intercept batch$"
+)]
+async fn runtime_poisoned_batch(w: &mut PlaneA) -> Step {
+    let poisoned = serde_json::json!({
+        "host": "poisoned.test",
+        "predicates": [{"not": {"inject": "function (r) { return true; }"}}],
+        "action": {"serve": {"statusCode": 200}}
+    });
+    let batch = Value::Array(vec![serve_rule("clean.test", "clean"), poisoned]);
+    runtime_send(w, "POST", "/intercept/rules", &batch.to_string()).await
+}
+
+#[when(regex = r"^a batch of (\d+) serve rules is posted to the runtime intercept rules$")]
+async fn runtime_rule_batch(w: &mut PlaneA, n: usize) -> Step {
+    let batch: Vec<Value> = (0..n)
+        .map(|i| serve_rule(&format!("cap-{i}.test"), "x"))
+        .collect();
+    let body = Value::Array(batch).to_string();
+    // The repro would otherwise carry a 10,000-rule body.
+    let admin = runtime_admin(w)?;
+    let url = format!("{admin}/intercept/rules");
+    w.curl.push(format!(
+        "curl -X POST -H 'Content-Type: application/json' -d '<{n} serve rules>' '{url}'"
+    ));
+    let (resp, _) = exchange(
+        &clients().verifying,
+        "POST",
+        &url,
+        &json_content_type(),
+        Some(&body),
+    )
+    .await?
+    .with_context(|| format!("transport failure on POST {url}"))?;
+    w.last = Some(resp);
+    Ok(())
+}
+
+// ── @intercept-auth: the --intercept-auth listener (rift#878) ──
+
+fn intercept_engine(w: &PlaneA) -> anyhow::Result<(String, u16)> {
+    w.intercept_engine
+        .as_ref()
+        .map(|e| (e.admin_url.clone(), e.intercept_port))
+        .ok_or_else(|| anyhow!("no intercept engine of its own was started in this scenario"))
+}
+
+async fn start_own_intercept_engine(
+    w: &mut PlaneA,
+    auth: Option<&str>,
+    upstream_ca: Option<&std::path::Path>,
+) -> Step {
+    if let Some(old) = w.intercept_engine.take() {
+        old.stop().await?;
+    }
+    w.intercept_engine = Some(harness().start_intercept_engine(auth, upstream_ca).await?);
+    Ok(())
+}
+
+#[given(regex = r"^a rift server whose intercept listener requires proxy auth$")]
+async fn auth_engine(w: &mut PlaneA) -> Step {
+    start_own_intercept_engine(w, Some(INTERCEPT_AUTH), None).await
+}
+
+/// A rule on the scenario's own intercept engine, requiring a 201.
+async fn add_own_engine_rule(w: &mut PlaneA, body: String, host: String) -> Step {
+    let (admin, _) = intercept_engine(w)?;
+    let rule = serve_rule(&unescape(&host), &unescape(&body)).to_string();
+    let r = intercept_admin(w, &admin, "POST", "/intercept/rules", Some(&rule)).await?;
+    w.ensure(r.status == 201, || {
+        format!("POST /intercept/rules -> {}: {}", r.status, r.body)
+    })
+}
+
+#[given(
+    regex = r#"^an intercept rule on the authenticated engine serves "((?:\\.|[^"\\])*)" for host "((?:\\.|[^"\\])*)"$"#
+)]
+async fn auth_engine_rule(w: &mut PlaneA, body: String, host: String) -> Step {
+    add_own_engine_rule(w, body, host).await
+}
+
+/// A bare `CONNECT host:443` on a plaintext connection to the auth listener; the answer is kept,
+/// and the connection too, to observe the close.
+async fn connect_to_auth_listener(w: &mut PlaneA, host: &str, auth: Option<String>) -> Step {
+    let (_, port) = intercept_engine(w)?;
+    let headers: Vec<(&str, &str)> = auth
+        .as_deref()
+        .map(|a| vec![("Proxy-Authorization", a)])
+        .unwrap_or_default();
+    w.curl.push(format!(
+        "printf 'CONNECT {host}:443 HTTP/1.1\\r\\nHost: {host}:443\\r\\n\\r\\n' | nc 127.0.0.1 {port}"
+    ));
+    let mut conn = RawConnection::plain("127.0.0.1", port).await?;
+    let read = conn
+        .exchange(&wire::connect_request(host, 443, &headers))
+        .await?;
+    w.listener_conn = Some(conn);
+    w.keep_raw(read, host)
+}
+
+#[when(
+    regex = r#"^a CONNECT to "((?:\\.|[^"\\])*)" is sent to the authenticated intercept listener without credentials$"#
+)]
+async fn connect_without_credentials(w: &mut PlaneA, host: String) -> Step {
+    connect_to_auth_listener(w, &unescape(&host), None).await
+}
+
+#[when(
+    regex = r#"^a CONNECT to "((?:\\.|[^"\\])*)" is sent to the authenticated intercept listener with credentials "((?:\\.|[^"\\])*)"$"#
+)]
+async fn connect_with_credentials(w: &mut PlaneA, host: String, credentials: String) -> Step {
+    let auth = intercept::basic_auth(&unescape(&credentials));
+    connect_to_auth_listener(w, &unescape(&host), Some(auth)).await
+}
+
+#[then(regex = r"^the response carries a Basic proxy-authenticate challenge$")]
+async fn basic_challenge(w: &mut PlaneA) -> Step {
+    let challenge: Vec<String> = w
+        .raw_response()?
+        .header("proxy-authenticate")
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    w.ensure(challenge.iter().any(|c| c.starts_with("Basic")), || {
+        format!("expected a `Proxy-Authenticate: Basic …` challenge, got {challenge:?}")
+    })
+}
+
+/// The listener closes the plaintext connection after a refusal instead of serving another
+/// request on it.
+async fn listener_closes(w: &mut PlaneA, after: &str) -> Step {
+    let read = w
+        .listener_conn
+        .as_mut()
+        .ok_or_else(|| anyhow!("no listener connection was opened in this scenario"))?
+        .read_next()
+        .await?;
+    w.ensure(read == RawRead::Closed, || {
+        format!("expected the listener to close after the {after}, but it sent another response: {read:?}")
+    })
+}
+
+#[then(regex = r"^the authenticated intercept listener then closes the connection$")]
+async fn auth_listener_closes(w: &mut PlaneA) -> Step {
+    listener_closes(w, "407").await
+}
+
+#[when(
+    regex = r#"^a raw HTTPS GET to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the authenticated intercept listener with credentials "((?:\\.|[^"\\])*)"$"#
+)]
+async fn raw_get_authenticated(
+    w: &mut PlaneA,
+    host: String,
+    path: String,
+    credentials: String,
+) -> Step {
+    let (host, path) = (unescape(&host), unescape(&path));
+    let (_, port) = intercept_engine(w)?;
+    let auth = intercept::basic_auth(&unescape(&credentials));
+    w.curl.push(format!(
+        "curl -sv --http1.1 --proxy http://{}@127.0.0.1:{port} --cacert {} https://{host}{path}",
+        unescape(&credentials),
+        test_ca_path().display()
+    ));
+    let conn = intercept::tunnel(
+        "127.0.0.1",
+        port,
+        &host,
+        443,
+        &test_ca_roots()?,
+        tls::ALPN_HTTP1,
+        &[("Proxy-Authorization", &auth)],
+        None,
+    )
+    .await?;
+    raw_get_on(w, conn, &host, &path).await
+}
+
+// ── @intercept-raw: framing and connection handling inside the tunnel (rift#991, rift#993) ──
+
+#[when(
+    regex = r#"^a raw HTTPS POST of (\d+) body bytes to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the intercept tunnel$"#
+)]
+async fn raw_post_bytes(w: &mut PlaneA, n: usize, host: String, path: String) -> Step {
+    let host = unescape(&host);
+    let request = wire::request("POST", &host, &unescape(&path), &[], &vec![b'a'; n]);
+    raw_exchange(w, &host, &request).await
+}
+
+#[then(regex = r"^the current imposter has recorded (\d+) requests$")]
+async fn current_imposter_recorded(w: &mut PlaneA, n: i64) -> Step {
+    let got = number_of_requests(w, w.current()?).await?;
+    w.ensure(got == n, || {
+        format!("expected the imposter to have recorded {n} request(s), got {got}")
+    })
+}
+
+#[when(
+    regex = r#"^a raw HTTPS POST of the chunked body "((?:\\.|[^"\\])*)" to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the intercept tunnel$"#
+)]
+async fn raw_post_chunked(w: &mut PlaneA, body: String, host: String, path: String) -> Step {
+    let (body, host) = (unescape(&body), unescape(&host));
+    // Several chunks, so the body only reads right if the engine reassembles them.
+    let chars: Vec<char> = body.chars().collect();
+    let chunks: Vec<String> = chars.chunks(5).map(|c| c.iter().collect()).collect();
+    let chunks: Vec<&str> = chunks.iter().map(String::as_str).collect();
+    let request = wire::chunked_request("POST", &host, &unescape(&path), &chunks);
+    raw_exchange(w, &host, &request).await
+}
+
+#[when(
+    regex = r#"^a raw HTTPS GET to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the intercept tunnel$"#
+)]
+async fn raw_get_tunnel(w: &mut PlaneA, host: String, path: String) -> Step {
+    let host = unescape(&host);
+    let request = wire::request("GET", &host, &unescape(&path), &[], b"");
+    raw_exchange(w, &host, &request).await
+}
+
+// Two separate header lines of one name, which a client library may fold into one.
+#[when(
+    regex = r#"^a raw HTTPS GET to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" with header "((?:\\.|[^"\\])*)" sent as "((?:\\.|[^"\\])*)" then "((?:\\.|[^"\\])*)" through the intercept tunnel$"#
+)]
+async fn raw_get_repeated_header(
+    w: &mut PlaneA,
+    host: String,
+    path: String,
+    name: String,
+    first: String,
+    second: String,
+) -> Step {
+    let (host, name, first, second) = (
+        unescape(&host),
+        unescape(&name),
+        unescape(&first),
+        unescape(&second),
+    );
+    let headers = [
+        (name.as_str(), first.as_str()),
+        (name.as_str(), second.as_str()),
+    ];
+    let request = wire::request("GET", &host, &unescape(&path), &headers, b"");
+    raw_exchange(w, &host, &request).await
+}
+
+#[then(regex = r"^the intercept tunnel answered (\d+) requests on one connection$")]
+async fn tunnel_answered(w: &mut PlaneA, n: usize) -> Step {
+    let (host, got) = w
+        .tunnel
+        .as_ref()
+        .map(|(h, c)| (h.clone(), c.responses_read()))
+        .ok_or_else(|| anyhow!("no raw tunnel was opened in this scenario"))?;
+    w.ensure(got == n, || {
+        format!("expected {n} responses on the one tunnel to {host}, got {got}")
+    })
+}
+
+// The body is back-to-back copies of a complete `GET <smuggled>` request: if the engine ever framed
+// the unread tail of the refused body as requests, the next response would be the smuggled one.
+#[when(
+    regex = r#"^a raw HTTPS POST of (\d+) body bytes of pipelined "((?:\\.|[^"\\])*)" requests to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the intercept tunnel$"#
+)]
+async fn raw_post_pipelined(
+    w: &mut PlaneA,
+    n: usize,
+    smuggled: String,
+    host: String,
+    path: String,
+) -> Step {
+    let host = unescape(&host);
+    let unit = wire::request("GET", &host, &unescape(&smuggled), &[], b"");
+    let body: Vec<u8> = unit.iter().copied().cycle().take(n).collect();
+    let request = wire::request("POST", &host, &unescape(&path), &[], &body);
+    raw_exchange(w, &host, &request).await
+}
+
+// rift#993 allows either outcome after a 413: the connection is reused (and the tail discarded),
+// or it is closed. What it must never do is answer from the leftover bytes.
+#[then(
+    regex = r#"^the next raw HTTPS GET to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" on the same tunnel is answered "((?:\\.|[^"\\])*)" or the connection is closed$"#
+)]
+async fn next_get_answered_or_closed(
+    w: &mut PlaneA,
+    host: String,
+    path: String,
+    expected: String,
+) -> Step {
+    let (host, path, expected) = (unescape(&host), unescape(&path), unescape(&expected));
+    let request = wire::request("GET", &host, &path, &[], b"");
+    let read = open_tunnel_to(w, &host)?.exchange(&request).await?;
+    match read {
+        RawRead::Closed => Ok(()),
+        RawRead::Response(r) => {
+            let body = r.body_text();
+            w.ensure(r.status == 200 && body == expected, || {
+                let head: String = body.chars().take(80).collect();
+                format!(
+                    "after the 413, GET {path} on the same tunnel should be answered 200 '{expected}' (or the connection closed), got {} '{head}'",
+                    r.status
+                )
+            })
+        }
+    }
+}
+
+#[when(regex = r#"^a plain GET for "((?:\\.|[^"\\])*)" is sent to the intercept listener$"#)]
+async fn plain_get_to_listener(w: &mut PlaneA, url: String) -> Step {
+    let url = unescape(&url);
+    let host = reqwest::Url::parse(&url)
+        .with_context(|| format!("URL {url}"))?
+        .host_str()
+        .ok_or_else(|| anyhow!("{url} has no host"))?
+        .to_string();
+    let port = harness().intercept_port;
+    let proxy = harness().imposter_host();
+    w.curl
+        .push(format!("curl -sv --proxy http://{proxy}:{port} '{url}'"));
+    let mut conn = RawConnection::plain(proxy, port).await?;
+    let read = conn
+        .exchange(&wire::request("GET", &host, &url, &[], b""))
+        .await?;
+    w.listener_conn = Some(conn);
+    match read {
+        RawRead::Response(r) => {
+            w.last = Some(r.to_response());
+            Ok(())
+        }
+        RawRead::Closed => Err(anyhow!("the intercept listener closed without answering").into()),
+    }
+}
+
+#[then(regex = r"^the intercept listener then closes the connection$")]
+async fn shared_listener_closes(w: &mut PlaneA) -> Step {
+    listener_closes(w, "refusal").await
+}
+
+/// A serve rule for `host``path` whose body is the one-field object `{key: value}`: as a JSON
+/// object, or as that object already rendered to an escaped JSON string (the pre-rift#933 form).
+fn object_body_rule(host: &str, path: &str, key: &str, value: &str, as_string: bool) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert(key.to_string(), value.into());
+    let obj = Value::Object(obj);
+    let body = if as_string {
+        Value::String(obj.to_string())
+    } else {
+        obj
+    };
+    serde_json::json!({
+        "host": host,
+        "predicates": [{"equals": {"path": path}}],
+        "action": {"serve": {"statusCode": 200, "body": body}}
+    })
+}
+
+#[given(
+    regex = r#"^an intercept rule for host "((?:\\.|[^"\\])*)" path "((?:\\.|[^"\\])*)" serves the object body with "((?:\\.|[^"\\])*)" set to "((?:\\.|[^"\\])*)"$"#
+)]
+async fn rule_object_body(
+    w: &mut PlaneA,
+    host: String,
+    path: String,
+    key: String,
+    value: String,
+) -> Step {
+    let rule = object_body_rule(
+        &unescape(&host),
+        &unescape(&path),
+        &unescape(&key),
+        &unescape(&value),
+        false,
+    );
+    add_shared_rule(w, &rule).await
+}
+
+#[given(
+    regex = r#"^an intercept rule for host "((?:\\.|[^"\\])*)" path "((?:\\.|[^"\\])*)" serves the escaped-string body with "((?:\\.|[^"\\])*)" set to "((?:\\.|[^"\\])*)"$"#
+)]
+async fn rule_escaped_string_body(
+    w: &mut PlaneA,
+    host: String,
+    path: String,
+    key: String,
+    value: String,
+) -> Step {
+    let rule = object_body_rule(
+        &unescape(&host),
+        &unescape(&path),
+        &unescape(&key),
+        &unescape(&value),
+        true,
+    );
+    add_shared_rule(w, &rule).await
+}
+
+#[then(
+    regex = r#"^the response body is the compact JSON object with "((?:\\.|[^"\\])*)" set to "((?:\\.|[^"\\])*)"$"#
+)]
+async fn body_is_compact_object(w: &mut PlaneA, key: String, value: String) -> Step {
+    let mut obj = serde_json::Map::new();
+    obj.insert(unescape(&key), unescape(&value).into());
+    let expected = Value::Object(obj).to_string();
+    let got = w.raw_response()?.body_text();
+    w.ensure(got == expected, || {
+        format!("expected body '{expected}', got '{got}'")
+    })
+}
+
+#[then(regex = r"^the response content-length matches its body$")]
+async fn content_length_matches(w: &mut PlaneA) -> Step {
+    let r = w.raw_response()?;
+    let declared: Vec<String> = r
+        .header("content-length")
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let len = r.body.len();
+    w.ensure(declared == [len.to_string()], || {
+        format!("content-length {declared:?} does not frame the {len}-byte body")
+    })
+}
+
+#[then(
+    regex = r#"^the response body is byte-identical to a raw HTTPS GET to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the intercept tunnel$"#
+)]
+async fn body_byte_identical(w: &mut PlaneA, host: String, path: String) -> Step {
+    let first = w.raw_response()?.clone();
+    let host = unescape(&host);
+    let request = wire::request("GET", &host, &unescape(&path), &[], b"");
+    raw_exchange(w, &host, &request).await?;
+    let second = w.raw_response()?;
+    w.ensure(
+        first.body == second.body && first.status == second.status,
+        || {
+            format!(
+                "expected identical bodies, got {} '{}' vs {} '{}'",
+                first.status,
+                first.body_text(),
+                second.status,
+                second.body_text()
+            )
+        },
+    )
+}
+
+/// The `action.serve` object of the listed rule for `host`.
+async fn listed_serve(w: &mut PlaneA, host: &str) -> anyhow::Result<Option<Value>> {
+    let admin = harness().admin_url.clone();
+    Ok(listed_rules(w, &admin)
+        .await?
+        .into_iter()
+        .find(|r| r.get("host").and_then(Value::as_str) == Some(host))
+        .and_then(|r| r.get("action")?.get("serve").cloned()))
+}
+
+#[then(
+    regex = r#"^the intercept rule for host "((?:\\.|[^"\\])*)" lists its serve body as a JSON object with "((?:\\.|[^"\\])*)" set to "((?:\\.|[^"\\])*)"$"#
+)]
+async fn listed_object_body(w: &mut PlaneA, host: String, key: String, value: String) -> Step {
+    let (host, key, value) = (unescape(&host), unescape(&key), unescape(&value));
+    let body = listed_serve(w, &host)
+        .await?
+        .and_then(|s| s.get("body").cloned());
+    let mut obj = serde_json::Map::new();
+    obj.insert(key.clone(), value.clone().into());
+    let want = Value::Object(obj);
+    w.ensure(body.as_ref() == Some(&want), || {
+        format!(
+            "expected GET /intercept/rules to list the {host} serve body as the object {{{key}: {value}}}, got {body:?}"
+        )
+    })
+}
+
+// The fall-through body is one text line: the message plus a trailing newline.
+#[then(regex = r#"^the response body is the line "((?:\\.|[^"\\])*)"$"#)]
+async fn body_is_line(w: &mut PlaneA, line: String) -> Step {
+    let line = unescape(&line);
+    let got = w.raw_response()?.body_text();
+    w.ensure(got == format!("{line}\n"), || {
+        format!("expected body '{line}\\n', got '{got}'")
+    })
+}
+
+#[given(
+    regex = r#"^an intercept rule for host "((?:\\.|[^"\\])*)" serves status "((?:\\.|[^"\\])*)" with "((?:\\.|[^"\\])*)" as "((?:\\.|[^"\\])*)" and "((?:\\.|[^"\\])*)" and "((?:\\.|[^"\\])*)" as the number (\d+)$"#
+)]
+#[allow(clippy::too_many_arguments)]
+async fn rule_widened_serve(
+    w: &mut PlaneA,
+    host: String,
+    status: String,
+    multi: String,
+    a: String,
+    b: String,
+    scalar: String,
+    n: i64,
+) -> Step {
+    let mut headers = serde_json::Map::new();
+    headers.insert(
+        unescape(&multi),
+        Value::Array(vec![unescape(&a).into(), unescape(&b).into()]),
+    );
+    headers.insert(unescape(&scalar), n.into());
+    let rule = serde_json::json!({
+        "host": unescape(&host),
+        "action": {"serve": {"statusCode": unescape(&status), "headers": headers, "body": "widened"}}
+    });
+    add_shared_rule(w, &rule).await
+}
+
+#[then(
+    regex = r#"^the raw response carries "((?:\\.|[^"\\])*)" lines "((?:\\.|[^"\\])*)" then "((?:\\.|[^"\\])*)"$"#
+)]
+async fn raw_header_lines(w: &mut PlaneA, name: String, first: String, second: String) -> Step {
+    let (name, first, second) = (unescape(&name), unescape(&first), unescape(&second));
+    let lines: Vec<String> = w
+        .raw_response()?
+        .header(&name)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    w.ensure(lines == [first.clone(), second.clone()], || {
+        format!("expected two {name} lines [{first}, {second}] in order, got {lines:?}")
+    })
+}
+
+#[then(
+    regex = r#"^the intercept rule for host "((?:\\.|[^"\\])*)" lists statusCode (\d+) as a number and header "((?:\\.|[^"\\])*)" as the string "((?:\\.|[^"\\])*)"$"#
+)]
+async fn listed_widened(
+    w: &mut PlaneA,
+    host: String,
+    status: i64,
+    header: String,
+    value: String,
+) -> Step {
+    let (host, header, value) = (unescape(&host), unescape(&header), unescape(&value));
+    let serve = listed_serve(w, &host).await?;
+    let listed_status = serve.as_ref().and_then(|s| s.get("statusCode")).cloned();
+    let listed_header = serve
+        .as_ref()
+        .and_then(|s| s.get("headers")?.get(&header))
+        .cloned();
+    w.ensure(
+        listed_status.as_ref().is_some_and(|s| is_number(s, status))
+            && listed_header.as_ref().and_then(Value::as_str) == Some(value.as_str()),
+        || {
+            format!(
+                "expected {host} listed with statusCode {status} (number) and {header} \"{value}\" (string), got statusCode={listed_status:?} {header}={listed_header:?}"
+            )
+        },
+    )
+}
+
+#[given(regex = r#"^an intercept rule for host "((?:\\.|[^"\\])*)" serves 200 with no body$"#)]
+async fn rule_no_body(w: &mut PlaneA, host: String) -> Step {
+    let rule =
+        serde_json::json!({"host": unescape(&host), "action": {"serve": {"statusCode": 200}}});
+    add_shared_rule(w, &rule).await
+}
+
+#[then(regex = r"^the raw response has content-length 0 and an empty body$")]
+async fn raw_empty_body(w: &mut PlaneA) -> Step {
+    let r = w.raw_response()?;
+    let declared: Vec<String> = r
+        .header("content-length")
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let len = r.body.len();
+    w.ensure(declared == ["0"] && len == 0, || {
+        format!("expected content-length [0] and an empty body, got {declared:?} and {len} bytes")
+    })
+}
+
+#[when(
+    regex = r#"^a raw HTTPS GET to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" with SNI and Host "((?:\\.|[^"\\])*)" through the intercept tunnel$"#
+)]
+async fn raw_get_sni(w: &mut PlaneA, connect_host: String, path: String, name: String) -> Step {
+    let (connect_host, path, name) = (unescape(&connect_host), unescape(&path), unescape(&name));
+    let port = harness().intercept_port;
+    let proxy = harness().imposter_host();
+    w.curl.push(format!(
+        "# CONNECT {connect_host}:443 via {proxy}:{port}, then TLS with SNI {name} and Host: {name}"
+    ));
+    let roots = shared_truststore_roots().await?;
+    let mut conn = intercept::tunnel(
+        proxy,
+        port,
+        &connect_host,
+        443,
+        &roots,
+        tls::ALPN_HTTP1,
+        &[],
+        Some(&name),
+    )
+    .await?;
+    let read = conn
+        .exchange(&wire::request("GET", &name, &path, &[], b""))
+        .await?;
+    w.keep_raw(read, &connect_host)
+}
+
+#[when(
+    regex = r#"^a raw HTTPS POST with the chunk-size line "((?:\\.|[^"\\])*)" to "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the intercept tunnel$"#
+)]
+async fn raw_post_bad_chunk(w: &mut PlaneA, size_line: String, host: String, path: String) -> Step {
+    let host = unescape(&host);
+    let request = format!(
+        "POST {} HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\n\r\n{}\r\nhello\r\n0\r\n\r\n",
+        unescape(&path),
+        unescape(&size_line)
+    );
+    raw_exchange(w, &host, request.as_bytes()).await
+}
+
+#[given(regex = r#"^an intercept rule forwards host "((?:\\.|[^"\\])*)" to a closed port$"#)]
+async fn rule_forwards_to_closed_port(w: &mut PlaneA, host: String) -> Step {
+    // A port nothing listens on, the use `free_port` is kept for.
+    let port = free_port()?;
+    let rule = serde_json::json!({"host": unescape(&host), "action": {"forward": {"port": port}}});
+    add_shared_rule(w, &rule).await
+}
+
+#[then(
+    regex = r#"^the intercept JKS truststore with password "((?:\\.|[^"\\])*)" echoes the password and holds the intercept CA$"#
+)]
+async fn jks_truststore(w: &mut PlaneA, password: String) -> Step {
+    let password = unescape(&password);
+    let admin = harness().admin_url.clone();
+    let url = format!("{admin}/intercept/truststore.jks?password={password}");
+    w.record_curl("GET", &url, &[], None);
+    let (status, headers, jks) = get_bytes(&url).await?;
+    let ca = ca_pem_of(w, &admin).await?;
+    let ca_der = tls::certs_from_pem(ca.body.as_bytes())?;
+    let echoed = header_str(&headers, "x-truststore-password");
+    let magic: String = jks.iter().take(4).map(|b| format!("{b:02X}")).collect();
+    let held = intercept::jks_trusted_certificates(&jks, &password);
+    let holds_ca = held.as_ref().is_ok_and(|certs| {
+        certs
+            .iter()
+            .any(|c| ca_der.iter().any(|d| d.as_ref() == c.as_slice()))
+    });
+    w.ensure(
+        status == 200 && echoed == password && holds_ca && magic == "FEEDFEED",
+        || {
+            format!(
+                "truststore.jks -> {status}, x-truststore-password='{echoed}', holds CA={holds_ca} ({}), magic={magic} (JKS is FEEDFEED)",
+                held.as_ref().err().map_or_else(|| "parsed".to_string(), |e| format!("{e:#}"))
+            )
+        },
+    )
+}
+
+#[then(regex = r#"^the intercept CA PEM is served as "((?:\\.|[^"\\])*)"$"#)]
+async fn ca_pem_content_type(w: &mut PlaneA, content_type: String) -> Step {
+    let content_type = unescape(&content_type);
+    let admin = harness().admin_url.clone();
+    let r = ca_pem_of(w, &admin).await?;
+    let got = r.header_values("content-type").to_vec();
+    w.ensure(r.status == 200 && got == [content_type.clone()], || {
+        format!(
+            "GET /intercept/ca.pem -> {}, content-type {got:?}",
+            r.status
+        )
+    })
+}
+
+// ── @intercept-ws: WebSocket passthrough (rift#997) ──
+
+#[given(regex = r"^a TLS WebSocket echo origin on localhost$")]
+async fn ws_echo_origin(w: &mut PlaneA) -> Step {
+    let cert =
+        std::fs::read(fixtures_dir().join("tls/server-cert.pem")).context("server-cert.pem")?;
+    let key = std::fs::read(fixtures_dir().join("tls/server-key.pem")).context("server-key.pem")?;
+    w.ws_origin = Some(intercept::WsEchoOrigin::start(&cert, &key).await?);
+    Ok(())
+}
+
+#[given(regex = r"^an intercept engine that trusts the test CA upstream$")]
+async fn ws_intercept_engine(w: &mut PlaneA) -> Step {
+    start_own_intercept_engine(w, None, Some(&test_ca_path())).await
+}
+
+#[given(
+    regex = r#"^an intercept rule on that engine serves "((?:\\.|[^"\\])*)" for host "((?:\\.|[^"\\])*)"$"#
+)]
+async fn ws_engine_rule(w: &mut PlaneA, body: String, host: String) -> Step {
+    add_own_engine_rule(w, body, host).await
+}
+
+fn ws_origin(w: &PlaneA) -> anyhow::Result<&intercept::WsEchoOrigin> {
+    w.ws_origin
+        .as_ref()
+        .ok_or_else(|| anyhow!("no WebSocket echo origin in this scenario"))
+}
+
+#[when(
+    regex = r"^a WebSocket upgrade to the echo origin is sent through that engine's intercept listener$"
+)]
+async fn ws_upgrade(w: &mut PlaneA) -> Step {
+    let (_, port) = intercept_engine(w)?;
+    let origin = ws_origin(w)?.port;
+    w.curl.push(format!(
+        "# CONNECT localhost:{origin} via 127.0.0.1:{port}, TLS trusting the test CA, then GET /echo with Upgrade: websocket"
+    ));
+    let mut conn = intercept::tunnel(
+        "127.0.0.1",
+        port,
+        "localhost",
+        origin,
+        &test_ca_roots()?,
+        tls::ALPN_HTTP1,
+        &[],
+        None,
+    )
+    .await?;
+    let request = wire::request(
+        "GET",
+        &format!("localhost:{origin}"),
+        "/echo",
+        &[
+            ("Upgrade", "websocket"),
+            ("Connection", "Upgrade"),
+            ("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
+            ("Sec-WebSocket-Version", "13"),
+        ],
+        b"",
+    );
+    let read = conn.upgrade(&request).await?;
+    w.tunnel = Some(("localhost".to_string(), conn));
+    match read {
+        RawRead::Response(r) => {
+            w.last = Some(r.to_response());
+            w.raw_response = Some(r);
+            Ok(())
+        }
+        RawRead::Closed => Err(anyhow!(
+            "the intercept tunnel closed without answering the upgrade (origin error: {})",
+            ws_origin(w)?.last_error()
+        )
+        .into()),
+    }
+}
+
+// A blind TCP tunnel would reach the origin too, and the client trusts the CA that signed the
+// origin's leaf. Only a leaf that is not the origin's shows the engine terminated TLS and relayed.
+#[then(
+    regex = r"^the tunnel's TLS certificate was minted by the intercept listener, not the origin's$"
+)]
+async fn ws_leaf_minted(w: &mut PlaneA) -> Step {
+    let origin = tls::certs_from_pem(
+        &std::fs::read(fixtures_dir().join("tls/server-cert.pem")).context("server-cert.pem")?,
+    )?;
+    let peer = open_tunnel_to(w, "localhost")?
+        .peer_certificates()
+        .first()
+        .cloned();
+    w.ensure(
+        peer.as_ref().is_some_and(|p| origin.first() != Some(p)),
+        || match &peer {
+            Some(p) => format!(
+                "expected an intercept-minted leaf on the tunnel, got the origin's own ({})",
+                tls::subject(p).unwrap_or_else(|e| format!("{e:#}"))
+            ),
+            None => {
+                "expected an intercept-minted leaf on the tunnel, got no certificate".to_string()
+            }
+        },
+    )
+}
+
+#[then(regex = r#"^a text frame "((?:\\.|[^"\\])*)" is echoed back as "((?:\\.|[^"\\])*)"$"#)]
+async fn ws_echo(w: &mut PlaneA, sent: String, expected: String) -> Step {
+    let (sent, expected) = (unescape(&sent), unescape(&expected));
+    let frame = intercept::client_text_frame(&sent)?;
+    let echoed = {
+        let conn = open_tunnel_to(w, "localhost")?;
+        match conn.write_raw(&frame).await {
+            Ok(()) => intercept::read_frame(conn).await,
+            Err(e) => Err(e),
+        }
+    };
+    let (opcode, payload) = echoed.map_err(|e| {
+        let why =
+            ws_origin(w).map_or_else(|o| format!("{o:#}"), intercept::WsEchoOrigin::last_error);
+        anyhow!("no echo frame ({e:#}; origin error: {why})")
+    })?;
+    let text = String::from_utf8_lossy(&payload).into_owned();
+    w.ensure(opcode == 1 && text == expected, || {
+        format!("expected a text frame '{expected}' back, got opcode {opcode} '{text}'")
+    })
+}
+
+#[then(
+    regex = r#"^the current imposter recorded header "((?:\\.|[^"\\])*)" as "((?:\\.|[^"\\])*)" then "((?:\\.|[^"\\])*)"$"#
+)]
+async fn current_imposter_header_values(
+    w: &mut PlaneA,
+    name: String,
+    first: String,
+    second: String,
+) -> Step {
+    let (name, first, second) = (unescape(&name), unescape(&first), unescape(&second));
+    let json = imposter_json(w, w.current()?).await?;
+    // Every recorded request's values for `name` (case-insensitive): a single value records as a
+    // string, a repeated header as an array.
+    let values: Vec<String> = json
+        .get("requests")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.get("headers")?.as_object())
+        .flat_map(|hs| hs.iter())
+        .filter(|(k, _)| k.eq_ignore_ascii_case(&name))
+        .flat_map(|(_, v)| match v {
+            Value::String(s) => vec![s.clone()],
+            Value::Array(vs) => vs
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    w.ensure(values == [first.clone(), second.clone()], || {
+        let head: String = json.to_string().chars().take(400).collect();
+        format!(
+            "expected the forwarded request to carry {name} as [{first}, {second}] in order, got {values:?}: {head}"
+        )
+    })
+}
+
+// ── front door and gateway dispatch (feature 16, #187) ───────────────────────────────────────
+
+#[given(
+    regex = r#"^the engine is started with the front door and routes fixture "((?:\\.|[^"\\])*)"$"#
+)]
+async fn start_with_front_door_fixture(w: &mut PlaneA, name: String) -> Step {
+    let json = load_fixture(&unescape(&name))?;
+    start_reload_engine(w, &json, true).await
+}
+
+/// `"x-t: a; x-t: b"` as `[(x-t, a), (x-t, b)]`, order kept.
+fn header_list(spec: &str) -> anyhow::Result<Vec<(String, String)>> {
+    spec.split(';')
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(|h| {
+            h.split_once(':')
+                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                .ok_or_else(|| anyhow!("header '{h}' is not 'name: value'"))
+        })
+        .collect()
+}
+
+#[when(
+    regex = r#"^the client sends "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the front door with host "((?:\\.|[^"\\])*)" and headers "((?:\\.|[^"\\])*)"$"#
+)]
+async fn send_through_front_door_with_headers(
+    w: &mut PlaneA,
+    method: String,
+    path: String,
+    host: String,
+    headers: String,
+) -> Step {
+    let headers = header_list(&unescape(&headers))?;
+    front_door_send(w, &method, &unescape(&path), &unescape(&host), headers).await
+}
+
+#[then(regex = r#"^the front door answered "((?:\\.|[^"\\])*)"$"#)]
+async fn front_door_answered(w: &mut PlaneA, outcome: String) -> Step {
+    let outcome = unescape(&outcome);
+    let r = w.last()?;
+    let marker = r.header_values("x-rift-front-door").to_vec();
+    if outcome == "no-route" {
+        w.ensure(r.status == 404 && marker == ["no-route"], || {
+            format!(
+                "expected 404 + x-rift-front-door: no-route, got {} marker={marker:?}: {}",
+                r.status, r.body
+            )
+        })
+    } else {
+        w.ensure(
+            r.status == 200 && r.body == outcome && marker.is_empty(),
+            || {
+                format!(
+                    "expected 200 '{outcome}' from a routed imposter, got {} marker={marker:?}: {}",
+                    r.status, r.body
+                )
+            },
+        )
+    }
+}
+
+/// The last entry of `GET {admin}/imposters/{port}`'s `requests`, on the scenario's engine.
+async fn last_recorded_request(
+    w: &PlaneA,
+    port: u16,
+) -> anyhow::Result<serde_json::Map<String, Value>> {
+    let url = format!("{}/imposters/{port}", w.admin_url());
+    let resp = get(&url).await?;
+    if resp.status != 200 {
+        bail!("GET {url} -> {} (expected 200): {}", resp.status, resp.body);
+    }
+    let json: Value = serde_json::from_str(&resp.body)
+        .with_context(|| format!("invalid admin JSON (body={})", resp.body))?;
+    match json
+        .get("requests")
+        .and_then(Value::as_array)
+        .and_then(|r| r.last())
+    {
+        Some(Value::Object(fields)) => Ok(fields.clone()),
+        _ => bail!("imposter {port} recorded no request: {}", resp.body),
+    }
+}
+
+#[then(
+    regex = r#"^imposter (\d+) last recorded path "((?:\\.|[^"\\])*)" with query "((?:\\.|[^"\\])*)" equal to "((?:\\.|[^"\\])*)"$"#
+)]
+async fn last_recorded_path_and_query(
+    w: &mut PlaneA,
+    port: u16,
+    path: String,
+    key: String,
+    value: String,
+) -> Step {
+    let (path, key, value) = (unescape(&path), unescape(&key), unescape(&value));
+    let req = last_recorded_request(w, port).await?;
+    let got_path = req.get("path").and_then(Value::as_str);
+    let got_value = req
+        .get("query")
+        .and_then(Value::as_object)
+        .and_then(|q| q.get(&key))
+        .and_then(Value::as_str);
+    w.ensure(
+        got_path == Some(path.as_str()) && got_value == Some(value.as_str()),
+        || {
+            format!(
+                "expected imposter {port} to record path '{path}' with query {key}={value}, got path={got_path:?} query.{key}={got_value:?}"
+            )
+        },
+    )
+}
+
+#[then(
+    regex = r#"^imposter (\d+) last recorded header "((?:\\.|[^"\\])*)" equal to "((?:\\.|[^"\\])*)"$"#
+)]
+async fn last_recorded_header(w: &mut PlaneA, port: u16, header: String, value: String) -> Step {
+    let (header, value) = (unescape(&header), unescape(&value));
+    let req = last_recorded_request(w, port).await?;
+    let got = req
+        .get("headers")
+        .and_then(Value::as_object)
+        .and_then(|hs| {
+            hs.iter()
+                .find(|(k, v)| k.eq_ignore_ascii_case(&header) && v.is_string())
+        })
+        .and_then(|(_, v)| v.as_str());
+    w.ensure(got == Some(value.as_str()), || {
+        format!("expected imposter {port} to record header {header}: {value}, got {got:?}")
+    })
+}
+
+#[when(
+    regex = r#"^the client sends a raw "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" through the front door with host "((?:\\.|[^"\\])*)"$"#
+)]
+async fn send_raw_through_front_door(
+    w: &mut PlaneA,
+    method: String,
+    path: String,
+    host: String,
+) -> Step {
+    let port = front_door_port(w)?;
+    let addr = harness().imposter_host().to_string();
+    capture_with_host(
+        w,
+        addr,
+        port,
+        unescape(&method),
+        unescape(&path),
+        unescape(&host),
+        false,
+    )
+    .await
+}
+
+#[when(
+    regex = r#"^an h2c client sends "((?:\\.|[^"\\])*)" then "((?:\\.|[^"\\])*)" on one connection through the front door with host "((?:\\.|[^"\\])*)"$"#
+)]
+async fn h2c_through_front_door(
+    w: &mut PlaneA,
+    first: String,
+    second: String,
+    authority: String,
+) -> Step {
+    let port = front_door_port(w)?;
+    let host = harness().imposter_host().to_string();
+    let (first, second, authority) = (unescape(&first), unescape(&second), unescape(&authority));
+    w.curl.push(format!(
+        "curl -sv --http2-prior-knowledge -H 'Host: {authority}' http://{host}:{port}{first} http://{host}:{port}{second}"
+    ));
+    let streams = tokio::task::spawn_blocking(move || {
+        raw::h2c_two_streams(&host, port, &authority, &first, &second)
+    })
+    .await
+    .context("the h2c task")??;
+    w.h2c = Some(streams);
+    Ok(())
+}
+
+#[when(
+    regex = r#"^an engine is booted with the front door and routes fixture "((?:\\.|[^"\\])*)"$"#
+)]
+async fn boot_front_door_engine(w: &mut PlaneA, name: String) -> Step {
+    let name = unescape(&name);
+    let json = load_fixture(&name)?;
+    let config = harness().scratch_file("boot-config.json", &json)?;
+    let flags = ["--configfile".to_string(), config.display().to_string()];
+    w.curl.push(format!(
+        "rift --front-door 0 --configfile {}   # fixture {name}; expected to refuse to boot",
+        config.display()
+    ));
+    w.boot = Some(harness().boot_engine(&flags, true).await?);
+    Ok(())
+}
+
+#[then(
+    regex = r#"^the engine refused to boot with output naming "((?:\\.|[^"\\])*)" and "((?:\\.|[^"\\])*)"$"#
+)]
+async fn engine_refused_to_boot(w: &mut PlaneA, route: String, rule: String) -> Step {
+    let (route, rule) = (unescape(&route), unescape(&rule));
+    let boot = w
+        .boot
+        .as_ref()
+        .ok_or_else(|| anyhow!("no engine boot attempted in this scenario"))?;
+    let tail: Vec<&str> = boot.output.lines().collect();
+    let tail = tail[tail.len().saturating_sub(5)..].join("\n");
+    let refused = boot.exit_code.is_some_and(|c| c != 0)
+        && boot.output.contains(&route)
+        && boot.output.contains(&rule);
+    let exit = boot.exit_code;
+    w.ensure(refused, || {
+        format!(
+            "expected the boot to fail naming [{route}] and [{rule}], got exit={exit:?}:\n{tail}"
+        )
+    })
+}
+
+#[when(regex = r#"^the client sends "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" to the admin port$"#)]
+async fn send_to_admin_port(w: &mut PlaneA, method: String, path: String) -> Step {
+    let url = format!("{}{}", harness().admin_url, unescape(&path));
+    w.send_with(&clients().verifying, &method, &url, &[], None)
+        .await
+}
+
+#[when(
+    regex = r#"^the client sends "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" via the gateway to a port with no imposter$"#
+)]
+async fn send_via_gateway_to_unknown_port(w: &mut PlaneA, method: String, path: String) -> Step {
+    let admin = harness().admin_url.clone();
+    let port = unknown_port(w, &admin).await?;
+    let url = format!("{admin}/__rift/{port}{}", unescape(&path));
+    w.send_with(&clients().verifying, &method, &url, &[], None)
+        .await
+}
+
+// ── TLS termination and HTTP/2 negotiation (feature 20, #197) ────────────────────────────────
+
+/// What a feature 20 HTTPS exchange settled: the chain the imposter presented and the HTTP version
+/// ALPN chose, named as the JDK's `HttpClient.Version` is (`HTTP_2`, `HTTP_1_1`).
+#[derive(Debug)]
+struct TlsExchange {
+    chain: Vec<rustls::pki_types::CertificateDer<'static>>,
+    version: &'static str,
+}
+
+/// The one stub every feature 20 imposter answers `/` with.
+fn plain_tls_stub() -> Value {
+    serde_json::json!({"responses": [{"is": {"statusCode": 200, "body": "tls-ok"}}]})
+}
+
+/// A stub on `path` only, so the plain stub still answers `/`.
+fn stub_on_path(path: &str, response: Value) -> Value {
+    serde_json::json!({"predicates": [{"equals": {"path": path}}], "responses": [response]})
+}
+
+fn tls_stubs(kind: &str) -> anyhow::Result<Vec<Value>> {
+    Ok(match kind {
+        "a plain stub" => vec![plain_tls_stub()],
+        "a _rift.fault.tcp stub" => vec![
+            stub_on_path(
+                "/fault",
+                serde_json::json!({"is": {"statusCode": 200}, "_rift": {"fault": {"tcp": "reset"}}}),
+            ),
+            plain_tls_stub(),
+        ],
+        "a _rift.script stub" => vec![
+            stub_on_path(
+                "/script",
+                serde_json::json!({"_rift": {"script": {"engine": "rhai", "code": "fn respond(ctx) { http(200, #{}) }"}}}),
+            ),
+            plain_tls_stub(),
+        ],
+        other => bail!("unknown stub kind '{other}'"),
+    })
+}
+
+/// An imposter of `protocol` with `fields` and `stubs`, without a port: the engine assigns one.
+fn tls_imposter(
+    protocol: &str,
+    fields: Vec<(&str, Value)>,
+    stubs: Vec<Value>,
+) -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    map.insert("protocol".to_string(), protocol.into());
+    map.insert("stubs".to_string(), Value::Array(stubs));
+    for (k, v) in fields {
+        map.insert(k.to_string(), v);
+    }
+    map
+}
+
+fn tls_fixture(name: &str) -> anyhow::Result<String> {
+    let path = fixtures_dir().join("tls").join(name);
+    std::fs::read_to_string(&path).with_context(|| format!("TLS fixture {}", path.display()))
+}
+
+fn test_ca_path() -> PathBuf {
+    fixtures_dir().join("intercept").join("ca-cert.pem")
+}
+
+fn test_ca_pem() -> anyhow::Result<String> {
+    let path = test_ca_path();
+    std::fs::read_to_string(&path).with_context(|| format!("the test CA {}", path.display()))
+}
+
+fn cert_key(cert: &str, key: &str) -> anyhow::Result<Vec<(&'static str, Value)>> {
+    Ok(vec![
+        ("cert", tls_fixture(cert)?.into()),
+        ("key", tls_fixture(key)?.into()),
+    ])
+}
+
+/// Create an imposter on the shared engine, requiring a 201: for the setup steps, where a refusal
+/// is a broken scenario. It becomes the scenario's target.
+async fn create_tls_imposter(w: &mut PlaneA, map: serde_json::Map<String, Value>) -> Step {
+    let json = Value::Object(map).to_string();
+    let port = post_at_engine_port(&harness().admin_url, &json, "the HTTPS imposter").await?;
+    w.tracked.push(port);
+    w.current = Some(port);
+    Ok(())
+}
+
+/// The scenario's `@tls-flags` engine.
+fn flag_admin(w: &PlaneA) -> anyhow::Result<String> {
+    w.side_engine
+        .as_ref()
+        .map(|e| e.admin_url.clone())
+        .ok_or_else(|| anyhow!("no TLS-flag engine was started in this scenario"))
+}
+
+/// Create an imposter on the `@tls-flags` engine, requiring a 201. Not tracked: the engine and its
+/// imposters are stopped after the scenario.
+async fn create_on_flag_engine(w: &mut PlaneA, map: serde_json::Map<String, Value>) -> Step {
+    let admin = flag_admin(w)?;
+    let port = post_assigned(
+        &admin,
+        &Value::Object(map).to_string(),
+        "the HTTPS imposter",
+    )
+    .await?;
+    w.current = Some(port);
+    Ok(())
+}
+
+/// POST an imposter and keep the answer as the last response, whatever it is. In container mode it
+/// goes out on a pool port; a regression that accepts it has its port tracked.
+async fn post_kept(w: &mut PlaneA, admin: &str, mut map: serde_json::Map<String, Value>) -> Step {
+    let shared = admin == harness().admin_url;
+    if shared && let Some(pool) = harness().imposter_port_pool() {
+        let port = pool.next_port();
+        w.tracked.push(port);
+        map.insert("port".to_string(), port.into());
+    }
+    let json = Value::Object(map).to_string();
+    let url = format!("{admin}/imposters");
+    w.send_with(
+        &clients().verifying,
+        "POST",
+        &url,
+        &json_content_type(),
+        Some(&json),
+    )
+    .await?;
+    let resp = w.last()?;
+    if resp.status == 201 {
+        let port = declared_port(&resp.body, "the 201 for an imposter")?;
+        if shared {
+            w.tracked.push(port);
+        }
+        w.current = Some(port);
+    }
+    Ok(())
+}
+
+#[given(regex = r#"^an HTTPS imposter serving "((?:\\.|[^"\\])*)" with key "((?:\\.|[^"\\])*)"$"#)]
+async fn https_imposter(w: &mut PlaneA, cert: String, key: String) -> Step {
+    let fields = cert_key(&unescape(&cert), &unescape(&key))?;
+    create_tls_imposter(w, tls_imposter("https", fields, vec![plain_tls_stub()])).await
+}
+
+#[given(
+    regex = r#"^an HTTPS imposter serving the chain "((?:\\.|[^"\\])*)" then "((?:\\.|[^"\\])*)" with key "((?:\\.|[^"\\])*)"$"#
+)]
+async fn https_imposter_chain(
+    w: &mut PlaneA,
+    leaf: String,
+    intermediate: String,
+    key: String,
+) -> Step {
+    let chain = tls_fixture(&unescape(&leaf))? + tls_fixture(&unescape(&intermediate))?.as_str();
+    let fields = vec![
+        ("cert", chain.into()),
+        ("key", tls_fixture(&unescape(&key))?.into()),
+    ];
+    create_tls_imposter(w, tls_imposter("https", fields, vec![plain_tls_stub()])).await
+}
+
+#[given(
+    regex = r#"^an HTTPS imposter serving "((?:\\.|[^"\\])*)" with key "((?:\\.|[^"\\])*)" and "((?:\\.|[^"\\])*)"$"#
+)]
+async fn https_imposter_with_stubs(
+    w: &mut PlaneA,
+    cert: String,
+    key: String,
+    stubs: String,
+) -> Step {
+    let fields = cert_key(&unescape(&cert), &unescape(&key))?;
+    let stubs = tls_stubs(&unescape(&stubs))?;
+    create_tls_imposter(w, tls_imposter("https", fields, stubs)).await
+}
+
+/// GET `/` on the target imposter over HTTPS, offering `h2` then `http/1.1` and trusting only the
+/// test CA. HTTP/2 is framed by hand (reqwest exposes neither the chain nor ALPN), so an `h2`
+/// answer carries its status and body, not its headers.
+async fn https_get_trusting_test_ca(w: &mut PlaneA) -> Step {
+    let port = w.current()?;
+    let host = harness().imposter_host();
+    let config = tls::client_config(
+        &tls::certs_from_pem(test_ca_pem()?.as_bytes())?,
+        tls::ALPN_H2_FIRST,
+    )?;
+    w.curl.push(format!(
+        "curl -sv --cacert {} --resolve localhost:{port}:{host} https://localhost:{port}/",
+        test_ca_path().display()
+    ));
+    let tcp = wire::connect(host, port).await?;
+    // `localhost`: every fixture leaf is issued for it, and the chain leaf for nothing else.
+    let mut conn = tls::handshake(Box::new(tcp), "localhost", config).await?;
+    let authority = format!("localhost:{port}");
+    let (response, version) = if conn.alpn() == Some(b"h2".as_slice()) {
+        match conn.h2_get("/", &authority).await? {
+            H2Outcome::Answered {
+                status: Some(status),
+                body,
+            } => (
+                Response {
+                    status,
+                    body,
+                    headers: BTreeMap::new(),
+                },
+                "HTTP_2",
+            ),
+            other => {
+                return Err(anyhow!("the HTTP/2 GET / did not complete: {other:?}").into());
+            }
+        }
+    } else {
+        match conn
+            .exchange(&wire::request("GET", &authority, "/", &[], b""))
+            .await?
+        {
+            RawRead::Response(r) => (r.to_response(), "HTTP_1_1"),
+            RawRead::Closed => {
+                return Err(
+                    anyhow!("the imposter closed the connection without answering GET /").into(),
+                );
+            }
+        }
+    };
+    w.tls = Some(TlsExchange {
+        chain: conn.peer_certificates().to_vec(),
+        version,
+    });
+    w.last = Some(response);
+    Ok(())
+}
+
+#[when(regex = r"^an HTTPS GET trusting only the test CA is sent to the imposter$")]
+async fn https_get(w: &mut PlaneA) -> Step {
+    https_get_trusting_test_ca(w).await
+}
+
+#[when(
+    regex = r"^an HTTP/2-preferring HTTPS GET trusting only the test CA is sent to the imposter$"
+)]
+async fn https_get_h2(w: &mut PlaneA) -> Step {
+    https_get_trusting_test_ca(w).await
+}
+
+impl PlaneA {
+    fn tls(&self) -> anyhow::Result<&TlsExchange> {
+        self.tls
+            .as_ref()
+            .ok_or_else(|| anyhow!("no HTTPS exchange yet in this scenario"))
+    }
+}
+
+#[then(regex = r#"^the peer certificate subject is "((?:\\.|[^"\\])*)"$"#)]
+async fn peer_subject(w: &mut PlaneA, expected: String) -> Step {
+    let expected = unescape(&expected);
+    let got = w.tls()?.chain.first().map(tls::subject).transpose()?;
+    w.ensure(got.as_deref() == Some(expected.as_str()), || {
+        format!("expected peer subject '{expected}', got {got:?}")
+    })
+}
+
+#[then(
+    regex = r#"^the peer certificate chain has (\d+) certificates, the first with subject "((?:\\.|[^"\\])*)"$"#
+)]
+async fn peer_chain(w: &mut PlaneA, n: usize, expected: String) -> Step {
+    let expected = unescape(&expected);
+    let subjects = w
+        .tls()?
+        .chain
+        .iter()
+        .map(tls::subject)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    w.ensure(
+        subjects.len() == n && subjects.first() == Some(&expected),
+        || format!("expected {n} certificates led by '{expected}', got {subjects:?}"),
+    )
+}
+
+#[then(regex = r#"^the response was served over "((?:\\.|[^"\\])*)"$"#)]
+async fn served_over(w: &mut PlaneA, expected: String) -> Step {
+    let expected = unescape(&expected);
+    let got = w.tls()?.version;
+    w.ensure(got == expected, || {
+        format!("expected {expected}, got {got}")
+    })
+}
+
+#[when(regex = r#"^an imposter with "((?:\\.|[^"\\])*)" is posted$"#)]
+async fn imposter_with_case(w: &mut PlaneA, kind: String) -> Step {
+    let ca: Value = test_ca_pem()?.into();
+    let yes = Value::Bool(true);
+    let (protocol, fields) = match unescape(&kind).as_str() {
+        "a key that does not match the cert" => {
+            ("https", cert_key("server-leaf.pem", "chain-leaf.key")?)
+        }
+        "a cert without a key" => (
+            "https",
+            vec![("cert", tls_fixture("server-leaf.pem")?.into())],
+        ),
+        "rejectUnauthorized without mutualAuth" => {
+            ("https", vec![("rejectUnauthorized", yes), ("ca", ca)])
+        }
+        "ca without rejectUnauthorized" => ("https", vec![("mutualAuth", yes), ("ca", ca)]),
+        "rejectUnauthorized without ca" => (
+            "https",
+            vec![("mutualAuth", yes.clone()), ("rejectUnauthorized", yes)],
+        ),
+        "an empty ca list" => (
+            "https",
+            vec![
+                ("mutualAuth", yes.clone()),
+                ("rejectUnauthorized", yes),
+                ("ca", Value::Array(Vec::new())),
+            ],
+        ),
+        "a ca with no certificate" => (
+            "https",
+            vec![
+                ("mutualAuth", yes.clone()),
+                ("rejectUnauthorized", yes),
+                ("ca", "no cert".into()),
+            ],
+        ),
+        "mutualAuth on an http imposter" => ("http", vec![("mutualAuth", yes)]),
+        "mutualAuth false on an http imposter" => {
+            ("http", vec![("mutualAuth", Value::Bool(false))])
+        }
+        other => return Err(anyhow!("unknown imposter case '{other}'").into()),
+    };
+    let admin = harness().admin_url.clone();
+    post_kept(
+        w,
+        &admin,
+        tls_imposter(protocol, fields, vec![plain_tls_stub()]),
+    )
+    .await
+}
+
+#[given(regex = r#"^a plain-HTTP imposter answering 200 "((?:\\.|[^"\\])*)"$"#)]
+async fn plain_http_imposter(w: &mut PlaneA, body: String) -> Step {
+    let stub =
+        serde_json::json!({"responses": [{"is": {"statusCode": 200, "body": unescape(&body)}}]});
+    create_tls_imposter(w, tls_imposter("http", Vec::new(), vec![stub])).await
+}
+
+#[when(regex = r"^an h2c prior-knowledge GET is sent to the imposter$")]
+async fn h2c_prior_knowledge_get(w: &mut PlaneA) -> Step {
+    let port = w.current()?;
+    let host = harness().imposter_host();
+    w.curl.push(format!(
+        "curl -sv --http2-prior-knowledge http://{host}:{port}/"
+    ));
+    let outcome = tokio::task::spawn_blocking(move || raw::h2c_get(host, port, "localhost", "/"))
+        .await
+        .context("the h2c task")??;
+    w.h2c_get = Some(outcome);
+    Ok(())
+}
+
+#[then(regex = r#"^the h2c response has status (\d+) and body "((?:\\.|[^"\\])*)"$"#)]
+async fn h2c_response(w: &mut PlaneA, status: u16, body: String) -> Step {
+    let want = H2Outcome::Answered {
+        status: Some(status),
+        body: unescape(&body),
+    };
+    let got = w
+        .h2c_get
+        .as_ref()
+        .ok_or_else(|| anyhow!("no h2c exchange yet in this scenario"))?;
+    w.ensure(*got == want, || {
+        format!("expected an HTTP/2 {want:?}, got {got:?}")
+    })
+}
+
+/// Start the scenario's `@tls-flags` engine, replacing any it already has.
+async fn start_tls_flag_engine(w: &mut PlaneA, flags: &[String], env: &[(String, String)]) -> Step {
+    if let Some(old) = w.side_engine.take() {
+        old.stop().await?;
+    }
+    w.side_engine = Some(harness().spawn_flag_engine_with_env(flags, env).await?);
+    Ok(())
+}
+
+#[given(
+    regex = r#"^an engine started with the default TLS cert "((?:\\.|[^"\\])*)" and key "((?:\\.|[^"\\])*)"$"#
+)]
+async fn engine_with_default_tls(w: &mut PlaneA, cert: String, key: String) -> Step {
+    let tls_dir = fixtures_dir().join("tls");
+    let flags = [
+        "--default-tls-cert".to_string(),
+        tls_dir.join(unescape(&cert)).display().to_string(),
+        "--default-tls-key".to_string(),
+        tls_dir.join(unescape(&key)).display().to_string(),
+    ];
+    start_tls_flag_engine(w, &flags, &[]).await
+}
+
+#[given(regex = r#"^an engine started with "((?:\\.|[^"\\])*)"$"#)]
+async fn engine_with_flag(w: &mut PlaneA, flag: String) -> Step {
+    start_tls_flag_engine(w, &[unescape(&flag)], &[]).await
+}
+
+#[given(
+    regex = r#"^an engine started with the environment "((?:\\.|[^"\\])*)" set to "((?:\\.|[^"\\])*)"$"#
+)]
+async fn engine_with_env(w: &mut PlaneA, name: String, value: String) -> Step {
+    start_tls_flag_engine(w, &[], &[(unescape(&name), unescape(&value))]).await
+}
+
+#[given(regex = r"^an HTTPS imposter with no cert on that engine$")]
+async fn https_no_cert_on_flag_engine(w: &mut PlaneA) -> Step {
+    create_on_flag_engine(w, tls_imposter("https", Vec::new(), vec![plain_tls_stub()])).await
+}
+
+#[given(
+    regex = r#"^an HTTPS imposter serving "((?:\\.|[^"\\])*)" with key "((?:\\.|[^"\\])*)" on that engine$"#
+)]
+async fn https_imposter_on_flag_engine(w: &mut PlaneA, cert: String, key: String) -> Step {
+    let fields = cert_key(&unescape(&cert), &unescape(&key))?;
+    create_on_flag_engine(w, tls_imposter("https", fields, vec![plain_tls_stub()])).await
+}
+
+#[when(regex = r"^an HTTPS imposter with no cert is posted to that engine$")]
+async fn post_https_no_cert_to_flag_engine(w: &mut PlaneA) -> Step {
+    let admin = flag_admin(w)?;
+    post_kept(
+        w,
+        &admin,
+        tls_imposter("https", Vec::new(), vec![plain_tls_stub()]),
+    )
+    .await
+}
+
+// Stricter than the Scala runner, which only saw the start fail: the engine must exit with 1 over
+// the missing file without ever reporting a listener.
+#[then(
+    regex = r"^an engine started with a default TLS cert file that does not exist exits before serving$"
+)]
+async fn missing_default_cert_exits(w: &mut PlaneA) -> Step {
+    let missing = harness().config.log_dir.join("no-such-default-cert.pem");
+    if missing.exists() {
+        return Err(anyhow!(
+            "{} exists, so it cannot stand for a missing file",
+            missing.display()
+        )
+        .into());
+    }
+    let flags = [
+        "--default-tls-cert".to_string(),
+        missing.display().to_string(),
+        "--default-tls-key".to_string(),
+        fixtures_dir()
+            .join("tls/server-leaf.key")
+            .display()
+            .to_string(),
+    ];
+    w.curl.push(format!("rift {}", flags.join(" ")));
+    let boot = harness().boot_engine(&flags, false).await?;
+    let tail: Vec<&str> = boot.output.lines().rev().take(5).collect();
+    w.ensure(
+        boot.exit_code == Some(1)
+            && boot.output.contains("No such file or directory")
+            && !boot.output.contains("listening on"),
+        || {
+            format!(
+                "expected the engine to exit with code 1 over the missing file before serving, got exit {:?}, output tail:\n{}",
+                boot.exit_code,
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            )
+        },
+    )
+}
+
+/// On a dedicated engine started with `flag`. The imposter is not tracked: the whole engine is
+/// killed after the scenario.
+#[when(
+    regex = r#"^a proxy imposter to the HTTPS upstream is created on an engine started with "((?:\\.|[^"\\])*)"$"#
+)]
+async fn proxy_to_upstream_on_flag_engine(w: &mut PlaneA, flag: String) -> Step {
+    let json = proxy_to_upstream_json(w)?;
+    start_tls_flag_engine(w, &[unescape(&flag)], &[]).await?;
+    let admin = flag_admin(w)?;
+    let port = post_assigned(&admin, &json, "proxy to the HTTPS upstream (flag engine)").await?;
+    w.current = Some(port);
+    Ok(())
+}
+
 // ── the run ──────────────────────────────────────────────────────────────────────────────────
+
+/// The two kinds of feature 12 engine a scenario owns, stopped alike.
+enum Owned {
+    Isolated(IsolatedEngine),
+    Intercept(InterceptEngine),
+}
+
+impl Owned {
+    fn log(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Isolated(e) => e.log(),
+            Self::Intercept(e) => e.log(),
+        }
+    }
+
+    async fn stop(self) -> Result<(), HarnessError> {
+        match self {
+            Self::Isolated(e) => e.stop().await,
+            Self::Intercept(e) => e.stop().await,
+        }
+    }
+}
 
 /// After every scenario, even a failed one: delete its imposters from the shared engine and stop
 /// any engine it started. A cleanup failure fails the run (as a hook error): a leaked imposter
@@ -3828,6 +6056,33 @@ async fn cleanup(world: Option<&mut PlaneA>) {
                     errors.push(format!("{e} (log {}:\n{})", log.display(), log_tail(&log)));
                 }
                 None => errors.push(format!("stopping the embedded isolated engine: {e}")),
+            }
+        }
+    }
+    // Raw connections first, so no tunnel outlives the engine it runs through.
+    w.tunnel = None;
+    w.listener_conn = None;
+    w.ws_origin = None;
+    if std::mem::take(&mut w.intercept_rules_added)
+        && let Err(e) = clear_rules(admin).await
+    {
+        errors.push(format!("clearing the shared intercept rules: {e:#}"));
+    }
+    for (what, engine) in [
+        (
+            "runtime-intercept",
+            w.runtime_engine.take().map(Owned::Isolated),
+        ),
+        ("intercept", w.intercept_engine.take().map(Owned::Intercept)),
+    ] {
+        let Some(engine) = engine else { continue };
+        let log = engine.log().map(std::path::Path::to_path_buf);
+        if let Err(e) = engine.stop().await {
+            match log {
+                Some(log) => {
+                    errors.push(format!("{e} (log {}:\n{})", log.display(), log_tail(&log)));
+                }
+                None => errors.push(format!("stopping the embedded {what} engine: {e}")),
             }
         }
     }
