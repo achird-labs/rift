@@ -2657,5 +2657,38 @@
     "reason": "Mountebank strips the JSONPath except from the whole body before selecting, which leaves unparseable JSON; Rift strips each selected value",
     "mountebank": "",
     "rift": "matched"
+  },
+  {
+    "id": "xpath-string-selector/status",
+    "case": "targeted: a string() XPath selector works in Rift, where Mountebank fails the request with a TypeError (#1495)",
+    "location": "step[1].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "An XPath selector that evaluates to a string, such as `string(//a)`, works in Rift's predicates and `copy`. Mountebank fails the request with a `500` `TypeError` (`result.map is not a function`): its XPath code handles node sets only.",
+    "reason": "Mountebank's xpath.js maps over the selection, which a string() result is not; Rift keeps string() as the way to read an element's whole text",
+    "mountebank": "500",
+    "rift": "200"
+  },
+  {
+    "id": "xpath-string-selector/content-type",
+    "case": "targeted: a string() XPath selector works in Rift, where Mountebank fails the request with a TypeError (#1495)",
+    "location": "step[1].header.content-type",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "An XPath selector that evaluates to a string, such as `string(//a)`, works in Rift's predicates and `copy`. Mountebank fails the request with a `500` `TypeError` (`result.map is not a function`): its XPath code handles node sets only.",
+    "reason": "Mountebank's xpath.js maps over the selection, which a string() result is not; Rift keeps string() as the way to read an element's whole text",
+    "mountebank": "application/json",
+    "rift": "(absent)"
+  },
+  {
+    "id": "xpath-string-selector/body",
+    "case": "targeted: a string() XPath selector works in Rift, where Mountebank fails the request with a TypeError (#1495)",
+    "location": "step[1].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "An XPath selector that evaluates to a string, such as `string(//a)`, works in Rift's predicates and `copy`. Mountebank fails the request with a `500` `TypeError` (`result.map is not a function`): its XPath code handles node sets only.",
+    "reason": "Mountebank's xpath.js maps over the selection, which a string() result is not; Rift keeps string() as the way to read an element's whole text",
+    "mountebankMatches": "\\{\"errors\":\\[\\{\"message\":\"result\\.map is not a function\",\"name\":\"TypeError\".*",
+    "rift": "matched"
   }
 ]

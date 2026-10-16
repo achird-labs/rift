@@ -350,7 +350,7 @@ from that value:
 |:---------|:-----------|:-------|
 | `regex` | A regular expression | The first capture group, or the whole match if the pattern has none. `options` takes `ignoreCase` and `multiline`. |
 | `jsonpath` | A JSONPath selector | The first selected value from a JSON source |
-| `xpath` | An XPath selector | The first selected value, in document order, from an XML source. `ns` maps each namespace prefix the selector uses to its URI. |
+| `xpath` | An XPath selector | The first selected value, in document order, from an XML source. An element reads as its first child node, or `undefined` when it has none or starts with an element, as in Mountebank (see [XPath predicates](predicates.md#what-a-selected-node-reads-as)). `ns` maps each namespace prefix the selector uses to its URI. |
 
 A namespaced XML source needs `ns`, as in Mountebank: `"using": { "method": "xpath", "selector":
 "//mb:name", "ns": { "mb": "http://example.com/mb" } }`. A prefix the selector uses without a
