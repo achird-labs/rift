@@ -33,6 +33,30 @@ use tokio::sync::broadcast;
 
 use tracing::{debug, error, info, warn};
 
+/// Whether a loopback listener holds an auto-assign candidate: only the BSD family can hand one
+/// out (see [`crate::proxy::network::loopback_listener_holds`]).
+fn loopback_holder(port: u16) -> bool {
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    return crate::proxy::network::loopback_listener_holds(port);
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    )))]
+    {
+        let _ = port;
+        false
+    }
+}
+
 /// Server-level TLS defaults for HTTPS imposters that don't carry their own cert/key (issue #206).
 #[derive(Debug, Clone)]
 pub struct TlsDefaults {
@@ -1043,10 +1067,7 @@ impl ImposterManager {
                         .map_err(|e| ImposterError::BindError(p, anyhow::Error::new(e)))?,
                 )
             }
-            None => {
-                // Auto-assign port: find an available port starting from a base
-                self.find_available_port(bind_host).await?
-            }
+            None => self.bind_auto_port(bind_host).await?,
         };
         // The group binds the address the probe actually took, so a name is resolved only once.
         let addr = probe
@@ -1081,14 +1102,12 @@ impl ImposterManager {
                 ]),
             },
             Some(runtimes) => {
-                // The auto-assign probe binds without SO_REUSEPORT and cannot coexist with the
-                // reusable group, so the group is rebound from scratch; explicit-port creates
-                // rebind uniformly for one code path. The instant between drop and rebind is
-                // the classic rebind race — tolerated at admin rate, and #197 hot reloads
-                // already accept the same window.
-                drop(probe);
+                // The probe is a reusable listener (explicit or auto-assigned, issue #1501), so it
+                // joins the SO_REUSEPORT group as its first member: the port is never released
+                // between learning it and serving it.
                 let mut group = Vec::with_capacity(runtimes.len());
-                for _ in 0..runtimes.len() {
+                group.extend(probe);
+                while group.len() < runtimes.len() {
                     group.push(
                         crate::proxy::network::create_reusable_listener(addr)
                             .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?,
@@ -1446,47 +1465,40 @@ impl ImposterManager {
         }
     }
 
-    /// Bind to an available port for auto-assignment
-    /// Starts from port 49152 (start of dynamic/private port range) and finds first available
-    async fn find_available_port(&self, host: &str) -> Result<(u16, TcpListener), ImposterError> {
-        let existing_ports: std::collections::HashSet<u16> =
-            self.imposters.ports().into_iter().collect();
-        let literal = crate::proxy::bind_addr(host, 0);
-
-        // Start from dynamic port range (49152-65535)
-        // If we could allow random ports, rather than requiring the minimum available port,
-        // we could bind to port 0, and let the OS pick an unused ephemeral port for us.
-        // Try ports in this range until we find one that's available
-        for port in 49152..=u16::MAX {
-            if existing_ports.contains(&port) {
+    /// Bind an auto-assigned port. The kernel picks it, as Mountebank's `listen(0)` does, and the
+    /// listener that learned the port is the one that serves it (issue #1501). The old scan from
+    /// 49152 probed each port with `SO_REUSEADDR`, which macOS lets "succeed" on a port another
+    /// process holds on loopback, and that process then kept every `127.0.0.1` connection.
+    ///
+    /// A candidate is refused when an imposter still owns it without a listener (serve-unbound,
+    /// issue #143) or, for the IPv4 wildcard, when another socket listens on it on a family or
+    /// address a client may reach first: IPv6-only (`localhost` resolving `::1`), or `127.0.0.1` on
+    /// the BSD family, whose port-0 search does not rule that out. A refused candidate stays bound
+    /// until a port is chosen, so the kernel cannot hand it out again.
+    async fn bind_auto_port(&self, host: &str) -> Result<(u16, TcpListener), ImposterError> {
+        const ATTEMPTS: usize = 16;
+        let addr = Self::resolve_bind_addr(host, 0).await?;
+        let mut refused = Vec::new();
+        for _ in 0..ATTEMPTS {
+            let listener = crate::proxy::network::create_reusable_listener(addr)
+                .map_err(|e| ImposterError::BindError(0, anyhow::Error::new(e)))?;
+            let port = listener
+                .local_addr()
+                .map_err(|e| ImposterError::BindError(0, anyhow::Error::new(e)))?
+                .port();
+            let v4_wildcard = addr.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+            if self.imposters.contains(port)
+                || (v4_wildcard && crate::proxy::network::ipv6_only_listener_holds(port))
+                || (v4_wildcard && loopback_holder(port))
+            {
+                refused.push(listener);
                 continue;
             }
-            // Try to bind to check if OS has it available
-            // A literal binds as written; a name goes to tokio, which resolves it off the worker
-            // and tries each of its addresses (issue #1137).
-            let bound = match literal {
-                Some(mut addr) => {
-                    addr.set_port(port);
-                    TcpListener::bind(addr).await
-                }
-                None => TcpListener::bind((host, port)).await,
-            };
-            match bound {
-                Ok(listener) => {
-                    // Port is available, return the port and bound listener
-                    return Ok((port, listener));
-                }
-                // Only "address in use" means "try the next port". Any other bind failure
-                // (e.g. EMFILE — too many open files) is not a port-availability signal: report it
-                // truthfully instead of scanning all 16k ports and then blaming port exhaustion.
-                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
-                Err(e) => return Err(ImposterError::BindError(port, anyhow::Error::new(e))),
-            }
+            return Ok((port, listener));
         }
-
         Err(ImposterError::BindError(
             0,
-            anyhow::anyhow!("No available ports in range 49152-65535"),
+            anyhow::anyhow!("no free port after {ATTEMPTS} attempts"),
         ))
     }
 
@@ -1938,8 +1950,8 @@ impl ImposterManager {
     }
 
     /// Stable-sort `configs` so every explicit-port config comes before any auto-assigned one (issue
-    /// #1112). An auto-assigned port is the lowest free port, so a port-less create that runs first
-    /// can take a port a later config in the same set names. With explicit ports created (or
+    /// #1112). The kernel picks an auto-assigned port (#1501) and can hand out one a later config in
+    /// the same set names, so a port-less create that runs first could take it. With explicit ports created (or
     /// replaced, which re-binds them) first, auto-assign skips every one that is serving. An explicit
     /// create that fails leaves its port free, and that failure is reported.
     pub fn explicit_ports_first(configs: &mut [ImposterConfig]) {
@@ -3291,8 +3303,8 @@ mod tests {
         use tokio::net::TcpStream;
 
         let manager = ImposterManager::new();
-        // Issue #809: this test probes the port *after* deleting the imposter, so it must keep a
-        // fixed port below the auto-assign range. See `delete_blocks_until_inflight_response_drains`
+        // Issue #809: this test probes the port *after* deleting the imposter, so it takes a port
+        // nothing auto-assigns from this test's manager. See `delete_blocks_until_inflight_response_drains`
         // for why the two halves of this file differ.
         let config: ImposterConfig = serde_json::from_value(serde_json::json!({
             "protocol": "http",
@@ -3379,10 +3391,9 @@ mod tests {
         // this test actually flaked: it panicked at `create`, not at the drain assertion below.
         //
         // Auto-assign is only safe for a test that never touches the port again after deleting it.
-        // A test that re-binds or re-probes the port must keep a fixed one below the 49152+
-        // auto-assign range, because `delete` returns the port to that shared pool where a
-        // concurrent test's `find_available_port` can claim it — see
-        // `delete_then_recreate_same_port_serves_new_generation`.
+        // A test that re-binds or re-probes the port must keep a fixed one below the ephemeral
+        // range, because `delete` returns the port to the kernel, which can hand it to a
+        // concurrent test's auto-assign — see `delete_then_recreate_same_port_serves_new_generation`.
         let port = manager.create_imposter(config).await.expect("create");
 
         // Send a request that will spend ~1.5s in the imposter's `wait` before its response is
@@ -3471,10 +3482,10 @@ mod tests {
 
         let manager = ImposterManager::new();
         // Issue #809: re-binding the *same* port after a delete is the whole point here, so the
-        // port must stay fixed and below the auto-assign range. An OS-assigned port would be
-        // returned to the shared 49152+ pool by the delete, and a concurrently-running test's
-        // `find_available_port` can claim it before the re-create — measured at ~25% failure under
-        // `--test-threads=16`, where the fixed port never failed.
+        // port must stay fixed rather than auto-assigned. An auto-assigned port would be
+        // returned to the kernel by the delete, and a concurrently-running test's auto-assign can
+        // claim it before the re-create — measured at ~25% failure under `--test-threads=16` when
+        // auto-assign took the lowest free port (before #1501), where the fixed port never failed.
         let cfg = |body: &str| -> ImposterConfig {
             serde_json::from_value(serde_json::json!({
                 "protocol": "http",

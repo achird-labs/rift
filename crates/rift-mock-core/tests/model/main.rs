@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use model::{Model, Reload, Served, UPSTREAM_RESPONSES, upstream_body};
 use ops::{Edit, FLOW_KEYS, FLOWS, Method, Op, PATHS, SCENARIOS, Shape, Spec, apply_edits};
 
-/// No connection pool: ports are reused (auto-assignment hands out the lowest free one, and
+/// No connection pool: ports are reused (the kernel can reissue a freed auto-assigned port, and
 /// `Recreate` re-binds the same one), and a pooled connection to a deleted imposter is closed by the
 /// time the next request is written on it.
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
