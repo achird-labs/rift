@@ -6,9 +6,9 @@
 // embedder holding only `rift-http-proxy` names them at the root exactly as it would on
 // `rift-mock-core` (issues #965, #1234), not via `imposter::fault_io`.
 pub use rift_mock_core::{
-    FaultCell, FaultIo, InjectedFault, TcpFaultKind, backends, behaviors, extensions, flow_state,
-    imposter, is_injected_fault, proxy, recording, response, scripting, stub_analysis,
-    tcp_fault_carrier, template, util,
+    FaultCell, FaultIo, InjectedFault, LingerOnClose, TcpFaultKind, arm_linger_if_requested,
+    backends, behaviors, extensions, flow_state, imposter, is_injected_fault, proxy, recording,
+    response, scripting, stub_analysis, tcp_fault_carrier, template, util,
 };
 
 /// Install the process-wide rustls `ring` crypto provider, idempotently (issue #343).

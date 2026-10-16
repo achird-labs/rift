@@ -324,6 +324,8 @@ impl BodyError {
 
     /// The error door for this failure. A limit refusal closes the connection, since the client
     /// may still be writing a body nobody will read, and the exhausted budget says when to retry.
+    /// That close is a lingering one (issue #1460), so it does not reset the connection under the
+    /// answer.
     pub fn into_response(&self) -> Response<Full<Bytes>> {
         let mut response = match self {
             // An expected overload state, not a server fault: kept off `error_response`'s
@@ -339,10 +341,16 @@ impl BodyError {
             BodyError::Read(_) => {}
             BodyError::TooLarge { .. } => {
                 headers.insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
+                response
+                    .extensions_mut()
+                    .insert(rift_mock_core::LingerOnClose);
             }
             BodyError::BudgetExhausted => {
                 headers.insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
                 headers.insert(hyper::header::RETRY_AFTER, HeaderValue::from_static("1"));
+                response
+                    .extensions_mut()
+                    .insert(rift_mock_core::LingerOnClose);
             }
         }
         response
@@ -501,6 +509,13 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.headers()["retry-after"], "1");
         assert_eq!(response.headers()["connection"], "close");
+        // Issue #1460: the close drains the unread body rather than resetting under the 503.
+        assert!(
+            response
+                .extensions()
+                .get::<rift_mock_core::LingerOnClose>()
+                .is_some()
+        );
     }
 
     #[test]

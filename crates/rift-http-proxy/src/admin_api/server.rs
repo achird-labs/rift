@@ -23,7 +23,7 @@ use rift_mock_core::proxy::{
     AcceptBackoff, AcceptErrorClass, AcceptErrorEvent, AcceptErrorLog, classify_accept_error,
     is_fatal_listener_error,
 };
-use rift_mock_core::{FaultCell, FaultIo, InjectedFault};
+use rift_mock_core::{FaultCell, FaultIo, InjectedFault, arm_linger_if_requested};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -778,6 +778,7 @@ async fn accept_loop(
                     // A carrier only ever comes from the gateway; everything else passes through.
                     let mut response = apply_tcp_fault(response, version, &fault_cell)
                         .map_err(AdminServiceError::Fault)?;
+                    arm_linger_if_requested(&response, version, &fault_cell);
                     if let Some(decorator) = decorator {
                         decorator.decorate(
                             ResponsePhase::Admin,

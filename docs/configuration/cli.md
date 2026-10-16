@@ -486,8 +486,10 @@ predicates, scripts and the request journal all need the whole body. Two limits 
 
 A proxied upstream response is held to the same limits, but never waits for the budget, and a
 refusal there fails the proxy with `502` like any other upstream failure. The `413` and `503`
-responses close the connection. A client still writing a large body when the refusal arrives
-may see a reset instead of the status. Embedders set the same limits with
+responses close the connection, and over HTTP/1.1 Rift first reads and discards the rest of the
+body for up to 2 s (1 s of silence, 64 MiB), so a client still writing it receives the status
+rather than a connection reset. A refused connection that is still draining holds an imposter
+delete, or a shutdown, for up to those 2 s. Embedders set the same limits with
 `ImposterManager::with_body_limits`, or `maxBodySize` / `bodyMemoryBudget` in the C-ABI
 `ServeOptions`. The intercept listener keeps its own 1 MiB cap.
 
