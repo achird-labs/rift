@@ -53,3 +53,93 @@ fn is_executable(_meta: &std::fs::Metadata) -> bool {
     // No portable executable-bit check off Unix; existence-as-a-file is the best we can assert.
     true
 }
+
+/// Spawn the server with `--port 0` plus `args`, and return it with the admin port it bound.
+///
+/// The port comes from the server's own `listening on http://<addr>` startup line, so no probe
+/// socket is ever opened and closed (#1474: a probed port can be taken, or its closing probe can
+/// reset a neighbour's connection, because the server binds `0.0.0.0` while a probe holds
+/// `127.0.0.1`). Colour is disabled with `NO_COLOR`, and ANSI sequences are stripped anyway in case
+/// the override is not honoured. Stdout and stderr keep being drained after the port is read so the
+/// child can never block on a full pipe. Panics with everything the child printed if it exits or
+/// stays silent past the 10 s deadline.
+#[allow(dead_code)] // each suite compiles this module; not all of them spawn through it
+pub async fn spawn_server(args: &[&str]) -> (tokio::process::Child, u16) {
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+
+    fn forward(
+        stream: impl AsyncRead + Unpin + Send + 'static,
+        tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stream).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                // The receiver is gone once the port is found; keep reading to drain the pipe.
+                let _ = tx.send(line);
+            }
+        });
+    }
+
+    let mut child = tokio::process::Command::new(server_bin())
+        .args(["--port", "0"])
+        .args(args)
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn rift server");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    forward(child.stdout.take().expect("piped stdout"), tx.clone());
+    forward(child.stderr.take().expect("piped stderr"), tx);
+
+    let mut seen = Vec::new();
+    let found = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(line) = rx.recv().await {
+            let plain = strip_ansi(&line);
+            if let Some(port) = admin_port_from(&plain) {
+                return Some(port);
+            }
+            seen.push(plain);
+        }
+        None // both pipes closed: the child exited
+    })
+    .await;
+    match found {
+        Ok(Some(port)) => (child, port),
+        Ok(None) => panic!(
+            "rift server exited before reporting its admin port; output:\n{}",
+            seen.join("\n")
+        ),
+        Err(_) => panic!(
+            "rift server did not report its admin port within 10s; output:\n{}",
+            seen.join("\n")
+        ),
+    }
+}
+
+/// The port in `... listening on http://<host>:<port>`, if `line` is the admin listener's line.
+fn admin_port_from(line: &str) -> Option<u16> {
+    let rest = line.split("listening on http://").nth(1)?;
+    let addr = rest.split_whitespace().next()?;
+    addr.rsplit(':').next()?.parse().ok()
+}
+
+/// Drop `ESC [ ... <final byte>` colour sequences.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}

@@ -3,65 +3,36 @@
 //! validation over HTTP, `_rift` fault headers / empty `_rift`, inject header casing, and
 //! `_rift.warnings`.
 //!
-//! Each test spawns its own server on three distinct OS-chosen ports (admin, imposter, backend),
-//! so concurrent runs of this binary never share one.
+//! Each test spawns its own server on an OS-chosen admin port (`--port 0`, read back from the
+//! server's startup line) and creates imposters without a `port`, so concurrent runs of this
+//! binary never probe-then-bind a port another server is about to use (#1474).
 
 mod support;
 
 use reqwest::{Client, Response};
 use serde_json::{Value, json};
-use std::time::Duration;
-use tokio::time::sleep;
 
 const HOST: &str = "http://127.0.0.1";
 
-/// Three distinct ports: the probe listeners are all held until every port is chosen, so none repeats.
-fn free_ports() -> [u16; 3] {
-    let listeners: Vec<std::net::TcpListener> = (0..3)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port"))
-        .collect();
-    std::array::from_fn(|i| listeners[i].local_addr().expect("local addr").port())
-}
+/// An imposter port no test creates, for asserting the 404 on a missing imposter.
+const MISSING_IMPOSTER: u16 = 1;
 
-/// A spawned Rift server, killed on drop. `imposter` and `backend` are free ports for the test.
+/// A spawned Rift server, killed on drop.
 struct Rift {
     admin: u16,
-    imposter: u16,
-    backend: u16,
     client: Client,
     _child: tokio::process::Child,
 }
 
 impl Rift {
     async fn start() -> Self {
-        let [admin, imposter, backend] = free_ports();
-        let child = tokio::process::Command::new(support::server_bin())
-            .args(["--port", &admin.to_string(), "--allow-injection"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn rift server");
+        let (child, admin) = support::spawn_server(&["--allow-injection"]).await;
         let client = Client::builder().no_proxy().build().expect("http client");
-        for _ in 0..100 {
-            if client
-                .get(format!("{HOST}:{admin}/"))
-                .timeout(Duration::from_millis(200))
-                .send()
-                .await
-                .is_ok()
-            {
-                return Self {
-                    admin,
-                    imposter,
-                    backend,
-                    client,
-                    _child: child,
-                };
-            }
-            sleep(Duration::from_millis(100)).await;
+        Self {
+            admin,
+            client,
+            _child: child,
         }
-        panic!("rift server did not start within 10s");
     }
 
     fn admin_url(&self, path: &str) -> String {
@@ -80,6 +51,15 @@ impl Rift {
             .send()
             .await
             .expect("POST /imposters")
+    }
+
+    /// POST /imposters (no `port`, so the manager picks one), asserting 201, and return the port.
+    async fn create_port(&self, config: &Value) -> u16 {
+        let created = self.create(config).await;
+        let port = created["port"]
+            .as_u64()
+            .expect("created imposter has a port");
+        u16::try_from(port).expect("port fits u16")
     }
 
     /// POST /imposters, asserting 201.
@@ -101,10 +81,8 @@ impl Rift {
     }
 
     /// Send a debug-mode request and parse the JSON report.
-    async fn debug(&self, path: &str, header: (&str, &str)) -> Value {
-        let (status, body) = self
-            .get(&self.imposter_url(self.imposter, path), Some(header))
-            .await;
+    async fn debug(&self, port: u16, path: &str, header: (&str, &str)) -> Value {
+        let (status, body) = self.get(&self.imposter_url(port, path), Some(header)).await;
         assert_eq!(status, 200, "debug response status");
         serde_json::from_str(&body).expect("debug response is JSON")
     }
@@ -119,16 +97,19 @@ impl Rift {
 #[tokio::test]
 async fn debug_mode_returns_match_information_for_matching_stub() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http", "name": "Test Service",
-        "stubs": [{
-            "id": "get-users",
-            "predicates": [{"equals": {"method": "GET", "path": "/api/users"}}],
-            "responses": [{"is": {"statusCode": 200, "body": "users list"}}]
-        }]
-    }))
-    .await;
-    let v = rift.debug("/api/users", ("X-Rift-Debug", "true")).await;
+    let port = rift
+        .create_port(&json!({
+            "protocol": "http", "name": "Test Service",
+            "stubs": [{
+                "id": "get-users",
+                "predicates": [{"equals": {"method": "GET", "path": "/api/users"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "users list"}}]
+            }]
+        }))
+        .await;
+    let v = rift
+        .debug(port, "/api/users", ("X-Rift-Debug", "true"))
+        .await;
     assert_eq!(v["debug"], true);
     assert_eq!(v["matchResult"]["matched"], true);
     assert_eq!(v["matchResult"]["stubIndex"], 0);
@@ -139,15 +120,16 @@ async fn debug_mode_returns_match_information_for_matching_stub() {
 #[tokio::test]
 async fn debug_mode_shows_response_preview() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http",
-        "stubs": [{
-            "predicates": [{"equals": {"path": "/test"}}],
-            "responses": [{"is": {"statusCode": 201, "body": "created"}}]
-        }]
-    }))
-    .await;
-    let v = rift.debug("/test", ("X-Rift-Debug", "true")).await;
+    let port = rift
+        .create_port(&json!({
+            "protocol": "http",
+            "stubs": [{
+                "predicates": [{"equals": {"path": "/test"}}],
+                "responses": [{"is": {"statusCode": 201, "body": "created"}}]
+            }]
+        }))
+        .await;
+    let v = rift.debug(port, "/test", ("X-Rift-Debug", "true")).await;
     let preview = &v["matchResult"]["responsePreview"];
     assert_eq!(preview["statusCode"], 201);
     assert_eq!(preview["bodyPreview"], "created");
@@ -157,15 +139,17 @@ async fn debug_mode_shows_response_preview() {
 #[tokio::test]
 async fn debug_mode_shows_all_stubs_when_no_match() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http",
+    let port = rift.create_port(&json!({
+        "protocol": "http",
         "stubs": [
             {"id": "stub-a", "predicates": [{"equals": {"path": "/a"}}], "responses": [{"is": {"body": "A"}}]},
             {"id": "stub-b", "predicates": [{"equals": {"path": "/b"}}], "responses": [{"is": {"body": "B"}}]}
         ]
     }))
     .await;
-    let v = rift.debug("/not-found", ("X-Rift-Debug", "true")).await;
+    let v = rift
+        .debug(port, "/not-found", ("X-Rift-Debug", "true"))
+        .await;
     let m = &v["matchResult"];
     assert_eq!(m["matched"], false);
     assert_eq!(m["reason"], "No stub predicates matched the request");
@@ -179,9 +163,10 @@ async fn debug_mode_shows_all_stubs_when_no_match() {
 #[tokio::test]
 async fn debug_mode_shows_reason_when_no_stubs_configured() {
     let rift = Rift::start().await;
-    rift.create(&json!({"port": rift.imposter, "protocol": "http", "stubs": []}))
+    let port = rift
+        .create_port(&json!({"protocol": "http", "stubs": []}))
         .await;
-    let v = rift.debug("/any", ("X-Rift-Debug", "true")).await;
+    let v = rift.debug(port, "/any", ("X-Rift-Debug", "true")).await;
     assert_eq!(v["matchResult"]["matched"], false);
     assert_eq!(
         v["matchResult"]["reason"],
@@ -193,17 +178,18 @@ async fn debug_mode_shows_reason_when_no_stubs_configured() {
 #[tokio::test]
 async fn debug_mode_does_not_execute_the_actual_response() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http", "recordRequests": true,
-        "stubs": [{
-            "predicates": [{"equals": {"path": "/test"}}],
-            "responses": [{"is": {"statusCode": 418, "body": "I'm a teapot"}}]
-        }]
-    }))
-    .await;
+    let port = rift
+        .create_port(&json!({
+            "protocol": "http", "recordRequests": true,
+            "stubs": [{
+                "predicates": [{"equals": {"path": "/test"}}],
+                "responses": [{"is": {"statusCode": 418, "body": "I'm a teapot"}}]
+            }]
+        }))
+        .await;
     let (status, body) = rift
         .get(
-            &rift.imposter_url(rift.imposter, "/test"),
+            &rift.imposter_url(port, "/test"),
             Some(("X-Rift-Debug", "true")),
         )
         .await;
@@ -224,12 +210,13 @@ async fn debug_mode_does_not_execute_the_actual_response() {
 #[tokio::test]
 async fn debug_mode_accepts_lowercase_header() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http",
-        "stubs": [{"predicates": [], "responses": [{"is": {"body": "catch-all"}}]}]
-    }))
-    .await;
-    let v = rift.debug("/any", ("x-rift-debug", "true")).await;
+    let port = rift
+        .create_port(&json!({
+            "protocol": "http",
+            "stubs": [{"predicates": [], "responses": [{"is": {"body": "catch-all"}}]}]
+        }))
+        .await;
+    let v = rift.debug(port, "/any", ("x-rift-debug", "true")).await;
     assert_eq!(v["debug"], true);
 }
 
@@ -237,12 +224,13 @@ async fn debug_mode_accepts_lowercase_header() {
 #[tokio::test]
 async fn debug_mode_accepts_value_one() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http",
-        "stubs": [{"predicates": [], "responses": [{"is": {"body": "catch-all"}}]}]
-    }))
-    .await;
-    let v = rift.debug("/any", ("X-Rift-Debug", "1")).await;
+    let port = rift
+        .create_port(&json!({
+            "protocol": "http",
+            "stubs": [{"predicates": [], "responses": [{"is": {"body": "catch-all"}}]}]
+        }))
+        .await;
+    let v = rift.debug(port, "/any", ("X-Rift-Debug", "1")).await;
     assert_eq!(v["debug"], true);
 }
 
@@ -250,13 +238,14 @@ async fn debug_mode_accepts_value_one() {
 #[tokio::test]
 async fn debug_mode_shows_request_details() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http",
-        "stubs": [{"predicates": [], "responses": [{"is": {"body": "catch-all"}}]}]
-    }))
-    .await;
+    let port = rift
+        .create_port(&json!({
+            "protocol": "http",
+            "stubs": [{"predicates": [], "responses": [{"is": {"body": "catch-all"}}]}]
+        }))
+        .await;
     let v = rift
-        .debug("/test/path?foo=bar", ("X-Rift-Debug", "true"))
+        .debug(port, "/test/path?foo=bar", ("X-Rift-Debug", "true"))
         .await;
     assert_eq!(v["request"]["method"], "GET");
     assert_eq!(v["request"]["path"], "/test/path");
@@ -267,13 +256,14 @@ async fn debug_mode_shows_request_details() {
 #[tokio::test]
 async fn debug_mode_shows_imposter_information() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http", "name": "My Test Service",
-        "stubs": [{"predicates": [], "responses": [{"is": {"body": "ok"}}]}]
-    }))
-    .await;
-    let v = rift.debug("/any", ("X-Rift-Debug", "true")).await;
-    assert_eq!(v["imposter"]["port"], rift.imposter);
+    let port = rift
+        .create_port(&json!({
+            "protocol": "http", "name": "My Test Service",
+            "stubs": [{"predicates": [], "responses": [{"is": {"body": "ok"}}]}]
+        }))
+        .await;
+    let v = rift.debug(port, "/any", ("X-Rift-Debug", "true")).await;
+    assert_eq!(v["imposter"]["port"], port);
     assert_eq!(v["imposter"]["name"], "My Test Service");
     assert_eq!(v["imposter"]["stubCount"], 1);
 }
@@ -286,24 +276,25 @@ async fn debug_mode_shows_imposter_information() {
 /// given `pathRewrite`, then request `request_path` through the proxy; returns (status, body).
 async fn proxy_with_path_rewrite(from: &str, to: &str, request_path: &str) -> (u16, String) {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.backend, "protocol": "http", "recordRequests": true,
+    let backend = rift
+        .create_port(&json!({
+        "protocol": "http", "recordRequests": true,
         "stubs": [{"predicates": [], "responses": [{
             "inject": "function(config) { return { statusCode: 200, body: 'path:' + config.request.path }; }"
         }]}]
     }))
     .await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http",
-        "stubs": [{"responses": [{"proxy": {
-            "to": format!("http://localhost:{}", rift.backend),
-            "mode": "proxyAlways",
-            "pathRewrite": {"from": from, "to": to}
-        }}]}]
-    }))
-    .await;
-    rift.get(&rift.imposter_url(rift.imposter, request_path), None)
-        .await
+    let port = rift
+        .create_port(&json!({
+            "protocol": "http",
+            "stubs": [{"responses": [{"proxy": {
+                "to": format!("http://localhost:{backend}"),
+                "mode": "proxyAlways",
+                "pathRewrite": {"from": from, "to": to}
+            }}]}]
+        }))
+        .await;
+    rift.get(&rift.imposter_url(port, request_path), None).await
 }
 
 /// Ported from tests/compatibility/features/proxy.feature: "pathRewrite removes path prefix when
@@ -339,8 +330,8 @@ async fn path_rewrite_leaves_non_matching_path_unchanged() {
 #[tokio::test]
 async fn get_all_stubs_for_an_imposter() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http",
+    let port = rift.create_port(&json!({
+        "protocol": "http",
         "stubs": [
             {"predicates": [{"equals": {"path": "/first"}}], "responses": [{"is": {"statusCode": 200, "body": "first"}}]},
             {"predicates": [{"equals": {"path": "/second"}}], "responses": [{"is": {"statusCode": 200, "body": "second"}}]}
@@ -349,7 +340,7 @@ async fn get_all_stubs_for_an_imposter() {
     .await;
     let resp = rift
         .client
-        .get(rift.admin_url(&format!("/imposters/{}/stubs", rift.imposter)))
+        .get(rift.admin_url(&format!("/imposters/{port}/stubs")))
         .send()
         .await
         .expect("GET stubs");
@@ -365,8 +356,8 @@ async fn get_all_stubs_for_an_imposter() {
 #[tokio::test]
 async fn get_stub_by_index() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http",
+    let port = rift.create_port(&json!({
+        "protocol": "http",
         "stubs": [
             {"predicates": [{"equals": {"path": "/zero"}}], "responses": [{"is": {"statusCode": 200, "body": "stub zero"}}]},
             {"predicates": [{"equals": {"path": "/one"}}], "responses": [{"is": {"statusCode": 200, "body": "stub one"}}]}
@@ -376,7 +367,7 @@ async fn get_stub_by_index() {
     for (index, path, body) in [(0, "/zero", "stub zero"), (1, "/one", "stub one")] {
         let resp = rift
             .client
-            .get(rift.admin_url(&format!("/imposters/{}/stubs/{index}", rift.imposter)))
+            .get(rift.admin_url(&format!("/imposters/{port}/stubs/{index}")))
             .send()
             .await
             .expect("GET stub");
@@ -397,7 +388,7 @@ async fn stub_reads_answer_404_for_a_missing_imposter_or_index() {
     for path in ["stubs", "stubs/0"] {
         let resp = rift
             .client
-            .get(rift.admin_url(&format!("/imposters/{}/{path}", rift.imposter)))
+            .get(rift.admin_url(&format!("/imposters/{MISSING_IMPOSTER}/{path}")))
             .send()
             .await
             .expect("GET stubs of a missing imposter");
@@ -406,14 +397,15 @@ async fn stub_reads_answer_404_for_a_missing_imposter_or_index() {
         assert_eq!(v["errors"][0]["type"], "no such resource", "{path}");
     }
 
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http",
-        "stubs": [{"responses": [{"is": {"statusCode": 200}}]}]
-    }))
-    .await;
+    let port = rift
+        .create_port(&json!({
+            "protocol": "http",
+            "stubs": [{"responses": [{"is": {"statusCode": 200}}]}]
+        }))
+        .await;
     let resp = rift
         .client
-        .get(rift.admin_url(&format!("/imposters/{}/stubs/99", rift.imposter)))
+        .get(rift.admin_url(&format!("/imposters/{port}/stubs/99")))
         .send()
         .await
         .expect("GET out-of-range stub");
@@ -435,9 +427,9 @@ async fn assert_create_rejected(rift: &Rift, config: &Value, expected: &[&str]) 
     }
 }
 
-fn script_imposter(port: u16, engine: &str, code: &str) -> Value {
+fn script_imposter(engine: &str, code: &str) -> Value {
     json!({
-        "port": port, "protocol": "http",
+        "protocol": "http",
         "stubs": [{"responses": [{"_rift": {"script": {"engine": engine, "code": code}}}]}]
     })
 }
@@ -448,7 +440,6 @@ fn script_imposter(port: u16, engine: &str, code: &str) -> Value {
 async fn rhai_syntax_error_is_rejected_with_400() {
     let rift = Rift::start().await;
     let cfg = script_imposter(
-        rift.imposter,
         "rhai",
         "fn should_inject(request, flow_store) { #{ inject: ",
     );
@@ -461,7 +452,6 @@ async fn rhai_syntax_error_is_rejected_with_400() {
 async fn engine_lua_is_rejected_with_400() {
     let rift = Rift::start().await;
     let cfg = script_imposter(
-        rift.imposter,
         "lua",
         "function should_inject(request, flow_store) return { inject =",
     );
@@ -473,7 +463,7 @@ async fn engine_lua_is_rejected_with_400() {
 #[tokio::test]
 async fn rhai_without_should_inject_is_accepted() {
     let rift = Rift::start().await;
-    let cfg = script_imposter(rift.imposter, "rhai", "fn wrong_function_name(x) { x + 1 }");
+    let cfg = script_imposter("rhai", "fn wrong_function_name(x) { x + 1 }");
     let resp = rift.post_imposter(&cfg).await;
     assert_eq!(resp.status().as_u16(), 201);
 }
@@ -484,7 +474,7 @@ async fn rhai_without_should_inject_is_accepted() {
 async fn javascript_inject_syntax_error_is_rejected_with_400() {
     let rift = Rift::start().await;
     let cfg = json!({
-        "port": rift.imposter, "protocol": "http",
+        "protocol": "http",
         "stubs": [{"responses": [{"inject": "function(config, state) { return { statusCode: "}]}]
     });
     assert_create_rejected(&rift, &cfg, &["Script validation failed"]).await;
@@ -495,7 +485,6 @@ async fn javascript_inject_syntax_error_is_rejected_with_400() {
 async fn valid_rhai_script_is_accepted() {
     let rift = Rift::start().await;
     let cfg = script_imposter(
-        rift.imposter,
         "rhai",
         "fn should_inject(request, flow_store) { #{ inject: false } }",
     );
@@ -507,14 +496,15 @@ async fn valid_rhai_script_is_accepted() {
 #[tokio::test]
 async fn invalid_script_in_stub_addition_is_rejected_with_400() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http",
-        "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "OK"}}]}]
-    }))
-    .await;
+    let port = rift
+        .create_port(&json!({
+            "protocol": "http",
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "OK"}}]}]
+        }))
+        .await;
     let resp = rift
         .client
-        .post(rift.admin_url(&format!("/imposters/{}/stubs", rift.imposter)))
+        .post(rift.admin_url(&format!("/imposters/{port}/stubs")))
         .json(&json!({"stub": {"responses": [{"_rift": {"script": {
             "engine": "rhai", "code": "fn invalid_syntax { }"
         }}}]}}))
@@ -530,7 +520,7 @@ async fn invalid_script_in_stub_addition_is_rejected_with_400() {
 #[tokio::test]
 async fn unknown_script_engine_is_rejected_with_400() {
     let rift = Rift::start().await;
-    let cfg = script_imposter(rift.imposter, "unknown_engine", "some code");
+    let cfg = script_imposter("unknown_engine", "some code");
     assert_create_rejected(
         &rift,
         &cfg,
@@ -547,20 +537,21 @@ async fn unknown_script_engine_is_rejected_with_400() {
 #[tokio::test]
 async fn error_fault_with_custom_headers() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http",
-        "stubs": [{"predicates": [], "responses": [{
-            "is": {"statusCode": 200, "body": "normal"},
-            "_rift": {"fault": {"error": {
-                "probability": 1.0, "status": 429, "body": "Too Many Requests",
-                "headers": {"Retry-After": "60", "X-RateLimit-Reset": "1234567890"}
-            }}}
-        }]}]
-    }))
-    .await;
+    let port = rift
+        .create_port(&json!({
+            "protocol": "http",
+            "stubs": [{"predicates": [], "responses": [{
+                "is": {"statusCode": 200, "body": "normal"},
+                "_rift": {"fault": {"error": {
+                    "probability": 1.0, "status": 429, "body": "Too Many Requests",
+                    "headers": {"Retry-After": "60", "X-RateLimit-Reset": "1234567890"}
+                }}}
+            }]}]
+        }))
+        .await;
     let resp = rift
         .client
-        .get(rift.imposter_url(rift.imposter, "/"))
+        .get(rift.imposter_url(port, "/"))
         .send()
         .await
         .expect("GET");
@@ -574,14 +565,15 @@ async fn error_fault_with_custom_headers() {
 #[tokio::test]
 async fn empty_rift_config_is_ignored() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http", "_rift": {},
-        "stubs": [{"predicates": [], "responses": [{
-            "is": {"statusCode": 200, "body": "works"}, "_rift": {}
-        }]}]
-    }))
-    .await;
-    let (status, body) = rift.get(&rift.imposter_url(rift.imposter, "/"), None).await;
+    let port = rift
+        .create_port(&json!({
+            "protocol": "http", "_rift": {},
+            "stubs": [{"predicates": [], "responses": [{
+                "is": {"statusCode": 200, "body": "works"}, "_rift": {}
+            }]}]
+        }))
+        .await;
+    let (status, body) = rift.get(&rift.imposter_url(port, "/"), None).await;
     assert_eq!(status, 200);
     assert_eq!(body, "works");
 }
@@ -593,8 +585,8 @@ async fn empty_rift_config_is_ignored() {
 #[tokio::test]
 async fn inject_header_lookup_case() {
     let rift = Rift::start().await;
-    rift.create(&json!({
-        "port": rift.imposter, "protocol": "http",
+    let port = rift.create_port(&json!({
+        "protocol": "http",
         "stubs": [{"predicates": [], "responses": [{"inject":
             "function(config) { var h = config.request.headers; return { statusCode: 200, body: 'exact=' + h['X-Client-Id'] + ' sent=' + h['X-Client-ID'] + ' lower=' + h['x-client-id'] }; }"
         }]}]
@@ -602,7 +594,7 @@ async fn inject_header_lookup_case() {
     .await;
     let (status, body) = rift
         .get(
-            &rift.imposter_url(rift.imposter, "/"),
+            &rift.imposter_url(port, "/"),
             Some(("X-Client-ID", "client-a")),
         )
         .await;
@@ -630,7 +622,7 @@ async fn warnings_for_shadowed_stubs() {
     let rift = Rift::start().await;
     let created = rift
         .create(&json!({
-            "port": rift.imposter, "protocol": "http",
+            "protocol": "http",
             "stubs": [
                 {"predicates": [], "responses": [{"is": {"statusCode": 200, "body": "catch all"}}]},
                 {"predicates": [{"equals": {"path": "/specific"}}], "responses": [{"is": {"statusCode": 200, "body": "specific"}}]}
@@ -646,7 +638,7 @@ async fn warnings_for_duplicate_ids() {
     let rift = Rift::start().await;
     let created = rift
         .create(&json!({
-            "port": rift.imposter, "protocol": "http",
+            "protocol": "http",
             "stubs": [
                 {"id": "duplicate-id", "predicates": [{"equals": {"path": "/a"}}], "responses": [{"is": {"statusCode": 200, "body": "A"}}]},
                 {"id": "duplicate-id", "predicates": [{"equals": {"path": "/b"}}], "responses": [{"is": {"statusCode": 200, "body": "B"}}]}
@@ -654,4 +646,27 @@ async fn warnings_for_duplicate_ids() {
         }))
         .await;
     assert!(warning_types(&created).contains(&"duplicate_id".to_string()));
+}
+
+// =============================================================================
+// support::spawn_server
+// =============================================================================
+
+#[tokio::test]
+async fn spawn_server_returns_a_port_that_answers() {
+    let rift = Rift::start().await;
+    assert_ne!(rift.admin, 0);
+    let resp = rift
+        .client
+        .get(rift.admin_url("/"))
+        .send()
+        .await
+        .expect("GET /");
+    assert!(resp.status().is_success(), "{}", resp.status());
+}
+
+#[tokio::test]
+#[should_panic(expected = "--no-such-flag")]
+async fn spawn_server_with_a_bad_flag_fails_fast_with_the_servers_output() {
+    let _ = support::spawn_server(&["--no-such-flag"]).await;
 }
