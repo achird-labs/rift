@@ -694,3 +694,85 @@ async fn shutdown_closes_stream_cleanly() {
         "stream must close (EOF) on shutdown, got {closed:?}"
     );
 }
+
+/// Issue #1492 (ported from rift-conformance's AdminEventsCursor122): both streaming doors answer
+/// `Content-Type: text/event-stream` and `Cache-Control: no-cache` on the wire, so no proxy or
+/// client caches or buffers the stream.
+#[tokio::test]
+async fn streams_answer_event_stream_content_type_and_no_cache() {
+    let (addr, mgr, running) = start_server(None).await;
+    let iport = create(
+        &mgr,
+        serde_json::json!({"protocol":"http","recordRequests":true,"stubs":[]}),
+    )
+    .await;
+    for path in [
+        "/events?types=requests".to_string(),
+        format!("/imposters/{iport}/savedRequests/stream"),
+    ] {
+        // `send` resolves once the head arrives; the never-ending body is dropped unread.
+        let resp = reqwest::get(format!("http://{addr}{path}"))
+            .await
+            .expect("stream head");
+        let header = |name: &str| {
+            resp.headers()
+                .get(name)
+                .map(|v| v.to_str().expect("header utf8").to_owned())
+        };
+        assert_eq!(resp.status(), 200, "{path}");
+        assert_eq!(
+            header("content-type").as_deref(),
+            Some("text/event-stream"),
+            "{path}"
+        );
+        assert_eq!(
+            header("cache-control").as_deref(),
+            Some("no-cache"),
+            "{path}"
+        );
+    }
+    running.shutdown().await;
+}
+
+/// `?since=` returns exactly the tail after that index: `0` is everything, and an index past the
+/// end is an empty array, not an error and not an object (#606 served `{}` where an array belongs).
+#[tokio::test]
+async fn saved_requests_since_past_the_end_is_an_empty_array() {
+    let (addr, mgr, running) = start_server(None).await;
+    let iport = create(
+        &mgr,
+        serde_json::json!({"protocol":"http","recordRequests":true,
+            "stubs":[{"responses":[{"is":{"statusCode":200}}]}]}),
+    )
+    .await;
+    for n in 1..=3 {
+        reqwest::get(format!("http://127.0.0.1:{iport}/r{n}"))
+            .await
+            .expect("drive request");
+    }
+    let since = |cursor: &'static str| async move {
+        let resp = reqwest::get(format!(
+            "http://{addr}/imposters/{iport}/savedRequests?since={cursor}"
+        ))
+        .await
+        .expect("since");
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = resp.json().await.expect("since json");
+        (status, body)
+    };
+    let paths = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .unwrap_or_else(|| panic!("an array: {v}"))
+            .iter()
+            .map(|r| r["path"].as_str().expect("path").to_owned())
+            .collect()
+    };
+    let (status, all) = since("0").await;
+    assert_eq!(status, 200);
+    assert_eq!(paths(&all), ["/r1", "/r2", "/r3"]);
+    let (_, tail) = since("1").await;
+    assert_eq!(paths(&tail), ["/r2", "/r3"]);
+    let (status, past) = since("99").await;
+    assert_eq!((status, past), (200, serde_json::json!([])));
+    running.shutdown().await;
+}

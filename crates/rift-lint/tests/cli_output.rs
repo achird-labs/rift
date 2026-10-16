@@ -1604,3 +1604,84 @@ fn numeric_and_boolean_header_values_exit_zero() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+// ===== Issue #1492: ported from rift-conformance's RiftToolsCli204 spec =====
+
+/// A W016 (unbuildable `defaultEngine`) imposter with no errors.
+const WARNING_ONLY: &str = r#"{"imposters":[{"port":4990,"protocol":"http",
+    "_rift":{"scriptEngine":{"defaultEngine":"lua"}},"stubs":[]}]}"#;
+
+/// An E025 (negative `wait`) imposter.
+const NEGATIVE_WAIT: &str = r#"{"imposters":[{"port":4991,"protocol":"http",
+    "stubs":[{"responses":[{"is":{"statusCode":200},"_behaviors":{"wait":-5}}]}]}]}"#;
+
+fn lint_text(path: &Path, extra: &[&str]) -> (Option<i32>, String) {
+    let out = Command::new(BIN)
+        .arg(path)
+        .args(extra)
+        .output()
+        .expect("run rift-lint");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code(), text)
+}
+
+/// `-e` prints errors only: a warnings-only file shows nothing and still exits 0, and a file with
+/// both keeps its error while dropping its warning.
+#[test]
+fn errors_only_flag_hides_warnings_and_keeps_errors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let warn = dir.path().join("warnings-only.json");
+    std::fs::write(&warn, WARNING_ONLY).expect("write");
+
+    let (code, plain) = lint_text(&warn, &[]);
+    assert_eq!(code, Some(0), "{plain}");
+    assert!(plain.contains("W016"), "{plain}");
+    let (code, errors_only) = lint_text(&warn, &["-e"]);
+    assert_eq!(code, Some(0), "{errors_only}");
+    assert!(!errors_only.contains("W016"), "{errors_only}");
+
+    let both = dir.path().join("both.json");
+    std::fs::write(
+        &both,
+        r#"{"imposters":[{"port":4992,"protocol":"http",
+            "_rift":{"scriptEngine":{"defaultEngine":"lua"}},
+            "stubs":[{"responses":[{"is":{"statusCode":200},"_behaviors":{"wait":-5}}]}]}]}"#,
+    )
+    .expect("write");
+    let (code, plain) = lint_text(&both, &[]);
+    assert_eq!(code, Some(1), "{plain}");
+    assert!(plain.contains("W016") && plain.contains("E025"), "{plain}");
+    let (code, errors_only) = lint_text(&both, &["-e"]);
+    assert_eq!(code, Some(1), "{errors_only}");
+    assert!(errors_only.contains("E025"), "{errors_only}");
+    assert!(!errors_only.contains("W016"), "{errors_only}");
+}
+
+/// A directory is read one level deep: a file in a subdirectory is not linted.
+#[test]
+fn a_directory_is_read_one_level_deep() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("top.json"), WARNING_ONLY).expect("write");
+    std::fs::create_dir(dir.path().join("nested")).expect("mkdir");
+    std::fs::write(dir.path().join("nested/deep.json"), NEGATIVE_WAIT).expect("write");
+
+    let out = Command::new(BIN)
+        .arg(dir.path())
+        .args(["-o", "json"])
+        .output()
+        .expect("run rift-lint");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON report");
+    assert_eq!(report["files_checked"], 1, "{report}");
+    let codes: Vec<&str> = report["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .map(|i| i["code"].as_str().expect("code"))
+        .collect();
+    assert_eq!(codes, ["W016"], "{report}");
+    assert_eq!(out.status.code(), Some(0), "{report}");
+}

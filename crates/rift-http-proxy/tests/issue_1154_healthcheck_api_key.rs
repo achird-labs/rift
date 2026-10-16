@@ -191,3 +191,24 @@ fn write_rcfile(dir: &Path, body: &str) -> std::path::PathBuf {
     std::fs::write(&path, body).expect("write rcfile");
     path
 }
+
+/// Issue #1492 (ported from rift-conformance's AdminExposure spec): the server itself takes its
+/// key from `MB_APIKEY` (the clap `env` binding on `--api-key`), so a container that sets only
+/// the environment variable gets a gated admin plane, exactly as with `--api-key`.
+#[tokio::test]
+async fn serving_with_mb_apikey_in_the_environment_gates_the_admin_api() {
+    let (mut child, admin) =
+        support::spawn_server_with_env(&["--host", "127.0.0.1"], &[("MB_APIKEY", "env-key")]).await;
+    let client = reqwest::Client::new();
+    let status = |key: Option<&'static str>| {
+        let mut req = client.get(format!("http://127.0.0.1:{admin}/imposters"));
+        if let Some(k) = key {
+            req = req.header("authorization", k);
+        }
+        async move { req.send().await.expect("admin reachable").status().as_u16() }
+    };
+    assert_eq!(status(None).await, 401, "no key");
+    assert_eq!(status(Some("not-the-key")).await, 401, "wrong key");
+    assert_eq!(status(Some("env-key")).await, 200, "the environment's key");
+    child.kill().await.expect("stop server");
+}

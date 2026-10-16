@@ -3552,3 +3552,483 @@ fn ffi_imposter_views_print_a_truthy_allow_cors_verbatim() {
         rift_stop(h);
     }
 }
+
+// ===========================================================================
+// Issue #1492: FFI ↔ admin-HTTP parity on one in-process engine, ported from
+// rift-conformance's FfiStubWarnings92 / FfiAdminParity75 / FfiVerifyParity94 /
+// FfiLongTail205 specs. Every comparison also pins a literal, so two equally wrong
+// answers cannot agree their way to a pass.
+// ===========================================================================
+
+/// Drop the admin plane's hypermedia `_links` at every depth: the C-ABI has no admin URL.
+fn strip_links(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(m) => {
+            m.remove("_links");
+            m.values_mut().for_each(strip_links);
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(strip_links),
+        _ => {}
+    }
+}
+
+unsafe fn ffi_json(p: *mut c_char) -> serde_json::Value {
+    unsafe { serde_json::from_str(&take_json(p)).expect("FFI returns JSON") }
+}
+
+async fn http_json(method: reqwest::Method, url: &str, body: Option<&str>) -> serde_json::Value {
+    let mut req = reqwest::Client::new().request(method, url);
+    if let Some(b) = body {
+        req = req
+            .header("content-type", "application/json")
+            .body(b.to_owned());
+    }
+    let resp = req.send().await.expect("admin request");
+    assert!(resp.status().is_success(), "{url} → {}", resp.status());
+    let mut v: serde_json::Value = resp.json().await.expect("admin JSON");
+    strip_links(&mut v);
+    v
+}
+
+async fn http_get_json(url: &str) -> serde_json::Value {
+    http_json(reqwest::Method::GET, url, None).await
+}
+
+/// Create an imposter over FFI from `{"protocol":"http", <extra>, "stubs": <stubs>}`.
+unsafe fn ffi_create(h: *mut RiftHandle, stubs: &str, extra: &str) -> u16 {
+    unsafe {
+        let doc = cstr(&format!(
+            r#"{{ "protocol": "http", "recordRequests": true, {extra} "stubs": {stubs} }}"#
+        ));
+        let port = rift_create_imposter(h, doc.as_ptr());
+        assert_ne!(port, 0, "auto-assigned port");
+        port
+    }
+}
+
+fn path_stub(id: &str, path: &str, body: &str) -> String {
+    format!(
+        r#"{{ "id": "{id}", "predicates": [{{ "equals": {{ "path": "{path}" }} }}],
+             "responses": [{{ "is": {{ "statusCode": 200, "body": "{body}" }} }}] }}"#
+    )
+}
+
+fn warning_types(w: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    w.as_array()
+        .expect("warnings array")
+        .iter()
+        .map(|w| w["warningType"].as_str().expect("warningType").to_owned())
+        .collect()
+}
+
+fn set_of(items: &[&str]) -> std::collections::BTreeSet<String> {
+    items.iter().map(|s| (*s).to_owned()).collect()
+}
+
+const FLOW_BY_SPACE_HEADER: &str =
+    r#""_rift": { "flowState": { "backend": "inmemory", "flowIdSource": "header:X-Space" } },"#;
+
+/// `rift_stub_warnings` answers the same analysis the admin detail exposes as `_rift.warnings`.
+#[test]
+fn ffi_stub_warnings_equal_the_http_rift_warnings() {
+    unsafe {
+        let h = rift_start();
+        // A catch-all ahead of a specific stub, and two stubs with the same predicate set.
+        let stubs = format!(
+            r#"[ {{ "id": "all", "responses": [{{ "is": {{ "statusCode": 200 }} }}] }}, {}, {} ]"#,
+            path_stub("a", "/a", "A"),
+            path_stub("a-dup", "/a", "A2")
+        );
+        let port = ffi_create(h, &stubs, "");
+        let admin_url = serve_admin(h, "{}")["adminUrl"]
+            .as_str()
+            .expect("adminUrl")
+            .to_owned();
+
+        let ffi = ffi_json(rift_stub_warnings(h, port));
+        let http = rt().block_on(http_get_json(&format!("{admin_url}/imposters/{port}")));
+        assert_eq!(http["_rift"]["warnings"], ffi, "FFI vs HTTP warnings");
+        assert_eq!(
+            warning_types(&ffi),
+            set_of(&[
+                "catch_all",
+                "catch_all_not_last",
+                "potentially_shadowed",
+                "exact_duplicate"
+            ]),
+            "{ffi}"
+        );
+        let catch_all_ids: Vec<&str> = ffi
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w["warningType"] == "catch_all")
+            .map(|w| w["stubId"].as_str().expect("stubId"))
+            .collect();
+        assert_eq!(catch_all_ids, ["all"], "{ffi}");
+        assert!(
+            ffi.as_array()
+                .unwrap()
+                .iter()
+                .all(|w| !w["message"].as_str().expect("message").is_empty()),
+            "{ffi}"
+        );
+        rift_stop(h);
+    }
+}
+
+/// A clean imposter: the FFI answers `[]`, and the HTTP detail omits `_rift.warnings`.
+#[test]
+fn ffi_stub_warnings_empty_for_a_clean_imposter() {
+    unsafe {
+        let h = rift_start();
+        let stubs = format!(
+            "[{}, {}]",
+            path_stub("a", "/a", "A"),
+            path_stub("b", "/b", "B")
+        );
+        let port = ffi_create(h, &stubs, "");
+        let admin_url = serve_admin(h, "{}")["adminUrl"]
+            .as_str()
+            .expect("adminUrl")
+            .to_owned();
+
+        assert_eq!(ffi_json(rift_stub_warnings(h, port)), serde_json::json!([]));
+        let http = rt().block_on(http_get_json(&format!("{admin_url}/imposters/{port}")));
+        assert!(http["_rift"].get("warnings").is_none(), "{http}");
+        rift_stop(h);
+    }
+}
+
+/// The cached analysis is recomputed when a stub is added and again when it is deleted.
+#[test]
+fn ffi_stub_warnings_recomputed_on_stub_add_and_delete() {
+    unsafe {
+        let h = rift_start();
+        let stubs = format!(
+            "[{}, {}]",
+            path_stub("a", "/a", "A"),
+            path_stub("b", "/b", "B")
+        );
+        let port = ffi_create(h, &stubs, "");
+        let admin_url = serve_admin(h, "{}")["adminUrl"]
+            .as_str()
+            .expect("adminUrl")
+            .to_owned();
+        let detail = format!("{admin_url}/imposters/{port}");
+
+        let dup = cstr(&path_stub("a-dup", "/a", "A2"));
+        assert_eq!(rift_add_stub(h, port, dup.as_ptr(), -1), 0);
+        let after_add = ffi_json(rift_stub_warnings(h, port));
+        assert_eq!(
+            warning_types(&after_add),
+            set_of(&["exact_duplicate"]),
+            "{after_add}"
+        );
+        let http = rt().block_on(http_get_json(&detail));
+        assert_eq!(http["_rift"]["warnings"], after_add);
+
+        assert_eq!(
+            rift_delete_stub(h, port, cstr(r#"{"id":"a-dup"}"#).as_ptr()),
+            0
+        );
+        assert_eq!(ffi_json(rift_stub_warnings(h, port)), serde_json::json!([]));
+        let http = rt().block_on(http_get_json(&detail));
+        assert!(http["_rift"].get("warnings").is_none(), "{http}");
+        rift_stop(h);
+    }
+}
+
+/// An unknown port is an error (null) carrying the engine's message in `rift_last_error`.
+#[test]
+fn ffi_stub_warnings_unknown_port_is_an_error() {
+    unsafe {
+        let h = rift_start();
+        // A port that held an imposter and no longer does is unknown to this handle.
+        let port = ffi_create(h, "[]", "");
+        assert_eq!(rift_delete_imposter(h, port), 0);
+        assert!(rift_stub_warnings(h, port).is_null());
+        assert_eq!(
+            take_last_error(),
+            format!("rift_stub_warnings: Imposter not found on port {port}")
+        );
+        assert!(rift_stub_warnings(std::ptr::null_mut(), port).is_null());
+        assert_eq!(take_last_error(), "rift_stub_warnings: null handle");
+        rift_stop(h);
+    }
+}
+
+/// `rift_list_imposters` / `rift_get_imposter` (summary, detail, replayable) equal their admin
+/// routes for the same imposter on one engine.
+#[test]
+fn ffi_list_and_get_imposter_equal_the_http_views() {
+    unsafe {
+        let h = rift_start();
+        let stubs = format!(
+            "[{}, {}]",
+            path_stub("a", "/a", "A"),
+            path_stub("b", "/b", "B")
+        );
+        let port = ffi_create(h, &stubs, "");
+        let admin_url = serve_admin(h, "{}")["adminUrl"]
+            .as_str()
+            .expect("adminUrl")
+            .to_owned();
+        let by_port = |list: &serde_json::Value| -> serde_json::Value {
+            list["imposters"]
+                .as_array()
+                .expect("imposters")
+                .iter()
+                .find(|i| i["port"] == serde_json::json!(port))
+                .cloned()
+                .expect("listed")
+        };
+        let replay_opts = cstr(r#"{"replayable":true}"#);
+
+        let (http_summary, http_list_replay, http_detail, http_single_replay) =
+            rt().block_on(async {
+                let r = reqwest::get(format!("http://127.0.0.1:{port}/a"))
+                    .await
+                    .expect("serve /a");
+                assert_eq!(r.text().await.unwrap(), "A");
+                (
+                    http_get_json(&format!("{admin_url}/imposters")).await,
+                    http_get_json(&format!("{admin_url}/imposters?replayable=true")).await,
+                    http_get_json(&format!("{admin_url}/imposters/{port}")).await,
+                    http_get_json(&format!("{admin_url}/imposters/{port}?replayable=true")).await,
+                )
+            });
+
+        // Summary: the FFI carries exactly its documented keys; HTTP adds stubCount/recordRequests.
+        let ffi_summary = by_port(&ffi_json(rift_list_imposters(h, std::ptr::null())));
+        let mut http_entry = by_port(&http_summary);
+        assert_eq!(http_entry["stubCount"], 2, "{http_entry}");
+        assert_eq!(http_entry["recordRequests"], true, "{http_entry}");
+        let http_map = http_entry.as_object_mut().unwrap();
+        http_map.remove("stubCount");
+        http_map.remove("recordRequests");
+        assert_eq!(ffi_summary, http_entry, "summary parity");
+        assert_eq!(ffi_summary["numberOfRequests"], 1);
+        assert_eq!(ffi_summary["enabled"], true);
+
+        let ffi_list_replay = by_port(&ffi_json(rift_list_imposters(h, replay_opts.as_ptr())));
+        assert_eq!(
+            ffi_list_replay,
+            by_port(&http_list_replay),
+            "list replayable"
+        );
+        let ids: Vec<&str> = ffi_list_replay["stubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert!(
+            ffi_list_replay.get("requests").is_none(),
+            "{ffi_list_replay}"
+        );
+
+        let ffi_detail = ffi_json(rift_get_imposter(h, port, std::ptr::null()));
+        assert_eq!(ffi_detail, http_detail, "detail parity");
+        assert_eq!(ffi_detail["numberOfRequests"], 1);
+
+        let ffi_replay = ffi_json(rift_get_imposter(h, port, replay_opts.as_ptr()));
+        assert_eq!(ffi_replay, http_single_replay, "single replayable parity");
+        assert_eq!(ffi_replay, ffi_list_replay);
+        rift_stop(h);
+    }
+}
+
+/// `rift_verify` equals `POST /imposters/{port}/verify` for the same body, and `flowId` scopes
+/// both `matched` and `total` to one flow. The journal is partitioned by `X-Space`: `blue` sends
+/// `/hi` twice and `/other` once, `green` sends `/hi` once.
+#[test]
+fn ffi_verify_equals_http_verify_including_flow_id_scoping() {
+    unsafe {
+        let h = rift_start();
+        let port = ffi_create(
+            h,
+            &format!("[{}]", path_stub("hi", "/hi", "hi")),
+            FLOW_BY_SPACE_HEADER,
+        );
+        let admin_url = serve_admin(h, "{}")["adminUrl"]
+            .as_str()
+            .expect("adminUrl")
+            .to_owned();
+        rt().block_on(async {
+            let client = reqwest::Client::new();
+            for (space, path) in [
+                ("blue", "/hi"),
+                ("blue", "/hi"),
+                ("blue", "/other"),
+                ("green", "/hi"),
+            ] {
+                client
+                    .get(format!("http://127.0.0.1:{port}{path}"))
+                    .header("X-Space", space)
+                    .send()
+                    .await
+                    .expect("data plane");
+            }
+        });
+        let verify_url = format!("{admin_url}/imposters/{port}/verify");
+        let both = |body: &str| -> serde_json::Value {
+            let ffi = ffi_json(rift_verify(h, port, cstr(body).as_ptr()));
+            let http = rt().block_on(http_json(reqwest::Method::POST, &verify_url, Some(body)));
+            assert_eq!(ffi, http, "FFI vs HTTP verify for {body}");
+            ffi
+        };
+        let counts = |v: &serde_json::Value| (v["matched"].clone(), v["total"].clone());
+        let hi = r#""predicates": [{ "equals": { "path": "/hi" } }]"#;
+
+        let all = both(&format!("{{ {hi} }}"));
+        assert_eq!(counts(&all), (3.into(), 4.into()), "{all}");
+        let blue = both(&format!(r#"{{ {hi}, "flowId": "blue" }}"#));
+        assert_eq!(counts(&blue), (2.into(), 3.into()), "{blue}");
+        let green = both(&format!(r#"{{ {hi}, "flowId": "green" }}"#));
+        assert_eq!(counts(&green), (1.into(), 1.into()), "{green}");
+        let absent = both(&format!(r#"{{ {hi}, "flowId": "absent" }}"#));
+        assert_eq!(counts(&absent), (0.into(), 0.into()), "{absent}");
+
+        let green_reqs = both(&format!(
+            r#"{{ {hi}, "flowId": "green", "includeRequests": true }}"#
+        ));
+        let paths: Vec<&str> = green_reqs["requests"]
+            .as_array()
+            .expect("requests")
+            .iter()
+            .map(|r| r["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["/hi"], "{green_reqs}");
+
+        let closest = both(
+            r#"{ "predicates": [{ "equals": { "path": "/absent" } }], "includeClosest": true }"#,
+        );
+        assert_eq!(counts(&closest), (0.into(), 4.into()), "{closest}");
+        assert!(
+            !closest["closest"]["failedPredicates"]
+                .as_array()
+                .expect("failedPredicates")
+                .is_empty(),
+            "{closest}"
+        );
+        rift_stop(h);
+    }
+}
+
+/// A space's stubs are served on the data plane only to requests carrying that space in the
+/// flow-id header, and the FFI space views equal their admin routes.
+#[test]
+fn ffi_space_stubs_are_served_via_the_space_header() {
+    unsafe {
+        let h = rift_start();
+        // A space stub is appended after the global one, so the global stub is on another path.
+        let port = ffi_create(
+            h,
+            &format!("[{}]", path_stub("global", "/g", "global")),
+            FLOW_BY_SPACE_HEADER,
+        );
+        let admin_url = serve_admin(h, "{}")["adminUrl"]
+            .as_str()
+            .expect("adminUrl")
+            .to_owned();
+        let space = cstr("s1");
+        let stub = cstr(&path_stub("sp", "/x", "S1"));
+        assert_eq!(
+            rift_space_add_stub(h, port, space.as_ptr(), stub.as_ptr()),
+            0
+        );
+        let ffi_list = ffi_json(rift_space_list_stubs(h, port, space.as_ptr()));
+        let (http_list, in_space, outside, global, http_recorded) = rt().block_on(async {
+            let client = reqwest::Client::new();
+            let get = |path: &str, space: Option<&str>| {
+                let mut r = client.get(format!("http://127.0.0.1:{port}{path}"));
+                if let Some(s) = space {
+                    r = r.header("X-Space", s);
+                }
+                async move {
+                    let resp = r.send().await.expect("data plane");
+                    (resp.status().as_u16(), resp.text().await.expect("body"))
+                }
+            };
+            let in_space = get("/x", Some("s1")).await;
+            let outside = get("/x", None).await;
+            let global = get("/g", Some("s1")).await;
+            (
+                http_get_json(&format!("{admin_url}/imposters/{port}/spaces/s1/stubs")).await,
+                in_space,
+                outside,
+                global,
+                http_get_json(&format!(
+                    "{admin_url}/imposters/{port}/savedRequests?match=header:X-Space=s1"
+                ))
+                .await,
+            )
+        });
+        assert_eq!(ffi_list, http_list, "space list parity");
+        assert_eq!(ffi_list["space"], "s1");
+        assert_eq!(ffi_list["stubs"].as_array().unwrap().len(), 1);
+        assert_eq!(in_space, (200, "S1".to_owned()));
+        assert_ne!(
+            outside.1, "S1",
+            "a request outside the space reached the space stub"
+        );
+        assert_eq!(global, (200, "global".to_owned()));
+
+        let ffi_recorded = ffi_json(rift_space_recorded(h, port, space.as_ptr()));
+        assert_eq!(ffi_recorded, http_recorded, "space recorded parity");
+        assert_eq!(ffi_recorded.as_array().unwrap().len(), 2, "{ffi_recorded}");
+
+        assert_eq!(rift_space_delete(h, port, space.as_ptr()), 0);
+        let after = rt().block_on(http_get_json(&format!(
+            "{admin_url}/imposters/{port}/spaces/s1/stubs"
+        )));
+        assert_eq!(after["stubs"], serde_json::json!([]), "{after}");
+        rift_stop(h);
+    }
+}
+
+/// `rift_space_add_stub` refuses a body that is not a stub, naming why in `rift_last_error`.
+#[test]
+fn ffi_space_add_stub_refuses_invalid_stub_json() {
+    unsafe {
+        let h = rift_start();
+        let port = ffi_create(h, "[]", FLOW_BY_SPACE_HEADER);
+        let space = cstr("s1");
+        let bad = cstr(r#"{"responses":"nope"}"#);
+        assert_eq!(
+            rift_space_add_stub(h, port, space.as_ptr(), bad.as_ptr()),
+            -1
+        );
+        let err = take_last_error();
+        assert!(
+            err.starts_with("rift_space_add_stub: invalid stub JSON: "),
+            "{err}"
+        );
+        rift_stop(h);
+    }
+}
+
+/// One intercept listener per handle: a second `rift_start_intercept` is refused while the first
+/// runs, and the first keeps running.
+#[test]
+fn ffi_second_start_intercept_is_refused_while_one_runs() {
+    unsafe {
+        let h = rift_start();
+        let started = ffi_json(rift_start_intercept(h, cstr(r#"{"port":0}"#).as_ptr()));
+        assert!(started["interceptPort"].as_u64().expect("interceptPort") > 0);
+
+        assert!(rift_start_intercept(h, cstr(r#"{"port":0}"#).as_ptr()).is_null());
+        assert_eq!(
+            take_last_error(),
+            "rift_start_intercept: already started (one intercept listener per handle)"
+        );
+        let ca = take_json(rift_intercept_ca_pem(h));
+        assert!(
+            ca.starts_with("-----BEGIN CERTIFICATE-----"),
+            "first listener still runs"
+        );
+        rift_stop(h);
+    }
+}
