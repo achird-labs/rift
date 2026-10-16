@@ -171,12 +171,6 @@ async fn a_mixed_case_route_answers_exactly_as_its_table_spelling() {
             "/admin/reload".into(),
             &["OPTIONS"][..],
         ),
-        // Unknown either way: the folding must not turn a 404 into a route.
-        (
-            format!("/IMPOSTERS/{port}/NOPE"),
-            format!("/imposters/{port}/nope"),
-            read,
-        ),
     ];
 
     for (mixed, plain, methods) in &cases {
@@ -186,6 +180,24 @@ async fn a_mixed_case_route_answers_exactly_as_its_table_spelling() {
             assert_eq!(
                 actual, expected,
                 "{method} {mixed} answers as {method} {plain}"
+            );
+        }
+    }
+    // Unknown either way: the folding must not turn a 404 into a route. Express's 404 page echoes
+    // the path as sent, so the body names the mixed spelling.
+    for method in read {
+        let (status, _, body) = send(
+            &client,
+            method,
+            format!("{base}/IMPOSTERS/{port}/NOPE"),
+            None,
+        )
+        .await;
+        assert_eq!(status, 404, "{method} /IMPOSTERS/{port}/NOPE");
+        if *method == "GET" {
+            assert!(
+                body.contains(&format!("<pre>Cannot GET /IMPOSTERS/{port}/NOPE</pre>")),
+                "{body}"
             );
         }
     }

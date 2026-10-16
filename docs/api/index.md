@@ -42,6 +42,10 @@ route's methods, sorted, in `Allow` and as a `text/plain` body (`DELETE, GET, HE
 imposter id that is not a port (`/imposters/abc`, `/imposters/70000`) is "no such imposter", answered
 as an absent port is on every `/imposters/:id` route.
 
+A path or method no route takes (`/nope`, `POST /config`, `PATCH /imposters`) answers `404` with
+Express's HTML error page (`Cannot POST /config`), byte for byte as Mountebank does, not the JSON
+error envelope. An absent imposter on a real route (`GET /imposters/9999`) stays a JSON `404`.
+
 A trailing `/` is ignored on every admin route, as Mountebank's Express router ignores it:
 `/imposters/`, `/imposters/4545/` and `/config/` answer exactly as `/imposters`, `/imposters/4545`
 and `/config` do. Only one `/` is dropped, so `/imposters//` is `404`. Gateway paths

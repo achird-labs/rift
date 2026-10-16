@@ -64,13 +64,18 @@ async fn send(
         .unwrap_or_else(|e| panic!("{} {}: {e}", entry.method, entry.path))
 }
 
-/// Whether a response is the router's own fall-through `404`, i.e. no route matched.
+/// Whether a response is the router's own fall-through `404`, i.e. no route matched: Express's
+/// `finalhandler` page, not a handler's JSON envelope.
 async fn is_router_404(response: reqwest::Response) -> bool {
     if response.status() != reqwest::StatusCode::NOT_FOUND {
         return false;
     }
-    let body: serde_json::Value = response.json().await.expect("error body is json");
-    body["errors"][0]["message"] == "Not Found"
+    let is_html = response
+        .headers()
+        .get("content-type")
+        .is_some_and(|v| v == "text/html; charset=utf-8");
+    let body = response.text().await.expect("body");
+    is_html && body.contains("<pre>Cannot ")
 }
 
 #[tokio::test]
