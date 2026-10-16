@@ -5166,6 +5166,200 @@
           "body": "<!DOCTYPE a><a>xy</a>"
         }
       ]
+    },
+    {
+      "name": "targeted: except strips digits from an xpath-selected value, in both orders (#1486)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "x"
+                    },
+                    "caseSensitive": true,
+                    "except": "\\d+",
+                    "xpath": {
+                      "selector": "//b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>x1</b></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>y1</b></a>"
+        }
+      ]
+    },
+    {
+      "name": "targeted: except strips digits from a jsonpath-selected value, in both orders (#1486)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "x"
+                    },
+                    "caseSensitive": true,
+                    "except": "\\d+",
+                    "jsonpath": {
+                      "selector": "$.a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "{\"a\":\"x1\"}"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "{\"a\":\"y1\"}"
+        }
+      ]
+    },
+    {
+      "name": "targeted: an xpath except that removes a tag stops Mountebank matching, since it strips the body before selecting (#1486)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "1"
+                    },
+                    "caseSensitive": true,
+                    "except": "<a>",
+                    "xpath": {
+                      "selector": "//b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<a><b>1</b></a>"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a jsonpath except that removes a key's quotes stops Mountebank matching, since it strips the body before selecting (#1486)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "1"
+                    },
+                    "caseSensitive": true,
+                    "except": "\"",
+                    "jsonpath": {
+                      "selector": "$.a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "{\"a\":1}"
+        }
+      ]
     }
   ]
 }

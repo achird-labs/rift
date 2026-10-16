@@ -108,6 +108,20 @@ the raw body text before parsing, so a pattern that matches JSON punctuation (a 
 make the body unparseable there, so every field in it reads as missing. A repeated query
 key is one comma-joined value in Rift, so `except` strips the joined text rather than each value.
 
+## `except` with an `xpath` or `jsonpath` selector
+
+With an `xpath` or `jsonpath` selector, Rift applies `except` to each selected value, after selecting.
+Mountebank applies it to the whole body before selecting, so the selector then reads the stripped
+text. An `except` that only removes noise from a value, such as `\d+`, behaves the same in both. One
+that alters the document's structure (tags, quotes, key names) can stop a Mountebank match that Rift
+still makes, or the reverse. See [Predicates](predicates.md#except).
+
+- An XPath `except` that removes markup still matches in Rift. In Mountebank it never matches: `{"equals": {"body": "1"}, "xpath": {"selector": "//b"}, "except": "<a>"}` strips `<a>` from `<a><b>1</b></a>` first, leaving `<b>1</b></a>`, which is no longer well-formed.
+- A JSONPath `except` that removes quotes still matches in Rift. In Mountebank it never matches: `{"equals": {"body": "1"}, "jsonpath": {"selector": "$.a"}, "except": "\""}` strips the quotes from `{"a":1}` first, leaving `{a:1}`, which is not JSON.
+
+The [JSON body](#except-on-a-json-body) entry covers the same difference for a predicate with no
+selector.
+
 ## Body size
 
 Mountebank has no body limit and crashes past about 512 MiB, where a body no longer fits a V8
