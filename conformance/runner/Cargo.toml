@@ -29,6 +29,8 @@ tempfile = "3.8"
 rift-ffi = { path = "../../crates/rift-ffi" }
 
 [dev-dependencies]
+# Feature 05's date tokens: the expected date is computed at assertion time.
+chrono = { workspace = true }
 cucumber = "0.23"
 futures = { workspace = true }
 

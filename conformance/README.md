@@ -10,7 +10,7 @@ Two trees, with opposite questions:
 The specification lives in this repository so a behaviour change and the scenario that pins it land
 in one pull request. Two runners read this tree while the features move from one to the other
 (#1338, #1346): the Rust runner in [`runner/`](runner/) (cucumber-rs) runs the features in its
-`spec::PORTED_FEATURES` (today 00, 01, 02, 06, 07, 09, 11, 14, 17 and 18), and the Scala runner (zio-bdd) in rift-conformance
+`spec::PORTED_FEATURES` (today 00, 01, 02, 03, 05, 06, 07, 09, 10, 11, 14, 17, 18, 19 and 21), and the Scala runner (zio-bdd) in rift-conformance
 runs every other one. Each feature has exactly one runner: the Scala runner drops the files listed
 in its `conformance/ported.txt` (rift-conformance#244), and a porting batch updates both lists in the
 same release. The container mode is the exception: the Scala runner's container leg keeps the
@@ -71,15 +71,27 @@ can run. Each engine's output goes to a log directory printed at start; it is ke
 fails.
 
 Ports: the engine's admin and metrics ports are chosen by the OS (bind `:0`, release, pass to the
-engine; a failed start retries on fresh ports). A "fresh imposter" is posted without a `port` and
+engine; a failed start retries on fresh ports). Every engine and imposter is addressed at
+`127.0.0.1`, never `localhost`: macOS resolves `localhost` to `::1` first, where an unrelated
+process can hold the same port while the engine listens on IPv4 only. A "fresh imposter" is posted without a `port` and
 the runner reads the one the engine assigned back from the `201`, so there is no probe-then-bind
 race. Only fixtures that name a port (`a fresh verbatim imposter`, the corpus's 45xx imposters)
-bind a fixed one.
+bind a fixed one. Feature 21's two imposters "on descending ports" take a fresh port for the first
+and, for the second, the highest port below it that the engine accepts (a `400` saying the port is
+in use moves one lower), so that one is bound by the engine too.
 
 Feature 11's `@reload-engine` scenarios each start an engine of their own serving a config file (on
 the fixed ports 4870-4878 the fixtures name), stopped after the scenario: a spawned `rift
 --configfile` in external mode, a second in-process engine given the file as `configFile` in
 embedded mode. Container mode does not start one and leaves them out.
+
+Two more kinds of scenario start an engine of their own, stopped after the scenario:
+
+- `@rift-debug-env` (features 05 and 19): a spawned `rift --debug`, holding the scenario's fixture.
+  The flow-state steps address it while it runs.
+- `@admin-isolated` (feature 21): an empty engine for `DELETE /imposters`, which on the shared
+  engine would wipe every other scenario's imposters: a spawned `rift` in external mode, a second
+  in-process engine in embedded mode.
 
 External mode runs every ported scenario. Embedded mode leaves out (`Mode::excludes`; the run lists
 what it left out):
@@ -88,7 +100,9 @@ what it left out):
   only external mode spawns engines;
 - feature 11's three `@front-door` scenarios: the front door is `rift --front-door`, which
   `rift_serve_admin` has no option for. One of the three (the warning for a routes block without
-  `--front-door`) would run, but carries the tag.
+  `--front-door`) would run, but carries the tag;
+- the two `@rift-debug-env` scenarios (05, 19): debug mode is `RIFT_DEBUG`, which the engine reads
+  once per process, so an in-process engine cannot have it for one scenario.
 
 Unlike the Scala runner's embedded leg, this one runs `@metrics-port` (the embedded engine serves
 its own metrics listener) and `@no-config-source` (its shared engine has no config file).
@@ -124,23 +138,25 @@ with `docker rm -f` at the end, its `docker logs` written to the log directory f
 Container mode starts no engine but the shared one, and leaves out (`Mode::excludes`; the run
 lists what it left out):
 
-- `@upstream-trust` (09) and `@front-door`: they start an engine of their own;
+- `@upstream-trust` (09), `@front-door`, `@rift-debug-env` (05, 19) and `@admin-isolated` (21): they
+  start an engine of their own;
 - `@reload-engine` (11): every scenario that starts an engine of its own serving a config file.
   Feature 11's `@no-config-source` scenario runs on the shared engine and still runs;
 - `@full-corpus-verify` (01): `rift-verify --verify-dynamic` has the engine bind imposters on dynamic
   ports, which are not published;
 - `@loopback-client`: Docker's forwarding rewrites the client address, so the engine never sees a
   loopback peer;
-- `@connect-refused`: a published port always accepts on the host;
+- `@connect-refused` (21): a published port always accepts on the host;
 - `@host-port`: an engine-assigned port lands outside the published ranges;
-- `@tcp-rst`: Docker's forwarder turns the engine's RST into an orderly EOF.
+- `@tcp-rst` (03): Docker's forwarder turns the engine's RST into an orderly EOF.
 
-The last four are inherent to Docker port publishing; no ported feature carries them yet, and the
-features that do inherit the exclusion when they are ported.
+The last four are inherent to Docker port publishing; a feature that carries one of them when it is
+ported inherits the exclusion.
 
 Known limit of embedded mode: the engine is linked into the test binary, so under `cargo test` it
 runs at the debug profile, not the release build external mode spawns. The timing assertions ported
-so far are lower bounds (`wait` behaviours), which a slower engine still meets; an upper bound or a
+so far are lower bounds (`wait` behaviours), which a slower engine still meets, and one generous
+upper bound (feature 03: a 200-250 ms wait range under a 2000 ms ceiling); a tighter bound or a
 timeout may need `cargo test --release` in embedded mode.
 
 ### The Scala runner (every other feature)

@@ -5,10 +5,11 @@ use std::path::PathBuf;
 /// The feature files this runner runs. Each one ported here is also listed in the Scala runner's
 /// `conformance/ported.txt` (EtaCassiopeia/rift-conformance#244), which drops it from that runner's
 /// external, embedded and lint legs, so every feature has exactly one runner during the move.
-/// Batch 1 (#1346) is 00, 01, 02 and 09, batch 2 (#1347) 06, 07, 11, 14, 17 and 18; later batches:
-/// #1348, #1349, #1350. Embedded mode leaves out `@upstream-trust` (09) and `@front-door` (11);
-/// container mode those, `@full-corpus-verify` (01) and `@reload-engine` (11): see
-/// `harness::Mode::excludes`.
+/// Batch 1 (#1346) is 00, 01, 02 and 09, batch 2 (#1347) 06, 07, 11, 14, 17 and 18, batch 3 (#1348)
+/// 03, 05, 10, 19 and 21; later batches: #1349, #1350. Embedded mode leaves out `@upstream-trust`
+/// (09), `@front-door` (11) and `@rift-debug-env` (05, 19); container mode those, `@admin-isolated`
+/// (21), `@full-corpus-verify` (01), `@reload-engine` (11), `@connect-refused` (21) and `@tcp-rst`
+/// (03): see `harness::Mode::excludes`.
 pub const PORTED_FEATURES: &[&str] = &[
     "00-smoke.feature",
     "01-consistency-gate.feature",
@@ -21,6 +22,12 @@ pub const PORTED_FEATURES: &[&str] = &[
     "14-behaviors-response-types.feature",
     "17-metrics.feature",
     "18-match-diagnostics.feature",
+    // Batch 3 (#1348).
+    "03-faults-transport.feature",
+    "05-templating.feature",
+    "10-proxy-record.feature",
+    "19-flow-state-declarative.feature",
+    "21-admin-rest.feature",
 ];
 
 /// The conformance tree: `features/`, `rift-fixtures/`, `rift-lint-fixtures/`, `rift-scripts/`.
