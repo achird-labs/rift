@@ -73,6 +73,7 @@ Before moving the pin:
 - [ ] Run the differential corpus against it: `npm install --prefix ~/bench-mb {PACKAGE}@{version}` then `cargo test -p rift-differential -- --nocapture`; every new difference is either a Rift bug or a documented allow-list entry, and every entry the harness reports stale is deleted.
 - [ ] Probe the dependency jumps between {pinned} and {version} (`npm diff --diff={PACKAGE}@{pinned} --diff={PACKAGE}@{version} -- package.json`) for behaviour Rift mirrors.
 - [ ] Bump `MB_VERSION` in `ci.yml`, the `mb_version` default in `benchmark-publish.yml`, and the install lines that name {pinned}.
+- [ ] Update every "compatible with **Mountebank {pinned}**" statement (README.md, docs/index.md, docs/mountebank/index.md, docs/getting-started/migration.md) and `docs/mountebank/differences.md`; `scripts/verify-mountebank-version-docs.sh` fails CI until they match `MB_VERSION`.
 
 <sub>Opened by `.github/workflows/mountebank-release-watch.yml` (#1454). It never edits the pin.</sub>
 """

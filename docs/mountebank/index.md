@@ -10,6 +10,13 @@ permalink: /mountebank/
 
 Rift implements the [Mountebank](https://www.mbtest.dev/) REST API and configuration format. This allows you to use Rift as a drop-in replacement for Mountebank with significantly better performance.
 
+**Version:** Rift is compatible with **Mountebank 2.9.5**, the latest release. Mountebank now
+publishes as [`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mountebank); the old
+`mountebank` npm package stops at 2.9.1. Every pull request that changes the engine replays the
+[differential corpus](https://github.com/achird-labs/rift/tree/master/conformance/differential)
+against Mountebank 2.9.5 and Rift, and a weekly job opens an issue when a newer Mountebank is
+released. The deliberate exceptions are listed in [Differences from Mountebank]({{ site.baseurl }}/mountebank/differences/).
+
 **Scope:** Rift imposters are **HTTP/HTTPS only**. Mountebank also supports `tcp` and `smtp`
 imposters, which Rift rejects — see the [migration guide]({{ site.baseurl }}/getting-started/migration/)
 for the full compatibility table before you migrate. (This is separate from TCP *fault injection*,

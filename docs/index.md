@@ -13,6 +13,8 @@ permalink: /
 
 Rift is a drop-in replacement for [Mountebank](https://www.mbtest.dev/) that delivers **~20–150x faster throughput on typical workloads, and up to ~1,820x on large regex predicate sets** — while maintaining full API compatibility. Use your existing Mountebank configurations and enjoy faster test execution.
 
+Rift is compatible with **Mountebank 2.9.5**, the latest release ([`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mountebank)), checked against a real Mountebank on every pull request that changes the engine — see [Differences from Mountebank]({{ site.baseurl }}/mountebank/differences/) for the few deliberate exceptions.
+
 [Get Started]({{ site.baseurl }}/getting-started/){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
 [View on GitHub](https://github.com/achird-labs/rift){: .btn .fs-5 .mb-4 .mb-md-0 }
 
