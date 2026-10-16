@@ -99,8 +99,9 @@ The deliberate deviations are listed for users in
 
 A step is `{"do": "admin", "method", "path", "body"?}`, `{"do": "send", "port", "method"?, "path"?,
 "headers"?: [[name, value]], "body"? | "bodyOfSize"?, "times"?}`, `{"do": "concurrent", ...,
-"times"}` (the answers are compared as a multiset), or `{"do": "reimport"}` (each engine re-imports
-its own `?replayable=true` export). A string `body` is sent verbatim, any other JSON value serialised.
+"times"}` (the answers are compared as a multiset), `{"do": "reimport"}` (each engine re-imports
+its own `?replayable=true` export), or `{"do": "hold", "port"}` (the harness itself listens on
+127.0.0.1 at each engine's mapped port until the case ends, standing in for another process). A string `body` is sent verbatim, any other JSON value serialised.
 
 ### SDK-corpus fixtures not driven
 

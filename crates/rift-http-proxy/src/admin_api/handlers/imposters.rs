@@ -347,6 +347,7 @@ async fn replace_all_from_bytes(
         // reconciled, so carry the full report — a partial failure is exactly when the client
         // needs to know what did apply (same contract as POST /admin/reload).
         Ok(report) => {
+            let status = replace_failure_status(&report.failed);
             let failures: Vec<String> = report
                 .failed
                 .iter()
@@ -360,16 +361,13 @@ async fn replace_all_from_bytes(
             body.insert(
                 "errors".to_owned(),
                 serde_json::json!([{
-                    "code": StatusCode::INTERNAL_SERVER_ERROR.as_str(),
-                    "type": ErrorKind::InternalError.slug(),
+                    "code": status.as_str(),
+                    "type": ErrorKind::for_status(status).slug(),
                     "message": format!("Replace partially failed: {}", failures.join("; ")),
                 }]),
             );
             body.insert("failed".to_owned(), serde_json::json!(failures));
-            json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &serde_json::Value::Object(body),
-            )
+            json_response(status, &serde_json::Value::Object(body))
         }
         // Set-level validation failure (bad protocol, duplicate port, duplicate stub id): a bad
         // request body, rejected before any imposter was touched.
@@ -377,6 +375,20 @@ async fn replace_all_from_bytes(
             StatusCode::BAD_REQUEST,
             &format!("Invalid imposter set (imposters unchanged): {e}"),
         ),
+    }
+}
+
+/// A reconcile whose every failure is the caller's address (taken, not local, not permitted,
+/// unresolvable) is a bad request, as Mountebank answers it (issue #1500); any other failure in the
+/// set makes it a server fault.
+fn replace_failure_status(failed: &[(u16, ImposterError)]) -> StatusCode {
+    let all_caller = failed
+        .iter()
+        .all(|(_, e)| matches!(e, ImposterError::PortInUse(_)) || e.is_caller_address_error());
+    if all_caller {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
     }
 }
 
@@ -2633,5 +2645,34 @@ mod delete_persistence_tests {
         std::fs::remove_file(dir.path().join("data")).expect("restore");
         std::fs::create_dir(dir.path().join("data")).expect("restore");
         manager.delete_all().await;
+    }
+
+    fn bind_failure(source: anyhow::Error) -> (u16, ImposterError) {
+        (4545, ImposterError::BindError(4545, source))
+    }
+
+    // Issue #1500: a reconcile is a bad request only when every failure is the caller's address.
+    #[test]
+    fn replace_status_is_400_only_when_every_failure_is_the_callers_address() {
+        let taken = || {
+            bind_failure(anyhow::Error::new(std::io::Error::from(
+                std::io::ErrorKind::AddrInUse,
+            )))
+        };
+        let fault = || bind_failure(anyhow::anyhow!("no socket address"));
+
+        assert_eq!(replace_failure_status(&[taken()]), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            replace_failure_status(&[taken(), (4546, ImposterError::PortInUse(4546))]),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            replace_failure_status(&[taken(), fault()]),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            replace_failure_status(&[fault()]),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

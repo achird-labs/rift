@@ -789,6 +789,61 @@
     "rift": "(absent)"
   },
   {
+    "case": "targeted: an imposter on a port another process holds is refused with 400 (#1500)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Error envelopes carry `code` (the HTTP status), `type` and `message`",
+    "reason": "Mountebank's bind error is node's EADDRINUSE object; Rift answers its own envelope",
+    "id": "external-bind-conflict-envelope#0",
+    "location": "step[1].admin.body/errors/0/address",
+    "mountebank": "\"127.0.0.1\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: an imposter on a port another process holds is refused with 400 (#1500)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Error envelopes carry `code` (the HTTP status), `type` and `message`",
+    "reason": "Mountebank's bind error is node's EADDRINUSE object; Rift answers its own envelope",
+    "id": "external-bind-conflict-envelope#1",
+    "location": "step[1].admin.body/errors/0/errno",
+    "mountebankMatches": "-\\d+",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: an imposter on a port another process holds is refused with 400 (#1500)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Error envelopes carry `code` (the HTTP status), `type` and `message`",
+    "reason": "Mountebank's bind error is node's EADDRINUSE object; Rift answers its own envelope",
+    "id": "external-bind-conflict-envelope#2",
+    "location": "step[1].admin.body/errors/0/message",
+    "mountebank": "(absent)",
+    "riftMatches": "\"Port \\d{4,5} is already in use: Address already in use \\(os error \\d+\\)\""
+  },
+  {
+    "case": "targeted: an imposter on a port another process holds is refused with 400 (#1500)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Error envelopes carry `code` (the HTTP status), `type` and `message`",
+    "reason": "Mountebank's bind error is node's EADDRINUSE object; Rift answers its own envelope",
+    "id": "external-bind-conflict-envelope#3",
+    "location": "step[1].admin.body/errors/0/port",
+    "mountebankMatches": "\\d{4,5}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: an imposter on a port another process holds is refused with 400 (#1500)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Error envelopes carry `code` (the HTTP status), `type` and `message`",
+    "reason": "Mountebank's bind error is node's EADDRINUSE object; Rift answers its own envelope",
+    "id": "external-bind-conflict-envelope#4",
+    "location": "step[1].admin.body/errors/0/syscall",
+    "mountebank": "\"listen\"",
+    "rift": "(absent)"
+  },
+  {
     "case": "sdk-corpus: 03-behaviors.json",
     "kind": "documented",
     "doc": "docs/mountebank/behaviors.md",

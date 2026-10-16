@@ -59,6 +59,8 @@ pub async fn run_case(client: &reqwest::Client, engines: &Engines, case: &Case) 
         ),
     ];
     let mut next_auto = AUTO_PORT_BASE;
+    // Listeners held for the rest of the case; dropped, and the ports freed, when it ends.
+    let mut held = Vec::new();
 
     for (index, step) in case.steps.iter().enumerate() {
         let at = format!("step[{index}]");
@@ -130,6 +132,17 @@ pub async fn run_case(client: &reqwest::Client, engines: &Engines, case: &Case) 
                         r,
                         false,
                     ));
+                }
+            }
+            Step::Hold { port } => {
+                for map in &maps {
+                    let actual = map.actual(*port);
+                    match std::net::TcpListener::bind(("127.0.0.1", actual)) {
+                        Ok(listener) => held.push(listener),
+                        Err(e) => report
+                            .errors
+                            .push(format!("{at}: cannot hold 127.0.0.1:{actual}: {e}")),
+                    }
                 }
             }
             Step::Reimport => {

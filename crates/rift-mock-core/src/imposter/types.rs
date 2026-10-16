@@ -3120,6 +3120,38 @@ mod schema_impls {
     }
 }
 
+/// Context marker for a bind host that does not resolve. tokio's lookup error has no stable
+/// `io::ErrorKind`, so the resolver tags it at the source for [`ImposterError::is_caller_address_error`].
+#[derive(Debug)]
+pub(crate) struct UnresolvableHost;
+
+impl std::fmt::Display for UnresolvableHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("host does not resolve to a bindable address")
+    }
+}
+
+impl ImposterError {
+    /// A bind failure caused by the address the caller asked for (taken, not local, not
+    /// permitted, unresolvable), as opposed to an engine-side fault such as EMFILE. Mountebank
+    /// answers these 400.
+    #[must_use]
+    pub fn is_caller_address_error(&self) -> bool {
+        let Self::BindError(_, source) = self else {
+            return false;
+        };
+        source.downcast_ref::<UnresolvableHost>().is_some()
+            || source.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                matches!(
+                    io.kind(),
+                    std::io::ErrorKind::AddrInUse
+                        | std::io::ErrorKind::AddrNotAvailable
+                        | std::io::ErrorKind::PermissionDenied
+                )
+            })
+    }
+}
+
 #[cfg(test)]
 mod imposter_error_chain_tests {
     use super::ImposterError;
@@ -5704,5 +5736,45 @@ mod normalized_print_tests {
         let served = is.completed_by(default);
         assert!(served.headers.is_empty(), "{:?}", served.headers);
         assert_eq!(served.status_code, 418);
+    }
+}
+
+#[cfg(test)]
+mod caller_address_error_tests {
+    use super::{ImposterError, UnresolvableHost};
+    use std::io::{Error, ErrorKind};
+
+    fn bind(kind: ErrorKind) -> ImposterError {
+        ImposterError::BindError(8080, anyhow::Error::new(Error::from(kind)))
+    }
+
+    #[test]
+    fn address_kinds_are_the_callers_mistake() {
+        assert!(bind(ErrorKind::AddrInUse).is_caller_address_error());
+        assert!(bind(ErrorKind::AddrNotAvailable).is_caller_address_error());
+        assert!(bind(ErrorKind::PermissionDenied).is_caller_address_error());
+    }
+
+    #[test]
+    fn a_context_wrapped_address_error_is_still_classified() {
+        let wrapped = anyhow::Error::new(Error::from(ErrorKind::AddrInUse)).context("bind");
+        assert!(ImposterError::BindError(8080, wrapped).is_caller_address_error());
+    }
+
+    #[test]
+    fn an_unresolvable_host_is_the_callers_mistake() {
+        let source = anyhow::Error::new(Error::other("lookup failed")).context(UnresolvableHost);
+        assert!(ImposterError::BindError(8080, source).is_caller_address_error());
+    }
+
+    #[test]
+    fn engine_faults_and_other_variants_are_not() {
+        assert!(!bind(ErrorKind::Other).is_caller_address_error());
+        assert!(!bind(ErrorKind::OutOfMemory).is_caller_address_error());
+        assert!(
+            !ImposterError::BindError(8080, anyhow::anyhow!("no socket address"))
+                .is_caller_address_error()
+        );
+        assert!(!ImposterError::PortInUse(8080).is_caller_address_error());
     }
 }

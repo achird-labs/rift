@@ -44,6 +44,10 @@ Error envelopes carry `code` (the HTTP status), `type` and `message` — see the
 does not add Mountebank's `source`, `name` or `stack` fields, and its messages are worded
 differently.
 
+When an imposter's address is held by another process, both engines answer `400`; Mountebank's body
+is node's raw `EADDRINUSE` object (`code`, `errno`, `syscall`, `address`, `port`, no `message`), Rift's
+is its own envelope.
+
 ## Request header names
 
 Rift cannot see the spelling a client used for a header name: an imposter sees names Title-Cased, and an inject or decorate script finds a header under any spelling. Mountebank passes scripts the names exactly as the client wrote them, so
