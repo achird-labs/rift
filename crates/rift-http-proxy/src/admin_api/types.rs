@@ -298,6 +298,66 @@ pub fn not_found() -> Response<Full<Bytes>> {
     error_response(StatusCode::NOT_FOUND, "Not Found")
 }
 
+/// Express's `finalhandler` 404 page, which Mountebank answers for a request no route took.
+///
+/// `raw_path` is the request's URI path as received (no query). The message is built as
+/// `encodeurl` then `escape-html` build it, so it matches Mountebank's body byte for byte.
+pub fn express_not_found(method: &hyper::Method, raw_path: &str) -> Response<Full<Bytes>> {
+    let message = escape_html(&format!("Cannot {method} {}", encode_url(raw_path)));
+    let body = format!(
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>Error</title>\n</head>\n<body>\n<pre>{message}</pre>\n</body>\n</html>\n"
+    );
+    let length = body.len().to_string();
+    build_response_with_headers(
+        StatusCode::NOT_FOUND,
+        [
+            ("Content-Security-Policy", "default-src 'none'"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Content-Type", "text/html; charset=utf-8"),
+            ("Content-Length", length.as_str()),
+        ],
+        body,
+    )
+}
+
+/// `encodeurl` 2.x: keep valid `%XX` escapes and its URL-safe set, percent-encode every other byte.
+fn encode_url(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut out = String::with_capacity(path.len());
+    for (i, &b) in bytes.iter().enumerate() {
+        let kept = match b {
+            b'%' => {
+                bytes.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+                    && bytes.get(i + 2).is_some_and(u8::is_ascii_hexdigit)
+            }
+            0x21 | 0x23..=0x3B | 0x3D | 0x3F..=0x5F | 0x61..=0x7A | 0x7C | 0x7E => true,
+            _ => false,
+        };
+        if kept {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// `escape-html`: `& < > " '`.
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Error reading a request body into bytes. Its `Display` is surfaced as the
 /// response body, so the wording is part of the admin API contract; the status
 /// code comes from [`BodyError::status_code`].
@@ -393,6 +453,65 @@ mod tests {
         fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
             Err(serde::ser::Error::custom("nope"))
         }
+    }
+
+    const NOPE_PAGE: &str = "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>Error</title>\n</head>\n<body>\n<pre>Cannot GET /nope</pre>\n</body>\n</html>\n";
+
+    #[tokio::test]
+    async fn express_not_found_is_finalhandlers_page_byte_for_byte() {
+        let resp = express_not_found(&hyper::Method::GET, "/nope");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let header = |name: &str| {
+            resp.headers()
+                .get(name)
+                .map(|v| v.to_str().expect("ascii").to_string())
+        };
+        assert_eq!(
+            header("content-type").as_deref(),
+            Some("text/html; charset=utf-8")
+        );
+        assert_eq!(
+            header("content-security-policy").as_deref(),
+            Some("default-src 'none'")
+        );
+        assert_eq!(header("x-content-type-options").as_deref(), Some("nosniff"));
+        assert_eq!(header("content-length").as_deref(), Some("143"));
+        assert_eq!(header("vary"), None);
+        assert_eq!(body_string(resp).await, NOPE_PAGE);
+    }
+
+    #[tokio::test]
+    async fn express_not_found_encodes_then_escapes_the_raw_path() {
+        let cases = [
+            ("/a'\"&b", "/a&#39;%22&amp;b"),
+            ("/no%20pe", "/no%20pe"),
+            ("/NoPe/", "/NoPe/"),
+            ("/100%", "/100%25"),
+            ("/%zz", "/%25zz"),
+            ("/<b>", "/%3Cb%3E"),
+        ];
+        for (raw, shown) in cases {
+            let body = body_string(express_not_found(&hyper::Method::POST, raw)).await;
+            assert_eq!(
+                body,
+                NOPE_PAGE.replace("Cannot GET /nope", &format!("Cannot POST {shown}")),
+                "{raw}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn express_not_found_for_head_names_head_and_is_144_bytes() {
+        let resp = express_not_found(&hyper::Method::HEAD, "/nope");
+        assert_eq!(
+            resp.headers().get("content-length").map(|v| v.as_bytes()),
+            Some(&b"144"[..])
+        );
+        assert!(
+            body_string(resp)
+                .await
+                .contains("<pre>Cannot HEAD /nope</pre>")
+        );
     }
 
     async fn body_string(resp: Response<Full<Bytes>>) -> String {
