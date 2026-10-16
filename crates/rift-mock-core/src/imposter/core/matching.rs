@@ -712,6 +712,24 @@ impl Imposter {
         ScenarioStampingStore::new(self).clear_flow(flow_id)
     }
 
+    /// Empty the built-in flow store (issue #1518), so every scenario is back at `Started` and
+    /// every flow as a fresh create would have it. Each scenario gating a conditional stub that a
+    /// flow held a state for is stamped as a transition. A
+    /// [`FlowStoreProvider`](crate::extensions::flow_state::FlowStoreProvider)'s store is left
+    /// alone: it belongs to the embedder, and a recreate would be handed it back.
+    pub(crate) fn restart_flow_state(&self) -> anyhow::Result<()> {
+        if !self.flow_store_is_default {
+            return Ok(());
+        }
+        let Some(flow_ids) = self.flow_store.flow_ids()? else {
+            anyhow::bail!("the built-in flow store cannot list its flows");
+        };
+        for flow_id in flow_ids {
+            self.flow_clear(&flow_id)?;
+        }
+        Ok(())
+    }
+
     /// Whether writing `after` (`None`: deleting) to `key` changes what the flow holds. An unreadable
     /// current value counts as a change, as in `set_scenario_state`: it is what the write repairs.
     fn would_change(&self, flow_id: &str, key: &str, after: Option<&serde_json::Value>) -> bool {

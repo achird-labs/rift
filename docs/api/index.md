@@ -192,12 +192,21 @@ curl -X POST http://localhost:2525/imposters \
 
 ### PUT /imposters
 
-Replace all imposters (bulk create/update). The running set is *reconciled* toward the payload —
-the same incremental engine as `POST /admin/reload` — rather than deleted wholesale and recreated:
-imposters absent from the payload are deleted, changed ones are replaced (or stub-patched), and an
-imposter whose config is unchanged keeps its runtime state (recorded requests, response cycling).
-The whole set is validated before anything is touched, so an invalid payload never disturbs the
-running imposters. Use `DELETE /imposters` first if you also want unchanged imposters reset.
+Replace all imposters (bulk create/update). The whole set is validated first, then the running set
+is *reconciled* toward the payload — the same incremental engine as `POST /admin/reload` — rather
+than deleted wholesale and recreated, so a failure never deletes what was running: imposters absent
+from the payload are deleted, changed ones are replaced (or stub-patched), and a port that fails is
+reported in `failed` while the rest are applied.
+
+After a successful apply, every imposter in the body starts with fresh runtime state, as in
+Mountebank: response cycles, recorded requests and `numberOfRequests`, injection state, scenario
+and flow state, and saved `proxyOnce` responses. Its listener stays bound. A flow store supplied by
+an embedder's `FlowStoreProvider` is left alone.
+
+`PUT /imposters?reconcile=true` keeps the runtime state of imposters whose config is unchanged (and
+of unchanged stubs in a stub-patched one), the same reconcile as `POST /admin/reload` and
+`rift_apply_config`. `reconcile=false` is the default; any other value is a `400`. An engine older
+than this parameter ignores it and reconciles, so a client may send it unconditionally.
 
 **Request Body:**
 ```json

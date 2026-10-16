@@ -2220,6 +2220,31 @@ impl ImposterManager {
         self.persist_imposter_checked(&imposter).await
     }
 
+    /// Give a running imposter the runtime state a fresh create would give it (Mountebank recreates
+    /// every imposter on `PUT /imposters`, issue #1518), without touching its listener, config,
+    /// persistence or `Last-Modified` stamps: response cycles and the sequencer's cursors, recorded
+    /// requests and `numberOfRequests`, saved `proxyOnce` responses, injection state, and the flow
+    /// and scenario state of the built-in flow store. A
+    /// [`FlowStoreProvider`](crate::extensions::flow_state::FlowStoreProvider)'s store is left alone.
+    ///
+    /// Writes no datadir file and emits no event: the config did not change.
+    pub fn restart_runtime_state(&self, port: u16) -> Result<(), ImposterError> {
+        let imposter = self.get_imposter(port)?;
+        imposter.restart_cycles();
+        if let Some(sequencer) = &self.sequencer {
+            sequencer.reset_scope(port, None);
+        }
+        imposter
+            .clear_recorded_requests()
+            .map_err(ImposterError::Backend)?;
+        imposter.proxy_store.clear(port);
+        #[cfg(feature = "javascript")]
+        crate::scripting::clear_imposter_state(port);
+        imposter
+            .restart_flow_state()
+            .map_err(ImposterError::Backend)
+    }
+
     /// Replace all stubs for an imposter
     pub async fn replace_stubs(&self, port: u16, stubs: Vec<Stub>) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
@@ -5092,6 +5117,48 @@ mod tests {
             manager.delete_all().await;
         }
 
+        // #1518: a runtime reset leaves a provider's store alone (the embedder owns it, and a
+        // recreate would be handed it back) and empties the built-in one.
+        #[tokio::test]
+        async fn restart_runtime_state_clears_only_the_builtin_flow_store() {
+            let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
+            let provided = Arc::new(FixedProvider {
+                store: Some(Arc::clone(&store)),
+                calls: Arc::new(Mutex::new(0)),
+            });
+            let manager = ImposterManager::new()
+                .with_flow_store_provider(provided as Arc<dyn FlowStoreProvider>);
+            let port = manager
+                .create_imposter(imposter_cfg(
+                    json!({"protocol": "http", "stubs": [gated_stub()]}),
+                ))
+                .await
+                .expect("create");
+            let imposter = manager.get_imposter(port).expect("imposter");
+            imposter.flow_set("f", "order", json!("paid")).expect("set");
+            manager.restart_runtime_state(port).expect("restart");
+            assert_eq!(
+                imposter.flow_get("f", "order").expect("get"),
+                Some(json!("paid"))
+            );
+            manager.delete_all().await;
+
+            let manager = ImposterManager::new();
+            let port = manager
+                .create_imposter(imposter_cfg(
+                    json!({"protocol": "http", "stubs": [gated_stub()]}),
+                ))
+                .await
+                .expect("create");
+            let imposter = manager.get_imposter(port).expect("imposter");
+            imposter.flow_set("f", "order", json!("paid")).expect("set");
+            imposter.flow_set("g", "k", json!(1)).expect("set");
+            manager.restart_runtime_state(port).expect("restart");
+            assert_eq!(imposter.flow_get("f", "order").expect("get"), None);
+            assert_eq!(imposter.flow_get("g", "k").expect("get"), None);
+            manager.delete_all().await;
+        }
+
         // AC2: a None-returning provider falls through to the built-ins — a scenario config
         // still gets a working (non-NoOp) in-memory store.
         #[tokio::test]
@@ -5494,6 +5561,23 @@ mod tests {
                     .contains(&(port, Some("s1".to_string()))),
                 "the old key's scope is reset"
             );
+            assert_eq!(cycle_bodies(port, 3).await, ["one", "one", "two"]);
+            manager.delete_all().await;
+        }
+
+        // #1518: a runtime reset restarts every cursor through the sequencer, as a recreate does.
+        #[tokio::test]
+        async fn restart_runtime_state_resets_the_whole_sequencer_scope() {
+            let (recorder, manager) = manager_with_recorder();
+            let port = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "stubs": [cycling_stub_json()]
+                })))
+                .await
+                .expect("create");
+            assert_eq!(cycle_bodies(port, 3).await, ["one", "one", "two"]);
+            manager.restart_runtime_state(port).expect("restart");
+            assert!(recorder.resets.lock().contains(&(port, None)));
             assert_eq!(cycle_bodies(port, 3).await, ["one", "one", "two"]);
             manager.delete_all().await;
         }

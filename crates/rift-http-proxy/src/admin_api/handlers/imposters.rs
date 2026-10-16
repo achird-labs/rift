@@ -10,8 +10,8 @@ use crate::admin_api::types::{
 use crate::extensions::decorate::backend_error_response;
 use crate::imposter::RecordedRequest;
 use crate::imposter::{
-    Imposter, ImposterConfig, ImposterError, ImposterManager, ScriptBaseDir, Stub, StubResponse,
-    VerifyOptions, resolve_scripts,
+    ApplyReport, Imposter, ImposterConfig, ImposterError, ImposterManager, ScriptBaseDir, Stub,
+    StubResponse, VerifyOptions, resolve_scripts,
 };
 use crate::response::ErrorKind;
 use crate::scripting::validate_stubs;
@@ -257,11 +257,61 @@ pub async fn handle_replace_all(
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
+    let reconcile = match reconcile_param(req.uri().query()) {
+        Ok(reconcile) => reconcile,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
+    };
     let body = match collect_body(req, &manager.body_guard()).await {
         Ok(b) => b,
         Err(e) => return e.into_response(),
     };
-    replace_all_from_bytes(&body, base_url, manager, allow_injection, scripts_dir).await
+    replace_all_from_bytes(
+        &body,
+        base_url,
+        manager,
+        allow_injection,
+        scripts_dir,
+        reconcile,
+    )
+    .await
+}
+
+/// `PUT /imposters?reconcile=true` (issue #1518): keep the runtime state of the imposters in the
+/// body. Absent or `false` is Mountebank's semantics. Any other value is refused, so a typo cannot
+/// quietly reset what the caller meant to keep.
+fn reconcile_param(query: Option<&str>) -> Result<bool, String> {
+    let mut reconcile = false;
+    for (key, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        if key == "reconcile" {
+            reconcile = match value.as_ref() {
+                "true" => true,
+                "false" => false,
+                other => {
+                    return Err(format!(
+                        "Invalid query parameter reconcile={other:?}: expected true or false"
+                    ));
+                }
+            };
+        }
+    }
+    Ok(reconcile)
+}
+
+/// Reset the runtime state of every imposter in a `PUT /imposters` body that the reconcile kept
+/// running (issue #1518): Mountebank recreates each one, so none keeps its cycles, journal or
+/// state. A created or replaced port is already fresh, and a failed one is left as the report
+/// describes it. A reset that fails joins `failed`.
+fn restart_kept_imposters(manager: &ImposterManager, ports: &[u16], report: &mut ApplyReport) {
+    for &port in ports {
+        let fresh = report.created.contains(&port) || report.replaced.contains(&port);
+        let failed = report.failed.iter().any(|(p, _)| *p == port);
+        if fresh || failed {
+            continue;
+        }
+        if let Err(e) = manager.restart_runtime_state(port) {
+            report.failed.push((port, e));
+        }
+    }
 }
 
 /// Parse, validate, and apply a `PUT /imposters` batch. Split out from `handle_replace_all` so
@@ -272,6 +322,7 @@ async fn replace_all_from_bytes(
     manager: Arc<ImposterManager>,
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
+    reconcile: bool,
 ) -> Response<Full<Bytes>> {
     #[derive(Deserialize)]
     struct BatchRequest {
@@ -324,58 +375,74 @@ async fn replace_all_from_bytes(
         }
     }
 
+    // Port-less (and port 0) configs are always fresh creates, so only explicit ports can need a
+    // reset. Collected before the configs move into the reconcile.
+    let explicit_ports: Vec<u16> = batch
+        .imposters
+        .iter()
+        .filter_map(|config| config.port)
+        .filter(|&port| port != 0)
+        .collect();
+
     // Reconcile toward the new set instead of delete-all-then-recreate (issue #549): the old
     // wholesale pre-delete meant any create failure (e.g. a transiently-held port) silently lost
     // the previous imposters behind a 200. apply_config validates the whole set before touching
-    // anything, only replaces what actually changed (an unchanged imposter keeps its runtime
-    // state, like POST /admin/reload), and reports per-port failures instead of log-and-continue.
-    match manager.apply_config(batch.imposters).await {
-        // The report rides beside `imposters` (Mountebank clients read `imposters`; the port
-        // lists mirror `POST /admin/reload`).
-        Ok(report) if report.failed.is_empty() => {
-            match imposter_list_value(&manager, None, base_url) {
-                Ok(mut body) => {
-                    if let Some(obj) = body.as_object_mut() {
-                        obj.extend(report.port_lists());
-                    }
-                    json_response(StatusCode::OK, &body)
-                }
-                Err(resp) => *resp,
-            }
-        }
-        // Residual per-port apply failures (e.g. a bind race): the other ports are already
-        // reconciled, so carry the full report — a partial failure is exactly when the client
-        // needs to know what did apply (same contract as POST /admin/reload).
-        Ok(report) => {
-            let status = replace_failure_status(&report.failed);
-            let failures: Vec<String> = report
-                .failed
-                .iter()
-                .map(|(port, e)| match port {
-                    // Port 0 is the ApplyReport sentinel for auto-assigned (port-less) configs.
-                    0 => format!("auto-assign: {e}"),
-                    port => format!("{port}: {e}"),
-                })
-                .collect();
-            let mut body = report.port_lists();
-            body.insert(
-                "errors".to_owned(),
-                serde_json::json!([{
-                    "code": status.as_str(),
-                    "type": ErrorKind::for_status(status).slug(),
-                    "message": format!("Replace partially failed: {}", failures.join("; ")),
-                }]),
-            );
-            body.insert("failed".to_owned(), serde_json::json!(failures));
-            json_response(status, &serde_json::Value::Object(body))
-        }
+    // anything, only replaces what actually changed, and reports per-port failures instead of
+    // log-and-continue. The imposters it kept running then get fresh runtime state in place, as
+    // Mountebank's recreate gives them (issue #1518), unless `?reconcile=true` asks to keep it.
+    let mut report = match manager.apply_config(batch.imposters).await {
+        Ok(report) => report,
         // Set-level validation failure (bad protocol, duplicate port, duplicate stub id): a bad
         // request body, rejected before any imposter was touched.
-        Err(e) => error_response(
-            StatusCode::BAD_REQUEST,
-            &format!("Invalid imposter set (imposters unchanged): {e}"),
-        ),
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid imposter set (imposters unchanged): {e}"),
+            );
+        }
+    };
+    if !reconcile {
+        restart_kept_imposters(&manager, &explicit_ports, &mut report);
     }
+
+    // The report rides beside `imposters` (Mountebank clients read `imposters`; the port lists
+    // mirror `POST /admin/reload`). Rendered after the reset, so it shows `numberOfRequests: 0`.
+    if report.failed.is_empty() {
+        return match imposter_list_value(&manager, None, base_url) {
+            Ok(mut body) => {
+                if let Some(obj) = body.as_object_mut() {
+                    obj.extend(report.port_lists());
+                }
+                json_response(StatusCode::OK, &body)
+            }
+            Err(resp) => *resp,
+        };
+    }
+
+    // Residual per-port failures (e.g. a bind race): the other ports are already reconciled, so
+    // carry the full report — a partial failure is exactly when the client needs to know what did
+    // apply (same contract as POST /admin/reload).
+    let status = replace_failure_status(&report.failed);
+    let failures: Vec<String> = report
+        .failed
+        .iter()
+        .map(|(port, e)| match port {
+            // Port 0 is the ApplyReport sentinel for auto-assigned (port-less) configs.
+            0 => format!("auto-assign: {e}"),
+            port => format!("{port}: {e}"),
+        })
+        .collect();
+    let mut body = report.port_lists();
+    body.insert(
+        "errors".to_owned(),
+        serde_json::json!([{
+            "code": status.as_str(),
+            "type": ErrorKind::for_status(status).slug(),
+            "message": format!("Replace partially failed: {}", failures.join("; ")),
+        }]),
+    );
+    body.insert("failed".to_owned(), serde_json::json!(failures));
+    json_response(status, &serde_json::Value::Object(body))
 }
 
 /// A reconcile whose every failure is the caller's address (taken, not local, not permitted,
@@ -2190,8 +2257,15 @@ mod replace_all_tests {
             {"protocol": "https", "cert": "not a pem", "key": "not a pem", "stubs": []}
         ]})
         .to_string();
-        let resp =
-            replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
+        let resp = replace_all_from_bytes(
+            body.as_bytes(),
+            BASE,
+            Arc::clone(&manager),
+            false,
+            None,
+            false,
+        )
+        .await;
 
         assert!(
             !resp.status().is_success(),
@@ -2231,8 +2305,15 @@ mod replace_all_tests {
         let (manager, port_a) = manager_with_http().await;
         let body =
             serde_json::json!({"imposters": [{"protocol": "http", "stubs": []}]}).to_string();
-        let resp =
-            replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
+        let resp = replace_all_from_bytes(
+            body.as_bytes(),
+            BASE,
+            Arc::clone(&manager),
+            false,
+            None,
+            false,
+        )
+        .await;
 
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
@@ -2297,8 +2378,15 @@ mod replace_all_tests {
         // The fourth imposter is new and port-less: its auto-assigned port is read from `created`.
         let body = serde_json::json!({"imposters": [at(port_a, "a"), at(port_b, "b2"), imp("c")]})
             .to_string();
-        let resp =
-            replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
+        let resp = replace_all_from_bytes(
+            body.as_bytes(),
+            BASE,
+            Arc::clone(&manager),
+            false,
+            None,
+            false,
+        )
+        .await;
 
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
@@ -2337,8 +2425,15 @@ mod replace_all_tests {
             {"port": imposter_port, "protocol": "http", "enabled": false, "stubs": []}
         ]})
         .to_string();
-        let resp =
-            replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
+        let resp = replace_all_from_bytes(
+            body.as_bytes(),
+            BASE,
+            Arc::clone(&manager),
+            false,
+            None,
+            false,
+        )
+        .await;
 
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
@@ -2353,13 +2448,9 @@ mod replace_all_tests {
         manager.delete_all().await;
     }
 
-    // The documented semantic delta of the #549 fix: an imposter whose config is unchanged is
-    // reconciled as a no-op and keeps its runtime state — under the old wholesale delete+recreate
-    // its recorded requests were wiped by every PUT.
-    #[serial_test::serial(auto_assigned_port)]
-    #[tokio::test]
-    async fn put_unchanged_imposter_keeps_recorded_requests() {
-        let manager = Arc::new(ImposterManager::new());
+    /// An unchanged imposter with one recorded request, and the `PUT /imposters` body that names it
+    /// unchanged.
+    async fn unchanged_with_one_request(manager: &ImposterManager) -> (u16, String) {
         let mut cfg = serde_json::json!({"protocol": "http", "recordRequests": true, "stubs": []});
         let config = serde_json::from_value(cfg.clone()).expect("config");
         let imposter_port = manager.create_imposter(config).await.expect("create");
@@ -2382,10 +2473,51 @@ mod replace_all_tests {
                 latency_ms: None,
                 node: None,
             });
-
         let body = serde_json::json!({"imposters": [cfg]}).to_string();
-        let resp =
-            replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
+        (imposter_port, body)
+    }
+
+    // Issue #1518: Mountebank recreates every imposter in a PUT body, so an unchanged one starts
+    // with an empty journal too. The reconcile (#549) still keeps it serving throughout.
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn put_resets_unchanged_imposter_recorded_requests() {
+        let manager = Arc::new(ImposterManager::new());
+        let (imposter_port, body) = unchanged_with_one_request(&manager).await;
+
+        let resp = replace_all_from_bytes(
+            body.as_bytes(),
+            BASE,
+            Arc::clone(&manager),
+            false,
+            None,
+            false,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let imposter = manager.get_imposter(imposter_port).expect("still running");
+        assert!(imposter.get_recorded_requests().is_empty());
+        assert_eq!(imposter.get_request_count(), 0);
+        manager.delete_all().await;
+    }
+
+    // `?reconcile=true` keeps #549's behaviour: an unchanged imposter keeps its runtime state.
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn put_with_reconcile_true_keeps_recorded_requests() {
+        let manager = Arc::new(ImposterManager::new());
+        let (imposter_port, body) = unchanged_with_one_request(&manager).await;
+
+        let resp = replace_all_from_bytes(
+            body.as_bytes(),
+            BASE,
+            Arc::clone(&manager),
+            false,
+            None,
+            true,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let recorded = manager
@@ -2395,9 +2527,19 @@ mod replace_all_tests {
         assert_eq!(
             recorded.len(),
             1,
-            "an unchanged imposter must keep its runtime state across PUT"
+            "an unchanged imposter keeps its runtime state across PUT ?reconcile=true"
         );
         manager.delete_all().await;
+    }
+
+    #[test]
+    fn put_with_bad_reconcile_value_is_400() {
+        assert_eq!(reconcile_param(None), Ok(false));
+        assert_eq!(reconcile_param(Some("reconcile=true")), Ok(true));
+        assert_eq!(reconcile_param(Some("other=1&reconcile=false")), Ok(false));
+        let refused = reconcile_param(Some("reconcile=yes")).expect_err("a typo is refused");
+        assert!(refused.contains("reconcile"), "{refused}");
+        assert!(reconcile_param(Some("reconcile=")).is_err());
     }
 
     // Issue #549: a set that fails validation (duplicate port) must be rejected as a client error
@@ -2412,8 +2554,15 @@ mod replace_all_tests {
             {"port": UNUSED_PORT, "protocol": "http", "stubs": []}
         ]})
         .to_string();
-        let resp =
-            replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
+        let resp = replace_all_from_bytes(
+            body.as_bytes(),
+            BASE,
+            Arc::clone(&manager),
+            false,
+            None,
+            false,
+        )
+        .await;
 
         assert_eq!(
             resp.status(),

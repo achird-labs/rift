@@ -246,6 +246,14 @@ the same imposter.
 - The imposter list carries `recordRequests` for each imposter, next to Rift's `stubCount` and `enabled`. Mountebank prints `recordRequests` only in an imposter's detail.
 - The `?replayable=true` export keeps the imposter's `host`, so a re-posted export binds where the original did. Mountebank 2.9.1's export leaves `host` out.
 
+## `PUT /imposters` that fails part-way
+
+Rift does not delete the running set before a `PUT /imposters`. A port that fails to bind is
+reported in `failed` and leaves the others applied, where Mountebank deletes every imposter first
+and is left with none. A successful `PUT` gives every imposter in the body fresh runtime state, as
+Mountebank's recreate does; `?reconcile=true` keeps the state of unchanged imposters instead (see
+[`PUT /imposters`](../api/index.md#put-imposters)).
+
 ## Elsewhere in these docs
 
 Each of these is described where the feature is:
