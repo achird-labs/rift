@@ -1197,7 +1197,8 @@ async fn request_header_removed(w: &mut PlaneA, name: String) {
 
 /// An admin request; `payload` is `-` for none, else a fixture name. In the path and the payload
 /// alike, `{port}` becomes the current imposter's port, `{unknownPort}` a port with no imposter on
-/// it, and `{name}` the port of the imposter a step named `name` (feature 21).
+/// it, `{newPort}` a port for a create (feature 13) and `{name}` the port of the imposter a step
+/// named `name` (feature 21).
 #[when(
     regex = r#"^the client sends admin "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" with payload "((?:\\.|[^"\\])*)"$"#
 )]
@@ -1272,6 +1273,21 @@ async fn send_admin_to(
     if mentions("{unknownPort}") {
         fills.push(("{unknownPort}".to_string(), unknown_port(w, admin).await?));
     }
+    // `0` has the engine assign the port, so nothing probes for a free one (#1461); a container
+    // engine's would be unreachable, so there it is a pool port. The doors that use it refuse the
+    // create; a regression that accepts it has its port tracked below.
+    let new_port = mentions("{newPort}");
+    if new_port {
+        let port = match harness().imposter_port_pool() {
+            Some(pool) => {
+                let port = pool.next_port();
+                w.tracked.push(port);
+                port
+            }
+            None => 0,
+        };
+        fills.push(("{newPort}".to_string(), port));
+    }
     fills.extend(w.named.iter().map(|(n, p)| (format!("{{{n}}}"), *p)));
     let fill = |s: &str| {
         fills
@@ -1300,7 +1316,14 @@ async fn send_admin_to(
         &json_content_type(),
         body.as_deref(),
     )
-    .await
+    .await?;
+    let resp = w.last()?;
+    if new_port && resp.status == 201 {
+        let port = declared_port(&resp.body, "the 201 for a {newPort} create")?;
+        w.tracked.push(port);
+        w.current = Some(port);
+    }
+    Ok(())
 }
 
 // ── more responses ───────────────────────────────────────────────────────────────────────────
@@ -2100,6 +2123,7 @@ async fn raw_connect_and_close(w: &mut PlaneA) -> Step {
 /// One entry of the error envelope `{"errors":[{"code","type","message"}]}`. `slug` is 0.15.0's
 /// `type` (rift#797): absent on an older engine, which fails the step that names it.
 struct EnvelopeEntry {
+    code: String,
     slug: Option<String>,
     message: String,
 }
@@ -2127,7 +2151,8 @@ fn parse_error_envelope(body: &str) -> Result<Vec<EnvelopeEntry>, String> {
                 f.get("code").and_then(Value::as_str),
                 f.get("message").and_then(Value::as_str),
             ) {
-                (Some(_), Some(m)) => Ok(EnvelopeEntry {
+                (Some(c), Some(m)) => Ok(EnvelopeEntry {
+                    code: c.to_string(),
                     slug: f.get("type").and_then(Value::as_str).map(str::to_string),
                     message: m.to_string(),
                 }),
@@ -3125,6 +3150,642 @@ async fn second_stream_answered(w: &mut PlaneA, status: u16, body: String) -> St
     let (_, second) = w.h2c()?;
     w.ensure(*second == want, || {
         format!("expected the same connection's next stream to answer {want:?}, got {second:?}")
+    })
+}
+
+// ── error envelope, continued (feature 13) ───────────────────────────────────────────────────
+
+// Pinned per door, not derived from the status: the four `inject` doors carry a Mountebank slug
+// ("invalid injection", …) where every other door carries the status as a string.
+#[then(regex = r#"^the error envelope code is "((?:\\.|[^"\\])*)"$"#)]
+async fn envelope_code_is(w: &mut PlaneA, code: String) -> Step {
+    let code = unescape(&code);
+    let entries = w.envelope()?;
+    w.ensure(entries.iter().any(|e| e.code == code), || {
+        let got: Vec<&str> = entries.iter().map(|e| e.code.as_str()).collect();
+        format!("expected envelope code '{code}', got {}", got.join(", "))
+    })
+}
+
+// The negative: a door that deliberately keeps a non-JSON reply must not be swept into the
+// envelope by a later change.
+#[then(regex = r"^the response is not a JSON error envelope$")]
+async fn response_is_not_envelope(w: &mut PlaneA) -> Step {
+    let body = w.last()?.body.clone();
+    w.ensure(parse_error_envelope(&body).is_err(), || {
+        format!("expected a non-envelope reply, but the body parsed as one: '{body}'")
+    })
+}
+
+// Generated rather than inlined: an over-the-cap literal has no place in a feature file.
+#[when(regex = r#"^the request body is (\d+) MiB of "((?:\\.|[^"\\])*)"$"#)]
+async fn request_body_mib(w: &mut PlaneA, mib: usize, ch: String) {
+    w.pending.body = Some(unescape(&ch).repeat(mib * 1024 * 1024));
+}
+
+/// An unresolvable script reference (`kind` is the field to poison: `ref` or `file`) is refused at
+/// creation, on the admin plane. The response is kept for the status/envelope steps; whatever port
+/// a regression that accepts it is given is tracked, so the stray imposter cannot squat it.
+#[when(
+    regex = r#"^the client posts an imposter whose script ("(?:\\.|[^"\\])*"|\S+) is unresolvable$"#
+)]
+async fn post_unresolvable_script(w: &mut PlaneA, kind: String) -> Step {
+    let kind = flexible_string(&kind);
+    let value = if kind == "file" {
+        "no-such-script.rhai"
+    } else {
+        "no-such-script"
+    };
+    let mut script = serde_json::Map::new();
+    script.insert("engine".to_string(), "rhai".into());
+    script.insert(kind, value.into());
+    let mut imposter = serde_json::json!({
+        "protocol": "http",
+        "stubs": [{
+            "predicates": [{"equals": {"path": "/x"}}],
+            "responses": [{"_rift": {"script": script}}]
+        }]
+    });
+    if let Some(pool) = harness().imposter_port_pool() {
+        let port = pool.next_port();
+        w.tracked.push(port);
+        imposter["port"] = port.into();
+    }
+    let url = format!("{}/imposters", w.admin_url());
+    let json = imposter.to_string();
+    w.send_with(
+        &clients().verifying,
+        "POST",
+        &url,
+        &json_content_type(),
+        Some(&json),
+    )
+    .await?;
+    let resp = w.last()?;
+    if resp.status == 201 {
+        let port = declared_port(&resp.body, "the 201 for an unresolvable script")?;
+        w.tracked.push(port);
+    }
+    Ok(())
+}
+
+// ── scripting (feature 04) ───────────────────────────────────────────────────────────────────
+
+// Real time: a `flowState.ttlSeconds` key has to expire.
+#[when(regex = r"^the client waits (\d+) ms$")]
+async fn client_waits(_w: &mut PlaneA, ms: u64) {
+    tokio::time::sleep(Duration::from_millis(ms)).await;
+}
+
+#[then(regex = r"^the engine remains responsive$")]
+async fn engine_responsive(w: &mut PlaneA) -> Step {
+    let url = format!("{}/imposters", harness().admin_url);
+    let status = get(&url).await?.status;
+    w.ensure(status == 200, || {
+        format!("admin API not responsive: GET /imposters -> {status}")
+    })
+}
+
+// ── admin surface (feature 08) ───────────────────────────────────────────────────────────────
+
+/// Java's `URLEncoder.encode` (the Scala runner's): form encoding, a space as `+`.
+fn form_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'*' | b'_' => {
+                char::from(b).to_string()
+            }
+            b' ' => "+".to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// `?match=header:h=v&…` over `pairs`, or nothing.
+fn header_match_query(pairs: &[(&str, &str)]) -> String {
+    if pairs.is_empty() {
+        return String::new();
+    }
+    let clauses: Vec<String> = pairs
+        .iter()
+        .map(|(h, v)| format!("match=header:{}={}", form_encode(h), form_encode(v)))
+        .collect();
+    format!("?{}", clauses.join("&"))
+}
+
+impl PlaneA {
+    /// `{admin}/imposters/{current}{rest}`.
+    fn current_admin_url(&self, rest: &str) -> anyhow::Result<String> {
+        Ok(format!(
+            "{}/imposters/{}{rest}",
+            self.admin_url(),
+            self.current()?
+        ))
+    }
+
+    /// An admin request whose answer a step asserts itself: recorded for the repro, not kept as
+    /// the last response.
+    async fn admin_call(
+        &mut self,
+        method: &str,
+        url: &str,
+        body: Option<&str>,
+    ) -> anyhow::Result<Response> {
+        let headers = if body.is_some() {
+            json_content_type()
+        } else {
+            Vec::new()
+        };
+        self.record_curl(method, url, &headers, body);
+        let (resp, _) = exchange(&clients().verifying, method, url, &headers, body)
+            .await?
+            .with_context(|| format!("transport failure on {method} {url}"))?;
+        Ok(resp)
+    }
+
+    /// The same, failing the step unless the engine answers `want`.
+    async fn admin_expect(
+        &mut self,
+        method: &str,
+        url: &str,
+        body: Option<&str>,
+        want: u16,
+    ) -> anyhow::Result<Response> {
+        let resp = self.admin_call(method, url, body).await?;
+        self.ensure(resp.status == want, || {
+            format!(
+                "{method} {url} -> {} (expected {want}): {}",
+                resp.status, resp.body
+            )
+        })
+        .map_err(|f| f.0)?;
+        Ok(resp)
+    }
+
+    async fn stub_by_id(&mut self, id: &str) -> anyhow::Result<Response> {
+        let url = self.current_admin_url(&format!("/stubs/by-id/{id}"))?;
+        self.admin_call("GET", &url, None).await
+    }
+
+    /// How many recorded requests `GET .../requests` lists under the header `pairs`: a bare
+    /// array, or `{"requests": [...]}`.
+    async fn recorded_count(&mut self, pairs: &[(&str, &str)]) -> anyhow::Result<usize> {
+        let url = self.current_admin_url(&format!("/requests{}", header_match_query(pairs)))?;
+        let resp = self.admin_expect("GET", &url, None, 200).await?;
+        let json: Value = serde_json::from_str(&resp.body)
+            .with_context(|| format!("invalid admin JSON (body={})", resp.body))?;
+        match &json {
+            Value::Array(es) => Ok(es.len()),
+            Value::Object(m) => match m.get("requests") {
+                Some(Value::Array(es)) => Ok(es.len()),
+                _ => bail!("no 'requests' array in response: {}", resp.body),
+            },
+            _ => bail!("/requests response is not an array/object: {}", resp.body),
+        }
+    }
+
+    /// `POST .../verify` with one `equals`-on-path predicate (rift#494): the engine counts its own
+    /// recorded requests.
+    async fn server_verify(
+        &mut self,
+        path: &str,
+        include_closest: bool,
+        flow: Option<&str>,
+    ) -> anyhow::Result<Verified> {
+        let mut body = serde_json::json!({"predicates": [{"equals": {"path": path}}]});
+        if include_closest {
+            body["includeClosest"] = Value::Bool(true);
+        }
+        if let Some(flow) = flow {
+            body["flowId"] = flow.into();
+        }
+        let url = self.current_admin_url("/verify")?;
+        let resp = self
+            .admin_expect("POST", &url, Some(&body.to_string()), 200)
+            .await?;
+        let json: Value = serde_json::from_str(&resp.body)
+            .with_context(|| format!("invalid admin JSON (body={})", resp.body))?;
+        let closest = json.get("closest");
+        Ok(Verified {
+            matched: json.get("matched").and_then(Value::as_i64),
+            total: json.get("total").and_then(Value::as_i64),
+            closest_path: closest
+                .and_then(|c| c.get("request"))
+                .and_then(|r| r.get("path"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            failed_predicates: closest
+                .and_then(|c| c.get("failedPredicates"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+        })
+    }
+}
+
+/// A verify's counts; a count the engine left out is `None`, which never equals an expectation.
+struct Verified {
+    matched: Option<i64>,
+    total: Option<i64>,
+    closest_path: Option<String>,
+    failed_predicates: usize,
+}
+
+fn count(n: Option<i64>) -> String {
+    n.map_or_else(|| "<absent>".to_string(), |n| n.to_string())
+}
+
+#[then(regex = r#"^the stub with id "((?:\\.|[^"\\])*)" is retrievable$"#)]
+async fn stub_retrievable(w: &mut PlaneA, id: String) -> Step {
+    let id = unescape(&id);
+    let resp = w.stub_by_id(&id).await?;
+    w.ensure(resp.status == 200, || {
+        format!(
+            "stubs/by-id/{id} -> {} (expected 200): {}",
+            resp.status, resp.body
+        )
+    })
+}
+
+#[then(regex = r#"^the stub with id "((?:\\.|[^"\\])*)" includes "((?:\\.|[^"\\])*)"$"#)]
+async fn stub_includes(w: &mut PlaneA, id: String, sub: String) -> Step {
+    let (id, sub) = (unescape(&id), unescape(&sub));
+    let resp = w.stub_by_id(&id).await?;
+    w.ensure(resp.status == 200 && resp.body.contains(&sub), || {
+        format!(
+            "stubs/by-id/{id} (status {}) did not include '{sub}': {}",
+            resp.status, resp.body
+        )
+    })
+}
+
+#[then(regex = r#"^no stub has id "((?:\\.|[^"\\])*)"$"#)]
+async fn no_stub_with_id(w: &mut PlaneA, id: String) -> Step {
+    let id = unescape(&id);
+    let resp = w.stub_by_id(&id).await?;
+    w.ensure(resp.status == 404, || {
+        format!(
+            "stubs/by-id/{id} -> {} (expected 404): {}",
+            resp.status, resp.body
+        )
+    })
+}
+
+async fn set_enabled(w: &mut PlaneA, enabled: bool) -> Step {
+    let verb = if enabled { "enable" } else { "disable" };
+    let url = w.current_admin_url(&format!("/{verb}"))?;
+    w.admin_expect("POST", &url, None, 200).await?;
+    // The Scala runner's settle, from the manual conformance script's `sleep 0.1`.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    Ok(())
+}
+
+#[when(regex = r"^the client disables the imposter$")]
+async fn disable_imposter(w: &mut PlaneA) -> Step {
+    set_enabled(w, false).await
+}
+
+#[when(regex = r"^the client enables the imposter$")]
+async fn enable_imposter(w: &mut PlaneA) -> Step {
+    set_enabled(w, true).await
+}
+
+#[then(regex = r"^recorded requests total (\d+)$")]
+async fn recorded_total(w: &mut PlaneA, n: usize) -> Step {
+    let got = w.recorded_count(&[]).await?;
+    w.ensure(got == n, || {
+        format!("expected {n} recorded request(s), got {got}")
+    })
+}
+
+#[then(
+    regex = r#"^recorded requests matching header "((?:\\.|[^"\\])*)" value "((?:\\.|[^"\\])*)" total (\d+)$"#
+)]
+async fn recorded_matching(w: &mut PlaneA, h: String, v: String, n: usize) -> Step {
+    let (h, v) = (unescape(&h), unescape(&v));
+    let got = w.recorded_count(&[(&h, &v)]).await?;
+    w.ensure(got == n, || {
+        format!("expected {n} request(s) matching header {h}={v}, got {got}")
+    })
+}
+
+#[then(
+    regex = r#"^recorded requests matching header "((?:\\.|[^"\\])*)" value "((?:\\.|[^"\\])*)" and header "((?:\\.|[^"\\])*)" value "((?:\\.|[^"\\])*)" total (\d+)$"#
+)]
+async fn recorded_matching_both(
+    w: &mut PlaneA,
+    h1: String,
+    v1: String,
+    h2: String,
+    v2: String,
+    n: usize,
+) -> Step {
+    let (h1, v1, h2, v2) = (unescape(&h1), unescape(&v1), unescape(&h2), unescape(&v2));
+    let got = w.recorded_count(&[(&h1, &v1), (&h2, &v2)]).await?;
+    w.ensure(got == n, || {
+        format!("expected {n} request(s) matching header {h1}={v1} and {h2}={v2}, got {got}")
+    })
+}
+
+#[when(
+    regex = r#"^the client deletes recorded requests matching header "((?:\\.|[^"\\])*)" value "((?:\\.|[^"\\])*)"$"#
+)]
+async fn delete_recorded_matching(w: &mut PlaneA, h: String, v: String) -> Step {
+    let (h, v) = (unescape(&h), unescape(&v));
+    let url = w.current_admin_url(&format!("/requests{}", header_match_query(&[(&h, &v)])))?;
+    w.admin_expect("DELETE", &url, None, 200).await?;
+    Ok(())
+}
+
+#[then(
+    regex = r#"^a verify for path "((?:\\.|[^"\\])*)" matches (\d+) of (\d+) recorded requests$"#
+)]
+async fn verify_matches(w: &mut PlaneA, path: String, matched: i64, total: i64) -> Step {
+    let path = unescape(&path);
+    let r = w.server_verify(&path, false, None).await?;
+    w.ensure(r.matched == Some(matched) && r.total == Some(total), || {
+        format!(
+            "verify path={path}: expected matched={matched} total={total}, got matched={} total={}",
+            count(r.matched),
+            count(r.total)
+        )
+    })
+}
+
+#[then(
+    regex = r#"^a verify for path "((?:\\.|[^"\\])*)" in flow "((?:\\.|[^"\\])*)" matches (\d+) of (\d+) recorded requests$"#
+)]
+async fn verify_in_flow_matches(
+    w: &mut PlaneA,
+    path: String,
+    flow: String,
+    matched: i64,
+    total: i64,
+) -> Step {
+    let (path, flow) = (unescape(&path), unescape(&flow));
+    let r = w.server_verify(&path, false, Some(&flow)).await?;
+    w.ensure(r.matched == Some(matched) && r.total == Some(total), || {
+        format!(
+            "verify path={path} flowId={flow}: expected matched={matched} total={total}, got matched={} total={}",
+            count(r.matched),
+            count(r.total)
+        )
+    })
+}
+
+#[then(
+    regex = r#"^a verify for path "((?:\\.|[^"\\])*)" with includeClosest reports the closest request path "((?:\\.|[^"\\])*)"$"#
+)]
+async fn verify_closest(w: &mut PlaneA, path: String, closest: String) -> Step {
+    let (path, closest) = (unescape(&path), unescape(&closest));
+    let r = w.server_verify(&path, true, None).await?;
+    w.ensure(
+        r.matched == Some(0)
+            && r.closest_path.as_deref() == Some(closest.as_str())
+            && r.failed_predicates > 0,
+        || {
+            format!(
+                "verify path={path} includeClosest: expected matched=0, closest path={closest}, \
+                 failedPredicates>0; got matched={}, closest={:?}, failed={}",
+                count(r.matched),
+                r.closest_path,
+                r.failed_predicates
+            )
+        },
+    )
+}
+
+#[when(
+    regex = r#"^the client deletes flow-state "((?:\\.|[^"\\])*)" in flow "((?:\\.|[^"\\])*)"$"#
+)]
+async fn delete_flow_state(w: &mut PlaneA, key: String, flow: String) -> Step {
+    let url = w.flow_state_url(&unescape(&flow), &unescape(&key))?;
+    w.admin_expect("DELETE", &url, None, 200).await?;
+    Ok(())
+}
+
+/// The `port`s a `{"imposters": [...]}` batch declares.
+fn batch_ports(raw: &str, what: &str) -> anyhow::Result<Vec<u16>> {
+    let root = parse_object(raw, what)?;
+    let Some(Value::Array(imposters)) = root.get("imposters") else {
+        bail!("{what} has no top-level 'imposters' array");
+    };
+    imposters
+        .iter()
+        .filter_map(|i| i.get("port").and_then(Value::as_u64))
+        .map(|p| u16::try_from(p).with_context(|| format!("{what} port {p}")))
+        .collect()
+}
+
+/// `PUT {admin}/imposters`: the atomic validate-then-swap of the whole imposter set.
+async fn replace_all(w: &mut PlaneA, raw: &str, what: &str) -> anyhow::Result<()> {
+    let url = format!("{}/imposters", w.admin_url());
+    w.admin_expect("PUT", &url, Some(raw), 200)
+        .await
+        .with_context(|| format!("PUT /imposters ({what})"))?;
+    Ok(())
+}
+
+#[when(regex = r#"^the client replaces all imposters with fixture "((?:\\.|[^"\\])*)"$"#)]
+async fn replace_all_with_fixture(w: &mut PlaneA, name: String) -> Step {
+    let name = unescape(&name);
+    let raw = harness().rewrite_fixture(&load_fixture(&name)?);
+    let what = format!("fixture {name}");
+    let ports = batch_ports(&raw, &what)?;
+    replace_all(w, &raw, &what).await?;
+    w.tracked.extend(ports);
+    Ok(())
+}
+
+/// A response `_rift.script` whose rhai does not compile: the whole batch must be refused, so its
+/// port is never bound. The Scala runner's `invalidImposterBatch`, byte for byte.
+const INVALID_IMPOSTER_BATCH: &str = r#"{"imposters":[{"port":4810,"protocol":"http","stubs":[{"predicates":[{"equals":{"path":"/x"}}],"responses":[{"_rift":{"script":{"engine":"rhai","code":"fn respond(ctx) { broken @#$ syntax"}}}]}]}]}"#;
+
+#[when(regex = r"^the client replaces all imposters with an invalid batch$")]
+async fn replace_all_invalid(w: &mut PlaneA) -> Step {
+    let url = format!("{}/imposters", w.admin_url());
+    let resp = w
+        .admin_call("PUT", &url, Some(INVALID_IMPOSTER_BATCH))
+        .await?;
+    // A regression that applies it must not leave 4810 behind for later scenarios.
+    if resp.status < 300 {
+        w.tracked.push(4810);
+    }
+    w.ensure(resp.status == 400, || {
+        format!(
+            "PUT /imposters (invalid batch) -> {} (expected 400): {}",
+            resp.status, resp.body
+        )
+    })
+}
+
+#[then(regex = r#"^the response JSON has (\d+) stubs and none carries "((?:\\.|[^"\\])*)"$"#)]
+async fn stubs_none_carry(w: &mut PlaneA, n: usize, field: String) -> Step {
+    let field = unescape(&field);
+    let root = w.last_json()?;
+    let Value::Object(fields) = &root else {
+        return Err(anyhow!("response is not a JSON object: {}", w.last()?.body).into());
+    };
+    let stubs = fields.get("stubs").and_then(Value::as_array);
+    let carrying = stubs.map_or(0, |s| {
+        s.iter()
+            .filter(|stub| stub.as_object().is_some_and(|o| o.contains_key(&field)))
+            .count()
+    });
+    w.ensure(stubs.is_some_and(|s| s.len() == n) && carrying == 0, || {
+        format!(
+            "expected {n} stubs with no '{field}', got {} stubs, {carrying} carrying it",
+            stubs.map_or_else(|| "no".to_string(), |s| s.len().to_string())
+        )
+    })
+}
+
+#[then(
+    regex = r#"^every element of the response JSON array has a non-negative integer "((?:\\.|[^"\\])*)"$"#
+)]
+async fn every_element_non_negative_integer(w: &mut PlaneA, field: String) -> Step {
+    let field = unescape(&field);
+    let Value::Array(es) = w.last_json()? else {
+        return Err(anyhow!("response is not a JSON array: {}", w.last()?.body).into());
+    };
+    let whole_non_negative = |v: &Value| match v {
+        Value::Number(n) => {
+            n.as_u64().is_some() || n.as_f64().is_some_and(|f| f >= 0.0 && f.fract() == 0.0)
+        }
+        _ => false,
+    };
+    let bad: Vec<&Value> = es
+        .iter()
+        .filter(|e| !json_at(e, &field).is_some_and(whole_non_negative))
+        .collect();
+    w.ensure(!es.is_empty() && bad.is_empty(), || {
+        format!(
+            "expected every element to carry a non-negative integer '{field}'; offending: {} (of {})",
+            Value::Array(bad.into_iter().cloned().collect()),
+            es.len()
+        )
+    })
+}
+
+// Two header lines of one name: the staged request holds one per name.
+#[when(
+    regex = r#"^the client sends "((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)" with header "((?:\\.|[^"\\])*)" repeated as "((?:\\.|[^"\\])*)" then "((?:\\.|[^"\\])*)"$"#
+)]
+async fn send_repeated_header(
+    w: &mut PlaneA,
+    method: String,
+    path: String,
+    name: String,
+    v1: String,
+    v2: String,
+) -> Step {
+    let (method, name) = (unescape(&method), unescape(&name));
+    let url = format!(
+        "http://{}:{}{}",
+        harness().imposter_host(),
+        w.current()?,
+        unescape(&path)
+    );
+    let headers = vec![(name.clone(), unescape(&v1)), (name, unescape(&v2))];
+    w.record_curl(&method, &url, &headers, None);
+    // `exchange` adds each pair with `RequestBuilder::header`, which appends.
+    let (resp, _) = exchange(&clients().verifying, &method, &url, &headers, None)
+        .await?
+        .with_context(|| format!("transport failure on {method} {url}"))?;
+    w.ensure(resp.status == 200, || {
+        format!("{method} {url} -> {} (expected 200)", resp.status)
+    })
+}
+
+/// `hex` is space-separated bytes (`ff fe`): a body that is not UTF-8, so the journal must record
+/// it as base64 with `_mode: "binary"`.
+#[when(regex = r#"^the client posts the bytes "((?:\\.|[^"\\])*)" to "((?:\\.|[^"\\])*)"$"#)]
+async fn post_bytes(w: &mut PlaneA, hex: String, path: String) -> Step {
+    let hex = unescape(&hex);
+    let bytes: Vec<u8> = hex
+        .split_whitespace()
+        .map(|b| u8::from_str_radix(b, 16))
+        .collect::<Result<_, _>>()
+        .with_context(|| format!("bad hex bytes '{hex}'"))?;
+    let url = format!(
+        "http://{}:{}{}",
+        harness().imposter_host(),
+        w.current()?,
+        unescape(&path)
+    );
+    let escaped: String = bytes.iter().map(|b| format!("\\x{b:02x}")).collect();
+    w.curl.push(format!(
+        "printf '{escaped}' | curl -X POST -H 'Content-Type: application/octet-stream' --data-binary @- '{url}'"
+    ));
+    let resp = clients()
+        .verifying
+        .post(&url)
+        .header("Content-Type", "application/octet-stream")
+        .body(bytes)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status().as_u16();
+    w.ensure(status == 200, || {
+        format!("POST {url} -> {status} (expected 200)")
+    })
+}
+
+/// The engine assigns a port-less imposter the first free port at or above this (#199).
+const AUTO_PORT_FLOOR: u16 = 49152;
+
+#[when(regex = r#"^the client creates a port-less imposter from fixture "((?:\\.|[^"\\])*)"$"#)]
+async fn create_port_less(w: &mut PlaneA, name: String) -> Step {
+    let name = unescape(&name);
+    let raw = harness().rewrite_fixture(&load_fixture(&name)?);
+    let url = format!("{}/imposters", w.admin_url());
+    let resp = w.admin_expect("POST", &url, Some(&raw), 201).await?;
+    let port = declared_port(&resp.body, "the create response")
+        .with_context(|| format!("no assigned 'port' in the create response: {}", resp.body))?;
+    w.tracked.push(port);
+    w.current = Some(port);
+    Ok(())
+}
+
+#[when(
+    regex = r#"^the client replaces all imposters with port-less batch fixture "((?:\\.|[^"\\])*)"$"#
+)]
+async fn replace_all_port_less(w: &mut PlaneA, name: String) -> Step {
+    let name = unescape(&name);
+    let raw = harness().rewrite_fixture(&load_fixture(&name)?);
+    let what = format!("fixture {name}");
+    let declared = batch_ports(&raw, &what)?;
+    replace_all(w, &raw, &what).await?;
+    // Declared ports first, so a failure below still tears them down.
+    w.tracked.extend(declared);
+    let listed = get(&format!("{}/imposters", w.admin_url())).await?;
+    let json: Value = serde_json::from_str(&listed.body)
+        .with_context(|| format!("invalid admin JSON (body={})", listed.body))?;
+    let ports: Vec<u16> = json
+        .get("imposters")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("no 'imposters' array in: {}", listed.body))?
+        .iter()
+        .filter_map(|i| i.get("port").and_then(Value::as_u64))
+        .map(|p| u16::try_from(p).with_context(|| format!("listed port {p}")))
+        .collect::<anyhow::Result<_>>()?;
+    w.tracked.extend(ports.iter().copied());
+    let auto: Vec<u16> = ports
+        .iter()
+        .copied()
+        .filter(|p| *p >= AUTO_PORT_FLOOR)
+        .collect();
+    w.ensure(auto.len() == 1, || {
+        format!("expected one auto-assigned port, got imposters {ports:?}")
+    })?;
+    w.current = auto.first().copied();
+    Ok(())
+}
+
+#[then(regex = r"^the assigned port is at least 49152$")]
+async fn assigned_port_floor(w: &mut PlaneA) -> Step {
+    let port = w.current()?;
+    w.ensure(port >= AUTO_PORT_FLOOR, || {
+        format!("expected an auto-assigned port >= {AUTO_PORT_FLOOR}, got {port}")
     })
 }
 
