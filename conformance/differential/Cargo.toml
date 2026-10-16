@@ -19,4 +19,4 @@ futures = { workspace = true }
 # `rustls` only gives reqwest a crypto provider so a client can be built in a binary with no `main`
 # to install one; every request this harness sends is plain HTTP to 127.0.0.1.
 reqwest = { workspace = true, features = ["rustls"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time", "net"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time", "net", "io-util", "sync"] }

@@ -147,11 +147,15 @@ fn newest_source(dir: &Path) -> Option<(PathBuf, std::time::SystemTime)> {
 /// Reserves `n` distinct free ports. The listeners are held until all are chosen, so the ports are
 /// distinct; they are released before the engines bind them.
 ///
+/// Fixed ports, probed (#1485): a case's documents name their imposters' ports, and Mountebank's
+/// admin port is set on its command line (it cannot report a port it chose). They are probed on the
+/// wildcard address both engines bind imposters (and Mountebank its admin API) on.
+///
 /// # Errors
 /// When the OS cannot hand out a port.
 pub fn free_ports(n: usize) -> std::io::Result<Vec<u16>> {
     let listeners = (0..n)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0"))
+        .map(|_| std::net::TcpListener::bind("0.0.0.0:0"))
         .collect::<std::io::Result<Vec<_>>>()?;
     listeners
         .iter()
@@ -196,26 +200,52 @@ pub async fn start_mountebank(mb: &Path, cwd: &Path) -> Result<Engine, String> {
     Ok(engine)
 }
 
+/// The admin API's startup line, logged at `info` by this target, carries the port it bound.
+const ADMIN_LISTENING_TARGET: &str = "rift_http_proxy::admin_api::server";
+const ADMIN_LISTENING: &str = "listening on http://";
+
 /// Starts Rift with the flags that mirror Mountebank's: injection on, localhost only.
 ///
+/// The admin API binds port 0 and the port is read from its startup line, so no probe is ever
+/// released for something else to take (#1485). Everything else logs at `error`, as before.
+///
 /// # Errors
-/// Spawn failure, or the admin API not answering within the startup window.
+/// Spawn failure, the admin port not reported, or the admin API not answering within the startup
+/// window.
 pub async fn start_rift(bin: &Path, cwd: &Path) -> Result<Engine, String> {
-    let admin_port = free_ports(1).map_err(|e| e.to_string())?[0];
-    let child = Command::new(bin)
-        .args([
-            "--port",
-            &admin_port.to_string(),
-            "--allow-injection",
-            "--local-only",
-        ])
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut child = Command::new(bin)
+        .args(["--port", "0", "--allow-injection", "--local-only"])
         .args(["--loglevel", "error"])
+        .env("RUST_LOG", format!("error,{ADMIN_LISTENING_TARGET}=info"))
+        .env("NO_COLOR", "1")
         .current_dir(cwd)
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
+    let stdout = child.stdout.take().ok_or("rift stdout was not piped")?;
+    let (port_tx, port_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        let mut port_tx = Some(port_tx);
+        // Read to the end either way, so the child never blocks on a full pipe.
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(port) = admin_port_from(&line)
+                && let Some(tx) = port_tx.take()
+            {
+                // The receiver is gone only once start_rift gave up waiting.
+                let _ = tx.send(port);
+            }
+        }
+    });
+    let admin_port = match tokio::time::timeout(Duration::from_secs(30), port_rx).await {
+        Ok(Ok(port)) => port,
+        Ok(Err(_)) => return Err("Rift exited before reporting its admin port".to_string()),
+        Err(_) => return Err("Rift did not report its admin port within 30s".to_string()),
+    };
     let mut engine = Engine {
         which: Which::Rift,
         admin_port,
@@ -224,6 +254,29 @@ pub async fn start_rift(bin: &Path, cwd: &Path) -> Result<Engine, String> {
     };
     wait_ready(&mut engine).await?;
     Ok(engine)
+}
+
+/// The port in `... listening on http://<host>:<port>`, colour codes ignored.
+fn admin_port_from(line: &str) -> Option<u16> {
+    let plain: String = {
+        let mut out = String::with_capacity(line.len());
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    };
+    let rest = plain.split(ADMIN_LISTENING).nth(1)?;
+    let addr = rest.split_whitespace().next()?;
+    addr.rsplit(':').next()?.parse().ok()
 }
 
 async fn wait_ready(engine: &mut Engine) -> Result<(), String> {
@@ -334,5 +387,19 @@ fn classify(error: &reqwest::Error) -> FailureClass {
         FailureClass::Connect
     } else {
         FailureClass::Transport
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admin_port_from;
+
+    #[test]
+    fn admin_port_from_reads_the_admin_startup_line() {
+        let line = "\u{1b}[2m2026-10-16T00:00:00Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \
+                    rift_http_proxy::admin_api::server: Rift Admin API (Mountebank-compatible) \
+                    listening on http://127.0.0.1:51234";
+        assert_eq!(admin_port_from(line), Some(51234));
+        assert_eq!(admin_port_from("starting"), None);
     }
 }

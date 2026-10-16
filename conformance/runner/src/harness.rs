@@ -23,8 +23,7 @@ use tokio::process::{Child, Command};
 /// How long an engine has to answer its readiness probes (the Scala runner's budget).
 const READINESS_BUDGET: Duration = Duration::from_secs(15);
 const READINESS_SPACING: Duration = Duration::from_millis(100);
-/// Spawn attempts for the shared engine. Each one uses fresh OS-assigned ports, so a port taken
-/// between our probe and the engine's bind costs one retry, not the run.
+/// Spawn attempts for a spawned engine, so one failed start costs a retry, not the run.
 const SPAWN_ATTEMPTS: usize = 5;
 
 /// Container mode's fixed ports inside the container. Admin and metrics are published on free host
@@ -235,9 +234,10 @@ fn absolute(path: PathBuf) -> Result<PathBuf, HarnessError> {
     })
 }
 
-/// A port nothing is listening on right now, chosen by the OS. There is a window between this
-/// probe releasing it and the engine binding it; callers that hand it to an engine retry on a
-/// failed start rather than trusting it.
+/// A port nothing is listening on right now, chosen by the OS. A spawned engine binds port 0 and
+/// reports its own ports instead (#1485); this is left for ports no engine binds before it is
+/// handed out: the host side of a container's `-p 127.0.0.1:<port>:…` publish (Docker binds that
+/// loopback address, the family probed here), and a port a scenario needs nothing listening on.
 pub fn free_port() -> Result<u16, HarnessError> {
     TcpListener::bind(("127.0.0.1", 0))
         .and_then(|l| l.local_addr())
@@ -505,22 +505,37 @@ async fn spawn_with_retry(
     )))
 }
 
+/// Names each spawned engine's log file, since its ports are not known until it has started.
+static ENGINE_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// The log targets of the three startup lines a spawned engine's ports are read from.
+const LISTENING_TARGETS: [&str; 3] = [
+    "rift_http_proxy::admin_api::server",
+    "rift_http_proxy::server",
+    "rift_http_proxy::front_door::listener",
+];
+
 impl SpawnedEngine {
-    /// Spawn `rift --port <admin> --nologfile --metrics-port <m> --allow-injection <extra>` (plus
-    /// `--front-door <fd>` when asked) in the corpus root, output to a log file, and wait until its
-    /// admin and metrics listeners answer and the front door accepts.
+    /// Spawn `rift --port 0 --nologfile --metrics-port 0 --allow-injection <extra>` (plus
+    /// `--front-door 0` when asked) in the corpus root, output to a log file, read the ports it
+    /// bound from its startup lines, and wait until its admin and metrics listeners answer and the
+    /// front door accepts. Port 0 throughout: a probed port could be taken before the engine bound
+    /// it, or answered by a neighbour's loopback socket while the engine holds the wildcard (#1485).
     async fn start(
         config: &Config,
         extra: &[String],
         front_door: bool,
     ) -> Result<Self, HarnessError> {
-        let admin_port = free_port()?;
-        let metrics_port = free_port()?;
-        let front_door_port = if front_door { Some(free_port()?) } else { None };
-        let front_door_args = front_door_port
-            .map(|p| vec!["--front-door".to_string(), p.to_string()])
-            .unwrap_or_default();
-        let log = config.log_dir.join(format!("engine-{admin_port}.log"));
+        let front_door_args: &[&str] = if front_door {
+            &["--front-door", "0"]
+        } else {
+            &[]
+        };
+        let log = config.log_dir.join(format!(
+            "engine-{}-{}.log",
+            std::process::id(),
+            ENGINE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         let log_file = std::fs::File::create(&log).map_err(|source| HarnessError::Io {
             action: "creating",
             path: log.clone(),
@@ -532,15 +547,19 @@ impl SpawnedEngine {
             source,
         })?;
         let binary = config.build_dir.join("rift");
-        let child = Command::new(&binary)
-            .arg("--port")
-            .arg(admin_port.to_string())
-            .arg("--nologfile")
-            .arg("--metrics-port")
-            .arg(metrics_port.to_string())
+        let mut command = Command::new(&binary);
+        command
+            .args(["--port", "0", "--nologfile", "--metrics-port", "0"])
             .arg("--allow-injection")
             .args(extra)
-            .args(&front_door_args)
+            .args(front_door_args)
+            .env("NO_COLOR", "1");
+        // A level set in this environment would also hide the info lines the ports are read from,
+        // so they are added back to whatever filter it asks for.
+        if let Some(filter) = listening_filter() {
+            command.env("RUST_LOG", filter);
+        }
+        let child = command
             .current_dir(&config.corpus_root)
             .stdin(Stdio::null())
             .stdout(log_file)
@@ -554,12 +573,16 @@ impl SpawnedEngine {
             })?;
         let mut engine = Self {
             child,
-            admin_url: format!("http://{LOOPBACK}:{admin_port}"),
-            metrics_url: format!("http://{LOOPBACK}:{metrics_port}"),
-            front_door_port,
+            admin_url: String::new(),
+            metrics_url: String::new(),
+            front_door_port: None,
             log,
         };
-        match engine.await_ready().await {
+        let ready = match engine.read_bound_ports(front_door).await {
+            Ok(()) => engine.await_ready().await,
+            Err(e) => Err(e),
+        };
+        match ready {
             Ok(()) => Ok(engine),
             Err(e) => {
                 let e = with_log(e, &engine.log);
@@ -571,6 +594,46 @@ impl SpawnedEngine {
                     ))),
                 }
             }
+        }
+    }
+
+    /// Fill in the admin and metrics URLs and the front door port from the engine's `listening on
+    /// http://<addr>` startup lines, polling its log until they are all there. A not-ready error
+    /// leaves the log out: the caller adds it once the engine is stopped.
+    async fn read_bound_ports(&mut self, front_door: bool) -> Result<(), HarnessError> {
+        let deadline = Instant::now() + READINESS_BUDGET;
+        loop {
+            // The file is created before the spawn, so a read failure is a real I/O error.
+            let text = std::fs::read_to_string(&self.log).map_err(|source| HarnessError::Io {
+                action: "reading",
+                path: self.log.clone(),
+                source,
+            })?;
+            let admin = listening_port(&text, "Admin API (Mountebank-compatible) listening on");
+            let metrics = listening_port(&text, "Metrics server listening on");
+            let door = listening_port(&text, "Front door listening on");
+            if let (Some(admin), Some(metrics)) = (admin, metrics)
+                && (door.is_some() || !front_door)
+            {
+                self.admin_url = format!("http://{LOOPBACK}:{admin}");
+                self.metrics_url = format!("http://{LOOPBACK}:{metrics}");
+                self.front_door_port = door.filter(|_| front_door);
+                return Ok(());
+            }
+            if let Some(why) = Liveness::Child(&mut self.child, &self.log)
+                .stopped()
+                .await?
+            {
+                return Err(HarnessError::NotReady(format!(
+                    "{why} before reporting the ports it bound"
+                )));
+            }
+            if Instant::now() >= deadline {
+                return Err(HarnessError::NotReady(format!(
+                    "the engine did not report the ports it bound within {READINESS_BUDGET:?}"
+                )));
+            }
+            tokio::time::sleep(READINESS_SPACING).await;
         }
     }
 
@@ -712,6 +775,46 @@ async fn await_listeners(
         }
     }
     Ok(())
+}
+
+/// The port in the first `<prefix> http://<host>:<port>[/...]` line of `log`, colour codes ignored.
+fn listening_port(log: &str, prefix: &str) -> Option<u16> {
+    let marker = format!("{prefix} http://");
+    log.lines().find_map(|line| {
+        let rest = strip_ansi(line).split(&marker).nth(1)?.to_string();
+        let addr = rest.split(['/', ' ']).next()?;
+        addr.rsplit(':').next()?.parse().ok()
+    })
+}
+
+/// Drop `ESC [ ... <final byte>` colour sequences, in case `NO_COLOR` is not honoured.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The `RUST_LOG` a spawned engine gets when this environment sets a log level (`RUST_LOG`, or
+/// `MB_LOGLEVEL`, which the engine reads as its `--loglevel`): that filter with the startup lines'
+/// targets at `info` appended. `None` leaves the engine's default `info` level, which logs them.
+fn listening_filter() -> Option<String> {
+    let base = std::env::var("RUST_LOG")
+        .ok()
+        .or_else(|| std::env::var("MB_LOGLEVEL").ok())
+        .filter(|v| !v.trim().is_empty())?;
+    let targets = LISTENING_TARGETS.map(|t| format!("{t}=info")).join(",");
+    Some(format!("{base},{targets}"))
 }
 
 /// A not-ready error with the engine log's tail appended.
@@ -1474,5 +1577,26 @@ mod tests {
     #[test]
     fn free_port_is_not_zero() {
         assert_ne!(free_port().expect("a free port"), 0);
+    }
+
+    #[test]
+    fn listening_port_reads_each_startup_line() {
+        let log = "\u{1b}[2m2026-10-16T00:00:00Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m rift_http_proxy::admin_api::server: \
+                   Rift Admin API (Mountebank-compatible) listening on http://0.0.0.0:51234\n\
+                   INFO rift_http_proxy::server: Metrics server listening on http://0.0.0.0:51235/metrics\n\
+                   INFO rift_http_proxy::front_door::listener: Front door listening on http://0.0.0.0:51236\n";
+        assert_eq!(
+            listening_port(log, "Admin API (Mountebank-compatible) listening on"),
+            Some(51234)
+        );
+        assert_eq!(
+            listening_port(log, "Metrics server listening on"),
+            Some(51235)
+        );
+        assert_eq!(listening_port(log, "Front door listening on"), Some(51236));
+        assert_eq!(
+            listening_port("starting up\n", "Front door listening on"),
+            None
+        );
     }
 }
