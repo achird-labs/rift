@@ -287,6 +287,10 @@
           "default": "text",
           "description": "Response mode: \"text\" (default) or \"binary\" (body is base64-encoded)"
         },
+        "_proxyResponseTime": {
+          "default": null,
+          "description": "The proxy round trip in milliseconds, written on each response a proxy records, as\nMountebank writes it. A number marks a recorded response, which\n`DELETE /imposters/:port/savedProxyResponses` removes; any other value is kept as written."
+        },
         "body": true,
         "headers": {
           "$ref": "#/$defs/MultiValueHeaders",

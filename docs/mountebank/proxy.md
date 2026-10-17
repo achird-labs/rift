@@ -50,7 +50,7 @@ What a proxy records depends on whether it has `predicateGenerators` (or `addWai
   it keeps the first response for each request in an internal store, so the upstream sees each
   request once. A request is identified by its method, path, query string and request body;
   headers are not part of the key, so use `predicateGenerators` (for example
-  `{"matches": {"headers": {"X-Tenant": true}}}`) to key on one. `DELETE /imposters/{port}/savedProxyResponses` clears that store. Its recordings are
+  `{"matches": {"headers": {"X-Tenant": true}}}`) to key on one. `DELETE /imposters/{port}/savedProxyResponses` clears that store, and the recorded responses described below. Its recordings are
   not stubs, so they do not appear in `GET /imposters/{port}` or an export; use
   `predicateGenerators` to record exportable stubs (see
   [Differences from Mountebank](differences.md)). `proxyAlways` and `proxyTransparent` forward every
@@ -110,6 +110,12 @@ As in Mountebank, a recorded stub is placed relative to the proxy stub that answ
   still shows append order (`[A, B, C, U]`). Added in the middle of a `repeat` run, the response
   splits that run for good: `[A×2, B]` that has served one `A` cycles `A B A U` from then on. Any
   later edit of the stub returns it to list order, from the response that was due next.
+
+Each recorded response carries `_proxyResponseTime` in its `is`, the upstream round trip in
+milliseconds, as in Mountebank. It is the mark `DELETE /imposters/{port}/savedProxyResponses` reads:
+every response carrying a numeric one is removed, a stub left empty goes, and every remaining stub
+starts its cycle over. `?replayable=true` and `rift save` leave it out, so a replayed export holds
+no saved proxy responses.
 
 A `proxyAlways` recording made without `predicateGenerators` (with `addWaitBehavior` or
 `addDecorateBehavior`) has no predicates. It therefore merges into the first stub after the proxy

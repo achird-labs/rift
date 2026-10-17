@@ -2269,20 +2269,18 @@ impl ImposterManager {
         self.persist_imposter_checked(&imposter).await
     }
 
-    /// Clear an imposter's saved proxy responses (`DELETE /imposters/{port}/savedProxyResponses`):
-    /// the proxy store, and every stub a proxy recorded (issue #1239). When stubs were removed the
-    /// change is announced and persisted like any other stub mutation.
+    /// Clear an imposter's saved proxy responses (`DELETE /imposters/{port}/savedProxyResponses`),
+    /// as [`Imposter::clear_proxy_responses`] describes. Every cycle restarts, so a sequencer's
+    /// cursors are reset for the whole port, as a bulk replace resets them. Only a changed stub set
+    /// is announced and persisted: a cursor restart alone is not a config change.
     pub async fn clear_proxy_responses(&self, port: u16) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
-        let removed = imposter.clear_proxy_responses();
-        if removed.is_empty() {
-            return Ok(());
-        }
+        let cleared = imposter.clear_proxy_responses();
         if let Some(sequencer) = &self.sequencer {
-            for stub in &removed {
-                let key = crate::imposter::reconcile::stub_key(stub, 0);
-                sequencer.reset_scope(port, Some(&key));
-            }
+            sequencer.reset_scope(port, None);
+        }
+        if !cleared.changed {
+            return Ok(());
         }
         self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
@@ -2691,6 +2689,26 @@ mod tests {
         assert_eq!(json["protocol"], "http");
 
         manager.delete_imposter(port_0).await.unwrap();
+    }
+
+    // Issue #1519: a clear that changes no stub only restarts cursors, which is not a config change.
+    #[tokio::test]
+    async fn a_clear_that_changes_no_stub_writes_nothing_to_the_datadir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        let config = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "stubs": [{"responses": [{"is": {"body": "a"}}, {"is": {"body": "b"}}]}]
+        }))
+        .expect("config");
+        let port_0 = manager.create_imposter(config).await.expect("create");
+        let file = dir.path().join(format!("{port_0}.json"));
+        std::fs::remove_file(&file).expect("the create wrote the file");
+
+        manager.clear_proxy_responses(port_0).await.expect("clear");
+        assert!(!file.exists(), "nothing changed, so nothing is persisted");
+
+        manager.delete_imposter(port_0).await.expect("delete");
     }
 
     // Issue #1181: a behaviors block on a proxy response used to be erased from the persisted file,
@@ -5801,6 +5819,27 @@ mod tests {
                 recorder.resets.lock().contains(&(port_0, None)),
                 "imposter teardown is the port-wide GC hook"
             );
+        }
+
+        // Issue #1519: clearing saved proxy responses restarts every stub's cycle, as Mountebank
+        // does, so it resets the whole port even when nothing was recorded.
+        #[tokio::test]
+        async fn clearing_proxy_responses_resets_the_whole_port() {
+            let (recorder, manager) = manager_with_recorder();
+            let port_0 = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http",
+                    "stubs": [cycling_stub_json()]
+                })))
+                .await
+                .expect("create");
+            manager.clear_proxy_responses(port_0).await.expect("clear");
+            assert!(
+                recorder.resets.lock().contains(&(port_0, None)),
+                "{:?}",
+                recorder.resets.lock()
+            );
+            manager.delete_all().await;
         }
 
         // A failing sequencer surfaces as the structured backend error (#318), never a

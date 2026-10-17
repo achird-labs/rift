@@ -425,6 +425,7 @@ pub fn get_rift_script_config(response: &StubResponse) -> Option<RiftScriptConfi
 /// headers (e.g., multiple `Set-Cookie`), which are stored as separate values in
 /// the stub's `IsResponse` (multi-value headers, issue #238). Hop-by-hop headers
 /// are dropped.
+#[allow(clippy::too_many_arguments)]
 pub fn create_stub_from_proxy_response(
     predicates: Vec<Predicate>,
     status: u16,
@@ -433,6 +434,7 @@ pub fn create_stub_from_proxy_response(
     latency_ms: Option<u64>,
     decorate_fn: Option<String>,
     recorded_from: Option<String>,
+    response_time_ms: u64,
 ) -> super::types::Stub {
     // Group values per key so multiple values for one header (e.g. Set-Cookie) survive replay.
     //
@@ -472,7 +474,9 @@ pub fn create_stub_from_proxy_response(
         ResponseMode::Text
     };
 
-    let is_response = IsResponse::new(status, response_headers, body_value, mode);
+    let mut is_response = IsResponse::new(status, response_headers, body_value, mode);
+    // The mark the clear reads (issue #1519): it travels with the response into a merged stub.
+    is_response.proxy_response_time = Some(serde_json::Value::from(response_time_ms));
 
     // Build behaviors object if needed
     let behaviors = if latency_ms.is_some() || decorate_fn.is_some() {
@@ -951,7 +955,8 @@ mod tests {
             ("Content-Type".to_string(), "text/html".to_string()),
         ];
 
-        let stub = create_stub_from_proxy_response(vec![], 200, &headers, b"OK", None, None, None);
+        let stub =
+            create_stub_from_proxy_response(vec![], 200, &headers, b"OK", None, None, None, 0);
 
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => {
@@ -975,7 +980,8 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let stub = create_stub_from_proxy_response(vec![], 200, &headers, b"OK", None, None, None);
+        let stub =
+            create_stub_from_proxy_response(vec![], 200, &headers, b"OK", None, None, None, 0);
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => is.headers.clone(),
             _ => panic!("Expected StubResponse::Is"),
@@ -1013,7 +1019,8 @@ mod tests {
             ("Keep-Alive".to_string(), "timeout=5".to_string()),
         ];
 
-        let stub = create_stub_from_proxy_response(vec![], 200, &headers, b"OK", None, None, None);
+        let stub =
+            create_stub_from_proxy_response(vec![], 200, &headers, b"OK", None, None, None, 0);
 
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => {
@@ -1045,7 +1052,7 @@ mod tests {
         let binary_body: Vec<u8> = vec![0x00, 0xFF, 0xFE, 0xFD, 0x89, 0x50, 0x4E, 0x47];
 
         let stub =
-            create_stub_from_proxy_response(vec![], 200, &[], &binary_body, None, None, None);
+            create_stub_from_proxy_response(vec![], 200, &[], &binary_body, None, None, None, 0);
 
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => {
@@ -1066,8 +1073,16 @@ mod tests {
 
     #[test]
     fn test_create_stub_text_body_not_base64() {
-        let stub =
-            create_stub_from_proxy_response(vec![], 200, &[], b"Hello, World!", None, None, None);
+        let stub = create_stub_from_proxy_response(
+            vec![],
+            200,
+            &[],
+            b"Hello, World!",
+            None,
+            None,
+            None,
+            0,
+        );
 
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => {
@@ -1092,6 +1107,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         match &stub.responses[0] {
@@ -1108,7 +1124,7 @@ mod tests {
 
     #[test]
     fn test_create_stub_empty_body() {
-        let stub = create_stub_from_proxy_response(vec![], 204, &[], b"", None, None, None);
+        let stub = create_stub_from_proxy_response(vec![], 204, &[], b"", None, None, None, 0);
 
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => {
@@ -1133,6 +1149,7 @@ mod tests {
             Some(150),
             Some("function(request, response) {}".to_string()),
             None,
+            0,
         );
 
         match &stub.responses[0] {
@@ -1215,13 +1232,25 @@ mod tests {
             None,
             None,
             Some("http://upstream:8080".to_string()),
+            42,
         );
         assert_eq!(stub.recorded_from.as_deref(), Some("http://upstream:8080"));
     }
 
+    // Issue #1519: every recorded response carries its round trip, the mark the clear reads.
+    #[test]
+    fn a_recorded_response_carries_its_proxy_response_time() {
+        let stub = create_stub_from_proxy_response(vec![], 200, &[], b"OK", None, None, None, 42);
+        assert!(stub.responses[0].is_recorded());
+        assert_eq!(
+            serde_json::to_value(&stub.responses[0]).expect("prints")["is"]["_proxyResponseTime"],
+            42
+        );
+    }
+
     #[test]
     fn test_create_stub_recorded_from_none_when_not_provided() {
-        let stub = create_stub_from_proxy_response(vec![], 200, &[], b"OK", None, None, None);
+        let stub = create_stub_from_proxy_response(vec![], 200, &[], b"OK", None, None, None, 0);
         assert!(stub.recorded_from.is_none());
     }
 

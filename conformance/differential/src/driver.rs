@@ -231,9 +231,10 @@ async fn compare_stored(
                         *set = canon::recorded_stubs(&document);
                     }
                 }
-                // A `proxyAlways` recording merged into a stub the case wrote is marked only by
-                // Mountebank (`_proxyResponseTime` on the response; Rift marks whole recorded
-                // stubs). Either engine's mark makes it a recorded stub on both sides (#1513).
+                // A `proxyAlways` recording merged into a stub the case wrote carries
+                // `_proxyResponseTime` on the response in both engines (#1519), and Rift also marks
+                // whole recorded stubs. Either engine's mark makes it a recorded stub on both sides
+                // (#1513).
                 let either: BTreeSet<usize> = recorded[0].union(&recorded[1]).copied().collect();
                 recorded = [either.clone(), either];
             }

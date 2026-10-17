@@ -11,20 +11,18 @@ record.
 
 ## [Unreleased]
 
-### Security
+### Added
 
-- **`--local-only` (`MB_LOCAL_ONLY`) now refuses non-loopback clients on every imposter port and on
-  the front door, as Mountebank does** (#1523). Before, it only confined the admin API and
-  `/metrics`, so imposters stayed reachable from other hosts. A refused client's connection is
-  closed at accept, before TLS, and the request is not recorded; `rift_blocked_connections_total`
-  counts refusals. Loopback means `127.0.0.0/8`, `::1` and their IPv4-mapped forms. Clients in Linux
-  Docker containers that reach the host through the bridge gateway (`172.17.0.1`) are now refused.
-  Docker Desktop delivers container traffic from loopback, so it is still admitted, as in
-  Mountebank. Imposter binds are unchanged. An `ImposterManager` injected through
-  `ServerBuilder::manager` is unaffected; call `ImposterManager::with_peer_policy` on it to opt in.
+- **Recorded proxy responses carry `_proxyResponseTime`** (ms), as Mountebank's do, and an imported
+  one is kept instead of dropped (#1519). `?replayable=true` and `rift save` leave it out, as
+  Mountebank's replayable form does.
 
 ### Changed
 
+- **`DELETE /imposters/:port/savedProxyResponses` now also removes responses a `proxyAlways` proxy
+  added to existing stubs, and restarts every remaining stub's response cycle**, as Mountebank does
+  (#1519). Any `is` response carrying a numeric `_proxyResponseTime` is removed, whoever wrote it,
+  and a stub left with no responses goes. Recorded requests are kept.
 - **`PUT /imposters` now resets the runtime state of every imposter in the body, as Mountebank's
   delete-and-recreate does** (#1518): response cycles, recorded requests and `numberOfRequests`,
   injection state, scenario and flow state, and saved `proxyOnce` responses. The reset is in place,
@@ -123,6 +121,18 @@ record.
   may not bind it, or the host does not resolve. `PUT` keeps its `created` / `failed` report and
   stays `500` if any failure is an engine fault. `/admin/reload`, `--configfile` startup and the FFI
   are unchanged.
+
+### Security
+
+- **`--local-only` (`MB_LOCAL_ONLY`) now refuses non-loopback clients on every imposter port and on
+  the front door, as Mountebank does** (#1523). Before, it only confined the admin API and
+  `/metrics`, so imposters stayed reachable from other hosts. A refused client's connection is
+  closed at accept, before TLS, and the request is not recorded; `rift_blocked_connections_total`
+  counts refusals. Loopback means `127.0.0.0/8`, `::1` and their IPv4-mapped forms. Clients in Linux
+  Docker containers that reach the host through the bridge gateway (`172.17.0.1`) are now refused.
+  Docker Desktop delivers container traffic from loopback, so it is still admitted, as in
+  Mountebank. Imposter binds are unchanged. An `ImposterManager` injected through
+  `ServerBuilder::manager` is unaffected; call `ImposterManager::with_peer_policy` on it to opt in.
 
 ## [0.22.0] - 2026-10-16
 

@@ -291,5 +291,5 @@ Each of these is described where the feature is:
 - String predicate operators fold ASCII case only; `matches` folds Unicode — [Predicates](predicates.md).
 - An unreachable proxy upstream answers `502` — [Proxy](proxy.md).
 - `protocol` is optional and defaults to `http` — [Imposters](imposters.md).
-- A proxy-recorded stub carries `recordedFrom` — [Imposters](imposters.md).
+- A proxy-recorded stub carries `recordedFrom` (Rift only, per stub) — [Imposters](imposters.md). Each recorded response also carries `_proxyResponseTime`, the per-response mark both engines share — [Proxy](proxy.md).
 - Rift-only config keys print with `?replayable=true`, and the error envelope carries `type` — [API](../api/index.md).

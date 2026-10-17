@@ -362,9 +362,10 @@ See [Behaviors]({{ site.baseurl }}/mountebank/behaviors/#repeat) for more on the
 
 - Cycling state is **per-stub** - each stub maintains its own position
 - State **resets** when the imposter is deleted and recreated, when the stub is replaced at its
-  index (`PUT /imposters/:port/stubs/:index`, even with identical content), and when the whole
-  stub list is replaced (`PUT /imposters/:port/stubs`), and for every imposter in a
-  `PUT /imposters` body (unless `?reconcile=true`), as in Mountebank
+  index (`PUT /imposters/:port/stubs/:index`, even with identical content), when the whole
+  stub list is replaced (`PUT /imposters/:port/stubs`), for every imposter in a
+  `PUT /imposters` body (unless `?reconcile=true`), and on
+  `DELETE /imposters/{port}/savedProxyResponses`, which restarts every stub's cycle, as in Mountebank
 - State is **kept** when another stub is inserted, deleted or replaced, when the stub is moved,
   when it is replaced by id (`PUT …/stubs/by-id/:id`, a Rift extension), and when a reload leaves
   the stub unchanged
