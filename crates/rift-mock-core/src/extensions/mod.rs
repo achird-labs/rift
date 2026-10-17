@@ -43,7 +43,9 @@ pub use exchange_inspector::{
 #[allow(unused_imports)]
 pub use flow_state::{CasOutcome, FlowStore, FlowStoreProvider, NoOpFlowStore};
 #[allow(unused_imports)]
-pub use metrics::{AcceptErrorCounters, AcceptOutageGuard, collect_metrics, record_request};
+pub use metrics::{
+    AcceptErrorCounters, AcceptOutageGuard, PeerCheck, collect_metrics, record_request,
+};
 #[allow(unused_imports)]
 pub use no_match::{NoMatchContext, NoMatchDirective, NoMatchInterceptor};
 // `Router` went with the reverse-proxy mode (#975); `routing` now exposes only the

@@ -262,6 +262,23 @@ and is left with none. A successful `PUT` gives every imposter in the body fresh
 Mountebank's recreate does; `?reconcile=true` keeps the state of unchanged imposters instead (see
 [`PUT /imposters`](../api/index.md#put-imposters)).
 
+## `--local-only`
+
+Both engines refuse a client that is not local on every imposter, and neither narrows imposter binds.
+Three differences:
+
+- **Refusal point.** Mountebank completes the TLS handshake, logs and parses the request, then
+  destroys the socket. Rift refuses at accept, before TLS. Either way the client gets no response
+  and the request is not recorded.
+- **Admitted set.** Rift admits `127.0.0.0/8`, `::1` and their IPv4-mapped forms. Mountebank admits
+  the loopback interface's exact addresses, which adds macOS's `fe80::1%lo0` and, on Linux, excludes
+  `127.0.0.2` and above.
+- **Admin API and `/metrics`.** Rift binds them to loopback (`127.0.0.1` and `::1`); Mountebank binds
+  every interface and refuses non-local clients. Rift's front door, which Mountebank has no
+  counterpart for, refuses the same clients as the imposters.
+
+`--ip-whitelist` remains not enforced (#879).
+
 ## Elsewhere in these docs
 
 Each of these is described where the feature is:

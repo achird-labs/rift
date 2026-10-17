@@ -16,10 +16,12 @@ use crate::behaviors::ResponseSequencer;
 use crate::extensions::decorate::ResponseDecorator;
 use crate::extensions::exchange_inspector::ExchangeInspectorProvider;
 use crate::extensions::flow_state::FlowStoreProvider;
+use crate::extensions::metrics::PeerCheck;
 use crate::extensions::no_match::NoMatchInterceptor;
 use crate::imposter::journal::RequestJournal;
 use crate::proxy::network::{
-    AcceptBackoff, AcceptErrorClass, AcceptErrorEvent, AcceptErrorLog, classify_accept_error,
+    AcceptBackoff, AcceptErrorClass, AcceptErrorEvent, AcceptErrorLog, PeerPolicy,
+    classify_accept_error,
 };
 use crate::recording::ProxyRecordingStore;
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -399,6 +401,9 @@ pub struct ImposterManager {
     /// The `host` an imposter binds when its config names none (issue #1517). See
     /// [`Self::with_default_host`].
     default_host: Option<Arc<str>>,
+    /// Which clients every imposter's accept loops, and a front door over this manager, admit
+    /// (issue #1523). See [`Self::with_peer_policy`].
+    peer_policy: PeerPolicy,
     /// Upper bound on how long `delete` waits for a torn-down imposter's in-flight connections to
     /// drain before returning anyway with a warning (issue #596). Never configurable at runtime;
     /// overridable only in tests via [`Self::with_conn_drain`].
@@ -444,6 +449,7 @@ impl ImposterManager {
             accept_runtimes: None,
             serve_unbound: false,
             default_host: None,
+            peer_policy: PeerPolicy::Any,
             conn_drain: DEFAULT_CONN_DRAIN,
             event_bus: Arc::new(super::events::AdminEventBus::new()),
         }
@@ -489,6 +495,30 @@ impl ImposterManager {
     pub fn with_default_host(mut self, host: Option<String>) -> Self {
         self.default_host = host.map(Arc::from);
         self
+    }
+
+    /// Refuse imposter clients the policy does not admit: Mountebank's `--localOnly`, which refuses
+    /// every non-loopback client on every imposter (`util/ip.js:5-52`, issue #1523). The default,
+    /// [`PeerPolicy::Any`], serves everyone.
+    ///
+    /// Checked once per accepted connection on every accept loop, before socket tuning, fault
+    /// wrapping and TLS: a refused client's socket is dropped, so it gets no handshake and no
+    /// response, and is never recorded or counted in `numberOfRequests`. A front door bound over
+    /// this manager reads it too, through [`Self::peer_policy`]. Binds are unchanged: an imposter
+    /// still listens where its `host` says, as Mountebank's do.
+    ///
+    /// `rift`'s own server sets this from `--local-only` only on the manager it builds itself; an
+    /// injected manager keeps whatever its builder chose.
+    #[must_use]
+    pub fn with_peer_policy(mut self, policy: PeerPolicy) -> Self {
+        self.peer_policy = policy;
+        self
+    }
+
+    /// The policy set by [`Self::with_peer_policy`].
+    #[must_use]
+    pub fn peer_policy(&self) -> PeerPolicy {
+        self.peer_policy
     }
 
     /// The host an imposter with this config binds: its own `host`, else [`Self::with_default_host`].
@@ -1209,6 +1239,7 @@ impl ImposterManager {
         // Read socket/HTTP tuning once per imposter, not per accepted connection.
         let socket_tuning = crate::proxy::network::SocketTuning::from_env();
         let http_tuning = crate::proxy::network::HttpTuning::from_env();
+        let peer_policy = self.peer_policy;
         // `None` (the default) preserves today's behavior exactly: no semaphore, no permit,
         // accept as fast as the kernel hands connections over. Created once per imposter and
         // shared by every listener so `RIFT_MAX_CONNECTIONS` keeps its global meaning under
@@ -1225,6 +1256,7 @@ impl ImposterManager {
             // so the accept path pays no label lookup or allocation (issue #746).
             let accept_counter = crate::extensions::metrics::ACCEPTED_CONNECTIONS_TOTAL
                 .with_label_values(&[index.to_string().as_str()]);
+            let peer_check = PeerCheck::new(peer_policy, "imposter", port);
             let loop_future = Self::run_accept_loop(
                 listener,
                 Arc::clone(imposter),
@@ -1237,6 +1269,7 @@ impl ImposterManager {
                 http_tuning,
                 port,
                 accept_counter,
+                peer_check,
             );
             serve_handles.push(match &self.accept_runtimes {
                 Some(runtimes) => runtimes[index].spawn(loop_future),
@@ -1331,6 +1364,7 @@ impl ImposterManager {
         http_tuning: crate::proxy::network::HttpTuning,
         port: u16,
         accept_counter: prometheus::Counter,
+        mut peer_check: PeerCheck,
     ) {
         // Per-loop, unshared: N loops on one port degrade independently, and cross-loop
         // coordination would add a shared cache line to the accept path for no behavioral gain
@@ -1383,6 +1417,13 @@ impl ImposterManager {
                                      suppressed error(s)"
                                 );
                                 backoff.reset();
+                            }
+                            // `--local-only` (issue #1523): refused before tuning, FaultIo and
+                            // TLS. Dropping the stream is Mountebank's `socket.destroy()`; the
+                            // permit drops with this iteration, so a refusal holds no slot.
+                            if !peer_check.admits(addr) {
+                                drop(stream);
+                                continue;
                             }
                             crate::proxy::network::apply_stream_tuning(&stream, &socket_tuning);
                             let imposter = Arc::clone(&imposter_clone);
@@ -8205,6 +8246,229 @@ mod tests {
                 .expect("apply validates");
             assert!(manager.imposters.get(port).expect("registered").is_bound());
             assert_v4_loopback_only(port);
+            manager.delete_all().await;
+        }
+    }
+
+    // Issue #1523: Mountebank's `--localOnly` refuses every client outside the loopback interface on
+    // every imposter (`util/ip.js:5-52`, `models/imposter.js:103-107`). The policy is a manager
+    // property, checked at accept, so a refused client never reaches the handler: nothing is
+    // recorded or counted, and an HTTPS client gets no handshake.
+    mod peer_policy {
+        use super::*;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        const V4_LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        /// The address this host routes off-host traffic from (#1517's UDP trick: a `connect` sends
+        /// nothing, it only picks the source). `None` where only loopback exists, and the test
+        /// then has nothing to refuse, so it says so and passes.
+        fn non_loopback_local_ip() -> Option<IpAddr> {
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+            socket.connect("192.0.2.1:9").ok()?;
+            let ip = socket.local_addr().ok()?.ip();
+            (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+        }
+
+        fn remote_or_skip(test: &str) -> Option<IpAddr> {
+            let ip = non_loopback_local_ip();
+            if ip.is_none() {
+                eprintln!("{test}: skipped, this host has no non-loopback address");
+            }
+            ip
+        }
+
+        /// One `GET /` over a raw socket, returning whatever came back. A refused client's
+        /// connection is closed with nothing written, which reads as EOF or a reset depending on
+        /// timing, so either is "nothing came back" (an empty string).
+        async fn raw_get(ip: IpAddr, port: u16) -> String {
+            let connect = tokio::net::TcpStream::connect(SocketAddr::new(ip, port));
+            let Ok(Ok(mut stream)) = tokio::time::timeout(Duration::from_secs(2), connect).await
+            else {
+                return String::new();
+            };
+            let request = b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+            if stream.write_all(request).await.is_err() {
+                return String::new();
+            }
+            let mut buf = Vec::new();
+            match tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut buf)).await {
+                // EOF or a reset: keep whatever arrived first.
+                Ok(_) => String::from_utf8_lossy(&buf).into_owned(),
+                Err(_) => panic!("{ip}:{port}: the connection neither answered nor closed"),
+            }
+        }
+
+        fn served(response: &str) -> bool {
+            response.starts_with("HTTP/1.1 200")
+        }
+
+        fn recording(host: Option<&str>, protocol: &str) -> ImposterConfig {
+            let mut v = json!({
+                "protocol": protocol,
+                "recordRequests": true,
+                "stubs": [stub_json("local")]
+            });
+            if let Some(h) = host {
+                v["host"] = json!(h);
+            }
+            imposter_cfg(v)
+        }
+
+        /// Loopback is served and recorded; the off-host client gets a closed connection and
+        /// leaves no trace in `numberOfRequests` or `requests`.
+        async fn assert_refuses_remote(manager: &ImposterManager, port: u16, remote: IpAddr) {
+            let local = raw_get(V4_LOOPBACK, port).await;
+            assert!(served(&local), "127.0.0.1:{port} must be served: {local:?}");
+            let refused = raw_get(remote, port).await;
+            assert!(
+                refused.is_empty(),
+                "{remote}:{port} must get a closed connection with no response under \
+                 LoopbackOnly, got {refused:?}"
+            );
+            let imposter = manager.get_imposter(port).expect("imposter");
+            assert_eq!(
+                imposter.get_request_count(),
+                1,
+                "only the loopback request counts"
+            );
+            let recorded = imposter.get_recorded_requests();
+            assert_eq!(recorded.len(), 1, "only the loopback request is recorded");
+            assert!(
+                recorded[0].request_from.contains("127.0.0.1"),
+                "the recorded request is the loopback one: {}",
+                recorded[0].request_from
+            );
+        }
+
+        #[tokio::test]
+        async fn loopback_only_refuses_a_remote_client_on_an_ipv4_wildcard_imposter() {
+            let Some(remote) = remote_or_skip("ipv4 wildcard") else {
+                return;
+            };
+            let manager = ImposterManager::new().with_peer_policy(PeerPolicy::LoopbackOnly);
+            assert_eq!(manager.peer_policy(), PeerPolicy::LoopbackOnly);
+            let port = manager
+                .create_imposter(recording(Some("0.0.0.0"), "http"))
+                .await
+                .expect("create");
+            assert_refuses_remote(&manager, port, remote).await;
+            manager.delete_all().await;
+        }
+
+        // A dual-stack listener sees both clients as IPv4-mapped (`::ffff:…`): loopback must still
+        // be admitted, the remote still refused. The host-less imposter binds `[::]` too (#1514).
+        #[tokio::test]
+        async fn loopback_only_canonicalises_ipv4_mapped_peers_on_a_dual_stack_imposter() {
+            let Some(remote) = remote_or_skip("dual stack") else {
+                return;
+            };
+            if std::net::TcpListener::bind("[::]:0").is_err() {
+                eprintln!("dual stack: skipped, this host has no IPv6");
+                return;
+            }
+            let manager = ImposterManager::new().with_peer_policy(PeerPolicy::LoopbackOnly);
+            for host in [Some("::"), None] {
+                let port = manager
+                    .create_imposter(recording(host, "http"))
+                    .await
+                    .expect("create");
+                assert_refuses_remote(&manager, port, remote).await;
+            }
+            manager.delete_all().await;
+        }
+
+        // Refused before TLS: the remote client's handshake fails because none is attempted.
+        #[tokio::test]
+        async fn loopback_only_refuses_a_remote_https_client_before_the_handshake() {
+            let Some(remote) = remote_or_skip("https") else {
+                return;
+            };
+            let manager = ImposterManager::new().with_peer_policy(PeerPolicy::LoopbackOnly);
+            let port = manager
+                .create_imposter(recording(Some("0.0.0.0"), "https"))
+                .await
+                .expect("create");
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .tls_danger_accept_invalid_certs(true)
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("client");
+            let local = client
+                .get(format!("https://127.0.0.1:{port}/"))
+                .send()
+                .await
+                .expect("loopback is served over TLS");
+            assert_eq!(local.status().as_u16(), 200);
+            let refused = client.get(format!("https://{remote}:{port}/")).send().await;
+            assert!(
+                refused.is_err(),
+                "{remote}:{port} must fail before a response under LoopbackOnly: {refused:?}"
+            );
+            assert_eq!(
+                manager
+                    .get_imposter(port)
+                    .expect("imposter")
+                    .get_request_count(),
+                1
+            );
+            manager.delete_all().await;
+        }
+
+        // The #143 heal goes through `spawn_accept_loops` again; the healed listener still refuses.
+        #[tokio::test]
+        async fn a_rebound_listener_keeps_refusing_remote_clients() {
+            let Some(remote) = remote_or_skip("rebind") else {
+                return;
+            };
+            // A plain listener on the IPv4 wildcard the imposter will bind, so its reusable bind
+            // cannot join it.
+            let squatter = std::net::TcpListener::bind("0.0.0.0:0").expect("squat");
+            let port = squatter.local_addr().expect("squat addr").port();
+            let manager = ImposterManager::new()
+                .with_serve_unbound(true)
+                .with_peer_policy(PeerPolicy::LoopbackOnly);
+            let mut cfg = recording(Some("0.0.0.0"), "http");
+            cfg.port = Some(port);
+            manager
+                .apply_config(vec![cfg.clone()])
+                .await
+                .expect("apply validates");
+            assert!(
+                !manager.imposters.get(port).expect("registered").is_bound(),
+                "the squatted port leaves the imposter unbound"
+            );
+
+            drop(squatter);
+            manager
+                .apply_config(vec![cfg])
+                .await
+                .expect("apply validates");
+            assert!(manager.imposters.get(port).expect("registered").is_bound());
+            assert_refuses_remote(&manager, port, remote).await;
+            manager.delete_all().await;
+        }
+
+        // Pins the default: a manager nobody configured serves every client, as before #1523.
+        #[tokio::test]
+        async fn the_default_manager_serves_remote_clients() {
+            let Some(remote) = remote_or_skip("default") else {
+                return;
+            };
+            let manager = ImposterManager::new();
+            assert_eq!(manager.peer_policy(), PeerPolicy::Any);
+            let port = manager
+                .create_imposter(recording(Some("0.0.0.0"), "http"))
+                .await
+                .expect("create");
+            let response = raw_get(remote, port).await;
+            assert!(
+                served(&response),
+                "{remote}:{port} must be served: {response:?}"
+            );
             manager.delete_all().await;
         }
     }

@@ -175,7 +175,7 @@ Server options:
       --datadir <DIR>              Directory for persistent imposter storage
       --scripts-dir <DIR>          Root directory for admin-API `file:`/`ref:` script resolution; references that escape it are rejected (unset ⇒ file-backed scripts via the admin API are refused)
       --allow-injection            Enable JavaScript injection in responses (alias: --allowInjection)
-      --local-only                 Only accept connections from localhost (binds both the admin API and /metrics to `127.0.0.1` and `::1`)
+      --local-only                 Only accept connections from localhost: binds the admin API and /metrics to `127.0.0.1` and `::1`, and refuses non-loopback clients on every imposter port and the front door
       --require-admin-auth         Refuse to start when the admin API would bind a non-loopback address with no --api-key (default: warn)
       --loglevel <LEVEL>           Log level: trace, debug, info, warn, error (an unrecognised value is refused) [default: info]
       --runtime <MODE>             Runtime topology: work-stealing (default) or per-core[=N] (RFC-712; experimental, Linux-first — macOS falls back with a warning, Windows rejects it)
@@ -241,7 +241,7 @@ What does work inside Rift:
 
 | Goal | Use |
 |:-----|:----|
-| Refuse connections from other hosts | `--local-only` (binds `127.0.0.1` and `::1`; covers `/metrics` too since 0.17.0) |
+| Refuse connections from other hosts | `--local-only`: the admin API and `/metrics` bind `127.0.0.1` and `::1` (`/metrics` since 0.17.0), and every imposter port and the front door refuse non-loopback clients at accept (#1523) |
 | Require a credential on the admin API | `--api-key <token>` |
 | Fail startup if the admin plane is exposed and keyless | `--require-admin-auth` |
 
@@ -388,7 +388,10 @@ such as `10.0.0.5`.
 `--host` also confines imposters, as in Mountebank: an imposter created without a `host` binds the
 server's `--host`, so `--host 127.0.0.1` keeps host-less imposters on loopback as well as the admin
 API. An imposter that names its own `host` (`"host": "0.0.0.0"`) binds that instead. `--local-only`
-does not narrow imposter binds; it confines the admin API and `/metrics` only.
+does not narrow imposter binds. As in Mountebank, an imposter still listens where its `host` says,
+but refuses every client that is not loopback (`127.0.0.0/8`, `::1`, and their IPv4-mapped forms):
+the connection is closed at accept, before TLS, and the request is not recorded. The front door
+refuses the same clients. `rift_blocked_connections_total{listener}` counts the refusals.
 
 The same rule applies at every door onto the admin plane, so an embedded host gets it too: the
 C-ABI `rift_serve_admin` accepts `"requireAdminAuth": true` in its options, and an embedder building
@@ -512,7 +515,7 @@ wins over the built-in default (and over an `--rcfile` value — see [RC file](#
 | `RIFT_IMPOSTERS` | Imposter source URIs (env alias of `--imposters`) | |
 | `MB_DATADIR` | Persistent storage directory | |
 | `MB_ALLOW_INJECTION` | Enable injection (`true`/`false`) | `false` |
-| `MB_LOCAL_ONLY` | Localhost only | `false` |
+| `MB_LOCAL_ONLY` | Localhost only: admin API and `/metrics` on loopback; imposters and the front door refuse non-loopback clients | `false` |
 | `RIFT_REQUIRE_ADMIN_AUTH` | Refuse to start on a keyless non-loopback admin bind (env alias of `--require-admin-auth`) | `false` |
 | `MB_LOGLEVEL` | Log level (env alias of `--loglevel`). Set-but-empty means `info` | `info` |
 | `MB_APIKEY` | Admin API authorization token (see `--api-key`) | |

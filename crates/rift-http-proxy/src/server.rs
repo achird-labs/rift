@@ -9,7 +9,8 @@ use crate::config_loader::ConfigSource;
 use crate::extensions::metrics;
 use crate::front_door::{CompiledRoutes, RouteTable, RunningFrontDoor, bind_front_door_at};
 use crate::imposter::{
-    ImposterConfig, ImposterManager, Persistence, ScriptBaseDir, TlsDefaults, resolve_scripts,
+    ImposterConfig, ImposterManager, PeerPolicy, Persistence, ScriptBaseDir, TlsDefaults,
+    resolve_scripts,
 };
 use crate::injection_gate::GATED_SCRIPT_SURFACES;
 use crate::intercept_control::{
@@ -125,7 +126,8 @@ pub struct Cli {
     )]
     pub allow_injection: bool,
 
-    /// Only accept requests from localhost: the admin API and /metrics listen on `127.0.0.1` and `::1`
+    /// Only accept requests from localhost: the admin API and /metrics listen on `127.0.0.1` and
+    /// `::1`, and every imposter port and the front door refuse non-loopback clients
     #[arg(
         long,
         env = "MB_LOCAL_ONLY",
@@ -992,9 +994,17 @@ impl ServerBuilder {
                 // Host-less imposters inherit `--host`, as Mountebank's do (issue #1517). Only on
                 // the manager built here: an injected one belongs to an embedder that may have
                 // re-pointed `--host` at its own admin (rift-cluster pins it to loopback).
-                // `--local-only` does not narrow imposter binds; Mountebank's filters connections.
+                // `--local-only` does not narrow imposter binds; like Mountebank's, it refuses
+                // non-loopback clients at accept (issue #1523). Also only on this manager: an
+                // injected one may sit behind a load balancer whose traffic is not loopback.
+                let peer_policy = if cli.local_only {
+                    PeerPolicy::LoopbackOnly
+                } else {
+                    PeerPolicy::Any
+                };
                 let mut built = ImposterManager::with_datadir(cli.datadir.clone())
                     .with_default_host(cli.host.clone())
+                    .with_peer_policy(peer_policy)
                     .with_tls_defaults(tls_defaults)
                     .with_accept_runtimes(self.accept_runtimes)
                     .with_body_limits(body_limits)
@@ -1106,6 +1116,13 @@ impl ServerBuilder {
             "Rift Admin API (Mountebank-compatible) starting on {}",
             crate::listen::http_urls(&admin_bound, "")
         );
+
+        if cli.local_only {
+            info!(
+                "--local-only: admin and /metrics bind loopback; imposters and the front door \
+                 refuse non-loopback clients"
+            );
+        }
 
         if cli.allow_injection {
             info!("JavaScript injection enabled");

@@ -574,6 +574,36 @@ pub fn is_fatal_listener_error(_e: &std::io::Error) -> bool {
     false
 }
 
+/// Which clients an imposter-serving listener admits (issue #1523): every imposter port and the
+/// front door check it once per accepted connection, before any byte is read or TLS is attempted.
+///
+/// `LoopbackOnly` is Mountebank's `--localOnly` (`util/ip.js:5-52`), which admits only the loopback
+/// interface's addresses and refuses everyone else. Two deliberate edges, both host-local: Rift
+/// admits all of `127.0.0.0/8` where Linux Mountebank lists only `127.0.0.1`, and refuses macOS's
+/// `fe80::1%lo0`, which Mountebank lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PeerPolicy {
+    /// Every peer (the default; no `--local-only`).
+    #[default]
+    Any,
+    /// Loopback peers only: `127.0.0.0/8`, `::1`, and their IPv4-mapped forms.
+    LoopbackOnly,
+}
+
+impl PeerPolicy {
+    /// Whether a client at `peer` may be served.
+    ///
+    /// The address is canonicalised first: a dual-stack (`[::]`) listener reports an IPv4 client
+    /// as `::ffff:a.b.c.d`, for which `Ipv6Addr::is_loopback` is false.
+    #[must_use]
+    pub fn admits(self, peer: IpAddr) -> bool {
+        match self {
+            Self::Any => true,
+            Self::LoopbackOnly => peer.to_canonical().is_loopback(),
+        }
+    }
+}
+
 /// How an `accept(2)` error should be handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcceptErrorClass {
@@ -1468,5 +1498,55 @@ mod bind_host_spellings {
                 "round trip for {addr}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod peer_policy {
+    use super::PeerPolicy;
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().expect("IP literal")
+    }
+
+    const LOOPBACK: [&str; 4] = ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1"];
+    const REMOTE: [&str; 5] = [
+        "192.168.1.5",
+        "::ffff:192.168.1.5",
+        "10.0.0.1",
+        "fe80::1",
+        "2001:db8::1",
+    ];
+
+    // A dual-stack listener reports an IPv4 client as `::ffff:a.b.c.d`, which
+    // `Ipv6Addr::is_loopback` alone calls non-loopback: the mapped form must be admitted.
+    #[test]
+    fn loopback_only_admits_every_loopback_spelling() {
+        for peer in LOOPBACK {
+            assert!(
+                PeerPolicy::LoopbackOnly.admits(ip(peer)),
+                "{peer} is loopback"
+            );
+        }
+    }
+
+    // `fe80::1` is macOS's lo0 link-local, which Mountebank admits; refusing it is the safe side.
+    #[test]
+    fn loopback_only_refuses_everything_else() {
+        for peer in REMOTE {
+            assert!(
+                !PeerPolicy::LoopbackOnly.admits(ip(peer)),
+                "{peer} is not loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn any_admits_every_peer() {
+        for peer in LOOPBACK.iter().chain(REMOTE.iter()) {
+            assert!(PeerPolicy::Any.admits(ip(peer)), "{peer}");
+        }
+        assert_eq!(PeerPolicy::default(), PeerPolicy::Any);
     }
 }

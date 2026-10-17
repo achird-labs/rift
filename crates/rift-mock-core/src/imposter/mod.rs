@@ -82,6 +82,8 @@ pub use crate::extensions::flow_state::FlowStoreProvider;
 
 // Re-export manager
 pub use manager::{ImposterManager, TlsDefaults};
+// Which clients the manager's imposters (and a front door over it) admit (issue #1523).
+pub use crate::proxy::PeerPolicy;
 
 // Re-export incremental reconciliation types (issue #316)
 pub use events::{AdminEvent, AdminEventBus, AdminEventKind, ImposterAction};
