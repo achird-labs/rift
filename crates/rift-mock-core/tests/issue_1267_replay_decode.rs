@@ -46,6 +46,13 @@ const BAD_GENERATOR_MATCH_FIELD: &str = r#"{
         "predicateGenerators": [{ "matches": { "pathh": true } }] } }]
 }"#;
 
+/// A `proxy.to` with a path (#1550): every engine before it admitted and stored one, so it is an
+/// admission check, never a decode refusal.
+const BAD_PROXY_TO_PATH: &str = r#"{ "responses": [{ "proxy": { "to": "http://h/x" } }] }"#;
+
+/// A `proxy.to` that is not a URL (#1550), likewise admitted and stored before.
+const BAD_PROXY_TO_URL: &str = r#"{ "responses": [{ "proxy": { "to": "not a url" } }] }"#;
+
 /// A stub with no responses (issue #1372): engines up to v0.21.0 admitted it on every door and
 /// served the imposter's `defaultResponse`, so it is an admission check, never a decode refusal.
 const NO_RESPONSES: &str = r#"{ "predicates": [] }"#;
@@ -167,6 +174,8 @@ fn each_admission_refusal_is_skipped_on_replay_and_reported_by_admission_check()
             BAD_COPY_NS,
             "`copy` behavior `xpath` `using.ns` must be an object mapping each prefix to a namespace URI string",
         ),
+        (BAD_PROXY_TO_PATH, "proxy.to must not contain a path '/x'"),
+        (BAD_PROXY_TO_URL, "proxy.to is not a valid URL: not a url"),
         (NO_RESPONSES, "'responses' must be a non-empty array"),
         (EMPTY_RESPONSES, "'responses' must be a non-empty array"),
     ];

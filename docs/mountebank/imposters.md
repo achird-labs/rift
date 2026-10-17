@@ -57,7 +57,7 @@ and the related fields are covered in [TLS/HTTPS](../features/tls.md).
 | `name` | string | No | Human-readable name |
 | `stubs` | array | No | Request/response mappings |
 | `defaultResponse` | object | No | Response when no stub matches. It also supplies the `statusCode`, `headers`, `body` and `_mode` that an `is` or `inject` response omits |
-| `defaultForward` | string | No | Rift extension: forward an unmatched request to this base URL (takes precedence over `defaultResponse`) |
+| `defaultForward` | string | No | Rift extension: forward an unmatched request to this base URL (takes precedence over `defaultResponse`). Its path prefixes the request's (`http://h/api` sends `/foo` as `/api/foo`); a trailing `/` on it is not doubled, and a query or fragment on it is ignored |
 | `recordRequests` | boolean | No | Store requests for verification (default `false`) |
 | `recordMatches` | boolean | No | **Accepted, no effect**: per-stub `matches` are not recorded. `true` is reported as [`config_key_ignored`](../features/stub-analysis.md#config_key_ignored) in `_rift.warnings` and by `rift-lint` `W017`. Use `recordRequests`: each recorded request carries `matchOutcome` |
 | `allowCORS` | any | No | Enable CORS headers and handle preflight requests when JavaScript-truthy (`true`, `"yes"`, `1` …); printed back in every view as configured |

@@ -26,6 +26,22 @@ Forward every request to a backend server:
 Without `"mode": "proxyTransparent"` the proxy is `proxyOnce`: it forwards the first request for
 each method, path, query and body, then replays that response (see [Proxy Modes](#proxy-modes)).
 
+### `to` is an origin
+
+`to` names where to send the request, not what to send. The upstream receives the request's own
+path and query; only the scheme, host and port are taken from `to`, as in Mountebank.
+
+- An `http` or `https` `to` with a path, such as `"http://api.example.com/v1"`, is refused:
+  `400` (`proxy.to must not contain a path '/v1'`) from `POST`/`PUT /imposters` and the stub
+  routes, a startup error from `--configfile` or `--datadir`, as Mountebank refuses it. A `to`
+  that is not a URL is refused the same way. `rift-lint` reports both as E057.
+- A trailing `/`, a `?query` or a `#fragment` in `to` is accepted and ignored:
+  `"to": "http://api.example.com/"` sends `GET /foo?a=1` for a request to `/foo?a=1`. So is
+  userinfo (`http://user:pw@host`): no `Authorization` header is made from it; use
+  [`injectHeaders`](#inject-headers) to send one.
+- To send every request under a base path, use [`pathRewrite`](#path-rewriting) with an empty
+  `from`: `"pathRewrite": {"from": "", "to": "/v1"}` sends `/foo` as `/v1/foo`.
+
 ---
 
 ## Proxy Modes
@@ -604,6 +620,26 @@ Remove a prefix from paths:
 ```
 
 Request to `/gateway/service/users` → forwards to `/users`
+
+**Add a Prefix:**
+
+`to` cannot carry a path (see [`to` is an origin](#to-is-an-origin)); an empty `from` prefixes
+every request path instead:
+
+```json
+{
+  "proxy": {
+    "to": "https://backend.internal",
+    "mode": "proxyTransparent",
+    "pathRewrite": {
+      "from": "",
+      "to": "/base"
+    }
+  }
+}
+```
+
+Request to `/foo/bar?a=1` → forwards to `/base/foo/bar?a=1`
 
 ---
 

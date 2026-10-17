@@ -130,7 +130,9 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // #1372 `refuse_empty_responses`: an admission check, the same three ways.
         // #1551 `refuse_response_type_count`: door-only (Admission::Checked only; the decoded
         // response holds one type, fixture in issue_1267_replay_decode.rs).
-        22,
+        // #1550 `refuse_proxy_to_path`: an admission check (Admission::Checked only, re-run in
+        // admission_check_stub, fixtures in issue_1267_replay_decode.rs); its call and its parse.
+        24,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",
@@ -139,7 +141,8 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // #1413 `refuse_unreadable_generators`: the shape refusal beside #1353's operator one, an
         // admission check (Admission::Checked only, re-run in admission_check_stub).
         // #1551 `refuse_response_type_count`, two and none: door-only (see above).
-        22,
+        // #1550 `refuse_proxy_to_path`, a path in an http(s) `to`: an admission check (see above).
+        23,
     ),
     ("crates/rift-types/src/wire.rs", "::custom", 4),
     ("crates/rift-types/src/wire.rs", "serde error helper", 0),

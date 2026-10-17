@@ -86,6 +86,8 @@ quamina = { version = "0.7", optional = true }
 memchr.workspace = true
 rand.workspace = true
 urlencoding = "2.1"
+# WHATWG URL parsing for `proxy.to` (issue #1550), the parser Mountebank's `new URL` is.
+url = "2"
 anyhow.workspace = true
 thiserror.workspace = true
 socket2 = "0.6"

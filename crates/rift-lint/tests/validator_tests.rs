@@ -884,6 +884,47 @@ fn e022_not_fired_for_https() {
     assert!(!has_code(&r, "E022"));
 }
 
+/// Issue #1550: the engine refuses an http(s) `to` whose WHATWG path is not `/`, or a `to` that is
+/// not a URL, as Mountebank does.
+#[test]
+fn e057_proxy_to_with_a_path() {
+    for to in [
+        "http://localhost:1/x",
+        "https://localhost:1/a/b?q=1",
+        "http://localhost:1//",
+        "http://not a url",
+    ] {
+        let mut r = LintResult::new();
+        validate_proxy_response(path(), &json!({ "to": to }), "loc", &mut r);
+        assert!(has_code(&r, "E057"), "{to}");
+    }
+    let mut r = LintResult::new();
+    validate_proxy_response(
+        path(),
+        &json!({ "to": "http://localhost:1/x" }),
+        "loc",
+        &mut r,
+    );
+    let issue = r.issues.iter().find(|i| i.code == "E057").expect("E057");
+    assert!(issue.message.contains("'/x'"), "{}", issue.message);
+}
+
+#[test]
+fn e057_not_fired_for_what_mountebank_admits() {
+    for to in [
+        "http://localhost:1",
+        "http://localhost:1/",
+        "http://localhost:1?q=1",
+        "http://localhost:1/#f",
+        "http://localhost:1/.",
+        "http://localhost:1/%2e/",
+    ] {
+        let mut r = LintResult::new();
+        validate_proxy_response(path(), &json!({ "to": to }), "loc", &mut r);
+        assert!(!has_code(&r, "E057"), "{to}");
+    }
+}
+
 #[test]
 fn e023_proxy_to_not_string() {
     let proxy = json!({ "to": 8080 });

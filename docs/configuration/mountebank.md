@@ -53,7 +53,7 @@ No field is strictly required.
 | `mutualAuth` | boolean | Request and **require** a client certificate (`https` only) |
 | `rejectUnauthorized` | boolean | Validate the client certificate against `ca`; requires `ca` |
 | `ca` | string or array | PEM trust anchor(s) client certificates must chain to |
-| `defaultForward` | string | *Rift extension.* Upstream URL an unmatched request is forwarded to (takes precedence over `defaultResponse`) |
+| `defaultForward` | string | *Rift extension.* Upstream base URL an unmatched request is forwarded to (takes precedence over `defaultResponse`). Its path prefixes the request's; a trailing `/` on it is not doubled, and a query or fragment on it is ignored |
 | `strictBehaviors` | boolean | *Rift extension.* Turn a failing behavior into a `500` — see [Strict Behaviors](native.md#strict-behaviors-strictbehaviors) |
 | `enabled` | boolean | Whether the imposter serves traffic (default `true`); toggled by `POST /imposters/{port}/disable` and `/enable` |
 

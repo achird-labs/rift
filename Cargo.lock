@@ -3911,6 +3911,7 @@ dependencies = [
  "serde_norway",
  "tempfile",
  "thiserror 2.0.21",
+ "url",
 ]
 
 [[package]]
@@ -3971,6 +3972,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-test",
+ "url",
  "urlencoding",
  "uuid",
  "x509-parser",

@@ -14,7 +14,7 @@ use super::response::{
 };
 use super::types::{
     DebugMatchResult, DebugRequest, DebugResponse, IsResponse, ProxyResponse, RecordedRequest,
-    ResponseMode, StubResponse,
+    ResponseMode, StubResponse, UpstreamTarget,
 };
 use crate::behaviors::{
     CsvCache, Spliced, SplicedHeaders, authored_headers, header_to_title_case, plain_headers,
@@ -1175,6 +1175,7 @@ async fn handle_request_inner(
             match imposter
                 .handle_proxy_request(
                     proxy_config,
+                    UpstreamTarget::Origin,
                     method_str,
                     &uri,
                     &request_headers,
@@ -2079,6 +2080,7 @@ async fn handle_request_inner(
         return match imposter
             .handle_proxy_request(
                 &proxy_config,
+                UpstreamTarget::Base,
                 method_str,
                 &uri,
                 &request_headers,
