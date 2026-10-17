@@ -1,11 +1,3 @@
----
-layout: default
-title: Mountebank Compatibility
-nav_order: 5.5
-has_children: true
-permalink: /mountebank/
----
-
 # Mountebank Compatibility
 
 Rift implements the [Mountebank](https://www.mbtest.dev/) REST API and configuration format. This allows you to use Rift as a drop-in replacement for Mountebank with significantly better performance.
@@ -15,14 +7,14 @@ publishes as [`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mounte
 `mountebank` npm package stops at 2.9.1. Every pull request that changes the engine replays the
 [differential corpus](https://github.com/achird-labs/rift/tree/master/conformance/differential)
 against Mountebank 2.9.5 and Rift, and a weekly job opens an issue when a newer Mountebank is
-released. The deliberate exceptions are listed in [Differences from Mountebank]({{ site.baseurl }}/mountebank/differences/).
+released. The deliberate exceptions are listed in [Differences from Mountebank](differences.md).
 
 **Scope:** Rift imposters are **HTTP/HTTPS only**. Mountebank also supports `tcp` and `smtp`
-imposters, which Rift rejects — see the [migration guide]({{ site.baseurl }}/getting-started/migration/)
+imposters, which Rift rejects — see the [migration guide](../getting-started/migration.md)
 for the full compatibility table before you migrate. (This is separate from TCP *fault injection*,
 which HTTP imposters do support.)
 
-> New to the model? Start with [Concepts]({{ site.baseurl }}/concepts/) — it explains imposters,
+> New to the model? Start with [Concepts](../concepts/index.md) — it explains imposters,
 > stubs, predicates, responses, and behaviors conceptually, then the Rift-specific stateful features.
 > This section is the syntax-level reference for the Mountebank-compatible surface.
 
@@ -33,6 +25,7 @@ which HTTP imposters do support.)
 ### Imposters
 
 An **imposter** is a mock server listening on a specific port. Each imposter:
+
 - Listens on a configurable port
 - Handles HTTP or HTTPS protocol
 - Contains one or more stubs for request matching
@@ -40,12 +33,14 @@ An **imposter** is a mock server listening on a specific port. Each imposter:
 ### Stubs
 
 A **stub** defines how to respond to matching requests:
+
 - **Predicates**: Rules to match incoming requests
 - **Responses**: What to return when predicates match
 
 ### Predicates
 
 **Predicates** define request matching criteria:
+
 - `equals`, `deepEquals` - Exact match
 - `contains`, `startsWith`, `endsWith` - Partial match
 - `matches` - Regex match
@@ -57,6 +52,7 @@ A **stub** defines how to respond to matching requests:
 ### Behaviors
 
 **Behaviors** modify responses before sending:
+
 - `wait` - Add latency
 - `repeat` - Serve a response several times before moving to the next
 - `copy` - Copy request values to response
@@ -163,9 +159,9 @@ DELETE /imposters
 
 ## Documentation Sections
 
-- [Imposters]({{ site.baseurl }}/mountebank/imposters/) - Creating and configuring mock servers
-- [Predicates]({{ site.baseurl }}/mountebank/predicates/) - Request matching rules
-- [Responses]({{ site.baseurl }}/mountebank/responses/) - Response configuration
-- [Behaviors]({{ site.baseurl }}/mountebank/behaviors/) - Response modification
-- [Proxy Mode]({{ site.baseurl }}/mountebank/proxy/) - Recording and replaying
-- [Differences from Mountebank]({{ site.baseurl }}/mountebank/differences/) - Every deliberate deviation, each pinned by a test
+- [Imposters](imposters.md) - Creating and configuring mock servers
+- [Predicates](predicates.md) - Request matching rules
+- [Responses](responses.md) - Response configuration
+- [Behaviors](behaviors.md) - Response modification
+- [Proxy Mode](proxy.md) - Recording and replaying
+- [Differences from Mountebank](differences.md) - Every deliberate deviation, each pinned by a test

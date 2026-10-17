@@ -1,9 +1,5 @@
 ---
-layout: default
 title: Java / JVM
-parent: Language SDKs
-nav_order: 1
-permalink: /sdk/java/
 ---
 
 # rift-java

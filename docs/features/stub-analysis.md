@@ -1,10 +1,3 @@
----
-layout: default
-title: Stub Analysis
-parent: Features
-nav_order: 5
----
-
 # Stub Analysis
 
 Rift provides automated stub analysis to detect common configuration issues that can lead to unexpected behavior.
@@ -114,7 +107,7 @@ Two stubs have identical predicates. The second stub will never match:
 }
 ```
 
-A stub gated on a different `requiredScenarioState` or `space` is not a duplicate, since only one of them is eligible at a time (for example the `Started` and `paid` stubs of a [scenario]({{ site.baseurl }}/features/scenarios/)). An ungated stub ahead of a gated one still is.
+A stub gated on a different `requiredScenarioState` or `space` is not a duplicate, since only one of them is eligible at a time (for example the `Started` and `paid` stubs of a [scenario](scenarios.md)). An ungated stub ahead of a gated one still is.
 
 ### potentially_shadowed
 
@@ -188,7 +181,7 @@ A catch-all stub appears before other stubs, shadowing them:
 
 A response carries `_rift.stateOps` but has no `is` body — a script-only `_rift` response, or the
 bare `_rift` form. `stateOps` runs only after an `is` response is rendered, so the operations never
-execute (see [Flow State]({{ site.baseurl }}/features/flow-state/#is-responses-only)):
+execute (see [Flow State](flow-state.md#is-responses-only)):
 
 ```json
 {
@@ -260,7 +253,7 @@ catch-all are still reported at any size.
 
 Because the analysis now lives in the engine, **embedded consumers get it too**: over the C-ABI,
 call `rift_stub_warnings(handle, port)` to retrieve the same warnings as a JSON array (see
-[Embedding — FFI]({{ site.baseurl }}/embedding/ffi/)).
+[Embedding — FFI](../embedding/ffi.md)).
 
 ---
 
@@ -286,9 +279,10 @@ Rift extends the stub schema with an optional `id` field for easier management:
 ```
 
 Benefits:
+
 - Easier to identify stubs in logs and warnings
 - Self-documenting stub configurations
-- Addressable through the admin API — see [Stub by ID]({{ site.baseurl }}/features/stub-by-id/)
+- Addressable through the admin API — see [Stub by ID](stub-by-id.md)
 
 **Note**: The `id` field is ignored by Mountebank but preserved by Rift.
 
@@ -479,7 +473,7 @@ Fields:
 An `expect` with no fields set matches any response. A malformed `_verify` block (e.g. a step missing
 `request`) fails that stub's check rather than being silently skipped.
 
-See [CLI Reference → `rift-verify`]({{ site.baseurl }}/configuration/cli/#rift-verify) for
+See [CLI Reference → `rift-verify`](../configuration/cli.md#rift-verify) for
 `--skip-dynamic` and `--verify-dynamic`.
 
 ---

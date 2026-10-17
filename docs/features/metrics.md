@@ -1,8 +1,5 @@
 ---
-layout: default
 title: Metrics
-parent: Features
-nav_order: 4
 ---
 
 # Prometheus Metrics
@@ -177,7 +174,7 @@ groups:
         labels: { severity: critical }
         annotations:
           summary: "Script errors in Rift"
-          description: "error_type={% raw %}{{ $labels.error_type }}{% endraw %}"
+          description: "error_type={{ $labels.error_type }}"
 ```
 
 ---

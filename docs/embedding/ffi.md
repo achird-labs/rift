@@ -1,10 +1,3 @@
----
-layout: default
-title: FFI (C-ABI)
-parent: Embedding & SPI
-nav_order: 3
----
-
 # FFI (C-ABI)
 
 `rift-ffi` exposes a stable **C-ABI (v2)** so any language with C interop — the JVM, Node, Go,
@@ -128,31 +121,31 @@ rift_free(result);
   the file with the same setting. `noParse: true` without `configFile` is refused, since it would
   change nothing.
 
-  **Feature-detect it** — see *Detecting which options an engine accepts* below. An engine from
-  0.17.0 on that does not list `"noParse"` refuses the key as unknown. An older engine publishes no
-  `serveOptions`, ignores the key, and strips or blanks the tag with only a log line, so check the
-  list rather than relying on an error.
+    **Feature-detect it** — see *Detecting which options an engine accepts* below. An engine from
+    0.17.0 on that does not list `"noParse"` refuses the key as unknown. An older engine publishes no
+    `serveOptions`, ignores the key, and strips or blanks the tag with only a log line, so check the
+    list rather than relying on an error.
 - **`requireAdminAuth`** (default `false`, issue #863): refuse to serve when the admin plane would
   bind a non-loopback address with no `apiKey`, instead of logging a warning. `host` defaults to
   `127.0.0.1` for this door, so the check is silent unless you ask for an off-host bind. It gates on
   *authentication*, not on the address — a real `apiKey` satisfies it on any bind. Under a refusal
   `rift_serve_admin` returns `NULL` with the reason in `rift_last_error`, and nothing has been bound.
 
-  Since issue #1149 it also covers the **intercept listener**: after this call, `rift_start_intercept`
-  and a `POST /intercept` on the embedded admin plane refuse an off-host bind with no `auth` instead
-  of only warning. Call `rift_serve_admin` first — the policy is whatever the most recent serve
-  stated, and a serve that omits the key returns the handle to warn-only. If an exposed listener is
-  **already** running when you serve with `requireAdminAuth`, the serve is refused naming that
-  listener rather than reporting a strictness it cannot deliver; the listener is left running for you
-  to stop or re-start with `auth`.
+    Since issue #1149 it also covers the **intercept listener**: after this call, `rift_start_intercept`
+    and a `POST /intercept` on the embedded admin plane refuse an off-host bind with no `auth` instead
+    of only warning. Call `rift_serve_admin` first — the policy is whatever the most recent serve
+    stated, and a serve that omits the key returns the handle to warn-only. If an exposed listener is
+    **already** running when you serve with `requireAdminAuth`, the serve is refused naming that
+    listener rather than reporting a strictness it cannot deliver; the listener is left running for you
+    to stop or re-start with `auth`.
 
-  **Feature-detect it** — see *Detecting which options an engine accepts* below. Against an engine
-  released before 0.17.0 this field is silently ignored and the keyless off-host admin plane is
-  served anyway, with a normal `{"adminPort":…}` and nothing to catch.
+    **Feature-detect it** — see *Detecting which options an engine accepts* below. Against an engine
+    released before 0.17.0 this field is silently ignored and the keyless off-host admin plane is
+    served anyway, with a normal `{"adminPort":…}` and nothing to catch.
 
-  The default `Warn` posture writes through the `tracing` facade. `rift-ffi` installs **no**
-  subscriber — correct for a library, but it means an embedding host that has not installed one of
-  its own sees nothing at all. Install a `tracing` subscriber if you want the warning to be visible.
+    The default `Warn` posture writes through the `tracing` facade. `rift-ffi` installs **no**
+    subscriber — correct for a library, but it means an embedding host that has not installed one of
+    its own sees nothing at all. Install a `tracing` subscriber if you want the warning to be visible.
 - **`upstreamCaFile` / `upstreamCaPem`** (default `null`): an extra trust anchor for every outbound
   TLS connection this engine makes — `proxy` stub upstreams, an `https://` `configFile`, and the
   intercept listener's WebSocket relay. A path or the PEM text; supplying both is refused, since an
@@ -162,12 +155,12 @@ rift_free(result);
 - **`upstreamTlsSkipVerify`** (default `false`): accept any upstream certificate. Development only;
   it logs a warning whenever a client is built with it.
 
-  The relay reads the trust when the listener **binds**, so start the intercept listener after the
-  `rift_serve_admin` that sets it.
+    The relay reads the trust when the listener **binds**, so start the intercept listener after the
+    `rift_serve_admin` that sets it.
 - **`maxBodySize`** (default `536870912`, 512 MiB) and **`bodyMemoryBudget`** (default
   `1073741824`, 1 GiB; `0` = unbounded): the per-body ceiling (`413`) and the in-flight memory
   budget shared by every body (`503` + `Retry-After`) — see
-  [Body size limits]({{ site.baseurl }}/configuration/cli/#body-size-limits). The budget must be at
+  [Body size limits](../configuration/cli.md#body-size-limits). The budget must be at
   least the ceiling, or this call fails. Set them before creating imposters: an imposter keeps the
   limits current when it was created.
 - **`journalMaxBytes`** (default `805306368`, 768 MiB): bytes of recorded requests each imposter
@@ -176,40 +169,40 @@ rift_free(result);
   (`inject`/`decorate`/`shellTransform`/JS-function `wait`/`_rift.script`), mirroring the
   `--allowInjection` CLI flag. Leave it `false` unless you intend to permit them.
 
-  **What the gate protects.** `allowInjection` gates config **documents that cross a trust
-  boundary**, not untrusted *hosts*. A config the embedding host hands over in-process is trusted;
-  one that arrives over HTTP or is read off disk is not:
+    **What the gate protects.** `allowInjection` gates config **documents that cross a trust
+    boundary**, not untrusted *hosts*. A config the embedding host hands over in-process is trusted;
+    one that arrives over HTTP or is read off disk is not:
 
-  | Door | Gated by `allowInjection`? | Why |
-  |---|---|---|
-  | Admin plane (`POST /imposters`, …) | **yes** (#492) | Arrives over HTTP, possibly from a less-trusted caller |
-  | `configFile` | **yes** (#616) | A path dereferenced to disk content the host may not have authored — ops-provisioned, mounted, or edited out-of-band. Same class as the CLI's `--configfile`/`--datadir` |
-  | `POST /admin/reload` (re-reads `configFile`) | **yes** (#612) | Same file, same flag — a file edited to add scripting after a clean start is refused on reload |
-  | Inline `config` | no (#492) | Authored in-process by the host |
-  | `rift_create_imposter`, `rift_replace_stubs`, `rift_apply_config`, … | no (#492) | Authored in-process by the host |
+    | Door | Gated by `allowInjection`? | Why |
+    |---|---|---|
+    | Admin plane (`POST /imposters`, …) | **yes** (#492) | Arrives over HTTP, possibly from a less-trusted caller |
+    | `configFile` | **yes** (#616) | A path dereferenced to disk content the host may not have authored — ops-provisioned, mounted, or edited out-of-band. Same class as the CLI's `--configfile`/`--datadir` |
+    | `POST /admin/reload` (re-reads `configFile`) | **yes** (#612) | Same file, same flag — a file edited to add scripting after a clean start is refused on reload |
+    | Inline `config` | no (#492) | Authored in-process by the host |
+    | `rift_create_imposter`, `rift_replace_stubs`, `rift_apply_config`, … | no (#492) | Authored in-process by the host |
 
-  The in-process doors are **ungated by design**, not an oversight: a caller who can reach the
-  C-ABI can already execute code in this process, so gating its own JSON would restrict nobody
-  while breaking hosts that legitimately drive script imposters over the C-ABI. If you load config
-  from a file you do not fully control, keep `allowInjection: false` — a scripted `configFile` then
-  fails the serve outright (`NULL` + `rift_last_error`) rather than loading, so nothing is applied.
-  A behaviors block the engine cannot read as an object (for example an array `_behaviors`) is
-  refused at every door, gated or not, before the gate runs (#1101).
+    The in-process doors are **ungated by design**, not an oversight: a caller who can reach the
+    C-ABI can already execute code in this process, so gating its own JSON would restrict nobody
+    while breaking hosts that legitimately drive script imposters over the C-ABI. If you load config
+    from a file you do not fully control, keep `allowInjection: false` — a scripted `configFile` then
+    fails the serve outright (`NULL` + `rift_last_error`) rather than loading, so nothing is applied.
+    A behaviors block the engine cannot read as an object (for example an array `_behaviors`) is
+    refused at every door, gated or not, before the gate runs (#1101).
 - **Returns** (caller frees): `{"adminPort":...,"adminUrl":"...","metricsPort":...}`, or `NULL` on
   error (bad JSON, bind failure, or already serving — one admin plane per handle). `adminUrl` is
   built from the bound address, so an IPv6 bind reads `http://[::1]:49321`.
 
-  **For a scoped bind (`fe80::1%2`) `adminUrl` — and `interceptUrl` on `rift_start_intercept` —
-  carry the socket-address spelling, `http://[fe80::1%2]:49321`, which is not a portable URL.**
-  No spelling is: Go's `url.Parse` rejects the raw `%`, Java's `URI` accepts it and rejects the
-  RFC 6874 `%25` form (it reads the zone as literal digits and connects to the wrong scope), and
-  the WHATWG parser Node uses rejects a zone id either way. RFC 6874 has itself since been
-  obsoleted (RFC 9844) for this reason. The engine therefore leaves the field as std's spelling
-  rather than picking a form that breaks a different runtime. For a scoped bind, build the URL
-  from `adminPort` / `interceptPort` plus the host you passed in, which you already have.
+    **For a scoped bind (`fe80::1%2`) `adminUrl` — and `interceptUrl` on `rift_start_intercept` —
+    carry the socket-address spelling, `http://[fe80::1%2]:49321`, which is not a portable URL.**
+    No spelling is: Go's `url.Parse` rejects the raw `%`, Java's `URI` accepts it and rejects the
+    RFC 6874 `%25` form (it reads the zone as literal digits and connects to the wrong scope), and
+    the WHATWG parser Node uses rejects a zone id either way. RFC 6874 has itself since been
+    obsoleted (RFC 9844) for this reason. The engine therefore leaves the field as std's spelling
+    rather than picking a form that breaks a different runtime. For a scoped bind, build the URL
+    from `adminPort` / `interceptPort` plus the host you passed in, which you already have.
 
-  The `rift save` and `rift healthcheck` subcommands cannot reach a scoped host at all: they go
-  through `reqwest`, whose URL parser rejects a zone in either spelling.
+    The `rift save` and `rift healthcheck` subcommands cannot reach a scoped host at all: they go
+    through `reqwest`, whose URL parser rejects a zone in either spelling.
 
 ### Detecting which options an engine accepts
 
@@ -242,7 +235,7 @@ over HTTP at `GET /config` for consumers that do not link the C-ABI.
 
 ## Intercept proxy over FFI
 
-Start the [intercept/TLS-MITM proxy]({{ site.baseurl }}/features/intercept-proxy/) on the handle and
+Start the [intercept/TLS-MITM proxy](../features/intercept-proxy.md) on the handle and
 drive its whole control plane over C-ABI — no in-process admin HTTP needed. One intercept listener
 per handle; `rift_stop_intercept` stops it, and `rift_stop` shuts it down with the handle.
 
@@ -260,7 +253,7 @@ per handle; `rift_stop_intercept` stops it, and `rift_stop` shuts it down with t
 An embedder calls `rift_start_intercept`, reads `interceptPort`, adds rules and fetches the CA /
 truststore (all over FFI), then points a CA-trusting SUT's HTTPS proxy at `interceptPort` — with no
 loopback HTTP. A `forward` rule reaches any imposter on that localhost port, including FFI-created
-ones, or a named `host`/`scheme` elsewhere ([forward targets]({{ site.baseurl }}/features/intercept-proxy/#forward-to-one-of-your-imposters)). Errors set `rift_last_error`. A handle that never calls `rift_start_intercept` is
+ones, or a named `host`/`scheme` elsewhere ([forward targets](../features/intercept-proxy.md#forward-to-one-of-your-imposters)). Errors set `rift_last_error`. A handle that never calls `rift_start_intercept` is
 unaffected.
 
 The intercept listener and the handle's embedded admin plane share one slot (#493): if you also call

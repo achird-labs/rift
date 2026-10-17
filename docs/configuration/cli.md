@@ -1,8 +1,5 @@
 ---
-layout: default
 title: CLI Reference
-parent: Configuration
-nav_order: 3
 ---
 
 # Command Line Reference
@@ -112,7 +109,7 @@ source reports no change the reload returns without touching the running imposte
 
 When the config file has an `intercept` block, the reply of a reload that applies changes also reports
 `"intercept": {"rulesSeeded": n, "rulesRuntime": m}`. See
-[Hot reload]({{ site.baseurl }}/features/hot-reload/#reload-response).
+[Hot reload](../features/hot-reload.md#reload-response).
 
 When something did change, the existing incremental apply runs: unchanged imposters keep their
 recorded requests, scenario state and response cyclers; only changed ports are patched or replaced.
@@ -247,13 +244,13 @@ What does work inside Rift:
 
 `GET /config` reports `"ipWhitelist": ["*"]`, which is accurate: every address may connect.
 
-`--intercept-port` eagerly starts the [intercept/TLS-MITM proxy]({{ site.baseurl }}/features/intercept-proxy/)
+`--intercept-port` eagerly starts the [intercept/TLS-MITM proxy](../features/intercept-proxy.md)
 at boot. It is no longer the only way to enable it: a server started without the flag still exposes
 the runtime lifecycle endpoints (`POST`/`GET`/`DELETE /intercept`), so intercept can be turned on at
 runtime over the admin API. The flag and the endpoints drive the same single listener.
 
 A third way, and the only declarative one, is an
-[`intercept` block in `--configfile`]({{ site.baseurl }}/features/intercept-proxy/#declare-it-in-the-config-file):
+[`intercept` block in `--configfile`](../features/intercept-proxy.md#declare-it-in-the-config-file):
 it starts the listener **with its rules already installed**, so a container needs no post-boot admin
 call. The block and these `--intercept-*` flags are two spellings of one listener — supplying both
 is a startup error rather than a silent precedence guess, so pick one. (Each flag also has a
@@ -403,7 +400,7 @@ An imposter declared with `protocol: https` terminates TLS. If it carries no `ce
 falls back to `--default-tls-cert` / `--default-tls-key` when set, otherwise to a generated
 self-signed certificate. Pass `--no-self-signed-tls` to refuse such an imposter instead of silently
 self-signing: `POST /imposters` answers `400`, and an imposter loaded at startup is skipped with an
-error log while the server still starts. See [TLS/HTTPS Support]({{ site.baseurl }}/features/tls/).
+error log while the server still starts. See [TLS/HTTPS Support](../features/tls.md).
 
 ```bash
 rift \
@@ -539,7 +536,7 @@ wins over the built-in default (and over an `--rcfile` value — see [RC file](#
 | `RIFT_INTERCEPT_CA_KEY` | PEM CA private key **file** for interception | |
 | `RIFT_INTERCEPT_CA_CERT_PEM` | Inline PEM CA certificate (the bytes, not a path; with `RIFT_INTERCEPT_CA_KEY_PEM`) — mutually exclusive with the `_CA_CERT`/`_CA_KEY` file pair | |
 | `RIFT_INTERCEPT_CA_KEY_PEM` | Inline PEM CA private key for interception | |
-| `RIFT_ADMIN_URL` | Admin API URL that `rift-tui` connects to (env alias of its `--admin-url`; see [TUI]({{ site.baseurl }}/features/tui/)) | `http://localhost:2525` |
+| `RIFT_ADMIN_URL` | Admin API URL that `rift-tui` connects to (env alias of its `--admin-url`; see [TUI](../features/tui.md)) | `http://localhost:2525` |
 | `RIFT_TRUSTSTORE_PASSWORD` | Password for `rift intercept-ca export` (same as `--password`, kept out of argv) | `changeit` |
 | `RIFT_DISABLE_HTTP2` | Force HTTP/1-only listeners, disabling HTTP/2 & h2c auto-negotiation (truthy: `1`/`true`/`yes`/`on`). On HTTPS listeners it also removes `h2` from the ALPN offer, so a client offering both protocols negotiates `http/1.1` instead of being handed an `h2` the server will not speak. A client offering **only** `h2` is refused at the handshake with `no_application_protocol` — a loud failure rather than a protocol mismatch | off |
 | `RIFT_TCP_BACKLOG` | Listen backlog for the accept loop (positive integer) | `1024` |
@@ -552,9 +549,9 @@ wins over the built-in default (and over an `--rcfile` value — see [RC file](#
 | `RUST_LOG` | A full `tracing` filter (e.g. `warn,rift::script=debug`). When set it replaces `--loglevel`/`--debug`; a value that does not parse is refused at startup | unset |
 
 `RIFT_DISABLE_HTTP2` is an escape hatch for clients or intermediaries that mishandle HTTP/2; see
-[HTTP/2 and h2c]({{ site.baseurl }}/mountebank/imposters/#http2-and-h2c). `RIFT_TCP_BACKLOG` and
+[HTTP/2 and h2c](../mountebank/imposters.md#http2-and-h2c). `RIFT_TCP_BACKLOG` and
 `RIFT_TCP_NODELAY` are socket-tuning knobs covered under
-[Performance → Runtime socket tuning]({{ site.baseurl }}/performance/#runtime-socket-tuning).
+[Performance → Runtime socket tuning](../performance/index.md#runtime-socket-tuning).
 
 The five tuning knobs above (`RIFT_TCP_BACKLOG`, `RIFT_TCP_NODELAY`, `RIFT_HTTP_MAX_BUF`,
 `RIFT_HTTP_HEADER_TIMEOUT`, `RIFT_MAX_CONNECTIONS`) fall back to their defaults when **unset**.
@@ -582,7 +579,7 @@ connection.
 
 `RIFT_STRICT_BEHAVIORS` and the per-imposter `strictBehaviors` field combine with **OR** — either
 being set enables strict mode. See
-[Rift Extensions → Strict Behaviors]({{ site.baseurl }}/configuration/native/#strict-behaviors-strictbehaviors)
+[Rift Extensions → Strict Behaviors](native.md#strict-behaviors-strictbehaviors)
 for the full semantics.
 
 ### Docker Example
@@ -833,7 +830,7 @@ switching a running Mountebank-style server from recording to replaying.
 ### script
 
 Validate and run `_rift.script` scripts outside a running server (no admin API, no imposter) — the
-authoring loop from [Scripting]({{ site.baseurl }}/features/scripting/). Two actions:
+authoring loop from [Scripting](../features/scripting.md). Two actions:
 
 **`rift script check <target>`** — statically validate a raw script file (`.rhai`/`.js`) or a
 config file (JSON/YAML) with `_rift.script` entries: engine syntax, entrypoint presence/arity for
@@ -877,7 +874,7 @@ rift script run scripts/echo.js --request fixtures/get-resource.json --flow-id t
 Probe a running server's admin API and exit `0` when it answers `2xx`, `1` otherwise. This is what
 the container images run as their `HEALTHCHECK` — the probe is built into the binary so the image
 needs no shell and no `curl`, which is what lets the `-static` image be `FROM scratch`
-(see [Docker]({{ site.baseurl }}/deployment/docker/)).
+(see [Docker](../deployment/docker.md)).
 
 With no arguments it probes `/health` on the admin API, reading `--host`/`--port` (and therefore
 `MB_HOST`/`MB_PORT`, and an `--rcfile` that sets them) exactly as the server does — so inside a
@@ -914,7 +911,7 @@ with no key configured says which setting to add.
 
 ### intercept-ca
 
-Make a persistent [intercept CA]({{ site.baseurl }}/features/intercept-proxy/#the-intercept-ca) and
+Make a persistent [intercept CA](../features/intercept-proxy.md#the-intercept-ca) and
 the truststores a SUT needs, offline — no server starts and nothing touches the admin API. This is
 for a SUT that has to trust the CA *before* rift runs (a container whose JVM reads its truststore
 once at startup), where the CA a listener generates for itself arrives too late.
@@ -1038,7 +1035,7 @@ faults. Each check runs against a throwaway imposter that is torn down afterward
 the imposters under test. A dynamic stub with none of these assertable markers is still surfaced as a
 visible `SKIP` in the output rather than silently ignored.
 
-See [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) for details, including the `_verify`
+See [Stub Analysis](../features/stub-analysis.md) for details, including the `_verify`
 annotation schema.
 
 ### rift-lint
@@ -1080,4 +1077,4 @@ rift-lint ./imposters/ --fix
 rift-lint ./imposters/ --errors-only
 ```
 
-See [Configuration Linting]({{ site.baseurl }}/features/linting/) for details.
+See [Configuration Linting](../features/linting.md) for details.

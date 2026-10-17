@@ -1,10 +1,3 @@
----
-layout: default
-title: Scripting
-parent: Features
-nav_order: 2
----
-
 # Scripting
 
 Rift supports multiple scripting engines for dynamic behavior.
@@ -84,7 +77,7 @@ config.request.headers     // { "Content-Type": "application/json" }; any spelli
 config.request.body        // Request body (string or parsed object)
 ```
 
-> Path parameters (`request.pathParams`, from a stub's [`routePattern`]({{ site.baseurl }}/configuration/native/#route-patterns-routepattern)) are exposed to the `_rift.script` engines — Rhai and JavaScript — not to this Mountebank `inject` `config.request` object.
+> Path parameters (`request.pathParams`, from a stub's [`routePattern`](../configuration/native.md#route-patterns-routepattern)) are exposed to the `_rift.script` engines — Rhai and JavaScript — not to this Mountebank `inject` `config.request` object.
 
 ### State Object
 
@@ -375,9 +368,9 @@ rather than `ctx`-shaped, and each has its own documented mechanism:
 
 | To do this | Use | Documented at |
 |:-----------|:----|:--------------|
-| Decide whether a stub matches | a Mountebank `inject` predicate — a bare function over `request`, `state`, `logger`, `config` | [Predicates]({{ site.baseurl }}/mountebank/predicates/) |
-| Rewrite a response after it is built | the `decorate` / `shellTransform` behaviors | [Behaviors]({{ site.baseurl }}/mountebank/behaviors/) |
-| Wait before responding | `_behaviors.wait` — a number, a `{min, max}` range, or a Mountebank-style JS function (`"wait": "function() { ... }"`, or the object spelling `{"inject": "function() { ... }"}`) | [Behaviors]({{ site.baseurl }}/mountebank/behaviors/) |
+| Decide whether a stub matches | a Mountebank `inject` predicate — a bare function over `request`, `state`, `logger`, `config` | [Predicates](../mountebank/predicates.md) |
+| Rewrite a response after it is built | the `decorate` / `shellTransform` behaviors | [Behaviors](../mountebank/behaviors.md) |
+| Wait before responding | `_behaviors.wait` — a number, a `{min, max}` range, or a Mountebank-style JS function (`"wait": "function() { ... }"`, or the object spelling `{"inject": "function() { ... }"}`) | [Behaviors](../mountebank/behaviors.md) |
 
 Each takes its own Mountebank-shaped inputs, **not** `ctx`: an `inject` predicate receives
 `request`/`state`/`logger`/`config`, a `decorate` function receives the request and the response,
@@ -448,7 +441,7 @@ uses `getOr`/`incrBy` (camelCase); `cas` and `ttl` are spelled the same everywhe
 
 Every `ctx.state` call is fail-loud: a store failure (a networked store's connection dropping mid-request, for
 example, on an embedder-supplied store) raises a script error and is logged — it is never silently swallowed into a default value.
-See [Flow State]({{ site.baseurl }}/features/flow-state/) for how the underlying store is selected,
+See [Flow State](flow-state.md) for how the underlying store is selected,
 including the in-memory auto-provisioning that lets `ctx.state` work with zero configuration.
 
 `ctx.store` is the escape hatch for touching a *different* flow's state — `ctx.store.flow(id)`
@@ -537,7 +530,7 @@ predicate `inject`, and the `decorate` behavior — all of which run off the asy
   `predicate injection timeout`; a `_rift.script` → `504` with `x-rift-script-error`; a `decorate`
   → the undecorated response (`200`) with `x-rift-decorate-error` (or `504` under
   `strictBehaviors`). All four also carry `x-rift-script-timeout: true`.
-  A [debug-mode]({{ site.baseurl }}/features/debug-mode/) matching run (`X-Rift-Debug`) that misses the same deadline is the
+  A [debug-mode](debug-mode.md) matching run (`X-Rift-Debug`) that misses the same deadline is the
   fifth case: `504` with `x-rift-script-timeout: true`. It answered `500` in earlier releases —
   a deadline miss there is now retry-worthy like every other script timeout (#695).
 - **Amortized JavaScript startup.** The Mountebank hooks reuse a per-worker-thread Boa context and

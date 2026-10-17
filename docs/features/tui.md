@@ -1,10 +1,3 @@
----
-layout: default
-title: Terminal UI (TUI)
-parent: Features
-nav_order: 8
----
-
 # Terminal UI (TUI)
 
 Rift includes an interactive terminal user interface (`rift-tui`) for managing imposters and stubs without writing any code or API calls.
@@ -166,9 +159,9 @@ Press `p` to create a proxy imposter for recording:
 2. **Port** (optional) - Leave empty for auto-assign
 3. **Name** (optional) - Display name
 4. **Proxy Mode**:
-   - `proxyOnce` - Record first response, replay subsequent
-   - `proxyAlways` - Always forward, keep recording
-   - `proxyTransparent` - Always forward, no recording
+    - `proxyOnce` - Record first response, replay subsequent
+    - `proxyAlways` - Always forward, keep recording
+    - `proxyTransparent` - Always forward, no recording
 
 ---
 
@@ -222,6 +215,7 @@ Press `/` to activate search mode:
 - Press `Esc` to clear search
 
 Search matches against:
+
 - Imposter port, name and protocol
 - Stub scenario name
 - Stub predicates (path, method)
@@ -244,6 +238,7 @@ curl -s \
 The command is copied to clipboard and can be pasted directly into a terminal.
 
 The generator handles:
+
 - Path extraction from predicates
 - Method detection (GET, POST, etc.)
 - Header extraction
@@ -295,6 +290,6 @@ Press `m` to view the metrics dashboard:
 
 ## See Also
 
-- [rift-verify]({{ site.baseurl }}/features/stub-analysis/) - Automated stub testing
-- [rift-lint]({{ site.baseurl }}/features/linting/) - Configuration validation
-- [REST API]({{ site.baseurl }}/api/) - Programmatic imposter management
+- [rift-verify](stub-analysis.md) - Automated stub testing
+- [rift-lint](linting.md) - Configuration validation
+- [REST API](../api/index.md) - Programmatic imposter management

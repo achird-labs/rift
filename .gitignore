@@ -312,3 +312,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
+
+# MkDocs build output (mkdocs build / the Docs Links CI job)
+/site/
+/_site/

@@ -1,11 +1,3 @@
----
-layout: default
-title: Node.js Integration
-parent: Getting Started
-nav_order: 4
-permalink: /getting-started/nodejs/
----
-
 # Node.js Integration
 
 Rift provides official Node.js bindings via the `@rift-vs/rift` npm package. This package is a drop-in replacement for Mountebank's Node.js API, making migration seamless.

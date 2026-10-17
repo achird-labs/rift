@@ -1,10 +1,3 @@
----
-layout: default
-title: The Rift Model
-parent: Concepts
-nav_order: 2
----
-
 # The Rift Model
 
 Plain Mountebank is essentially stateless: a request matches a stub and gets a response. Rift adds a
@@ -29,10 +22,10 @@ The same flow id drives both **flow-state** and **spaces**, which is what lets t
 
 ## Flow-state — a per-flow key/value store
 
-[Flow-state]({{ site.baseurl }}/features/flow-state/) is a `(flow_id, key)` → value store for
-stateful behavior. [Scripts]({{ site.baseurl }}/features/scripting/) read and write it freely; a
+[Flow-state](../features/flow-state.md) is a `(flow_id, key)` → value store for
+stateful behavior. [Scripts](../features/scripting.md) read and write it freely; a
 static response can also write it declaratively with `_rift.stateOps` and read it back with a
-{% raw %}`{{ state.<key> }}`{% endraw %} [template]({{ site.baseurl }}/features/date-templates/), no script needed. Either
+`{{ state.<key> }}` [template](../features/date-templates.md), no script needed. Either
 way you can count attempts, fail the first N and then succeed, or gate on a stored value:
 
 ```
@@ -40,11 +33,11 @@ attempt 1 → 503   attempt 2 → 503   attempt 3 → 200
 ```
 
 The built-in store is in-memory; an embedder can supply its own through `FlowStoreProvider`, and state shared across
-processes is a [rift-cluster]({{ site.baseurl }}/deployment/kubernetes/#shared-state-across-pods) deployment. Values expire after `ttlSeconds`. You can also inspect and seed flow-state directly over the admin API.
+processes is a [rift-cluster](../deployment/kubernetes.md#shared-state-across-pods) deployment. Values expire after `ttlSeconds`. You can also inspect and seed flow-state directly over the admin API.
 
 ## Scenarios — declarative state machines
 
-[Scenarios]({{ site.baseurl }}/features/scenarios/) let a stub advance a named finite-state machine
+[Scenarios](../features/scenarios.md) let a stub advance a named finite-state machine
 **without writing a script**. A stub can require the scenario to be in a given state to match
 (`requiredScenarioState`) and move it to a new state after responding (`newScenarioState`). This
 models multi-step flows (e.g. `Started → InProgress → Complete`) declaratively; the admin API
@@ -52,7 +45,7 @@ inspects and resets scenario state.
 
 ## Spaces — correlated isolation
 
-[Spaces]({{ site.baseurl }}/features/spaces/) partition an imposter's stubs and state **per flow id**,
+[Spaces](../features/spaces.md) partition an imposter's stubs and state **per flow id**,
 so concurrent tests don't step on each other. Each flow gets its own view — its own stub overrides
 and its own state — over the same imposter port. This is how many parallel tests share one imposter
 without cross-contamination.
@@ -69,5 +62,5 @@ without cross-contamination.
 Reach for the simplest one that fits: scenarios for a declarative multi-step flow, `stateOps` and
 templates for counters and stored values, a script when the logic outgrows them, spaces when
 parallel tests must not interfere. See also
-[Fault Injection]({{ site.baseurl }}/features/fault-injection/) for stateful failure simulation built
+[Fault Injection](../features/fault-injection.md) for stateful failure simulation built
 on flow-state.

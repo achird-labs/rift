@@ -1,8 +1,5 @@
 ---
-layout: default
 title: Migration from Mountebank
-parent: Getting Started
-nav_order: 2
 ---
 
 # Migrating from Mountebank to Rift
@@ -87,7 +84,7 @@ Map Mountebank CLI options to Rift environment variables:
 | `--loglevel debug` | `--loglevel debug` or `MB_LOGLEVEL=debug` |
 | `--apikey` | `--api-key` (CLI) or `MB_APIKEY` |
 | `--localOnly` | `--local-only` (CLI) or `MB_LOCAL_ONLY=true` |
-| `--rcfile` | `--rcfile` (CLI) — a subset of keys, see the [CLI Reference]({{ site.baseurl }}/configuration/cli/#rc-file---rcfile) |
+| `--rcfile` | `--rcfile` (CLI) — a subset of keys, see the [CLI Reference](../configuration/cli.md#rc-file---rcfile) |
 
 Rift's flags are kebab-case. Of Mountebank's camelCase spellings, only `--allowInjection` and
 `--noParse` are accepted as aliases — `--localOnly`, `--apikey` and `--ipWhitelist` must be written
@@ -114,7 +111,7 @@ go test ./...
 
 Rift provides significantly better performance:
 
-- **~20–150x faster** request processing on typical workloads (see [Performance]({{ site.baseurl }}/performance/))
+- **~20–150x faster** request processing on typical workloads (see [Performance](../performance/index.md))
 - **Consistent latency** regardless of stub count
 - **Lower memory usage** due to Rust's efficiency
 
@@ -135,7 +132,7 @@ Rift includes features not in Mountebank:
 | Admin UI | Built-in web UI | No web UI; a terminal UI (`rift-tui`) ships with the binaries |
 | `mb replay` | Switches a running server's proxies to replay | `rift replay --configfile <file>` starts a server with that file loaded |
 | Shutdown | — | `SIGTERM`/`SIGINT` shut down gracefully and exit `0`, as Mountebank does; no `--init` needed in a container (#1155) |
-| `mutualAuth` | Requests a client certificate (only with `rejectUnauthorized`) and never rejects one | **Requires** a client certificate; `rejectUnauthorized`/`ca` without `mutualAuth`, or `rejectUnauthorized` without `ca`, is refused with `400` — see [Mutual TLS]({{ site.baseurl }}/features/tls/#mutual-tls-mtls) (#977) |
+| `mutualAuth` | Requests a client certificate (only with `rejectUnauthorized`) and never rejects one | **Requires** a client certificate; `rejectUnauthorized`/`ca` without `mutualAuth`, or `rejectUnauthorized` without `ca`, is refused with `400` — see [Mutual TLS](../features/tls.md#mutual-tls-mtls) (#977) |
 
 ### Known HTTP Behavior Differences
 
@@ -238,12 +235,12 @@ mocking, continue using Mountebank.
 
 Note this is separate from **TCP fault injection**: HTTP(S) imposters *can* simulate transport-level
 failures (connection reset, etc.) via `_rift.fault.tcp` or a top-level `fault` response — see
-[Fault Injection]({{ site.baseurl }}/features/fault-injection/).
+[Fault Injection](../features/fault-injection.md).
 
 ---
 
 ## Getting Help
 
 - [GitHub Issues](https://github.com/achird-labs/rift/issues) - Report bugs or request features
-- [Documentation]({{ site.baseurl }}/) - Full documentation
-- [Performance Benchmarks]({{ site.baseurl }}/performance/) - Compare with Mountebank
+- [Documentation](../index.md) - Full documentation
+- [Performance Benchmarks](../performance/index.md) - Compare with Mountebank

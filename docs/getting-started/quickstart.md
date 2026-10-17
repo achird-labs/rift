@@ -1,8 +1,5 @@
 ---
-layout: default
 title: Quick Start
-parent: Getting Started
-nav_order: 1
 ---
 
 # Quick Start Tutorial
@@ -465,6 +462,6 @@ curl -X PUT http://localhost:2525/imposters \
 
 ## Next Steps
 
-- [Predicates Reference]({{ site.baseurl }}/mountebank/predicates/) - All predicate types
-- [Behaviors Guide]({{ site.baseurl }}/mountebank/behaviors/) - wait, decorate, copy
-- [Proxy Mode]({{ site.baseurl }}/mountebank/proxy/) - Record and replay
+- [Predicates Reference](../mountebank/predicates.md) - All predicate types
+- [Behaviors Guide](../mountebank/behaviors.md) - wait, decorate, copy
+- [Proxy Mode](../mountebank/proxy.md) - Record and replay

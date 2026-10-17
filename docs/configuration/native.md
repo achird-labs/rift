@@ -1,8 +1,5 @@
 ---
-layout: default
 title: Rift Extensions (_rift namespace)
-parent: Configuration
-nav_order: 2
 ---
 
 # Rift Extensions (`_rift` Namespace)
@@ -53,7 +50,7 @@ in-memory store ignores them. That includes a leftover `backend` key: the `backe
 removed, so it selects nothing.
 
 **Fail-loud errors**: a non-positive `ttlSeconds` fails imposter creation with `400 Bad Request`. See
-[Flow State → Invalid flowState is fail-loud]({{ site.baseurl }}/features/flow-state/#invalid-flowstate-is-fail-loud)
+[Flow State → Invalid flowState is fail-loud](../features/flow-state.md#invalid-flowstate-is-fail-loud)
 for details. With no `flowState` block, every imposter gets an in-memory store at the default TTL
 (300 s); a script or `stateOps` stub also logs a warning that the state does not survive a restart.
 
@@ -124,7 +121,7 @@ Defaults for `_rift.script` execution.
 
 A named registry of scripts. A response script can say `{ "ref": "<name>" }` instead of carrying
 `code` or `file`; each entry is itself a `code` or `file` script (a `ref` to another `ref` is an
-error). See [Scripting → Authoring Scripts]({{ site.baseurl }}/features/scripting/#authoring-scripts-file-and-ref-yaml).
+error). See [Scripting → Authoring Scripts](../features/scripting.md#authoring-scripts-file-and-ref-yaml).
 
 ```json
 "_rift": {
@@ -170,10 +167,10 @@ failure via an `x-rift-<behavior>-error` header. With `strictBehaviors` on, the 
 `500` (still carrying that header) instead.
 
 Strict mode can also be forced process-wide with the `RIFT_STRICT_BEHAVIORS` environment variable
-(see [CLI Reference]({{ site.baseurl }}/configuration/cli/)) — the per-imposter flag **or** the env
+(see [CLI Reference](cli.md)) — the per-imposter flag **or** the env
 var enables it.
 
-See [Mountebank Behaviors → Error Semantics]({{ site.baseurl }}/mountebank/behaviors/#error-semantics)
+See [Mountebank Behaviors → Error Semantics](../mountebank/behaviors.md#error-semantics)
 for the full walkthrough of `decorate`/`shellTransform`/binary failures under strict mode.
 
 ---
@@ -193,9 +190,9 @@ segment must match exactly and each `:name` segment captures the corresponding p
 captured values are exposed as:
 
 - `${request.pathParams.<name>}` in response templates (see
-  [Request Interpolation]({{ site.baseurl }}/mountebank/responses/#request-interpolation)).
+  [Request Interpolation](../mountebank/responses.md#request-interpolation)).
 - `request.pathParams.<name>` in scripts, for every engine (see
-  [Scripting]({{ site.baseurl }}/features/scripting/)).
+  [Scripting](../features/scripting.md)).
 
 If `routePattern` is absent, or the request path doesn't match its segment shape, `pathParams` is
 simply empty — nothing errors. Extraction is `:name`-segment matching only; there's no regex or
@@ -291,7 +288,7 @@ TCP fault types (canonical name or short alias):
 | `MALFORMED_RESPONSE_CHUNK` | `malformed` | Status line + malformed chunked body, then close |
 
 When `latency`, `tcp`, and `error` are combined in one `fault` block, `tcp` takes precedence over
-`error`. See [Fault Injection]({{ site.baseurl }}/features/fault-injection/) for precedence, the
+`error`. See [Fault Injection](../features/fault-injection.md) for precedence, the
 top-level `fault` response form, and scripted faults.
 
 ---
@@ -303,7 +300,7 @@ response. The source is exactly one of `code` (inline), `file` (a path, relative
 file, or to `--scripts-dir` for admin-API imposters) or `ref` (an entry in `_rift.scripts`). The script defines `respond(ctx)` and returns a result constructor — `http(status, body)`,
 `delay(ms)`, `reset()`, or `pass()`/nothing for no injection. `ctx.state` is a key/value handle
 already scoped to the request's resolved flow id — no explicit flow id argument needed. See
-[Scripting]({{ site.baseurl }}/features/scripting/#ctx-api) for the full `ctx` reference.
+[Scripting](../features/scripting.md#ctx-api) for the full `ctx` reference.
 
 ```json
 {
@@ -331,8 +328,8 @@ other's block is accepted and ignored.
 - Scripts require `--allow-injection` and are bounded by a wall-clock timeout
   (`_rift.scriptEngine.timeoutMs`, default 5000 ms).
 
-See [Scripting]({{ site.baseurl }}/features/scripting/) for the full API (request object, `flow_store`
-methods, `last_error()`, return values) and [Flow State]({{ site.baseurl }}/features/flow-state/) for
+See [Scripting](../features/scripting.md) for the full API (request object, `flow_store`
+methods, `last_error()`, return values) and [Flow State](../features/flow-state.md) for
 the state model.
 
 ---
@@ -408,9 +405,9 @@ Besides `fault` and `script`, a response's `_rift` block accepts:
 
 | Key | Purpose |
 |:----|:--------|
-| `templated` | `true` evaluates the function-grammar templates in the body and header values. See [Response Templates]({{ site.baseurl }}/features/date-templates/). |
-| `stateOps` | Declarative flow-state writes after an `is` response is rendered. See [Flow State]({{ site.baseurl }}/features/flow-state/). |
-| `conditional` | `true`, or an object with `etag` and `lastModified`. Adds a strong `ETag` and a `Last-Modified` to a `GET`/`HEAD` `is` response, and answers `304` to a matching `If-None-Match` or `If-Modified-Since`. See [Conditional GET]({{ site.baseurl }}/mountebank/responses/#conditional-get). |
+| `templated` | `true` evaluates the function-grammar templates in the body and header values. See [Response Templates](../features/date-templates.md). |
+| `stateOps` | Declarative flow-state writes after an `is` response is rendered. See [Flow State](../features/flow-state.md). |
+| `conditional` | `true`, or an object with `etag` and `lastModified`. Adds a strong `ETag` and a `Last-Modified` to a `GET`/`HEAD` `is` response, and answers `304` to a matching `If-None-Match` or `If-Modified-Since`. See [Conditional GET](../mountebank/responses.md#conditional-get). |
 | `dataset` | **Carried, not executed** by standalone Rift — a named `lookup` binding that Rift Cluster resolves per node: `name`, optional `version`, `key` (as in `lookup`), `keyColumn`, `into`, and the `digest` the binder pins. It round-trips through `GET /imposters`; a response carrying one is served as if it were absent. |
 
 ---
@@ -446,6 +443,6 @@ Both `_behaviors.wait` and `_rift.fault.latency` will be applied.
 
 ## See Also
 
-- [Mountebank Compatibility]({{ site.baseurl }}/configuration/mountebank/) - Standard Mountebank configuration
-- [Fault Injection]({{ site.baseurl }}/features/fault-injection/) - Detailed fault injection documentation
-- [Scripting]({{ site.baseurl }}/features/scripting/) - Scripting engine documentation
+- [Mountebank Compatibility](mountebank.md) - Standard Mountebank configuration
+- [Fault Injection](../features/fault-injection.md) - Detailed fault injection documentation
+- [Scripting](../features/scripting.md) - Scripting engine documentation

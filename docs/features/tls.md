@@ -1,8 +1,5 @@
 ---
-layout: default
 title: TLS/HTTPS
-parent: Features
-nav_order: 3
 ---
 
 # TLS/HTTPS Support
@@ -23,7 +20,7 @@ row that matches what you are trying to do, or what is failing:
 | Rift proxies or records to a real origin, and fails with `UnknownIssuer` | **Rift** must trust the **origin's** CA | [`--upstream-ca-file`](#trusting-a-private-ca) |
 | Your app calls a Rift HTTPS imposter and rejects its certificate | Your **app** must trust **Rift's** imposter certificate | [`cert`/`key` on the imposter](#custom-certificate), or trust the [generated self-signed one](#basic-https-imposter) |
 | Every HTTPS imposter should serve the same certificate | Your **app** must trust that certificate | [`--default-tls-cert` / `--default-tls-key`](#server-wide-default-certificate) |
-| Your app is pointed at Rift's intercept (MITM) proxy and rejects it | Your **app** must trust **Rift's intercept CA** | [Intercept proxy]({{ site.baseurl }}/features/intercept-proxy/#trusting-the-ca-from-the-sut) — `GET /intercept/ca.pem`, or the PKCS#12/JKS truststore export |
+| Your app is pointed at Rift's intercept (MITM) proxy and rejects it | Your **app** must trust **Rift's intercept CA** | [Intercept proxy](intercept-proxy.md#trusting-the-ca-from-the-sut) — `GET /intercept/ca.pem`, or the PKCS#12/JKS truststore export |
 | You want Rift to demand a certificate *from* the caller | **Rift** must trust the **caller's** CA | [`mutualAuth` / `rejectUnauthorized` / `ca`](#mutual-tls-mtls) |
 
 The first and fourth are the ones most often confused. The intercept CA is Rift's *own* certificate
@@ -277,7 +274,7 @@ curl -v --http2 --cacert ca.crt https://localhost:4545/ 2>&1 | grep -i alpn
 An imposter that can fire a TCP fault or runs a `_rift.script` response, and every imposter under
 `RIFT_DISABLE_HTTP2=1`, offers only `http/1.1` — so a client that offers **only** `h2` is refused at
 the handshake (`no_application_protocol`) rather than handed a protocol the imposter will not
-speak. See [HTTP/2 and h2c]({{ site.baseurl }}/mountebank/imposters/#http2-and-h2c) for the full
+speak. See [HTTP/2 and h2c](../mountebank/imposters.md#http2-and-h2c) for the full
 rules. The intercept listener follows the same switch.
 
 ---
@@ -352,10 +349,10 @@ usable certificate, stops the server there rather than failing the first proxied
 
 This trust covers every outbound TLS connection the engine makes: `proxy` stub upstreams,
 `--configfile https://…`, and the intercept listener's
-[WebSocket passthrough]({{ site.baseurl }}/features/intercept-proxy/#websocket-passthrough).
+[WebSocket passthrough](intercept-proxy.md#websocket-passthrough).
 Embedders set the same policy on `rift_serve_admin` with `upstreamCaFile` (a path), `upstreamCaPem`
 (the PEM text; not both) and `upstreamTlsSkipVerify` — see
-[FFI]({{ site.baseurl }}/embedding/ffi/) — and since issue #1149 it reaches the intercept relay
+[FFI](../embedding/ffi.md) — and since issue #1149 it reaches the intercept relay
 there too, so an embedded listener trusts exactly what an embedded `proxy` stub trusts. A listener
 builds its origin trust when it binds, so start the intercept listener **after** the
 `rift_serve_admin` that sets the trust; one already running keeps what it was born with.

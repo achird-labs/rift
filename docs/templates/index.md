@@ -1,8 +1,5 @@
 ---
-layout: default
 title: Templates
-nav_order: 9.5
-permalink: /templates/
 ---
 
 # Vendor-Mock Templates
@@ -13,7 +10,7 @@ and talks to Rift instead of the vendor's hosts:
 
 - **Direct mode**: point the SDK at the mock's URLs (usually one or two settings).
 - **Intercept mode**: change nothing in the code; set `HTTPS_PROXY` to Rift's
-  [intercept proxy]({{ site.baseurl }}/features/intercept-proxy/) and trust its CA, the way
+  [intercept proxy](../features/intercept-proxy.md) and trust its CA, the way
   `AWS_ENDPOINT_URL` points an AWS SDK at LocalStack.
 
 Every imposter in a template records requests, so a test asserts on what the SDK sent through the
@@ -63,7 +60,7 @@ the directory — a directory lint reads the template's `template.json` manifest
 - **Declarative.** No `inject`, `decorate`, `shellTransform` or `_rift.script`; it loads on a plain
   `rift --configfile`, without `--allow-injection`.
 - **Reserved ports.** Templates use 4600–4999, a 20-port block each, so templates can run side by
-  side and next to the [examples]({{ site.baseurl }}/examples/) (4545–4550).
+  side and next to the [examples](../examples/index.md) (4545–4550).
 - **Gated in CI.** Each template is parsed and linted by the test suite, then booted on the built
   binary with its `smoke.sh` run against it, on every pull request.
 - **Synthetic data.** Fixtures are written for the template; ids and keys are made up, and there are
