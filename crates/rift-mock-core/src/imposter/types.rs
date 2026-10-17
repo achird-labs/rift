@@ -628,7 +628,8 @@ pub fn admission_check_stub(stub: &Stub) -> Result<(), String> {
         match response {
             StubResponse::Proxy { proxy, .. } => {
                 refuse_unknown_proxy_mode(Some(proxy), Admission::Checked)?;
-                refuse_unreadable_generators(Some(proxy), Admission::Checked)
+                refuse_unreadable_generators(Some(proxy), Admission::Checked)?;
+                refuse_proxy_to_path(Some(proxy), Admission::Checked)
             }
             _ => Ok(()),
         }
@@ -1612,6 +1613,7 @@ impl TryFrom<StubResponseRaw> for StubResponse {
         if raw.is.is_none() {
             refuse_unknown_proxy_mode(raw.proxy.as_ref(), admission())?;
             refuse_unreadable_generators(raw.proxy.as_ref(), admission())?;
+            refuse_proxy_to_path(raw.proxy.as_ref(), admission())?;
         }
         // Priority: is > proxy > inject > fault > rift-script-only. A door has refused two types or
         // none above, so this order only decides what a replayed config admitted before #1551 decodes
@@ -2224,6 +2226,74 @@ fn refuse_unknown_proxy_mode(
         return Ok(());
     }
     proxy.map_or(Ok(()), |proxy| proxy.mode().map(|_| ()))
+}
+
+/// Refuse an `http(s)` `proxy.to` with a path, or a `to` that is not a URL, at a config door only
+/// (issue #1550), in Mountebank's words: its dry run parses `to` with WHATWG `new URL` and refuses
+/// a pathname other than `/` (`dryRunValidator.js`). `url::Url` is WHATWG too, so `/.` and `/%2e/`
+/// normalise to `/` and are admitted, as they are there. A trailing `/`, a query or a fragment is
+/// admitted: the forward sends only the request's own path and query ([`upstream_url`]). Every
+/// engine before this one admitted and stored such a `to`, so it is never a decode refusal.
+fn refuse_proxy_to_path(proxy: Option<&ProxyResponse>, admission: Admission) -> Result<(), String> {
+    if admission == Admission::Skipped {
+        return Ok(());
+    }
+    let Some(proxy) = proxy else {
+        return Ok(());
+    };
+    let url = url::Url::parse(&proxy.to)
+        .map_err(|_| format!("proxy.to is not a valid URL: {}", proxy.to))?;
+    if url.scheme().starts_with("http") && url.path() != "/" {
+        return Err(format!("proxy.to must not contain a path '{}'", url.path()));
+    }
+    Ok(())
+}
+
+/// How [`upstream_url`] treats the path of the URL it forwards to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpstreamTarget {
+    /// A stub's `proxy.to`: an origin. Only its scheme, host and port are used, as Mountebank's
+    /// `getProxyRequest` uses them; its path, query, fragment and userinfo never reach the upstream.
+    Origin,
+    /// `defaultForward`, a Rift extension documented as a base URL: its path prefixes the request's,
+    /// without a doubled `/`; its query, fragment and userinfo are dropped.
+    Base,
+}
+
+/// The URL a proxy sends a request to (issue #1550): `to`'s scheme and authority, then the
+/// (already rewritten) request path and the request's query. It used to be `to` + path + query as a
+/// string, so `to` ending in `/` sent `//path`, a `?query` in `to` swallowed the request into the
+/// query, and a `#fragment` dropped the path.
+///
+/// A `to` that does not parse is admitted only from a stored or programmatic config (the doors
+/// refuse it); it is an error the caller answers with the proxy-error 502.
+pub(crate) fn upstream_url(
+    to: &str,
+    target: UpstreamTarget,
+    path: &str,
+    query: Option<&str>,
+) -> Result<url::Url, String> {
+    let mut url =
+        url::Url::parse(to).map_err(|e| format!("proxy.to `{to}` is not a valid URL: {e}"))?;
+    if url.cannot_be_a_base() {
+        return Err(format!("proxy.to `{to}` is not a URL with a host"));
+    }
+    let joined = match target {
+        UpstreamTarget::Origin => path.to_string(),
+        UpstreamTarget::Base => {
+            let base = url.path();
+            let base = base.strip_suffix('/').unwrap_or(base);
+            format!("{base}{path}")
+        }
+    };
+    url.set_path(&joined);
+    url.set_query(query);
+    url.set_fragment(None);
+    // Fails only for a URL without a host (`unix:/socket`), which no upstream client can reach.
+    url.set_username("")
+        .and_then(|()| url.set_password(None))
+        .map_err(|()| format!("proxy.to `{to}` has no host to drop userinfo from"))?;
+    Ok(url)
 }
 
 /// Refuse a `predicateGenerators` entry the recorder cannot read, at a config door only, like
@@ -3825,6 +3895,63 @@ mod tests {
             "admission re-check refuses it"
         );
     }
+
+    fn imposter_proxying_to(to: &str) -> String {
+        serde_json::json!({
+            "port": 4545, "protocol": "http",
+            "stubs": [{ "responses": [{ "proxy": { "to": to } }] }]
+        })
+        .to_string()
+    }
+
+    /// Issue #1550: Mountebank's dry run refuses an `http(s)` `to` whose WHATWG pathname is not
+    /// `/`, in these words, on every config door.
+    #[test]
+    fn a_proxy_to_with_a_path_is_refused_in_mountebanks_words() {
+        for (to, path) in [
+            ("http://localhost:1/x", "/x"),
+            ("https://localhost:1/a/b", "/a/b"),
+            ("http://localhost:1/x?q=1", "/x"),
+            ("http://localhost:1//", "//"),
+            ("HTTP://localhost:1/x", "/x"),
+        ] {
+            let err = serde_json::from_str::<ImposterConfig>(&imposter_proxying_to(to))
+                .expect_err(to)
+                .to_string();
+            assert!(
+                err.contains(&format!("proxy.to must not contain a path '{path}'")),
+                "{to}: {err}"
+            );
+        }
+        let err = serde_json::from_str::<ImposterConfig>(&imposter_proxying_to("not a url"))
+            .expect_err("not a url")
+            .to_string();
+        assert!(
+            err.contains("proxy.to is not a valid URL: not a url"),
+            "{err}"
+        );
+    }
+
+    /// What Mountebank admits: the pathname is `/` (dot segments removed, as WHATWG does), or the
+    /// scheme is not http, or the string parses with a non-http scheme.
+    #[test]
+    fn a_proxy_to_mountebank_admits_is_admitted() {
+        for to in [
+            "http://localhost:1",
+            "http://localhost:1/",
+            "http://localhost:1?q=1",
+            "http://localhost:1/#f",
+            "http://localhost:1/.",
+            "http://localhost:1/%2e/",
+            "http://user:pw@localhost:1",
+            "tcp://localhost:1/x",
+            "localhost:1/x",
+        ] {
+            serde_json::from_str::<ImposterConfig>(&imposter_proxying_to(to))
+                .unwrap_or_else(|e| panic!("{to}: {e}"));
+        }
+    }
+
     use super::*;
     use serde_json::json;
 

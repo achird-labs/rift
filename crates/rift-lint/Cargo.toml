@@ -25,6 +25,8 @@ serde_norway.workspace = true
 
 # Regex for pattern validation
 regex = "1"
+# WHATWG URL parsing for E057, the parser the engine checks `proxy.to` with (issue #1550).
+url = "2"
 rift-ejs = { path = "../rift-ejs", version = "0.1.0" }
 # The predicate grammar's names — operators, parameters, generator keys — come from the crate the
 # engine reads them from (issue #1342), so the linter cannot drift from it.

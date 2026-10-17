@@ -23,6 +23,21 @@ record.
   Configs an engine already stored load unchanged. `rift-lint` reports two types as the error
   `E056`, for every pair (`W003`, a warning for `is` + `proxy` only, is retired), and `E014` now
   counts an empty `inject`/`fault` as absent.
+- **A `proxy.to` whose URL has a path is now refused** (`400` from the admin API, a startup error
+  from `--configfile` and `--datadir`), as Mountebank refuses it (#1550), and so is a `to` that is
+  not a URL. Rift used to store it and prepend the path to every forwarded request; use
+  `pathRewrite` with `"from": ""` for a base path. A config an engine already stored with such a
+  `to` still decodes for an embedder replaying it, and `admission_check` refuses it. `rift-lint`
+  reports it as `E057`.
+
+### Fixed
+
+- **A proxy forwards the request's own path and query to the upstream** whatever follows the host
+  in `to`, as Mountebank does (#1550). A `to` ending in `/` used to send `//path`, one with `?query`
+  folded the request into the query, and one with `#fragment` dropped the path. Userinfo in `to` no
+  longer becomes an `Authorization` header, which Mountebank never sends either; use `injectHeaders`.
+  `defaultForward` keeps its base path but no longer doubles a trailing `/`, and ignores a query or
+  fragment on it.
 
 ### Testing
 

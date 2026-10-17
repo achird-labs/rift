@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::imposter::behavior_pipeline::{BehaviorOutcome, BehaviorRun, ServedParts};
+use crate::imposter::types::{UpstreamTarget, upstream_url};
 use crate::recording::{ClaimToken, ProxyStoreError, StubPlacement, StubPublication};
 // The predicate-generator keys this engine reads (issue #1327). Any other key is accepted and
 // reported as unread, never refused: Mountebank configs carry keys Rift may not implement yet.
@@ -847,6 +848,8 @@ impl Imposter {
     pub(crate) async fn handle_proxy_request<SH>(
         &self,
         proxy_config: &ProxyResponse,
+        // A stub's `to` is an origin; `defaultForward` is a base URL (issue #1550).
+        target: UpstreamTarget,
         method: &str,
         uri: &hyper::Uri,
         headers: &HashMap<String, Vec<String>, SH>,
@@ -879,12 +882,10 @@ impl Imposter {
             original_path.to_string()
         };
 
-        let target_url = format!(
-            "{}{}{}",
-            proxy_config.to,
-            rewritten_path,
-            uri.query().map(|q| format!("?{q}")).unwrap_or_default()
-        );
+        // Before the claim, so a `to` that does not parse fails the request with nothing to release.
+        let target_url = upstream_url(&proxy_config.to, target, &rewritten_path, uri.query())
+            .map_err(anyhow::Error::msg)?
+            .to_string();
 
         if proxy_config.path_rewrite.is_some() {
             debug!(

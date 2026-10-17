@@ -2263,6 +2263,17 @@ pub fn validate_proxy_response(
                     )
                     .with_location(format!("{location}.to")),
                 );
+            } else if let Some(message) = proxy_to_refusal(url) {
+                // E057 (issue #1550): the engine refuses it at the door, as Mountebank does.
+                let mut issue = LintIssue::error("E057", message.clone(), file.to_path_buf())
+                    .with_location(format!("{location}.to"));
+                if let Ok(parsed) = url::Url::parse(url) {
+                    issue = issue.with_suggestion(format!(
+                        "use pathRewrite {{\"from\": \"\", \"to\": \"{}\"}} to prefix the upstream path",
+                        parsed.path()
+                    ));
+                }
+                result.add_issue(issue);
             }
 
             if (url.contains("localhost:") || url.contains("127.0.0.1:"))
@@ -2336,6 +2347,20 @@ pub fn validate_proxy_response(
                 )),
             ),
         }
+    }
+}
+
+/// Why the engine refuses this `http(s)` proxy `to` (issue #1550), parsed as the engine and
+/// Mountebank parse it (WHATWG): it is not a URL, or its normalised path is not `/`. A trailing
+/// `/`, a query or a fragment is fine; the engine forwards only the request's own path and query.
+fn proxy_to_refusal(to: &str) -> Option<String> {
+    match url::Url::parse(to) {
+        Err(_) => Some(format!("Proxy 'to' is not a valid URL: '{to}'")),
+        Ok(url) if url.scheme().starts_with("http") && url.path() != "/" => Some(format!(
+            "Proxy 'to' must not contain a path: '{}'",
+            url.path()
+        )),
+        Ok(_) => None,
     }
 }
 
