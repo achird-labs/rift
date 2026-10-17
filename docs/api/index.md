@@ -1,8 +1,5 @@
 ---
-layout: default
 title: API Reference
-nav_order: 7
-permalink: /api/
 ---
 
 # REST API Reference
@@ -90,6 +87,7 @@ calls, so a client may rely on it — for example when diffing two snapshots of 
 Earlier releases followed an internal hash map order, which could vary between calls (#713).
 
 **Query Parameters:**
+
 - `replayable` (boolean) - Return each imposter's full config, for export
 - `removeProxies` (boolean, with `replayable`) - Strip proxy responses from the export
 - `list` (boolean) - Return a shorter entry per imposter: `protocol`, `port`, `name`,
@@ -236,6 +234,7 @@ arrays are always present and mirror `POST /admin/reload`: `created`, `replaced`
 runtime state intact). An unchanged imposter appears in none of them.
 
 **Errors:**
+
 - `400 Bad Request` — the set failed validation (bad protocol, duplicate port, duplicate stub id);
   the running imposters are unchanged. An absent or `0` port is auto-assigned, never a duplicate;
   such an imposter is re-created on each `PUT`, after every imposter with an explicit port, so it
@@ -251,6 +250,7 @@ runtime state intact). An unchanged imposter appears in none of them.
 Get imposter details.
 
 **Query Parameters:**
+
 - `replayable` (boolean) - Return the imposter's config for export instead of the details below:
   the same document `GET /imposters?replayable=true` lists for it, with the stubs it serves now
   and no `numberOfRequests`, `requests` or `_links`
@@ -492,6 +492,7 @@ Get recorded requests (if `recordRequests: true`). Also available under the alia
 `GET /imposters/{port}/requests`.
 
 **Query Parameters:**
+
 - `match=header:<Name>=<Value>` — keep only requests carrying a matching header
 - `match=flow_id=<Value>` — keep only requests whose resolved flow id matches
 - `match=method=<Verb>` — keep only requests whose method matches exactly (case-sensitive)
@@ -622,6 +623,7 @@ the wire just to count it.
   "includeClosest": false
 }
 ```
+
 - `predicates` — standard Mountebank/Rift predicate objects, AND-ed together (same semantics as a
   stub's `predicates`). A request header the client sent more than once matches if **any** of its
   values satisfies the predicate — and `not` on such a header fails as soon as one value matches.
@@ -700,6 +702,7 @@ API key like every other admin route. Older engines return `404`, so an SDK prob
 falls back to polling.
 
 **Query parameters:**
+
 - `types=requests,lifecycle` — which event families to stream (default: both).
 - `port=<port>` — restrict to one imposter.
 - `match=header:<Name>=<Value>` / `match=flow_id=<Value>` / `match=method=<Verb>` /
@@ -843,7 +846,7 @@ the flow store fails.
 These routes exist only when the server was built with an intercept control. The `rift` binary
 always has one, and so does an embedded `rift_serve_admin`. Without one, every `/intercept*` path
 returns `404`. The request and rule schemas, CA options and authentication are documented in
-[Intercept proxy]({{ site.baseurl }}/features/intercept-proxy/#runtime-lifecycle-admin-api).
+[Intercept proxy](../features/intercept-proxy.md#runtime-lifecycle-admin-api).
 Authorization actions are `intercept.read` / `intercept.write`.
 
 | Method | Path | Success | Errors |
@@ -860,7 +863,7 @@ Authorization actions are `intercept.read` / `intercept.write`.
 
 A serve rule's `body` may be any JSON value (#934), and a serve rule accepts the Mountebank
 `statusCode` and `headers` spellings (#938). The
-[rule schema]({{ site.baseurl }}/features/intercept-proxy/#configuring-rules-admin-api) is canonical.
+[rule schema](../features/intercept-proxy.md#configuring-rules-admin-api) is canonical.
 
 ---
 
@@ -938,7 +941,7 @@ Field notes (issue #879 — these were previously hardcoded literals):
   the real one rather than the `2525` default. An embedder that fronts the admin API with its own
   public listener can override it with `AdminApiServer::with_reported_admin_port` /
   `ServerBuilder::reported_admin_port` (issue #1135), so clients building URLs from `options.port`
-  get the public port. See [Embeddable Server]({{ site.baseurl }}/embedding/server/).
+  get the public port. See [Embeddable Server](../embedding/server.md).
 - **`localOnly`** reports whether **`--local-only` was supplied**, not whether the admin listener
   happened to bind loopback. With the flag, the admin API and `/metrics` bind loopback, and every
   imposter port and the front door refuse non-loopback clients. The distinction matters: `--host 127.0.0.1` narrows the admin plane
@@ -947,7 +950,7 @@ Field notes (issue #879 — these were previously hardcoded literals):
   is reachable off-host while a listener still is.
 - **`ipWhitelist`** is always `["*"]`. `--ip-whitelist` is accepted for Mountebank compatibility and
   **never enforced**, so every address may connect; see the
-  [CLI reference]({{ site.baseurl }}/configuration/cli/#--ip-whitelist-does-not-filter-anything).
+  [CLI reference](../configuration/cli.md#--ip-whitelist-does-not-filter-anything).
 
 `serveOptions` (since 0.17.0, issue #877; 0.17.0 listed the first eight keys without `noParse`)
 lists the keys the embedded serve-options document accepts, so a consumer can feature-detect an option before sending it. **Absence of the key means an
@@ -1124,7 +1127,7 @@ reason, such as running out of file descriptors, stays `500`.
 The request body exceeds `--max-body-size` (default 512 MiB, Mountebank's own breaking point). The
 same limit applies to imposter requests; a proxied upstream response over it, or one that does not
 fit the memory budget, fails the proxy with `502` like any other upstream failure. See
-[Body size limits]({{ site.baseurl }}/configuration/cli/#body-size-limits).
+[Body size limits](../configuration/cli.md#body-size-limits).
 
 ```json
 {

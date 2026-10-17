@@ -1,8 +1,5 @@
 ---
-layout: default
 title: Kubernetes
-parent: Deployment
-nav_order: 2
 ---
 
 # Kubernetes Deployment
@@ -306,10 +303,10 @@ spec:
 ### Intercept listener as a sidecar
 
 To mock an external HTTPS host the app hard-codes, run the
-[intercept listener]({{ site.baseurl }}/features/intercept-proxy/) in the sidecar. Containers in a pod
+[intercept listener](../features/intercept-proxy.md) in the sidecar. Containers in a pod
 share a network namespace, so the app reaches it on `127.0.0.1`. Keep the CA pair in a `Secret`
 (made with `rift intercept-ca generate --out-dir ca`, see
-[`intercept-ca`]({{ site.baseurl }}/configuration/cli/#intercept-ca)). Rift reads it from a mounted
+[`intercept-ca`](../configuration/cli.md#intercept-ca)). Rift reads it from a mounted
 volume through the config block's `caCertPath` / `caKeyPath`, and the app trusts the certificate from
 its own mount. Do not also set `RIFT_INTERCEPT_*` env vars on the sidecar: with an `intercept` block
 that is a startup error.
@@ -371,13 +368,13 @@ volumes:
 ```
 
 The `intercept` block in `mock.json` is the one shown under
-[Docker]({{ site.baseurl }}/deployment/docker/#intercepting-https-from-another-container), with
+[Docker](docker.md#intercepting-https-from-another-container), with
 `"caCertPath": "/ca/ca-cert.pem"` and `"caKeyPath": "/ca/ca-key.pem"`; the listener can bind
 `127.0.0.1` here since only the pod's own app connects. Other trust variables
 (`NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, a JVM truststore) and which of them replace the default
-roots: [Trusting the CA from the SUT]({{ site.baseurl }}/features/intercept-proxy/#trusting-the-ca-from-the-sut).
+roots: [Trusting the CA from the SUT](../features/intercept-proxy.md#trusting-the-ca-from-the-sut).
 A `forward` rule reaches the sidecar's own `127.0.0.1` unless it names a `host`
-([details]({{ site.baseurl }}/features/intercept-proxy/#forward-to-one-of-your-imposters)).
+([details](../features/intercept-proxy.md#forward-to-one-of-your-imposters)).
 
 Each replica has its own listener and its own rules, like everything else in a replicated Rift (see
 [High Availability](#high-availability)). Editing the ConfigMap and calling `POST /admin/reload`

@@ -1,10 +1,3 @@
----
-layout: default
-title: Hot Reload
-parent: Features
-nav_order: 26
----
-
 # Hot Reload
 
 `POST /admin/reload` re-reads the startup config source and applies it **incrementally** — Rift

@@ -1,9 +1,5 @@
 ---
-layout: default
 title: Embedding & SPI
-nav_order: 10
-has_children: true
-permalink: /embedding/
 ---
 
 # Embedding & Extension (SPI)
@@ -23,16 +19,16 @@ the source, the source wins — please file an issue.
 
 | You want to… | Use | Page |
 |:-------------|:----|:-----|
-| Run the full Rift server (imposters + admin API + metrics) inside a Rust host | `ServerBuilder` | [Embeddable Server]({{ site.baseurl }}/embedding/server/) |
-| Bind the admin or metrics plane to a chosen (or ephemeral `:0`) address and learn the bound port | `AdminApiServer::bind` / `bind_metrics_server` | [Embeddable Server]({{ site.baseurl }}/embedding/server/) |
-| Replace a storage backend (flow-state, request journal, proxy recording, response sequencing) | SPI traits on `ImposterManager` | [Extension Points (SPI)]({{ site.baseurl }}/embedding/spi/) |
-| Observe reconciliation events or decorate responses | `ImposterEventListener` / `ResponseDecorator` | [Extension Points (SPI)]({{ site.baseurl }}/embedding/spi/) |
-| Apply policy to live exchanges, rescue a no-match, or authorize admin requests | `ExchangeInspector` / `NoMatchInterceptor` / `AdminAuthorizer` | [Extension Points (SPI)]({{ site.baseurl }}/embedding/spi/) |
-| Drive Rift from a non-Rust host (JVM, Node, Go, …) | The C-ABI (`rift-ffi`) | [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/) |
-| Drive Rift from Java, Scala, Node/TypeScript or Go without writing an FFI bridge yourself | An official SDK | [Language SDKs]({{ site.baseurl }}/sdk/) |
+| Run the full Rift server (imposters + admin API + metrics) inside a Rust host | `ServerBuilder` | [Embeddable Server](server.md) |
+| Bind the admin or metrics plane to a chosen (or ephemeral `:0`) address and learn the bound port | `AdminApiServer::bind` / `bind_metrics_server` | [Embeddable Server](server.md) |
+| Replace a storage backend (flow-state, request journal, proxy recording, response sequencing) | SPI traits on `ImposterManager` | [Extension Points (SPI)](spi.md) |
+| Observe reconciliation events or decorate responses | `ImposterEventListener` / `ResponseDecorator` | [Extension Points (SPI)](spi.md) |
+| Apply policy to live exchanges, rescue a no-match, or authorize admin requests | `ExchangeInspector` / `NoMatchInterceptor` / `AdminAuthorizer` | [Extension Points (SPI)](spi.md) |
+| Drive Rift from a non-Rust host (JVM, Node, Go, …) | The C-ABI (`rift-ffi`) | [FFI (C-ABI)](ffi.md) |
+| Drive Rift from Java, Scala, Node/TypeScript or Go without writing an FFI bridge yourself | An official SDK | [Language SDKs](../sdk/index.md) |
 
 > **Runtime topology is yours to choose when embedding.** The `--runtime per-core` flag
-> ([Performance → Runtime Topology]({{ site.baseurl }}/performance/#runtime-topology-per-core-experimental))
+> ([Performance → Runtime Topology](../performance/index.md#runtime-topology-per-core-experimental))
 > is a property of the `rift` **binary's** bootstrap — an embedded host runs `ServerBuilder` on
 > whatever Tokio runtime it already owns. To opt into the same per-core listener fan-out from a
 > host, pass your worker runtime handles to `ServerBuilder::accept_runtimes(...)` (or
@@ -90,5 +86,5 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-See [Embeddable Server]({{ site.baseurl }}/embedding/server/) for injecting a custom
+See [Embeddable Server](server.md) for injecting a custom
 `ImposterManager`, binding to ephemeral ports, and graceful shutdown.

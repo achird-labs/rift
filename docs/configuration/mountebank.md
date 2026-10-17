@@ -1,8 +1,5 @@
 ---
-layout: default
 title: Mountebank Format
-parent: Configuration
-nav_order: 1
 ---
 
 # Mountebank Configuration Format
@@ -57,14 +54,14 @@ No field is strictly required.
 | `rejectUnauthorized` | boolean | Validate the client certificate against `ca`; requires `ca` |
 | `ca` | string or array | PEM trust anchor(s) client certificates must chain to |
 | `defaultForward` | string | *Rift extension.* Upstream URL an unmatched request is forwarded to (takes precedence over `defaultResponse`) |
-| `strictBehaviors` | boolean | *Rift extension.* Turn a failing behavior into a `500` — see [Strict Behaviors]({{ site.baseurl }}/configuration/native/#strict-behaviors-strictbehaviors) |
+| `strictBehaviors` | boolean | *Rift extension.* Turn a failing behavior into a `500` — see [Strict Behaviors](native.md#strict-behaviors-strictbehaviors) |
 | `enabled` | boolean | Whether the imposter serves traffic (default `true`); toggled by `POST /imposters/{port}/disable` and `/enable` |
 
 A request that matches no stub gets the `defaultResponse` when there is one, and otherwise a `200`
 with an empty body — as in Mountebank, never a `404`.
 
 TLS fields (`key`, `cert`, `mutualAuth`, `rejectUnauthorized`, `ca`) are covered in
-[TLS/HTTPS]({{ site.baseurl }}/features/tls/).
+[TLS/HTTPS](../features/tls.md).
 
 ### Rift-Specific Metadata Fields
 
@@ -293,13 +290,13 @@ and `xpath` selectors apply to the value `from` picked.
 ```
 
 `copy` and `lookup` each accept a single object or an array of them. See
-[Behaviors]({{ site.baseurl }}/mountebank/behaviors/) for `shellTransform`, `repeat` and the
+[Behaviors](../mountebank/behaviors.md) for `shellTransform`, `repeat` and the
 error semantics.
 
 Behaviors run on `is`, `inject` and `proxy` responses, and `repeat` on every response. A block
 setting anything else on a `fault` or `_rift`-only response is kept and returned, and reported as
 `config_key_ignored` in `_rift.warnings` and by `rift-lint` `W017` — see
-[Behaviors]({{ site.baseurl }}/mountebank/behaviors/).
+[Behaviors](../mountebank/behaviors.md).
 
 ---
 
@@ -416,7 +413,7 @@ rift --configfile imposters.json
 ```
 
 The file may also be YAML (a sequence of imposters) or a single imposter object, and may use the
-Mountebank EJS tags — see [Document shapes and formats]({{ site.baseurl }}/configuration/#document-shapes-and-formats).
+Mountebank EJS tags — see [Document shapes and formats](index.md#document-shapes-and-formats).
 
 ### Via REST API
 

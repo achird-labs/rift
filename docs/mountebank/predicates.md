@@ -1,10 +1,3 @@
----
-layout: default
-title: Predicates
-parent: Mountebank Compatibility
-nav_order: 2
----
-
 # Predicates
 
 Predicates define rules for matching incoming requests. When all predicates in a stub match, the stub's response is returned.

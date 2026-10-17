@@ -1,10 +1,3 @@
----
-layout: default
-title: Extension Points (SPI)
-parent: Embedding & SPI
-nav_order: 2
----
-
 # Extension Points (SPI)
 
 Rift's storage and observation seams are **traits** in `rift-mock-core`. An embedding host implements a
@@ -30,13 +23,13 @@ let manager = ImposterManager::new()
 ```
 
 Then pass `Arc::new(manager)` to `ServerBuilder::manager(...)` (see
-[Embeddable Server]({{ site.baseurl }}/embedding/server/)).
+[Embeddable Server](server.md)).
 
 ---
 
 ## `FlowStoreProvider` — custom flow-state backend
 
-Provide a [flow-state]({{ site.baseurl }}/features/flow-state/) store per imposter, or return `None`
+Provide a [flow-state](../features/flow-state.md) store per imposter, or return `None`
 to defer to the built-ins (in-memory).
 
 ```rust
@@ -74,7 +67,7 @@ implementation keeps compiling: `is_blocking`, `increment_by`, `set_key_ttl`, `c
 ## `ResponseSequencer` — custom response cycling
 
 Owns the per-stub cursor that drives multiple-response cycling and `repeat` (see
-[Behaviors → repeat]({{ site.baseurl }}/mountebank/behaviors/#repeat)).
+[Behaviors → repeat](../mountebank/behaviors.md#repeat)).
 
 ```rust
 pub trait ResponseSequencer: Send + Sync {
@@ -146,7 +139,7 @@ failure propagates rather than being swallowed. Inject with `.with_request_journ
 
 ## `ProxyRecordingStore` — custom proxy-recording store
 
-Backs [proxy record/replay]({{ site.baseurl }}/mountebank/proxy/): claims the right to record a
+Backs [proxy record/replay](../mountebank/proxy.md): claims the right to record a
 response once per request signature, then stores and looks up recordings.
 
 ```rust
@@ -294,7 +287,7 @@ Two consequences worth knowing before you set `publishes_stubs() == true`:
 ## `ImposterEventListener` — observe reconciliation
 
 Get a callback whenever the imposter set changes (startup load, `POST /admin/reload`, admin CRUD).
-See [Hot Reload]({{ site.baseurl }}/features/hot-reload/) for how the incremental diff produces these.
+See [Hot Reload](../features/hot-reload.md) for how the incremental diff produces these.
 
 ```rust
 pub enum ImposterEvent {
@@ -484,7 +477,7 @@ when a stub injects a TCP fault, where a socket client would see the connection 
 with `rift_mock_core::tcp_fault_carrier(&response)`, which returns the canonical fault name or `None`.
 To branch per fault, read the `#[non_exhaustive]` `TcpFaultKind` extension (issue #984). Both are
 also re-exported from `rift_http_proxy`. See
-[Fault injection → Detecting a fault in-process]({{ site.baseurl }}/features/fault-injection/#detecting-a-fault-in-process-embedders).
+[Fault injection → Detecting a fault in-process](../features/fault-injection.md#detecting-a-fault-in-process-embedders).
 Do not classify on the `x-rift-fault` header.
 
 `dispatch_to_port` returns the same carrier untouched. A listener you own can instead apply it as the
@@ -500,7 +493,7 @@ drain the unread body before closing, so the client gets the refusal instead of 
 #1460). The drain is timed with `tokio::time`, so an armed `FaultIo` must be driven on a Tokio
 runtime with its time driver enabled, and it can hold a graceful shutdown for up to 2 s. `FaultCell`, `FaultIo`, `InjectedFault`, `is_injected_fault`, `LingerOnClose` and
 `arm_linger_if_requested` are exported from both `rift_mock_core` and `rift_http_proxy`. See
-[Fault injection → Serving from your own listener]({{ site.baseurl }}/features/fault-injection/#serving-from-your-own-listener).
+[Fault injection → Serving from your own listener](../features/fault-injection.md#serving-from-your-own-listener).
 
 ## Observing front-door route dispatches
 
@@ -508,7 +501,7 @@ runtime with its time driver enabled, and it can hold a graceful shutdown for up
 the route id. It is meant for a per-route hit counter (issue #961). Pass it to
 `bind_front_door_with_observer(addr, manager, routes, Some(observer))`. `bind_front_door` is the same
 call without an observer. See
-[Front door → Observing dispatches]({{ site.baseurl }}/features/front-door/#observing-dispatches-embedders).
+[Front door → Observing dispatches](../features/front-door.md#observing-dispatches-embedders).
 
 ## `AdminAuthorizer` — per-request admin authorization
 
@@ -708,4 +701,4 @@ reads. It still arrives when the engine ran the work on `spawn_blocking` (a stor
 dropped. This is the same mechanism behind the script/behavior error headers — e.g. a script that hits a
 down flow-store backend records an annotation, and a `ctx.state` call against that backend is
 **fail-loud**: it raises a script error that surfaces to the response rather than silently returning a
-default (see [Scripting → `ctx.state` and `ctx.store`]({{ site.baseurl }}/features/scripting/#ctxstate-and-ctxstore)).
+default (see [Scripting → `ctx.state` and `ctx.store`](../features/scripting.md#ctxstate-and-ctxstore)).

@@ -1,10 +1,3 @@
----
-layout: default
-title: Behaviors
-parent: Mountebank Compatibility
-nav_order: 4
----
-
 # Behaviors
 
 Behaviors modify responses before they are sent to the client. They enable latency simulation, response transformation, and dynamic content.
@@ -37,7 +30,7 @@ Behaviors apply to `is` responses (and the flat response form, and a response th
 behaviors block), to `inject` responses, where they run on the response the function returned — a
 function that throws runs none of them — and to `proxy` responses, where they run on the upstream's
 response before it is recorded (see
-[Proxy → Behaviors on the proxy response]({{ site.baseurl }}/mountebank/proxy/#behaviors-on-the-proxy-response)),
+[Proxy → Behaviors on the proxy response](proxy.md#behaviors-on-the-proxy-response)),
 all as in Mountebank. `repeat` applies to every response type. The other behaviors are not
 applied on a `fault` or `_rift`-only response, as in Mountebank. Such a block is not dropped, though: it
 is kept and returned by `GET /imposters/:port`, `rift save` and `--datadir` (as Mountebank's
@@ -574,6 +567,7 @@ Control how many times a response is returned before cycling to the next respons
 ```
 
 The first response is returned 3 times before advancing to the second:
+
 - Requests 1-3 → "First response"
 - Request 4 → "Second response"
 - Requests 5-7 → "First response" (cycles back)
@@ -614,7 +608,7 @@ Each response can have its own repeat count:
 
 Returns "Success" 5 times, then "Error" 2 times, then cycles.
 
-### Use Cases
+### Use Cases {#use-cases-1}
 
 **Simulating rate limiting:**
 ```json
@@ -711,7 +705,7 @@ step here; it controls which response is chosen.
 
 Text the engine substitutes into a response is never read as a token again: a token is expanded
 only if you wrote its first and last characters. This covers the `${request.…}` and
-`_rift.templated` `{% raw %}{{ }}{% endraw %}` passes, which run before behaviors, and `copy` and
+`_rift.templated` `{{ }}` passes, which run before behaviors, and `copy` and
 `lookup`, in body and header values alike. A client that sends `${R}[secret]` in a query parameter
 therefore gets `${R}[secret]` back, never the `secret` column of the row the lookup matched. Sending
 only part of a token does not help either. `${R}[secret` followed by a `]` you wrote, or
@@ -732,9 +726,9 @@ Three sources count as your text, because they are configuration rather than req
   returns, since the upstream is the one named in `proxy.to`.
 - **What an `inject` function returns.** Its behaviors treat the whole response as yours.
 
-The serve-time date tokens (`{% raw %}{{NOW}}{% endraw %}`, `{% raw %}{{DAYS+N}}{% endraw %}`,
-`{% raw %}{{MONTHS+N}}{% endraw %}`) are the one pass that still reads the finished body, so a
-client that sends `{% raw %}{{NOW}}{% endraw %}` gets a timestamp back. They expand only to a date.
+The serve-time date tokens (`{{NOW}}`, `{{DAYS+N}}`,
+`{{MONTHS+N}}`) are the one pass that still reads the finished body, so a
+client that sends `{{NOW}}` gets a timestamp back. They expand only to a date.
 
 **Differs from Mountebank:** for `"behaviors": [{"copy": …}, {"lookup": …}]` Mountebank 2.9.1 expands
 a lookup token the client put in the copied field. Rift serves it as sent.

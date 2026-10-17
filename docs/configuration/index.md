@@ -1,11 +1,3 @@
----
-layout: default
-title: Configuration
-nav_order: 4
-has_children: true
-permalink: /configuration/
----
-
 # Configuration
 
 Rift uses Mountebank-compatible JSON configuration with optional `_rift` extensions for advanced features.
@@ -45,14 +37,14 @@ docker run -v $(pwd)/imposters.json:/imposters.json \
 | Key | Purpose |
 |---|---|
 | `imposters` | The imposters to create — the Mountebank format above. |
-| `intercept` | *Optional, Rift extension.* Declares the [HTTPS intercept listener]({{ site.baseurl }}/features/intercept-proxy/#declare-it-in-the-config-file) and its rules, so a container needs no post-boot admin call to install them. Its keys are `host` (default `127.0.0.1`), `port` (default `0`, which lets the OS pick), the CA pair (`caCertPath`/`caKeyPath`, **or** `caCertPem`/`caKeyPem`, **or** `caCertPemEnv`/`caKeyPemEnv` naming two environment variables), `rules`, and `auth`; any other key is a startup error. With no CA pair, Rift generates a CA at start. `returnCaKey: true` is refused too: a config file has no response to return a generated key in, so use `POST /intercept` for that. |
-| `routes` | *Optional, Rift extension.* The [front door]({{ site.baseurl }}/features/front-door/) route table, as `{"routes": [ ... ]}`. Validated at load, so a table that cannot route is a startup error. It only takes effect with `--front-door`. |
+| `intercept` | *Optional, Rift extension.* Declares the [HTTPS intercept listener](../features/intercept-proxy.md#declare-it-in-the-config-file) and its rules, so a container needs no post-boot admin call to install them. Its keys are `host` (default `127.0.0.1`), `port` (default `0`, which lets the OS pick), the CA pair (`caCertPath`/`caKeyPath`, **or** `caCertPem`/`caKeyPem`, **or** `caCertPemEnv`/`caKeyPemEnv` naming two environment variables), `rules`, and `auth`; any other key is a startup error. With no CA pair, Rift generates a CA at start. `returnCaKey: true` is refused too: a config file has no response to return a generated key in, so use `POST /intercept` for that. |
+| `routes` | *Optional, Rift extension.* The [front door](../features/front-door.md) route table, as `{"routes": [ ... ]}`. Validated at load, so a table that cannot route is a startup error. It only takes effect with `--front-door`. |
 
 `intercept.auth` (issue #878) is `{"username": "…", "password": "…"}` and requires
 `Proxy-Authorization: Basic …` on every `CONNECT` to the listener. Omit it and the proxy is open —
-see [Authenticating the proxy]({{ site.baseurl }}/features/intercept-proxy/#authenticating-the-proxy)
+see [Authenticating the proxy](../features/intercept-proxy.md#authenticating-the-proxy)
 for why that matters on a shared host. A blank username or password is a startup error, not a
-disabled gate. Certificate and CA handling is covered in [TLS/HTTPS]({{ site.baseurl }}/features/tls/).
+disabled gate. Certificate and CA handling is covered in [TLS/HTTPS](../features/tls.md).
 
 `caCertPemEnv` and `caKeyPemEnv` hold the *names* of two environment variables, not the PEM text. Rift
 reads the variables when the listener starts. Use them where a secret store delivers secrets only as
@@ -63,7 +55,7 @@ error names it.
 file. The listener itself stays as booted: a change to `host`, `port`, `auth` or the CA source needs a
 restart, and the reload reply carries a warning that says so. If one edit changes the listener and
 the rules together, the rules are not re-applied either; restart to apply both. See
-[Hot reload]({{ site.baseurl }}/features/hot-reload/) for the reply format.
+[Hot reload](../features/hot-reload.md) for the reply format.
 
 Any other top-level key is ignored.
 
@@ -87,9 +79,9 @@ Before parsing, a `--configfile` document is run through the EJS subset Mounteba
 `<%= process.env.VAR %>` / `<%= process.env.VAR || 'default' %>`. Any other `<% %>` tag is refused
 with an error rather than stripped; pass `--no-parse` for a document that holds a literal `<%`. A
 referenced variable that is unset renders empty and logs a warning naming it. See
-[CLI Reference → Imposter Sources]({{ site.baseurl }}/configuration/cli/#imposter-sources) for what a
+[CLI Reference → Imposter Sources](cli.md#imposter-sources) for what a
 document fetched over `https:` may not do, and
-[Data directory]({{ site.baseurl }}/configuration/cli/#data-directory---datadir) for the stricter
+[Data directory](cli.md#data-directory---datadir) for the stricter
 rules on `--datadir` files.
 
 `<%- stringify('file') %>` yields the file's contents, trimmed and **escaped for the inside of a JSON
@@ -100,7 +92,7 @@ string** — you write the quotes, as in Mountebank:
 ```
 
 The result is a *string* body, served byte-for-byte as the file has it (keys unsorted — see
-[object vs string bodies]({{ site.baseurl }}/mountebank/responses/#body-types)). Written without the quotes,
+[object vs string bodies](../mountebank/responses.md#body-types)). Written without the quotes,
 `"body": <%- stringify('fixtures/datafile.json') %>`, the document does not parse; the load error
 then names the tag, where it is, and the quoted form, and says its line and column are in the
 rendered document. Run with `--loglevel debug` to see that rendered document — it includes every
@@ -118,7 +110,7 @@ curl -X POST http://localhost:2525/imposters \
   -d @imposter.json
 ```
 
-[Full Mountebank Format Reference]({{ site.baseurl }}/configuration/mountebank/)
+[Full Mountebank Format Reference](mountebank.md)
 
 ---
 
@@ -154,12 +146,13 @@ Extend Mountebank configurations with advanced chaos engineering features:
 ```
 
 Available `_rift` features:
+
 - **Flow State**: Stateful testing with the in-memory backend
 - **Fault Injection**: Probabilistic latency, error, and TCP faults
 - **Scripting**: `respond(ctx)` scripts in Rhai or JavaScript
 - **Templating and state operations**: `_rift.templated` (function-grammar response templates) and `_rift.stateOps` (declarative flow-state writes)
 
-[Full Rift Extensions Reference]({{ site.baseurl }}/configuration/native/)
+[Full Rift Extensions Reference](native.md)
 
 ---
 
@@ -181,7 +174,7 @@ Configure Rift behavior via environment variables:
 | `RUST_LOG` | Full `tracing` filter; overrides `MB_LOGLEVEL` when set. A value that does not parse is refused at startup | unset |
 
 This is the common subset; the full list — TLS, intercept, runtime and socket-tuning variables —
-is in the [CLI Reference]({{ site.baseurl }}/configuration/cli/#environment-variables).
+is in the [CLI Reference](cli.md#environment-variables).
 
 ```bash
 docker run -e MB_PORT=2525 -e MB_ALLOW_INJECTION=true \
@@ -215,7 +208,7 @@ Options:
 This is an excerpt. Subcommands (`save`, `replay`, `stop`, `restart`, `script`, `healthcheck`),
 TLS and intercept flags, and the `--rcfile` key list are in the full reference.
 
-[Full CLI Reference]({{ site.baseurl }}/configuration/cli/)
+[Full CLI Reference](cli.md)
 
 ---
 
@@ -223,6 +216,7 @@ TLS and intercept flags, and the `--rcfile` key list are in the full reference.
 
 ### Standard API Mocking
 Use Mountebank JSON format for:
+
 - Migrating from Mountebank
 - Creating API mocks for integration tests
 - Working with existing Mountebank tooling
@@ -230,6 +224,7 @@ Use Mountebank JSON format for:
 
 ### Advanced Chaos Engineering
 Add `_rift` extensions for:
+
 - Probabilistic fault injection
 - Stateful testing scenarios
 - Complex conditional logic with scripting

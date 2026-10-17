@@ -1,10 +1,3 @@
----
-layout: default
-title: Changelog
-nav_order: 12
-permalink: /changelog/
----
-
 # Changelog
 
 Rift keeps a [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)–formatted changelog and follows

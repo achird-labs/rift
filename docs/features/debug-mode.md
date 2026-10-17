@@ -1,10 +1,3 @@
----
-layout: default
-title: Debug Mode
-parent: Features
-nav_order: 6
----
-
 # Debug Mode
 
 Rift provides a debug mode that returns stub matching information instead of executing the actual response. This is useful for diagnosing why requests match (or don't match) specific stubs.
@@ -249,26 +242,27 @@ curl -H "X-Rift-Debug: true" http://localhost:4545/users/123
 ## Use Cases
 
 1. **Diagnosing Match Failures**
-   - See why a request doesn't match any stub
-   - View all stubs to identify missing or incorrect predicates
+    - See why a request doesn't match any stub
+    - View all stubs to identify missing or incorrect predicates
 
 2. **Understanding First-Match-Wins**
-   - See which stub wins when multiple could match
-   - Identify stub ordering issues
+    - See which stub wins when multiple could match
+    - Identify stub ordering issues
 
 3. **Verifying Stub Configuration**
-   - Confirm the right response would be returned
-   - Check response preview without executing
+    - Confirm the right response would be returned
+    - Check response preview without executing
 
 4. **CI/CD Integration**
-   - Programmatically verify stub routing
-   - Validate imposter configuration
+    - Programmatically verify stub routing
+    - Validate imposter configuration
 
 ---
 
 ## Response Headers
 
 Debug responses include:
+
 - `Content-Type: application/json`
 - `X-Rift-Debug-Response: true` - Indicates this is a debug response
 
@@ -288,7 +282,7 @@ with `Content-Type: application/json`:
 | The matching run exceeded `_rift.scriptEngine.timeoutMs` | `504` | `x-rift-script-timeout: true` | `{"errors":[{"code":"...","message":"Debug matching timed out"}]}` |
 
 The timeout answered `500` in earlier releases. It is now a `504`, consistent with every other script
-deadline (see [Scripting]({{ site.baseurl }}/features/scripting/)), so a transient deadline miss is distinguishable from a
+deadline (see [Scripting](scripting.md)), so a transient deadline miss is distinguishable from a
 permanent configuration error — a debug request that times out is worth retrying.
 
 Note the distinction from a normal debug response: an error here means the *inspection itself*

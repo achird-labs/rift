@@ -1,10 +1,3 @@
----
-layout: default
-title: Embeddable Server
-parent: Embedding & SPI
-nav_order: 1
----
-
 # Embeddable Server
 
 The `rift` binary is a thin wrapper around library entry points in `rift-http-proxy`. A Rust host can
@@ -17,7 +10,7 @@ The server composition lives in the `rift_http_proxy::server` module (`Cli`, `Co
 `rift-mock-core` modules plus the TCP-fault seam (`TcpFaultKind`, `tcp_fault_carrier`, `FaultCell`,
 `FaultIo`, `InjectedFault`, `is_injected_fault`, `LingerOnClose`, `arm_linger_if_requested`) and
 `install_default_crypto_provider`. `gateway::apply_tcp_fault` applies a fault carrier on a listener
-of your own ([SPI → Detecting a TCP fault in-process]({{ site.baseurl }}/embedding/spi/#detecting-a-tcp-fault-in-process)).
+of your own ([SPI → Detecting a TCP fault in-process](spi.md#detecting-a-tcp-fault-in-process)).
 
 `Cli`'s `Debug` output redacts its credentials: `--api-key`, `--intercept-auth` and
 `--intercept-ca-key-pem` render as `"<redacted>"` when set (issue #1166), so a host that flattens
@@ -44,7 +37,7 @@ let builder = ServerBuilder::from_cli(Cli::parse());
 | `manager` | `fn manager(self, manager: Arc<ImposterManager>) -> Self` | **The embedding seam** — inject a pre-built `ImposterManager` (e.g. one wired with custom SPI backends) instead of letting the builder construct the default one. Skips internal construction, including `--datadir` write-through, TLS defaults and `--host` inheritance: an injected manager's host-less imposters bind every interface unless you call `ImposterManager::with_default_host(cli.host.clone())` on it yourself (issue #1517). `--local-only` is not inherited either: an injected manager serves every client unless you call `ImposterManager::with_peer_policy(PeerPolicy::LoopbackOnly)` on it (issue #1523). A front door bound over a manager follows that manager's `peer_policy()`. |
 | `imposter_source` | `fn imposter_source(self, source: Arc<dyn ImposterSource>) -> Self` | Register an `--imposters` URI scheme (repeatable). `file:`/`https:` are built in; claiming a scheme already taken is a startup error. |
 | `accept_runtimes` | `fn accept_runtimes(self, runtimes: Vec<tokio::runtime::Handle>) -> Self` | Fan imposter accept loops out across per-core runtimes (issue #745). Applies only to the builder-constructed manager; an injected one uses `ImposterManager::with_accept_runtimes`. Empty keeps the single-listener topology. |
-| `admin_authorizer` | `fn admin_authorizer(self, authorizer: Arc<dyn AdminAuthorizer>) -> Self` | Per-request admin authorization hook (issue #854) — see [`AdminAuthorizer`]({{ site.baseurl }}/embedding/spi/#adminauthorizer--per-request-admin-authorization). |
+| `admin_authorizer` | `fn admin_authorizer(self, authorizer: Arc<dyn AdminAuthorizer>) -> Self` | Per-request admin authorization hook (issue #854) — see [`AdminAuthorizer`](spi.md#adminauthorizer--per-request-admin-authorization). |
 | `reported_admin_port` | `fn reported_admin_port(self, port: u16) -> Self` | The port `GET /config` reports, when the admin plane binds somewhere other than where clients reach it (issue #1135). See `AdminApiServer::with_reported_admin_port` below. |
 | `run` | `async fn run(self) -> anyhow::Result<()>` | Load configs, bind, and serve **forever** (returns only on error/shutdown). |
 | `start` | `async fn start(self) -> anyhow::Result<RunningServer>` | Same, but returns a `RunningServer` handle **once bound** — supports ephemeral (`:0`) ports and programmatic shutdown. |
@@ -57,8 +50,8 @@ Returned by `start()`; lets the host discover bound addresses and control lifecy
 |:-------|:----------|:--------|
 | `admin_addr` | `fn admin_addr(&self) -> SocketAddr` | The bound admin API address (resolve an ephemeral `:0` to the real port). |
 | `metrics_addr` | `fn metrics_addr(&self) -> Option<SocketAddr>` | The bound metrics address, or `None` if metrics weren't started. |
-| `intercept_addr` | `fn intercept_addr(&self) -> Option<SocketAddr>` | The bound [intercept proxy]({{ site.baseurl }}/features/intercept-proxy/) address, whether started by `--intercept-port` or later by `POST /intercept`; `None` when none is running. |
-| `front_door_addr` | `fn front_door_addr(&self) -> Option<SocketAddr>` | The bound [front door]({{ site.baseurl }}/features/front-door/) address; `None` unless `--front-door` was given. |
+| `intercept_addr` | `fn intercept_addr(&self) -> Option<SocketAddr>` | The bound [intercept proxy](../features/intercept-proxy.md) address, whether started by `--intercept-port` or later by `POST /intercept`; `None` when none is running. |
+| `front_door_addr` | `fn front_door_addr(&self) -> Option<SocketAddr>` | The bound [front door](../features/front-door.md) address; `None` unless `--front-door` was given. |
 | `join` | `async fn join(self) -> anyhow::Result<()>` | Await the server until it exits, consuming it. |
 | `wait` | `async fn wait(&self) -> anyhow::Result<()>` | Await the server until it exits **without consuming it** — so you can race it against your own shutdown signal. |
 | `shutdown` | `async fn shutdown(&self)` | Trigger a graceful shutdown. |
@@ -96,7 +89,7 @@ in an `Arc` and stopped from another task.
 ### Injecting a custom `ImposterManager`
 
 `ImposterManager` (from `rift-mock-core`) is the injection point for every SPI backend (see
-[Extension Points]({{ site.baseurl }}/embedding/spi/)). Build it, wire your backends, then hand it to
+[Extension Points](spi.md)). Build it, wire your backends, then hand it to
 the server:
 
 ```rust
@@ -223,7 +216,7 @@ println!("admin bound to {}", running.local_addr());
 | `with_allow_injection` | `fn with_allow_injection(self, allow: bool) -> Self` | Admit scripted configs (`inject`, `decorate`, `shellTransform`, `_rift.script`, …) submitted through this admin API, and report the setting from `GET /config`. The embedder spelling of `--allowInjection`; default `false`. |
 | `with_local_only` | `fn with_local_only(self, local_only: bool) -> Self` | Record `--local-only` for `GET /config` to report (issue #879). Stated explicitly, not inferred from the bind address. |
 | `with_admin_authorizer` | `fn with_admin_authorizer(self, authorizer: Arc<dyn AdminAuthorizer>) -> Self` | Install the per-request authorization hook (issue #854); `ServerBuilder::admin_authorizer` is the builder spelling. |
-| `with_intercept` | `fn with_intercept(self, control: InterceptControl) -> Self` | Serve the `/intercept*` routes against this shared control slot. Without it every `/intercept*` route answers `404`. See [Intercept proxy]({{ site.baseurl }}/features/intercept-proxy/). |
+| `with_intercept` | `fn with_intercept(self, control: InterceptControl) -> Self` | Serve the `/intercept*` routes against this shared control slot. Without it every `/intercept*` route answers `404`. See [Intercept proxy](../features/intercept-proxy.md). |
 | `with_scripts_dir` | `fn with_scripts_dir(self, dir: PathBuf) -> Self` | Root that `_rift.script` `file:` references resolve under for imposters created through this API (issue #356). Without it such references are rejected. |
 | `with_reported_admin_port` | `fn with_reported_admin_port(self, port: u16) -> Self` | Report `port` from `GET /config` instead of the port this server bound (issue #1135). For a host that fronts the admin API with its own public listener and binds the core to an ephemeral loopback port — without it, `options.port` advertises the *private* port to Mountebank-compat clients that read it to build URLs. Unset reports the bound port; `0` is a configured `0`, not "unset". `ServerBuilder::reported_admin_port` is the builder spelling. |
 | `listen` | `fn listen(self, addr: ListenAddr) -> Self` | Listen on `addr` instead of the exact address given to `new` (issue #1528): `ListenAddr::Any(port)` for `[::]` dual-stack with a `0.0.0.0` fallback, `ListenAddr::Loopback(port)` for `127.0.0.1` and `[::1]`, `ListenAddr::Exact(addr)` for one address. `new(addr, …)` alone is `Exact(addr)`; an IPv6 address is dual-stack. |

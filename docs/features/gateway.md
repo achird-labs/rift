@@ -1,10 +1,3 @@
----
-layout: default
-title: Single-Port Gateway
-parent: Features
-nav_order: 25
----
-
 # Single-Port Gateway
 
 The gateway dispatches to any imposter through the admin port, so a containerized Rift only needs to

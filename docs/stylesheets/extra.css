@@ -1,0 +1,27 @@
+/* The logo's navy-indigo header with its cyan and violet as accents. White header text on the
+   primary is about 11:1 (WCAG AAA). */
+:root {
+  --md-primary-fg-color: #1e1b4b;
+  --md-primary-fg-color--light: #312e81;
+  --md-primary-fg-color--dark: #0e0f1d;
+  --md-accent-fg-color: #6260f9;
+  --md-typeset-a-color: #4338ca;
+}
+
+/* On the dark scheme the logo's cyan carries links and hover (about 9:1 on the slate background). */
+[data-md-color-scheme="slate"] {
+  --md-accent-fg-color: #53cafd;
+  --md-typeset-a-color: #53cafd;
+}
+
+/* Buttons take the primary colour, which is the header navy and vanishes on the slate background. */
+[data-md-color-scheme="slate"] .md-typeset .md-button {
+  color: #53cafd;
+  border-color: #53cafd;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary {
+  color: #fff;
+  background-color: #6260f9;
+  border-color: #6260f9;
+}
