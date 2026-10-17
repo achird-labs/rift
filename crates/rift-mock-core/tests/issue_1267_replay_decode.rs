@@ -364,3 +364,44 @@ fn a_replayed_stub_without_responses_still_decodes() {
         );
     }
 }
+
+/// Issue #1551: a response with two types, or none, is a door-only refusal. Engines up to v0.23.0
+/// admitted both and kept the first type by precedence, or served `{}` as an empty `is`; an embedder
+/// that stored such bytes still decodes them to that value, and `admission_check` passes on it,
+/// because the decoded response holds exactly one type.
+#[test]
+fn a_response_with_two_types_or_none_replays_to_its_pre_1551_value() {
+    let cases = [
+        (
+            r#"{ "responses": [{ "is": { "statusCode": 201 }, "proxy": { "to": "http://127.0.0.1:9" } }] }"#,
+            "each response object must have only one response type",
+            serde_json::json!({ "is": { "statusCode": 201 } }),
+        ),
+        (
+            r#"{ "responses": [{}] }"#,
+            "unrecognized response type",
+            serde_json::json!({ "is": {} }),
+        ),
+        (
+            r#"{ "responses": [{ "behaviors": [{ "wait": 10 }] }] }"#,
+            "unrecognized response type",
+            serde_json::json!({ "is": {}, "behaviors": [{ "wait": 10 }] }),
+        ),
+    ];
+    for (stub, refusal, replays_to) in cases {
+        let door = serde_json::from_str::<Stub>(stub)
+            .expect_err("the validating decode refuses")
+            .to_string();
+        assert!(door.starts_with(refusal), "door: {door}");
+
+        let decoded: Stub = replayed(stub).expect("the replayed decode admits the bytes");
+        assert_eq!(
+            serde_json::to_value(&decoded.responses[0]).expect("print"),
+            replays_to,
+            "{stub}"
+        );
+        assert_eq!(admission_check_stub(&decoded), Ok(()), "door-only: {stub}");
+        let config: ImposterConfig = replayed(&imposter_with(stub)).expect("replay admits");
+        assert_eq!(admission_check(&config), Ok(()), "{stub}");
+    }
+}

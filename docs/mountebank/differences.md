@@ -213,6 +213,18 @@ A proxy's `predicateGenerators` record predicates whose order, selector scope, s
 and header-name lookup differ from Mountebank 2.9.1's; each difference, and why Rift's recording is
 the one that replays, is listed under [Proxy: What Gets Recorded](proxy.md#what-gets-recorded).
 
+## Two response shapes Mountebank does not have
+
+A stub response carries exactly one of `is`, `proxy`, `inject` and `fault`, and Rift refuses one with
+two or with none, with Mountebank's messages. It also accepts two shapes that carry a whole response
+without any of those keys, and that Mountebank refuses with `unrecognized response type`:
+
+- the flat form, `statusCode`/`headers`/`body`/`_mode` at the top of the response with no `is`
+  wrapper, served as that `is` response (see
+  [Responses: Flat response](responses.md#flat-response-no-is-wrapper));
+- a response that is only a `_rift` block, whose `_rift.script` builds the response (see
+  [Scripting](../features/scripting.md)).
+
 ## `defaultResponse` completes a response by the fields it omits
 
 An imposter's `defaultResponse` is served when no stub matches, and it also supplies the `statusCode`, `headers`, `body` and `_mode` that an `is` or `inject` response omits, as in Mountebank. `headers` is taken whole, never merged key by key; a `proxy` response is never completed. Mountebank decides by falsiness and Rift by whether the field was written, which differs in two places:

@@ -135,13 +135,14 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | E050 | A config file's `intercept` sets `returnCaKey: true` |
 | E051 | A `copy`, `lookup`, `decorate` or `shellTransform` value the engine cannot read |
 | E052 | An unknown proxy `mode` the engine refuses |
+| E056 | A response with more than one of `is`, `proxy`, `inject` and `fault`, which the engine refuses |
 
 ### Warnings
 
 | Code | Description |
 |------|-------------|
 | W001 | Privileged port |
-| W003-W016 | Potential issues (`W002` retired, folded into `E006`), including lossy number literals (W012), unset EJS env vars (W013) and state used without `_rift.flowState` (W014) |
+| W004-W016 | Potential issues (`W002` retired, folded into `E006`; `W003` retired, now `E056`), including lossy number literals (W012), unset EJS env vars (W013) and state used without `_rift.flowState` (W014) |
 | W017 | A key the engine accepts but ignores (`_rift.metrics`, `_rift.proxy`, `recordMatches: true`, ...) |
 | W018 | A `behaviors` array element that sets several behaviors, which run in a fixed order |
 | W019 | `_rift.conditional` that can never answer 304 (script-only response, or a `method` predicate excluding GET and HEAD) |

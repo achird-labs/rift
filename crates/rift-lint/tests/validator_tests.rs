@@ -575,22 +575,80 @@ fn e014_not_fired_for_fault_response() {
     assert!(!has_code(&r, "E014"));
 }
 
-#[test]
-fn w003_both_is_and_proxy() {
-    let resp = json!({
-        "is": { "statusCode": 200 },
-        "proxy": { "to": "http://example.com" }
-    });
+fn lint_response(resp: &serde_json::Value) -> LintResult {
     let mut r = LintResult::new();
     validate_response(
         path(),
-        &resp,
+        resp,
         "loc",
         &mut r,
         &opts(),
         &serde_json::Value::Null,
     );
-    assert!(has_code(&r, "W003"));
+    r
+}
+
+/// Issue #1551: two response types are an error the engine refuses, for every pair, by
+/// Mountebank's truthiness (formerly W003, a warning for `is` + `proxy` only).
+#[test]
+fn e056_more_than_one_response_type() {
+    let values = [
+        ("is", json!({ "statusCode": 200 })),
+        ("proxy", json!({ "to": "http://example.com" })),
+        ("inject", json!("function () { return {}; }")),
+        ("fault", json!("CONNECTION_RESET_BY_PEER")),
+    ];
+    for (i, (a, va)) in values.iter().enumerate() {
+        for (b, vb) in &values[i + 1..] {
+            let mut pair = serde_json::Map::new();
+            pair.insert((*a).to_string(), va.clone());
+            pair.insert((*b).to_string(), vb.clone());
+            let resp = serde_json::Value::Object(pair);
+            let r = lint_response(&resp);
+            assert!(has_code(&r, "E056"), "{resp}: {:?}", codes(&r));
+            assert!(!has_code(&r, "W003"), "W003 is retired: {:?}", codes(&r));
+            let issue = r
+                .issues
+                .iter()
+                .find(|issue| issue.code == "E056")
+                .expect("E056");
+            assert!(
+                issue.message.contains(&format!("{a}, {b}")),
+                "{}",
+                issue.message
+            );
+        }
+    }
+}
+
+/// `null` and an empty `inject`/`fault` string are absent, as Mountebank's truthiness reads them.
+#[test]
+fn e056_not_fired_for_a_falsy_second_type() {
+    for resp in [
+        json!({ "is": {}, "proxy": null }),
+        json!({ "is": {}, "inject": "" }),
+        json!({ "is": {}, "fault": "" }),
+        json!({ "proxy": { "to": "http://example.com" }, "inject": "", "fault": null }),
+    ] {
+        let r = lint_response(&resp);
+        assert!(!has_code(&r, "E056"), "{resp}: {:?}", codes(&r));
+        assert!(!has_code(&r, "E014"), "{resp}: {:?}", codes(&r));
+    }
+}
+
+/// Issue #1551: a response whose only type keys are falsy has no type, as the engine refuses it.
+#[test]
+fn e014_fired_for_falsy_types() {
+    for resp in [
+        json!({ "fault": "" }),
+        json!({ "inject": "" }),
+        json!({ "is": null }),
+        json!({ "proxy": null, "repeat": 2 }),
+        json!({}),
+    ] {
+        let r = lint_response(&resp);
+        assert!(has_code(&r, "E014"), "{resp}: {:?}", codes(&r));
+    }
 }
 
 // ─── Is-response rules ────────────────────────────────────────────────────────

@@ -1,0 +1,17 @@
+{
+  "protocol": "http",
+  "name": "faults \u00b7 an is beside a top-level fault is refused",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "is-wins"
+          },
+          "fault": "CONNECTION_RESET_BY_PEER"
+        }
+      ]
+    }
+  ]
+}

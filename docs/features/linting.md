@@ -131,7 +131,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E008 | Predicate has no operator | `{"caseSensitive": true}` on its own |
 | E009 | Unknown predicate operator | `{"equalz": {"path": "/a"}}` |
 | E011 | JSONPath missing `selector` field | `"jsonpath": {}` |
-| E014 | Response has no response type | Neither `is`, `proxy`, `inject`, `fault`, `_rift` nor a flat `statusCode`/`headers`/`body` |
+| E014 | Response has no response type — the engine refuses it with `unrecognized response type`, as Mountebank does. A `null`, or an empty `inject`/`fault` string, counts as absent | Neither `is`, `proxy`, `inject`, `fault`, `_rift` nor a flat `statusCode`/`headers`/`body`: `{}`, `{"fault": ""}`, only `behaviors` |
 | E015 | Invalid HTTP status code | `"statusCode": 999` |
 | E016 | `statusCode` is not a number or numeric string | `"statusCode": true` |
 | E017 | Empty header name | `"headers": {"": "value"}` |
@@ -169,6 +169,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E053 | A proxy `predicateGenerators` entry's `predicateOperator` is not one of `equals`, `deepEquals`, `contains`, `startsWith`, `endsWith`, `matches`, `exists`. Rift refuses the imposter; every recording would otherwise match every request | `"predicateOperator": "bogus"` |
 | E054 | A header value (`is.headers`, `defaultResponse.headers`) is `null` or an object; the engine refuses the document. A number or boolean is fine: the engine coerces it, as Mountebank does | `"X-Request-Id": null` |
 | E055 | A proxy `predicateGenerators` entry the recorder cannot read: not an object, neither `matches` nor `inject`, a non-string `inject`, a `matches` that is not an object, a `matches` key that is not a request field (`method`, `path`, `query`, `headers`, `body`, `requestFrom`, `ip`, `form`), a non-boolean `caseSensitive` or a non-string `except`. Rift refuses the imposter | `"predicateGenerators": [{"matches": {"pathh": true}}]` |
+| E056 | Response has more than one of `is`, `proxy`, `inject` and `fault` — the engine refuses it with `each response object must have only one response type`, as Mountebank does. A `null`, or an empty `inject`/`fault` string, counts as absent. Formerly `W003`, a warning for `is` + `proxy` only. To pair a status with a transport fault, put `_rift.fault` inside `is` | `{"is": {...}, "fault": "CONNECTION_RESET_BY_PEER"}` |
 
 ### Warnings
 
@@ -177,7 +178,6 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | Code | Description | Example |
 |:-----|:------------|:--------|
 | W001 | Privileged port | Port 80 requires root access |
-| W003 | Response has both `is` and `proxy` defined | `{"is": {...}, "proxy": {...}}` |
 | W004 | Invalid JSON body | Body isn't JSON but Content-Type is application/json. Not reported when `_rift.templated` or a `copy`/`lookup`/`decorate`/`shellTransform` behavior rewrites the body before it is served |
 | W006 | `Content-Length` header is a numeric string below 10 | `"Content-Length": "5"` |
 | W007 | A proxy mode in a non-canonical spelling — Rift reads `mode` case-insensitively, so it works, but the canonical names are `proxyOnce`, `proxyAlways`, `proxyTransparent` | `"mode": "proxyalways"` |
@@ -216,7 +216,8 @@ prefix saw a different rule set from one filtering on severity. A rule's letter 
 its severity. `E019`/`E020` were retired in #1358: the engine coerces number and boolean header
 values, as Mountebank does, so they are not findings. `W005` became `E054`, because the engine
 refuses a `null` header value. `W002` (an empty `responses`) was folded into `E006` in #1372, when the engine
-began refusing an empty `responses` as it does an absent one.
+began refusing an empty `responses` as it does an absent one. `W003` (`is` beside `proxy`) became
+`E056` in #1551, when the engine began refusing any response with two types, for every pair.
 
 ## Auto-Fix
 

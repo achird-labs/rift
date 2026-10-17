@@ -26,8 +26,7 @@ using any of them is refused unless the server was started with `--allowInjectio
 `wait`, `repeat`, `copy` and `lookup` need no flag. A behavior key set to `null` is treated as
 absent everywhere, including by that check.
 
-Behaviors apply to `is` responses (and the flat response form, and a response that is only a
-behaviors block), to `inject` responses, where they run on the response the function returned — a
+Behaviors apply to `is` responses (and the flat response form), to `inject` responses, where they run on the response the function returned — a
 function that throws runs none of them — and to `proxy` responses, where they run on the upstream's
 response before it is recorded (see
 [Proxy → Behaviors on the proxy response](proxy.md#behaviors-on-the-proxy-response)),

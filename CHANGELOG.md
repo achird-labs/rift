@@ -11,6 +11,19 @@ record.
 
 ## [Unreleased]
 
+### Changed
+
+- **A stub response with more than one of `is`, `proxy`, `inject` and `fault`, or with none, is now
+  refused**, with Mountebank's messages (`each response object must have only one response type`,
+  `unrecognized response type`), on every config door (#1551). Rift used to keep the first by
+  precedence and drop the rest, and served a response with none (`{}`, a typo'd key, only
+  `behaviors` or `repeat`, an empty `fault`) as an empty `200`. Write `{"is": {}, "behaviors": [...]}`
+  for a delayed empty response, and put `_rift.fault` inside `is` to pair a status with a transport
+  fault. The flat `statusCode`/`headers`/`body` form and a `_rift`-only response are still accepted.
+  Configs an engine already stored load unchanged. `rift-lint` reports two types as the error
+  `E056`, for every pair (`W003`, a warning for `is` + `proxy` only, is retired), and `E014` now
+  counts an empty `inject`/`fault` as absent.
+
 ### Testing
 
 - **The differential suite measures how much of Mountebank it exercises** (#1548):

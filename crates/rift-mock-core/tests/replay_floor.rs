@@ -67,7 +67,11 @@ const DECODE_FN: &str = r"\bfn (try_from|deserialize\w*|de_\w+|visit_\w+|refuse_
 ///   `tests/issue_1267_replay_decode.rs`;
 /// - **structural** (no engine ever admitted the input, in practice the shape rules of a field added
 ///   in the same change): leave it unconditional and add a fixture to
-///   `the_floor_refusals_hold_on_replay`.
+///   `the_floor_refusals_hold_on_replay`;
+/// - **door-only** (the decoded value cannot hold what it checks, and the serialised form never
+///   carries it, e.g. #1551's two response types or none): run it only under `Admission::Checked`;
+///   add a replay fixture to `tests/issue_1267_replay_decode.rs` showing the bytes still decode to
+///   their pre-change value.
 ///
 /// Anything else makes bytes an older engine admitted undecodable for an embedder replaying them
 /// (rift-cluster#657). A change that only moves or rewords code may update the counts directly; the
@@ -124,7 +128,9 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // #1353/#1413 `refuse_unreadable_generators`: an admission check (Admission::Checked only,
         // re-run in admission_check_stub, fixtures in issue_1267_replay_decode.rs).
         // #1372 `refuse_empty_responses`: an admission check, the same three ways.
-        21,
+        // #1551 `refuse_response_type_count`: door-only (Admission::Checked only; the decoded
+        // response holds one type, fixture in issue_1267_replay_decode.rs).
+        22,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",
@@ -132,7 +138,8 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // #1372 `refuse_empty_responses` (see above).
         // #1413 `refuse_unreadable_generators`: the shape refusal beside #1353's operator one, an
         // admission check (Admission::Checked only, re-run in admission_check_stub).
-        20,
+        // #1551 `refuse_response_type_count`, two and none: door-only (see above).
+        22,
     ),
     ("crates/rift-types/src/wire.rs", "::custom", 4),
     ("crates/rift-types/src/wire.rs", "serde error helper", 0),

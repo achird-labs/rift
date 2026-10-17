@@ -17,7 +17,8 @@
 //! hand, so each can be tested against the schema:
 //! - `x-rift-known-keys` on `predicateGenerators` items: the keys the recorder reads;
 //! - `x-rift-canonical-order` on `ResponseBehaviors`: the order one object's behaviors run in;
-//! - `x-rift-response-variants` on `StubResponse`: the response-type keys, in decode precedence;
+//! - `x-rift-response-variants` on `StubResponse`: the response-type keys, in the precedence a
+//!   replayed decode reads them (a config door refuses two, issue #1551);
 //! - `x-rift-carrier: true` on a field the engine keeps and returns but never reads;
 //! - `x-rift-rewrites-body: true` on a behavior that rewrites the response body.
 
@@ -545,7 +546,10 @@ mod tests {
             for (key, value) in RESPONSE_VARIANT_KEYS.iter().zip(values).skip(from) {
                 response.insert((*key).to_owned(), value);
             }
-            serde_json::from_value::<StubResponse>(Value::Object(response)).expect("decodes")
+            // Replayed: a config door refuses two types (#1551), so the precedence is what a
+            // stored config an older engine admitted decodes to.
+            crate::imposter::deserialize_replayed::<StubResponse, _>(Value::Object(response))
+                .expect("decodes")
         };
         assert!(matches!(full(0), StubResponse::Is { .. }));
         assert!(matches!(full(1), StubResponse::Proxy { .. }));
