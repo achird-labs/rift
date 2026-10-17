@@ -7,9 +7,14 @@ name: mbTest (Mountebank's own suite)
 # documented + differences.md anchor, or harness + reason), and a listed test that now passes
 # fails the run, so the list only shrinks. See conformance/mbtest/README.md.
 #
-# Deliberately NOT a PR check yet: the expected list will churn while the first findings are fixed.
-# Promoting it to PR CI is a later owner decision. Scheduled + manual only.
+# Deliberately NOT a required check yet: the expected list will churn while the first findings are
+# fixed. Promoting it is a later owner decision. It runs weekly, on demand, and on PRs that change the
+# harness itself, so a harness change is exercised before it merges.
 on:
+  pull_request:
+    paths:
+      - "conformance/mbtest/**"
+      - ".github/workflows/mbtest.yml"
   schedule:
     - cron: "41 5 * * 1" # Mondays 05:41 UTC (mutants.yml runs at 03:17)
   workflow_dispatch:
