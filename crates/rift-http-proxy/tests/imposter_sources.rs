@@ -936,9 +936,12 @@ async fn a_body_phase_timeout_stays_recognisable_through_the_context_wrap() {
         sent: 16,
         stall: Duration::from_secs(3),
     });
+    // Built before the clock starts: constructing a source reads the OS trust store, which is
+    // synchronous and contended across this binary's parallel tests (#1525); the bound below is
+    // about the fetch, not about that.
+    let source = HttpSource::with_timeout(Duration::from_millis(150)).unwrap();
     let started = std::time::Instant::now();
-    let err = HttpSource::with_timeout(Duration::from_millis(150))
-        .unwrap()
+    let err = source
         .fetch(&SourceRef::new(origin.uri()))
         .await
         .expect_err("a body that never finishes must not hang the fetch");
