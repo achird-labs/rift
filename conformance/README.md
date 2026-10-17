@@ -1,11 +1,12 @@
 # Rift conformance
 
-Two trees, with opposite questions:
+Three trees, each answering a different question:
 
 | Tree | Question it answers | Who runs it |
 |---|---|---|
 | [`features/`](features/) + fixtures | **What Rift must do.** The Plane A specification: Gherkin scenarios driving a real `rift`, `rift-lint` and `rift-verify` binary. | The Rust runner in [`runner/`](runner/): `cargo test -p rift-conformance-runner --test plane_a` |
 | [`differential/`](differential/) | **What Mountebank does.** Every case is replayed on Mountebank 2.9.5 and on this build, and any difference not on its documented allow-list fails. | `cargo test -p rift-differential` (see its README) |
+| [`mbtest/`](mbtest/) | **What Mountebank's own tests expect.** Mountebank 2.9.5's functional suite (mbTest, with its docs examples) runs against Mountebank and then this build; every Rift failure must be classified in `expected.json` as a filed bug, a documented difference or a harness limit. | `conformance/mbtest/run.sh` (see its README), weekly in `mbtest.yml` |
 
 The specification lives in this repository so a behaviour change and the scenario that pins it land
 in one pull request. Its runner lives here too: [`runner/`](runner/) (`rift-conformance-runner`,
@@ -25,6 +26,7 @@ conformance/
   rift-scripts/*            Rhai/JS scripts for the scripting scenarios
   runner/                   the Rust Plane A runner (rift-conformance-runner) — not part of the contract
   differential/             the Mountebank oracle — not part of the Plane A contract
+  mbtest/                   Mountebank's own suite against Rift — not part of the Plane A contract
 ```
 
 Paths inside feature files are relative to this directory (`Given a fresh imposter from fixture

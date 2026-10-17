@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#
+# mbTest's MB_EXECUTABLE for Rift (#1547). mbTest spawns `mb` itself for its CLI suite and two API
+# tests (mbTest/mb.js: `restart --port P --logfile mb-test.log --pidfile test.pid`, then `stop`).
+#
+# Two translations, and no others. Translating a flag Rift refuses, or swallowing a failed `stop`,
+# would hide exactly the divergences this suite exists to find: those stay failures in
+# expected.json until Rift is fixed.
+#
+#   RIFT_BIN           the rift-http-proxy binary under test (required)
+#   SHIM_METRICS_PORT  the port the spawned Rift's /metrics listener takes (default 19600)
+set -euo pipefail
+
+rift="${RIFT_BIN:?RIFT_BIN must name the rift-http-proxy binary under test}"
+
+args=()
+while (($# > 0)); do
+  case "$1" in
+    # Rift spells it --log. Remove once #1559 makes --logfile an alias.
+    --logfile) args+=(--log "$2"); shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+
+case "${args[0]:-}" in
+  # Every Rift start also binds a /metrics listener (default 9090), which Mountebank has no
+  # counterpart for; give it a port of its own so it cannot collide with the suite's fixed ports.
+  # Not a parity gap, so no issue removes it.
+  start | restart) exec "$rift" "${args[@]}" --metrics-port "${SHIM_METRICS_PORT:-19600}" ;;
+  *) exec "$rift" "${args[@]}" ;;
+esac

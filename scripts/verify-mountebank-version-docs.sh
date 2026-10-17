@@ -4,7 +4,9 @@
 # latest release). That claim is only true while it names the version the differential oracle runs,
 # `MB_VERSION` in .github/workflows/ci.yml. This fails when any statement names another version, or
 # when a page that should carry the statement lost it, so bumping the oracle cannot leave the docs
-# advertising the old release.
+# advertising the old release. It also holds conformance/mbtest/MBTEST_REF, the Mountebank tag whose
+# own functional suite (mbTest) runs against Rift, to the same version, so the suite and the oracle
+# move together (#1547).
 #
 # Usage:
 #   scripts/verify-mountebank-version-docs.sh              # check the repo (exit 1 on a mismatch)
@@ -50,6 +52,19 @@ run_check() {
     bad+=("docs/mountebank/differences.md: opening sentence does not name Mountebank $version")
   fi
 
+  # mbTest, Mountebank's own suite, runs at the oracle's tag (conformance/mbtest/MBTEST_REF).
+  local ref_file="$ROOT/conformance/mbtest/MBTEST_REF" ref
+  ref="$(tr -d '[:space:]' <"$ref_file" 2>/dev/null || true)"
+  if [[ "$ref" != "v$version" ]]; then
+    bad+=("conformance/mbtest/MBTEST_REF: ${ref:-missing}, not v$version")
+  fi
+  # ...and installs the baseline Mountebank by its own MB_VERSION.
+  local wf="$ROOT/.github/workflows/mbtest.yml" wf_version
+  wf_version="$(grep -oE 'MB_VERSION: "[0-9]+\.[0-9]+\.[0-9]+"' "$wf" 2>/dev/null | grep -oE '[0-9.]+[0-9]' || true)"
+  if [[ "$wf_version" != "$version" ]]; then
+    bad+=(".github/workflows/mbtest.yml: MB_VERSION ${wf_version:-missing}, not $version")
+  fi
+
   if (( ${#bad[@]} > 0 )); then
     echo "Mountebank version in docs does not match MB_VERSION ($version):" >&2
     printf '  - %s\n' "${bad[@]}" >&2
@@ -62,8 +77,10 @@ self_test() {
   local tmp out rc=0
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' RETURN
-  mkdir -p "$tmp/.github/workflows" "$tmp/docs/mountebank" "$tmp/docs/getting-started"
+  mkdir -p "$tmp/.github/workflows" "$tmp/docs/mountebank" "$tmp/docs/getting-started" "$tmp/conformance/mbtest"
   echo '  MB_VERSION: "3.0.0"' >"$tmp/.github/workflows/ci.yml"
+  echo 'v3.0.0' >"$tmp/conformance/mbtest/MBTEST_REF"
+  echo '  MB_VERSION: "3.0.0"' >"$tmp/.github/workflows/mbtest.yml"
   for page in "${PAGES[@]}"; do echo 'Rift is compatible with **Mountebank 3.0.0**.' >"$tmp/$page"; done
   echo 'Rift answers the way Mountebank 3.0.0 does.' >"$tmp/docs/mountebank/differences.md"
 
@@ -71,6 +88,13 @@ self_test() {
   if (( rc != 0 )); then
     echo "SELF-TEST FAILED: a consistent tree was rejected:" >&2; echo "$out" >&2; return 1
   fi
+
+  echo 'v2.9.5' >"$tmp/conformance/mbtest/MBTEST_REF"
+  rc=0; out="$(ROOT="$tmp" run_check 2>&1)" || rc=$?
+  if (( rc != 1 )) || ! grep -qF "MBTEST_REF: v2.9.5, not v3.0.0" <<<"$out"; then
+    echo "SELF-TEST FAILED: a stale MBTEST_REF was not flagged (rc=$rc):" >&2; echo "$out" >&2; return 1
+  fi
+  echo 'v3.0.0' >"$tmp/conformance/mbtest/MBTEST_REF"
 
   echo 'Also compatible with **Mountebank 2.9.5**.' >>"$tmp/docs/index.md"
   rc=0; out="$(ROOT="$tmp" run_check 2>&1)" || rc=$?
@@ -84,7 +108,7 @@ self_test() {
     echo "SELF-TEST FAILED: a missing statement was not flagged (rc=$rc):" >&2; echo "$out" >&2; return 1
   fi
 
-  echo "Self-test OK: flags a stale version and a missing statement, accepts a consistent tree."
+  echo "Self-test OK: flags a stale version, a missing statement and a stale MBTEST_REF, accepts a consistent tree."
 }
 
 case "${1:-}" in
