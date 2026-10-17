@@ -1,0 +1,918 @@
+{
+  "mbtestRef": "v2.9.5",
+  "unsupported": [
+    {
+      "glob": "api/tcp/**",
+      "reason": "tcp imposters: Rift imposters are HTTP/HTTPS only",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "api/smtp/**",
+      "reason": "smtp imposters: Rift imposters are HTTP/HTTPS only",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "cli/debugTest.js::--debug tcp server should record matches against stubs",
+      "reason": "a tcp imposter",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "cli/hostTest.js::--host should bind tcp imposter to provided host",
+      "reason": "a tcp imposter",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "cli/hostTest.js::--host should bind smtp imposter to provided host",
+      "reason": "an smtp imposter",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "cli/securityTest.js::security IP blocking should only allow local requests to tcp imposter if --localOnly used",
+      "reason": "a tcp imposter",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "cli/configFileTest.js::--configfile should support complex configuration with --configfile in multiple files",
+      "reason": "the config file's imposters include an smtp imposter, which Rift refuses, so the file cannot load",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "docs:/docs/api/predicates#tcp *",
+      "reason": "tcp examples",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "docs:/docs/protocols/tcp#*",
+      "reason": "the tcp protocol page",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "api/impostersControllerTest.js::PUT /imposters overwrites previous imposters",
+      "reason": "the replacing set includes an smtp imposter",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "docs:/docs/api/mocks#example",
+      "reason": "an smtp imposter",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "docs:/docs/api/overview#imposters",
+      "reason": "creates tcp and smtp imposters (it also prints the serving host's /config, so it fails on Mountebank outside Mountebank's own CI)",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "docs:/docs/gettingStarted#getting-started",
+      "reason": "its later steps create and call a tcp imposter",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "docs:/docs/api/behaviors#copy-jsonpath",
+      "reason": "a tcp imposter",
+      "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
+    },
+    {
+      "glob": "js/**",
+      "reason": "requires Mountebank's src/mountebank.js in-process; Rift has no JavaScript embedding API"
+    },
+    {
+      "glob": "perf/**",
+      "reason": "performance tests of Mountebank's own repository and process (perf/databaseConcurrencyTest.js requires its sources); not a behaviour check"
+    },
+    {
+      "glob": "web/docsIntegrityTest.js",
+      "reason": "replaced by docsScenarios.js, which runs the same pages one scenario at a time"
+    },
+    {
+      "glob": "web/contractTest.js",
+      "reason": "validates the JSON contracts printed in Mountebank's HTML docs site, which Rift does not serve",
+      "doc": "docs/mountebank/differences.md#the-admin-api-serves-json-only"
+    },
+    {
+      "glob": "web/crawlerTest.js",
+      "reason": "crawls Mountebank's HTML docs site and its external links, which Rift does not serve",
+      "doc": "docs/mountebank/differences.md#the-admin-api-serves-json-only"
+    },
+    {
+      "glob": "web/feedTest.js",
+      "reason": "reads Mountebank's release feed, an HTML-site page Rift does not serve",
+      "doc": "docs/mountebank/differences.md#the-admin-api-serves-json-only"
+    }
+  ],
+  "expected": [
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should add latency when using behaviors.wait as a function",
+      "class": "bug",
+      "issue": "#1588",
+      "note": "a wait written as an arrow function (`() => 1000`) waits about 100 ms; a `function () { return 1000; }` waits 1000 ms"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support post-processing when using behaviors.decorate (old interface)",
+      "class": "bug",
+      "issue": "#1567",
+      "note": "old two-argument decorate is a silent no-op"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should fix content-length if set and adjusted using decoration (issue #155)",
+      "class": "bug",
+      "issue": "#1554",
+      "note": "a stale Content-Length after decorate (Mountebank #155); the decorator is the old two-argument form, so #1567 must land first"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support using request parameters during decorating (old interface)",
+      "class": "bug",
+      "issue": "#1567",
+      "note": "old two-argument decorate is a silent no-op"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support using request parameters during decorating multiple times (issue #173)",
+      "class": "bug",
+      "issue": "#1567",
+      "note": "old two-argument decorate is a silent no-op"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support decorate functions that return a value (old interface)",
+      "class": "bug",
+      "issue": "#1567",
+      "note": "a decorate that returns a new response is ignored"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support decorate functions that return a value",
+      "class": "bug",
+      "issue": "#1567",
+      "note": "a decorate that returns a new response is ignored"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support shell transform without array for backwards compatibility",
+      "class": "bug",
+      "issue": "#1589",
+      "note": "shellTransform commands get no request/response arguments (Mountebank appends them as argv[2], argv[3]); after that, the documented output-as-body difference remains"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support array of shell transforms in order",
+      "class": "bug",
+      "issue": "#1589",
+      "note": "shellTransform commands get no request/response arguments; after that, the documented output-as-body difference remains"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support copying from request fields using regex",
+      "class": "bug",
+      "issue": "#1558",
+      "note": "a copy token in is.statusCode is refused at load"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support copying from request fields using jsonpath",
+      "class": "bug",
+      "issue": "#1590",
+      "note": "copy.from \"BODY\" (upper case) copies nothing; Mountebank reads request field names case-insensitively"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support lookup from CSV file keyed by regex",
+      "class": "bug",
+      "issue": "#1558",
+      "note": "a lookup token in is.statusCode is refused at load; #1566 (CSV quoting) is next"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should compose multiple behaviors together (old interface for backwards compatibility)",
+      "class": "bug",
+      "issue": "#1589",
+      "note": "the shellTransform reads process.argv[3]; the old-interface decorate is #1567"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should apply multiple behaviors in sequence with repeat (new format)",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
+      "note": "shellTransform output is served as the body, not read as a response object (behaviors.md)"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should add latency when using behaviors.wait as a function",
+      "class": "bug",
+      "issue": "#1588",
+      "note": "a wait written as an arrow function (`() => 1000`) waits about 100 ms; a `function () { return 1000; }` waits 1000 ms"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support post-processing when using behaviors.decorate (old interface)",
+      "class": "bug",
+      "issue": "#1567",
+      "note": "old two-argument decorate is a silent no-op"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should fix content-length if set and adjusted using decoration (issue #155)",
+      "class": "bug",
+      "issue": "#1554",
+      "note": "a stale Content-Length after decorate (Mountebank #155); the decorator is the old two-argument form, so #1567 must land first"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support using request parameters during decorating (old interface)",
+      "class": "bug",
+      "issue": "#1567",
+      "note": "old two-argument decorate is a silent no-op"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support using request parameters during decorating multiple times (issue #173)",
+      "class": "bug",
+      "issue": "#1567",
+      "note": "old two-argument decorate is a silent no-op"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support decorate functions that return a value (old interface)",
+      "class": "bug",
+      "issue": "#1567",
+      "note": "a decorate that returns a new response is ignored"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support decorate functions that return a value",
+      "class": "bug",
+      "issue": "#1567",
+      "note": "a decorate that returns a new response is ignored"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support shell transform without array for backwards compatibility",
+      "class": "bug",
+      "issue": "#1589",
+      "note": "shellTransform commands get no request/response arguments (Mountebank appends them as argv[2], argv[3]); after that, the documented output-as-body difference remains"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support array of shell transforms in order",
+      "class": "bug",
+      "issue": "#1589",
+      "note": "shellTransform commands get no request/response arguments; after that, the documented output-as-body difference remains"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support copying from request fields using regex",
+      "class": "bug",
+      "issue": "#1558",
+      "note": "a copy token in is.statusCode is refused at load"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support copying from request fields using jsonpath",
+      "class": "bug",
+      "issue": "#1590",
+      "note": "copy.from \"BODY\" (upper case) copies nothing; Mountebank reads request field names case-insensitively"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support lookup from CSV file keyed by regex",
+      "class": "bug",
+      "issue": "#1558",
+      "note": "a lookup token in is.statusCode is refused at load; #1566 (CSV quoting) is next"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should compose multiple behaviors together (old interface for backwards compatibility)",
+      "class": "bug",
+      "issue": "#1589",
+      "note": "the shellTransform reads process.argv[3]; the old-interface decorate is #1567"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should apply multiple behaviors in sequence with repeat (new format)",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
+      "note": "shellTransform output is served as the body, not read as a response object (behaviors.md)"
+    },
+    {
+      "id": "api/http/httpFaultTest.js::http imposter POST /imposters with stubs should do nothing when undefined fault is specified",
+      "class": "bug",
+      "issue": "#1556",
+      "note": "an unknown fault answers 500"
+    },
+    {
+      "id": "api/http/httpFaultTest.js::https imposter POST /imposters with stubs should write garbage then drop the connection when fault RANDOM_DATA_THEN_CLOSE is specified",
+      "class": "bug",
+      "issue": "#1600",
+      "note": "on an https imposter the garbage is written before or instead of the TLS layer, so the client fails the handshake (ERR_SSL_BAD_RECORD_TYPE) instead of parsing garbage HTTP (HPE_INVALID_CONSTANT)"
+    },
+    {
+      "id": "api/http/httpFaultTest.js::https imposter POST /imposters with stubs should do nothing when undefined fault is specified",
+      "class": "bug",
+      "issue": "#1556",
+      "note": "an unknown fault answers 500"
+    },
+    {
+      "id": "api/http/httpImposterTest.js::http imposter POST /imposters/:id should support CORS preflight requests if \"allowCORS\" option is enabled",
+      "class": "bug",
+      "issue": "#1555",
+      "note": "allowCORS answers wildcards"
+    },
+    {
+      "id": "api/http/httpImposterTest.js::http imposter POST /imposters/:id should not handle non-preflight requests when \"allowCORS\" is enabled",
+      "class": "bug",
+      "issue": "#1555",
+      "note": "allowCORS adds headers to non-preflight requests"
+    },
+    {
+      "id": "api/http/httpImposterTest.js::http imposter DELETE /imposters/:id supports returning a replayable body with proxies removed",
+      "class": "bug",
+      "issue": "#1591",
+      "note": "DELETE /imposters/:id ignores ?replayable and ?removeProxies"
+    },
+    {
+      "id": "api/http/httpImposterTest.js::https imposter POST /imposters/:id should support CORS preflight requests if \"allowCORS\" option is enabled",
+      "class": "bug",
+      "issue": "#1555",
+      "note": "allowCORS answers wildcards"
+    },
+    {
+      "id": "api/http/httpImposterTest.js::https imposter POST /imposters/:id should not handle non-preflight requests when \"allowCORS\" is enabled",
+      "class": "bug",
+      "issue": "#1555",
+      "note": "allowCORS adds headers to non-preflight requests"
+    },
+    {
+      "id": "api/http/httpImposterTest.js::https imposter DELETE /imposters/:id supports returning a replayable body with proxies removed",
+      "class": "bug",
+      "issue": "#1591",
+      "note": "DELETE /imposters/:id ignores ?replayable and ?removeProxies"
+    },
+    {
+      "id": "api/http/httpInjectionTest.js::http imposter POST /imposters with injections should allow synchronous javascript injection for responses (old interface)",
+      "class": "bug",
+      "issue": "#1592",
+      "note": "Mountebank's default response carries `Connection: close`; Rift sends no Connection header"
+    },
+    {
+      "id": "api/http/httpInjectionTest.js::http imposter POST /imposters with injections should allow synchronous javascript injection for responses",
+      "class": "bug",
+      "issue": "#1592",
+      "note": "Mountebank's default response carries `Connection: close`; Rift sends no Connection header"
+    },
+    {
+      "id": "api/http/httpInjectionTest.js::http imposter POST /imposters with injections should allow access to the global process object",
+      "class": "bug",
+      "issue": "#1593",
+      "note": "inject runs in Boa, not Node: no `process`, `require` or timers"
+    },
+    {
+      "id": "api/http/httpInjectionTest.js::http imposter POST /imposters with injections should allow asynchronous injection",
+      "class": "bug",
+      "issue": "#1593",
+      "note": "an async (callback) inject needs Node's `require('http')`/timers"
+    },
+    {
+      "id": "api/http/httpInjectionTest.js::https imposter POST /imposters with injections should allow synchronous javascript injection for responses (old interface)",
+      "class": "bug",
+      "issue": "#1592",
+      "note": "Mountebank's default response carries `Connection: close`; Rift sends no Connection header"
+    },
+    {
+      "id": "api/http/httpInjectionTest.js::https imposter POST /imposters with injections should allow synchronous javascript injection for responses",
+      "class": "bug",
+      "issue": "#1592",
+      "note": "Mountebank's default response carries `Connection: close`; Rift sends no Connection header"
+    },
+    {
+      "id": "api/http/httpInjectionTest.js::https imposter POST /imposters with injections should allow access to the global process object",
+      "class": "bug",
+      "issue": "#1593",
+      "note": "inject runs in Boa, not Node: no `process`, `require` or timers"
+    },
+    {
+      "id": "api/http/httpInjectionTest.js::https imposter POST /imposters with injections should allow asynchronous injection",
+      "class": "bug",
+      "issue": "#1593",
+      "note": "an async (callback) inject needs Node's `require('http')`/timers"
+    },
+    {
+      "id": "api/http/httpMetricsTest.js::Metrics GET /metrics should return imposter metrics after imposters calls",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#metrics",
+      "note": "Rift's /metrics are rift_* on --metrics-port"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should proxy to https",
+      "class": "bug",
+      "issue": "#1577",
+      "note": "the https origin has a self-signed certificate; Rift verifies it and answers 502"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should allow proxy stubs to invalid domains",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
+      "note": "an unreachable proxy upstream answers 502 (proxy.md); #1569 item 3 tracks the decision"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should proxy to different host",
+      "class": "bug",
+      "issue": "#1594",
+      "note": "the proxy follows the upstream's 30x itself; Mountebank relays it"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should handle the connect method",
+      "class": "bug",
+      "issue": "#1595",
+      "note": "a CONNECT request through an https imposter's proxy answers 400; Mountebank tunnels it (Mountebank #600)"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should match entire object graphs",
+      "class": "bug",
+      "issue": "#1596",
+      "note": "request.query in a script lists keys in an arbitrary order, not the client's",
+      "flaky": "the key order is arbitrary per request, so the test passes when it happens to match"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should persist behaviors from origin server",
+      "class": "bug",
+      "issue": "#1589",
+      "note": "the shellTransform reads process.argv[3]; its decorate is old-interface (#1567)"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should support retrieving replayable JSON with proxies removed for later playback",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
+      "note": "recordedFrom and recordMatches are Rift-only replayable keys, the recorded headers carry Rift's markers and Content-Length framing (#marker-headers-on-served-responses, #http-framing); the recorded `Connection: close` is #1592"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should persist decorated proxy responses and only run decorator once",
+      "class": "bug",
+      "issue": "#1567",
+      "note": "old two-argument decorate is a silent no-op"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should support http proxy to https server",
+      "class": "bug",
+      "issue": "#1594",
+      "note": "the proxy follows the upstream's 30x itself; Mountebank relays it"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should maintain case of headers from origin",
+      "class": "bug",
+      "issue": "#1597",
+      "note": "Rift writes every response header name in lower case on the wire, configured and proxied alike"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should inject proxy headers if specified",
+      "class": "bug",
+      "issue": "#1567",
+      "note": "the mirror imposter's old two-argument decorate is a silent no-op"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should add decorate behaviors to newly created response",
+      "class": "bug",
+      "issue": "#1567",
+      "note": "addDecorateBehavior with an old two-argument decorate is a silent no-op"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should save JSON bodies as JSON instead of text (issue #656)",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#a-json-body-gets-content-type-applicationjson",
+      "note": "the origin's object body is served with Content-Type: application/json, so the client parses it"
+    },
+    {
+      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should support JSON bodies",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#a-json-body-gets-content-type-applicationjson",
+      "note": "an object body is served with Content-Type: application/json, so the client parses it"
+    },
+    {
+      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should support treating the body as a JSON object for predicate matching",
+      "class": "bug",
+      "issue": "#1579",
+      "note": "deepEquals on an array is order-sensitive and equals on an array is not a subset match"
+    },
+    {
+      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should correctly set content-length for binary data",
+      "class": "bug",
+      "issue": "#1554",
+      "note": "a stale Content-Length on a binary body hangs the client"
+    },
+    {
+      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should correctly set content-length for binary data when using multiline base64",
+      "class": "bug",
+      "issue": "#1554",
+      "note": "a stale Content-Length on a binary body hangs the client"
+    },
+    {
+      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should handle JSON null values",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#a-json-body-gets-content-type-applicationjson",
+      "note": "an object body is served with Content-Type: application/json, so the client parses it"
+    },
+    {
+      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should support predicate from gzipped request (issue #499)",
+      "class": "bug",
+      "issue": "#1579",
+      "note": "the same predicates as the JSON-object test, on a gzipped body"
+    },
+    {
+      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should support adding single stub without restarting the imposter",
+      "class": "bug",
+      "issue": "#1598",
+      "note": "a stub added with POST /imposters/:id/stubs prints its generated `id`; stubs created with the imposter print none, nor does Mountebank"
+    },
+    {
+      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should provide a good error message when adding stub with missing information",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#error-envelopes",
+      "note": "code/type and message wording differ"
+    },
+    {
+      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should support adding single stub at end without index ",
+      "class": "bug",
+      "issue": "#1598",
+      "note": "a stub added with POST /imposters/:id/stubs prints its generated `id`; stubs created with the imposter print none, nor does Mountebank"
+    },
+    {
+      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should support JSON bodies",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#a-json-body-gets-content-type-applicationjson",
+      "note": "an object body is served with Content-Type: application/json, so the client parses it"
+    },
+    {
+      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should support treating the body as a JSON object for predicate matching",
+      "class": "bug",
+      "issue": "#1579",
+      "note": "deepEquals on an array is order-sensitive and equals on an array is not a subset match"
+    },
+    {
+      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should correctly set content-length for binary data",
+      "class": "bug",
+      "issue": "#1554",
+      "note": "a stale Content-Length on a binary body hangs the client"
+    },
+    {
+      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should correctly set content-length for binary data when using multiline base64",
+      "class": "bug",
+      "issue": "#1554",
+      "note": "a stale Content-Length on a binary body hangs the client"
+    },
+    {
+      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should handle JSON null values",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#a-json-body-gets-content-type-applicationjson",
+      "note": "an object body is served with Content-Type: application/json, so the client parses it"
+    },
+    {
+      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should support predicate from gzipped request (issue #499)",
+      "class": "bug",
+      "issue": "#1579",
+      "note": "the same predicates as the JSON-object test, on a gzipped body"
+    },
+    {
+      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should support adding single stub without restarting the imposter",
+      "class": "bug",
+      "issue": "#1598",
+      "note": "a stub added with POST /imposters/:id/stubs prints its generated `id`; stubs created with the imposter print none, nor does Mountebank"
+    },
+    {
+      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should provide a good error message when adding stub with missing information",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#error-envelopes",
+      "note": "code/type and message wording differ"
+    },
+    {
+      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should support adding single stub at end without index ",
+      "class": "bug",
+      "issue": "#1598",
+      "note": "a stub added with POST /imposters/:id/stubs prints its generated `id`; stubs created with the imposter print none, nor does Mountebank"
+    },
+    {
+      "id": "api/https/httpsCertificateTest.js::https imposter should support sending key/cert pair during imposter creation",
+      "class": "bug",
+      "issue": "#1599",
+      "note": "mbTest's fixture certificate is X.509 v1 (and expired); rustls refuses it (UnsupportedCertVersion)"
+    },
+    {
+      "id": "api/https/httpsCertificateTest.js::https imposter should work with mutual auth",
+      "class": "bug",
+      "issue": "#1599",
+      "note": "the client presents the X.509 v1 fixture certificate, which rustls refuses (alert certificate unknown)"
+    },
+    {
+      "id": "api/https/httpsCertificateTest.js::https imposter should support proxying to origin server requiring mutual auth",
+      "class": "bug",
+      "issue": "#1599",
+      "note": "the proxy presents the X.509 v1 fixture certificate to a mutualAuth origin"
+    },
+    {
+      "id": "api/impostersControllerTest.js::POST /imposters should return 400 on invalid input",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
+      "note": "`protocol` is optional and defaults to http (imposters.md), so POST {} creates an imposter"
+    },
+    {
+      "id": "api/impostersControllerTest.js::POST /imposters should return 400 on port conflict",
+      "class": "bug",
+      "issue": "#1557",
+      "note": "an imposter can take the admin port under --local-only"
+    },
+    {
+      "id": "api/impostersControllerTest.js::POST /imposters should return 400 on invalid JSON",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#error-envelopes",
+      "note": "code/type and message wording differ, no `source`"
+    },
+    {
+      "id": "api/impostersControllerTest.js::DELETE /imposters deletes all imposters and returns replayable body",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
+      "note": "Rift-only config keys (recordMatches) print with ?replayable=true (api/index.md)"
+    },
+    {
+      "id": "api/impostersControllerTest.js::DELETE /imposters supports returning a non-replayable body with proxies removed",
+      "class": "bug",
+      "issue": "#1591",
+      "note": "DELETE /imposters ignores ?replayable=false and ?removeProxies"
+    },
+    {
+      "id": "cli/configFileTest.js::--configfile should support legacy ejs 2.x include syntax in configuration files",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/configFileTest.js::--configfile should evaluate stringify function in templates when loading configuration files",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/configFileTest.js::--configfile should evaluate nested stringify functions when loading configuration files",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/configFileTest.js::--configfile should evaluate stringify functions with injected data when loading configuration files",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/configFileTest.js::--configfile should not render through ejs when --noParse option provided",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/configFileTest.js::--configfile should evaluate gzipped requests (issue #477)",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/datadirTest.js::--datadir should load previously saved imposters until they are deleted",
+      "class": "bug",
+      "issue": "#1603",
+      "note": "a --datadir restart resets each stub's response cycle; Mountebank resumes it (serves 'second')"
+    },
+    {
+      "id": "cli/datadirTest.js::--datadir should allow configfile to overwrite imposters loaded from datadir",
+      "class": "bug",
+      "issue": "#1604",
+      "note": "imposters.ejs uses EJS 3's `<%- include('file') -%>`, which Rift refuses, so the configfile does not load"
+    },
+    {
+      "id": "cli/datadirTest.js::--datadir should not delete files outside of imposter directories when deleting imposter",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/debugTest.js::--debug http server should record matches against stubs",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#--debug",
+      "note": "no per-stub matches (#1573)"
+    },
+    {
+      "id": "cli/debugTest.js::--debug should record final response from out of process proxy",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#--debug",
+      "note": "no per-stub matches (#1573)"
+    },
+    {
+      "id": "cli/formatterTest.js::--formatter should allow using custom synchronous formatter",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#command-line",
+      "note": "--formatter is accepted and ignored"
+    },
+    {
+      "id": "cli/formatterTest.js::--formatter should allow using custom asynchronous formatter",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#command-line",
+      "note": "--formatter is accepted and ignored"
+    },
+    {
+      "id": "cli/formatterTest.js::--formatter should allow passing custom CLI options to formatter",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#command-line",
+      "note": "--formatter is accepted and ignored"
+    },
+    {
+      "id": "cli/hostTest.js::--host should allow binding to specific host",
+      "class": "bug",
+      "issue": "#1575",
+      "note": "a DNS-name --host is refused for the admin plane"
+    },
+    {
+      "id": "cli/hostTest.js::--host should work with --configfile",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/hostTest.js::--host should work with mb save",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/hostTest.js::--host should work with mb replay",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/hostTest.js::--host should disallow localhost calls when bound to specific host",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/hostTest.js::--host should bind http imposter to provided host",
+      "class": "harness",
+      "reason": "binds to the address os.hostname() resolves to; fails on Mountebank too on a host whose name resolves to a non-loopback or IPv6 address, and is skipped where it resolves to localhost",
+      "flaky": "depends on what the host's name resolves to",
+      "note": "never runs on Rift until #1559 and #1575 land"
+    },
+    {
+      "id": "cli/rcfileTest.js::--rcfile should still start if rcfile does not exist",
+      "class": "bug",
+      "issue": "#1574",
+      "note": "a missing --rcfile aborts startup"
+    },
+    {
+      "id": "cli/rcfileTest.js::--rcfile should still start if rcfile is not JSON",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/rcfileTest.js::--rcfile should load rcfile options and override defaults",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/rcfileTest.js::--rcfile options passed on CLI should override rcfile options",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/rcfileTest.js::--rcfile options passed on CLI using an alias should override rcfile options",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/replayTest.js::mb replay should remove proxies",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#command-line",
+      "note": "`rift replay` starts a server from --configfile; it does not switch a running server's proxies to replay"
+    },
+    {
+      "id": "cli/saveTest.js::mb save should allow saving replayable format",
+      "class": "bug",
+      "issue": "#1604",
+      "note": "imposters.ejs uses `<%- include('file') -%>`, which Rift refuses"
+    },
+    {
+      "id": "cli/saveTest.js::mb save should allow saving to a different config file",
+      "class": "bug",
+      "issue": "#1604",
+      "note": "imposters.ejs uses `<%- include('file') -%>`, which Rift refuses"
+    },
+    {
+      "id": "cli/saveTest.js::mb save should allow removing proxies during save",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/securityTest.js::security mb without --allowInjection should return a 400 if endOfResponseResolver is used",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#error-envelopes",
+      "note": "the error envelope's code is the HTTP status; Mountebank's is 'invalid injection'"
+    },
+    {
+      "id": "cli/securityTest.js::security IP blocking should only allow local requests if --localOnly used",
+      "class": "bug",
+      "issue": "#1568",
+      "note": "the --local-only admin accepts a non-loopback source address over loopback"
+    },
+    {
+      "id": "cli/securityTest.js::security IP blocking should only allow local requests to http imposter if --localOnly used",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/securityTest.js::security IP blocking should allow non-local requests if --localOnly not used",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/securityTest.js::security IP blocking should block IPs not on --ipWhitelist",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "cli/securityTest.js::security IP blocking should ignore --ipWhitelist if --localOnly passed",
+      "class": "bug",
+      "issue": "#1559",
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+    },
+    {
+      "id": "docs:/docs/api/proxies#predicate-generators",
+      "class": "bug",
+      "issue": "#1580",
+      "note": "a nested generator matcher with a value ({query: {q: ...}}) records `equals query {}`"
+    },
+    {
+      "id": "docs:/docs/api/proxies#proxyAlways",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#the-admin-api-serves-json-only",
+      "note": "no Vary: Accept; recordedFrom/recordMatches and the recorded markers and framing are documented too"
+    },
+    {
+      "id": "docs:/docs/api/proxies#waitBehavior",
+      "class": "harness",
+      "reason": "Mountebank records the addWaitBehavior wait only when the measured proxy time is non-zero, so on a fast host it fails on Mountebank too",
+      "flaky": "passes on Mountebank when the upstream takes a millisecond or more",
+      "note": "on Rift: a stub's empty predicates are not printed (differences.md#printed-imposters-are-normalized)"
+    },
+    {
+      "id": "docs:/docs/api/proxies#decorateBehavior",
+      "class": "harness",
+      "reason": "the scenario proxies to a public website, which answers 403 to the runner; fails on Mountebank too",
+      "flaky": "depends on what the website answers this runner"
+    },
+    {
+      "id": "docs:/docs/api/injection#predicate response",
+      "class": "bug",
+      "issue": "#1593",
+      "note": "the inject calls require('http')"
+    },
+    {
+      "id": "docs:/docs/api/json#json",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#a-json-body-gets-content-type-applicationjson",
+      "note": "the response gains Content-Type: application/json"
+    },
+    {
+      "id": "docs:/docs/protocols/https#https-mutual-auth",
+      "class": "bug",
+      "issue": "#1577",
+      "note": "the proxy's https origin has a self-signed certificate; Rift verifies it and answers 502"
+    },
+    {
+      "id": "docs:/docs/api/jsonpath#jsonpath",
+      "class": "bug",
+      "issue": "#1601",
+      "note": "with caseSensitive false, a jsonpath selector's key names are not folded ($..TITLE does not select title)"
+    },
+    {
+      "id": "docs:/docs/api/overview#home",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#the-admin-api-serves-json-only",
+      "note": "no Vary: Accept"
+    },
+    {
+      "id": "docs:/docs/api/predicates#array",
+      "class": "bug",
+      "issue": "#1553",
+      "note": "array-valued query predicate"
+    },
+    {
+      "id": "docs:/docs/api/behaviors#copy-regex",
+      "class": "bug",
+      "issue": "#1558",
+      "note": "copy token in is.statusCode refused at load"
+    },
+    {
+      "id": "docs:/docs/api/behaviors#lookup",
+      "class": "bug",
+      "issue": "#1558",
+      "note": "lookup token in is.statusCode refused at load"
+    },
+    {
+      "id": "docs:/docs/api/behaviors#shellTransform",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
+      "note": "shellTransform output is served as the body (behaviors.md)"
+    },
+    {
+      "id": "docs:/docs/api/stubs#example",
+      "class": "bug",
+      "issue": "#1602",
+      "note": "recorded requests carry no `ip`; the extra journal fields (status, latencyMs, matchOutcome) and Vary are documented"
+    },
+    {
+      "id": "api/http/httpProxyStubTest.js::http proxy stubs should match sub-objects",
+      "class": "bug",
+      "issue": "#1596",
+      "note": "request.query in a script lists keys in an arbitrary order, not the client's",
+      "flaky": "the key order is arbitrary per request, so the test passes when it happens to match"
+    }
+  ]
+}

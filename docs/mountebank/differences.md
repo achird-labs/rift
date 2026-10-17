@@ -272,6 +272,45 @@ Three differences:
 
 `--ip-whitelist` remains not enforced (#879).
 
+## HTTP framing
+
+Rift frames a response body with `Content-Length` where Mountebank sends it chunked
+(`Transfer-Encoding: chunked`), and the order of the response's header fields can differ from
+Mountebank's. Both are framing, not content: a client that reads a response as HTTP defines it sees
+the same message. Mountebank's own docs examples print raw responses, so the
+[mbTest harness](https://github.com/achird-labs/rift/tree/master/conformance/mbtest) compares them
+without the framing headers and with the header fields sorted.
+
+## A JSON body gets `Content-Type: application/json`
+
+When an `is` response's `body` is a JSON object or array and the response sets no `Content-Type`,
+Rift adds `Content-Type: application/json` (see [Responses](responses.md)). Mountebank serves the
+same body, pretty-printed, with no `Content-Type`, so a client that parses by content type reads
+Rift's answer as JSON and Mountebank's as text.
+
+## Command line
+
+- `--formatter` is accepted and ignored: Rift does not load Mountebank's JavaScript formatter
+  modules, so `rift save` always writes JSON (see the [CLI reference](../configuration/cli.md)).
+- `rift replay --configfile <file>` starts a server with that file loaded. `mb replay` switches a
+  running server's proxies to replay mode; Rift has no command for that (see
+  [Migration](../getting-started/migration.md)).
+
+## `/metrics`
+
+Rift serves Prometheus metrics on its own listener (`--metrics-port`, default `9090`), not on the
+admin port, and names them `rift_*` (see [Metrics](../features/metrics.md)). Mountebank serves
+`/metrics` on the admin port, with `mb_*` names such as `mb_predicate_match_duration_seconds` and
+`mb_no_match_total`.
+
+## `--debug`
+
+Mountebank's `--debug` lists every match on each stub of `GET /imposters/:id` (`matches`). Rift's
+`--debug` raises the log level and enables script tracing. It does not record matches per stub. To
+see which stub answered each request, set `recordRequests: true`: each recorded request carries
+`matchOutcome.stubIndex`, `status` and `latencyMs`. To ask which stub *would* answer, send the
+request with `X-Rift-Debug: true` (see [Debug mode](../features/debug-mode.md)).
+
 ## Elsewhere in these docs
 
 Each of these is described where the feature is:

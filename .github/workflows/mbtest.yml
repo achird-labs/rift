@@ -1,0 +1,91 @@
+name: mbTest (Mountebank's own suite)
+
+# Issue #1547: Mountebank's own functional test suite (mbTest, including its docs examples) at the
+# tag in conformance/mbtest/MBTEST_REF, run against Mountebank first (the baseline: anything that
+# fails there may only be a `harness` entry) and then against this build of Rift. Every Rift
+# failure must be listed in conformance/mbtest/expected.json with its class (bug + issue,
+# documented + differences.md anchor, or harness + reason), and a listed test that now passes
+# fails the run, so the list only shrinks. See conformance/mbtest/README.md.
+#
+# Deliberately NOT a PR check yet: the expected list will churn while the first findings are fixed.
+# Promoting it to PR CI is a later owner decision. Scheduled + manual only.
+on:
+  schedule:
+    - cron: "41 5 * * 1" # Mondays 05:41 UTC (mutants.yml runs at 03:17)
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Rift branch, tag or SHA to test (default: the branch the run is started on)"
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The differential oracle's version. scripts/verify-mountebank-version-docs.sh holds this and
+  # conformance/mbtest/MBTEST_REF to ci.yml's MB_VERSION, so the suite and the oracle move together.
+  MB_VERSION: "2.9.5"
+
+jobs:
+  mbtest:
+    name: mbTest against Mountebank and Rift
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v6
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Mountebank ${{ env.MB_VERSION }}
+        run: |
+          npm install --prefix "$HOME/bench-mb" "@mbtest/mountebank@$MB_VERSION"
+          "$HOME/bench-mb/node_modules/.bin/mb" --version
+
+      # The debug build, as the differential job uses.
+      - name: Build the Rift server under test
+        run: cargo build -p rift-http-proxy --bin rift-http-proxy
+
+      - name: Check the harness's own checker
+        run: python3 conformance/mbtest/check.py --self-test
+
+      # Clones mbTest at MBTEST_REF into $RUNNER_TEMP, runs the api, cli and docs phases against
+      # Mountebank and then Rift (serially: mbTest uses fixed ports), and writes the counts to the
+      # job summary.
+      - name: Run mbTest
+        env:
+          RIFT_BIN: ${{ github.workspace }}/target/debug/rift-http-proxy
+          OUT_DIR: ${{ runner.temp }}/mbtest-out
+        run: conformance/mbtest/run.sh
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mbtest-results
+          path: ${{ runner.temp }}/mbtest-out/
+          if-no-files-found: ignore

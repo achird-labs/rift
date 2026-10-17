@@ -18,6 +18,11 @@ record.
   function counts of 28 in-scope Mountebank files against `conformance/differential/mb-coverage.json`
   on every pull request, and 27 new `coverage:` cases (HTTPS imposters among them, via a
   `"scheme": "https"` send) raise in-scope line coverage from 87.7% to 90.2%.
+- **Mountebank 2.9.5's own functional suite (mbTest), including its docs examples, now runs against
+  Rift weekly** (#1547). `conformance/mbtest/run.sh` runs mbTest's API, CLI and per-scenario docs
+  tests against Mountebank (the baseline) and then Rift. Every Rift failure is classified in
+  `conformance/mbtest/expected.json` as a bug with its issue, a documented difference or a harness
+  limit, and a listed test that starts passing fails the run, so the list can only shrink.
 
 ## [0.23.0] - 2026-10-16
 
