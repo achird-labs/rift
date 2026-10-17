@@ -1,0 +1,1167 @@
+{
+  "source": "#1548 — one case per Mountebank code path the differential suite did not reach, named `coverage: <mb file>:<line> <what>`",
+  "cases": [
+    {
+      "name": "coverage: httpsServer.js:13 an https imposter with its own key and cert serves its stubs over TLS",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "https",
+                "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXEX/fnYkYAcizx3v\nahNgfzAVPeWgrbxN9qx9CQ4iGnqhRANCAASDXiLzeB6up5bgpTReHcf4JU6e7C4f\nrpDMFw4CoCTpMVXyno+FspxrMFGOrrY55pJtwuNG0P+eiS+EmGk81KWj\n-----END PRIVATE KEY-----\n",
+                "cert": "-----BEGIN CERTIFICATE-----\nMIIClzCCAX+gAwIBAgIUb76s3Bu32t04g8Yk97Awl6nREj0wDQYJKoZIhvcNAQEL\nBQAwLTErMCkGA1UEAwwicmlmdC1jb25mb3JtYW5jZS10ZXN0LWludGVyY2VwdC1j\nYTAeFw0yNjA5MjkwMjU5MDBaFw00NjA5MjQwMjU5MDBaMBQxEjAQBgNVBAMMCWxv\nY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABINeIvN4Hq6nluClNF4d\nx/glTp7sLh+ukMwXDgKgJOkxVfKej4WynGswUY6utjnmkm3C40bQ/56JL4SYaTzU\npaOjgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww\nCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQW\nBBQFFykmXW4Tc+8DGcDc9dA00gVkszAfBgNVHSMEGDAWgBSSlbpvl+VQ7TncCG8D\nootZHZDvlTANBgkqhkiG9w0BAQsFAAOCAQEAYLl6o+p7bEqeoYpwNh7XGytSBF9P\nP7gejJxmPYcz7UdGSaNFpWoE3Ic2VzBKIXfvlQbHmf4D94xoTC4LDm021xeZxrsR\n+Va2YNpBwC5z71ktJPlng4R/FFZgrN4cRq14rVxekm+BIejEavDxY0B72AzCafZB\njKWHXCvtWM59e/IsOLK2MkBrDXl2TVPoWCieKqnvSwJOsVzacB20zZL8vHMRhwYG\nveyjA8Hwcjio9gNIK71BvCdBkWz4SouMpSJlntfikfaBGAf2ZsIgii6vC1jPEEkW\nnNYxYS6bPSrDXul440CKJGqWX1wAkeI+EHAGioUacTf8hBryNlsFBV0hIg==\n-----END CERTIFICATE-----\n",
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "equals": {
+                          "path": "/a"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 201,
+                          "headers": {
+                            "X-Tls": "yes"
+                          },
+                          "body": "secure"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "predicates": [
+                      {
+                        "equals": {
+                          "method": "POST",
+                          "body": "payload"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "body": "posted"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "scheme": "https",
+          "path": "/a"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "scheme": "https",
+          "method": "POST",
+          "path": "/b",
+          "body": "payload"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "scheme": "https",
+          "path": "/none"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: httpsServer.js:16 an https imposter with the engine's default certificate",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "https",
+                "stubs": [
+                  {
+                    "responses": [
+                      {
+                        "is": {
+                          "body": "ok"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "scheme": "https",
+          "path": "/"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: httpsServer.js:13 an https imposter counts the requests it receives over TLS",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "https",
+                "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXEX/fnYkYAcizx3v\nahNgfzAVPeWgrbxN9qx9CQ4iGnqhRANCAASDXiLzeB6up5bgpTReHcf4JU6e7C4f\nrpDMFw4CoCTpMVXyno+FspxrMFGOrrY55pJtwuNG0P+eiS+EmGk81KWj\n-----END PRIVATE KEY-----\n",
+                "cert": "-----BEGIN CERTIFICATE-----\nMIIClzCCAX+gAwIBAgIUb76s3Bu32t04g8Yk97Awl6nREj0wDQYJKoZIhvcNAQEL\nBQAwLTErMCkGA1UEAwwicmlmdC1jb25mb3JtYW5jZS10ZXN0LWludGVyY2VwdC1j\nYTAeFw0yNjA5MjkwMjU5MDBaFw00NjA5MjQwMjU5MDBaMBQxEjAQBgNVBAMMCWxv\nY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABINeIvN4Hq6nluClNF4d\nx/glTp7sLh+ukMwXDgKgJOkxVfKej4WynGswUY6utjnmkm3C40bQ/56JL4SYaTzU\npaOjgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww\nCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQW\nBBQFFykmXW4Tc+8DGcDc9dA00gVkszAfBgNVHSMEGDAWgBSSlbpvl+VQ7TncCG8D\nootZHZDvlTANBgkqhkiG9w0BAQsFAAOCAQEAYLl6o+p7bEqeoYpwNh7XGytSBF9P\nP7gejJxmPYcz7UdGSaNFpWoE3Ic2VzBKIXfvlQbHmf4D94xoTC4LDm021xeZxrsR\n+Va2YNpBwC5z71ktJPlng4R/FFZgrN4cRq14rVxekm+BIejEavDxY0B72AzCafZB\njKWHXCvtWM59e/IsOLK2MkBrDXl2TVPoWCieKqnvSwJOsVzacB20zZL8vHMRhwYG\nveyjA8Hwcjio9gNIK71BvCdBkWz4SouMpSJlntfikfaBGAf2ZsIgii6vC1jPEEkW\nnNYxYS6bPSrDXul440CKJGqWX1wAkeI+EHAGioUacTf8hBryNlsFBV0hIg==\n-----END CERTIFICATE-----\n",
+                "recordRequests": true,
+                "stubs": [
+                  {
+                    "responses": [
+                      {
+                        "is": {
+                          "body": "ok"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "scheme": "https",
+          "method": "PUT",
+          "path": "/r?x=1",
+          "headers": [
+            [
+              "X-A",
+              "1"
+            ]
+          ],
+          "body": "hello"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "scheme": "https",
+          "path": "/r",
+          "times": 2
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: httpsServer.js:13 an https imposter's default response, behaviors and injection",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "https",
+                "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXEX/fnYkYAcizx3v\nahNgfzAVPeWgrbxN9qx9CQ4iGnqhRANCAASDXiLzeB6up5bgpTReHcf4JU6e7C4f\nrpDMFw4CoCTpMVXyno+FspxrMFGOrrY55pJtwuNG0P+eiS+EmGk81KWj\n-----END PRIVATE KEY-----\n",
+                "cert": "-----BEGIN CERTIFICATE-----\nMIIClzCCAX+gAwIBAgIUb76s3Bu32t04g8Yk97Awl6nREj0wDQYJKoZIhvcNAQEL\nBQAwLTErMCkGA1UEAwwicmlmdC1jb25mb3JtYW5jZS10ZXN0LWludGVyY2VwdC1j\nYTAeFw0yNjA5MjkwMjU5MDBaFw00NjA5MjQwMjU5MDBaMBQxEjAQBgNVBAMMCWxv\nY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABINeIvN4Hq6nluClNF4d\nx/glTp7sLh+ukMwXDgKgJOkxVfKej4WynGswUY6utjnmkm3C40bQ/56JL4SYaTzU\npaOjgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww\nCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQW\nBBQFFykmXW4Tc+8DGcDc9dA00gVkszAfBgNVHSMEGDAWgBSSlbpvl+VQ7TncCG8D\nootZHZDvlTANBgkqhkiG9w0BAQsFAAOCAQEAYLl6o+p7bEqeoYpwNh7XGytSBF9P\nP7gejJxmPYcz7UdGSaNFpWoE3Ic2VzBKIXfvlQbHmf4D94xoTC4LDm021xeZxrsR\n+Va2YNpBwC5z71ktJPlng4R/FFZgrN4cRq14rVxekm+BIejEavDxY0B72AzCafZB\njKWHXCvtWM59e/IsOLK2MkBrDXl2TVPoWCieKqnvSwJOsVzacB20zZL8vHMRhwYG\nveyjA8Hwcjio9gNIK71BvCdBkWz4SouMpSJlntfikfaBGAf2ZsIgii6vC1jPEEkW\nnNYxYS6bPSrDXul440CKJGqWX1wAkeI+EHAGioUacTf8hBryNlsFBV0hIg==\n-----END CERTIFICATE-----\n",
+                "defaultResponse": {
+                  "statusCode": 418,
+                  "body": "default"
+                },
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "startsWith": {
+                          "path": "/inj"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "inject": "function (config) { return { statusCode: 202, body: config.request.method + ' ' + config.request.path }; }"
+                      }
+                    ]
+                  },
+                  {
+                    "predicates": [
+                      {
+                        "equals": {
+                          "path": "/wait"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "body": "waited"
+                        },
+                        "behaviors": [
+                          {
+                            "wait": 10
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "scheme": "https",
+          "path": "/inj/x"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "scheme": "https",
+          "path": "/wait"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "scheme": "https",
+          "path": "/other"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: predicates.js:148 an imposter in binary mode accepts an equals predicate over base64",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "mode": "binary",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "aGVsbG8="
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "x"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: responseResolver.js:151 a predicateGenerator inject builds the recorded predicates",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "function (config) { return { body: 'upstream ' + config.request.method + ' ' + config.request.path }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "inject": "function (config) { return [{ deepEquals: { path: config.request.path } }]; }"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/one"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/one"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/two"
+        }
+      ]
+    },
+    {
+      "name": "coverage: predicates.js:37 deepEquals with a null value",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "a": null,
+                        "b": 1
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "{\"a\":null,\"b\":1}"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "{\"b\":1}"
+        }
+      ]
+    },
+    {
+      "name": "coverage: behaviors.js:297 copy with regex ignoreCase and multiline options",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "got ${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "^name: \\w+$",
+                            "options": {
+                              "ignoreCase": true,
+                              "multiline": true
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "first line\nNAME: alice\nlast"
+        }
+      ]
+    },
+    {
+      "name": "coverage: behaviors.js:440 lookup with a keyColumn missing from the CSV headers",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "name=${row}[name]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": "path",
+                            "using": {
+                              "method": "regex",
+                              "selector": "\\d+"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "data/products.csv",
+                              "keyColumn": "missing"
+                            }
+                          },
+                          "into": "${row}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/1"
+        }
+      ]
+    },
+    {
+      "name": "coverage: dryRunValidator.js:176 an invalid behavior is refused at creation",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "x"
+                    },
+                    "behaviors": [
+                      {
+                        "wait": -1
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: behaviorsValidator.js:94 a behavior field of the wrong type is refused",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "x"
+                    },
+                    "behaviors": [
+                      {
+                        "wait": true
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: behaviorsValidator.js:101 a copy using an unknown method is refused",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "x"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "${x}",
+                          "using": {
+                            "method": "bogus",
+                            "selector": ".*"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: behaviorsValidator.js:83 a copy without into is refused",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "x"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: xpath.js:92 an xpath selector that counts",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "2"
+                    },
+                    "xpath": {
+                      "selector": "count(//a)"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "two"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<r><a/><a/></r>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "<r><a/></r>"
+        }
+      ]
+    },
+    {
+      "name": "coverage: predicates.js:343 a matches predicate with a regex safe-regex calls unsafe",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "body": "^(a+)+$"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "aaaa"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "body": "aab"
+        }
+      ]
+    },
+    {
+      "name": "coverage: behaviors.js:322 a copy with a regex safe-regex calls unsafe",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "got ${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "(a+)+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/aaa"
+        }
+      ]
+    },
+    {
+      "name": "coverage: predicates.js:433 a predicate with no known operator",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "bogus": {
+                      "path": "/"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "x"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "coverage: imposter.js:200 an imposter created without a port gets one",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "auto"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: httpProxy.js:210 a proxy to a host that does not resolve",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://no-such-host.invalid"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "coverage: impostersController.js:34 an invalid port is refused",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "protocol": "http",
+            "port": 70000
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: impostersController.js:45 an unsupported protocol is refused",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "protocol": "ftp",
+            "port": 4545
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: impostersController.js:179 PUT /imposters without imposters is refused",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {}
+        }
+      ]
+    },
+    {
+      "name": "coverage: impostersController.js:189 PUT /imposters with an invalid imposter is refused",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "kept"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "protocol": "http",
+                "port": 4546,
+                "stubs": [
+                  {
+                    "responses": []
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: imposterController.js:152 PUT stubs without stubs is refused",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "kept"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs",
+          "body": {}
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "stubs": {
+              "responses": []
+            }
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "stubs": [
+              {
+                "responses": []
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: imposterController.js:210 a stub index past the end is refused",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "kept"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs/5",
+          "body": {
+            "responses": [
+              {
+                "is": {}
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545/stubs/5"
+        }
+      ]
+    },
+    {
+      "name": "coverage: imposterController.js:237 PUT a single invalid stub is refused",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "kept"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs/0",
+          "body": {
+            "responses": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: imposterController.js:250 POST stubs with an out-of-range index or no stub is refused",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "kept"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "index": 5,
+            "stub": {
+              "responses": [
+                {
+                  "is": {}
+                }
+              ]
+            }
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "index": 0
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "index": 0,
+            "stub": {
+              "responses": []
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -703,6 +703,17 @@
     "rift": "502"
   },
   {
+    "id": "proxy-upstream-502/unresolvable",
+    "case": "coverage: httpProxy.js:210 a proxy to a host that does not resolve",
+    "location": "step[1].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "client `502` with an `x-rift-proxy-error: true` header and a JSON error envelope (`type` `upstream failure`)",
+    "reason": "an upstream host that does not resolve answers 502 (Mountebank: 500, `Cannot resolve`)",
+    "mountebank": "500",
+    "rift": "502"
+  },
+  {
     "id": "config-shape",
     "case": "admin_api: Get server config",
     "location": "step[0].admin.body",

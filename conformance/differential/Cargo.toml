@@ -16,7 +16,8 @@ serde_json = { workspace = true }
 regex = "1.11"
 similar = "3"
 futures = { workspace = true }
-# `rustls` only gives reqwest a crypto provider so a client can be built in a binary with no `main`
-# to install one; every request this harness sends is plain HTTP to 127.0.0.1.
+# `rustls` gives reqwest a crypto provider so a client can be built in a binary with no `main` to
+# install one. Admin calls are plain HTTP to 127.0.0.1; a `"scheme": "https"` send reaches an https
+# imposter over TLS, accepting its self-signed certificate.
 reqwest = { workspace = true, features = ["rustls"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time", "net", "io-util", "sync"] }

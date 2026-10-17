@@ -1,7 +1,7 @@
 //! Runs one case on both engines and collects every difference.
 
 use crate::canon;
-use crate::case::{Case, Request, Step};
+use crate::case::{Case, Request, Scheme, Step};
 use crate::diff::{Difference, Observation, compare_json, compare_observations, unified};
 use crate::engine::{Engine, Outgoing, free_ports, send};
 use crate::ports::PortMap;
@@ -325,6 +325,7 @@ async fn admin(
         ),
     };
     let outgoing = Outgoing {
+        scheme: Scheme::Http,
         port: engine.admin_port,
         method: method.to_string(),
         path: map.forward_path(path),
@@ -336,6 +337,7 @@ async fn admin(
 
 fn imposter_request(map: &PortMap, port: u16, request: &Request) -> Outgoing {
     Outgoing {
+        scheme: request.scheme,
         port: map.actual(port),
         method: request.method.clone(),
         path: request.path.clone(),
