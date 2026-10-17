@@ -12,6 +12,7 @@
 pub mod allow;
 pub mod canon;
 pub mod case;
+pub mod coverage;
 pub mod diff;
 pub mod driver;
 pub mod engine;

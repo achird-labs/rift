@@ -62,11 +62,33 @@ pub enum Step {
     Hold { port: u16 },
 }
 
+/// How a request reaches an imposter: `https` for an `https` imposter, whose self-signed
+/// certificate the harness accepts (it compares answers, not certificates).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scheme {
+    #[default]
+    Http,
+    Https,
+}
+
+impl Scheme {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scheme::Http => "http",
+            Scheme::Https => "https",
+        }
+    }
+}
+
 /// The fields of a `send` / `concurrent` step.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendStep {
     pub port: u16,
+    #[serde(default)]
+    pub scheme: Scheme,
     #[serde(default = "get")]
     pub method: String,
     #[serde(default = "root")]
@@ -85,6 +107,7 @@ impl SendStep {
     #[must_use]
     pub fn request(&self) -> Request {
         Request {
+            scheme: self.scheme,
             method: self.method.clone(),
             path: self.path.clone(),
             headers: self.headers.clone(),
@@ -97,6 +120,7 @@ impl SendStep {
 /// One request, as sent to an imposter.
 #[derive(Debug, Clone)]
 pub struct Request {
+    pub scheme: Scheme,
     pub method: String,
     pub path: String,
     /// Ordered `[name, value]` pairs, so duplicates and order survive.
@@ -211,6 +235,7 @@ pub fn fixture_case(imposters_dir: &Path, fixture: &FixtureRef) -> Result<Case, 
     for request in requests {
         steps.push(Step::Send(SendStep {
             port,
+            scheme: request.scheme,
             method: request.method,
             path: request.path,
             headers: request.headers,
@@ -296,6 +321,7 @@ fn verify_requests(file: &str, verify: &Value) -> Result<Vec<Request>, LoadError
             let mut request: VerifyRequest = serde_json::from_value(raw)
                 .map_err(|e| LoadError(format!("{file}: _verify request: {e}")))?;
             Ok(Request {
+                scheme: Scheme::Http,
                 method: request.method.take().unwrap_or_else(get),
                 path: request.path,
                 headers: request.headers.into_iter().collect(),
@@ -331,18 +357,27 @@ mod tests {
             "steps": [
                 {"do": "admin", "method": "POST", "path": "/imposters", "body": {"port": 4545, "protocol": "http"}},
                 {"do": "send", "port": 4545, "path": "/x", "headers": [["X-A", "1"]], "times": 2},
-                {"do": "concurrent", "port": 4545, "times": 5},
+                {"do": "concurrent", "port": 4545, "times": 5, "scheme": "https"},
                 {"do": "reimport"}
             ]
         }))
         .expect("case parses");
         assert_eq!(case.steps.len(), 4);
+        let Step::Concurrent(burst) = &case.steps[2] else {
+            panic!("third step is a concurrent burst");
+        };
+        assert_eq!(burst.scheme, Scheme::Https);
         let Step::Send(send) = &case.steps[1] else {
             panic!("second step is a send");
         };
         assert_eq!(
-            (send.method.as_str(), send.path.as_str(), send.times),
-            ("GET", "/x", 2)
+            (
+                send.scheme,
+                send.method.as_str(),
+                send.path.as_str(),
+                send.times
+            ),
+            (Scheme::Http, "GET", "/x", 2)
         );
         assert_eq!(send.headers, vec![("X-A".to_string(), "1".to_string())]);
         assert_eq!(
@@ -423,6 +458,14 @@ mod tests {
         };
         assert!(fixture_case(&dir, &everything).is_err(), "no stubs left");
         std::fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn an_unknown_scheme_is_refused() {
+        let parsed = serde_json::from_value::<Case>(json!({
+            "name": "n", "steps": [{"do": "send", "port": 1, "scheme": "ftp"}]
+        }));
+        assert!(parsed.is_err(), "only http and https reach an imposter");
     }
 
     #[test]

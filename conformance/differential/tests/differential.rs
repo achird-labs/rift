@@ -7,9 +7,16 @@
 //! `RIFT_DIFFERENTIAL_FILTER=<substring>` runs only the cases whose name contains it, and
 //! `RIFT_DIFFERENTIAL_DUMP=<file>` writes every difference found (explained or not) as JSON — the
 //! raw material for a precise allow-list entry.
+//!
+//! Mountebank coverage (#1548): `RIFT_DIFFERENTIAL_MB_COVERAGE=<dir>` runs Mountebank under
+//! `NODE_V8_COVERAGE=<dir>` and records which Mountebank and node ran in `<dir>/mountebank.json`;
+//! `mb_coverage_matches_baseline` then holds c8's summary of that profile
+//! (`RIFT_DIFFERENTIAL_MB_COVERAGE_SUMMARY`) against `mb-coverage.json`. `scripts/mb-coverage.sh`
+//! runs the whole sequence.
 
 use rift_differential::allow::{self, Rule};
 use rift_differential::case::{Case, CaseFile, Step, fixture_case};
+use rift_differential::coverage::{self, Baseline, Run};
 use rift_differential::driver::{Engines, run_case};
 use rift_differential::engine::{self, client};
 use std::fmt::Write as _;
@@ -137,6 +144,7 @@ fn the_corpus_covers_every_source() {
         "stub_management",
         "sdk-corpus",
         "targeted",
+        "coverage",
     ] {
         assert!(prefixes.contains(prefix), "no case comes from {prefix}");
     }
@@ -174,7 +182,7 @@ async fn mountebank_is_the_oracle() {
     };
     let rift_bin = engine::locate_rift().unwrap_or_else(|e| panic!("{e}"));
     let cwd = corpus_dir();
-    let engines = Engines {
+    let mut engines = Engines {
         mountebank: engine::start_mountebank(&mb, &cwd)
             .await
             .unwrap_or_else(|e| panic!("{e}")),
@@ -237,6 +245,23 @@ async fn mountebank_is_the_oracle() {
         }
     }
 
+    // Before anything can panic: a red run still yields Mountebank's coverage.
+    let mut stop_errors = Vec::new();
+    match engine::mb_coverage_dir() {
+        Ok(Some(dir)) => {
+            if let Err(e) = record_run(&client, &engines.mountebank, &mb, &dir).await {
+                stop_errors.push(e);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => stop_errors.push(e),
+    }
+    for engine in [&mut engines.mountebank, &mut engines.rift] {
+        if let Err(e) = engine.stop().await {
+            stop_errors.push(e);
+        }
+    }
+
     if let Some(path) = std::env::var_os("RIFT_DIFFERENTIAL_DUMP") {
         let rows: Vec<serde_json::Value> = dump
             .iter()
@@ -265,10 +290,130 @@ async fn mountebank_is_the_oracle() {
         failures.is_empty(),
         "Rift and Mountebank answered differently:{failures}"
     );
+    assert!(
+        stop_errors.is_empty(),
+        "stopping the engines: {stop_errors:?}"
+    );
     if filter.is_none() {
         assert!(
             stale.is_empty(),
             "allow-list entries that matched nothing (fixed? remove them): {stale:?}"
         );
     }
+}
+
+/// Mountebank's own account of what ran (`GET /config`: `version`, `process.nodeVersion`) and its
+/// package directory, written to `<dir>/mountebank.json` beside the V8 profile (c8 skips files
+/// that are not profiles).
+async fn record_run(
+    client: &reqwest::Client,
+    mountebank: &engine::Engine,
+    mb: &std::path::Path,
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    let url = format!("http://127.0.0.1:{}/config", mountebank.admin_port);
+    let config: serde_json::Value = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("GET {url}: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("GET {url}: {e}"))?;
+    let field = |pointer: &str| {
+        config
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("GET {url}: no {pointer} in {config}"))
+    };
+    // `node_modules/.bin/mb` is a link to `<package>/bin/mb`.
+    let root = std::fs::canonicalize(mb)
+        .map_err(|e| format!("{}: {e}", mb.display()))?
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(|p| p.display().to_string())
+        .ok_or_else(|| format!("{}: not inside a Mountebank package", mb.display()))?;
+    let run = Run {
+        mountebank: field("/version")?,
+        node: field("/process/nodeVersion")?,
+        root,
+    };
+    let path = dir.join("mountebank.json");
+    let text = serde_json::to_string_pretty(&run).expect("a Run always serialises");
+    std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The ratchet: c8's summary of the Mountebank profile must match `mb-coverage.json` exactly.
+/// Skipped unless `RIFT_DIFFERENTIAL_MB_COVERAGE_SUMMARY` names the summary; with
+/// `RIFT_DIFFERENTIAL_MB_COVERAGE_BLESS` set it rewrites the baseline instead.
+#[test]
+fn mb_coverage_matches_baseline() {
+    let Some(summary_path) = std::env::var_os("RIFT_DIFFERENTIAL_MB_COVERAGE_SUMMARY") else {
+        eprintln!(
+            "SKIP mb_coverage_matches_baseline: RIFT_DIFFERENTIAL_MB_COVERAGE_SUMMARY is not set \
+             (scripts/mb-coverage.sh sets it)"
+        );
+        return;
+    };
+    let summary_path = PathBuf::from(summary_path);
+    let dir = engine::mb_coverage_dir()
+        .unwrap_or_else(|e| panic!("{e}"))
+        .expect("RIFT_DIFFERENTIAL_MB_COVERAGE names the profile directory the summary came from");
+    let read = |path: &std::path::Path| {
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    };
+    let run: Run = serde_json::from_str(&read(&dir.join("mountebank.json")))
+        .unwrap_or_else(|e| panic!("{}/mountebank.json: {e}", dir.display()));
+    let summary = serde_json::from_str(&read(&summary_path))
+        .map_err(|e| e.to_string())
+        .and_then(|json| coverage::parse_summary(&json, &run.root))
+        .unwrap_or_else(|e| panic!("{}: {e}", summary_path.display()));
+    let baseline_path = harness_dir().join("mb-coverage.json");
+    let baseline: Baseline = serde_json::from_str(&read(&baseline_path))
+        .unwrap_or_else(|e| panic!("{}: {e}", baseline_path.display()));
+
+    let tracked: std::collections::BTreeMap<_, _> = summary
+        .iter()
+        .filter(|(file, _)| baseline.baseline.contains_key(*file))
+        .map(|(file, c)| (file.clone(), *c))
+        .collect();
+    let total = coverage::in_scope_total(&tracked);
+    eprintln!(
+        "Mountebank {} on node {}: in scope ({} files) lines {}, branches {}, functions {}",
+        run.mountebank,
+        run.node,
+        tracked.len(),
+        total.lines,
+        total.branches,
+        total.functions
+    );
+
+    if std::env::var_os("RIFT_DIFFERENTIAL_MB_COVERAGE_BLESS").is_some() {
+        let blessed = coverage::bless(&baseline, &run, &summary).unwrap_or_else(|problems| {
+            panic!(
+                "cannot bless until mb-coverage.json classifies every file:\n  {}",
+                problems
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            )
+        });
+        std::fs::write(&baseline_path, coverage::render(&blessed))
+            .unwrap_or_else(|e| panic!("{}: {e}", baseline_path.display()));
+        eprintln!("blessed {}", baseline_path.display());
+        return;
+    }
+
+    let changes = coverage::compare(&baseline, &run, &summary);
+    assert!(
+        changes.is_empty(),
+        "Mountebank coverage does not match conformance/differential/mb-coverage.json:\n  {}",
+        changes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
 }

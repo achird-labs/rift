@@ -23,6 +23,9 @@ cargo test -p rift-differential -- --nocapture
 | `RIFT_DIFFERENTIAL_REQUIRE_MB` | Fail, instead of skipping, when no Mountebank is found (CI sets it) |
 | `RIFT_DIFFERENTIAL_FILTER` | Run only the cases whose name contains this text (the stale-entry check is then off) |
 | `RIFT_DIFFERENTIAL_DUMP` | Write every difference found, explained or not, to this file as JSON — the raw material for a precise allow-list entry |
+| `RIFT_DIFFERENTIAL_MB_COVERAGE` | An absolute directory: Mountebank runs under `NODE_V8_COVERAGE` there, and the harness records which Mountebank and node ran in `mountebank.json` beside the profile (see [Mountebank coverage](#mountebank-coverage)) |
+| `RIFT_DIFFERENTIAL_MB_COVERAGE_SUMMARY` | c8's `coverage-summary.json` of that profile; `mb_coverage_matches_baseline` holds it against `mb-coverage.json` (skipped when unset) |
+| `RIFT_DIFFERENTIAL_MB_COVERAGE_BLESS` | With the summary set: rewrite `mb-coverage.json`'s counts instead of checking them |
 
 Mountebank is pinned to 2.9.5 (`MB_VERSION` in `ci.yml`), the newest stable release on npm and the
 version the published benchmark uses (`benchmark-publish.yml`). Since 2.9.2 Mountebank publishes as
@@ -85,6 +88,104 @@ JavaScript stack) are pinned by a regex over their stable part.
 The deliberate deviations are listed for users in
 [`docs/mountebank/differences.md`](../../docs/mountebank/differences.md).
 
+## Mountebank coverage
+
+The cases are only as good as the Mountebank code they reach, so the suite measures it (#1548):
+
+```bash
+scripts/mb-coverage.sh           # run the suite with Mountebank under coverage, report, check
+scripts/mb-coverage.sh --bless   # the same, then rewrite the baseline's counts
+```
+
+The script runs every `rift-differential` test with `RIFT_DIFFERENTIAL_MB_COVERAGE` set. `mb` is a
+`#!/usr/bin/env node` script, so the Mountebank child is node itself and `NODE_V8_COVERAGE` is
+enough; after the cases the harness stops Mountebank with `mb stop` (its SIGTERM handler exits
+cleanly, which is when node writes the profile; a kill would lose it, and a stop that fails under
+coverage fails the run). `c8 report`, run from Mountebank's package directory, writes HTML and
+`coverage-summary.json` to `conformance/differential/coverage/` (gitignored; CI uploads it as the
+`mb-coverage` artifact). Last, `mb_coverage_matches_baseline` holds the summary against
+[`mb-coverage.json`](mb-coverage.json):
+
+- Every file c8 reports under `src/` (less `src/public`) is either `excluded`, with the reason it
+  cannot or need not be reached, or has a `baseline` of covered/total lines, branches and
+  functions — exactly one of the two. A Mountebank release that adds a file fails until it is
+  classified; `--bless` records counts, it never classifies.
+- The check is strict both ways. A covered count that drops means a case stopped reaching code it
+  used to. One that rises means the baseline is slack: re-bless, so a change that closes a gap shows
+  it in the diff.
+- Counts, never percentages: totals move with a Mountebank release, and V8 does not count the
+  branches of a function that never ran, so a branch percentage can rise while coverage falls.
+- The profile must come from the node major the baseline was measured on (`node`, 22, what CI
+  pins); V8's block ranges can shift between majors. Another major is refused with a message, not
+  compared. To move the major, bless on it and commit the new baseline with the pin change.
+
+The baseline was measured on Mountebank 2.9.5 and node 22.23.3. The in-scope set is 28 files: the
+models, `models/http`, `models/https/httpsServer.js`, the imposter, imposters and config
+controllers, and `util` less its loggers.
+
+| | lines | branches | functions |
+|:--|--:|--:|--:|
+| before `coverage.json` | 4268/4867 (87.7%) | 764/924 (82.7%) | 279/306 (91.2%) |
+| with it | 4391/4867 (90.2%) | 836/963 (86.8%) | 283/307 (92.2%) |
+
+The branch and function totals grow because code that now runs has branches V8 did not count before.
+
+### Uncovered in-scope code
+
+Line numbers are Mountebank 2.9.5's. Each range is out of reach of a case, or a case for it shows
+a divergence (to be fixed in Rift and then covered here), or nobody has written the case yet.
+
+**Divergences — a case would fail today:**
+
+| Mountebank | What a case shows |
+|:-----------|:------------------|
+| `dryRunValidator.js:81-86`, `responseResolver.js:313-316`, `:341-343`, `imposterController.js:210` with a non-integer index | Response-shape and stub-index validation — tracked by #1550/#1551/#1552 |
+| `predicates.js:21-24`, `:238-241`, `:269-271` | Array semantics of `deepEquals`/`equals`: order-independent arrays of objects, an expected array as a subset of the actual one, an object over an array of objects |
+| `predicates.js:58-59`, `:338-339` | An imposter with `"mode": "binary"` refuses `matches`, `jsonpath` and `xpath` at creation in Mountebank; Rift creates it |
+| `predicates.js:384-389`, `responseResolver.js:69-77` | A predicate or response `inject` that throws: Mountebank answers `500`, Rift `400` |
+| `responseResolver.js:109-110`, `:119-120`, `:131-144`, `:159-163`, `:197-198`; `helpers.js:81-87`, `:117-129` | `predicateGenerators` with `ignore`, a nested matcher, `predicateOperator: "exists"`, and an `inject` that throws (Mountebank refuses the last two at creation) |
+| `dryRunValidator.js:188-192`; `behaviorsValidator.js:98-99`, `:167-173` | `repeat: 0`, a `copy.from` with two keys, an unknown behavior and a behavior object with two types: Mountebank refuses each at creation, Rift accepts it |
+| `behaviors.js:275-276`, `:286-287`, `:364-369` | `copy` from a missing field, from a repeated query key, and into a header name or body key |
+| `baseHttpServer.js:47-50` | A CORS preflight (`Access-Control-Request-Headers` set): Mountebank echoes the request's values and serves the stub's body |
+| `baseHttpServer.js:64-65` | A stub's own `Content-Length` header: Mountebank recomputes it from the body |
+| `headersMap.js:63-65` | A repeated request header: Mountebank keeps both values |
+| `httpRequest.js:63-73` | A `gzip`/`br` `Content-Encoding` whose body does not decode |
+| `xpath.js:36-40` | A malformed `xpath` selector: Mountebank creates the imposter and answers `500` per request, Rift refuses it at creation |
+| `helpers.js:104-107` | An unknown `fault` |
+| `httpsServer.js:35-37` | `ciphers` on an `https` imposter |
+
+The `https` cases create their imposters with `PUT /imposters` and remove them with an empty one,
+whose answers are the list form, so what they compare is what is served over TLS. An `https`
+imposter's detail and replayable forms differ: Mountebank prints `ca: null` and its default `key`
+and `cert`, and its replayable export keeps `mutualAuth` and `rejectUnauthorized`. Once those agree
+(or are listed in `docs/mountebank/differences.md`), the cases can create with `POST` and keep the
+stored-imposter check.
+
+**Out of reach of a case:**
+
+| Mountebank | Why |
+|:-----------|:----|
+| `imposterController.js:124-128`, `:140-146`; `imposter.js:79-98`, `:132-138`; `responseResolver.js:281-295`, `:357-359`, `:376-393`; `dryRunValidator.js:91-93`; `httpProxy.js:62-68`; `middleware.js:125-127` | The callback API of out-of-process (`--protofile`) protocols, which Rift does not implement |
+| `behaviors.js:141-204`; `compatibility.js:23-24` | `shellTransform`, a documented difference |
+| `dryRunValidator.js:130-171`, `:229-232` | The injection checks, which run only without `--allowInjection`; the harness runs both engines with it |
+| `dryRunValidator.js:250-251` | A protocol's own validator; http and https have none |
+| `compatibility.js:91-100`; `imposterPrinter.js:31-32` | tcp-only upcasts and printing |
+| `imposter.js:105-107`, `baseHttpServer.js:135-137`, `ip.js:31-47` | `--ipWhitelist` blocking (#879: not enforced in Rift) |
+| `imposter.js:126-127`, `inMemoryImpostersRepository.js:82-89` | `--debug` match recording; the harness starts both engines without it |
+| `middleware.js:228-252` | `--apikey`; likewise |
+| `imposter.js:195-196`; `impostersRepository.js:21-39` | `--host` and `--impostersRepository`/`--datadir` |
+| `middleware.js:146-153`, `:173-176`; `date.js:32-45` | HTML page rendering, Internet Explorer's `Accept` header, and the relative dates of the log and feed pages |
+| `httpProxy.js:81-85` | `http_proxy`/`https_proxy` in Mountebank's environment |
+| `httpProxy.js:118-119` | A proxied body with neither `Content-Length` nor `Transfer-Encoding`, which an HTTP/1.1 client cannot send |
+| `baseHttpServer.js:77-95` | `CONNECT` tunnelling, which the harness's client cannot send as a plain request |
+| `baseHttpServer.js:107`, `:161-165`, `:179`; `imposter.js:238-239`; `impostersController.js:207-208` | Socket errors, a bind the OS refuses (the `hold` step's `127.0.0.1` listener does not stop a wildcard bind), and a connection still open at shutdown |
+| `inMemoryImpostersRepository.js:174-175`, `:189-190`, `:357-359` | Guarded by the controllers' own index checks; imposters still running when Mountebank stops (every case deletes its imposters) |
+
+**Not yet written** (reachable, no case yet): `behaviors.js:346-348`, `:453-454`, `:472-474`,
+`:507-508`; `behaviorsValidator.js:23-24`, `:40-41`, `:107-108`, `:160-162`; `httpProxy.js:133-134`,
+`:203-204`, `:215-217`; `jsonpath.js:27-28`; `predicates.js:51-53`, `:137-138`, `:396-398`;
+`responseResolver.js:86-87`; `xpath.js:15-16`, `:26-28`; `helpers.js:58-59`.
+
 ## Cases
 
 `cases/*.json`, one file per source:
@@ -96,9 +197,12 @@ The deliberate deviations are listed for users in
   loaded from the corpus itself, `_verify` stripped, each `_verify.sequence[].request` sent in order.
 - `targeted.json` — the miss classes the retired suite could not see (#1329, #1333, #1334,
   `deepEquals` on query), and one case per documented deviation the allow-list cites.
+- `coverage.json` — one case per Mountebank code path the rest did not reach (#1548), named
+  `coverage: <mb file>:<line> <what>` after the line it first reaches in Mountebank 2.9.5.
 
-A step is `{"do": "admin", "method", "path", "body"?}`, `{"do": "send", "port", "method"?, "path"?,
-"headers"?: [[name, value]], "body"? | "bodyOfSize"?, "times"?}`, `{"do": "concurrent", ...,
+A step is `{"do": "admin", "method", "path", "body"?}`, `{"do": "send", "port", "scheme"?, "method"?,
+"path"?, "headers"?: [[name, value]], "body"? | "bodyOfSize"?, "times"?}` (`"scheme": "https"`
+reaches an `https` imposter over TLS, accepting its self-signed certificate; the default is `http`), `{"do": "concurrent", ...,
 "times"}` (the answers are compared as a multiset), `{"do": "reimport"}` (each engine re-imports
 its own `?replayable=true` export), or `{"do": "hold", "port"}` (the harness itself listens on
 127.0.0.1 at each engine's mapped port until the case ends, standing in for another process). A string `body` is sent verbatim, any other JSON value serialised.

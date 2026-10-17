@@ -1,5 +1,6 @@
 //! Spawning the two engines and talking HTTP to them.
 
+use crate::case::Scheme;
 use crate::diff::{FailureClass, Observation, normalize_headers};
 use crate::ports::PortMap;
 use std::path::{Path, PathBuf};
@@ -13,13 +14,114 @@ pub enum Which {
     Rift,
 }
 
-/// A running engine. The process is killed when this is dropped.
+/// A running engine. [`Engine::stop`] shuts it down; the process is also killed when this is
+/// dropped (the backstop for a panic, which loses Mountebank's coverage).
 #[derive(Debug)]
 pub struct Engine {
     pub which: Which,
     pub admin_port: u16,
     child: Child,
     pidfile: Option<PathBuf>,
+    /// Mountebank's `mb`, for `mb stop`.
+    mb: Option<PathBuf>,
+    /// Mountebank runs under `NODE_V8_COVERAGE`, so a stop that does not let it exit cleanly loses
+    /// the coverage and is an error.
+    coverage: bool,
+}
+
+/// How long Mountebank gets to close its server and exit after `mb stop`.
+const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+
+impl Engine {
+    /// Shuts the engine down. Rift is killed. Mountebank is stopped with `mb stop`, the SIGTERM
+    /// its shutdown handler answers with `process.exit()`, which is when node writes the
+    /// `NODE_V8_COVERAGE` profile; a kill would lose it.
+    ///
+    /// # Errors
+    /// When the kill fails, or, for a Mountebank run under coverage, when `mb stop` fails or
+    /// Mountebank has not exited cleanly within the stop window.
+    pub async fn stop(&mut self) -> Result<(), String> {
+        let (Some(mb), Some(pidfile)) = (&self.mb, &self.pidfile) else {
+            return self
+                .child
+                .kill()
+                .await
+                .map_err(|e| format!("kill {:?}: {e}", self.which));
+        };
+        let stopped = Command::new(mb)
+            .arg("stop")
+            .arg("--pidfile")
+            .arg(pidfile)
+            // The stop command is a second node process; its profile is not Mountebank serving.
+            .env_remove("NODE_V8_COVERAGE")
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+            .await;
+        let exited = match stopped {
+            Ok(status) if status.success() => {
+                tokio::time::timeout(STOP_TIMEOUT, self.child.wait()).await
+            }
+            Ok(status) => {
+                return self
+                    .stop_failed(format!("`{} stop` exited with {status}", mb.display()))
+                    .await;
+            }
+            Err(e) => {
+                return self
+                    .stop_failed(format!("spawn `{} stop`: {e}", mb.display()))
+                    .await;
+            }
+        };
+        match exited {
+            Ok(Ok(status)) if status.success() || !self.coverage => Ok(()),
+            Ok(Ok(status)) => Err(format!(
+                "Mountebank exited with {status} after `mb stop`: its coverage profile may be \
+                 incomplete"
+            )),
+            Ok(Err(e)) => self.stop_failed(format!("wait for Mountebank: {e}")).await,
+            Err(_) => {
+                self.stop_failed(format!(
+                    "Mountebank did not exit within {}s of `mb stop`",
+                    STOP_TIMEOUT.as_secs()
+                ))
+                .await
+            }
+        }
+    }
+
+    /// Kills a Mountebank that would not stop. Without coverage that is the whole job; with
+    /// coverage the profile is lost, so it is still an error.
+    async fn stop_failed(&mut self, why: String) -> Result<(), String> {
+        let killed = self.child.kill().await;
+        match (self.coverage, killed) {
+            (true, _) => Err(format!("{why}; killed it, losing its coverage profile")),
+            (false, Ok(())) => Ok(()),
+            (false, Err(e)) => Err(format!("{why}; kill: {e}")),
+        }
+    }
+}
+
+/// `RIFT_DIFFERENTIAL_MB_COVERAGE`: the directory Mountebank writes its V8 coverage profile to,
+/// created if missing. `None` when unset.
+///
+/// # Errors
+/// When the path is relative (node resolves it against Mountebank's working directory, not
+/// the caller's) or cannot be created.
+pub fn mb_coverage_dir() -> Result<Option<PathBuf>, String> {
+    let Some(dir) = std::env::var_os("RIFT_DIFFERENTIAL_MB_COVERAGE") else {
+        return Ok(None);
+    };
+    let dir = PathBuf::from(dir);
+    if !dir.is_absolute() {
+        return Err(format!(
+            "RIFT_DIFFERENTIAL_MB_COVERAGE={} must be an absolute path",
+            dir.display()
+        ));
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("RIFT_DIFFERENTIAL_MB_COVERAGE={}: {e}", dir.display()))?;
+    Ok(Some(dir))
 }
 
 impl Drop for Engine {
@@ -105,7 +207,7 @@ fn refuse_stale(binary: &Path) -> Result<(), String> {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates");
     match newest_source(&crates) {
         Some((path, modified)) if modified > built => Err(format!(
-            "{} is older than {}: rebuild it (`cargo build -p rift-http-proxy`) or set \\
+            "{} is older than {}: rebuild it (`cargo build -p rift-http-proxy`) or set \
              RIFT_SERVER_BIN",
             binary.display(),
             path.display()
@@ -163,17 +265,26 @@ pub fn free_ports(n: usize) -> std::io::Result<Vec<u16>> {
         .collect()
 }
 
-/// Starts Mountebank with injection on and no log/pid files in the working directory.
+/// Starts Mountebank with injection on and no log/pid files in the working directory. With
+/// `RIFT_DIFFERENTIAL_MB_COVERAGE` set, node writes a V8 coverage profile there when Mountebank
+/// is stopped with [`Engine::stop`]: `mb` is a `#!/usr/bin/env node` script, so the child is node
+/// itself and needs no wrapper.
 ///
 /// # Errors
-/// Spawn failure, or the admin API not answering within the startup window.
+/// A bad coverage directory, spawn failure, or the admin API not answering within the startup
+/// window.
 pub async fn start_mountebank(mb: &Path, cwd: &Path) -> Result<Engine, String> {
+    let coverage = mb_coverage_dir()?;
     let admin_port = free_ports(1).map_err(|e| e.to_string())?[0];
     let pidfile = std::env::temp_dir().join(format!(
         "rift-differential-mb-{}-{admin_port}.pid",
         std::process::id()
     ));
-    let child = Command::new(mb)
+    let mut command = Command::new(mb);
+    if let Some(dir) = &coverage {
+        command.env("NODE_V8_COVERAGE", dir);
+    }
+    let child = command
         .args(["start", "--port", &admin_port.to_string()])
         .args([
             "--allowInjection",
@@ -195,6 +306,8 @@ pub async fn start_mountebank(mb: &Path, cwd: &Path) -> Result<Engine, String> {
         admin_port,
         child,
         pidfile: Some(pidfile),
+        mb: Some(mb.to_path_buf()),
+        coverage: coverage.is_some(),
     };
     wait_ready(&mut engine).await?;
     Ok(engine)
@@ -251,6 +364,8 @@ pub async fn start_rift(bin: &Path, cwd: &Path) -> Result<Engine, String> {
         admin_port,
         child,
         pidfile: None,
+        mb: None,
+        coverage: false,
     };
     wait_ready(&mut engine).await?;
     Ok(engine)
@@ -303,7 +418,9 @@ async fn wait_ready(engine: &mut Engine) -> Result<(), String> {
 }
 
 /// The HTTP client both engines are driven with: no redirects, no proxy, no pooling (a fault that
-/// kills a connection must not poison the next request), a generous per-request timeout.
+/// kills a connection must not poison the next request), a generous per-request timeout. It
+/// accepts any certificate: an `https` imposter serves its engine's self-signed default (or the
+/// case's own), and the harness compares what is served over TLS, not who signed it.
 ///
 /// # Errors
 /// When reqwest cannot build a client.
@@ -313,12 +430,14 @@ pub fn client() -> reqwest::Result<reqwest::Client> {
         .no_proxy()
         .pool_max_idle_per_host(0)
         .timeout(Duration::from_secs(30))
+        .tls_danger_accept_invalid_certs(true)
         .build()
 }
 
 /// A request already mapped to one engine's ports.
 #[derive(Debug, Clone)]
 pub struct Outgoing {
+    pub scheme: Scheme,
     pub port: u16,
     pub method: String,
     pub path: String,
@@ -334,7 +453,12 @@ pub async fn send(client: &reqwest::Client, request: &Outgoing, ports: &PortMap)
     // A malformed method is a broken case file, not an engine answer: fail loudly.
     let method = reqwest::Method::from_bytes(request.method.as_bytes())
         .unwrap_or_else(|_| panic!("case uses an invalid HTTP method {:?}", request.method));
-    let url = format!("http://127.0.0.1:{}{}", request.port, request.path);
+    let url = format!(
+        "{}://127.0.0.1:{}{}",
+        request.scheme.as_str(),
+        request.port,
+        request.path
+    );
     let mut builder = client.request(method, url);
     for (name, value) in &request.headers {
         builder = builder.header(name, value);

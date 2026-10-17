@@ -11,6 +11,14 @@ record.
 
 ## [Unreleased]
 
+### Testing
+
+- **The differential suite measures how much of Mountebank it exercises** (#1548):
+  `scripts/mb-coverage.sh` runs the oracle under V8 coverage and holds the covered line, branch and
+  function counts of 28 in-scope Mountebank files against `conformance/differential/mb-coverage.json`
+  on every pull request, and 27 new `coverage:` cases (HTTPS imposters among them, via a
+  `"scheme": "https"` send) raise in-scope line coverage from 87.7% to 90.2%.
+
 ## [0.23.0] - 2026-10-16
 
 ### Added
