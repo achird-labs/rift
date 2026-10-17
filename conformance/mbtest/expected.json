@@ -591,7 +591,8 @@
       "id": "api/impostersControllerTest.js::POST /imposters should return 400 on port conflict",
       "class": "bug",
       "issue": "#1557",
-      "note": "an imposter can take the admin port under --local-only"
+      "note": "an imposter can take the admin port under --local-only",
+      "flaky": "macOS only: Linux refuses the wildcard imposter bind beside the loopback admin listener, so the test passes there (#1557 triage)"
     },
     {
       "id": "api/impostersControllerTest.js::POST /imposters should return 400 on invalid JSON",
@@ -796,31 +797,36 @@
       "id": "cli/securityTest.js::security IP blocking should only allow local requests if --localOnly used",
       "class": "bug",
       "issue": "#1568",
-      "note": "the --local-only admin accepts a non-loopback source address over loopback"
+      "note": "the --local-only admin accepts a non-loopback source address over loopback",
+      "mountebankMayFail": "these tests need a routable non-loopback local address; GitHub's Linux runners do not provide one, so they fail on Mountebank there too (they pass on Mountebank on macOS)"
     },
     {
       "id": "cli/securityTest.js::security IP blocking should only allow local requests to http imposter if --localOnly used",
       "class": "bug",
       "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file",
+      "mountebankMayFail": "these tests need a routable non-loopback local address; GitHub's Linux runners do not provide one, so they fail on Mountebank there too (they pass on Mountebank on macOS)"
     },
     {
       "id": "cli/securityTest.js::security IP blocking should allow non-local requests if --localOnly not used",
       "class": "bug",
       "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file",
+      "mountebankMayFail": "these tests need a routable non-loopback local address; GitHub's Linux runners do not provide one, so they fail on Mountebank there too (they pass on Mountebank on macOS)"
     },
     {
       "id": "cli/securityTest.js::security IP blocking should block IPs not on --ipWhitelist",
       "class": "bug",
       "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file",
+      "mountebankMayFail": "these tests need a routable non-loopback local address; GitHub's Linux runners do not provide one, so they fail on Mountebank there too (they pass on Mountebank on macOS)"
     },
     {
       "id": "cli/securityTest.js::security IP blocking should ignore --ipWhitelist if --localOnly passed",
       "class": "bug",
       "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file",
+      "mountebankMayFail": "these tests need a routable non-loopback local address; GitHub's Linux runners do not provide one, so they fail on Mountebank there too (they pass on Mountebank on macOS)"
     },
     {
       "id": "docs:/docs/api/proxies#predicate-generators",

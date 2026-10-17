@@ -14,7 +14,8 @@ OUT_DIR/<engine>/results.json, and exits non-zero when:
   - a test expected.json lists now passes (remove the entry: the list only shrinks), unless the
     entry carries `flaky` (why its outcome varies from run to run);
   for Mountebank (the baseline)
-  - a test failed, or never ran, and expected.json does not list it as `harness`;
+  - a test failed, or never ran, and expected.json does not list it as `harness`, nor mark it
+    `mountebankMayFail` (why its Mountebank outcome depends on the host, e.g. its network);
   for both
   - an expected.json or unsupported id names no test in the suite (renamed upstream);
   - an entry is malformed: a `bug` without `issue`, a `documented` whose `doc` anchor does not
@@ -219,7 +220,8 @@ def check(engine: str, out: Path, expected_path: Path, mbtest_dir: Path | None,
         entry = entries.get(tid)
         failed = outcome in ("fail", "notrun")
         if engine == "mountebank":
-            if failed and (entry is None or entry.get("class") != "harness"):
+            if failed and (entry is None or (entry.get("class") != "harness"
+                                             and not entry.get("mountebankMayFail"))):
                 unexpected.append(f"{tid} [{outcome}] {message.get(tid, '')}".rstrip()
                                   + "  -- fails on Mountebank, so it can only be a `harness` entry")
         elif failed and entry is None:
@@ -351,6 +353,9 @@ def self_test() -> int:
             {**entries[2], "reason": ""}]), outcome), "needs a reason"),
         ("a missing phase fails", run(good, {k: v for k, v in outcome.items() if k != "docs"}), "missing"),
         ("Mountebank: a non-harness failure fails", run(good, outcome, "mountebank"), "only be a `harness`"),
+        ("Mountebank: a mountebankMayFail entry may fail", run(with_expected(expected=[
+            e if e.get("class") == "harness" else {**e, "mountebankMayFail": "host network"} for e in entries]),
+            outcome, "mountebank"), None),
         ("Mountebank: harness failures only pass", run(good, with_outcome("cli", {"b fails": "pass"}) | {
             "api": [("api/aTest.js", "a passes", "pass"), ("api/aTest.js", "a fails", "pass")]}, "mountebank"), None),
     ]

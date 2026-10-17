@@ -90,7 +90,10 @@ Every entry in `expected` has a `class`:
 
 A `flaky` string marks an entry whose outcome varies from run to run (a random key order, a
 public website, the host's name resolution) and says why: it is exempt from the stale-entry rule
-and, for `harness`, from the Mountebank check. A `note` says what the test showed. When a fix lands, the test passes, the run fails on the stale
+and, for `harness`, from the Mountebank check. A `mountebankMayFail` string marks a `bug` or
+`documented` entry whose test can also fail on Mountebank because of the host, for example the IP-blocking tests,
+which need a routable non-loopback address that GitHub's runners lack; it keeps the entry's issue
+link while letting the baseline phase fail there. A `note` says what the test showed. When a fix lands, the test passes, the run fails on the stale
 entry, and the entry is deleted in the same change, as with the differential allow-list. A test
 that fails for more than one reason is listed under the first one it hits.
 
