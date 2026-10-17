@@ -1,10 +1,3 @@
----
-layout: default
-title: Stub-by-ID
-parent: Features
-nav_order: 24
----
-
 # Stub-by-ID
 
 Stubs can be addressed by a stable `id` instead of by array index, so concurrent edits don't shift

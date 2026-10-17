@@ -5,6 +5,8 @@ on:
     branches: [master]
     paths:
       - "docs/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -24,11 +26,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions/configure-pages@v6
-      - uses: actions/jekyll-build-pages@v1
+      - uses: actions/setup-python@v7
         with:
-          source: ./docs
-          destination: ./_site
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+      - run: pip install -r requirements-docs.txt
+      # --strict fails on any warning, and mkdocs.yml's `validation:` makes a dead page link or
+      # anchor a warning, so a broken cross-reference cannot be deployed.
+      - name: Build the site
+        run: mkdocs build --strict
       - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
 
   deploy:
     needs: build

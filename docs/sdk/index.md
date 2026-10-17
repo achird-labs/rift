@@ -1,11 +1,3 @@
----
-layout: default
-title: Language SDKs
-nav_order: 10.5
-has_children: true
-permalink: /sdk/
----
-
 # Language SDKs
 
 Rift has four official SDKs. Each one wraps the same engine — the typed wire model, the three
@@ -14,10 +6,10 @@ never hand-write Mountebank JSON or an FFI bridge.
 
 | SDK | Package | Latest | Docs |
 |---|---|---|---|
-| [Java / JVM]({{ site.baseurl }}/sdk/java/) | `io.github.achird-labs:rift-java-core` | `v0.3.4` | [rift-java](https://achird-labs.github.io/rift-java/) |
-| [Scala 3]({{ site.baseurl }}/sdk/scala/) | `io.github.achird-labs::rift-scala-*` | `v0.3.2` | [rift-scala](https://achird-labs.github.io/rift-scala/) |
-| [Node / TypeScript]({{ site.baseurl }}/sdk/node/) | `@rift-vs/rift` | `v0.16.0` | [rift-node](https://achird-labs.github.io/rift-node/) |
-| [Go]({{ site.baseurl }}/sdk/go/) | `github.com/achird-labs/rift-go` | `v0.3.2` | [rift-go](https://achird-labs.github.io/rift-go/) |
+| [Java / JVM](java.md) | `io.github.achird-labs:rift-java-core` | `v0.3.4` | [rift-java](https://achird-labs.github.io/rift-java/) |
+| [Scala 3](scala.md) | `io.github.achird-labs::rift-scala-*` | `v0.3.2` | [rift-scala](https://achird-labs.github.io/rift-scala/) |
+| [Node / TypeScript](node.md) | `@rift-vs/rift` | `v0.16.0` | [rift-node](https://achird-labs.github.io/rift-node/) |
+| [Go](go.md) | `github.com/achird-labs/rift-go` | `v0.3.2` | [rift-go](https://achird-labs.github.io/rift-go/) |
 
 ---
 
@@ -70,6 +62,6 @@ itself when the lane goes green again, so an open one always means live drift.
 
 ## Why the DSLs agree
 
-Every SDK replays the same [SDK conformance corpus]({{ site.baseurl }}/embedding/sdk-conformance/)
+Every SDK replays the same [SDK conformance corpus](../embedding/sdk-conformance.md)
 in its own CI — a fixture the typed DSL cannot express is a red build. That is what keeps four
 independently-written DSLs in lockstep with one engine grammar, and with each other.

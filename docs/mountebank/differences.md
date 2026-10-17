@@ -1,10 +1,3 @@
----
-layout: default
-title: Differences from Mountebank
-parent: Mountebank Compatibility
-nav_order: 6
----
-
 # Differences from Mountebank
 
 Rift answers the Mountebank API the way Mountebank 2.9.5 does, with the deliberate exceptions on
@@ -131,7 +124,7 @@ Mountebank has no body limit and crashes past about 512 MiB, where a body no lon
 string. Rift refuses a body over `--max-body-size` (default 512 MiB) with `413`, and answers `503`
 with `Retry-After` when the bodies buffered at once would exceed `--body-memory-budget` (default
 1 GiB), where Mountebank would run out of heap. Below those limits the two serve the same bodies.
-See [Body size limits]({{ site.baseurl }}/configuration/cli/#body-size-limits).
+See [Body size limits](../configuration/cli.md#body-size-limits).
 
 ## Recorded requests are bounded by bytes
 

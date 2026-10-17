@@ -1,8 +1,5 @@
 ---
-layout: default
 title: Scenarios (FSM)
-parent: Features
-nav_order: 20
 ---
 
 # Scenarios (Stateful FSM)
@@ -15,6 +12,8 @@ state after it responds.
 
 ## Stub fields
 
+![A Rift scenario with states Started, paid and shipped. Stub 0 answers POST /pay only in Started and moves the scenario to paid; stub 1 answers POST /ship only in paid and moves it to shipped; stub 2 answers POST /pay in paid and leaves the state alone. POST /ship in Started matches no eligible stub and gets the defaultResponse 404; then /pay gets 200, /pay again 409, /ship 202, and a scenarios reset puts the token back to Started.](../assets/scenarios.svg)
+
 | Field | Meaning |
 |:------|:--------|
 | `scenarioName` | Names the scenario this stub belongs to. |
@@ -26,7 +25,7 @@ its current state — no transition happens. That lets a stub gate on state with
 it, which is how you model a repeatable step in the middle of a flow.
 
 The implicit initial state is **`Started`**. State is tracked per flow id (see
-[Spaces]({{ site.baseurl }}/features/spaces/)); by default that is the imposter port, so a single
+[Spaces](spaces.md)); by default that is the imposter port, so a single
 imposter has one scenario timeline.
 
 ---
@@ -108,7 +107,7 @@ curl http://localhost:2525/imposters/4602/scenarios?flowId=bob
 # -> {"flowId":"bob","scenarios":[{"name":"checkout","state":"paid"}]}
 ```
 
-See [Correlated Isolation (Spaces)]({{ site.baseurl }}/features/spaces/) for how `flowIdSource` is
+See [Correlated Isolation (Spaces)](spaces.md) for how `flowIdSource` is
 resolved.
 
 ---
@@ -130,11 +129,11 @@ curl -X PUT http://localhost:2525/imposters/4602/scenarios/checkout/state \
 curl -X POST http://localhost:2525/imposters/4602/scenarios/reset -d '{}'
 ```
 
-See the [API Reference]({{ site.baseurl }}/api/#scenarios) for the full endpoint contract.
+See the [API Reference](../api/index.md#scenarios) for the full endpoint contract.
 
 A stub serving `_rift.conditional` behind a scenario gate re-stamps its `Last-Modified` on every
 transition of that scenario, however it is made (`newScenarioState`, the scenarios or flow-state
 admin API, `_rift.stateOps`, a script's `ctx.state`), so a polling client sees the switch. A
 positive TTL running out on a scenario's key is the exception: no write happens, so nothing is
 stamped. See
-[Conditional GET]({{ site.baseurl }}/mountebank/responses/#conditional-get).
+[Conditional GET](../mountebank/responses.md#conditional-get).

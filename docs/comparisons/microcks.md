@@ -1,10 +1,3 @@
----
-layout: default
-title: Rift vs Microcks
-parent: Comparisons
-nav_order: 2
----
-
 # Rift vs Microcks
 
 [Microcks](https://microcks.io/) is the open-source API mocking and testing tool a team usually
@@ -12,11 +5,11 @@ reaches for before a commercial one: Apache-2.0, a CNCF **Incubating** project s
 [11 May 2026](https://microcks.io/blog/), and free permanently — the governance sits with the CNCF,
 so it cannot be relicensed out from under you.
 
-{: .highlight }
-> **The one-line version.** Microcks starts from your **specification** and gives you mocking *and*
-> contract testing across many protocols. Rift starts from your **stubs** and gives you a fast HTTP
-> mock that embeds in-process in four languages. They overlap on HTTP mocking and diverge almost
-> everywhere else.
+!!! abstract ""
+    **The one-line version.** Microcks starts from your **specification** and gives you mocking *and*
+    contract testing across many protocols. Rift starts from your **stubs** and gives you a fast HTTP
+    mock that embeds in-process in four languages. They overlap on HTTP mocking and diverge almost
+    everywhere else.
 
 ---
 
@@ -63,7 +56,7 @@ publish a ratio between two different workloads.
 Rift is **13.6x–54.6x** Microcks' throughput on the HTTP matching path, and holds a p99 of ~2.4 ms
 where Microcks' runs 75–250 ms at this concurrency.
 
-That is a wider gap than [Rift vs WireMock]({{ site.baseurl }}/comparisons/wiremock/) (4.0x–14.0x), and the reason is not that
+That is a wider gap than [Rift vs WireMock](wiremock.md) (4.0x–14.0x), and the reason is not that
 Microcks is a worse mock server. It is that Microcks is a *different kind of product* — a
 spec-driven mocking **and contract-testing** platform with a web UI, multi-tenancy and eight
 protocols, built on Spring Boot with a database behind it. Raw HTTP stub-serving throughput is not
@@ -88,7 +81,7 @@ Read each engine down its own column, not across:
 | | **trivial → 310 stubs** | **−60%** | **−3%** | **−71%** |
 
 <sub>† WireMock 3.9.1 at the same settings, from the run published on the
-[WireMock page]({{ site.baseurl }}/comparisons/wiremock/) (2026-07-27); cited rather than
+[WireMock page](wiremock.md) (2026-07-27); cited rather than
 re-measured. **Not the same physical host:** GitHub's `ubuntu-16core` pool is heterogeneous, and that
 run landed on an Intel Xeon 8573C while this one got an AMD EPYC 7763 — Rift itself reads 334,025 on
 the former and 347,604 on the latter, a ~4% difference. So the WireMock column is safe to read

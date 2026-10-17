@@ -1,19 +1,12 @@
----
-layout: default
-title: Rift vs WireMock
-parent: Comparisons
-nav_order: 1
----
-
 # Rift vs WireMock
 
 WireMock is the most widely used mock server on the JVM, and for most teams evaluating Rift it
 is the incumbent. This page is the honest version of that comparison: where Rift is genuinely
 better, where WireMock is genuinely better, and where you should not switch.
 
-{: .highlight }
-> **The one-line version.** WireMock is a JVM library that grew a server. Rift is a server that
-> embeds as a library in four languages. Almost every difference below follows from that.
+!!! abstract ""
+    **The one-line version.** WireMock is a JVM library that grew a server. Rift is a server that
+    embeds as a library in four languages. Almost every difference below follows from that.
 
 ---
 
@@ -29,7 +22,7 @@ better, where WireMock is genuinely better, and where you should not switch.
 | p99 at 310 stubs | 31.6 ms | 2.5 ms |
 | In-process embedding | JVM only | Java, Node, Go, Scala 3 |
 | Config format | WireMock mappings JSON / Java DSL | Mountebank `imposters.json` (JSON or YAML) + `_rift` extensions |
-| Response templating | Handlebars, mature | `${request.*}` interpolation, `_rift.templated` {% raw %}`{{ }}`{% endraw %} functions, `decorate`, Rhai/JS scripting |
+| Response templating | Handlebars, mature | `${request.*}` interpolation, `_rift.templated` `{{ }}` functions, `decorate`, Rhai/JS scripting |
 | Recording & playback | Yes, with UI | Yes (proxy mode), no UI |
 | OpenAPI import / validation | Cloud | No |
 | gRPC / GraphQL / WebSocket | Via extensions | No (WebSocket passthrough only, via the intercept proxy) |
@@ -103,7 +96,7 @@ Each SDK also runs the engine four ways behind the same DSL: **embedded** (in-pr
 between them is a constructor argument, not a rewrite — so the mock in a unit test and the mock
 in a shared environment are the same engine with the same semantics.
 
-See [Embedding & SPI]({{ site.baseurl }}/embedding/).
+See [Embedding & SPI](../embedding/index.md).
 
 ### 3. Mocking dependencies you cannot repoint
 
@@ -121,8 +114,8 @@ WireMock has a browser proxy mode that overlaps with the first of these. Rift's 
 complete and is a first-class matching path rather than an inspection aid.
 
 It is a man-in-the-middle proxy. The CA is generated per run, trust should be process-scoped,
-and it belongs in test environments — see [Intercept Proxy]({{ site.baseurl }}/features/intercept-proxy/)
-and [Front Door]({{ site.baseurl }}/features/front-door/).
+and it belongs in test environments — see [Intercept Proxy](../features/intercept-proxy.md)
+and [Front Door](../features/front-door.md).
 
 ### 4. Parallel test isolation without per-shard instances
 
@@ -133,20 +126,20 @@ of global state.
 
 The usual alternatives — one instance per shard with port allocation, or resetting between tests
 and losing the parallelism — both cost something real. See
-[Spaces]({{ site.baseurl }}/features/spaces/) and [Flow State]({{ site.baseurl }}/features/flow-state/).
+[Spaces](../features/spaces.md) and [Flow State](../features/flow-state.md).
 
 ### 5. Operational and authoring tooling
 
-- **[Debug mode]({{ site.baseurl }}/features/debug-mode/)** — ask *why* a request matched or
+- **[Debug mode](../features/debug-mode.md)** — ask *why* a request matched or
   did not, instead of executing the response.
-- **[Stub analysis]({{ site.baseurl }}/features/stub-analysis/)** — static detection of stubs
+- **[Stub analysis](../features/stub-analysis.md)** — static detection of stubs
   shadowed or made unreachable by an earlier one.
-- **[`rift-lint`]({{ site.baseurl }}/features/linting/)** — validate config in CI before it loads.
+- **[`rift-lint`](../features/linting.md)** — validate config in CI before it loads.
 - **`rift-verify`** — generate requests from your predicates to test your own stubs.
-- **[`rift-tui`]({{ site.baseurl }}/features/tui/)** — interactive terminal UI over imposters and stubs.
-- **[Prometheus metrics]({{ site.baseurl }}/features/metrics/)** — request counts, latency
+- **[`rift-tui`](../features/tui.md)** — interactive terminal UI over imposters and stubs.
+- **[Prometheus metrics](../features/metrics.md)** — request counts, latency
   histograms, fault-injection stats on `:9090/metrics`.
-- **[Hot reload]({{ site.baseurl }}/features/hot-reload/)** — `POST /admin/reload` diffs the
+- **[Hot reload](../features/hot-reload.md)** — `POST /admin/reload` diffs the
   running imposters against the new config and touches only what changed.
 - **Native multi-arch binaries** — Linux gnu/musl on x86_64 and aarch64, macOS Intel and Apple
   Silicon, Windows. No JVM on the box.
@@ -173,8 +166,8 @@ WireMock Inc. sells support and a hosted product. Rift has GitHub issues.
 WireMock's Handlebars templating is mature, well-documented and broadly used, with a large helper
 library. Rift covers the common case — putting a request value, a UUID, a date or a stored value
 into a response — with Mountebank's `${request.*}` interpolation and the opt-in
-[`_rift.templated` grammar]({{ site.baseurl }}/features/date-templates/), and the rest with the
-`decorate`/`copy`/`lookup` behaviors and [Rhai or JavaScript scripting]({{ site.baseurl }}/features/scripting/).
+[`_rift.templated` grammar](../features/date-templates.md), and the rest with the
+`decorate`/`copy`/`lookup` behaviors and [Rhai or JavaScript scripting](../features/scripting.md).
 That is more powerful at the top end, but Rift's template grammar is small next to Handlebars: no
 conditionals or loops outside a script.
 
@@ -229,15 +222,15 @@ organisations running more than one language.
 
 There is no config compatibility between WireMock and Rift, so this is genuine translation
 work, not a drop-in. (If you are coming from **Mountebank**, it *is* a drop-in — see the
-[migration guide]({{ site.baseurl }}/getting-started/migration/).)
+[migration guide](../getting-started/migration.md).)
 
 ### Concept mapping
 
 | WireMock | Rift |
 |:--|:--|
-| Stub mapping | Stub inside an [imposter]({{ site.baseurl }}/mountebank/imposters/) |
-| `request` matcher | [`predicates`]({{ site.baseurl }}/mountebank/predicates/) |
-| `response` | [`responses`]({{ site.baseurl }}/mountebank/responses/) with `is` |
+| Stub mapping | Stub inside an [imposter](../mountebank/imposters.md) |
+| `request` matcher | [`predicates`](../mountebank/predicates.md) |
+| `response` | [`responses`](../mountebank/responses.md) with `is` |
 | `urlPath` / `method` | `equals: { path, method }` |
 | `urlPattern` / `urlPathPattern` | `matches: { path }` (regex) |
 | `equalToJson` | `equals` / `deepEquals` on `body` |
@@ -252,12 +245,12 @@ work, not a drop-in. (If you are coming from **Mountebank**, it *is* a drop-in �
 | `scenarioName` | `scenarioName` |
 | `whenScenarioStateIs` | `requiredScenarioState` |
 | `willSetStateTo` | `newScenarioState` |
-| `fixedDelay` / `randomDelay` | `wait` behavior, [fault injection]({{ site.baseurl }}/features/fault-injection/) |
+| `fixedDelay` / `randomDelay` | `wait` behavior, [fault injection](../features/fault-injection.md) |
 | Fault kinds | Direct equivalents — see below |
 | `proxyBaseUrl` | `proxy` response |
-| Record & playback | [Proxy mode]({{ site.baseurl }}/mountebank/proxy/) |
+| Record & playback | [Proxy mode](../mountebank/proxy.md) |
 | `verify(...)` | `verify` in the SDKs, or the recorded-requests API |
-| Java DSL | The [Java]({{ site.baseurl }}/sdk/java/), [Node]({{ site.baseurl }}/sdk/node/), [Go]({{ site.baseurl }}/sdk/go/) or [Scala]({{ site.baseurl }}/sdk/scala/) SDK DSL |
+| Java DSL | The [Java](../sdk/java.md), [Node](../sdk/node.md), [Go](../sdk/go.md) or [Scala](../sdk/scala.md) SDK DSL |
 
 Rift's predicate set is `equals`, `deepEquals`, `contains`, `startsWith`, `endsWith`, `matches`,
 `exists`, `jsonpath`, `xpath`, and `and` / `or` / `not`, with a `caseSensitive` option.
@@ -268,7 +261,7 @@ Rift's predicate set is `equals`, `deepEquals`, `contains`, `startsWith`, `endsW
 are the direct equivalents of WireMock's `whenScenarioStateIs` and `willSetStateTo`, keyed by
 `(flow_id, scenarioName)`. A WireMock scenario translates field-for-field. The `flow_id` part is
 an addition, not a difference — it is what lets the same state machine run concurrently in
-parallel test shards without collisions (see [Spaces]({{ site.baseurl }}/features/spaces/)).
+parallel test shards without collisions (see [Spaces](../features/spaces.md)).
 
 **Connection faults.** Rift's `_rift.fault.tcp` accepts WireMock's fault names verbatim:
 
@@ -307,7 +300,7 @@ to get right if anyone revives the idea.
 ## Benchmark methodology
 
 The full write-up, including the 50-connection series and the stock-thread-pool column, is in
-[Performance]({{ site.baseurl }}/performance/#rift-vs-wiremock).
+[Performance](../performance/index.md#rift-vs-wiremock).
 
 **Setup.** Intel Xeon Platinum 8573C, 16 vCPU (GitHub `ubuntu-16core`), 2026-07-27. WireMock
 3.9.1 on Temurin 21; Rift built from `master`. `oha` at 256 keep-alive connections, 20 s per

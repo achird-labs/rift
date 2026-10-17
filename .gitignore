@@ -193,6 +193,8 @@ flamegraph.svg
 perf.data
 perf.data.old
 *.svg
+# ...but the docs' animated SVGs are generated, committed and diffed in CI (scripts/visuals/check.sh)
+!docs/assets/*.svg
 
 # CI/CD local testing
 .github-actions/
@@ -312,3 +314,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
+
+# MkDocs build output (mkdocs build / the Docs Links CI job)
+/site/
+/_site/

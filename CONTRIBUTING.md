@@ -86,6 +86,16 @@ each docs example. A block that shows rejected input on purpose, or JSON that is
 API response body), goes unchecked with a `<!-- rift-lint: skip -->` line directly above its fence.
 A key that is unread by choice goes in the test's `ALLOWED` list, with the reason.
 
+The docs site under `docs/` is built with [MkDocs Material](https://squidfunk.github.io/mkdocs-material/).
+To preview it while you edit:
+
+```sh
+pip install -r requirements-docs.txt && mkdocs serve
+```
+
+Link between pages with relative links to the `.md` file (`[Spaces](../features/spaces.md#managing-spaces-at-runtime)`).
+`mkdocs build --strict`, which the `Docs Links` check runs, fails on a link to a missing page or anchor.
+
 ## Mutation testing
 
 A scheduled workflow, [`mutants.yml`](.github/workflows/mutants.yml), runs `cargo-mutants` weekly over

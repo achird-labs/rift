@@ -1,10 +1,3 @@
----
-layout: default
-title: Proxy Mode
-parent: Mountebank Compatibility
-nav_order: 5
----
-
 # Proxy Mode
 
 Proxy mode forwards requests to real servers and optionally records responses for playback. This is useful for creating mocks from real API behavior.
@@ -36,6 +29,8 @@ each method, path, query and body, then replays that response (see [Proxy Modes]
 ---
 
 ## Proxy Modes
+
+![Rift's three proxy modes, each sent GET /x three times. proxyOnce, also the default when mode is omitted, forwards the first request, records the answer as a new stub in front of the proxy stub, and replays it, so upstream is called once. proxyAlways forwards every request and records behind the proxy, appending each answer to one recorded stub that answers only once the proxy stops matching. proxyTransparent forwards every request and records nothing.](../assets/proxy-modes.svg)
 
 What a proxy records depends on whether it has `predicateGenerators` (or `addWaitBehavior` /
 `addDecorateBehavior`):
@@ -104,12 +99,12 @@ As in Mountebank, a recorded stub is placed relative to the proxy stub that answ
   written after the proxy. It answers only once the proxy stops matching, for example after
   `mb replay` or when the proxy stub is removed.
 
-  A response added to an existing stub joins the **end of that stub's current cycle**, as in
-  Mountebank's rotating response queue: if the stub has served `A` from `[A, B, C]`, the new
-  response `U` is served after `B`, `C` and `A`, not straight after `C`. The stub's `responses` list
-  still shows append order (`[A, B, C, U]`). Added in the middle of a `repeat` run, the response
-  splits that run for good: `[A×2, B]` that has served one `A` cycles `A B A U` from then on. Any
-  later edit of the stub returns it to list order, from the response that was due next.
+    A response added to an existing stub joins the **end of that stub's current cycle**, as in
+    Mountebank's rotating response queue: if the stub has served `A` from `[A, B, C]`, the new
+    response `U` is served after `B`, `C` and `A`, not straight after `C`. The stub's `responses` list
+    still shows append order (`[A, B, C, U]`). Added in the middle of a `repeat` run, the response
+    splits that run for good: `[A×2, B]` that has served one `A` cycles `A B A U` from then on. Any
+    later edit of the stub returns it to list order, from the response that was due next.
 
 Each recorded response carries `_proxyResponseTime` in its `is`, the upstream round trip in
 milliseconds, as in Mountebank. It is the mark `DELETE /imposters/{port}/savedProxyResponses` reads:
@@ -501,7 +496,7 @@ several certificates, and a missing or unusable one stops startup. This applies 
 call Rift makes: `proxy` stub upstreams, `--configfile https://…`, and (on the standalone binary) the
 intercept listener's WebSocket passthrough. Embedders pass `upstreamCaFile` / `upstreamCaPem` to
 `rift_serve_admin` instead. For a worked example, see
-[TLS/HTTPS → Trusting a Private CA]({{ site.baseurl }}/features/tls/#trusting-a-private-ca).
+[TLS/HTTPS → Trusting a Private CA](../features/tls.md#trusting-a-private-ca).
 
 > `SSL_CERT_FILE` / `SSL_CERT_DIR` are also honoured, but they **replace** the trust store rather
 > than adding to it — pointing `SSL_CERT_FILE` at a lone private CA silently drops every public
@@ -545,7 +540,7 @@ Add headers to proxied requests:
 **rejected** — `400` from `POST /imposters`, a startup error from `--configfile` — rather than
 sending two header lines, and `rift-lint` reports it before deploy (`E043`/`E044`). This diverges
 from Mountebank, which keeps the last entry; see
-[Single-valued header objects]({{ site.baseurl }}/mountebank/imposters/#single-valued-header-objects-reject-a-repeated-name).
+[Single-valued header objects](imposters.md#single-valued-header-objects-reject-a-repeated-name).
 
 ---
 

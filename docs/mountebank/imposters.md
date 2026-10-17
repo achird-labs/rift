@@ -1,10 +1,3 @@
----
-layout: default
-title: Imposters
-parent: Mountebank Compatibility
-nav_order: 1
----
-
 # Imposters
 
 An imposter is a mock server that listens on a specific port and responds to requests based on configured stubs.
@@ -242,7 +235,7 @@ not proxy from it either): it is kept as written and reported as `config_key_ign
 `defaultResponse` honours `"_mode": "binary"`, with the same contract as a stub's `is` body: a
 base64 `body` is decoded and served as bytes. If it does not decode, the raw text is served with
 `x-rift-binary-error: true` alongside `x-rift-default-response: true`, or a `500` under
-`strictBehaviors` — see [behavior failures]({{ site.baseurl }}/mountebank/behaviors/). A non-string
+`strictBehaviors` — see [behavior failures](behaviors.md). A non-string
 `body` in binary mode can never decode, since it is serialized to JSON text first. `rift-lint`
 reports both cases as `W015`.
 
@@ -496,16 +489,18 @@ preprocessed, so it cannot carry a literal `<%`.
 `<% include 'path' %>` inlines another file, and `<%- stringify('path') %>` inlines a file's contents,
 trimmed and escaped for use inside a JSON string — so the tag goes inside quotes, as in Mountebank:
 `"body": "<%- stringify('datafile.json') %>"` (see
-[Configuration]({{ site.baseurl }}/configuration/#document-shapes-and-formats) for what an unquoted tag reports). A
+[Configuration](../configuration/index.md#document-shapes-and-formats) for what an unquoted tag reports). A
 stringified file is rendered first, so `process.env` tags in it are substituted. `--no-parse` turns preprocessing off; see the
-[CLI reference]({{ site.baseurl }}/configuration/cli/). `rift-lint` renders a templated file the same
-way before it checks it; see [Linting]({{ site.baseurl }}/features/linting/#templated-files).
+[CLI reference](../configuration/cli.md). `rift-lint` renders a templated file the same
+way before it checks it; see [Linting](../features/linting.md#templated-files).
 
 ---
 
 ## Stub Matching Behavior
 
 ### First-Match-Wins
+
+![Predicate matching in a Rift imposter: a request is checked against the stubs in order. Each stub's predicates (equals, contains, jsonpath, matches) are evaluated until one fails, and that stub is skipped. The first stub whose predicates all match answers, here POST /orders gets 201 from stub 2. A request no stub matches, GET /reports, falls through to the imposter's defaultResponse, 404 here; without one Rift answers 200 with an empty body, as Mountebank does.](../assets/matching.svg)
 
 Stubs are evaluated in order. The **first stub whose predicates match** is used:
 

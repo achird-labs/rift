@@ -1,15 +1,8 @@
----
-layout: default
-title: Core Building Blocks
-parent: Concepts
-nav_order: 1
----
-
 # Core Building Blocks
 
 These are the Mountebank-compatible primitives every Rift config is built from. This page explains
 what each one *is*; the reference pages under
-[Mountebank Compatibility]({{ site.baseurl }}/mountebank/) give the exact syntax and every option.
+[Mountebank Compatibility](../mountebank/index.md) give the exact syntax and every option.
 
 ---
 
@@ -25,7 +18,7 @@ optional `name`, and a list of `stubs`. Create one by `POST`ing it to the admin 
 
 One Rift process hosts many imposters, each on its own port. An `https` imposter can also require
 and validate a client certificate (`mutualAuth`, `rejectUnauthorized`, `ca`) — see
-[TLS]({{ site.baseurl }}/features/tls/#mutual-tls-mtls). → [Imposters]({{ site.baseurl }}/mountebank/imposters/)
+[TLS](../features/tls.md#mutual-tls-mtls). → [Imposters](../mountebank/imposters.md)
 
 ## Stub
 
@@ -41,28 +34,28 @@ A **predicate** decides whether a stub applies to a request. Predicates match on
 (`method`, `path`, `query`, `headers`, `body`) with operators like `equals`, `deepEquals`,
 `contains`, `startsWith`, `endsWith`, `matches` (regex), and `exists`, plus `jsonpath`/`xpath`
 selectors and the logical combinators `and`, `or`, `not`. Multiple predicates in one stub combine
-with implicit AND. → [Predicates]({{ site.baseurl }}/mountebank/predicates/)
+with implicit AND. → [Predicates](../mountebank/predicates.md)
 
 ## Response
 
 A **response** is what a matched stub returns. The three kinds:
 
 - **`is`** — a static response (`statusCode`, `headers`, `body`). Supports
-  [request interpolation]({{ site.baseurl }}/mountebank/responses/#request-interpolation) and
-  Rift's [response templates]({{ site.baseurl }}/features/date-templates/).
+  [request interpolation](../mountebank/responses.md#request-interpolation) and
+  Rift's [response templates](../features/date-templates.md).
 - **`proxy`** — forward to a real upstream and optionally record the reply for replay.
 - **`inject`** / `_rift.script` — compute the response dynamically with a script.
 
 A stub can list several responses; Rift cycles through them per request (round-robin), honoring each
-response's `repeat` count. → [Responses]({{ site.baseurl }}/mountebank/responses/)
+response's `repeat` count. → [Responses](../mountebank/responses.md)
 
 ## Behavior
 
 A **behavior** post-processes a response before it's sent. Rift supports `wait` (latency), `copy` and
 `lookup` (pull request/CSV data into the response), `decorate` and `shellTransform` (transform the
-body), and `repeat` (response cycling). → [Behaviors]({{ site.baseurl }}/mountebank/behaviors/)
+body), and `repeat` (response cycling). → [Behaviors](../mountebank/behaviors.md)
 
 ---
 
-Once these click, the [Rift Model]({{ site.baseurl }}/concepts/rift-model/) adds state on top: making
+Once these click, the [Rift Model](rift-model.md) adds state on top: making
 responses depend on what happened on *previous* requests.

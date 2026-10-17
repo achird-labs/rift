@@ -1,11 +1,3 @@
----
-layout: default
-title: Features
-nav_order: 5
-has_children: true
-permalink: /features/
----
-
 # Features
 
 Rift provides advanced features for service virtualization and chaos engineering.
@@ -27,7 +19,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 
 - **Fault Injection** - Probabilistic latency, error, and TCP fault injection
 - **Scripting** - Rhai and JavaScript engines for dynamic behavior
-- **Response Templates** - Date tokens and the `_rift.templated` `{% raw %}{{ }}{% endraw %}` function grammar
+- **Response Templates** - Date tokens and the `_rift.templated` `{{ }}` function grammar
 - **Conditional GET** - `ETag` / `Last-Modified` and `304 Not Modified` on an `is` response with `_rift.conditional`
 - **Scenarios (FSM)** - Stateful stubs as declarative state machines
 - **Flow State** - Per-flow key/value store with the in-memory backend, written by scripts or declaratively with `_rift.stateOps`
@@ -61,7 +53,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 | JavaScript Injection | ✅ | — |
 | Probabilistic Faults | Via injection | ✅ `_rift.fault` |
 | Rhai/JS Scripting | — | ✅ `_rift.script` |
-| Response Templates | `${request.*}` | ✅ `{% raw %}{{NOW}}{% endraw %}`, `_rift.templated` |
+| Response Templates | `${request.*}` | ✅ `{{NOW}}`, `_rift.templated` |
 | Conditional GET (`ETag`, `304`) | Two stubs, hand-synced | ✅ `_rift.conditional` |
 | Scenarios (FSM) | Via injection | ✅ stub `scenarioName` |
 | Flow State | Via injection | ✅ `_rift.flowState` |
@@ -84,27 +76,27 @@ Rift provides advanced features for service virtualization and chaos engineering
 
 ## Feature Documentation
 
-- [Fault Injection]({{ site.baseurl }}/features/fault-injection/) - Latency and error simulation
-- [Scripting]({{ site.baseurl }}/features/scripting/) - Dynamic behavior with scripts
-- [Scenarios (FSM)]({{ site.baseurl }}/features/scenarios/) - Stateful stubs with declarative state machines
-- [Correlated Isolation (Spaces)]({{ site.baseurl }}/features/spaces/) - Per-flow stub and state partitioning
-- [Flow State]({{ site.baseurl }}/features/flow-state/) - Per-flow key/value store for stateful mocks
-- [Response Templates]({{ site.baseurl }}/features/date-templates/) - date tokens and the `_rift.templated` `{% raw %}{{ }}{% endraw %}` function grammar
-- [Conditional GET]({{ site.baseurl }}/mountebank/responses/#conditional-get) - `ETag`, `Last-Modified` and `304` with `_rift.conditional`
-- [Stub-by-ID]({{ site.baseurl }}/features/stub-by-id/) - Address stubs by stable id
-- [Single-Port Gateway]({{ site.baseurl }}/features/gateway/) - Reach every imposter through the admin port
-- [Front Door]({{ site.baseurl }}/features/front-door/) - One listener routing to many imposters by host, path, header or method
-- [Hot Reload]({{ site.baseurl }}/features/hot-reload/) - Re-read config without restarting
-- [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) - Overlap detection and warnings
-- [Debug Mode]({{ site.baseurl }}/features/debug-mode/) - Request matching diagnostics
-- [TLS/HTTPS]({{ site.baseurl }}/features/tls/) - Secure connections
-- [Intercept Proxy (TLS-MITM)]({{ site.baseurl }}/features/intercept-proxy/) - Mock a hard-coded external HTTPS host without mitmproxy
-- [Metrics]({{ site.baseurl }}/features/metrics/) - Prometheus monitoring
-- [Configuration Linting]({{ site.baseurl }}/features/linting/) - Validate imposter configs before loading
-- [Terminal UI]({{ site.baseurl }}/features/tui/) - Interactive imposter management
+- [Fault Injection](fault-injection.md) - Latency and error simulation
+- [Scripting](scripting.md) - Dynamic behavior with scripts
+- [Scenarios (FSM)](scenarios.md) - Stateful stubs with declarative state machines
+- [Correlated Isolation (Spaces)](spaces.md) - Per-flow stub and state partitioning
+- [Flow State](flow-state.md) - Per-flow key/value store for stateful mocks
+- [Response Templates](date-templates.md) - date tokens and the `_rift.templated` `{{ }}` function grammar
+- [Conditional GET](../mountebank/responses.md#conditional-get) - `ETag`, `Last-Modified` and `304` with `_rift.conditional`
+- [Stub-by-ID](stub-by-id.md) - Address stubs by stable id
+- [Single-Port Gateway](gateway.md) - Reach every imposter through the admin port
+- [Front Door](front-door.md) - One listener routing to many imposters by host, path, header or method
+- [Hot Reload](hot-reload.md) - Re-read config without restarting
+- [Stub Analysis](stub-analysis.md) - Overlap detection and warnings
+- [Debug Mode](debug-mode.md) - Request matching diagnostics
+- [TLS/HTTPS](tls.md) - Secure connections
+- [Intercept Proxy (TLS-MITM)](intercept-proxy.md) - Mock a hard-coded external HTTPS host without mitmproxy
+- [Metrics](metrics.md) - Prometheus monitoring
+- [Configuration Linting](linting.md) - Validate imposter configs before loading
+- [Terminal UI](tui.md) - Interactive imposter management
 
 Documented elsewhere:
 
-- [Outbound TLS trust]({{ site.baseurl }}/features/tls/#trusting-a-private-ca) - `--upstream-ca-file`
-- [Imposter Sources]({{ site.baseurl }}/configuration/cli/#imposter-sources) - `--imposters` URIs and merging
-- [Embedding]({{ site.baseurl }}/embedding/) - Rust API and C ABI
+- [Outbound TLS trust](tls.md#trusting-a-private-ca) - `--upstream-ca-file`
+- [Imposter Sources](../configuration/cli.md#imposter-sources) - `--imposters` URIs and merging
+- [Embedding](../embedding/index.md) - Rust API and C ABI

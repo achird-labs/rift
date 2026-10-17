@@ -1,37 +1,44 @@
 ---
-layout: default
 title: Home
-nav_order: 1
-description: "Rift is a high-performance Mountebank-compatible HTTP/HTTPS mock server written in Rust"
-permalink: /
+description: Rift is a high-performance Mountebank-compatible HTTP/HTTPS mock server written in Rust
 ---
 
 # Rift
 
 **High-performance Mountebank-compatible HTTP/HTTPS mock server written in Rust**
-{: .fs-6 .fw-300 }
 
-Rift is a drop-in replacement for [Mountebank](https://www.mbtest.dev/) that delivers **~20–150x faster throughput on typical workloads, and up to ~1,820x on large regex predicate sets** — while maintaining full API compatibility. Use your existing Mountebank configurations and enjoy faster test execution.
+Rift implements [Mountebank](https://www.mbtest.dev/)'s REST API and imposter format, so most existing
+`imposters.json` files and Mountebank clients work unchanged. It keeps its throughput flat as a stub file
+grows, and the same engine embeds in-process in Java, Node, Go and Scala.
 
-Rift is compatible with **Mountebank 2.9.5**, the latest release ([`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mountebank)), checked against a real Mountebank on every pull request that changes the engine — see [Differences from Mountebank]({{ site.baseurl }}/mountebank/differences/) for the few deliberate exceptions.
+Rift is compatible with **Mountebank 2.9.5**, the latest release
+([`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mountebank)). Every pull request that changes
+the engine runs a differential suite that sends the same requests to a real Mountebank and to Rift. The
+differences it finds are listed in [Differences from Mountebank](mountebank/differences.md). Compatibility
+is established by those tests, so behaviour they do not exercise can still differ: if you find a case,
+[open an issue](https://github.com/achird-labs/rift/issues).
 
-[Get Started]({{ site.baseurl }}/getting-started/){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
-[View on GitHub](https://github.com/achird-labs/rift){: .btn .fs-5 .mb-4 .mb-md-0 }
+![Rift, a Mountebank-compatible HTTP and HTTPS mock server. Requests reach an imposter and are checked against its stubs in order; the first stub whose predicates match answers with the next response in its cycle, 200 v1 and then 200 v2. A request no hand-written stub matches reaches a proxyOnce proxy stub, which forwards it upstream and records the answer as a new stub in front of itself; the next identical request is replayed from that recording without calling upstream.](assets/hero.svg)
+
+[Get Started](getting-started/index.md){ .md-button .md-button--primary }
+[View on GitHub](https://github.com/achird-labs/rift){ .md-button }
 
 ---
 
 ## Why Rift?
 
-### Drop-in Mountebank Replacement
+### Mountebank Compatible
 
-Rift implements the Mountebank REST API, allowing you to:
-- Use existing Mountebank configuration files without changes
-- Keep your current test infrastructure and tooling
-- Switch between Mountebank and Rift transparently
+Rift implements the Mountebank REST API, so you can usually:
 
-### Blazing Fast Performance
+- load existing Mountebank configuration files without changes;
+- keep your current Mountebank clients and test tooling;
+- check the [documented differences](mountebank/differences.md) for anything your tests rely on.
 
-Built in Rust with async I/O, Rift delivers exceptional performance:
+### Performance
+
+Rift indexes stubs instead of scanning them in order, so its cost does not grow with the size of the stub
+file. Measured against Mountebank on the same machine:
 
 | Feature | Mountebank | Rift | Speedup |
 |:--------|:-----------|:-----|:--------|
@@ -45,11 +52,11 @@ Built in Rust with async I/O, Rift delivers exceptional performance:
 same suite reaches 325k RPS and 6,160x on regex — but Mountebank is *slower* there, so the M4
 figures above are the conservative read.</sub>
 
-See the [performance page](performance/) for both hosts, the full suite, and the method.
+See the [performance page](performance/index.md) for both hosts, the full suite, and the method.
 
-### Full Feature Compatibility
+### Mountebank Features
 
-Rift supports all major Mountebank features:
+Rift supports Mountebank's HTTP and HTTPS feature set (not its TCP and SMTP protocols):
 
 - **Imposters** - HTTP/HTTPS mock servers on any port, including mutual TLS
 - **Stubs** - Request matching with responses
@@ -63,19 +70,19 @@ Rift supports all major Mountebank features:
 Compatibility is the floor, not the ceiling. Rift adds the things you would otherwise build by hand
 on top of a mock server:
 
-- **[Fault Injection]({{ site.baseurl }}/features/fault-injection/)** - probabilistic latency, error and TCP faults, declaratively
-- **[Scripting]({{ site.baseurl }}/features/scripting/)** - Rhai and JavaScript engines, with a `script check` / `script run` CLI
-- **[Scenarios]({{ site.baseurl }}/features/scenarios/)** and **[Flow State]({{ site.baseurl }}/features/flow-state/)** - declarative state machines and a per-flow key/value store
-- **[Correlated Isolation]({{ site.baseurl }}/features/spaces/)** - per-flow partitioning so parallel tests don't collide
-- **[Front Door]({{ site.baseurl }}/features/front-door/)** and **[Gateway]({{ site.baseurl }}/features/gateway/)** - route many imposters through one listener
-- **[Intercept Proxy]({{ site.baseurl }}/features/intercept-proxy/)** - TLS-MITM a hard-coded external host without mitmproxy, over HTTP/1.1 or HTTP/2, with WebSocket upgrades relayed to the real origin
-- **[TLS & Mutual TLS]({{ site.baseurl }}/features/tls/)** - HTTPS imposters that require and validate client certificates, plus a private-CA trust store for proxying
-- **[Response Templates]({{ site.baseurl }}/features/date-templates/)** - date tokens and the `_rift.templated` {% raw %}`{{ }}`{% endraw %} grammar, no script engine needed
-- **[Stub Analysis]({{ site.baseurl }}/features/stub-analysis/)** and **[Debug Mode]({{ site.baseurl }}/features/debug-mode/)** - find shadowed stubs, and see why a request matched
-- **[Conditional GET]({{ site.baseurl }}/mountebank/responses/#conditional-get)** and **[Vendor-Mock Templates]({{ site.baseurl }}/templates/)** - `ETag` / `304` without hand-synced validators, and ready-made mocks for third-party SaaS
-- **[Embedding & FFI]({{ site.baseurl }}/embedding/)** - run the engine in-process from Rust or any language over the C ABI
+- **[Fault Injection](features/fault-injection.md)** - probabilistic latency, error and TCP faults, declaratively
+- **[Scripting](features/scripting.md)** - Rhai and JavaScript engines, with a `script check` / `script run` CLI
+- **[Scenarios](features/scenarios.md)** and **[Flow State](features/flow-state.md)** - declarative state machines and a per-flow key/value store
+- **[Correlated Isolation](features/spaces.md)** - per-flow partitioning so parallel tests don't collide
+- **[Front Door](features/front-door.md)** and **[Gateway](features/gateway.md)** - route many imposters through one listener
+- **[Intercept Proxy](features/intercept-proxy.md)** - TLS-MITM a hard-coded external host without mitmproxy, over HTTP/1.1 or HTTP/2, with WebSocket upgrades relayed to the real origin
+- **[TLS & Mutual TLS](features/tls.md)** - HTTPS imposters that require and validate client certificates, plus a private-CA trust store for proxying
+- **[Response Templates](features/date-templates.md)** - date tokens and the `_rift.templated` `{{ }}` grammar, no script engine needed
+- **[Stub Analysis](features/stub-analysis.md)** and **[Debug Mode](features/debug-mode.md)** - find shadowed stubs, and see why a request matched
+- **[Conditional GET](mountebank/responses.md#conditional-get)** and **[Vendor-Mock Templates](templates/index.md)** - `ETag` / `304` without hand-synced validators, and ready-made mocks for third-party SaaS
+- **[Embedding & FFI](embedding/index.md)** - run the engine in-process from Rust or any language over the C ABI
 
-The [Features]({{ site.baseurl }}/features/) section covers all of them.
+The [Features](features/index.md) section covers all of them.
 
 ---
 
@@ -142,7 +149,7 @@ await users.verify(onGet('/api/users/1'), times(1)); // throws with a diff on mi
 Migrating from Mountebank? The Mountebank-compatible `rift.create({ port })` API stays available as
 a permanent drop-in, so adopting the typed DSL above is incremental rather than a rewrite.
 
-See the [Node.js Integration Guide]({{ site.baseurl }}/getting-started/nodejs/) for complete documentation.
+See the [Node.js Integration Guide](getting-started/nodejs.md) for complete documentation.
 
 ### Java / JVM Integration
 
@@ -205,7 +212,7 @@ surface.
 ### All four SDKs
 
 Java, Scala, Node/TypeScript and Go are all officially supported and all replay the same
-conformance corpus. The [Language SDKs]({{ site.baseurl }}/sdk/) section has the install snippet and
+conformance corpus. The [Language SDKs](sdk/index.md) section has the install snippet and
 hello-world for each, plus the transport and version-compatibility matrices.
 
 ---
@@ -213,70 +220,70 @@ hello-world for each, plus the transport and version-compatibility matrices.
 ## Documentation
 
 ### Getting Started
-- [Installation]({{ site.baseurl }}/getting-started/) - Docker, binary, and build from source
-- [Quick Start]({{ site.baseurl }}/getting-started/quickstart/) - Create your first imposter
-- [Node.js Integration]({{ site.baseurl }}/getting-started/nodejs/) - npm package for Node.js projects
-- [Language SDKs]({{ site.baseurl }}/sdk/) - Java, Scala, Node/TypeScript and Go, with the transport and version-compatibility matrices
-- [Java / JVM SDK]({{ site.baseurl }}/sdk/java/) - rift-java for JUnit 5, Spring, and Testcontainers
-- [Scala SDK]({{ site.baseurl }}/sdk/scala/) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
-- [Go SDK]({{ site.baseurl }}/sdk/go/) - rift-go for `testing.T`, embedded via purego (no cgo)
-- [Migration from Mountebank]({{ site.baseurl }}/getting-started/migration/) - Switch from Mountebank to Rift
+- [Installation](getting-started/index.md) - Docker, binary, and build from source
+- [Quick Start](getting-started/quickstart.md) - Create your first imposter
+- [Node.js Integration](getting-started/nodejs.md) - npm package for Node.js projects
+- [Language SDKs](sdk/index.md) - Java, Scala, Node/TypeScript and Go, with the transport and version-compatibility matrices
+- [Java / JVM SDK](sdk/java.md) - rift-java for JUnit 5, Spring, and Testcontainers
+- [Scala SDK](sdk/scala.md) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
+- [Go SDK](sdk/go.md) - rift-go for `testing.T`, embedded via purego (no cgo)
+- [Migration from Mountebank](getting-started/migration.md) - Switch from Mountebank to Rift
 
 ### Concepts
-- [Concepts Overview]({{ site.baseurl }}/concepts/) - The Rift mental model, start here
-- [Core Building Blocks]({{ site.baseurl }}/concepts/building-blocks/) - Imposters, stubs, predicates, responses, behaviors
-- [The Rift Model]({{ site.baseurl }}/concepts/rift-model/) - Flow-state, scenarios, and correlated isolation
+- [Concepts Overview](concepts/index.md) - The Rift mental model, start here
+- [Core Building Blocks](concepts/building-blocks.md) - Imposters, stubs, predicates, responses, behaviors
+- [The Rift Model](concepts/rift-model.md) - Flow-state, scenarios, and correlated isolation
 
 ### Mountebank Compatibility (reference)
-- [Imposters]({{ site.baseurl }}/mountebank/imposters/) - Creating and managing mock servers
-- [Predicates]({{ site.baseurl }}/mountebank/predicates/) - Request matching (equals, contains, regex, jsonpath, xpath)
-- [Responses]({{ site.baseurl }}/mountebank/responses/) - Configuring stub responses
-- [Behaviors]({{ site.baseurl }}/mountebank/behaviors/) - Response modification (wait, decorate, copy, lookup, shellTransform)
-- [Proxy Mode]({{ site.baseurl }}/mountebank/proxy/) - Recording and replaying responses
+- [Imposters](mountebank/imposters.md) - Creating and managing mock servers
+- [Predicates](mountebank/predicates.md) - Request matching (equals, contains, regex, jsonpath, xpath)
+- [Responses](mountebank/responses.md) - Configuring stub responses
+- [Behaviors](mountebank/behaviors.md) - Response modification (wait, decorate, copy, lookup, shellTransform)
+- [Proxy Mode](mountebank/proxy.md) - Recording and replaying responses
 
 ### Configuration
-- [Mountebank Format]({{ site.baseurl }}/configuration/mountebank/) - JSON configuration reference
-- [Rift Extensions]({{ site.baseurl }}/configuration/native/) - The `_rift` namespace and other Rift-specific keys
-- [CLI Reference]({{ site.baseurl }}/configuration/cli/) - Command-line options
+- [Mountebank Format](configuration/mountebank.md) - JSON configuration reference
+- [Rift Extensions](configuration/native.md) - The `_rift` namespace and other Rift-specific keys
+- [CLI Reference](configuration/cli.md) - Command-line options
 
 ### Features
-- [Features Overview]({{ site.baseurl }}/features/) - Every extension, with the Mountebank comparison table
-- [Fault Injection]({{ site.baseurl }}/features/fault-injection/) - Latency and error simulation
-- [Scripting]({{ site.baseurl }}/features/scripting/) - Rhai and JavaScript engines
-- [Scenarios (FSM)]({{ site.baseurl }}/features/scenarios/) - Stateful stubs as declarative state machines
-- [Correlated Isolation (Spaces)]({{ site.baseurl }}/features/spaces/) - Per-flow stub and state partitioning
-- [Flow State]({{ site.baseurl }}/features/flow-state/) - Per-flow key/value store
-- [Front Door]({{ site.baseurl }}/features/front-door/) - One listener routing to many imposters
-- [Single-Port Gateway]({{ site.baseurl }}/features/gateway/) - Reach every imposter through the admin port
-- [Intercept Proxy (TLS-MITM)]({{ site.baseurl }}/features/intercept-proxy/) - Mock a hard-coded external HTTPS host (HTTP/1.1, HTTP/2, WebSocket passthrough)
-- [Response Templates]({{ site.baseurl }}/features/date-templates/) - Date tokens and the `_rift.templated` grammar
-- [Hot Reload]({{ site.baseurl }}/features/hot-reload/) - Re-read config without restarting
-- [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) - Overlap detection and warnings
-- [Debug Mode]({{ site.baseurl }}/features/debug-mode/) - Why a request matched, or didn't
-- [TLS/HTTPS]({{ site.baseurl }}/features/tls/) - HTTPS imposters, mutual TLS, outbound trust for private CAs
-- [Metrics]({{ site.baseurl }}/features/metrics/) - Prometheus integration
-- [Configuration Linting]({{ site.baseurl }}/features/linting/) - Validate configs before they load
-- [Terminal UI]({{ site.baseurl }}/features/tui/) - Interactive imposter management
+- [Features Overview](features/index.md) - Every extension, with the Mountebank comparison table
+- [Fault Injection](features/fault-injection.md) - Latency and error simulation
+- [Scripting](features/scripting.md) - Rhai and JavaScript engines
+- [Scenarios (FSM)](features/scenarios.md) - Stateful stubs as declarative state machines
+- [Correlated Isolation (Spaces)](features/spaces.md) - Per-flow stub and state partitioning
+- [Flow State](features/flow-state.md) - Per-flow key/value store
+- [Front Door](features/front-door.md) - One listener routing to many imposters
+- [Single-Port Gateway](features/gateway.md) - Reach every imposter through the admin port
+- [Intercept Proxy (TLS-MITM)](features/intercept-proxy.md) - Mock a hard-coded external HTTPS host (HTTP/1.1, HTTP/2, WebSocket passthrough)
+- [Response Templates](features/date-templates.md) - Date tokens and the `_rift.templated` grammar
+- [Hot Reload](features/hot-reload.md) - Re-read config without restarting
+- [Stub Analysis](features/stub-analysis.md) - Overlap detection and warnings
+- [Debug Mode](features/debug-mode.md) - Why a request matched, or didn't
+- [TLS/HTTPS](features/tls.md) - HTTPS imposters, mutual TLS, outbound trust for private CAs
+- [Metrics](features/metrics.md) - Prometheus integration
+- [Configuration Linting](features/linting.md) - Validate configs before they load
+- [Terminal UI](features/tui.md) - Interactive imposter management
 
 ### Deployment
-- [Docker]({{ site.baseurl }}/deployment/docker/) - Container deployment
-- [Kubernetes]({{ site.baseurl }}/deployment/kubernetes/) - K8s deployment patterns
-- [ECS / Fargate]({{ site.baseurl }}/deployment/ecs-fargate/) - Reference task definition, including the intercept proxy
+- [Docker](deployment/docker.md) - Container deployment
+- [Kubernetes](deployment/kubernetes.md) - K8s deployment patterns
+- [ECS / Fargate](deployment/ecs-fargate.md) - Reference task definition, including the intercept proxy
 
 ### Reference
-- [REST API]({{ site.baseurl }}/api/) - Admin API reference
-- [Examples]({{ site.baseurl }}/examples/) - Ready-to-use imposter configurations
-- [Templates]({{ site.baseurl }}/templates/) - Vendor-mock templates for third-party SaaS
-- [Performance]({{ site.baseurl }}/performance/) - Benchmark results
-- [Rift vs WireMock]({{ site.baseurl }}/comparisons/wiremock/) - Where each one wins, and when not to switch
-- [Rift vs Microcks]({{ site.baseurl }}/comparisons/microcks/) - Spec-driven vs stub-driven, and where they overlap
-- [Changelog]({{ site.baseurl }}/changelog/) - Notable user-facing changes
+- [REST API](api/index.md) - Admin API reference
+- [Examples](examples/index.md) - Ready-to-use imposter configurations
+- [Templates](templates/index.md) - Vendor-mock templates for third-party SaaS
+- [Performance](performance/index.md) - Benchmark results
+- [Rift vs WireMock](comparisons/wiremock.md) - Where each one wins, and when not to switch
+- [Rift vs Microcks](comparisons/microcks.md) - Spec-driven vs stub-driven, and where they overlap
+- [Changelog](changelog.md) - Notable user-facing changes
 
 ### Embedding & Extension
-- [Embedding & SPI]({{ site.baseurl }}/embedding/) - Embed Rift as a library, extend it via SPI traits
-- [Embeddable Server]({{ site.baseurl }}/embedding/server/) - `ServerBuilder`, bindable admin/metrics
-- [Extension Points (SPI)]({{ site.baseurl }}/embedding/spi/) - Pluggable flow-store, journal, proxy store, sequencer, plus exchange-inspector, no-match, admin-authorizer and front-door observer hooks
-- [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/) - Drive Rift from any language
+- [Embedding & SPI](embedding/index.md) - Embed Rift as a library, extend it via SPI traits
+- [Embeddable Server](embedding/server.md) - `ServerBuilder`, bindable admin/metrics
+- [Extension Points (SPI)](embedding/spi.md) - Pluggable flow-store, journal, proxy store, sequencer, plus exchange-inspector, no-match, admin-authorizer and front-door observer hooks
+- [FFI (C-ABI)](embedding/ffi.md) - Drive Rift from any language
 
 ---
 

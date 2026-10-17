@@ -1,10 +1,3 @@
----
-layout: default
-title: Performance
-nav_order: 8
-permalink: /performance/
----
-
 # Performance
 
 Rift delivers **18–6,000x** the throughput of Mountebank on identical imposter
@@ -282,6 +275,7 @@ Apple M4, 50 connections, median of 3 repetitions (2026-09-17):
 ### Throughput Scaling
 
 Rift maintains consistent throughput regardless of:
+
 - Stub count (310 stubs with minimal degradation)
 - Stub position (first vs last stub match)
 - Predicate complexity
@@ -529,7 +523,7 @@ run on an Intel Xeon 8573C while Microcks and Rift are from 2026-07-30 on an AMD
 sound read downwards and the cross-column absolutes are not.
 
 Full methodology, the stock-defaults column, where Microcks is genuinely better, and what the data
-does *not* support: [Rift vs Microcks]({{ site.baseurl }}/comparisons/microcks/).
+does *not* support: [Rift vs Microcks](../comparisons/microcks.md).
 
 ---
 
@@ -552,10 +546,10 @@ WireMock 3.9.1 with its Jetty pool pinned to 256 and its request journal off; Mo
 
 These are architecture comparisons, not quality judgements. Both engines are well-built and more
 widely adopted than Rift, and each does things Rift does not — see
-[Rift vs WireMock]({{ site.baseurl }}/comparisons/wiremock/) for both directions.
+[Rift vs WireMock](../comparisons/wiremock.md) for both directions.
 
 **Microcks** is measured in [Rift vs Microcks](#rift-vs-microcks) above and written up in full at
-[Rift vs Microcks]({{ site.baseurl }}/comparisons/microcks/). It is deliberately *not* a row in the
+[Rift vs Microcks](../comparisons/microcks.md). It is deliberately *not* a row in the
 table above: its figures come from a different dispatch on different hardware, and this table's whole
 value is that every cell in it came from one run on one host.
 
@@ -697,7 +691,7 @@ JavaScript `wait` function that computes a delay — run inline on the calling w
 the blocking pool, so keep such scripts cheap under per-core.
 
 Flow-store work is offloaded only when it can actually reach the store. A matched stub with no
-`newScenarioState` has no transition to apply, and a `_rift.templated` response whose `{% raw %}{{ }}{% endraw %}`
+`newScenarioState` has no transition to apply, and a `_rift.templated` response whose `{{ }}`
 expressions never read `state.<key>` has nothing to look up — both render on the worker even on a
 blocking backend, rather than paying a pool round trip to do nothing.
 
@@ -716,8 +710,8 @@ curl -s localhost:9090/metrics | grep rift_accepted_connections_total
 ```
 
 The `worker` label is the accept-loop slot — the worker index under per-core, or a single `0` in
-the default topology. See [Metrics]({{ site.baseurl }}/features/metrics/) for the full metric set,
-and the [CLI Reference]({{ site.baseurl }}/configuration/cli/) for `--runtime` / `--runtime-affinity`
+the default topology. See [Metrics](../features/metrics.md) for the full metric set,
+and the [CLI Reference](../configuration/cli.md) for `--runtime` / `--runtime-affinity`
 and their env-var aliases.
 
 ## Build Tuning
