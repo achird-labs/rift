@@ -1,9 +1,5 @@
 ---
-layout: default
 title: Getting Started
-nav_order: 2
-has_children: true
-permalink: /getting-started/
 ---
 
 # Getting Started with Rift
@@ -27,7 +23,7 @@ docker run -p 2525:2525 zainalpour/rift-proxy:latest
 ```
 
 Publish every imposter port you intend to call from the host as well (for example
-`-p 4545:4545`), and see [Docker]({{ site.baseurl }}/deployment/docker/) for the `-static` image.
+`-p 4545:4545`), and see [Docker](../deployment/docker.md) for the `-static` image.
 With no `--api-key`, the admin API is open to anyone who can reach the port; Rift logs a warning
 saying so at startup.
 
@@ -110,7 +106,7 @@ await users.verify(onGet('/api/users/1'), times(1));
 The Mountebank-compatible `rift.create({ port })` API stays available as a permanent drop-in if you
 are migrating.
 
-See the [Node.js Integration Guide]({{ site.baseurl }}/getting-started/nodejs/) for complete documentation.
+See the [Node.js Integration Guide](nodejs.md) for complete documentation.
 
 ### Java / JVM
 
@@ -176,12 +172,12 @@ libraryDependencies += "io.github.achird-labs" %% "rift-scala-zio" % "0.1.4" % T
 ```
 
 There is a module per effect system — ZIO, Cats Effect 3 / FS2, or no effect system at all — over
-one shared typed model. See [rift-scala]({{ site.baseurl }}/sdk/scala/).
+one shared typed model. See [rift-scala](../sdk/scala.md).
 
 ### All four SDKs
 
 Install snippets, hello-worlds, the transport matrix and the version-compatibility table for Java,
-Scala, Node/TypeScript and Go live in [Language SDKs]({{ site.baseurl }}/sdk/).
+Scala, Node/TypeScript and Go live in [Language SDKs](../sdk/index.md).
 
 ---
 
@@ -267,7 +263,7 @@ rift --configfile imposters.json
 
 Mountebank's EJS tags (`<% include %>`, `<%- stringify() %>`, `<%= process.env.X %>`) work in the
 file; any other `<% %>` tag is refused, so pass `--no-parse` if a file holds a literal `<%`. YAML is
-accepted too — see [Configuration]({{ site.baseurl }}/configuration/#document-shapes-and-formats).
+accepted too — see [Configuration](../configuration/index.md#document-shapes-and-formats).
 
 Example `imposters.json`:
 
@@ -292,12 +288,12 @@ Example `imposters.json`:
 
 ## Next Steps
 
-- [Quick Start Tutorial]({{ site.baseurl }}/getting-started/quickstart/) - Detailed walkthrough
-- [Node.js Integration]({{ site.baseurl }}/getting-started/nodejs/) - npm package for Node.js projects
-- [Language SDKs]({{ site.baseurl }}/sdk/) - Java, Scala, Node/TypeScript and Go, with the transport and version-compatibility matrices
-- [Java / JVM SDK]({{ site.baseurl }}/sdk/java/) - rift-java for JUnit 5, Spring, and Testcontainers
-- [Scala SDK]({{ site.baseurl }}/sdk/scala/) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
-- [Go SDK]({{ site.baseurl }}/sdk/go/) - rift-go for `testing.T`, embedded via purego (no cgo)
-- [Predicates Guide]({{ site.baseurl }}/mountebank/predicates/) - Request matching
-- [Responses Guide]({{ site.baseurl }}/mountebank/responses/) - Response configuration
-- [Migration Guide]({{ site.baseurl }}/getting-started/migration/) - Switching from Mountebank
+- [Quick Start Tutorial](quickstart.md) - Detailed walkthrough
+- [Node.js Integration](nodejs.md) - npm package for Node.js projects
+- [Language SDKs](../sdk/index.md) - Java, Scala, Node/TypeScript and Go, with the transport and version-compatibility matrices
+- [Java / JVM SDK](../sdk/java.md) - rift-java for JUnit 5, Spring, and Testcontainers
+- [Scala SDK](../sdk/scala.md) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
+- [Go SDK](../sdk/go.md) - rift-go for `testing.T`, embedded via purego (no cgo)
+- [Predicates Guide](../mountebank/predicates.md) - Request matching
+- [Responses Guide](../mountebank/responses.md) - Response configuration
+- [Migration Guide](migration.md) - Switching from Mountebank

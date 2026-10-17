@@ -1,10 +1,3 @@
----
-layout: default
-title: SDK conformance corpus
-parent: Embedding & SPI
-nav_order: 4
----
-
 # SDK conformance corpus
 
 Every Rift release publishes **`sdk-conformance-<version>.tar.gz`** as a GitHub release asset. It is
@@ -66,7 +59,7 @@ For each fixture, an SDK conformance suite must:
    `injection` fixture without `--allowInjection`), never ad hoc.
 
 The full contract ships in the tarball's `README.md`. See also the
-[`_verify` annotations]({{ site.baseurl }}/configuration/cli/) documented for `rift-verify`.
+[`_verify` annotations](../configuration/cli.md) documented for `rift-verify`.
 
 ## Replaying against an externally-supplied server
 

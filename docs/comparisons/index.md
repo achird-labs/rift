@@ -1,24 +1,17 @@
----
-layout: default
-title: Comparisons
-nav_order: 5.7
-has_children: true
----
-
 # Comparisons
 
 How Rift relates to the other mock servers you might be choosing between.
 
-- [Rift vs WireMock]({{ site.baseurl }}/comparisons/wiremock/) — the JVM incumbent, and the
+- [Rift vs WireMock](wiremock.md) — the JVM incumbent, and the
   comparison most teams evaluating Rift actually care about.
-- [Rift vs Microcks]({{ site.baseurl }}/comparisons/microcks/) — the Apache-2.0, CNCF-incubating
+- [Rift vs Microcks](microcks.md) — the Apache-2.0, CNCF-incubating
   alternative. Spec-driven rather than stub-driven, and it does contract testing and seven protocols
   Rift does not, so the overlap is narrower than the throughput table suggests.
 
 For Mountebank, the relationship is different in kind: Rift implements Mountebank's admin API
 and loads its `imposters.json` unchanged, so the relevant page is
-[Mountebank Compatibility]({{ site.baseurl }}/mountebank/) rather than a comparison, plus the
-[migration guide]({{ site.baseurl }}/getting-started/migration/).
+[Mountebank Compatibility](../mountebank/index.md) rather than a comparison, plus the
+[migration guide](../getting-started/migration.md).
 
 ---
 
@@ -33,7 +26,7 @@ Three rules, so you can calibrate how much to trust the numbers:
    its own documentation says to, publish what we changed, and publish the untuned column
    beside it so you can see whether the tuning mattered.
 3. **We publish the scenarios where the comparison is not like-for-like**, and say why. See
-   [the two caveats we do not bury]({{ site.baseurl }}/performance/#two-caveats-we-will-not-bury).
+   [the two caveats we do not bury](../performance/index.md#two-caveats-we-will-not-bury).
 
 The full harness lives in [`tests/benchmark`](https://github.com/achird-labs/rift/tree/master/tests/benchmark)
 and runs both engines, not just ours. If you think a comparison is unfair, the fastest way to

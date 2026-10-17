@@ -1,9 +1,5 @@
 ---
-layout: default
 title: Go
-parent: Language SDKs
-nav_order: 4
-permalink: /sdk/go/
 ---
 
 # rift-go

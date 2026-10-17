@@ -1,9 +1,5 @@
 ---
-layout: default
 title: Scala 3
-parent: Language SDKs
-nav_order: 2
-permalink: /sdk/scala/
 ---
 
 # rift-scala

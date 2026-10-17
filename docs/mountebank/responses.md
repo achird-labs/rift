@@ -1,10 +1,3 @@
----
-layout: default
-title: Responses
-parent: Mountebank Compatibility
-nav_order: 3
----
-
 # Responses
 
 Responses define what an imposter returns when a stub's predicates match.
@@ -69,7 +62,7 @@ Break the connection instead of answering, as Mountebank's `fault` response does
 
 `CONNECTION_RESET_BY_PEER` and `RANDOM_DATA_THEN_CLOSE` are Mountebank's names; Rift also accepts
 `EMPTY_RESPONSE`, `MALFORMED_RESPONSE_CHUNK` and the short aliases listed in
-[Fault Injection]({{ site.baseurl }}/features/fault-injection/). An unrecognised name is served as a
+[Fault Injection](../features/fault-injection.md). An unrecognised name is served as a
 `500` with an `Unknown fault` body.
 
 ### Where behaviors and `_rift` apply
@@ -77,7 +70,7 @@ Break the connection instead of answering, as Mountebank's `fault` response does
 `_behaviors`/`behaviors` run on an `is` response (and the flat form below, and a response that is
 only a behaviors block, served as an empty `is`), on an `inject` response and on a `proxy`
 response; `repeat` applies to every response type — see
-[Behaviors]({{ site.baseurl }}/mountebank/behaviors/). A response-level `_rift` block is read on an
+[Behaviors](behaviors.md). A response-level `_rift` block is read on an
 `is` response only. On a `proxy`, `inject` or `fault` response it is kept and returned by
 `GET /imposters/:port`, but not acted on, and is reported as `config_key_ignored` in
 `_rift.warnings` and by `rift-lint` `W017`.
@@ -212,7 +205,7 @@ substitutes them into the response **body** and **header values** before any beh
 
 `${request.pathParams.<name>}` only resolves when the stub declares a top-level `routePattern`
 (e.g. `/users/:id`) whose shape matches the request path — see
-[Route patterns]({{ site.baseurl }}/configuration/native/#route-patterns-routepattern).
+[Route patterns](../configuration/native.md#route-patterns-routepattern).
 
 ```json
 {
@@ -234,7 +227,7 @@ substituted text*, and logs a `rift::template` warning naming what it removed. T
 carries `port`, `stub` (the stub's index) and `stub_id` alongside `removed`, so on a server
 running many imposters you can grep straight back to the stub that produced it. A horizontal tab and
 any non-ASCII character are legal in a header value and are kept byte-exact. The same repair covers
-every other way substituted text reaches a header: the `{% raw %}{{ }}{% endraw %}` templating grammar and the text the
+every other way substituted text reaches a header: the `{{ }}` templating grammar and the text the
 `copy` and `lookup` behaviors splice in.
 
 The repair is deliberately narrow: it covers only the substituted value, never the literal text you
@@ -243,17 +236,17 @@ authoring error rather than client data, so it still fails that response with a 
 the same header also contains a token. Response **bodies** are never filtered this way.
 
 These `${request.…}` tokens are distinct from the free-form `${name}` placeholders that the
-[`copy` and `lookup` behaviors]({{ site.baseurl }}/mountebank/behaviors/#copy) fill in — the two do
+[`copy` and `lookup` behaviors](behaviors.md#copy) fill in — the two do
 not collide, because only tokens beginning with `request.` are treated as request interpolation. On
 the proxy path, only the body is interpolated (not headers).
 
 What a token substitutes is served as the client sent it and is never read as a `${request.…}`,
 `copy` or `lookup` token again. With
-`_rift.templated`, a `{% raw %}{{request.query.q}}{% endraw %}` that renders `${request.headers.authorization}`
+`_rift.templated`, a `{{request.query.q}}` that renders `${request.headers.authorization}`
 stays that literal text: it does not reflect a request header the client named. Likewise a `copy` or
 `lookup` never expands a token that arrived inside interpolated text, even when your own text
 supplies its closing character. See
-[Substituted text is never re-scanned]({{ site.baseurl }}/mountebank/behaviors/#substituted-text-is-never-re-scanned).
+[Substituted text is never re-scanned](behaviors.md#substituted-text-is-never-re-scanned).
 
 ---
 
@@ -262,7 +255,7 @@ supplies its closing character. See
 When a stub has multiple responses, they cycle through in round-robin order. Each request returns the next response in the sequence, wrapping back to the first after reaching the end.
 
 A `proxyAlways` recording appended to a stub mid-cycle joins the end of its current cycle; see
-[Where recordings go]({{ site.baseurl }}/mountebank/proxy/#where-recordings-go).
+[Where recordings go](proxy.md#where-recordings-go).
 
 ### Basic Cycling
 
@@ -280,6 +273,7 @@ A `proxyAlways` recording appended to a stub mid-cycle joins the end of its curr
 ```
 
 Requests return responses in order:
+
 - Request 1 → "Response 1"
 - Request 2 → "Response 2"
 - Request 3 → "Response 3"
@@ -350,13 +344,14 @@ Use the `repeat` behavior to return the same response multiple times before adva
 ```
 
 This returns "Success" three times, then "Error" once, then cycles:
+
 - Requests 1-3 → "Success"
 - Request 4 → "Error"
 - Requests 5-7 → "Success"
 - Request 8 → "Error"
 - ...
 
-See [Behaviors]({{ site.baseurl }}/mountebank/behaviors/#repeat) for more on the repeat behavior.
+See [Behaviors](behaviors.md#repeat) for more on the repeat behavior.
 
 ### Cycling State
 
@@ -391,8 +386,8 @@ First request returns cached data, second proxies to real API, then cycles. (Wit
 
 ## Rift Extensions: Controlled State Management
 
-{: .rift-only }
-> **Rift-Specific Feature**: The following features use Rift's `_rift.script` and `flowState` extensions, which are not available in Mountebank.
+!!! info "Rift extension"
+    **Rift-Specific Feature**: The following features use Rift's `_rift.script` and `flowState` extensions, which are not available in Mountebank.
 
 Standard response cycling is **global** - all users share the same position in the cycle. This can cause unpredictable behavior in multi-user scenarios. Rift provides **flow state** and **scripting** for controlled, isolated state management.
 
@@ -433,13 +428,14 @@ With standard cycling, if User A triggers the first failure, User B gets the sec
 ```
 
 Now each user experiences their own retry sequence:
+
 - User A: Fail → Fail → Success
 - User B: Fail → Fail → Success (independent of User A)
 
 ### Quota Exhaustion with Reset
 
-{: .rift-only }
-> **Rift-Only**: Track quota consumption over time with manual or automatic reset.
+!!! info "Rift extension"
+    **Rift-Only**: Track quota consumption over time with manual or automatic reset.
 
 ```json
 {
@@ -486,12 +482,12 @@ Now each user experiences their own retry sequence:
 | State survives restart | ❌ | ❌ (in-memory flow store; shared state is a rift-cluster deployment) |
 | Per-session behavior | ❌ | ✅ |
 
-See [Scripting]({{ site.baseurl }}/features/scripting/) and [Fault Injection]({{ site.baseurl }}/features/fault-injection/) for more examples.
+See [Scripting](../features/scripting.md) and [Fault Injection](../features/fault-injection.md) for more examples.
 
 ### Conditional GET
 
-{: .rift-only }
-> **Rift-Only**: `_rift.conditional` on an `is` response.
+!!! info "Rift extension"
+    **Rift-Only**: `_rift.conditional` on an `is` response.
 
 A client that polls with validators (a CDN-hosted datafile, a feature-flag SDK) expects `ETag` /
 `Last-Modified` on the response and a `304 Not Modified` when it already holds the current copy.
@@ -516,32 +512,32 @@ A client that polls with validators (a CDN-hosted datafile, a feature-flag SDK) 
   HTTP-date in the `Sat, 03 Oct 2026 12:00:00 GMT` form, served verbatim. Any other string is
   refused when the config is loaded.
 
-  `"load"` stamps are whole seconds, and a change made through the admin API or a reload in the
-  same second as the previous one is stamped one second after it — including across a reload that
-  restarts the imposter and a delete and re-create on the same port (not across a process restart). A client that revalidates with
-  `If-Modified-Since` alone (the Optimizely SDKs do) therefore always sees a change. The cost is
-  that rapid changes can stamp `Last-Modified` up to a second per change ahead of `Date`.
+    `"load"` stamps are whole seconds, and a change made through the admin API or a reload in the
+    same second as the previous one is stamped one second after it — including across a reload that
+    restarts the imposter and a delete and re-create on the same port (not across a process restart). A client that revalidates with
+    `If-Modified-Since` alone (the Optimizely SDKs do) therefore always sees a change. The cost is
+    that rapid changes can stamp `Last-Modified` up to a second per change ahead of `Date`.
 
-  A stub is also re-stamped when it may now answer requests another stub answered: when a stub
-  ahead of it is deleted or moved, or has its predicates (or `space` / scenario gate) changed —
-  through the admin API, `PUT /imposters/{port}/stubs` or a reload. The first stub that matches
-  wins, so otherwise a client holding the removed stub's newer stamp would be told `304` for a
-  different body. Stubs ahead of the change keep their stamps; deleting the last stub, or
-  changing only a stub's responses, re-stamps nothing else.
+    A stub is also re-stamped when it may now answer requests another stub answered: when a stub
+    ahead of it is deleted or moved, or has its predicates (or `space` / scenario gate) changed —
+    through the admin API, `PUT /imposters/{port}/stubs` or a reload. The first stub that matches
+    wins, so otherwise a client holding the removed stub's newer stamp would be told `304` for a
+    different body. Stubs ahead of the change keep their stamps; deleting the last stub, or
+    changing only a stub's responses, re-stamps nothing else.
 
-  A scenario transition changes which stub answers with no stub changing, so it counts too: the
-  served `Last-Modified` is the later of the stub's own stamp and the last transition of any
-  scenario gating that stub or a stub ahead of it — through a `newScenarioState`, the scenarios
-  admin API, a reset, a space teardown, or the raw `…/flow-state` routes (a scenario's state is
-  the key named after it, so setting or deleting that key, or clearing the flow, is a transition
-  too). Writing the state a scenario already has is not a transition, and only scenarios gating a
-  stub at or ahead of a `_rift.conditional` stub are tracked. A transition in one flow moves the
-  stamp for every flow of that scenario (one extra `200` for the others), and it is per process: a
-  transition made by another node does not move this node's stamp. A response that writes a
-  scenario's key counts too: `_rift.stateOps` and a script's `ctx.state`, including a TTL of zero,
-  which deletes at once (#1388). The one change it cannot see is a positive TTL running out on a
-  scenario's key, which returns the scenario to `Started` with no write; revalidate with
-  `If-None-Match` (the `ETag` follows the body) if your scenarios expire that way.
+    A scenario transition changes which stub answers with no stub changing, so it counts too: the
+    served `Last-Modified` is the later of the stub's own stamp and the last transition of any
+    scenario gating that stub or a stub ahead of it — through a `newScenarioState`, the scenarios
+    admin API, a reset, a space teardown, or the raw `…/flow-state` routes (a scenario's state is
+    the key named after it, so setting or deleting that key, or clearing the flow, is a transition
+    too). Writing the state a scenario already has is not a transition, and only scenarios gating a
+    stub at or ahead of a `_rift.conditional` stub are tracked. A transition in one flow moves the
+    stamp for every flow of that scenario (one extra `200` for the others), and it is per process: a
+    transition made by another node does not move this node's stamp. A response that writes a
+    scenario's key counts too: `_rift.stateOps` and a script's `ctx.state`, including a TTL of zero,
+    which deletes at once (#1388). The one change it cannot see is a positive TTL running out on a
+    scenario's key, which returns the scenario to `Started` with no write; revalidate with
+    `If-None-Match` (the `ETag` follows the body) if your scenarios expire that way.
 
 On a script-only response, or behind a non-GET method predicate, it never fires; `rift-lint` W019 says so.
 
@@ -579,7 +575,7 @@ Forward requests to real servers and optionally record for later playback.
 ### Proxy Modes
 
 `mode` defaults to `proxyOnce`, as in Mountebank; an unknown value is refused. See
-[Proxy Mode]({{ site.baseurl }}/mountebank/proxy/#proxy-modes) for what each mode records.
+[Proxy Mode](proxy.md#proxy-modes) for what each mode records.
 
 **proxyAlways** - Always forward, record each response:
 ```json
@@ -635,7 +631,7 @@ Control how recorded stubs are created:
 `addDecorateBehavior` is copied onto the stubs a `proxyOnce` or `proxyAlways` recording saves, and
 `addWaitBehavior: true` gives each saved response a `wait` equal to the upstream's observed latency,
 so both take effect when the recorded stubs are replayed. See
-[Proxy Mode]({{ site.baseurl }}/mountebank/proxy/).
+[Proxy Mode](proxy.md).
 
 ```json
 {
@@ -731,8 +727,8 @@ function(request, state, logger) {
 
 EJS tags in a config file are expanded once, when the file loads, and never see a request. To put
 request values into a response, use the `${request.…}` tokens in
-[Request Interpolation](#request-interpolation), or the opt-in `_rift.templated` `{% raw %}{{ }}{% endraw %}` grammar and
-the date tokens described in [Response Templates]({{ site.baseurl }}/features/date-templates/).
+[Request Interpolation](#request-interpolation), or the opt-in `_rift.templated` `{{ }}` grammar and
+the date tokens described in [Response Templates](../features/date-templates.md).
 
 ```json
 {
@@ -851,6 +847,7 @@ A complete example using multiple alternative formats:
 ```
 
 This example shows:
+
 - `behaviors` without underscore prefix
 - `behaviors` as an array
 - `statusCode` as a string

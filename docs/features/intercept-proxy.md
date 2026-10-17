@@ -1,8 +1,5 @@
 ---
-layout: default
 title: Intercept Proxy (TLS-MITM)
-parent: Features
-nav_order: 16
 ---
 
 # Intercept / Redirect Proxy Mode
@@ -24,7 +21,7 @@ CA/key/truststore files) with a couple of Rift admin calls and **no committed cr
 > trust Rift. If instead *Rift* is failing to reach a real origin with `invalid peer certificate:
 > UnknownIssuer` — typically a corporate API behind a private CA — that is outbound trust, and you
 > want `--upstream-ca-file`. See
-> [TLS/HTTPS → Which certificate are you configuring?]({{ site.baseurl }}/features/tls/#which-certificate-are-you-configuring).
+> [TLS/HTTPS → Which certificate are you configuring?](tls.md#which-certificate-are-you-configuring).
 
 ---
 
@@ -36,7 +33,7 @@ CA/key/truststore files) with a couple of Rift admin calls and **no committed cr
    **TLS-terminates** the tunnel, minting a per-host leaf certificate on the fly, signed by the
    **intercept CA** (generated when the listener starts, unless you [supply one](#the-intercept-ca)).
 3. The decrypted request is matched against **intercept rules** using the same
-   [predicate engine]({{ site.baseurl }}/features/) as imposters.
+   [predicate engine](index.md) as imposters.
 4. A matching rule either **serves an inline stub** or **forwards** the request to one of your
    imposters on `127.0.0.1:<port>`.
 
@@ -124,7 +121,7 @@ Bake the certificate (or the exported truststore) into the SUT image, and give r
 files, or as `RIFT_INTERCEPT_CA_CERT_PEM`/`RIFT_INTERCEPT_CA_KEY_PEM` from a secret store. Merge the
 public roots unless the SUT talks to nothing real: a JVM pointed at a store holding the intercept CA
 alone loses every public root. `--merge-system-cas` takes a **PEM** bundle; the JDK's own `cacerts`
-is a keystore, not PEM. See [`rift intercept-ca`]({{ site.baseurl }}/configuration/cli/#intercept-ca).
+is a keystore, not PEM. See [`rift intercept-ca`](../configuration/cli.md#intercept-ca).
 
 To bring your own CA, create a proper CA certificate — `CA:TRUE`, allowed to sign certificates:
 
@@ -313,7 +310,7 @@ plus `rules[]` using the
   the block still describes the running listener (`host`, `port`, `auth`, CA source). A change to
   any of those, a listener stopped with `DELETE /intercept`, or one started by the flags or at
   runtime leaves the rules alone and says why in the response's `warnings`; restart to apply a
-  listener change. See [Hot reload]({{ site.baseurl }}/features/hot-reload/#reload-response).
+  listener change. See [Hot reload](hot-reload.md#reload-response).
 - **Injection is gated.** A rule whose predicates use `inject` needs `--allowInjection`, exactly as a
   config-file imposter's scripting surface does — the file crossed the same trust boundary.
 
@@ -369,6 +366,7 @@ DELETE /intercept   → 204 always (idempotent); stops the listener and drops it
   { "interceptPort": N, "interceptUrl": "...", "caCertPem": "-----BEGIN CERTIFICATE-----…",
     "caKeyPem": "-----BEGIN PRIVATE KEY-----…" }
   ```
+
   The key is returned **once**, in this response only — `GET /intercept` never carries it. Combining
   `returnCaKey` with any supplied `caCert*`/`caKey*` is a `400` (it would otherwise let a caller echo
   back an arbitrary keypair from the engine's filesystem). Absent `returnCaKey`, the response carries
@@ -396,7 +394,7 @@ curl -sX DELETE http://localhost:2525/intercept
 ### Embedding over the C-ABI (non-Rust)
 
 > A non-Rust host (JVM, Node, Go, Python, …) can start and drive the intercept listener with **no
-> loopback HTTP and no Rust code** — see [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#intercept-proxy-over-ffi).
+> loopback HTTP and no Rust code** — see [FFI (C-ABI)](../embedding/ffi.md#intercept-proxy-over-ffi).
 > `rift_start_intercept` starts the listener, `rift_stop_intercept` stops it, and the
 > `rift_intercept_*` control-plane functions — `rift_intercept_add_rules`,
 > `rift_intercept_list_rules`, `rift_intercept_replace_rules`, `rift_intercept_clear_rules`,
@@ -415,7 +413,7 @@ A rule matches an intercepted request by **host** (exact, case-insensitive; omit
 
 Body predicates see a request body that is not valid UTF-8 (protobuf, gzip, an image upload) as
 its **standard base64 encoding** (with padding) — the same convention as
-[binary recorded requests]({{ site.baseurl }}/mountebank/imposters/) and binary responses. Write
+[binary recorded requests](../mountebank/imposters.md) and binary responses. Write
 the predicate against the base64 string, e.g.
 `{ "equals": { "body": "H4sIAAAAAAAA/w==" } }`. A valid-UTF-8 (text or JSON) body is matched
 as-is, unchanged. Forwarding always relays the raw bytes regardless of classification.
@@ -693,7 +691,7 @@ that connection silently broken by being routed through the proxy.
   no frame grammar and no frame capture.
 - **The origin connection uses the same outbound TLS trust as everything else** — on the standalone
   binary, the process-wide policy, so `--upstream-ca-file` covers an origin behind a private CA
-  (see [TLS/HTTPS → Trusting a private CA]({{ site.baseurl }}/features/tls/#trusting-a-private-ca)).
+  (see [TLS/HTTPS → Trusting a private CA](tls.md#trusting-a-private-ca)).
   It offers `http/1.1` only, since the upgrade is an HTTP/1.1 mechanism. If the origin declines the
   upgrade, its response (status, headers and body, minus hop-by-hop headers) is passed back to the
   client. This is the only outbound connection the intercept listener makes; if it fails, the

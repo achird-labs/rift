@@ -19,6 +19,10 @@
 #   VERSION=vX.Y.Z                                  shell variable in a download snippet
 #   rift-fetch@latest -version vX.Y.Z               the rift-go native-library fetch
 #
+# Plus one fixed location: the site footer's "Docs current as of vX.Y.Z" in mkdocs.yml's
+# `copyright`. Every release-prep PR bumped it by hand alongside `--set`, and it once sat four
+# releases behind, so `--set`/`--fix` now rewrite it and the check fails when it disagrees.
+#
 # DELIBERATELY NOT COVERED — these are versions that must NOT track the newest release:
 #
 #   docs/embedding/ffi.md   "As of v0.11.3 (#429)"  historical statements about when behaviour
@@ -26,8 +30,8 @@
 #   docs/sdk/index.md       SDK versions + engine   each SDK's own floor, maintained by that SDK's
 #                           floor columns           bump automation; a floor is what it is TESTED
 #                                                   against, not the newest engine
-#   docs/_config.yml        "Docs current as of"    a human-reconciliation claim (see sync.yml)
-#   docs/_data/sync.yml     release:/commit:/date:  ditto — automation must never assert a review
+#   docs/_data/sync.yml     release:/commit:/date:  a human-reconciliation claim — automation
+#                                                   must never assert a review
 #
 # The gate is HERMETIC: it compares the snippets against the declared value in docs/_data/rift.yml
 # and never calls the GitHub API, so it cannot flake on a network blip or fork-PR token. Keeping
@@ -47,6 +51,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Overridable so the self-test can point the checks at a scratch copy of the tree.
 ROOT="${ROOT:-$repo_root}"
 VERSION_FILE="${VERSION_FILE:-$ROOT/docs/_data/rift.yml}"
+FOOTER_FILE="${FOOTER_FILE:-$ROOT/mkdocs.yml}"
+
+# The footer's version: `Docs current as of <a href="...">vX.Y.Z</a>` in mkdocs.yml's copyright.
+FOOTER_RE='(Docs current as of <a [^>]*>)v[0-9]+\.[0-9]+\.[0-9]+'
 
 log()  { echo "[docs-version] $*"; }
 fail() { echo "[FAIL] $*" >&2; }
@@ -74,8 +82,8 @@ write_declared() {
 # --- snippet discovery ------------------------------------------------------
 
 # Files that may carry install snippets. README.md is included because it is the first thing a
-# visitor copy-pastes and is NOT part of the Jekyll site, so it cannot interpolate a data value —
-# the literal has to be kept in step by this script.
+# visitor copy-pastes and is NOT part of the docs site; neither can interpolate a data value —
+# every literal has to be kept in step by this script.
 snippet_files() {
   { echo "$ROOT/README.md"
     find "$ROOT/docs" -name '*.md' -type f
@@ -111,15 +119,38 @@ fix_files() {
       rm -f "$tmp"
     fi
   done < <(snippet_files)
+  if [ -f "$FOOTER_FILE" ]; then
+    tmp="$(mktemp)"
+    sed -E "s#${FOOTER_RE}#\\1${want}#" "$FOOTER_FILE" >"$tmp"
+    if ! cmp -s "$FOOTER_FILE" "$tmp"; then
+      mv "$tmp" "$FOOTER_FILE"
+      log "updated ${FOOTER_FILE#"$ROOT"/} footer"
+      n=$((n + 1))
+    else
+      rm -f "$tmp"
+    fi
+  fi
   log "$n file(s) rewritten to $want"
+}
+
+# Emit a line when the footer is missing its version or names a different one.
+footer_drift() {
+  local want="$1" found
+  [ -f "$FOOTER_FILE" ] || return 0
+  found="$(grep -oE "$FOOTER_RE" "$FOOTER_FILE" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+  if [ -z "$found" ]; then
+    printf '%s: no "Docs current as of <a ...>vX.Y.Z</a>" footer\n' "${FOOTER_FILE#"$ROOT"/}"
+  elif [ "$found" != "$want" ]; then
+    printf '%s: footer says "Docs current as of %s"\n' "${FOOTER_FILE#"$ROOT"/}" "$found"
+  fi
 }
 
 check() {
   local want out
   want="$(read_declared)"
-  out="$(drifted "$want" || true)"
+  out="$( { drifted "$want" || true; footer_drift "$want"; } )"
   if [ -n "$out" ]; then
-    fail "install snippet(s) disagree with docs/_data/rift.yml (latest_release: $want):"
+    fail "install snippet(s) or site footer disagree with docs/_data/rift.yml (latest_release: $want):"
     echo "$out" | sed 's/^/  /' >&2
     echo >&2
     echo "Fix with: scripts/verify-docs-version.sh --fix" >&2
@@ -140,12 +171,19 @@ self_test() {
   mkdir -p "$tmp/docs/_data"
   cp "$VERSION_FILE" "$tmp/docs/_data/rift.yml"
   printf 'VERSION=v9.9.9\n' >"$tmp/README.md"
+  printf 'copyright: Docs current as of <a href="x">v9.9.9</a>.\n' >"$tmp/mkdocs.yml"
 
-  # 1. planted drift must FAIL
+  # 1. planted drift must FAIL — in a snippet, and in the footer alone
   if ROOT="$tmp" VERSION_FILE="$tmp/docs/_data/rift.yml" "$SELF" >/dev/null 2>&1; then
     echo "verify-docs-version --self-test: FAILED — checker passed a planted drift." >&2
     return 1
   fi
+  printf 'VERSION=%s\n' "$(read_declared)" >"$tmp/README.md"
+  if ROOT="$tmp" VERSION_FILE="$tmp/docs/_data/rift.yml" "$SELF" >/dev/null 2>&1; then
+    echo "verify-docs-version --self-test: FAILED — checker passed a stale site footer." >&2
+    return 1
+  fi
+  printf 'VERSION=v9.9.9\n' >"$tmp/README.md"
 
   # 2. --fix must repair it, and the repaired tree must PASS
   ROOT="$tmp" VERSION_FILE="$tmp/docs/_data/rift.yml" "$SELF" --fix >/dev/null 2>&1

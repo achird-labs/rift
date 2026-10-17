@@ -1,9 +1,5 @@
 ---
-layout: default
 title: Node / TypeScript
-parent: Language SDKs
-nav_order: 3
-permalink: /sdk/node/
 ---
 
 # rift-node
@@ -56,7 +52,7 @@ await server.close();
 
 Raw Mountebank imposter JSON round-trips through `fromJson()` and can be mixed with DSL-built
 imposters on the same engine, so the typed DSL can be adopted one stub at a time. See also the
-[Node.js integration guide]({{ site.baseurl }}/getting-started/nodejs/) on this site.
+[Node.js integration guide](../getting-started/nodejs.md) on this site.
 
 ## Further reading
 

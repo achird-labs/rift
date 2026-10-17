@@ -1,14 +1,11 @@
 ---
-layout: default
 title: ECS / Fargate
-parent: Deployment
-nav_order: 3
 ---
 
 # ECS / Fargate Deployment
 
 Run Rift beside your application in one ECS task, so the application's hard-coded HTTPS calls are
-answered by the [intercept listener]({{ site.baseurl }}/features/intercept-proxy/).
+answered by the [intercept listener](../features/intercept-proxy.md).
 
 > **A reference, not a tested path.** The task definition below is a starting point assembled from
 > the container and intercept behaviour documented elsewhere. Nothing in this repository runs it on
@@ -22,7 +19,7 @@ answered by the [intercept listener]({{ site.baseurl }}/features/intercept-proxy
 
 With `awsvpc` networking (mandatory on Fargate) every container in a task shares one network
 namespace, so the app reaches Rift on `localhost` -- the same arrangement as the
-[Kubernetes sidecar]({{ site.baseurl }}/deployment/kubernetes/#intercept-listener-as-a-sidecar).
+[Kubernetes sidecar](kubernetes.md#intercept-listener-as-a-sidecar).
 
 - `rift` runs the intercept listener, with its rules declared in a config file.
 - `app` sets `HTTPS_PROXY=http://127.0.0.1:8080` and trusts the intercept CA.
@@ -83,7 +80,7 @@ namespace, so the app reaches Rift on `localhost` -- the same arrangement as the
 
 `dependsOn: HEALTHY` on the built-in `rift healthcheck` means the app starts only once the listener
 is up with its rules installed. The `intercept` block in `mock.json` is the one shown under
-[Docker]({{ site.baseurl }}/deployment/docker/#intercepting-https-from-another-container); give it
+[Docker](docker.md#intercepting-https-from-another-container); give it
 `"host": "127.0.0.1"` here, since only the task's own app connects, `"port": 8080`,
 `"caCertPemEnv": "INTERCEPT_CA_CERT"` and `"caKeyPemEnv": "INTERCEPT_CA_KEY"`. A multi-line PEM
 survives intact: Secrets Manager stores it verbatim and Rift reads the variable as-is. No shell is
@@ -114,6 +111,7 @@ Two ways:
    FROM zainalpour/rift-proxy:latest
    COPY mock.json /config/mock.json
    ```
+
 2. **Fetch it from S3 with an init container.** Add a non-essential-after-exit container that copies
    the file to a shared volume, and make `rift` depend on it with `"condition": "SUCCESS"`:
    ```json
@@ -121,6 +119,7 @@ Two ways:
      "command": ["s3", "cp", "s3://my-bucket/mock.json", "/config/mock.json"],
      "mountPoints": [{ "sourceVolume": "config", "containerPath": "/config" }] }
    ```
+
    with `volumes: [{ "name": "config" }]` on the task and the same `mountPoints` entry on `rift`,
    plus `"dependsOn": [{ "containerName": "fetch-config", "condition": "SUCCESS" }]`. The task role
    needs `s3:GetObject`. A running task can then pick up an edited file with `POST /admin/reload` on
@@ -132,7 +131,7 @@ Two ways:
 
 Generate the CA once, outside the task, and store the two halves in Secrets Manager. In the CI job
 that builds the **app** image, add the certificate to the image's truststore. Rift's offline
-[`intercept-ca`]({{ site.baseurl }}/configuration/cli/#intercept-ca) does both steps without starting
+[`intercept-ca`](../configuration/cli.md#intercept-ca) does both steps without starting
 a server:
 
 ```bash
@@ -149,7 +148,7 @@ RIFT_TRUSTSTORE_PASSWORD=changeit \
 Then `COPY ca/ca-cert.pem /certs/ca.pem` (or `truststore.jks`) into the app image and point the
 runtime at it. Which variable adds to the default roots and which replaces them, and the JVM flags,
 are under
-[Trusting the CA from the SUT]({{ site.baseurl }}/features/intercept-proxy/#trusting-the-ca-from-the-sut).
+[Trusting the CA from the SUT](../features/intercept-proxy.md#trusting-the-ca-from-the-sut).
 Keep `ca-key.pem` out of the app image -- only Rift needs it.
 
 **Alternative: an init container.** Rift serves the CA it is actually using at
@@ -163,14 +162,14 @@ shell in either image, so it works with a distroless Rift image and a distroless
 
 ECS sends `SIGTERM` and, after `stopTimeout`, `SIGKILL`. Rift handles `SIGTERM` itself, as PID 1,
 and exits `0` within about three seconds, so a short `stopTimeout` is enough and no init process is
-needed -- see [Stopping the container]({{ site.baseurl }}/deployment/docker/#stopping-the-container).
+needed -- see [Stopping the container](docker.md#stopping-the-container).
 
 ## Notes
 
 - **`forward` rules.** A `forward` action defaults to `127.0.0.1:{port}`, the Rift container's own
   loopback. An imposter in the same task is reachable there; one in another task or service needs
   `"host"` (and `"scheme"`): see
-  [Forward to one of your imposters]({{ site.baseurl }}/features/intercept-proxy/#forward-to-one-of-your-imposters).
+  [Forward to one of your imposters](../features/intercept-proxy.md#forward-to-one-of-your-imposters).
 - **One listener per task.** Each task has its own listener and rules, as with Kubernetes replicas.
 - **Keep the listener private.** Do not map port 8080 in a load balancer or open it in the security
   group; an unauthenticated intercept proxy is open to anything that can reach it. To expose it

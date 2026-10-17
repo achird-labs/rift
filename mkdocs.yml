@@ -1,0 +1,158 @@
+site_name: Rift
+site_description: High-performance Mountebank-compatible HTTP/HTTPS mock server written in Rust
+site_url: https://achird-labs.github.io/rift/
+repo_url: https://github.com/achird-labs/rift
+repo_name: achird-labs/rift
+edit_uri: edit/master/docs/
+# The "Docs current as of" version is bumped with every release: scripts/verify-docs-version.sh
+# --set rewrites it alongside the install snippets, and its check fails when the two disagree.
+copyright: >-
+  Copyright &copy; 2026 Rift Contributors. Distributed under the
+  <a href="https://github.com/achird-labs/rift/blob/master/LICENSE">Apache License 2.0</a>.
+  Docs current as of <a href="https://github.com/achird-labs/rift/blob/master/CHANGELOG.md">v0.23.0</a>.
+strict: true
+
+# Every page URL is the directory form Jekyll's `permalink: pretty` served (`/features/spaces/`),
+# which use_directory_urls (the default) reproduces. External SDK docs link to these URLs.
+use_directory_urls: true
+
+# Not part of the site: the demo compose files and fixtures (read by CI and linked on GitHub), and
+# the data files release.yml and scripts/verify-docs-version.sh read. MkDocs always excludes
+# `/templates/` (it assumes theme overrides live there); ours is a page, so it is re-included.
+exclude_docs: |
+  !/templates/
+  /_data/
+  /demo/
+
+# Strict mode fails on every warning, so these make a dead page link or anchor fail the build.
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+theme:
+  name: material
+  logo: assets/logo-mark.png
+  favicon: assets/favicon.png
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - content.code.copy
+    - content.action.edit
+    - navigation.footer
+    - navigation.indexes
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      # GitHub-style ids (lowercase, punctuation dropped, every space a dash), which is what the
+      # Jekyll site generated. MkDocs' default collapses `--`, which would break existing anchors.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - getting-started/index.md
+      - Quick Start: getting-started/quickstart.md
+      - Migration from Mountebank: getting-started/migration.md
+      - Node.js Integration: getting-started/nodejs.md
+  - Concepts:
+      - concepts/index.md
+      - Core Building Blocks: concepts/building-blocks.md
+      - The Rift Model: concepts/rift-model.md
+  - Configuration:
+      - configuration/index.md
+      - Mountebank Format: configuration/mountebank.md
+      - "Rift Extensions (_rift namespace)": configuration/native.md
+      - CLI Reference: configuration/cli.md
+  - Features:
+      - features/index.md
+      - Fault Injection: features/fault-injection.md
+      - Scripting: features/scripting.md
+      - TLS/HTTPS: features/tls.md
+      - Metrics: features/metrics.md
+      - Stub Analysis: features/stub-analysis.md
+      - Debug Mode: features/debug-mode.md
+      - Configuration Linting: features/linting.md
+      - "Terminal UI (TUI)": features/tui.md
+      - "Intercept Proxy (TLS-MITM)": features/intercept-proxy.md
+      - "Scenarios (FSM)": features/scenarios.md
+      - "Correlated Isolation (Spaces)": features/spaces.md
+      - Flow State: features/flow-state.md
+      - Response Templates: features/date-templates.md
+      - Stub-by-ID: features/stub-by-id.md
+      - Single-Port Gateway: features/gateway.md
+      - Hot Reload: features/hot-reload.md
+      - Front Door: features/front-door.md
+  - Mountebank Compatibility:
+      - mountebank/index.md
+      - Imposters: mountebank/imposters.md
+      - Predicates: mountebank/predicates.md
+      - Responses: mountebank/responses.md
+      - Behaviors: mountebank/behaviors.md
+      - Proxy Mode: mountebank/proxy.md
+      - Differences from Mountebank: mountebank/differences.md
+  - Comparisons:
+      - comparisons/index.md
+      - Rift vs WireMock: comparisons/wiremock.md
+      - Rift vs Microcks: comparisons/microcks.md
+  - Deployment:
+      - deployment/index.md
+      - Docker: deployment/docker.md
+      - Kubernetes: deployment/kubernetes.md
+      - ECS / Fargate: deployment/ecs-fargate.md
+  - API Reference: api/index.md
+  - Performance: performance/index.md
+  - Examples: examples/index.md
+  - Templates: templates/index.md
+  - "Embedding & SPI":
+      - embedding/index.md
+      - Embeddable Server: embedding/server.md
+      - "Extension Points (SPI)": embedding/spi.md
+      - "FFI (C-ABI)": embedding/ffi.md
+      - SDK conformance corpus: embedding/sdk-conformance.md
+  - Language SDKs:
+      - sdk/index.md
+      - Java / JVM: sdk/java.md
+      - Scala 3: sdk/scala.md
+      - Node / TypeScript: sdk/node.md
+      - Go: sdk/go.md
+  - Changelog: changelog.md

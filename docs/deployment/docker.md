@@ -1,8 +1,5 @@
 ---
-layout: default
 title: Docker
-parent: Deployment
-nav_order: 1
 ---
 
 # Docker Deployment
@@ -60,26 +57,27 @@ Two consequences worth knowing before you switch:
 - **No shell.** There is no `/bin/sh`, so `docker exec ... sh`, string-form `command:` overrides, and
   shell-form healthchecks do not work. Use exec form (`["rift", "healthcheck"]`) and pass flags
   directly. The health probe is built into the binary precisely for this reason — see
-  [`rift healthcheck`]({{ site.baseurl }}/configuration/cli/).
+  [`rift healthcheck`](../configuration/cli.md).
 
-  The images' built-in `HEALTHCHECK` runs `rift healthcheck` (every 30s, 3s timeout, 3 retries,
-  5s start period), which probes `/health` on the host and port the container's own `MB_HOST` /
-  `MB_PORT` say. Moving the port with `-e MB_PORT=…` is therefore followed automatically. Moving it
-  with a `--port` argument or an `--rcfile` is **not** — the probe never sees the server's command
-  line — so override the healthcheck to tell the probe the same thing, or it will report unhealthy
-  forever (issue #1133):
+    The images' built-in `HEALTHCHECK` runs `rift healthcheck` (every 30s, 3s timeout, 3 retries,
+    5s start period), which probes `/health` on the host and port the container's own `MB_HOST` /
+    `MB_PORT` say. Moving the port with `-e MB_PORT=…` is therefore followed automatically. Moving it
+    with a `--port` argument or an `--rcfile` is **not** — the probe never sees the server's command
+    line — so override the healthcheck to tell the probe the same thing, or it will report unhealthy
+    forever (issue #1133):
 
-  ```yaml
-  healthcheck:
-    test: ["CMD", "rift", "--rcfile", "/etc/rift/rc.json", "healthcheck"]
-  ```
+    ```yaml
+    healthcheck:
+      test: ["CMD", "rift", "--rcfile", "/etc/rift/rc.json", "healthcheck"]
+    ```
+
 - **No mimalloc.** The musl binaries are built without the mimalloc allocator. Scripting is
   present. If you are benchmarking allocation-heavy workloads, use the
   default flavor on `amd64` (the `arm64` default image is built without mimalloc too).
 
 HTTPS upstream proxying works in both: the CA bundle is copied into the static image, because rift's
 TLS client loads the OS trust store at runtime. For a private CA, see
-[Reaching an Origin Behind a Private CA]({{ site.baseurl }}/deployment/#reaching-an-origin-behind-a-private-ca).
+[Reaching an Origin Behind a Private CA](index.md#reaching-an-origin-behind-a-private-ca).
 
 ### Health checks and `--api-key`
 
@@ -114,7 +112,6 @@ Published images carry an SBOM and max-mode provenance, and are signed with
 [cosign](https://docs.sigstore.dev/) keyless — the signing identity is the release workflow itself,
 so there is no public key to distribute.
 
-{% raw %}
 ```bash
 # Verify the signature and its provenance
 cosign verify \
@@ -128,7 +125,6 @@ docker buildx imagetools inspect zainalpour/rift-proxy:latest-static \
 docker buildx imagetools inspect zainalpour/rift-proxy:latest-static \
   --format '{{ json .Provenance }}'
 ```
-{% endraw %}
 
 ---
 
@@ -230,13 +226,13 @@ services:
       - "/certs/server-key.pem"
 ```
 
-See [TLS/HTTPS]({{ site.baseurl }}/features/tls/) for per-imposter certificates, mutual TLS and the
+See [TLS/HTTPS](../features/tls.md) for per-imposter certificates, mutual TLS and the
 self-signed fallback.
 
 ### Intercepting HTTPS from another container
 
 To mock an external HTTPS host your application hard-codes, run the
-[intercept listener]({{ site.baseurl }}/features/intercept-proxy/) beside it and send the app's
+[intercept listener](../features/intercept-proxy.md) beside it and send the app's
 HTTPS through it. Declare the listener and its rules in the config file, so it is correct the moment
 `rift` is healthy:
 
@@ -266,7 +262,7 @@ belong to the other way of starting a listener -- `--intercept-port` with no blo
 the admin API afterwards. Setting any of them **alongside a block is a startup error**, so do not put
 `RIFT_INTERCEPT_CA_CERT_PEM` (or any `RIFT_INTERCEPT_*`) in the environment of a container that loads
 a block. Make the CA once with `rift intercept-ca generate --out-dir ./ca` (see
-[`intercept-ca`]({{ site.baseurl }}/configuration/cli/#intercept-ca)) and mount it:
+[`intercept-ca`](../configuration/cli.md#intercept-ca)) and mount it:
 
 ```yaml
 services:
@@ -302,7 +298,7 @@ A JVM app reads its truststore once at startup, so give it a JKS built ahead of 
 `rift intercept-ca export --cert ./ca/ca-cert.pem --format jks --out truststore.jks --merge-system-cas /etc/ssl/certs/ca-certificates.crt`
 (password from `RIFT_TRUSTSTORE_PASSWORD`), then `-Djavax.net.ssl.trustStore=…`. Which variable adds
 to the default roots and which replaces them is spelled out under
-[Trusting the CA from the SUT]({{ site.baseurl }}/features/intercept-proxy/#trusting-the-ca-from-the-sut);
+[Trusting the CA from the SUT](../features/intercept-proxy.md#trusting-the-ca-from-the-sut);
 it is not repeated here.
 
 Three things that fail quietly in containers:
@@ -320,7 +316,7 @@ Three things that fail quietly in containers:
 - **`forward` reaches the rift container.** A rule's `forward` defaults to `127.0.0.1:{port}`
   inside the rift container. To reach an imposter elsewhere, name it:
   `{"forward": {"host": "mock-svc", "port": 4600, "scheme": "https"}}` -- see
-  [Forward to one of your imposters]({{ site.baseurl }}/features/intercept-proxy/#forward-to-one-of-your-imposters).
+  [Forward to one of your imposters](../features/intercept-proxy.md#forward-to-one-of-your-imposters).
 
 Changing a rule needs only an edited file and `POST /admin/reload`; the listener itself (host, port,
 CA) is fixed at boot. The CI-verified, runnable version of this setup is the
@@ -465,8 +461,8 @@ instead, use `crates/rift-http-proxy/Dockerfile` from the repository root
 (`docker build -f crates/rift-http-proxy/Dockerfile .`); its runtime stage is `debian:trixie-slim`,
 and it builds with `ARG FEATURES=javascript` by default (on top of the crate's default
 features). If you're building a slimmer image (or embedding Rift as a `cdylib` instead of running the
-container), see the Cargo feature table in [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#cargo-features)
-and the [Embedding & SPI]({{ site.baseurl }}/embedding/) overview — the same features gate both the
+container), see the Cargo feature table in [FFI (C-ABI)](../embedding/ffi.md#cargo-features)
+and the [Embedding & SPI](../embedding/index.md) overview — the same features gate both the
 binary and the `rift-ffi` cdylib, and `cargo build --no-default-features` (plus an explicit
 `--features` list) drops the scripting engines you don't need.
 

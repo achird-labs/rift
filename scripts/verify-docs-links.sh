@@ -4,14 +4,15 @@
 #
 # Resolves every internal link in the *built* docs site the way GitHub Pages actually serves it,
 # and fails if any of them would 404. This is the gate that was missing when the whole site
-# shipped with 156 dead cross-references: `docs/_config.yml` emitted `features/spaces.html` while
-# every hand-written link pointed at `features/spaces/`, and nothing noticed — the just-the-docs
-# navigation is generated from `page.url`, so the theme's own links stayed correct and the site
-# looked navigable. Only links a human wrote were broken.
+# shipped with 156 dead cross-references: the then-Jekyll config emitted `features/spaces.html`
+# while every hand-written link pointed at `features/spaces/`, and nothing noticed — the theme's
+# navigation is generated from the page URL, so its own links stayed correct and the site looked
+# navigable. Only links a human wrote were broken.
 #
-# Checking the *sources* would not have caught it: `{{ site.baseurl }}/features/spaces/` is a
-# perfectly well-formed link. The bug only exists in the relationship between the authored URL and
-# the file layout Jekyll produces, so the check has to run against the built output.
+# The site is now MkDocs, whose `--strict` build (with `validation:` in mkdocs.yml) already rejects
+# a source link to a missing page or anchor. This gate stays as the check on the *built* output: it
+# is what proves the served file layout (`use_directory_urls`) matches the URL shape the links and
+# the external SDK docs use, which no source-level check can see.
 #
 # Pages' resolution rules, which this reproduces:
 #   - `/path/`      -> requires `path/index.html`
@@ -29,8 +30,9 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Overridable so the self-test can point the checker at fixtures.
-BASEURL="${BASEURL:-$(grep -E '^baseurl:' "$repo_root/docs/_config.yml" | sed -E 's/^baseurl:[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/')}"
+# Overridable so the self-test can point the checker at fixtures. The path part of mkdocs.yml's
+# `site_url` (`https://achird-labs.github.io/rift/` -> `/rift`) is where Pages serves the site.
+BASEURL="${BASEURL:-$(sed -nE 's#^site_url:[[:space:]]*"?[a-z]+://[^/]+(/[^"]*)?"?[[:space:]]*$#\1#p' "$repo_root/mkdocs.yml" | sed 's#/$##')}"
 
 check_site() {
   local site_dir="$1" baseurl="$2"
@@ -43,7 +45,7 @@ site = os.path.abspath(os.environ["SITE_DIR"])
 baseurl = os.environ["BASEURL"].rstrip("/")
 
 if not os.path.isdir(site):
-    sys.exit(f"verify-docs-links: site dir not found: {site}\nBuild it first (see .github/workflows/ci.yml).")
+    sys.exit(f"verify-docs-links: site dir not found: {site}\nBuild it first: mkdocs build --strict -d _site")
 
 EXTERNAL = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|//)", re.I)
 
@@ -128,7 +130,7 @@ if broken:
     for page_url, href, why in sorted(set(broken)):
         print(f"  {page_url}\n      -> {href}  [{why}]")
     print("\nA trailing-slash link needs a directory index. If these are all `/foo/` links whose")
-    print("files are `foo.html`, the site is missing `permalink: pretty` in docs/_config.yml.")
+    print("files are `foo.html`, the site was built with `use_directory_urls: false` in mkdocs.yml.")
     sys.exit(1)
 
 print(f"verify-docs-links: OK — every internal link across {pages} page(s) resolves.")
@@ -146,7 +148,7 @@ self_test() {
   printf '<a href="/rift/features/spaces/">spaces</a>' > "$tmp/broken/index.html"
   printf 'spaces' > "$tmp/broken/features/spaces.html"
 
-  # The same link under `permalink: pretty` — served by the directory index. Also covers the two
+  # The same link under directory URLs — served by the directory index. Also covers the two
   # relative-link shapes the docs actually use: a relative link carries no baseurl, so resolving it
   # as though it did reports a false 404 (which is exactly what this checker did on first run).
   mkdir -p "$tmp/fixed/features/spaces" "$tmp/fixed/performance"

@@ -1,11 +1,3 @@
----
-layout: default
-title: Deployment
-nav_order: 6
-has_children: true
-permalink: /deployment/
----
-
 # Deployment
 
 Rift can be deployed in various environments, from local development to production Kubernetes clusters.
@@ -23,7 +15,7 @@ docker pull zainalpour/rift-proxy:latest
 docker run -p 2525:2525 zainalpour/rift-proxy:latest
 ```
 
-[Full Docker Guide]({{ site.baseurl }}/deployment/docker/)
+[Full Docker Guide](docker.md)
 
 ### Kubernetes
 
@@ -46,12 +38,12 @@ spec:
             - containerPort: 9090
 ```
 
-[Full Kubernetes Guide]({{ site.baseurl }}/deployment/kubernetes/)
+[Full Kubernetes Guide](kubernetes.md)
 
 ### AWS ECS / Fargate
 
 A task with Rift and your app side by side, sharing `localhost`, with the intercept CA held in
-Secrets Manager: [ECS / Fargate Guide]({{ site.baseurl }}/deployment/ecs-fargate/) (a reference task
+Secrets Manager: [ECS / Fargate Guide](ecs-fargate.md) (a reference task
 definition).
 
 ### Binary
@@ -70,7 +62,7 @@ tar -xzf rift-$VERSION-$TARGET.tar.gz
 ```
 
 The archive's `bin/` also holds `rift-lint`, `rift-tui` and `rift-verify`. See
-[Getting Started]({{ site.baseurl }}/getting-started/#download-binary) for every platform.
+[Getting Started](../getting-started/index.md#download-binary) for every platform.
 
 ---
 
@@ -120,9 +112,9 @@ One listener serving every imposter, routed by host, path, header or method
                    └──────────────┘        └────────────┘     └──────────┘
 ```
 
-See [Front Door]({{ site.baseurl }}/features/front-door/). Without it, the admin port's
+See [Front Door](../features/front-door.md). Without it, the admin port's
 `/__rift/<port>/…` gateway reaches any imposter through one published port — see
-[Gateway]({{ site.baseurl }}/features/gateway/).
+[Gateway](../features/gateway.md).
 
 ---
 
@@ -177,7 +169,7 @@ Three things worth knowing:
   verification entirely. A recording proxy with verification off will faithfully record MITM'd
   traffic, so prefer the CA mount anywhere the recordings matter.
 
-See [TLS/HTTPS]({{ site.baseurl }}/features/tls/) for the full picture, including which certificate
+See [TLS/HTTPS](../features/tls.md) for the full picture, including which certificate
 belongs to which direction.
 
 ---
@@ -197,12 +189,12 @@ No setting is required; every one has a default.
 | `RIFT_METRICS_PORT` | Metrics port | `9090` |
 | `RIFT_UPSTREAM_CA_FILE` | PEM CA file trusted for outbound TLS — proxy stubs and `--configfile` URLs. Appended to the image's trust store | |
 | `RIFT_UPSTREAM_TLS_SKIP_VERIFY` | Skip outbound certificate verification (development only) | `false` |
-| `RIFT_INTERCEPT_PORT` | Start the [intercept listener]({{ site.baseurl }}/features/intercept-proxy/) on this port | off |
+| `RIFT_INTERCEPT_PORT` | Start the [intercept listener](../features/intercept-proxy.md) on this port | off |
 | `RIFT_INTERCEPT_AUTH` | `user:pass` required as `Proxy-Authorization: Basic` on every `CONNECT` | off |
 | `RIFT_INTERCEPT_CA_CERT` / `RIFT_INTERCEPT_CA_KEY` | Intercept CA certificate and key as PEM file paths | a CA is generated in memory |
 | `RIFT_INTERCEPT_CA_CERT_PEM` / `RIFT_INTERCEPT_CA_KEY_PEM` | The same pair as inline PEM text (for `Secret`s and Secrets Manager); conflicts with the file pair | |
 
-The full list is in the [CLI Reference]({{ site.baseurl }}/configuration/cli/#environment-variables).
+The full list is in the [CLI Reference](../configuration/cli.md#environment-variables).
 
 ---
 
@@ -240,8 +232,8 @@ curl http://localhost:2525/health
 In a container, `rift healthcheck` makes the same probe without needing `curl`. With `--api-key`
 set, admin paths (this one included) answer `401` without the key; `rift healthcheck` presents the
 key the process holds from `MB_APIKEY` (or an rcfile `apiKey`), so it stays healthy on a keyed
-server — see [Docker]({{ site.baseurl }}/deployment/docker/) and
-[Kubernetes]({{ site.baseurl }}/deployment/kubernetes/) for how to pass the key to the probe.
+server — see [Docker](docker.md) and
+[Kubernetes](kubernetes.md) for how to pass the key to the probe.
 
 ### Metrics Endpoint
 
@@ -268,4 +260,4 @@ readinessProbe:
 ```
 
 With `--api-key` / `MB_APIKEY` set, an `httpGet` probe gets `401`; use an `exec` probe running
-`rift healthcheck` instead (see [Kubernetes]({{ site.baseurl }}/deployment/kubernetes/#probes-and---api-key)).
+`rift healthcheck` instead (see [Kubernetes](kubernetes.md#probes-and---api-key)).

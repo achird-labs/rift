@@ -1,8 +1,5 @@
 ---
-layout: default
 title: Examples
-nav_order: 9
-permalink: /examples/
 ---
 
 # Configuration Examples
@@ -16,7 +13,7 @@ Ready-to-use examples for common use cases.
 > `README.md`).
 
 > **Vendor mocks.** To stand in for a third-party SaaS (Optimizely's datafile CDN, event ingest and
-> ODP) with its real SDK unchanged, start from a [vendor-mock template]({{ site.baseurl }}/templates/).
+> ODP) with its real SDK unchanged, start from a [vendor-mock template](../templates/index.md).
 
 ---
 
@@ -375,7 +372,7 @@ Requiring and validating a client certificate (mutual TLS) against your own CA:
 ```
 
 A client that presents no certificate, or one that does not chain to `ca`, fails the handshake. See
-[TLS/HTTPS]({{ site.baseurl }}/features/tls/#mutual-tls-mtls) for the other combinations and a
+[TLS/HTTPS](../features/tls.md#mutual-tls-mtls) for the other combinations and a
 walkthrough with `curl`.
 
 ---

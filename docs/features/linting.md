@@ -1,10 +1,3 @@
----
-layout: default
-title: Configuration Linting
-parent: Features
-nav_order: 7
----
-
 # Configuration Linting
 
 Rift includes a powerful configuration linter (`rift-lint`) that validates imposter configuration files before loading them. This helps catch common issues early and ensures your configurations will work correctly.
@@ -314,7 +307,7 @@ Or with a direct command:
 ```yaml
 - name: Lint Imposters
   run: |
-    docker run --rm -v ${% raw %}{{ github.workspace }}{% endraw %}:/imposters \
+    docker run --rm -v ${{ github.workspace }}:/imposters \
       zainalpour/rift-lint:latest . --strict
 ```
 
@@ -455,5 +448,5 @@ Without `features = ["javascript"]`, JavaScript is not syntax-checked and the ru
 
 ## See Also
 
-- [rift-verify]({{ site.baseurl }}/features/stub-analysis/) - Test imposters by making requests
-- [Mountebank Compatibility]({{ site.baseurl }}/mountebank/) - Configuration format reference
+- [rift-verify](stub-analysis.md) - Test imposters by making requests
+- [Mountebank Compatibility](../mountebank/index.md) - Configuration format reference
