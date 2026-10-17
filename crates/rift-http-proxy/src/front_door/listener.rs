@@ -92,6 +92,7 @@ pub(crate) async fn bind_front_door_at(
     let task = tokio::spawn(async move {
         let result = front_door_accept_loop(
             listener,
+            local_addr.port(),
             manager,
             routes,
             observer,
@@ -175,6 +176,7 @@ impl RunningFrontDoor {
 
 async fn front_door_accept_loop(
     mut listener: ListenerSet,
+    port: u16,
     manager: Arc<ImposterManager>,
     routes: Arc<ArcSwap<CompiledRoutes>>,
     observer: Option<Arc<dyn RouteObserver>>,
@@ -204,6 +206,11 @@ async fn front_door_accept_loop(
     // Resolved once per loop, not per error (#840).
     let accept_errors = rift_mock_core::extensions::AcceptErrorCounters::new("front-door");
     rift_mock_core::extensions::metrics::materialize_preface_failure_counters("front-door");
+    // `--local-only` (issue #1523): the front door serves every imposter, so it refuses whom the
+    // manager's imposters refuse. Checked here, at accept, because the handler cannot: the gateway
+    // hands it a synthetic `127.0.0.1:0` peer.
+    let mut peer_check =
+        rift_mock_core::extensions::PeerCheck::new(manager.peer_policy(), "front-door", port);
 
     loop {
         // Acquire a permit *before* accepting so a cap holds connections back in the listener
@@ -228,7 +235,7 @@ async fn front_door_accept_loop(
             _ = cancel.cancelled() => break,
             accepted = listener.accept() => accepted,
         };
-        let (stream, _) = match accepted {
+        let (stream, peer) = match accepted {
             Ok(accepted) => {
                 // Recovery: only the transition out of a systemic-error state logs and resets the
                 // backoff, so a healthy accept path pays one branch.
@@ -284,6 +291,11 @@ async fn front_door_accept_loop(
                 }
             },
         };
+        // Dropped before the preface sniff and any TLS; the permit drops with this iteration.
+        if !peer_check.admits(peer) {
+            drop(stream);
+            continue;
+        }
         let conn_cancel = cancel.clone();
         let manager = Arc::clone(&manager);
         let routes = Arc::clone(&routes);

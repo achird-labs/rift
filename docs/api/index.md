@@ -940,7 +940,8 @@ Field notes (issue #879 — these were previously hardcoded literals):
   `ServerBuilder::reported_admin_port` (issue #1135), so clients building URLs from `options.port`
   get the public port. See [Embeddable Server]({{ site.baseurl }}/embedding/server/).
 - **`localOnly`** reports whether **`--local-only` was supplied**, not whether the admin listener
-  happened to bind loopback. The distinction matters: `--host 127.0.0.1` narrows the admin plane
+  happened to bind loopback. With the flag, the admin API and `/metrics` bind loopback, and every
+  imposter port and the front door refuse non-loopback clients. The distinction matters: `--host 127.0.0.1` narrows the admin plane
   and every imposter created without a `host`, while `/metrics` stays on every interface (and an
   imposter that names its own `host` binds that) — so reporting `true` there would tell you nothing
   is reachable off-host while a listener still is.

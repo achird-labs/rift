@@ -65,7 +65,8 @@ pub struct ConfigSnapshot {
     /// `--port 3000` (or the `:0` every embedder test uses) reported `2525`.
     pub admin_port: u16,
     /// Whether `--local-only` was set — **the flag**, not "did the admin plane happen to bind
-    /// loopback".
+    /// loopback". With it, the admin API and `/metrics` bind loopback, and every imposter port and
+    /// the front door refuse non-loopback clients (#1523).
     ///
     /// Deriving it from the bound address reads as more truthful and is worse. `--host 127.0.0.1`
     /// without `--local-only` binds the admin plane and host-less imposters to loopback (#1517)

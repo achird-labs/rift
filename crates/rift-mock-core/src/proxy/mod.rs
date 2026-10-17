@@ -36,6 +36,8 @@ pub use network::{bind_addr, bind_host};
 // Node's no-host listen and the server-listener socket builder, shared with rift-http-proxy's admin,
 // metrics, front-door and intercept listeners (issue #1528).
 pub use network::{bind_server_listener, bind_unspecified};
+// Which clients imposter ports and the front door admit (`--local-only`, issue #1523).
+pub use network::PeerPolicy;
 // Accept-error handling shared by every listener in the workspace: the imposter serve loop
 // (issue #750) and the admin API accept loop (issue #826), which must classify-and-retry rather
 // than let one transient accept failure end the server.

@@ -72,6 +72,20 @@ pub static PREFACE_FAILURES_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
     .expect("metric can be created")
 });
 
+/// Connections refused at accept because the peer is not loopback under `--local-only`, by
+/// listener (`imposter` or `front-door`), issue #1523. Rift's counterpart of Mountebank's
+/// `mb_blocked_ip_total`. Present at `0` on every listener that enforces the policy, so a scrape
+/// tells "nothing refused" from "not enforced"; absent when nothing enforces it. No `port` label,
+/// for the same unbounded-cardinality reason as `ACCEPT_ERRORS_TOTAL`.
+pub static BLOCKED_CONNECTIONS_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
+    register_counter_vec!(
+        "rift_blocked_connections_total",
+        "Connections refused at accept because the client is not loopback (--local-only)",
+        &["listener"]
+    )
+    .expect("metric can be created")
+});
+
 /// Whether a listener is currently in a systemic accept-error outage (1) or not (0),
 /// issue #838 — the gauge to alert on.
 pub static ACCEPT_ERROR_OUTAGE: LazyLock<GaugeVec> = LazyLock::new(|| {
@@ -341,6 +355,65 @@ impl AcceptErrorCounters {
     /// Count a systemic accept error (backed off).
     pub fn record_systemic(&self) {
         self.systemic.inc();
+    }
+}
+
+/// One accept loop's [`PeerPolicy`](crate::proxy::PeerPolicy) check (issue #1523): the policy,
+/// its pre-resolved [`BLOCKED_CONNECTIONS_TOTAL`] child, and the loop's once-only `warn`.
+///
+/// Mountebank logs a `warn` per refusal, which hands a remote peer one log line per connection it
+/// opens. Here the first refusal on a loop logs at `warn` and every later one at `debug`, so under
+/// the per-core fan-out (#745) a port logs at most one `warn` per accept loop.
+#[derive(Debug)]
+pub struct PeerCheck {
+    policy: crate::proxy::PeerPolicy,
+    listener: &'static str,
+    port: u16,
+    /// `None` under `PeerPolicy::Any`, which never refuses: no series is created for a policy that
+    /// is not enforced.
+    blocked: Option<Counter>,
+    warned: bool,
+}
+
+impl PeerCheck {
+    /// Resolve the counter child for `listener` once, materialising it at `0` when the policy can
+    /// refuse. `port` is the listener's local port, for the log line.
+    #[must_use]
+    pub fn new(policy: crate::proxy::PeerPolicy, listener: &'static str, port: u16) -> Self {
+        let blocked = (policy != crate::proxy::PeerPolicy::Any)
+            .then(|| BLOCKED_CONNECTIONS_TOTAL.with_label_values(&[listener]));
+        Self {
+            policy,
+            listener,
+            port,
+            blocked,
+            warned: false,
+        }
+    }
+
+    /// Whether the client at `peer` may be served. A refusal is counted and logged here; the
+    /// caller drops the connection.
+    pub fn admits(&mut self, peer: std::net::SocketAddr) -> bool {
+        if self.policy.admits(peer.ip()) {
+            return true;
+        }
+        if let Some(blocked) = &self.blocked {
+            blocked.inc();
+        }
+        let (listener, port) = (self.listener, self.port);
+        if self.warned {
+            tracing::debug!(listener, port, %peer, "refused a non-loopback client (--local-only)");
+        } else {
+            self.warned = true;
+            tracing::warn!(
+                listener,
+                port,
+                %peer,
+                "refusing non-loopback client {peer} on {listener} port {port}: --local-only \
+                 (logged once per listener; further refusals log at debug)"
+            );
+        }
+        false
     }
 }
 

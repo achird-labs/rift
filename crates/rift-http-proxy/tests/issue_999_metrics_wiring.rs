@@ -10,7 +10,7 @@
 //! traffic must be what registers them — a test that recorded the metric itself first would pass
 //! against the very defect it exists to catch.
 
-use rift_http_proxy::imposter::ImposterManager;
+use rift_http_proxy::imposter::{ImposterManager, PeerPolicy};
 use std::time::Duration;
 
 /// The published table, embedded at compile time so a moved or renamed docs file breaks the build
@@ -73,14 +73,15 @@ async fn hit(client: &reqwest::Client, port: u16, path: &str) {
 #[tokio::test]
 async fn documented_metric_families_all_appear_in_the_scrape() {
     let families = documented_families();
-    // The `:9090` table has 12 rows (11 before `rift_preface_failures_total`, issue #1045). A
+    // The `:9090` table has 13 rows (11 before `rift_preface_failures_total`, issue #1045, and
+    // `rift_blocked_connections_total`, issue #1523). A
     // parser that silently dropped a few would leave exactly those families unchecked, which is
     // the failure this guard is supposed to make impossible — so the floor is the real count, not
     // a loose lower bound.
     assert_eq!(
         families.len(),
-        12,
-        "expected 11 documented `:9090` families; the table shape or contents changed. If a row \
+        13,
+        "expected 13 documented `:9090` families; the table shape or contents changed. If a row \
          was deliberately added or removed, update this count deliberately too: {families:?}"
     );
 
@@ -165,6 +166,17 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     )
     .await;
 
+    // A `--local-only` manager's imposter -> blocked_connections_total, materialised at 0 by the
+    // accept loop (issue #1523). No traffic needed: presence at 0 is the documented contract.
+    let local_only = ImposterManager::new().with_peer_policy(PeerPolicy::LoopbackOnly);
+    let local_only_port = mk(
+        &local_only,
+        serde_json::json!({
+            "protocol": "http", "stubs": [{ "responses": [{ "is": { "statusCode": 200 } }] }]
+        }),
+    )
+    .await;
+
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let client = reqwest::Client::new();
@@ -220,6 +232,7 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
         r#"rift_preface_failures_total{kind="eof",listener="imposter"}"#.to_string(),
         r#"rift_preface_failures_total{kind="io",listener="imposter"}"#.to_string(),
         r#"rift_preface_failures_total{kind="timeout",listener="imposter"}"#.to_string(),
+        r#"rift_blocked_connections_total{listener="imposter"}"#.to_string(),
     ] {
         assert!(
             scrape.contains(&expected),
@@ -247,6 +260,7 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     ] {
         let _ = manager.delete_imposter(port).await;
     }
+    let _ = local_only.delete_imposter(local_only_port).await;
 }
 
 /// A probability roll that passes but yields a zero delay injects nothing, so it must not count.

@@ -121,6 +121,15 @@ a different `priority`, is the supported way to stage a replacement.
 
 ---
 
+## `--local-only`
+
+The front door honours `--local-only` by refusing clients, not by moving its bind: under the flag it
+still listens where `--front-door` says (a bare port is every interface), and closes every
+connection from a client that is not loopback before reading a byte, exactly as each imposter port
+does. It follows the `ImposterManager` it serves (`ImposterManager::peer_policy`), so an embedder's
+front door over its own manager follows that manager's policy. Refusals count in
+`rift_blocked_connections_total{listener="front-door"}`.
+
 ## When nothing matches
 
 The front door falls back to the gateway's own `/__rift/{port}/{path}` addressing, so one port
