@@ -67,9 +67,14 @@ Break the connection instead of answering, as Mountebank's `fault` response does
 
 ### Where behaviors and `_rift` apply
 
-`_behaviors`/`behaviors` run on an `is` response (and the flat form below, and a response that is
-only a behaviors block, served as an empty `is`), on an `inject` response and on a `proxy`
-response; `repeat` applies to every response type — see
+Every response needs exactly one type: `is`, `proxy`, `inject` or `fault` (or one of Rift's two
+extensions, the flat form below and a `_rift`-only script response). A config door refuses a
+response with two, with `each response object must have only one response type`, and one with none
+— `{}`, a misspelt key, only a behaviors block or only `repeat` — with `unrecognized response type`,
+as Mountebank does. For a plain delayed `200`, write `{"is": {}, "behaviors": [{"wait": 500}]}`.
+
+`_behaviors`/`behaviors` run on an `is` response (and the flat form below), on an `inject`
+response and on a `proxy` response; `repeat` applies to every response type — see
 [Behaviors](behaviors.md). A response-level `_rift` block is read on an
 `is` response only. On a `proxy`, `inject` or `fault` response it is kept and returned by
 `GET /imposters/:port`, but not acted on, and is reported as `config_key_ignored` in
@@ -817,6 +822,8 @@ Some tools include `"proxy": null` alongside an `is` response. This is accepted 
 
 Recorded and migrated mocks often put `statusCode`, `headers`, `body` and `_mode` directly on the
 response. Rift serves that exactly like the same fields inside `is`; `statusCode` defaults to `200`.
+Mountebank refuses this form with `unrecognized response type`: it is a Rift extension (see
+[Differences](differences.md#two-response-shapes-mountebank-does-not-have)).
 
 ```json
 {

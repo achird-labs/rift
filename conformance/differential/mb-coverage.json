@@ -20,7 +20,7 @@
   },
   "baseline": {
     "src/controllers/configController.js": {"lines": [64, 64], "branches": [6, 6], "functions": [3, 4]},
-    "src/controllers/imposterController.js": {"lines": [316, 328], "branches": [44, 44], "functions": [17, 22]},
+    "src/controllers/imposterController.js": {"lines": [316, 328], "branches": [43, 43], "functions": [17, 22]},
     "src/controllers/impostersController.js": {"lines": [213, 215], "branches": [41, 44], "functions": [15, 16]},
     "src/models/behaviors.js": {"lines": [517, 553], "branches": [77, 89], "functions": [29, 29]},
     "src/models/behaviorsValidator.js": {"lines": [169, 186], "branches": [39, 48], "functions": [14, 14]},
@@ -38,7 +38,7 @@
     "src/models/inMemoryImpostersRepository.js": {"lines": [403, 418], "branches": [59, 63], "functions": [31, 34]},
     "src/models/jsonpath.js": {"lines": [42, 44], "branches": [9, 10], "functions": [1, 1]},
     "src/models/predicates.js": {"lines": [409, 438], "branches": [124, 134], "functions": [33, 34]},
-    "src/models/responseResolver.js": {"lines": [319, 398], "branches": [77, 88], "functions": [20, 22]},
+    "src/models/responseResolver.js": {"lines": [326, 398], "branches": [86, 95], "functions": [20, 22]},
     "src/models/xpath.js": {"lines": [95, 105], "branches": [22, 25], "functions": [6, 6]},
     "src/util/combinators.js": {"lines": [68, 68], "branches": [8, 8], "functions": [4, 5]},
     "src/util/date.js": {"lines": [41, 51], "branches": [5, 11], "functions": [3, 3]},

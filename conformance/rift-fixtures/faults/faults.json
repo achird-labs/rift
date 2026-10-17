@@ -76,10 +76,6 @@
     },
     { "predicates": [{ "equals": { "path": "/delay-range" } }], "delayRange": [{ "min": 200, "max": 200 }], "responses": [{ "is": { "statusCode": 200, "body": "dr" } }] },
     {
-      "predicates": [{ "equals": { "path": "/is-beats-fault" } }],
-      "responses": [{ "is": { "statusCode": 200, "body": "is-wins" }, "fault": "CONNECTION_RESET_BY_PEER" }]
-    },
-    {
       "predicates": [{ "equals": { "path": "/topfault-alias" } }],
       "responses": [{ "fault": "reset" }]
     }

@@ -390,15 +390,18 @@ this order:
 So `latency` + `tcp` is a *delay-then-drop*, and a configured `tcp` fault always wins over an
 `error` fault rather than being silently dropped.
 
-### Response-type precedence
+### One response type per response
 
-`_rift.fault` and a top-level `fault` string live on different response shapes, and a single stub
-response can only render as one shape. When a response carries more than one recognized type, Rift
-picks in this order: **`is` > `proxy` > `inject` > `fault`**. This response-type precedence means a
-stub combining an `is` block (with `_rift.fault` inside it) *and* a top-level `"fault"` string on
-the same response silently drops the top-level `fault` — `is` wins and the fault string is never
-evaluated. If you want the top-level transport fault, the response must be a bare `fault` with no
-`is`/`proxy`/`inject` alongside it.
+`_rift.fault` and a top-level `fault` string live on different response shapes. A stub response
+carries exactly one of `is`, `proxy`, `inject` and `fault`: one with two, such as an `is` block
+*and* a top-level `"fault"` string, is refused with `400` and
+`each response object must have only one response type`, as Mountebank refuses it. A `null` or an
+empty `""` value counts as absent, as it does in Mountebank. To combine a status, headers or a body
+with a transport fault, put `_rift.fault` inside the `is` block; for the transport fault alone, use
+a bare `fault`.
+
+Earlier releases kept the first of `is` > `proxy` > `inject` > `fault` and silently dropped the
+rest. A config an engine already stored (`--datadir`, an embedder's log) still loads that way.
 
 ---
 

@@ -1102,10 +1102,11 @@ fn a_generator_key_the_proxy_does_not_read_is_reported() {
 }
 
 #[test]
-fn a_shadowed_response_variant_and_behaviors_block_are_reported() {
+fn a_shadowed_flat_field_and_behaviors_block_are_reported() {
+    // A second response type beside `is` (`proxy` here, once reported as shadowed) no longer
+    // decodes: a config door refuses it (#1551).
     let document = imposter_of(json!({ "responses": [{
         "is": { "statusCode": 200 },
-        "proxy": { "to": "http://127.0.0.1:1" },
         "statusCode": 404,
         "_behaviors": { "wait": 1 },
         "behaviors": [{ "wait": 2 }]
@@ -1114,7 +1115,6 @@ fn a_shadowed_response_variant_and_behaviors_block_are_reported() {
         unread(document),
         vec![
             "stubs.0.responses.0.behaviors",
-            "stubs.0.responses.0.proxy",
             "stubs.0.responses.0.statusCode",
         ]
     );

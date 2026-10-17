@@ -613,6 +613,8 @@ where
 /// place, a top-level `repeat`: the door checks the behaviors block before it, and merges it after.
 /// So a malformed `repeat` inside the block that the top-level one replaces is refused only by the
 /// door, and when the top-level `repeat` is itself malformed, both refuse but this names it first.
+/// A response with more than one type, or none (#1551), is door-only for the same reason: the
+/// decoded response holds exactly one type, so what the door refused cannot reach this function.
 pub fn admission_check(config: &ImposterConfig) -> Result<(), String> {
     config.stubs.iter().try_for_each(admission_check_stub)
 }
@@ -789,8 +791,9 @@ fn inject_wait_behavior(response: StubResponse, wait_val: serde_json::Value) -> 
 // paths keep resolving unchanged.
 pub use rift_types::{Predicate, PredicateOperation, PredicateParameters, PredicateSelector};
 
-/// The response-type keys, in the precedence `TryFrom<StubResponseRaw>` reads them: the first one
-/// present is the response, and the rest are kept only to be reported. Pinned to that conversion
+/// The response-type keys, in the precedence `TryFrom<StubResponseRaw>` reads them. A config door
+/// refuses a response with two (#1551), so the precedence only decides what a replayed config an
+/// older engine admitted decodes to. Pinned to that conversion
 /// by `response_variant_keys_follow_the_decode_precedence`; the JSON Schema carries it as
 /// `x-rift-response-variants` (issue #1342).
 #[cfg(feature = "schema")]
@@ -1039,7 +1042,7 @@ fn parse_behaviors(
     feature = "schema",
     derive(schemars::JsonSchema),
     schemars(
-        description = "One response of a stub: an `is`, `proxy`, `inject` or `fault` response, a `_rift`-only script response, or the flat recorded form (`statusCode`/`headers`/`body` at the top level). The first of `is`, `proxy`, `inject`, `fault` present is the one read."
+        description = "One response of a stub: an `is`, `proxy`, `inject` or `fault` response, a `_rift`-only script response, or the flat recorded form (`statusCode`/`headers`/`body` at the top level). Exactly one of `is`, `proxy`, `inject`, `fault`, or a `_rift`-only or flat response; a config door refuses two, or none."
     )
 )]
 #[serde(rename_all = "camelCase")]
@@ -1579,6 +1582,8 @@ impl TryFrom<StubResponseRaw> for StubResponse {
     type Error = String;
 
     fn try_from(raw: StubResponseRaw) -> Result<Self, Self::Error> {
+        // First, as Mountebank's `resolve` checks it before anything else in the response.
+        refuse_response_type_count(&raw, admission())?;
         // `_behaviors` when present, else `behaviors`, compiled into the program that runs
         // (issue #1198). Checked before the response type is chosen, so a block on a `proxy`,
         // `inject` or `fault` response is held to the same rule rift-lint applies to every response.
@@ -1608,7 +1613,9 @@ impl TryFrom<StubResponseRaw> for StubResponse {
             refuse_unknown_proxy_mode(raw.proxy.as_ref(), admission())?;
             refuse_unreadable_generators(raw.proxy.as_ref(), admission())?;
         }
-        // Priority: is > proxy > inject > fault > rift-script-only
+        // Priority: is > proxy > inject > fault > rift-script-only. A door has refused two types or
+        // none above, so this order only decides what a replayed config admitted before #1551 decodes
+        // to; it must not change.
         Ok(if let Some(is_raw) = raw.is {
             StubResponse::new_is(IsResponse::from(is_raw), behaviors, raw.rift.map(Box::new))
         } else if let Some(proxy) = raw.proxy {
@@ -2170,6 +2177,40 @@ impl ProxyResponse {
                 self.mode
             )
         })
+    }
+}
+
+/// Refuse a response with more than one of `is`, `proxy`, `inject` and `fault`, or with none, at a
+/// config door, in Mountebank's words (issue #1551): `resolve` refuses two types first
+/// (`responseResolver.js` `hasMultipleTypes`) and `processResponse` refuses none, and its dry run
+/// checks every response of every stub. Types are counted by Mountebank's truthiness: `null` and an
+/// empty `inject`/`fault` string are absent. A `_rift`-only response and the flat
+/// `statusCode`/`headers`/`body` form (#304) are Rift extensions and still count as a response.
+///
+/// **Door-only.** [`admission_check_stub`] cannot re-run it: the decoded [`StubResponse`] holds one
+/// type, so what this refuses is already gone, and what it serialises never carries two or none.
+/// A replayed decode ([`Admission::Skipped`]) keeps the precedence reduction older engines applied.
+fn refuse_response_type_count(raw: &StubResponseRaw, admission: Admission) -> Result<(), String> {
+    if admission == Admission::Skipped {
+        return Ok(());
+    }
+    let truthy = |text: &Option<String>| text.as_deref().is_some_and(|text| !text.is_empty());
+    let types = [
+        raw.is.is_some(),
+        raw.proxy.is_some(),
+        truthy(&raw.inject),
+        truthy(&raw.fault),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    let flat = raw.status_code.is_some() || raw.body.is_some() || raw.headers.is_some();
+    if types > 1 {
+        Err("each response object must have only one response type".to_string())
+    } else if types == 0 && raw.rift.is_none() && !flat {
+        Err("unrecognized response type".to_string())
+    } else {
+        Ok(())
     }
 }
 
@@ -3280,6 +3321,161 @@ mod imposter_error_chain_tests {
 
 #[cfg(test)]
 mod tests {
+
+    // ===== Issue #1551: a response carries exactly one type, as in Mountebank =====
+    mod response_type_count {
+        use super::super::{ImposterConfig, StubResponse, deserialize_replayed};
+
+        fn imposter_with_responses(responses: &str) -> String {
+            format!(r#"{{"port":4700,"protocol":"http","stubs":[{{"responses":{responses}}}]}}"#)
+        }
+
+        const MULTIPLE_TYPES: &str = "each response object must have only one response type";
+        const NO_TYPE: &str = "unrecognized response type";
+
+        /// Every row Mountebank 2.9.5 answers `400` for, with its message (probed in the #1551 triage).
+        #[test]
+        fn a_response_with_two_types_or_none_is_refused_with_mountebanks_message() {
+            let proxy = r#"{"to":"http://localhost:1"}"#;
+            let inject = r#""function () { return {}; }""#;
+            let fault = r#""CONNECTION_RESET_BY_PEER""#;
+            let refused = [
+                (
+                    format!(r#"[{{"is":{{}},"proxy":{proxy}}}]"#),
+                    MULTIPLE_TYPES,
+                ),
+                (
+                    format!(r#"[{{"is":{{}},"inject":{inject}}}]"#),
+                    MULTIPLE_TYPES,
+                ),
+                (
+                    format!(r#"[{{"is":{{}},"fault":{fault}}}]"#),
+                    MULTIPLE_TYPES,
+                ),
+                (
+                    format!(r#"[{{"proxy":{proxy},"inject":{inject}}}]"#),
+                    MULTIPLE_TYPES,
+                ),
+                (
+                    format!(r#"[{{"proxy":{proxy},"fault":{fault}}}]"#),
+                    MULTIPLE_TYPES,
+                ),
+                (
+                    format!(r#"[{{"inject":{inject},"fault":{fault}}}]"#),
+                    MULTIPLE_TYPES,
+                ),
+                (
+                    format!(r#"[{{"is":{{}},"proxy":{proxy},"inject":{inject},"fault":{fault}}}]"#),
+                    MULTIPLE_TYPES,
+                ),
+                ("[{}]".to_string(), NO_TYPE),
+                (r#"[{"is":null}]"#.to_string(), NO_TYPE),
+                (r#"[{"iss":{"statusCode":500}}]"#.to_string(), NO_TYPE),
+                (r#"[{"behaviors":[{"wait":10}]}]"#.to_string(), NO_TYPE),
+                (r#"[{"_behaviors":{"wait":10}}]"#.to_string(), NO_TYPE),
+                (r#"[{"repeat":2}]"#.to_string(), NO_TYPE),
+                // #1556's triage: an empty `fault` is no type, as Mountebank's truthiness reads it.
+                (r#"[{"fault":""}]"#.to_string(), NO_TYPE),
+                (r#"[{"inject":""}]"#.to_string(), NO_TYPE),
+                (
+                    r#"[{"proxy":null,"inject":"","fault":""}]"#.to_string(),
+                    NO_TYPE,
+                ),
+            ];
+            for (responses, message) in refused {
+                let error =
+                    serde_json::from_str::<ImposterConfig>(&imposter_with_responses(&responses))
+                        .expect_err(&responses)
+                        .to_string();
+                assert!(
+                    error.starts_with(message),
+                    "{responses}: expected `{message}`, got `{error}`"
+                );
+            }
+        }
+
+        /// The rows Mountebank admits, by the truthiness it counts types with, and Rift's two
+        /// extensions: the flat form (#304) and a `_rift`-only response.
+        #[test]
+        fn a_response_with_one_type_by_mountebanks_truthiness_is_admitted() {
+            let admitted = [
+                (r#"[{"is":{}}]"#, "is"),
+                (r#"[{"is":{},"proxy":null}]"#, "is"),
+                (r#"[{"is":{},"inject":""}]"#, "is"),
+                (r#"[{"is":{},"fault":""}]"#, "is"),
+                (
+                    r#"[{"proxy":{"to":"http://localhost:1"},"inject":""}]"#,
+                    "proxy",
+                ),
+                (
+                    r#"[{"inject":"function () { return {}; }","fault":""}]"#,
+                    "inject",
+                ),
+                (
+                    r#"[{"fault":"CONNECTION_RESET_BY_PEER","proxy":null}]"#,
+                    "fault",
+                ),
+                (r#"[{"is":{},"behaviors":[{"wait":10}],"repeat":2}]"#, "is"),
+                (r#"[{"statusCode":201,"body":"flat"}]"#, "is"),
+                (r#"[{"headers":{"X-A":"1"}}]"#, "is"),
+                (
+                    r#"[{"_rift":{"script":{"engine":"rhai","code":"fn respond(ctx) { http(200, #{}) }"}}}]"#,
+                    "_rift",
+                ),
+            ];
+            for (responses, kind) in admitted {
+                let config: ImposterConfig =
+                    serde_json::from_str(&imposter_with_responses(responses))
+                        .unwrap_or_else(|e| panic!("{responses}: {e}"));
+                let response = &config.stubs[0].responses[0];
+                let decoded = match response {
+                    StubResponse::Is { .. } => "is",
+                    StubResponse::Proxy { .. } => "proxy",
+                    StubResponse::Inject { .. } => "inject",
+                    StubResponse::Fault { .. } => "fault",
+                    StubResponse::RiftScript { .. } => "_rift",
+                };
+                assert_eq!(decoded, kind, "{responses}");
+            }
+        }
+
+        /// Mountebank's dry run checks every response, not just the first: a valid first response does
+        /// not cover a bad second one, and the error points into the second.
+        #[test]
+        fn a_bad_second_response_is_refused_and_located() {
+            let json = imposter_with_responses(r#"[{"is":{"body":"a"}},{}]"#);
+            let error = serde_json::from_str::<ImposterConfig>(&json).expect_err("refused");
+            assert!(error.to_string().starts_with(NO_TYPE), "{error}");
+            let second = json.find("},{}").expect("second response") + 2;
+            assert!(
+                error.column() > second,
+                "the error must point past the first response (column {} > {second}): {error}",
+                error.column()
+            );
+        }
+
+        /// Door-only (issue #1551): a replayed decode keeps the old reduction, so stored bytes decode to
+        /// what they always did.
+        #[test]
+        fn a_replayed_response_keeps_the_precedence_and_the_empty_default() {
+            let replay = |json: &str| -> ImposterConfig {
+                let mut deserializer = serde_json::Deserializer::from_str(json);
+                deserialize_replayed(&mut deserializer).expect("replayed decode admits")
+            };
+            let two = replay(&imposter_with_responses(
+                r#"[{"is":{"statusCode":201},"proxy":{"to":"http://localhost:1"}}]"#,
+            ));
+            assert!(matches!(
+                &two.stubs[0].responses[0],
+                StubResponse::Is { is, .. } if is.status_code == 201
+            ));
+            let none = replay(&imposter_with_responses("[{}]"));
+            assert_eq!(
+                serde_json::to_value(&none.stubs[0].responses[0]).expect("print"),
+                serde_json::json!({"is": {}})
+            );
+        }
+    }
 
     // ===== Issue #1362: a stub's `name` is kept and printed first =====
 
@@ -4474,8 +4670,10 @@ mod tests {
 
     #[test]
     fn empty_response_object_still_defaults_to_empty_is() {
-        // Regression guard: a genuinely-empty `{}` response must remain a 200 empty Is.
-        let r: StubResponse = serde_json::from_value(json!({})).unwrap();
+        // Regression guard: a genuinely-empty `{}` response a pre-#1551 engine stored must still
+        // replay as a 200 empty Is. A config door refuses it now (`unrecognized response type`).
+        let r: StubResponse =
+            crate::imposter::deserialize_replayed(json!({})).expect("replay admits `{}`");
         match r {
             StubResponse::Is { is, .. } => {
                 assert_eq!(is.status_code, 200);
@@ -5236,10 +5434,12 @@ mod tests {
     }
 
     // Issue #1181: a response carrying only a behaviors block serves its empty 200 *with* the block.
+    // A config door refuses it since #1551; a pre-#1551 engine stored it, and it replays this way.
     #[test]
     fn a_behaviors_only_response_keeps_its_block() {
         let response: StubResponse =
-            serde_json::from_value(json!({"_behaviors": {"wait": 500}})).expect("parses");
+            crate::imposter::deserialize_replayed(json!({"_behaviors": {"wait": 500}}))
+                .expect("replay admits it");
         let StubResponse::Is {
             behaviors_parsed, ..
         } = &response

@@ -468,6 +468,32 @@ async fn rhai_without_should_inject_is_accepted() {
     assert_eq!(resp.status().as_u16(), 201);
 }
 
+/// Issue #1551: Mountebank refuses a response with no `is`/`proxy`/`inject`/`fault` as
+/// `unrecognized response type`, and so does Rift, except for its two extensions, which carry a whole
+/// response: the flat `statusCode`/`headers`/`body` form (#304) and a `_rift`-only script response.
+/// Mountebank has no oracle for either, so they are pinned here.
+#[tokio::test]
+async fn the_flat_form_and_a_rift_only_response_are_still_accepted() {
+    let rift = Rift::start().await;
+    let flat = rift
+        .create_port(&json!({
+            "protocol": "http",
+            "stubs": [{"responses": [{"statusCode": 201, "body": "flat"}]}]
+        }))
+        .await;
+    let (status, body) = rift.get(&rift.imposter_url(flat, "/"), None).await;
+    assert_eq!((status, body.as_str()), (201, "flat"));
+
+    let script = rift
+        .create_port(&script_imposter(
+            "rhai",
+            "fn respond(ctx) { http(202, \"scripted\") }",
+        ))
+        .await;
+    let (status, body) = rift.get(&rift.imposter_url(script, "/"), None).await;
+    assert_eq!((status, body.as_str()), (202, "scripted"));
+}
+
 /// Ported from rift_extensions.feature: "JavaScript inject script with syntax error is rejected
 /// at creation time"
 #[tokio::test]

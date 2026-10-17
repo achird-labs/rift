@@ -160,12 +160,13 @@ Feature: Faults and transport errors
     And the response body is "dr"
     And the response took at least 200 ms
 
-  # Response-type precedence is is > proxy > inject > fault: a top-level fault beside an `is` is dropped.
-  Scenario: an is response beats a top-level fault on the same response
-    Given a fresh imposter from fixture "faults/faults"
-    When the client sends "GET" "/is-beats-fault"
-    Then the response status is 200
-    And the response body is "is-wins"
+  # rift#1551: a response carries one type. A top-level fault beside an `is` used to be dropped
+  # (is > proxy > inject > fault); it is refused now, with Mountebank's message.
+  Scenario: an is response beside a top-level fault is refused
+    When the client posts the imposter fixture "faults/is-and-fault"
+    Then the response status is 400
+    And the error envelope type is "bad data"
+    And the error envelope message contains "each response object must have only one response type"
 
   Scenario: a top-level fault accepts the tcp aliases
     Given a fresh imposter from fixture "faults/faults"

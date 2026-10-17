@@ -59,7 +59,6 @@ fn the_linter_reports_e028_exactly_when_the_engine_refuses_an_inject() {
         "function (config) { return 1 ]; }",
         "function (config) { return { statusCode: ",
         "function (config) { return {}; } }",
-        "",
         "   ",
         "function (config) { var = 1; }",
         "return { statusCode: 200 };",
@@ -80,4 +79,31 @@ fn the_linter_reports_e028_exactly_when_the_engine_refuses_an_inject() {
         "rift-lint and the engine disagree:\n  {}",
         disagreements.join("\n  ")
     );
+}
+
+/// Issue #1551: an empty `inject` is no response type, as Mountebank's truthiness reads it, so the
+/// engine refuses it at decode (`unrecognized response type`) before any script check, and the
+/// linter reports E014 rather than E028.
+#[test]
+fn an_empty_inject_is_no_response_type_for_both() {
+    let refused = serde_json::from_value::<Stub>(json!({ "responses": [{ "inject": "" }] }))
+        .expect_err("an empty inject has no response type");
+    assert!(
+        refused
+            .to_string()
+            .starts_with("unrecognized response type"),
+        "{refused}"
+    );
+    let mut result = LintResult::new();
+    validate_response(
+        Path::new("<parity>"),
+        &json!({ "inject": "" }),
+        "r",
+        &mut result,
+        &LintOptions::default(),
+        &Value::Null,
+    );
+    let codes: Vec<&str> = result.issues.iter().map(|i| i.code.as_str()).collect();
+    assert!(codes.contains(&"E014"), "{codes:?}");
+    assert!(!codes.contains(&"E028"), "{codes:?}");
 }

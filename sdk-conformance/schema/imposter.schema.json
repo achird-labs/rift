@@ -1502,7 +1502,7 @@
     },
     "StubResponse": {
       "additionalProperties": false,
-      "description": "One response of a stub: an `is`, `proxy`, `inject` or `fault` response, a `_rift`-only script response, or the flat recorded form (`statusCode`/`headers`/`body` at the top level). The first of `is`, `proxy`, `inject`, `fault` present is the one read.",
+      "description": "One response of a stub: an `is`, `proxy`, `inject` or `fault` response, a `_rift`-only script response, or the flat recorded form (`statusCode`/`headers`/`body` at the top level). Exactly one of `is`, `proxy`, `inject`, `fault`, or a `_rift`-only or flat response; a config door refuses two, or none.",
       "properties": {
         "_behaviors": {
           "anyOf": [

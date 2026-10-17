@@ -1441,6 +1441,20 @@ fn validate_regex_patterns(
     }
 }
 
+/// The keys that make a response a Mountebank response type (issue #1551).
+const RESPONSE_TYPE_KEYS: [&str; 4] = ["is", "proxy", "inject", "fault"];
+
+/// JavaScript truthiness, which Mountebank counts response types by.
+fn js_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
+        Value::String(s) => !s.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
+    }
+}
+
 /// Validate a response object.
 pub fn validate_response(
     file: &Path,
@@ -1538,16 +1552,31 @@ pub fn validate_response(
         );
     }
 
-    let response_types = [
-        has_is || has_flat,
-        has_proxy,
-        has_inject,
-        has_fault,
-        has_rift,
-    ];
-    let active_types = response_types.iter().filter(|&&t| t).count();
-
-    if active_types == 0 {
+    // The response types, counted as the engine counts them at a config door and Mountebank in
+    // `responseResolver.js` (issue #1551): by JavaScript truthiness, so `null` and an empty
+    // `inject`/`fault` string are absent. Two are refused; none is refused unless the response is
+    // one of Rift's two extensions, `_rift`-only or the flat form.
+    let types: Vec<&str> = RESPONSE_TYPE_KEYS
+        .into_iter()
+        .filter(|key| response.get(*key).is_some_and(js_truthy))
+        .collect();
+    if types.len() > 1 {
+        result.add_issue(
+            LintIssue::error(
+                "E056",
+                format!(
+                    "Response has more than one response type: {}",
+                    types.join(", ")
+                ),
+                file.to_path_buf(),
+            )
+            .with_location(location)
+            .with_suggestion(
+                "Keep one of 'is', 'proxy', 'inject' and 'fault' per response; to pair a status \
+                 with a transport fault, put '_rift.fault' inside 'is'",
+            ),
+        );
+    } else if types.is_empty() && !has_rift && !has_flat {
         result.add_issue(
             LintIssue::error(
                 "E014",
@@ -1556,22 +1585,10 @@ pub fn validate_response(
             )
             .with_location(location)
             .with_suggestion(
-                "Add 'is', 'proxy', 'inject', 'fault', or '_rift' to define the response",
+                "Add 'is', 'proxy', 'inject', 'fault', or '_rift' to define the response; for a \
+                 delayed empty 200, write {\"is\": {}, \"behaviors\": [{\"wait\": 500}]}",
             ),
         );
-    } else if active_types > 1 && has_is && has_proxy {
-        let proxy_val = response.get("proxy");
-        if proxy_val.map(|p| !p.is_null()).unwrap_or(false) {
-            result.add_issue(
-                LintIssue::warning(
-                    "W003",
-                    "Response has both 'is' and 'proxy' defined",
-                    file.to_path_buf(),
-                )
-                .with_location(location)
-                .with_suggestion("Use either 'is' for static responses or 'proxy' for forwarding"),
-            );
-        }
     }
 
     if let Some(is_response) = response.get("is") {
@@ -1585,10 +1602,12 @@ pub fn validate_response(
     }
 
     // The engine picks `is`, then `proxy`, then `inject` (a `null` is absent), so an `inject` beside
-    // either of the others never runs and is not checked as this response's script.
+    // either of the others never runs and is not checked as this response's script. An empty one is
+    // no response type at all (E014, #1551): the engine refuses it before parsing it.
     if !present("is")
         && !present("proxy")
         && let Some(script) = response.get("inject").and_then(Value::as_str)
+        && !script.is_empty()
     {
         validate_javascript_behavior(
             file,
