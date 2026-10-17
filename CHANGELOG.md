@@ -11,6 +11,8 @@ record.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-16
+
 ### Added
 
 - **Recorded proxy responses carry `_proxyResponseTime`** (ms), as Mountebank's do, and an imported
@@ -4767,7 +4769,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/achird-labs/rift/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/achird-labs/rift/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/achird-labs/rift/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/achird-labs/rift/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/achird-labs/rift/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/achird-labs/rift/compare/v0.19.0...v0.20.0
