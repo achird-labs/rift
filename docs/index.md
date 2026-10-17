@@ -11,7 +11,7 @@ Rift implements [Mountebank](https://www.mbtest.dev/)'s REST API and imposter fo
 `imposters.json` files and Mountebank clients work unchanged. It keeps its throughput flat as a stub file
 grows, and the same engine embeds in-process in Java, Node, Go and Scala.
 
-Rift targets **Mountebank 2.9.5**, the latest release
+Rift is compatible with **Mountebank 2.9.5**, the latest release
 ([`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mountebank)). Every pull request that changes
 the engine runs a differential suite that sends the same requests to a real Mountebank and to Rift. The
 differences it finds are listed in [Differences from Mountebank](mountebank/differences.md). Compatibility
