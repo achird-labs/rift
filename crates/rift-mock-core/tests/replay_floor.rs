@@ -96,7 +96,9 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // #1369 wraps the same decoders to record presence (`present_status_code`, `present_headers`,
         // `present_mode` call the decoder they replace and add `Some`): `statusCode: null` and
         // `_mode: null` are refused exactly as before, so four more attributes, no new refusal.
-        17,
+        // #1519 `present_value` on `_proxyResponseTime` decodes any JSON value, `null` included:
+        // one more attribute, no refusal.
+        18,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",

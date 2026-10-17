@@ -4070,6 +4070,39 @@ fn ffi_second_start_intercept_is_refused_while_one_runs() {
     }
 }
 
+/// Issue #1519: clearing saved proxy responses restarts every stub's cycle, as Mountebank's
+/// `deleteSavedProxyResponses` does, even a stub no proxy recorded into.
+#[test]
+fn ffi_clear_proxy_recordings_restarts_an_unrecorded_cycle() {
+    unsafe {
+        let h = rift_start();
+        let config = cstr(
+            r#"{ "protocol": "http", "stubs": [{ "responses": [
+                { "is": { "body": "A" } }, { "is": { "body": "B" } }, { "is": { "body": "C" } }
+            ] }] }"#,
+        );
+        let port = rift_create_imposter(h, config.as_ptr());
+        assert_ne!(port, 0, "auto-assigned port");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let next = || {
+            rt.block_on(async {
+                reqwest::get(format!("http://127.0.0.1:{port}/"))
+                    .await
+                    .expect("get")
+                    .text()
+                    .await
+                    .expect("body")
+            })
+        };
+        assert_eq!([next(), next()], ["A", "B"]);
+        assert_eq!(rift_clear_proxy_recordings(h, port), 0);
+        assert_eq!([next(), next(), next()], ["A", "B", "C"]);
+
+        assert_eq!(rift_delete_all(h), 0);
+        rift_stop(h);
+    }
+}
+
 /// #1515: `rift_update_stub` with `{"index"}` restarts the stub's response cycle, even with an
 /// identical stub, as Mountebank's `overwriteAtIndex` does; `{"id"}` keeps it.
 #[test]

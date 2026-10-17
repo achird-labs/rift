@@ -893,8 +893,13 @@ pub fn tls_header(config: &ImposterConfig) -> Option<TlsHeader> {
 /// routes or recorded by a proxy would otherwise be missing from the export (issue #1219). With
 /// `remove_proxies`, proxy responses are stripped via [`filter_proxy_stubs`]. `pub` so the FFI
 /// layer (issue #491) serves the SAME projection as both admin routes instead of re-implementing it.
+///
+/// Every `_proxyResponseTime` is dropped, as Mountebank's replayable form drops it (issue #1519).
 pub fn replayable_config(imposter: &Imposter, remove_proxies: bool) -> ImposterConfig {
     let mut config = imposter.current_config();
+    for stub in &mut config.stubs {
+        stub.forget_proxy_response_times();
+    }
     if remove_proxies {
         config.stubs = filter_proxy_stubs(config.stubs);
     }

@@ -1144,6 +1144,7 @@ impl Imposter {
                         recorded_latency,
                         proxy_config.add_decorate_behavior.clone(),
                         Some(proxy_config.to.clone()),
+                        latency_ms,
                     );
 
                     // Insert or append the stub based on proxy mode

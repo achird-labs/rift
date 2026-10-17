@@ -354,6 +354,16 @@ impl Stub {
                 .map(|state| (self.scenario_name.as_deref().unwrap_or(""), state)),
         }
     }
+
+    /// Drop every response's `_proxyResponseTime`, as Mountebank's replayable form does (issue
+    /// #1519): what is replayed is no longer a saved proxy response.
+    pub fn forget_proxy_response_times(&mut self) {
+        for response in &mut self.responses {
+            if let StubResponse::Is { is, .. } = response {
+                is.proxy_response_time = None;
+            }
+        }
+    }
 }
 
 impl Gate<'_> {
@@ -947,6 +957,13 @@ impl StubResponse {
         }
     }
 
+    /// Whether a proxy recorded this response (issue #1519). Only an `is` response carries the mark;
+    /// Mountebank reads only `response.is`, so the flat recorded form (#304) is never one.
+    #[must_use]
+    pub fn is_recorded(&self) -> bool {
+        matches!(self, StubResponse::Is { is, .. } if is.is_recorded())
+    }
+
     /// The `_rift` block written on this response, whatever its type.
     pub(crate) fn rift_block(&self) -> Option<&RiftResponseExtension> {
         match self {
@@ -1192,11 +1209,26 @@ pub(crate) struct IsResponseRaw {
     #[cfg_attr(feature = "schema", schemars(with = "ResponseMode"))]
     #[cfg_attr(feature = "schema", schemars(default = "schema_default_mode"))]
     pub mode: Option<ResponseMode>,
+    /// The proxy round trip in milliseconds, written on each response a proxy records, as
+    /// Mountebank writes it. A number marks a recorded response, which
+    /// `DELETE /imposters/:port/savedProxyResponses` removes; any other value is kept as written.
+    // Any JSON value decodes: refusing one would make stored configs undecodable (rift-cluster
+    // replays them), and Mountebank only tests `typeof === 'number'`.
+    #[serde(
+        rename = "_proxyResponseTime",
+        default,
+        deserialize_with = "present_value"
+    )]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<serde_json::Value>"))]
+    pub proxy_response_time: Option<serde_json::Value>,
 }
 
 impl From<IsResponseRaw> for IsResponse {
     fn from(raw: IsResponseRaw) -> Self {
-        IsResponse::decoded(raw.status_code, raw.headers, raw.body, raw.mode)
+        IsResponse {
+            proxy_response_time: raw.proxy_response_time,
+            ..IsResponse::decoded(raw.status_code, raw.headers, raw.body, raw.mode)
+        }
     }
 }
 
@@ -1222,6 +1254,9 @@ pub(crate) struct IsResponseOut {
     /// `defaultResponse` can still supply it.
     #[serde(rename = "_mode", skip_serializing_if = "Option::is_none")]
     pub mode: Option<ResponseMode>,
+    /// See [`IsResponse::proxy_response_time`]. Printed everywhere but the replayable form.
+    #[serde(rename = "_proxyResponseTime", skip_serializing_if = "Option::is_none")]
+    pub proxy_response_time: Option<serde_json::Value>,
 }
 
 impl From<IsResponse> for IsResponseOut {
@@ -1231,8 +1266,16 @@ impl From<IsResponse> for IsResponseOut {
             headers: (!is.omitted.headers).then_some(is.headers),
             body: is.body,
             mode: (!is.omitted.mode).then_some(is.mode),
+            proxy_response_time: is.proxy_response_time,
         }
     }
+}
+
+/// `Some(..)` for a present field, `null` included, so a written value prints back as written.
+fn present_value<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(d).map(Some)
 }
 
 fn serialize_present_headers<H, S>(headers: &Option<H>, serializer: S) -> Result<S::Ok, S::Error>
@@ -1860,6 +1903,10 @@ pub struct IsResponse {
     #[serde(default)]
     #[cfg_attr(feature = "schema", schemars(skip))]
     pub(crate) proxy: Option<Box<serde_json::Value>>,
+    /// A stub's `is` only: the `_proxyResponseTime` a proxy recording carries (issue #1519), kept
+    /// as written. A `defaultResponse` neither reads nor prints it, as before.
+    #[serde(skip)]
+    pub(crate) proxy_response_time: Option<serde_json::Value>,
 }
 
 /// The printed form of [`IsResponse`]: a field the author omitted is not written.
@@ -1974,6 +2021,7 @@ impl IsResponse {
             mode,
             omitted: Omitted::default(),
             proxy: None,
+            proxy_response_time: None,
         }
     }
 
@@ -2003,7 +2051,14 @@ impl IsResponse {
             body,
             mode: mode.unwrap_or_default(),
             proxy: None,
+            proxy_response_time: None,
         }
+    }
+
+    /// Whether a proxy recorded this response: its `_proxyResponseTime` is a number, Mountebank's
+    /// `typeof === 'number'` (issue #1519).
+    pub(crate) fn is_recorded(&self) -> bool {
+        matches!(self.proxy_response_time, Some(serde_json::Value::Number(_)))
     }
 
     /// Whether `default` has anything to add: a field was omitted (an omitted `_mode` only counts
@@ -3420,6 +3475,48 @@ mod tests {
             serde_json::to_value(&recorded).expect("prints")["is"]["_mode"],
             serde_json::json!("text"),
             "a recording prints `_mode`, as Mountebank's recorder does"
+        );
+    }
+
+    // Issue #1519: `_proxyResponseTime` is the per-response mark Mountebank's clear reads.
+    #[test]
+    fn a_proxy_response_time_is_kept_and_printed() {
+        let written = serde_json::json!({"is": {"body": "u", "_proxyResponseTime": 5}});
+        let stub: super::StubResponse = serde_json::from_value(written.clone()).expect("decodes");
+        assert_eq!(serde_json::to_value(&stub).expect("prints"), written);
+    }
+
+    #[test]
+    fn a_non_numeric_proxy_response_time_loads_and_echoes_but_marks_nothing() {
+        for value in [serde_json::json!("x"), serde_json::json!(null)] {
+            let written = serde_json::json!({"is": {"body": "u", "_proxyResponseTime": value}});
+            let stub: super::StubResponse =
+                serde_json::from_value(written.clone()).expect("a lenient decode");
+            assert_eq!(serde_json::to_value(&stub).expect("prints"), written);
+            assert!(
+                !stub.is_recorded(),
+                "{value}: only a number marks a recording"
+            );
+        }
+        let marked: super::StubResponse = serde_json::from_value(
+            serde_json::json!({"is": {"body": "u", "_proxyResponseTime": 0}}),
+        )
+        .expect("decodes");
+        assert!(marked.is_recorded());
+    }
+
+    #[test]
+    fn a_default_response_ignores_a_proxy_response_time() {
+        let config: super::ImposterConfig = serde_json::from_value(serde_json::json!({
+            "port": 0, "protocol": "http",
+            "defaultResponse": {"body": "d", "_proxyResponseTime": 5}
+        }))
+        .expect("decodes");
+        let printed = serde_json::to_value(&config).expect("prints");
+        assert_eq!(
+            printed["defaultResponse"],
+            serde_json::json!({"body": "d"}),
+            "{printed}"
         );
     }
 

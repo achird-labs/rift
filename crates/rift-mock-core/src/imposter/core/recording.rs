@@ -135,35 +135,44 @@ impl Imposter {
         self.journal.retain(self.journal_port(), &keep);
     }
 
-    /// Clear saved proxy responses: the proxy store, and every stub a proxy recorded (marked
-    /// `recordedFrom`), as Mountebank's `deleteSavedProxyResponses` does. A proxy that records
-    /// through `predicateGenerators`, `addWaitBehavior` or `addDecorateBehavior` records a *stub*
-    /// rather than a store entry, and clearing only the store left that stub replaying, so the
-    /// upstream was never reached again (issue #1239).
+    /// Clear saved proxy responses, as Mountebank's `deleteSavedProxyResponses` does: the proxy
+    /// store, and every response a proxy recorded (its `is` carries a numeric
+    /// `_proxyResponseTime`), including those a `proxyAlways` proxy appended to a stub the author
+    /// wrote (issue #1519). A stub this leaves with no responses is removed, and every remaining
+    /// stub starts its response cycle over. Recorded requests are kept.
     ///
-    /// Returns the recorded stubs removed. An embedder should prefer
+    /// A stub recorded by an engine from before the mark (`recordedFrom`, no marked response) is
+    /// removed whole (issue #1239), so a datadir or a replayed log from then is cleared too.
+    ///
+    /// An embedder should prefer
     /// [`ImposterManager::clear_proxy_responses`](crate::imposter::ImposterManager::clear_proxy_responses),
-    /// which also announces and persists the changed stub set.
-    pub fn clear_proxy_responses(&self) -> Vec<Stub> {
+    /// which also restarts a sequencer's cursors, and announces and persists a changed stub set.
+    pub fn clear_proxy_responses(&self) -> ClearedProxyResponses {
         self.proxy_store.clear(self.journal_port());
-        if !self
-            .snapshot()
-            .stubs()
-            .iter()
-            .any(|s| s.stub.recorded_from.is_some())
-        {
-            return Vec::new();
-        }
+        // One mutation for the filter and the overwrite, so a recording racing the clear is either
+        // cleared or kept, never lost between a read and a write.
         self.mutate_stubs(|stubs| {
-            let mut removed = Vec::new();
-            stubs.retain(|state| {
-                let recorded = state.stub.recorded_from.is_some();
-                if recorded {
-                    removed.push(state.stub.clone());
-                }
-                !recorded
-            });
-            removed
+            let mut changed = false;
+            let kept: Vec<Stub> = stubs
+                .iter()
+                .filter_map(|state| {
+                    let stub = &state.stub;
+                    let marked = stub.responses.iter().any(StubResponse::is_recorded);
+                    if !marked {
+                        if stub.recorded_from.is_some() {
+                            changed = true;
+                            return None;
+                        }
+                        return Some(stub.clone());
+                    }
+                    changed = true;
+                    let mut stripped = stub.clone();
+                    stripped.responses.retain(|r| !r.is_recorded());
+                    (!stripped.responses.is_empty()).then_some(stripped)
+                })
+                .collect();
+            self.overwrite_all(stubs, kept);
+            ClearedProxyResponses { changed }
         })
     }
 
@@ -175,5 +184,169 @@ impl Imposter {
     /// Get request count
     pub fn get_request_count(&self) -> u64 {
         self.journal.count(self.journal_port())
+    }
+}
+
+/// What [`Imposter::clear_proxy_responses`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub struct ClearedProxyResponses {
+    /// A stub was removed or lost a response. A clear always restarts every cycle, but only this
+    /// changes the config.
+    pub changed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const TO: &str = "http://127.0.0.1:1";
+
+    fn imposter(stubs: serde_json::Value) -> Imposter {
+        let config =
+            serde_json::from_value(json!({ "port": 0, "protocol": "http", "stubs": stubs }))
+                .expect("config");
+        Imposter::new(config).expect("imposter")
+    }
+
+    fn proxy_stub() -> serde_json::Value {
+        json!({ "responses": [{ "proxy": { "to": TO, "mode": "proxyAlways" } }] })
+    }
+
+    /// Each stub's response bodies, in display order.
+    fn bodies(imposter: &Imposter) -> Vec<Vec<String>> {
+        imposter
+            .get_stubs()
+            .iter()
+            .map(|stub| {
+                stub.responses
+                    .iter()
+                    .map(
+                        |r| match serde_json::to_value(r).expect("prints").pointer("/is/body") {
+                            Some(serde_json::Value::String(body)) => body.clone(),
+                            _ => "<not is>".to_string(),
+                        },
+                    )
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn next_body(imposter: &Imposter, index: usize) -> String {
+        let snapshot = imposter.snapshot();
+        let response = snapshot.stubs()[index]
+            .get_next_response()
+            .expect("stub has responses");
+        serde_json::to_value(response).expect("prints")["is"]["body"]
+            .as_str()
+            .expect("string body")
+            .to_string()
+    }
+
+    #[test]
+    fn an_appended_response_is_stripped_and_the_authored_ones_stay() {
+        let on_b = json!([{ "deepEquals": { "path": "/b" } }]);
+        let imposter = imposter(json!([
+            proxy_stub(),
+            { "predicates": on_b, "responses": [{ "is": { "body": "A" } }, { "is": { "body": "B" } }] }
+        ]));
+        let recorded: Stub = serde_json::from_value(json!({
+            "predicates": on_b, "recordedFrom": TO,
+            "responses": [{ "is": { "body": "U", "_proxyResponseTime": 7 } }]
+        }))
+        .expect("stub");
+        imposter.insert_or_append_proxy_stub(recorded, TO, "proxyAlways", None, None);
+        assert_eq!(bodies(&imposter)[1], ["A", "B", "U"]);
+
+        assert!(imposter.clear_proxy_responses().changed);
+        assert_eq!(
+            bodies(&imposter),
+            vec![vec!["<not is>".to_string()], vec!["A".into(), "B".into()]]
+        );
+    }
+
+    #[test]
+    fn a_marked_stub_goes_whole_and_a_partly_marked_one_keeps_the_rest() {
+        let imposter = imposter(json!([
+            { "predicates": [{ "equals": { "path": "/i" } }],
+              "responses": [{ "is": { "body": "IMP", "_proxyResponseTime": 5 } }] },
+            { "predicates": [{ "equals": { "path": "/m" } }],
+              "responses": [{ "is": { "body": "M1" } }, { "is": { "body": "M2", "_proxyResponseTime": 3 } }] },
+            { "predicates": [{ "equals": { "path": "/n" } }], "responses": [{ "is": { "body": "N" } }] }
+        ]));
+        assert!(imposter.clear_proxy_responses().changed);
+        assert_eq!(
+            bodies(&imposter),
+            vec![vec!["M1".to_string()], vec!["N".to_string()]]
+        );
+    }
+
+    #[test]
+    fn a_legacy_recording_without_marks_goes_whole() {
+        let imposter = imposter(json!([
+            { "recordedFrom": TO, "responses": [{ "is": { "body": "old" } }] },
+            { "responses": [{ "is": { "body": "mine" } }] }
+        ]));
+        assert!(imposter.clear_proxy_responses().changed);
+        assert_eq!(bodies(&imposter), vec![vec!["mine".to_string()]]);
+    }
+
+    /// Config refuses `responses: []`, but an embedder can build such a stub; nothing was removed
+    /// from it, so the clear keeps it.
+    #[test]
+    fn a_stub_built_with_no_responses_is_kept() {
+        let imposter = imposter(json!([]));
+        let mut empty: Stub =
+            serde_json::from_value(json!({ "responses": [{ "is": { "body": "x" } }] }))
+                .expect("stub");
+        let other = empty.clone();
+        empty.responses.clear();
+        imposter.replace_stubs(vec![empty, other]);
+        assert!(!imposter.clear_proxy_responses().changed);
+        assert_eq!(imposter.get_stubs().len(), 2);
+    }
+
+    #[test]
+    fn clearing_with_nothing_recorded_restarts_every_cycle() {
+        let imposter = imposter(json!([
+            { "responses": [{ "is": { "body": "A" } }, { "is": { "body": "B" } }, { "is": { "body": "C" } }] }
+        ]));
+        assert_eq!(
+            [next_body(&imposter, 0), next_body(&imposter, 0)],
+            ["A", "B"]
+        );
+        assert!(!imposter.clear_proxy_responses().changed);
+        assert_eq!(next_body(&imposter, 0), "A", "the cycle restarted");
+    }
+
+    // Issue #1303: stamps are aligned by position, as a bulk replace aligns them.
+    #[test]
+    fn an_untouched_prefix_keeps_its_stamp_and_a_stub_behind_a_removal_takes_a_new_one() {
+        let imposter = imposter(json!([
+            { "predicates": [{ "equals": { "path": "/a" } }], "responses": [{ "is": { "body": "a" } }] },
+            { "predicates": [{ "equals": { "path": "/r" } }],
+              "responses": [{ "is": { "body": "r", "_proxyResponseTime": 1 } }] },
+            { "predicates": [{ "equals": { "path": "/c" } }], "responses": [{ "is": { "body": "c" } }] }
+        ]));
+        let before: Vec<_> = imposter
+            .snapshot()
+            .stubs()
+            .iter()
+            .map(|s| s.loaded_at())
+            .collect();
+        assert!(imposter.clear_proxy_responses().changed);
+        let after: Vec<_> = imposter
+            .snapshot()
+            .stubs()
+            .iter()
+            .map(|s| s.loaded_at())
+            .collect();
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0], before[0], "the prefix is untouched");
+        assert!(
+            after[1] > before[2],
+            "the stub behind the removal is restamped"
+        );
     }
 }

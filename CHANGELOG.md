@@ -11,8 +11,18 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **Recorded proxy responses carry `_proxyResponseTime`** (ms), as Mountebank's do, and an imported
+  one is kept instead of dropped (#1519). `?replayable=true` and `rift save` leave it out, as
+  Mountebank's replayable form does.
+
 ### Changed
 
+- **`DELETE /imposters/:port/savedProxyResponses` now also removes responses a `proxyAlways` proxy
+  added to existing stubs, and restarts every remaining stub's response cycle**, as Mountebank does
+  (#1519). Any `is` response carrying a numeric `_proxyResponseTime` is removed, whoever wrote it,
+  and a stub left with no responses goes. Recorded requests are kept.
 - **`PUT /imposters` now resets the runtime state of every imposter in the body, as Mountebank's
   delete-and-recreate does** (#1518): response cycles, recorded requests and `numberOfRequests`,
   injection state, scenario and flow state, and saved `proxyOnce` responses. The reset is in place,

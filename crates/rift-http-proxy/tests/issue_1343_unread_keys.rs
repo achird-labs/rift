@@ -850,8 +850,11 @@ fn the_hand_lists_here_match_the_schema() {
         defs["StubResponse"]["x-rift-response-variants"],
         json!(RESPONSE_VARIANTS)
     );
-    // The flat form mirrors an `is` response field for field.
-    assert_eq!(keys(&defs["IsResponse"]), sorted(&FLAT_RESPONSE_KEYS));
+    // The flat form mirrors an `is` response field for field, but for the recording mark (#1519),
+    // which Mountebank reads only on `is`.
+    let mut is_keys = keys(&defs["IsResponse"]);
+    is_keys.retain(|key| key != "_proxyResponseTime");
+    assert_eq!(is_keys, sorted(&FLAT_RESPONSE_KEYS));
     assert_eq!(
         keys(&defs["RiftResponseExtension"]),
         sorted(&RIFT_RESPONSE_KEYS)

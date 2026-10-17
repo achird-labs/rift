@@ -870,20 +870,24 @@ impl Imposter {
     /// shares one stamp from the load clock (issues #1301, #1303) — a stub that moved keeps nothing,
     /// since what it answers may have changed.
     pub fn replace_stubs(&self, new_stubs: Vec<Stub>) {
-        self.mutate_stubs(|stubs| {
-            let k = first_divergence(stubs.iter().map(|s| &s.stub), new_stubs.iter());
-            let old: Vec<Arc<StubState>> = std::mem::take(stubs);
-            // Taken on the first stub that needs it only: an identical replace must not push the clock.
-            let mut fresh: Option<chrono::DateTime<chrono::Utc>> = None;
-            stubs.extend(new_stubs.into_iter().enumerate().map(|(p, s)| {
-                let hash = crate::imposter::reconcile::content_hash(&s);
-                let at = match old.get(p) {
-                    Some(prev) if p < k && prev.content_hash() == hash => prev.loaded_at(),
-                    _ => *fresh.get_or_insert_with(|| self.load_clock.next()),
-                };
-                Arc::new(StubState::with_hash(s, hash).with_loaded_at(at))
-            }));
-        });
+        self.mutate_stubs(|stubs| self.overwrite_all(stubs, new_stubs));
+    }
+
+    /// [`Self::replace_stubs`]' body, for a caller already inside [`Self::mutate_stubs`]: every
+    /// slot is new, and stamps are aligned by position.
+    pub(crate) fn overwrite_all(&self, stubs: &mut Vec<Arc<StubState>>, new_stubs: Vec<Stub>) {
+        let k = first_divergence(stubs.iter().map(|s| &s.stub), new_stubs.iter());
+        let old: Vec<Arc<StubState>> = std::mem::take(stubs);
+        // Taken on the first stub that needs it only: an identical replace must not push the clock.
+        let mut fresh: Option<chrono::DateTime<chrono::Utc>> = None;
+        stubs.extend(new_stubs.into_iter().enumerate().map(|(p, s)| {
+            let hash = crate::imposter::reconcile::content_hash(&s);
+            let at = match old.get(p) {
+                Some(prev) if p < k && prev.content_hash() == hash => prev.loaded_at(),
+                _ => *fresh.get_or_insert_with(|| self.load_clock.next()),
+            };
+            Arc::new(StubState::with_hash(s, hash).with_loaded_at(at))
+        }));
     }
 
     /// Create the flow store: the store a
@@ -1100,6 +1104,7 @@ pub(crate) use proxy::{ProxiedResponse, ProxyBody, ProxyOutcome, unread_generato
 mod recording;
 mod responses;
 mod verify;
+pub use recording::ClearedProxyResponses;
 pub use verify::{ClosestMatch, FailedPredicate, VerifyOptions, VerifyOutcome};
 
 #[cfg(test)]
