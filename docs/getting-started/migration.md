@@ -4,7 +4,7 @@ title: Migration from Mountebank
 
 # Migrating from Mountebank to Rift
 
-Rift is designed as a drop-in replacement for Mountebank. This guide covers the migration process and highlights any differences.
+Rift is designed to run your Mountebank setup unchanged. This guide covers the migration and the [differences](../mountebank/differences.md) worth checking against your tests.
 
 ---
 

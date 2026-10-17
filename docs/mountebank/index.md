@@ -1,6 +1,6 @@
 # Mountebank Compatibility
 
-Rift implements the [Mountebank](https://www.mbtest.dev/) REST API and configuration format. This allows you to use Rift as a drop-in replacement for Mountebank with significantly better performance.
+Rift implements the [Mountebank](https://www.mbtest.dev/) REST API and configuration format, so most Mountebank configurations and clients work with Rift unchanged. Where Rift behaves differently, the difference is listed in [Differences from Mountebank](differences.md).
 
 **Version:** Rift is compatible with **Mountebank 2.9.5**, the latest release. Mountebank now
 publishes as [`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mountebank); the old

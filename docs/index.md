@@ -7,9 +7,16 @@ description: Rift is a high-performance Mountebank-compatible HTTP/HTTPS mock se
 
 **High-performance Mountebank-compatible HTTP/HTTPS mock server written in Rust**
 
-Rift is a drop-in replacement for [Mountebank](https://www.mbtest.dev/) that delivers **~20–150x faster throughput on typical workloads, and up to ~1,820x on large regex predicate sets** — while maintaining full API compatibility. Use your existing Mountebank configurations and enjoy faster test execution.
+Rift implements [Mountebank](https://www.mbtest.dev/)'s REST API and imposter format, so most existing
+`imposters.json` files and Mountebank clients work unchanged. It keeps its throughput flat as a stub file
+grows, and the same engine embeds in-process in Java, Node, Go and Scala.
 
-Rift is compatible with **Mountebank 2.9.5**, the latest release ([`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mountebank)), checked against a real Mountebank on every pull request that changes the engine — see [Differences from Mountebank](mountebank/differences.md) for the few deliberate exceptions.
+Rift targets **Mountebank 2.9.5**, the latest release
+([`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mountebank)). Every pull request that changes
+the engine runs a differential suite that sends the same requests to a real Mountebank and to Rift. The
+differences it finds are listed in [Differences from Mountebank](mountebank/differences.md). Compatibility
+is established by those tests, so behaviour they do not exercise can still differ: if you find a case,
+[open an issue](https://github.com/achird-labs/rift/issues).
 
 [Get Started](getting-started/index.md){ .md-button .md-button--primary }
 [View on GitHub](https://github.com/achird-labs/rift){ .md-button }
@@ -18,17 +25,18 @@ Rift is compatible with **Mountebank 2.9.5**, the latest release ([`@mbtest/moun
 
 ## Why Rift?
 
-### Drop-in Mountebank Replacement
+### Mountebank Compatible
 
-Rift implements the Mountebank REST API, allowing you to:
+Rift implements the Mountebank REST API, so you can usually:
 
-- Use existing Mountebank configuration files without changes
-- Keep your current test infrastructure and tooling
-- Switch between Mountebank and Rift transparently
+- load existing Mountebank configuration files without changes;
+- keep your current Mountebank clients and test tooling;
+- check the [documented differences](mountebank/differences.md) for anything your tests rely on.
 
-### Blazing Fast Performance
+### Performance
 
-Built in Rust with async I/O, Rift delivers exceptional performance:
+Rift indexes stubs instead of scanning them in order, so its cost does not grow with the size of the stub
+file. Measured against Mountebank on the same machine:
 
 | Feature | Mountebank | Rift | Speedup |
 |:--------|:-----------|:-----|:--------|
@@ -44,9 +52,9 @@ figures above are the conservative read.</sub>
 
 See the [performance page](performance/index.md) for both hosts, the full suite, and the method.
 
-### Full Feature Compatibility
+### Mountebank Features
 
-Rift supports all major Mountebank features:
+Rift supports Mountebank's HTTP and HTTPS feature set (not its TCP and SMTP protocols):
 
 - **Imposters** - HTTP/HTTPS mock servers on any port, including mutual TLS
 - **Stubs** - Request matching with responses
