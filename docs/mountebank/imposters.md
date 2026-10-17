@@ -500,6 +500,8 @@ way before it checks it; see [Linting](../features/linting.md#templated-files).
 
 ### First-Match-Wins
 
+![Predicate matching in a Rift imposter: a request is checked against the stubs in order. Each stub's predicates (equals, contains, jsonpath, matches) are evaluated until one fails, and that stub is skipped. The first stub whose predicates all match answers, here POST /orders gets 201 from stub 2. A request no stub matches, GET /reports, falls through to the imposter's defaultResponse, 404 here; without one Rift answers 200 with an empty body, as Mountebank does.](../assets/matching.svg)
+
 Stubs are evaluated in order. The **first stub whose predicates match** is used:
 
 ```json

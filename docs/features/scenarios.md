@@ -12,6 +12,8 @@ state after it responds.
 
 ## Stub fields
 
+![A Rift scenario with states Started, paid and shipped. Stub 0 answers POST /pay only in Started and moves the scenario to paid; stub 1 answers POST /ship only in paid and moves it to shipped; stub 2 answers POST /pay in paid and leaves the state alone. POST /ship in Started matches no eligible stub and gets the defaultResponse 404; then /pay gets 200, /pay again 409, /ship 202, and a scenarios reset puts the token back to Started.](../assets/scenarios.svg)
+
 | Field | Meaning |
 |:------|:--------|
 | `scenarioName` | Names the scenario this stub belongs to. |

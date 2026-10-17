@@ -193,6 +193,8 @@ flamegraph.svg
 perf.data
 perf.data.old
 *.svg
+# ...but the docs' animated SVGs are generated, committed and diffed in CI (scripts/visuals/check.sh)
+!docs/assets/*.svg
 
 # CI/CD local testing
 .github-actions/
