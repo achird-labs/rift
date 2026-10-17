@@ -4,6 +4,8 @@ Rift enables fault injection for chaos engineering and resilience testing.
 
 ---
 
+![One connection through a Rift imposter started with --local-only. A remote client, 203.0.113.7, is accepted and dropped at the peer check. A loopback client, 127.0.0.1, passes the peer check, socket tuning (TCP_NODELAY), FaultIo, the TLS handshake of an https imposter and HTTP/1 or h2, matches a stub, and runs its behaviors in order: wait, lookup, copy, shellTransform, decorate. The response is written back through FaultIo, where a fault armed by the stub would reset or cut the connection.](../assets/connection-path.svg)
+
 ## Mountebank Behaviors
 
 ### Latency with wait Behavior

@@ -252,6 +252,8 @@ supplies its closing character. See
 
 ## Response Cycling
 
+![Response cycling in a Rift stub with responses A (repeat 2), B and C: each request is answered by the response at the head of the queue, which moves to the tail once it has been served repeat times, so requests get A, A, B, C, A. Replacing the stub by id keeps the cycle; replacing it at its index resets it to A. Captions list the other resets (PUT /imposters, DELETE savedProxyResponses) and what keeps the cycle (replace by id, a reload that leaves the stub unchanged).](../assets/response-cycle.svg)
+
 When a stub has multiple responses, they cycle through in round-robin order. Each request returns the next response in the sequence, wrapping back to the first after reaching the end.
 
 A `proxyAlways` recording appended to a stub mid-cycle joins the end of its current cycle; see

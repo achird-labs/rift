@@ -18,6 +18,8 @@ differences it finds are listed in [Differences from Mountebank](mountebank/diff
 is established by those tests, so behaviour they do not exercise can still differ: if you find a case,
 [open an issue](https://github.com/achird-labs/rift/issues).
 
+![Rift, a Mountebank-compatible HTTP and HTTPS mock server. Requests reach an imposter and are checked against its stubs in order; the first stub whose predicates match answers with the next response in its cycle, 200 v1 and then 200 v2. A request no hand-written stub matches reaches a proxyOnce proxy stub, which forwards it upstream and records the answer as a new stub in front of itself; the next identical request is replayed from that recording without calling upstream.](assets/hero.svg)
+
 [Get Started](getting-started/index.md){ .md-button .md-button--primary }
 [View on GitHub](https://github.com/achird-labs/rift){ .md-button }
 

@@ -30,6 +30,8 @@ each method, path, query and body, then replays that response (see [Proxy Modes]
 
 ## Proxy Modes
 
+![Rift's three proxy modes, each sent GET /x three times. proxyOnce, also the default when mode is omitted, forwards the first request, records the answer as a new stub in front of the proxy stub, and replays it, so upstream is called once. proxyAlways forwards every request and records behind the proxy, appending each answer to one recorded stub that answers only once the proxy stops matching. proxyTransparent forwards every request and records nothing.](../assets/proxy-modes.svg)
+
 What a proxy records depends on whether it has `predicateGenerators` (or `addWaitBehavior` /
 `addDecorateBehavior`):
 
