@@ -284,9 +284,12 @@ pub struct Cli {
     )]
     pub ip_whitelist: Option<Vec<String>>,
 
-    /// Require this token in the Authorization header for all admin API requests
+    /// Require this token in the Authorization header (or Mountebank's x-api-key) for all admin
+    /// API requests; Authorization wins when both are sent. `--apikey` is Mountebank's spelling
+    /// (issue #1565)
     #[arg(
         long,
+        visible_alias = "apikey",
         value_name = "TOKEN",
         env = "MB_APIKEY",
         global = true,

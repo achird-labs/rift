@@ -186,7 +186,7 @@ Server options:
       --log <FILE>                 Also write logs to this file (off unless set) (alias: --logfile)
       --pidfile <FILE>             Write the server's PID here (off unless set; stop/restart read ./rift.pid when omitted)
       --origin <ORIGIN>            Accepted for Mountebank compatibility; NOT implemented — the admin API sends no CORS headers
-      --api-key <TOKEN>            Require this token in the Authorization header for all admin API requests
+      --api-key <TOKEN>            Require this token in the Authorization header (or Mountebank's x-api-key) for all admin API requests; Authorization wins when both are sent (alias: --apikey)
       --rcfile <FILE>              RC file with default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/apiKey/datadir/configfile/noParse); one that cannot be read or applied aborts startup
       --default-tls-cert <FILE>    Default TLS certificate (PEM) for HTTPS imposters without their own
       --default-tls-key <FILE>     Default TLS private key (PEM), paired with --default-tls-cert
@@ -215,8 +215,8 @@ load, so use `--no-parse` when a document contains a literal `<%`. A `<%= proces
 variable is unset (and has no `|| 'default'`) renders empty and logs a `WARN` naming the variable
 and where the tag is; if the rendered document then fails to parse, the error names it too.
 
-Mountebank's spellings `--localOnly`, `--logfile` and `--ipWhitelist` are aliases of `--local-only`,
-`--log` and `--ip-whitelist`, alongside `--allowInjection` and `--noParse` (and `save`'s
+Mountebank's spellings `--localOnly`, `--logfile`, `--ipWhitelist` and `--apikey` are aliases of
+`--local-only`, `--log`, `--ip-whitelist` and `--api-key`, alongside `--allowInjection` and `--noParse` (and `save`'s
 `--removeProxies`, of `--remove-proxies`). Unlike `mb`, `--logfile` has no default: Rift writes no
 log file unless one is named.
 
@@ -336,9 +336,12 @@ Rules:
 
 ### API-key authentication
 
-`--api-key` (or `MB_APIKEY`) requires every admin API request to carry the token in the
-`Authorization` header. Data-plane traffic — direct imposter ports and the `/__rift/:port/...`
-gateway — is **not** gated by this key.
+`--api-key` (or Mountebank's spelling `--apikey`, or `MB_APIKEY`) requires every admin API request
+to carry the token, as the raw value, in the `Authorization` header or in Mountebank's `x-api-key`
+header. When both headers are sent, `Authorization` decides alone and `x-api-key` is ignored: a
+request never authenticates on whichever of the two happens to match. Data-plane traffic — direct
+imposter ports and the `/__rift/:port/...` gateway — is **not** gated by this key. `rift
+healthcheck`, `save` and `replay` present the key in `Authorization`.
 
 A **blank** value is refused at startup rather than accepted as a key:
 
@@ -354,6 +357,7 @@ merely *contains* spaces is still a valid key and is compared exactly as given.
 ```bash
 rift --api-key s3cr3t
 curl -H "Authorization: s3cr3t" http://localhost:2525/imposters
+curl -H "x-api-key: s3cr3t" http://localhost:2525/imposters
 ```
 
 ### Unauthenticated admin plane on a public interface

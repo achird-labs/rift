@@ -18,15 +18,19 @@ http://localhost:2525
 
 ## Authentication
 
-When Rift is started with `--api-key <TOKEN>` (or `MB_APIKEY`), every admin API request must send the
-token in the `Authorization` header. Requests without a matching token receive `401 Unauthorized`.
-Data-plane traffic — direct imposter ports and the `/__rift/:port/...` gateway — is not gated.
+When Rift is started with `--api-key <TOKEN>` (or `--apikey`, or `MB_APIKEY`), every admin API
+request must send the token, as the raw value, in the `Authorization` header or in Mountebank's
+`x-api-key` header. When a request sends both, `Authorization` decides alone and `x-api-key` is
+ignored, so a wrong `Authorization` is refused even beside a right `x-api-key`. Requests without a
+matching token receive `401 Unauthorized`. Data-plane traffic — direct imposter ports and the
+`/__rift/:port/...` gateway — is not gated, and needs neither header.
 
 A blank token is a startup error, not a key: it would enable this gate and then authenticate every
 request. Omit the option to run the admin API explicitly unauthenticated.
 
 ```bash
 curl -H "Authorization: <TOKEN>" http://localhost:2525/imposters
+curl -H "x-api-key: <TOKEN>" http://localhost:2525/imposters   # Mountebank's header
 ```
 
 ---
