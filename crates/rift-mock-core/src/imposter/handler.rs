@@ -262,11 +262,18 @@ pub(super) enum BinaryBody {
 /// Decode a binary-mode body. `Err` carries the ready-made strict-mode 500 — the failure is
 /// already a response by then, so the caller returns it as-is. Boxed because a `Response` is large
 /// and this is the rare path; the `Ok` path stays small.
+///
+/// Every character outside the base64 alphabet is dropped before the decode, as Mountebank's
+/// `postProcess` does (`baseHttpServer.js:53-57`, `/[^A-Za-z0-9=+/]+/g`), so a body wrapped at 76
+/// columns decodes (#1554). A body that still fails keeps its original text for the fallback.
+/// `rift-lint`'s W015 applies the same filter, so the two cannot disagree on what decodes.
 pub(super) fn decode_binary_body(
     body: String,
     strict: bool,
 ) -> Result<BinaryBody, Box<Response<Full<Bytes>>>> {
-    match base64::engine::general_purpose::STANDARD.decode(&body) {
+    let decoded =
+        base64::engine::general_purpose::STANDARD.decode(strip_non_base64(&body).as_bytes());
+    match decoded {
         Ok(decoded) => Ok(BinaryBody::Decoded(Bytes::from(decoded))),
         Err(e) if strict => {
             warn!("Failed to decode base64 body: {e}; failing loud (strictBehaviors)");
@@ -288,6 +295,17 @@ pub(super) fn decode_binary_body(
             warn!("Failed to decode base64 body: {e}, using raw body");
             Ok(BinaryBody::RawFallback(Bytes::from(body)))
         }
+    }
+}
+
+/// `body` with every character outside `A-Za-z0-9+/=` removed (#1554). Borrowed when there is
+/// nothing to remove, which is the common single-line case.
+fn strip_non_base64(body: &str) -> std::borrow::Cow<'_, str> {
+    let in_alphabet = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=');
+    if body.chars().all(in_alphabet) {
+        std::borrow::Cow::Borrowed(body)
+    } else {
+        std::borrow::Cow::Owned(body.chars().filter(|&c| in_alphabet(c)).collect())
     }
 }
 
@@ -571,7 +589,61 @@ pub async fn handle_imposter_request(
     if let Some(preflight) = cors_preflight {
         preflight.apply(response.headers_mut());
     }
+    // The last header edit on the funnel, after the CORS echo, so nothing after it can make the
+    // length stale again (#1554). The serve loop's `ResponseDecorator` runs later but edits only
+    // an embedder's own headers.
+    reconcile_content_length(&mut response);
     Ok(response)
+}
+
+/// Correct a `Content-Length` the response carries to the body's real byte length (#1554).
+///
+/// Mountebank does this in `postProcess` (`baseHttpServer.js:63-65`), after behaviors, for every
+/// response that has the header: `is`, `inject`, `decorate`, `copy`, `lookup`, `shellTransform`
+/// and `defaultResponse` alike. A response without the header is left alone, and hyper frames it
+/// from the body as before. Without this, hyper writes the stub's value verbatim beside a body
+/// framed by its real length (`proto/h1/role.rs`, "we are just going to trust that the values
+/// match"): too large hangs the client, too small truncates the body and leaves the rest on the
+/// connection, and a debug build panics on the mismatch.
+///
+/// The header is removed instead when:
+/// - the response also sets `Transfer-Encoding`. RFC 9112 §6.2 forbids sending both, and hyper
+///   cancels such a response, so the client got nothing at all. Mountebank sends both; the body
+///   the client reads is the same.
+/// - the status is 1xx or 204, which RFC 9110 §8.6 says must not carry one. hyper omits it there
+///   itself when no header is set, so this is what the same stub without the header gets.
+/// - the body's length is not known exactly. `Full<Bytes>` always knows it; this keeps an unknown
+///   length from being guessed.
+///
+/// A HEAD response keeps its full body here (hyper drops the bytes), so its corrected value is the
+/// GET length, as RFC 9110 §9.3.2 asks.
+fn reconcile_content_length(response: &mut Response<Full<Bytes>>) {
+    use hyper::body::Body as _;
+    use hyper::header::{CONTENT_LENGTH, HeaderValue, TRANSFER_ENCODING};
+
+    if !response.headers().contains_key(CONTENT_LENGTH) {
+        return;
+    }
+    let status = response.status();
+    let length = if response.headers().contains_key(TRANSFER_ENCODING)
+        || status.is_informational()
+        || status == StatusCode::NO_CONTENT
+    {
+        None
+    } else {
+        response.body().size_hint().exact()
+    };
+    match length {
+        // `insert` replaces every value, so a header given twice ends up with one.
+        Some(length) => {
+            response
+                .headers_mut()
+                .insert(CONTENT_LENGTH, HeaderValue::from(length));
+        }
+        None => {
+            response.headers_mut().remove(CONTENT_LENGTH);
+        }
+    }
 }
 
 /// Marks a response that reports *on* a request instead of answering it: the `X-Rift-Debug` match
@@ -4180,6 +4252,30 @@ mod decode_binary_body_tests {
             Some("true"),
             "the strict 500 still carries the #323 signal header"
         );
+    }
+
+    // #1554: Mountebank drops every non-base64 character before decoding, so the multiline PNG of
+    // mbTest `httpStubTest.js:317` decodes to its 274 bytes instead of falling back to raw text.
+    #[test]
+    fn a_body_with_line_breaks_decodes_as_mountebank_decodes_it() {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAGQAAAAyBAMAAABYG2ONAAAAFVBMVEUAAAD///9/f39fX1+fn58f\nHx8/Pz8rYiDqAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAo0lEQVRIie2Qyw7CIBBFb2DwO5q+1o0L\n1w0NrrHRPQnV//8EAUl0ga1ujIs5CZAz4YYZAIZhmN/QQOkjzq3LLuv6xUrQHmTJGphcEGE9rUQ3\nY4bqqrDjAlgQoJK9Z8YBmFy8Gp8DeSeTfRSBCf2I6/JN5ORiRfrNiIfqh9S9SVPL27A1C0G4EX2e\nJR7J1iI7rbG0Vf4x0UwPW0Uh3i0bwzD/yR11mBj1DIKiVwAAAABJRU5ErkJggg==\n";
+        let Ok(BinaryBody::Decoded(bytes)) = decode_binary_body(png.to_string(), true) else {
+            panic!("a base64 body wrapped with line breaks must decode");
+        };
+        assert_eq!(bytes.len(), 274);
+        assert_eq!(&bytes[..4], b"\x89PNG");
+    }
+
+    // A body that is still not base64 once the stray characters are gone falls back with its
+    // original text, not the filtered one.
+    #[test]
+    fn a_body_still_bad_after_the_filter_falls_back_with_its_original_text() {
+        let Ok(BinaryBody::RawFallback(bytes)) =
+            decode_binary_body("aGVsbG8\n!".to_string(), false)
+        else {
+            panic!("`aGVsbG8` (no padding) must not decode");
+        };
+        assert_eq!(bytes.as_ref(), b"aGVsbG8\n!");
     }
 
     // Strict mode must not turn a *valid* body into a failure.

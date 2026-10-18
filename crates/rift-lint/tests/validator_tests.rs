@@ -3661,6 +3661,24 @@ fn w015_is_silent_for_a_null_or_absent_binary_body() {
     }
 }
 
+/// The multiline PNG from mbTest `httpStubTest.js:317`, wrapped at 76 columns with `\n`.
+const MULTILINE_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAGQAAAAyBAMAAABYG2ONAAAAFVBMVEUAAAD///9/f39fX1+fn58f\nHx8/Pz8rYiDqAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAo0lEQVRIie2Qyw7CIBBFb2DwO5q+1o0L\n1w0NrrHRPQnV//8EAUl0ga1ujIs5CZAz4YYZAIZhmN/QQOkjzq3LLuv6xUrQHmTJGphcEGE9rUQ3\nY4bqqrDjAlgQoJK9Z8YBmFy8Gp8DeSeTfRSBCf2I6/JN5ORiRfrNiIfqh9S9SVPL27A1C0G4EX2e\nJR7J1iI7rbG0Vf4x0UwPW0Uh3i0bwzD/yR11mBj1DIKiVwAAAABJRU5ErkJggg==\n";
+
+// #1554: the engine drops every non-base64 character (line breaks above all) before decoding, as
+// Mountebank does, so a wrapped body decodes and W015 must not flag it.
+#[test]
+fn w015_is_silent_for_base64_with_line_breaks() {
+    let imposter = json!({
+        "port": 4545, "protocol": "http",
+        "stubs": [{ "responses": [{ "is": {
+            "statusCode": 200, "body": MULTILINE_PNG_BASE64, "_mode": "binary"
+        } }] }]
+    });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &imposter, &mut r, &opts());
+    assert!(!has_code(&r, "W015"), "got {:?}", codes(&r));
+}
+
 // ─── #1152: keys the engine parses and ignores (W017), carriers (I005), returnCaKey (E050) ──────
 
 #[test]
