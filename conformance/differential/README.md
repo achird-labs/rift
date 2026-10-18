@@ -145,10 +145,9 @@ a divergence (to be fixed in Rift and then covered here), or nobody has written 
 | `predicates.js:384-389`, `responseResolver.js:69-77` | A predicate or response `inject` that throws: Mountebank answers `500`, Rift `400` |
 | `responseResolver.js:109-110`, `:119-120`, `:131-144`, `:159-163`, `:197-198`; `helpers.js:81-87`, `:117-129` | `predicateGenerators` with `ignore`, a nested matcher, `predicateOperator: "exists"`, and an `inject` that throws (Mountebank refuses the last two at creation) |
 | `dryRunValidator.js:188-192`; `behaviorsValidator.js:98-99`, `:167-173` | `repeat: 0`, a `copy.from` with two keys, an unknown behavior and a behavior object with two types: Mountebank refuses each at creation, Rift accepts it |
-| `behaviors.js:275-276`, `:286-287`, `:364-369` | `copy` from a missing field, from a repeated query key, and into a header name or body key |
+| `behaviors.js:275-276`, `:364-369` | `copy` from a missing field, and into a header name or body key |
 | `baseHttpServer.js:47-50` | A CORS preflight (`Access-Control-Request-Headers` set): Mountebank echoes the request's values and serves the stub's body |
 | `baseHttpServer.js:64-65` | A stub's own `Content-Length` header: Mountebank recomputes it from the body |
-| `headersMap.js:63-65` | A repeated request header: Mountebank keeps both values |
 | `httpRequest.js:63-73` | A `gzip`/`br` `Content-Encoding` whose body does not decode |
 | `xpath.js:36-40` | A malformed `xpath` selector: Mountebank creates the imposter and answers `500` per request, Rift refuses it at creation |
 | `helpers.js:104-107` | An unknown `fault` |

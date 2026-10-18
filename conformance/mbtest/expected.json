@@ -813,12 +813,6 @@
       "note": "no Vary: Accept"
     },
     {
-      "id": "docs:/docs/api/predicates#array",
-      "class": "bug",
-      "issue": "#1553",
-      "note": "array-valued query predicate"
-    },
-    {
       "id": "docs:/docs/api/behaviors#copy-regex",
       "class": "bug",
       "issue": "#1558",

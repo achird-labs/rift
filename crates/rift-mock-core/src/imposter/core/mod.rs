@@ -1906,7 +1906,7 @@ mod tests {
         );
     }
 
-    // Fix #95: Multi-valued form fields are now comma-joined instead of overwritten
+    // Fix #95, #1553: a repeated form field keeps every value instead of being overwritten
     #[test]
     fn test_parse_form_data_multi_valued_fields() {
         // parse_form_data now reads the pre-built header map (Title-Case keys); the Content-Type
@@ -1921,8 +1921,8 @@ mod tests {
         let form = result.expect("Should parse form data");
         assert_eq!(
             form.get("checkbox").unwrap(),
-            "A,B,C",
-            "Multi-valued form fields should be comma-joined"
+            &["A", "B", "C"],
+            "a repeated form field keeps every value in order"
         );
 
         // Content-Type lookup must be case-insensitive over the map (a lower-cased key must

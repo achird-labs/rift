@@ -22,7 +22,10 @@ pub fn header_to_title_case(name: &str) -> String {
 pub struct RequestContext {
     pub method: String,
     pub path: String,
-    pub query: HashMap<String, String>,
+    /// Every value of each query key, in request order (issue #1553). `copy` and `lookup` read a
+    /// repeated key's first value, as Mountebank's `getFrom` does; `decorate` and `shellTransform`
+    /// see it comma-joined (`docs/mountebank/behaviors.md`).
+    pub query: HashMap<String, Vec<String>>,
     pub headers: HashMap<String, String>,
     pub body: Option<String>,
     /// `requestFrom` / `ip` / `form` for `decorate` and `MB_REQUEST`, as Mountebank's
@@ -31,6 +34,18 @@ pub struct RequestContext {
     pub request_from: Option<String>,
     pub ip: Option<String>,
     pub form: Option<HashMap<String, String>>,
+}
+
+impl RequestContext {
+    /// The query as `decorate` and `shellTransform` see it: one string per key, a repeated key's
+    /// values comma-joined.
+    #[must_use]
+    pub fn query_joined(&self) -> HashMap<String, String> {
+        self.query
+            .iter()
+            .map(|(k, v)| (k.clone(), v.join(",")))
+            .collect()
+    }
 }
 
 impl RequestContext {
@@ -66,7 +81,7 @@ impl RequestContext {
         // into the std map re-hashes it, which #704 otherwise avoids; accepted here because it runs
         // only for a stub with behaviors on a map of a few entries, and removing it means changing
         // the public `query` field's type.
-        let query_map: HashMap<String, String> = uri
+        let query_map: HashMap<String, Vec<String>> = uri
             .query()
             .map(|q| crate::util::parse_query_string(q).into_iter().collect())
             .unwrap_or_default();
@@ -90,7 +105,7 @@ impl RequestContext {
             request_from: client_addr.map(|addr| addr.to_string()),
             ip: client_addr.map(|addr| addr.ip().to_string()),
             form: crate::imposter::Imposter::request_form(headers, body)
-                .map(|form| form.into_iter().collect()),
+                .map(|form| crate::util::comma_joined(&form)),
         }
     }
 }
@@ -107,7 +122,10 @@ mod tests {
         let uri: hyper::Uri = "/p?k=%FF".parse().unwrap();
         let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
         assert_eq!(
-            ctx.query.get("k").map(String::as_str),
+            ctx.query
+                .get("k")
+                .and_then(|v| v.first())
+                .map(String::as_str),
             Some("%FF"),
             "an undecodable value must pass through raw, not become an empty string"
         );
@@ -117,7 +135,13 @@ mod tests {
     fn from_request_still_decodes_a_valid_query_value() {
         let uri: hyper::Uri = "/p?k=hello%20world".parse().unwrap();
         let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
-        assert_eq!(ctx.query.get("k").map(String::as_str), Some("hello world"));
+        assert_eq!(
+            ctx.query
+                .get("k")
+                .and_then(|v| v.first())
+                .map(String::as_str),
+            Some("hello world")
+        );
     }
 
     // Issue #614: the key was left raw while the value was decoded, so a behavior reading the
@@ -127,7 +151,10 @@ mod tests {
         let uri: hyper::Uri = "/p?a%20b=1".parse().unwrap();
         let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
         assert_eq!(
-            ctx.query.get("a b").map(String::as_str),
+            ctx.query
+                .get("a b")
+                .and_then(|v| v.first())
+                .map(String::as_str),
             Some("1"),
             "an encoded key must be decoded, matching imposter::parse_query_string"
         );
@@ -138,7 +165,10 @@ mod tests {
         let uri: hyper::Uri = "/p?%FF=v".parse().unwrap();
         let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
         assert_eq!(
-            ctx.query.get("%FF").map(String::as_str),
+            ctx.query
+                .get("%FF")
+                .and_then(|v| v.first())
+                .map(String::as_str),
             Some("v"),
             "an undecodable key must pass through raw, not collapse to an empty key"
         );

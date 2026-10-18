@@ -318,21 +318,25 @@ impl<SH: BuildHasher> GeneratorRequest<'_, SH> {
             .map(String::as_str)
     }
 
+    /// The query as the matcher reads it: a key sent once is recorded as a string and a repeated
+    /// key as the array of its values (issue #1553), as Mountebank records it, so the generated
+    /// `deepEquals` replays to the request that produced it in any value order.
     fn query(&self) -> serde_json::Map<String, serde_json::Value> {
         self.query
             .map(crate::imposter::parse_query_string)
             .unwrap_or_default()
-            .into_iter()
-            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .iter()
+            .map(|(k, v)| (k.clone(), crate::util::values_as_json(v)))
             .collect()
     }
 
-    /// The urlencoded form, parsed as the matcher parses it. `None` when the request has none:
-    /// Mountebank builds `request.form` only for a non-empty urlencoded body (`httpRequest.js`).
+    /// The urlencoded form, parsed as the matcher parses it, a repeated key as an array like
+    /// [`Self::query`]. `None` when the request has none: Mountebank builds `request.form` only for
+    /// a non-empty urlencoded body (`httpRequest.js`).
     fn form(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
         crate::imposter::Imposter::request_form(self.headers, self.body).map(|form| {
-            form.into_iter()
-                .map(|(k, v)| (k, serde_json::Value::String(v)))
+            form.iter()
+                .map(|(k, v)| (k.clone(), crate::util::values_as_json(v)))
                 .collect()
         })
     }
@@ -603,7 +607,8 @@ impl Imposter {
                     let mb_request = MountebankRequest {
                         method: method.to_string(),
                         path: path.to_string(),
-                        query: query_map.into_iter().collect(),
+                        // A script sees a repeated key comma-joined (`docs/mountebank/responses.md`).
+                        query: crate::util::comma_joined(&query_map),
                         // `MountebankRequest.headers` is the fixed single-value scripting boundary
                         // (out of scope for #704/#1025), so a repeated header exposes only its
                         // first value to a predicateGenerator inject script.
@@ -619,7 +624,7 @@ impl Imposter {
                         request_from: Some(client_addr.to_string()),
                         ip: Some(client_addr.ip().to_string()),
                         form: crate::imposter::Imposter::request_form(headers, body)
-                            .map(|form| form.into_iter().collect()),
+                            .map(|form| crate::util::comma_joined(&form)),
                     };
                     let inject_preds =
                         execute_predicate_generator_inject(inject_fn, &mb_request, &predicates)?;

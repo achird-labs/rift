@@ -803,7 +803,7 @@ impl Imposter {
     pub(crate) fn parse_form_data<H: RequestHeaders>(
         headers: &H,
         body: Option<&str>,
-    ) -> Option<FastMap<String, String>> {
+    ) -> Option<crate::util::MultiValueMap> {
         // Header keys are Title-Case in the pre-built map, so match Content-Type case-insensitively
         // (HeaderMap lookups were case-insensitive; preserve that). Generic over `RequestHeaders`
         // (issue #1026) so the verify API can pass a recorded request's multi-value map straight
@@ -821,24 +821,9 @@ impl Imposter {
         if content_type.contains("application/x-www-form-urlencoded")
             && let Some(body_str) = body
         {
-            let mut map = FastMap::default();
-            for pair in body_str.split('&').filter(|s| !s.is_empty()) {
-                let mut parts = pair.splitn(2, '=');
-                if let Some(raw_key) = parts.next() {
-                    let key = crate::util::decode_or_raw(raw_key);
-                    let value = parts
-                        .next()
-                        .map(crate::util::decode_or_raw)
-                        .unwrap_or_default();
-                    map.entry(key)
-                        .and_modify(|existing: &mut String| {
-                            existing.push(',');
-                            existing.push_str(&value);
-                        })
-                        .or_insert(value);
-                }
-            }
-            return Some(map);
+            // The query parser: Mountebank builds `form` with the same `querystring.parse`, so a
+            // repeated key keeps every value (issue #1553).
+            return Some(crate::util::parse_query_string(body_str));
         }
         None
     }
@@ -849,7 +834,7 @@ impl Imposter {
     pub(crate) fn request_form<H: RequestHeaders>(
         headers: &H,
         body: Option<&str>,
-    ) -> Option<FastMap<String, String>> {
+    ) -> Option<crate::util::MultiValueMap> {
         if body.is_none_or(str::is_empty) {
             return None;
         }
@@ -1045,21 +1030,21 @@ mod bounded_matching_tests {
         let form = Imposter::parse_form_data(&headers, Some("k=%FF")).expect("form parsed");
         assert_eq!(
             form.get("k"),
-            Some(&"%FF".to_string()),
+            Some(&vec!["%FF".to_string()]),
             "an undecodable value must pass through raw, not become empty"
         );
 
         let form = Imposter::parse_form_data(&headers, Some("%FF=v")).expect("form parsed");
         assert_eq!(
             form.get("%FF"),
-            Some(&"v".to_string()),
+            Some(&vec!["v".to_string()]),
             "an undecodable key must pass through raw, not collapse to an empty key"
         );
 
         let form = Imposter::parse_form_data(&headers, Some("k=hello%20world")).expect("parsed");
         assert_eq!(
             form.get("k"),
-            Some(&"hello world".to_string()),
+            Some(&vec!["hello world".to_string()]),
             "valid sequences must still decode"
         );
     }
@@ -1080,8 +1065,8 @@ mod bounded_matching_tests {
 
         let form = Imposter::parse_form_data(&header("Content-Type", &[FORM]), Some("a=1&b=2"))
             .expect("form parsed");
-        assert_eq!(form.get("a"), Some(&"1".to_string()));
-        assert_eq!(form.get("b"), Some(&"2".to_string()));
+        assert_eq!(form.get("a"), Some(&vec!["1".to_string()]));
+        assert_eq!(form.get("b"), Some(&vec!["2".to_string()]));
 
         // Content-Type is single-valued (RFC 9110), so a repeated one is a malformed request:
         // take the first value rather than let a stray second one suppress the parse.
@@ -1089,7 +1074,7 @@ mod bounded_matching_tests {
             Imposter::parse_form_data(&header("Content-Type", &[FORM, "text/plain"]), Some("a=1"))
                 .expect("first Content-Type wins")
                 .get("a"),
-            Some(&"1".to_string())
+            Some(&vec!["1".to_string()])
         );
 
         // The header NAME lookup stays case-insensitive on this shape too.
@@ -1119,9 +1104,9 @@ mod bounded_matching_tests {
         assert_eq!(Imposter::request_form(&json_headers, Some("a=1")), None);
 
         let form = Imposter::request_form(&form_headers, Some("a=1&b=2")).expect("form");
-        let expected: crate::util::FastMap<String, String> = [
-            ("a".to_string(), "1".to_string()),
-            ("b".to_string(), "2".to_string()),
+        let expected: crate::util::MultiValueMap = [
+            ("a".to_string(), vec!["1".to_string()]),
+            ("b".to_string(), vec!["2".to_string()]),
         ]
         .into_iter()
         .collect();
@@ -1132,10 +1117,17 @@ mod bounded_matching_tests {
             "application/x-www-form-urlencoded; charset=utf-8".to_string(),
         )]);
         let form = Imposter::request_form(&charset, Some("a=1")).expect("form with a charset");
-        assert_eq!(form.get("a").map(String::as_str), Some("1"));
+        assert_eq!(
+            form.get("a").and_then(|v| v.first()).map(String::as_str),
+            Some("1")
+        );
 
         let form = Imposter::request_form(&form_headers, Some("a%20b=1")).expect("form");
-        assert_eq!(form.get("a b").map(String::as_str), Some("1"), "{form:?}");
+        assert_eq!(
+            form.get("a b").and_then(|v| v.first()).map(String::as_str),
+            Some("1"),
+            "{form:?}"
+        );
     }
 
     // Issue #475: run_flow_blocking must be transparent — on the default (non-blocking) backend it

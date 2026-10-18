@@ -18,6 +18,60 @@ pub(crate) use rift_types::wire::{
 // Recorded Request Types
 // ============================================================================
 
+/// Serde for a recorded query (issue #1553): a key sent once is a string and a repeated key an
+/// array, as Mountebank's `querystring.parse` shows them. Unlike [`multi_value_headers`], keys are
+/// case-sensitive — `?Q=1&q=2` is two parameters — so nothing is merged. Decoding accepts either
+/// shape for any key, so journals and exports written before the array form still read.
+pub(crate) mod multi_value_query {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    #[derive(Serialize)]
+    #[serde(untagged)]
+    enum Shown<'a> {
+        One(&'a str),
+        Many(&'a [String]),
+    }
+
+    pub fn serialize<S: Serializer>(
+        query: &HashMap<String, Vec<String>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(query.iter().filter_map(|(key, values)| {
+            let shown = match values.as_slice() {
+                [] => return None,
+                [one] => Shown::One(one),
+                many => Shown::Many(many),
+            };
+            Some((key, shown))
+        }))
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<String, Vec<String>>, D::Error> {
+        let raw = HashMap::<String, OneOrMany>::deserialize(deserializer)?;
+        Ok(raw
+            .into_iter()
+            .map(|(key, value)| {
+                let values = match value {
+                    OneOrMany::One(one) => vec![one],
+                    OneOrMany::Many(many) => many,
+                };
+                (key, values)
+            })
+            .filter(|(_, values)| !values.is_empty())
+            .collect())
+    }
+}
+
 /// Recorded request for imposter
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,7 +79,11 @@ pub struct RecordedRequest {
     pub request_from: String,
     pub method: String,
     pub path: String,
-    pub query: HashMap<String, String>,
+    /// Every value of each query key, in request order (issue #1553). On the wire a key sent once
+    /// is a string and a repeated key an array, as Mountebank prints `requests[].query`; a journal
+    /// written when Rift comma-joined a repeated key still decodes, its value as one string.
+    #[serde(with = "multi_value_query")]
+    pub query: HashMap<String, Vec<String>>,
     #[serde(default, with = "multi_value_headers")]
     pub headers: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4668,8 +4726,14 @@ mod tests {
             let form =
                 crate::imposter::Imposter::parse_form_data(&req.headers, req.body.as_deref())
                     .expect("the first Content-Type value is the form type, so the body parses");
-            assert_eq!(form.get("a").map(String::as_str), Some("1"));
-            assert_eq!(form.get("b").map(String::as_str), Some("2"));
+            assert_eq!(
+                form.get("a").and_then(|v| v.first()).map(String::as_str),
+                Some("1")
+            );
+            assert_eq!(
+                form.get("b").and_then(|v| v.first()).map(String::as_str),
+                Some("2")
+            );
         }
     }
 
@@ -5490,6 +5554,50 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&req).expect("serializes"),
             r#"{"requestFrom":"127.0.0.1:1234","method":"POST","path":"/x","query":{},"headers":{},"body":"hello","timestamp":"2026-01-01T00:00:00Z"}"#
+        );
+    }
+
+    // Issue #1553: a recorded query key sent once is a string and a repeated key an array, as
+    // Mountebank prints `requests[].query`; a journal written while Rift comma-joined a repeated key
+    // still reads, its joined value as one string, and keys stay case-sensitive.
+    #[test]
+    fn a_recorded_query_is_a_string_or_an_array_per_key() {
+        let recorded = |query: serde_json::Value| -> RecordedRequest {
+            serde_json::from_value(json!({
+                "requestFrom": "127.0.0.1:1234",
+                "method": "GET",
+                "path": "/x",
+                "query": query,
+                "headers": {},
+                "timestamp": "2026-01-01T00:00:00Z",
+            }))
+            .expect("deserializes")
+        };
+
+        let new = recorded(json!({"key": ["first", "second"], "one": "1", "Q": "a", "q": "b"}));
+        assert_eq!(
+            new.query["key"],
+            vec!["first".to_string(), "second".to_string()]
+        );
+        assert_eq!(new.query["one"], vec!["1".to_string()]);
+        assert_eq!(
+            new.query.len(),
+            4,
+            "query keys are case-sensitive: {:?}",
+            new.query
+        );
+        let round = serde_json::to_value(&new).expect("serializes");
+        assert_eq!(
+            round["query"],
+            json!({"key": ["first", "second"], "one": "1", "Q": "a", "q": "b"})
+        );
+
+        let old = recorded(json!({"key": "first,second"}));
+        assert_eq!(old.query["key"], vec!["first,second".to_string()]);
+        assert_eq!(
+            serde_json::to_value(&old).expect("serializes")["query"],
+            json!({"key": "first,second"}),
+            "an old journal round-trips byte-identically"
         );
     }
 

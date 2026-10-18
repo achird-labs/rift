@@ -2,10 +2,40 @@
 //! that compare a request's extracted fields against predicate values.
 
 use super::RequestHeaders;
+use super::arrays::{deep_equals_array, satisfied_by_array};
 use super::json::compare_json_recursive;
 use super::regex_cache::cached_regex;
-use crate::util::FastMap;
+use crate::util::MultiValueMap;
 use std::collections::HashMap;
+
+/// One keyed field — `query`, `form` or `headers` — whose keys may each carry several values
+/// (issue #1553): a repeated query or form key, or a repeated header. A key sent once is compared
+/// as a scalar by `check_value`; a key sent several times is an array, compared by Mountebank's
+/// array rule ([`super::arrays`]), so a scalar expectation holds when any value satisfies it and an
+/// array one needs each of its elements among the values. `deepEquals` also needs the same set of
+/// keys, and a repeated key the same values as a multiset.
+fn keyed_field_holds<M: RequestHeaders>(
+    expected: &serde_json::Map<String, serde_json::Value>,
+    actual: &M,
+    deep_equals: bool,
+    key_matches: &impl Fn(&str, &str) -> bool,
+    check_value: &impl Fn(&serde_json::Value, &str) -> bool,
+) -> bool {
+    if deep_equals && expected.len() != actual.len() {
+        return false;
+    }
+    expected.iter().all(|(key, expected_val)| {
+        let Some((_, values)) = actual.entries().find(|(k, _)| key_matches(key, k)) else {
+            return false;
+        };
+        let test = |element: &serde_json::Value, value: &String| check_value(element, value);
+        match values {
+            [one] => check_value(expected_val, one),
+            many if deep_equals => deep_equals_array(expected_val, many, test),
+            many => satisfied_by_array(expected_val, many, test),
+        }
+    })
+}
 
 /// Check predicate fields against request values
 /// Supports: method, path, body, query, headers, requestFrom, ip, form
@@ -14,8 +44,9 @@ pub(crate) fn check_predicate_fields<F, H>(
     obj: &HashMap<String, serde_json::Value>,
     method: &str,
     path: &str,
-    // Concretely `FastMap` — always sourced from `parse_query`/`parse_query_string` (issue #704).
-    query: &FastMap<String, String>,
+    // Concretely `FastMap` — always sourced from `parse_query`/`parse_query_string` (issue #704);
+    // every value of a repeated key (issue #1553).
+    query: &MultiValueMap,
     headers: &H,
     body: &str,
     apply_except: &impl for<'a> Fn(&'a str) -> std::borrow::Cow<'a, str>,
@@ -24,7 +55,7 @@ pub(crate) fn check_predicate_fields<F, H>(
     request_from: Option<&str>,
     client_ip: Option<&str>,
     // Concretely `FastMap` — see `predicate_matches_inner`.
-    form: Option<&FastMap<String, String>>,
+    form: Option<&MultiValueMap>,
     key_case_sensitive: bool,
     // The request body, parsed at most once per request (issue #290) and only when an object or
     // array `body` expectation needs the tree (#1442); absent for a selector predicate.
@@ -120,92 +151,30 @@ where
         }
     }
 
-    // Check form fields (parsed from application/x-www-form-urlencoded) - Mountebank compatible
-    if let Some(expected_form) = obj.get("form")
-        && let Some(expected_obj) = expected_form.as_object()
+    // Form, query and headers: each key may carry several values (issues #994, #1553). A request
+    // without a urlencoded body has no form, so every form key is missing.
+    let check_value =
+        |expected: &serde_json::Value, actual: &str| check_string_field(expected, actual, &absent);
+    if let Some(expected) = obj.get("form").and_then(|v| v.as_object())
+        && !keyed_field_holds(
+            expected,
+            form.unwrap_or(&MultiValueMap::default()),
+            deep_equals,
+            &key_matches,
+            &check_value,
+        )
     {
-        let actual_form = form.cloned().unwrap_or_default();
-
-        // For deepEquals, check exact match (same number of fields)
-        if deep_equals && expected_obj.len() != actual_form.len() {
-            return false;
-        }
-
-        for (key, expected_val) in expected_obj {
-            // Find key using keyCaseSensitive option
-            let actual = actual_form
-                .iter()
-                .find(|(k, _)| key_matches(key, k))
-                .map(|(_, v)| v.as_str());
-
-            match actual {
-                Some(actual) => {
-                    if !check_string_field(expected_val, actual, &absent) {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
+        return false;
     }
-
-    // Check query parameters
-    if let Some(expected_query) = obj.get("query")
-        && let Some(expected_obj) = expected_query.as_object()
+    if let Some(expected) = obj.get("query").and_then(|v| v.as_object())
+        && !keyed_field_holds(expected, query, deep_equals, &key_matches, &check_value)
     {
-        // For deepEquals, check exact match (same number of params)
-        if deep_equals && expected_obj.len() != query.len() {
-            return false;
-        }
-
-        for (key, expected_val) in expected_obj {
-            // Find key using keyCaseSensitive option
-            let actual = query
-                .iter()
-                .find(|(k, _)| key_matches(key, k))
-                .map(|(_, v)| v.as_str());
-
-            match actual {
-                Some(actual) => {
-                    if !check_string_field(expected_val, actual, &absent) {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
+        return false;
     }
-
-    // Check headers
-    if let Some(expected_headers) = obj.get("headers")
-        && let Some(expected_obj) = expected_headers.as_object()
+    if let Some(expected) = obj.get("headers").and_then(|v| v.as_object())
+        && !keyed_field_holds(expected, headers, deep_equals, &key_matches, &check_value)
     {
-        // For deepEquals, check exact match
-        if deep_equals && expected_obj.len() != headers.len() {
-            return false;
-        }
-
-        for (key, expected_val) in expected_obj {
-            // Headers use keyCaseSensitive option. A repeated header is one name with several
-            // values (issue #994): the predicate matches the NAME if ANY of its values satisfies
-            // it, not only the first or the last.
-            let actual_values = headers
-                .entries()
-                .find(|(k, _)| key_matches(key, k))
-                .map(|(_, v)| v);
-
-            match actual_values {
-                Some(values) => {
-                    if !values
-                        .iter()
-                        .any(|v| check_string_field(expected_val, v.as_str(), &absent))
-                    {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
+        return false;
     }
 
     true
@@ -219,7 +188,7 @@ pub(crate) fn check_predicate_fields_regex<H>(
     method: &str,
     path: &str,
     // Concretely `FastMap` — see `check_predicate_fields`.
-    query: &FastMap<String, String>,
+    query: &MultiValueMap,
     headers: &H,
     body: &str,
     apply_except: &impl for<'a> Fn(&'a str) -> std::borrow::Cow<'a, str>,
@@ -227,7 +196,7 @@ pub(crate) fn check_predicate_fields_regex<H>(
     request_from: Option<&str>,
     client_ip: Option<&str>,
     // Concretely `FastMap` — see `check_predicate_fields`.
-    form: Option<&FastMap<String, String>>,
+    form: Option<&MultiValueMap>,
     key_case_sensitive: bool,
     // Request body already parsed once per request (issue #290); see `check_predicate_fields`.
     body_json: &crate::behaviors::LazyJson<'_>,
@@ -330,67 +299,30 @@ where
         return false;
     }
 
-    // Check form fields
-    if let Some(expected_form) = obj.get("form").and_then(|v| v.as_object()) {
-        let actual_form = form.cloned().unwrap_or_default();
-        for (key, pattern_val) in expected_form {
-            let actual = actual_form
-                .iter()
-                .find(|(k, _)| key_matches(key, k))
-                .map(|(_, v)| v.as_str());
-
-            match actual {
-                Some(actual) => {
-                    if !check_regex_field(pattern_val, actual, &absent) {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
+    // Form, query and headers: each key may carry several values (issues #994, #1553), and a
+    // pattern list needs each of its patterns matched by some value.
+    let check_value =
+        |expected: &serde_json::Value, actual: &str| check_regex_field(expected, actual, &absent);
+    if let Some(expected) = obj.get("form").and_then(|v| v.as_object())
+        && !keyed_field_holds(
+            expected,
+            form.unwrap_or(&MultiValueMap::default()),
+            false,
+            &key_matches,
+            &check_value,
+        )
+    {
+        return false;
     }
-
-    // Check query parameters
-    if let Some(expected_query) = obj.get("query").and_then(|v| v.as_object()) {
-        for (key, pattern_val) in expected_query {
-            let actual = query
-                .iter()
-                .find(|(k, _)| key_matches(key, k))
-                .map(|(_, v)| v.as_str());
-
-            match actual {
-                Some(actual) => {
-                    if !check_regex_field(pattern_val, actual, &absent) {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
+    if let Some(expected) = obj.get("query").and_then(|v| v.as_object())
+        && !keyed_field_holds(expected, query, false, &key_matches, &check_value)
+    {
+        return false;
     }
-
-    // Check headers
-    if let Some(expected_headers) = obj.get("headers").and_then(|v| v.as_object()) {
-        for (key, pattern_val) in expected_headers {
-            // A repeated header is one name with several values (issue #994): the pattern
-            // matches the NAME if ANY of its values satisfies it.
-            let actual_values = headers
-                .entries()
-                .find(|(k, _)| key_matches(key, k))
-                .map(|(_, v)| v);
-
-            match actual_values {
-                Some(values) => {
-                    if !values
-                        .iter()
-                        .any(|v| check_regex_field(pattern_val, v.as_str(), &absent))
-                    {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
+    if let Some(expected) = obj.get("headers").and_then(|v| v.as_object())
+        && !keyed_field_holds(expected, headers, false, &key_matches, &check_value)
+    {
+        return false;
     }
 
     true

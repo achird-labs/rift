@@ -2,12 +2,12 @@
 //!
 //! Templates used to parse with the orphaned `rift_mock_core::predicate` copy, which keeps the
 //! *last* value of a repeated key, while predicates, the recorded request and scripts used the live
-//! parser, which comma-joins every value in order. So one request could match a predicate on
-//! `color = "red,green"` and then render `${request.query.color}` as `green` in the same response.
+//! parser. So one request could match a predicate on the repeated key and then render
+//! `${request.query.color}` as `green` in the same response.
 //!
-//! This drives both surfaces on one real request so the agreement is observed, not assumed: the stub
-//! only matches if the predicate sees `red,green`, and its body only echoes `red,green` if the
-//! template sees it too.
+//! This drives both surfaces on one real request so the agreement is observed, not assumed: the
+//! stub only matches if the predicate sees both values (each matched on its own since #1553), and
+//! its body only echoes `red,green` if the template sees both too, comma-joined.
 
 use rift_http_proxy::imposter::ImposterManager;
 use std::time::Duration;
@@ -18,7 +18,7 @@ async fn a_predicate_and_a_template_see_the_same_repeated_query_value() {
     let config = serde_json::from_value(serde_json::json!({
         "protocol": "http",
         "stubs": [{
-            "predicates": [{ "equals": { "query": { "color": "red,green" } } }],
+            "predicates": [{ "equals": { "query": { "color": ["green", "red"] } } }],
             "responses": [{ "is": {
                 "statusCode": 200,
                 "body": "${request.query.color}"
@@ -37,7 +37,7 @@ async fn a_predicate_and_a_template_see_the_same_repeated_query_value() {
 
     assert!(
         !resp.headers().contains_key("x-rift-no-match"),
-        "the predicate must match: it sees the repeated key comma-joined"
+        "the predicate must match: it sees both values of the repeated key"
     );
     assert_eq!(
         resp.text().await.expect("body"),
@@ -82,5 +82,8 @@ async fn the_templated_syntax_also_renders_a_repeated_key_comma_joined() {
 fn the_public_parse_query_string_path_still_resolves() {
     use rift_http_proxy::imposter::parse_query_string;
     let params = parse_query_string("color=red&color=green");
-    assert_eq!(params.get("color").map(String::as_str), Some("red,green"));
+    assert_eq!(
+        params.get("color"),
+        Some(&vec!["red".to_string(), "green".to_string()])
+    );
 }

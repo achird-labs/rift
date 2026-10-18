@@ -186,8 +186,8 @@ fn test_execute_stub() {
 fn test_parse_query_string() {
     let query = "name=alice&age=30";
     let parsed = parse_query_string(query);
-    assert_eq!(parsed.get("name"), Some(&"alice".to_string()));
-    assert_eq!(parsed.get("age"), Some(&"30".to_string()));
+    assert_eq!(parsed.get("name"), Some(&vec!["alice".to_string()]));
+    assert_eq!(parsed.get("age"), Some(&vec!["30".to_string()]));
 }
 
 #[test]
@@ -199,21 +199,21 @@ fn test_parse_query_string_url_encoded() {
     // Comma should be decoded
     assert_eq!(
         parsed.get("lenderIds"),
-        Some(&"LENDER1,LENDER2".to_string()),
+        Some(&vec!["LENDER1,LENDER2".to_string()]),
         "URL-encoded comma (%2C) should be decoded"
     );
 
     // Space should be decoded
     assert_eq!(
         parsed.get("name"),
-        Some(&"John Doe".to_string()),
+        Some(&vec!["John Doe".to_string()]),
         "URL-encoded space (%20) should be decoded"
     );
 
     // Forward slashes should be decoded
     assert_eq!(
         parsed.get("path"),
-        Some(&"/api/users".to_string()),
+        Some(&vec!["/api/users".to_string()]),
         "URL-encoded slashes (%2F) should be decoded"
     );
 }
@@ -226,13 +226,13 @@ fn test_parse_query_string_url_encoded_keys() {
 
     assert_eq!(
         parsed.get("user name"),
-        Some(&"alice".to_string()),
+        Some(&vec!["alice".to_string()]),
         "URL-encoded space in key should be decoded"
     );
 
     assert_eq!(
         parsed.get("filter[status]"),
-        Some(&"active".to_string()),
+        Some(&vec!["active".to_string()]),
         "URL-encoded brackets in key should be decoded"
     );
 }
@@ -243,8 +243,8 @@ fn test_parse_query_basic() {
     use crate::imposter::predicates::parse_query;
 
     let parsed = parse_query(Some("name=alice&age=30"));
-    assert_eq!(parsed.get("name"), Some(&"alice".to_string()));
-    assert_eq!(parsed.get("age"), Some(&"30".to_string()));
+    assert_eq!(parsed.get("name"), Some(&vec!["alice".to_string()]));
+    assert_eq!(parsed.get("age"), Some(&vec!["30".to_string()]));
 
     // None returns empty map
     let empty = parse_query(None);
@@ -260,13 +260,13 @@ fn test_parse_query_url_encoded() {
 
     assert_eq!(
         parsed.get("lenderIds"),
-        Some(&"LENDER1,LENDER2".to_string()),
+        Some(&vec!["LENDER1,LENDER2".to_string()]),
         "URL-encoded comma (%2C) should be decoded for predicate matching"
     );
 
     assert_eq!(
         parsed.get("name"),
-        Some(&"John Doe".to_string()),
+        Some(&vec!["John Doe".to_string()]),
         "URL-encoded space (%20) should be decoded for predicate matching"
     );
 }
@@ -2794,14 +2794,14 @@ fn test_header_predicate_matches_title_case() {
 #[test]
 fn test_parse_query_string_bare_param() {
     let result = parse_query_string("flag");
-    assert_eq!(result.get("flag").unwrap(), "");
+    assert_eq!(result.get("flag").unwrap(), &[""]);
 }
 
 #[test]
 fn test_parse_query_string_bare_and_valued() {
     let result = parse_query_string("flag&key=value");
-    assert_eq!(result.get("flag").unwrap(), "");
-    assert_eq!(result.get("key").unwrap(), "value");
+    assert_eq!(result.get("flag").unwrap(), &[""]);
+    assert_eq!(result.get("key").unwrap(), &["value"]);
 }
 
 #[test]
@@ -2860,31 +2860,30 @@ fn test_bare_query_param_equals_empty_string() {
 }
 
 // =============================================================================
-// Issue #83: Multi-valued query params
+// Issues #83, #1553: Multi-valued query params keep every value
 // =============================================================================
 
 #[test]
 fn test_parse_query_string_multi_valued() {
     let result = parse_query_string("key=a&key=b");
-    assert_eq!(result.get("key").unwrap(), "a,b");
+    assert_eq!(result.get("key").unwrap(), &["a", "b"]);
 }
 
 #[test]
 fn test_parse_query_string_multi_valued_three() {
     let result = parse_query_string("color=red&color=green&color=blue");
-    assert_eq!(result.get("color").unwrap(), "red,green,blue");
+    assert_eq!(result.get("color").unwrap(), &["red", "green", "blue"]);
 }
 
 #[test]
 fn test_multi_valued_query_param_equals() {
+    // Issue #1553: each value is matched on its own, as in Mountebank; the comma-joined spelling
+    // (which this test used to pin as matching) no longer does.
     let empty_headers: HashMap<String, String> = HashMap::new();
-    let predicates = predicates_from_jsons(vec![serde_json::json!({
-        "equals": {
-            "query": { "key": "a,b" }
-        }
-    })]);
-
-    assert!(
+    let matches = |expected: serde_json::Value| {
+        let predicates = predicates_from_jsons(vec![
+            serde_json::json!({ "equals": { "query": { "key": expected } } }),
+        ]);
         stub_matches(
             &predicates,
             "GET",
@@ -2895,36 +2894,41 @@ fn test_multi_valued_query_param_equals() {
             None,
             None,
             None,
-            0
+            0,
         )
         .unwrap()
-    );
+    };
+    assert!(!matches(serde_json::json!("a,b")));
+    assert!(matches(serde_json::json!("b")));
+    assert!(matches(serde_json::json!(["b", "a"])));
 }
 
 #[test]
 fn test_multi_valued_query_param_contains() {
+    // Issue #1553: `contains` holds when some value contains the text, not the joined string.
     let empty_headers: HashMap<String, String> = HashMap::new();
-    let predicates = predicates_from_jsons(vec![serde_json::json!({
-        "contains": {
-            "query": { "key": "a,b" }
-        }
-    })]);
-
-    assert!(
+    let matches = |expected: serde_json::Value| {
+        let predicates = predicates_from_jsons(vec![
+            serde_json::json!({ "contains": { "query": { "key": expected } } }),
+        ]);
         stub_matches(
             &predicates,
             "GET",
             "/test",
-            Some("key=a&key=b&other=x"),
+            Some("key=ab&key=cd&other=x"),
             &empty_headers,
             None,
             None,
             None,
             None,
-            0
+            0,
         )
         .unwrap()
-    );
+    };
+    assert!(!matches(serde_json::json!("ab,cd")));
+    assert!(matches(serde_json::json!("c")));
+    assert!(matches(serde_json::json!(["d", "a"])));
+    assert!(!matches(serde_json::json!(["d", "x"])));
 }
 
 // =============================================================================

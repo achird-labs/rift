@@ -378,7 +378,7 @@ mod tests {
         std::fs::write(&path, "id,name\nhi,Wor\u{1b}ld\n").expect("write csv");
 
         let mut query = HashMap::new();
-        query.insert("q".to_string(), "hi".to_string());
+        query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
@@ -439,7 +439,7 @@ mod tests {
         std::fs::write(&path, "id,name\nhi,Wor\u{1b}ld\n").expect("write csv");
 
         let mut query = HashMap::new();
-        query.insert("q".to_string(), "hi".to_string());
+        query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
@@ -513,7 +513,7 @@ mod tests {
         std::fs::write(&path, "id,name\nhi,Wor\u{1b}ld\n").expect("write csv");
 
         let mut query = HashMap::new();
-        query.insert("q".to_string(), "hi".to_string());
+        query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
@@ -578,7 +578,7 @@ mod tests {
         std::fs::write(&path, "id,name\nhi,World\n").expect("write csv");
 
         let mut query = HashMap::new();
-        query.insert("q".to_string(), "hi".to_string());
+        query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
@@ -637,7 +637,7 @@ mod tests {
         std::fs::write(&path, "id,name\nhi,World\n").expect("write csv");
 
         let mut query = HashMap::new();
-        query.insert("q".to_string(), "hi".to_string());
+        query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),

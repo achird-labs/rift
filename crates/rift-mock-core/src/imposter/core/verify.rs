@@ -116,7 +116,7 @@ impl Imposter {
         // `RecordedRequest.query` is the fixed std-hasher journal/serde boundary (out of scope for
         // #704); `stub_matches_inner`'s `query_map` parameter is concretely `FastMap` (it is always
         // sourced from `parse_query`/`parse_query_string` elsewhere), so copy across here.
-        let query_map: crate::util::FastMap<String, String> = req
+        let query_map: crate::util::MultiValueMap = req
             .query
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
@@ -238,7 +238,7 @@ fn request_view(req: &RecordedRequest) -> Value {
     let mut m = Map::new();
     m.insert("method".to_string(), json!(req.method));
     m.insert("path".to_string(), json!(req.path));
-    m.insert("query".to_string(), json!(req.query));
+    m.insert("query".to_string(), shown(&req.query));
     m.insert("headers".to_string(), json!(req.headers));
     m.insert("requestFrom".to_string(), json!(req.request_from));
     if let Some(body) = &req.body {
@@ -252,18 +252,29 @@ fn request_field(req: &RecordedRequest, key: &str) -> Option<Value> {
     match key {
         "method" => Some(json!(req.method)),
         "path" => Some(json!(req.path)),
-        "query" => Some(json!(req.query)),
+        // A repeated key's values as an array, a single one as a string: the recorded shape.
+        "query" => Some(shown(&req.query)),
         "headers" => Some(json!(req.headers)),
         "body" => Some(json!(req.body)),
         "requestFrom" => Some(json!(req.request_from)),
         // The `ip` predicate matches against the bare IP (`client_ip_of`), so report that as the
         // actual — not the `ip:port` `request_from` the matcher never compares against.
         "ip" => Some(json!(client_ip_of(req).unwrap_or_default())),
-        "form" => Some(json!(
-            Imposter::parse_form_data(&req.headers, req.body.as_deref()).unwrap_or_default()
+        "form" => Some(shown(
+            &Imposter::parse_form_data(&req.headers, req.body.as_deref()).unwrap_or_default(),
         )),
         _ => None,
     }
+}
+
+/// A query or form as the journal prints it (issue #1553): one value is a string, several an
+/// array.
+fn shown<SH>(map: &std::collections::HashMap<String, Vec<String>, SH>) -> Value {
+    Value::Object(
+        map.iter()
+            .map(|(k, v)| (k.clone(), crate::util::values_as_json(v)))
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -332,6 +343,55 @@ mod tests {
         assert_eq!(out.matched, 1);
         assert!(out.requests.is_none(), "requests omitted unless requested");
         assert!(out.closest.is_none(), "closest omitted unless requested");
+    }
+
+    // Issue #1553: verify re-runs predicates over the recorded query, which keeps every value of a
+    // repeated key, so it answers as live matching does — including the closest-miss report,
+    // which shows the key as an array.
+    #[test]
+    fn an_array_predicate_matches_a_recorded_repeated_key() {
+        let imp = imposter(None);
+        let mut req = rec("GET", "/q", &[], None);
+        req.query.insert(
+            "key".to_string(),
+            vec!["first".to_string(), "second".to_string()],
+        );
+        imp.record_request(req);
+
+        let count = |predicates: Value| {
+            let opts = VerifyOptions {
+                predicates: preds(predicates),
+                ..Default::default()
+            };
+            imp.verify(&opts).expect("verify").matched
+        };
+        assert_eq!(
+            count(json!([{ "equals": { "query": { "key": ["second", "first"] } } }])),
+            1
+        );
+        assert_eq!(
+            count(json!([{ "deepEquals": { "query": { "key": ["second", "first"] } } }])),
+            1
+        );
+        assert_eq!(
+            count(json!([{ "equals": { "query": { "key": "second" } } }])),
+            1
+        );
+        assert_eq!(
+            count(json!([{ "equals": { "query": { "key": "first,second" } } }])),
+            0
+        );
+
+        let opts = VerifyOptions {
+            predicates: preds(json!([{ "equals": { "query": { "key": "third" } } }])),
+            include_closest: true,
+            ..Default::default()
+        };
+        let closest = imp.verify(&opts).expect("verify").closest.expect("closest");
+        assert_eq!(
+            closest.failed_predicates[0].actual,
+            json!({ "query": { "key": ["first", "second"] } })
+        );
     }
 
     #[test]
@@ -541,11 +601,13 @@ mod tests {
     }
 
     #[test]
-    fn deep_equals_on_a_repeated_header_matches_any_value_and_counts_the_name_once() {
+    fn deep_equals_on_a_repeated_header_needs_its_values_and_counts_the_name_once() {
         // Issue #1026: `deepEquals` is the one header operator that also compares the expected
         // object's key count against `RequestHeaders::len()`, and the multi-value impl counts
         // *names*, not values. A repeated header must therefore stay one name — otherwise a
         // request carrying two values of one header could never satisfy a one-key `deepEquals`.
+        // Issue #1553: the repeated name is an array, so `deepEquals` needs its values as a
+        // multiset, as Mountebank compares it; one of them alone no longer matches.
         let imp = imposter(None);
         imp.record_request(rec(
             "GET",
@@ -554,20 +616,26 @@ mod tests {
             None,
         ));
 
-        for value in ["first", "second"] {
+        for (value, expected) in [
+            (json!(["second", "first"]), 1),
+            (json!("first"), 0),
+            (json!(["first"]), 0),
+        ] {
             let opts = VerifyOptions {
                 predicates: preds(json!([{ "deepEquals": { "headers": { "X-Dup": value } } }])),
                 ..Default::default()
             };
             assert_eq!(
                 imp.verify(&opts).expect("verify").matched,
-                1,
-                "one repeated name counts once, and {value} is one of its values"
+                expected,
+                "one repeated name counts once; {value} against both of its values"
             );
         }
 
         let unsent = VerifyOptions {
-            predicates: preds(json!([{ "deepEquals": { "headers": { "X-Dup": "third" } } }])),
+            predicates: preds(
+                json!([{ "deepEquals": { "headers": { "X-Dup": ["first", "third"] } } }]),
+            ),
             ..Default::default()
         };
         assert_eq!(
@@ -578,7 +646,7 @@ mod tests {
 
         let extra_name = VerifyOptions {
             predicates: preds(json!([
-                { "deepEquals": { "headers": { "X-Dup": "first", "X-Other": "x" } } }
+                { "deepEquals": { "headers": { "X-Dup": ["first", "second"], "X-Other": "x" } } }
             ])),
             ..Default::default()
         };
