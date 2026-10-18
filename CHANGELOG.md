@@ -39,6 +39,8 @@ record.
   `strictBehaviors`. Write `printf '{"body":"hello"}' #` instead. Commands written for Mountebank
   now work unchanged.
 
+- A `wait` computed by a JavaScript function is no longer capped at 60 s, matching Mountebank and
+  the numeric form (#1612).
 - **A `decorate` that returns an object now replaces the response** (#1567), as in Mountebank. The
   return value used to be ignored, so `return { body: 'x' }` changed nothing. A field the returned
   object leaves out is taken from the imposter's `defaultResponse`, or is `200`, no headers and an

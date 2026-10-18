@@ -149,8 +149,8 @@ extension; Mountebank's own spelling is the bare function string shown in the ne
 }
 ```
 
-Returns random delay between 500-1500ms. A delay computed by a function is capped at 60 seconds;
-a function that throws or returns no usable number falls back to 100ms and logs a warning.
+Returns random delay between 500-1500ms. A function that throws or returns no usable number falls
+back to 100ms and logs a warning.
 
 ### JavaScript Function String
 
