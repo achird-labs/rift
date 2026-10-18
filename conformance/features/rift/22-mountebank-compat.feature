@@ -292,6 +292,16 @@ Feature: Mountebank compatibility — predicates, imposter options and response 
     And the response body is "orig"
     And the response header "x-rift-shelltransform-error" is "true"
 
+  # rift#1589: stdout must be a JSON response, as in Mountebank; `echo hello` also prints the two
+  # appended JSON arguments, so it is invalid JSON there too. Lenient: the original, marked.
+  @shell
+  Scenario: a shellTransform that prints plain text fails and serves the original marked
+    Given a fresh imposter from fixture "mbcompat/behaviors"
+    When the client sends "GET" "/shell-text"
+    Then the response status is 200
+    And the response body is "orig"
+    And the response header "x-rift-shelltransform-error" is "true"
+
   Scenario: decorate receives a string response.body
     Given a fresh imposter from fixture "mbcompat/behaviors"
     When the client sends "GET" "/decorate"

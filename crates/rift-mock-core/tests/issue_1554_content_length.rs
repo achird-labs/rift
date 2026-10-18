@@ -191,7 +191,9 @@ fn cases() -> Vec<(&'static str, Value)> {
         (
             "/shell-transform",
             json!({ "is": { "headers": { "Content-Length": 5 }, "body": "hello" },
-                    "_behaviors": { "shellTransform": "printf 'shell-output'" } }),
+                    // The printed response replaces the `is` (#1589), so it carries the stale length.
+                    "_behaviors": { "shellTransform":
+                        r#"printf '{"headers":{"Content-Length":5},"body":"shell-output"}' #"# } }),
         ),
         (
             "/inject",

@@ -20,7 +20,7 @@
     },
     {
       "predicates": [{ "equals": { "path": "/sh" } }],
-      "responses": [{ "is": { "statusCode": 200, "body": "original" }, "_behaviors": { "shellTransform": "printf transformed" } }]
+      "responses": [{ "is": { "statusCode": 200, "body": "original" }, "_behaviors": { "shellTransform": "printf '{\"statusCode\":201,\"body\":\"transformed\"}' #" } }]
     },
     {
       "predicates": [{ "equals": { "path": "/cc" } }],

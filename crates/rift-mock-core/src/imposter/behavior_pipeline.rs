@@ -9,8 +9,9 @@ use super::headers::StubRef;
 use super::response::{apply_decorate_bounded, body_text};
 use super::types::{IsResponse, StatusValue};
 use crate::behaviors::{
-    BehaviorProgram, BehaviorStep, CsvCache, Decorated, RequestContext, ResponseStatus, Spliced,
-    SplicedHeaders, apply_copy_spliced, apply_lookup_spliced, apply_shell_transform,
+    BehaviorProgram, BehaviorStep, CsvCache, Decorated, RequestContext, ResponseStatus,
+    ShellTransformError, Spliced, SplicedHeaders, apply_copy_spliced, apply_lookup_spliced,
+    apply_shell_transform,
 };
 use crate::util::build_response_with_headers;
 use bytes::Bytes;
@@ -108,6 +109,34 @@ pub(crate) struct BehaviorRun<'a, SH> {
     pub default_response: Option<&'a IsResponse>,
 }
 
+/// The response's headers as a script sees them in `MB_RESPONSE` (issue #1589): one string per
+/// header, an array for a header with several lines.
+fn headers_json(headers: &SplicedHeaders) -> serde_json::Value {
+    headers
+        .iter()
+        .map(|(name, lines)| {
+            let value = match lines.as_slice() {
+                [line] => line.as_str().into(),
+                lines => lines.iter().map(Spliced::as_str).collect(),
+            };
+            (name.clone(), value)
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
+/// A shellTransform's stdout as the response it replaces this one with (issue #1589): an object
+/// is read as an `is` response, and any other value is an empty one, as Mountebank reads no field
+/// of it. What the response leaves out is the default's.
+fn shell_response(stdout: serde_json::Value) -> Result<IsResponse, ShellTransformError> {
+    if stdout.is_object() {
+        serde_json::from_value(stdout)
+            .map_err(|e| ShellTransformError::InvalidResponse(e.to_string()))
+    } else {
+        Ok(IsResponse::empty())
+    }
+}
+
 impl<SH: BuildHasher> BehaviorRun<'_, SH> {
     /// Run the program's steps over `parts`, in order (issue #1198). A step that fails under the
     /// lenient contract marks the response degraded and the next step still runs; under
@@ -125,6 +154,10 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
             None => ResponseStatus::Code(status),
         };
         let mut degraded = false;
+        // The JSON body the last shellTransform returned (issue #1589), so the next command reads
+        // a number as a number, as in Mountebank. Used only while the body is still its rendering:
+        // any step that rewrites the body leaves text.
+        let mut shell_body: Option<serde_json::Value> = None;
 
         // Lazy request context (issue #561): only copy/lookup/decorate/shellTransform read
         // it, and `RequestContext::from_request` re-parses the query, clones a key and
@@ -332,34 +365,55 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                         }
                     }
                 }
-                // shellTransform (issue #269): pipe the body through external command(s);
-                // stdout becomes the new body. Runs independently of copy/lookup/decorate.
+                // shellTransform (issues #269, #1589): Mountebank's contract. The command gets the
+                // request and the response as `MB_REQUEST` / `MB_RESPONSE` and as two arguments,
+                // and its stdout is a JSON response that replaces this one, completed from
+                // `defaultResponse` like a returned decorate object (#1567).
                 BehaviorStep::ShellTransform(cmd) => {
+                    let response_in = serde_json::json!({
+                        "statusCode": script_status(status, &status_text).to_json(),
+                        "headers": headers_json(&headers),
+                        "body": shell_body
+                            .as_ref()
+                            .filter(|value| body_text(Some(value)) == body.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| body.as_str().into()),
+                    });
                     // Run the fork/exec/wait off the tokio worker (issue #478): a synchronous
                     // subprocess run inline would stall the worker for its whole lifetime,
                     // starving unrelated requests multiplexed on it.
                     let shell_result = {
                         let cmd = cmd.clone();
                         let rc = request_context.get_or_init(build_request_context).clone();
-                        let body_in = body.as_str().to_string();
-                        let status_in = script_status(status, &status_text);
                         // Plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987):
                         // `apply_shell_transform` is a fork/exec of an external command and never
                         // touches a `FlowStore`, so nothing here can annotate.
                         tokio::task::spawn_blocking(move || {
-                            apply_shell_transform(&cmd, &rc, &body_in, &status_in)
+                            apply_shell_transform(&cmd, &rc, &response_in)
                         })
                         .await
                         .unwrap_or_else(|e| {
-                            Err(std::io::Error::other(format!(
+                            Err(ShellTransformError::Spawn(format!(
                                 "shellTransform task panicked: {e}"
                             )))
                         })
+                        .and_then(shell_response)
                     };
                     match shell_result {
-                        Ok(transformed) => body = Spliced::authored(transformed),
-                        // Keep the body unchanged (issue #269) but signal the failure so it
-                        // isn't a silent success (issue #323).
+                        Ok(authored) => {
+                            let fallback = IsResponse::default();
+                            let default = self.default_response.unwrap_or(&fallback);
+                            shell_body.clone_from(&authored.completed_by(default).body);
+                            let completed =
+                                ServedParts::completed(&authored, self.default_response);
+                            status = completed.status;
+                            status_text = completed.status_text;
+                            headers = completed.headers;
+                            body = completed.body;
+                        }
+                        // Not a response (#1589), or the command failed: keep the response
+                        // unchanged (issue #269) but signal the failure so it isn't a silent
+                        // success (issue #323); a 500 under `strictBehaviors`.
                         Err(e) => {
                             warn!("shellTransform command {cmd:?} failed: {e}");
                             if self.strict {
@@ -465,12 +519,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_successful_transform_is_applied_and_not_degraded() {
-        match run(json!({ "shellTransform": ["printf transformed"] }), false).await {
+        let command = r#"printf '{"statusCode":201,"body":"transformed"}' #"#;
+        match run(json!({ "shellTransform": [command] }), false).await {
             BehaviorOutcome::Applied { parts, degraded } => {
                 assert!(!degraded);
                 assert_eq!(parts.body, "transformed");
                 assert_eq!(parts.status, 201);
-                assert_eq!(parts.headers["set-cookie"], vec!["a=1", "b=2"]);
+                // The printed response replaces the original, headers included (#1589).
+                assert!(parts.headers.is_empty(), "{:?}", parts.headers);
             }
             BehaviorOutcome::StrictFailure(_) => panic!("nothing failed"),
         }
@@ -539,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn a_failure_stops_the_pipeline_only_in_strict_mode() {
         // Two commands: the first fails, the second would rewrite the body. Lenient keeps going.
-        let block = json!({ "shellTransform": ["exit 3", "printf second"] });
+        let block = json!({ "shellTransform": ["exit 3", r#"printf '{"body":"second"}' #"#] });
         match run(block.clone(), false).await {
             BehaviorOutcome::Applied { parts, degraded } => {
                 assert!(degraded);
@@ -551,6 +607,125 @@ mod tests {
             run(block, true).await,
             BehaviorOutcome::StrictFailure(_)
         ));
+    }
+
+    fn applied(outcome: BehaviorOutcome) -> (ServedParts, bool) {
+        match outcome {
+            BehaviorOutcome::Applied { parts, degraded } => (parts, degraded),
+            BehaviorOutcome::StrictFailure(_) => panic!("nothing should fail"),
+        }
+    }
+
+    /// Issue #1589: the command's stdout is a JSON response that replaces the response, Set-Cookie
+    /// included, and what it leaves out comes from `defaultResponse`, as for a returned decorate.
+    #[tokio::test]
+    async fn shell_stdout_replaces_the_response_completed_from_the_default_response() {
+        let default: IsResponse = serde_json::from_value(json!({
+            "statusCode": 418, "headers": { "X-Def": "d" }, "body": "dflt"
+        }))
+        .expect("default response");
+        let block = json!({ "shellTransform": r#"printf '{"body":"b"}' #"# });
+        let (parts, degraded) =
+            applied(run_with_default(block.clone(), false, Some(&default)).await);
+        assert!(!degraded);
+        assert_eq!(parts.status, 418);
+        assert_eq!(parts.body, "b");
+        assert_eq!(parts.headers.len(), 1, "{:?}", parts.headers);
+        assert_eq!(parts.headers["X-Def"], vec!["d"]);
+        // Without a default: the built-in 200 and no headers.
+        let (parts, _) = applied(run(block, false).await);
+        assert_eq!((parts.status, parts.body.as_str()), (200, "b"));
+        assert!(parts.headers.is_empty(), "{:?}", parts.headers);
+        // Every field written: status, the whole header map and a non-string body as `is` renders it.
+        let block = json!({ "shellTransform":
+            r#"printf '{"statusCode":202,"headers":{"X-S":["1","2"]},"body":{"k":3}}' #"# });
+        let (parts, _) = applied(run_with_default(block, false, Some(&default)).await);
+        assert_eq!(parts.status, 202);
+        assert_eq!(parts.headers.len(), 1, "{:?}", parts.headers);
+        assert_eq!(parts.headers["X-S"], vec!["1", "2"]);
+        assert_eq!(parts.body, r#"{"k":3}"#);
+    }
+
+    /// Issue #1589: the command line carries the request and the response JSON as two arguments,
+    /// as Mountebank appends them, and `MB_RESPONSE` holds the same response, headers included.
+    #[tokio::test]
+    async fn the_command_receives_the_request_and_response_as_two_arguments() {
+        let block = json!({ "shellTransform":
+            r#"f() { printf '{"body":[%s,%s,%s]}' "$1" "$2" "$MB_RESPONSE"; }; f"# });
+        let (parts, degraded) = applied(run(block, false).await);
+        assert!(!degraded, "{:?}", parts.headers);
+        let [request, response, env]: [serde_json::Value; 3] =
+            serde_json::from_str(parts.body.as_str()).expect("three JSON values");
+        assert_eq!(request["method"], "GET");
+        assert_eq!(request["path"], "/users/42");
+        assert_eq!(request["query"], json!({ "x": "1" }));
+        assert_eq!(
+            response,
+            json!({ "statusCode": 201, "headers": { "set-cookie": ["a=1", "b=2"] }, "body": "orig" })
+        );
+        assert_eq!(env, response, "MB_RESPONSE is the second argument");
+    }
+
+    /// Issue #1589: each step reads the response the previous one returned, with its body's JSON
+    /// type, so `body += 1` on a number adds (Mountebank's "array of shell transforms in order").
+    #[tokio::test]
+    async fn a_chained_command_sees_the_previous_commands_response() {
+        let block = json!({ "shellTransform": [
+            r#"printf '{"statusCode":203,"body":2}' #"#,
+            r#"printf '{"body":%s}' "$MB_RESPONSE" #"#,
+        ] });
+        let (parts, _) = applied(run(block, false).await);
+        let seen: serde_json::Value = serde_json::from_str(parts.body.as_str()).expect("JSON body");
+        assert_eq!(seen, json!({ "statusCode": 203, "headers": {}, "body": 2 }));
+    }
+
+    /// Issue #1589: stdout that is valid JSON but not an object replaces the response with an empty
+    /// one, as Mountebank reads no field of it.
+    #[tokio::test]
+    async fn a_non_object_stdout_is_an_empty_response() {
+        for output in ["3", r#""text""#, "[1]"] {
+            let block = json!({ "shellTransform": format!("printf '{output}' #") });
+            let (parts, degraded) = applied(run(block, false).await);
+            assert!(!degraded, "{output}");
+            assert_eq!((parts.status, parts.body.as_str()), (200, ""), "{output}");
+            assert!(parts.headers.is_empty(), "{output}: {:?}", parts.headers);
+        }
+    }
+
+    /// Issue #1589: stdout that is not a JSON response — plain text, empty, `null` — is a failed
+    /// shellTransform, never a body: the original is kept and marked, or a 500 under strict.
+    #[tokio::test]
+    async fn stdout_that_is_not_a_json_response_fails_the_transform() {
+        for (command, message) in [
+            ("echo hello", "Shell command returned invalid JSON"),
+            ("true", "Shell command returned invalid JSON"),
+            ("printf null #", "Shell command returned null"),
+        ] {
+            let block = json!({ "shellTransform": command });
+            let (parts, degraded) = applied(run(block.clone(), false).await);
+            assert!(degraded, "{command}");
+            assert_eq!(
+                (parts.status, parts.body.as_str()),
+                (201, "orig"),
+                "{command}"
+            );
+            assert_eq!(parts.headers["x-rift-shelltransform-error"], vec!["true"]);
+            assert_eq!(parts.headers["set-cookie"], vec!["a=1", "b=2"], "{command}");
+            match run(block, true).await {
+                BehaviorOutcome::StrictFailure(response) => {
+                    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+                    let body = response
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("body")
+                        .to_bytes();
+                    let text = String::from_utf8_lossy(&body);
+                    assert!(text.contains(message), "{command}: {text}");
+                }
+                BehaviorOutcome::Applied { .. } => panic!("strict mode must fail: {command}"),
+            }
+        }
     }
 
     // Issue #1567: a decorate's returned object replaces the response, Set-Cookie included, and

@@ -82,14 +82,15 @@ impl Admin {
 const APPEND_D: &str = "function (request, response) { response.body = response.body + 'D'; }";
 
 /// The finding's last row: Mountebank serves `xSD` — shellTransform, then decorate. The
-/// shellTransform here ignores its input and prints `S`, so the order is visible in the body.
+/// shellTransform here ignores its input and prints a response whose body is `S`, so the order is
+/// visible in the body.
 #[tokio::test]
 async fn shell_transform_runs_before_decorate_in_the_object_form() {
     let admin = Admin::start().await;
     let port = admin
         .serve(
             "x",
-            json!({"decorate": APPEND_D, "shellTransform": "printf S"}),
+            json!({"decorate": APPEND_D, "shellTransform": r#"printf '{"body":"S"}' #"#}),
         )
         .await;
     assert_eq!(admin.body(port, "/p").await, "SD");

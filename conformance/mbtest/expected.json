@@ -107,34 +107,10 @@
       "note": "a wait written as an arrow function (`() => 1000`) waits about 100 ms; a `function () { return 1000; }` waits 1000 ms"
     },
     {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support shell transform without array for backwards compatibility",
-      "class": "bug",
-      "issue": "#1589",
-      "note": "shellTransform commands get no request/response arguments (Mountebank appends them as argv[2], argv[3]); after that, the documented output-as-body difference remains"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support array of shell transforms in order",
-      "class": "bug",
-      "issue": "#1589",
-      "note": "shellTransform commands get no request/response arguments; after that, the documented output-as-body difference remains"
-    },
-    {
       "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support copying from request fields using jsonpath",
       "class": "bug",
       "issue": "#1590",
       "note": "copy.from \"BODY\" (upper case) copies nothing; Mountebank reads request field names case-insensitively"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should compose multiple behaviors together (old interface for backwards compatibility)",
-      "class": "bug",
-      "issue": "#1589",
-      "note": "the shellTransform reads process.argv[3]; the old-interface decorate is #1567"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should apply multiple behaviors in sequence with repeat (new format)",
-      "class": "documented",
-      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
-      "note": "shellTransform output is served as the body, not read as a response object (behaviors.md)"
     },
     {
       "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should add latency when using behaviors.wait as a function",
@@ -143,34 +119,10 @@
       "note": "a wait written as an arrow function (`() => 1000`) waits about 100 ms; a `function () { return 1000; }` waits 1000 ms"
     },
     {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support shell transform without array for backwards compatibility",
-      "class": "bug",
-      "issue": "#1589",
-      "note": "shellTransform commands get no request/response arguments (Mountebank appends them as argv[2], argv[3]); after that, the documented output-as-body difference remains"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support array of shell transforms in order",
-      "class": "bug",
-      "issue": "#1589",
-      "note": "shellTransform commands get no request/response arguments; after that, the documented output-as-body difference remains"
-    },
-    {
       "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support copying from request fields using jsonpath",
       "class": "bug",
       "issue": "#1590",
       "note": "copy.from \"BODY\" (upper case) copies nothing; Mountebank reads request field names case-insensitively"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should compose multiple behaviors together (old interface for backwards compatibility)",
-      "class": "bug",
-      "issue": "#1589",
-      "note": "the shellTransform reads process.argv[3]; the old-interface decorate is #1567"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should apply multiple behaviors in sequence with repeat (new format)",
-      "class": "documented",
-      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
-      "note": "shellTransform output is served as the body, not read as a response object (behaviors.md)"
     },
     {
       "id": "api/http/httpFaultTest.js::https imposter POST /imposters with stubs should write garbage then drop the connection when fault RANDOM_DATA_THEN_CLOSE is specified",
@@ -277,9 +229,9 @@
     },
     {
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should persist behaviors from origin server",
-      "class": "bug",
-      "issue": "#1589",
-      "note": "the shellTransform reads process.argv[3]; its decorate is old-interface (#1567)"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#a-proxy-without-generators-records-into-a-store-not-a-stub",
+      "note": "the shellTransform and decorate now apply (#1589, #1567); the second request, /world, is replayed per request (proxied anew), where Mountebank's empty-predicate stub answers it with the first, transformed response"
     },
     {
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should support retrieving replayable JSON with proxies removed for later playback",
@@ -684,12 +636,6 @@
       "class": "documented",
       "doc": "docs/mountebank/differences.md#the-admin-api-serves-json-only",
       "note": "no Vary: Accept"
-    },
-    {
-      "id": "docs:/docs/api/behaviors#shellTransform",
-      "class": "documented",
-      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
-      "note": "shellTransform output is served as the body (behaviors.md)"
     },
     {
       "id": "docs:/docs/api/stubs#example",

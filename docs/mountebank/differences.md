@@ -74,6 +74,21 @@ the undecorated response with `x-rift-decorate-error: true` instead, and `500` o
 `strictBehaviors` — see [Behaviors](behaviors.md). A decorate that is not a function at all (`42`,
 a bare expression) answers `500` in Mountebank; Rift runs it as a Rhai script, so it may succeed.
 
+## `shellTransform` arguments
+
+`shellTransform` appends the request and response JSON to the command as two single-quoted
+arguments, as Mountebank does. Rift escapes a `'` inside the JSON as `'\''`, so the command still
+receives both arguments whole; Mountebank does not escape it, so a request or response containing
+`'` breaks its command line. Rift's JSON keys may come in a different order. Where Mountebank's
+command line works, each argument is the same JSON. See [Behaviors](behaviors.md#shelltransform).
+`MB_RESPONSE.body` is the body as text, where Mountebank hands an `is` body written as JSON (an
+object, a number) over as that value; a body a previous command in the chain printed keeps its JSON
+type in both.
+
+A command that fails, or prints anything other than JSON, is a `500` in Mountebank. Rift serves the
+response as it was before the command, with `x-rift-shelltransform-error: true`, and answers `500`
+only under `strictBehaviors`, as for `decorate`.
+
 ## `copy` from an absent source
 
 A `copy` whose source is absent (a query parameter or header the request does not carry) leaves its
@@ -370,7 +385,6 @@ Each of these is described where the feature is:
 
 - Served JSON bodies have their keys sorted — [Responses](responses.md).
 - `copy` with a `regex` returns the first capture group — [Behaviors](behaviors.md).
-- `shellTransform` output is served as the body, not read as a response object — [Behaviors](behaviors.md).
 - A `lookup` after a `copy` does not expand a token the client put in the copied field — [Behaviors](behaviors.md).
 - A `wait` range `{"min", "max"}` is a Rift extension — [Behaviors](behaviors.md).
 - String predicate operators fold ASCII case only; `matches` folds Unicode — [Predicates](predicates.md).

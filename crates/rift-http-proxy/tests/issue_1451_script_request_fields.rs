@@ -233,7 +233,8 @@ async fn shell_transform_mb_request_carries_request_from_ip_and_form() {
         &manager,
         json!({"protocol": "http", "stubs": [{"responses": [{
             "is": {"statusCode": 200, "body": "orig"},
-            "behaviors": [{"shellTransform": "printf '%s' \"$MB_REQUEST\""}]
+            // stdout is the response (#1589): `MB_REQUEST` as its JSON body.
+            "behaviors": [{"shellTransform": "printf '{\"body\":%s}' \"$MB_REQUEST\" #"}]
         }]}]}),
     )
     .await;
