@@ -165,7 +165,6 @@ stored-imposter check.
 | Mountebank | Why |
 |:-----------|:----|
 | `imposterController.js:124-128`, `:140-146`; `imposter.js:79-98`, `:132-138`; `responseResolver.js:281-295`, `:357-359`, `:376-393`; `dryRunValidator.js:91-93`; `httpProxy.js:62-68`; `middleware.js:125-127` | The callback API of out-of-process (`--protofile`) protocols, which Rift does not implement |
-| `behaviors.js:141-204`; `compatibility.js:23-24` | `shellTransform`, a documented difference |
 | `dryRunValidator.js:130-171`, `:229-232` | The injection checks, which run only without `--allowInjection`; the harness runs both engines with it |
 | `dryRunValidator.js:250-251` | A protocol's own validator; http and https have none |
 | `compatibility.js:91-100`; `imposterPrinter.js:31-32` | tcp-only upcasts and printing |

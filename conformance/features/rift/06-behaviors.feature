@@ -30,10 +30,11 @@ Feature: Response behaviors — copy, lookup, wait, shellTransform, decorate
     And the response body is "waited"
     And the response took at least 500 ms
 
-  Scenario: shellTransform rewrites a static response body
+  # rift#1589: the command's stdout is a JSON response that replaces the static one.
+  Scenario: shellTransform's JSON stdout replaces a static response
     Given a fresh imposter from fixture "behaviors/behaviors"
     When the client sends "GET" "/sh"
-    Then the response status is 200
+    Then the response status is 201
     And the response body is "transformed"
 
   # rift#272: a multi-value Set-Cookie must survive a copy behavior as two distinct headers (not

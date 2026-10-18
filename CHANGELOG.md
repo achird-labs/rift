@@ -27,6 +27,18 @@ record.
 
 ### Changed
 
+- **BREAKING: `shellTransform` follows Mountebank's contract** (#1589). A command now receives the
+  request and the response JSON as two arguments appended to its command line, as well as in
+  `MB_REQUEST` / `MB_RESPONSE` (the arguments are left off when the line reaches 2048 characters);
+  `MB_RESPONSE` now carries `headers`; and stdout is parsed as a JSON response that replaces the
+  response, with what it leaves out taken from the imposter's `defaultResponse`. Stdout used to be
+  served as the body text. **Migration:** a command that prints a plain body must print a JSON
+  response instead, and a command that does not expect the two arguments should end with ` #`.
+  `echo hello` is now a shellTransform failure, as in Mountebank (where it answers `500`): Rift
+  serves the response as it was with `x-rift-shelltransform-error: true`, or `500` under
+  `strictBehaviors`. Write `printf '{"body":"hello"}' #` instead. Commands written for Mountebank
+  now work unchanged.
+
 - **A `decorate` that returns an object now replaces the response** (#1567), as in Mountebank. The
   return value used to be ignored, so `return { body: 'x' }` changed nothing. A field the returned
   object leaves out is taken from the imposter's `defaultResponse`, or is `200`, no headers and an
@@ -99,6 +111,11 @@ record.
   reports it as `E057`.
 
 ### Fixed
+
+- **A number or boolean `is` body no longer gets `Content-Type: application/json`** (#1589). The
+  automatic header is documented for an object or array body only, and Mountebank adds none; a
+  client that parses by content type read `"body": 3` as the number `3` from Rift and the text `3`
+  from Mountebank. An object or array body still gets it.
 
 - **A `decorate` runs on Mountebank's contract, whatever function form it is written in** (#1567).
   An arrow whose parameter is not named `config`, such as `(request, response) => { ... }`,

@@ -24,7 +24,7 @@
       "predicates": [{ "equals": { "path": "/object-order" } }],
       "responses": [{ "is": { "statusCode": 200, "body": "orig" }, "_behaviors": {
         "decorate": "config => { config.response.body += 'D'; }",
-        "shellTransform": "printf S"
+        "shellTransform": "printf '{\"body\":\"S\"}' #"
       } }]
     },
     {

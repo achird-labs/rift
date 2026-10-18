@@ -62,7 +62,7 @@ async fn static_response_applies_shell_transform() {
         serde_json::json!({
             "protocol": "http", "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
-                  "_behaviors": { "shellTransform": "printf transformed" } }] }
+                  "_behaviors": { "shellTransform": "printf '{\"body\":\"transformed\"}' #" } }] }
             ]
         }),
     )

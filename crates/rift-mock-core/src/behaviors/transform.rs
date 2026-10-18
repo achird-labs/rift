@@ -65,20 +65,37 @@ pub struct ReturnedOmits {
     pub body: bool,
 }
 
-/// Execute shell transform command
-/// The command receives MB_REQUEST and MB_RESPONSE environment variables
-/// and should output the transformed response body to stdout
-pub fn apply_shell_transform(
-    command: &str,
-    request: &RequestContext,
-    response_body: &str,
-    response_status: &ResponseStatus,
-) -> Result<String, std::io::Error> {
-    use std::process::Command;
+/// Why a `shellTransform` command did not produce a response (issue #1589). The messages are
+/// Mountebank's (`behaviors.js:186-201`), so a strict 500 says what Mountebank's does.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ShellTransformError {
+    /// The shell could not be started at all.
+    #[error("Could not run shell command: {0}")]
+    Spawn(String),
+    /// The command exited non-zero or was killed by a signal.
+    #[error("Command failed: {command}\n{stderr}")]
+    Failed { command: String, stderr: String },
+    /// stdout was not JSON, empty included.
+    #[error("Shell command returned invalid JSON: '{0}'")]
+    InvalidJson(String),
+    /// stdout was the JSON `null`, which Mountebank cannot read a response from.
+    #[error("Shell command returned null, not a response")]
+    Null,
+    /// stdout was a JSON object that is not a response (a `statusCode` that is not a status, a
+    /// header that is not a string).
+    #[error("Shell command returned an invalid response: {0}")]
+    InvalidResponse(String),
+}
 
-    // Serialize request to JSON for MB_REQUEST
-    // Mountebank's `httpRequest.transform` keys. Each of `requestFrom`, `ip` and `form` is absent
-    // when `None`, as `JSON.stringify` omits an undefined value (issue #1451).
+/// Mountebank's limit on the command line, in UTF-16 units (`behaviors.js:170`): at or above it the
+/// two JSON arguments are dropped and the command runs alone.
+pub const MAX_SHELL_COMMAND_LENGTH: usize = 2048;
+
+/// `MB_REQUEST` for a `shellTransform`: Mountebank's `httpRequest.transform` keys. Each of
+/// `requestFrom`, `ip` and `form` is absent when `None`, as `JSON.stringify` omits an undefined
+/// value (issue #1451).
+#[must_use]
+pub fn shell_request_json(request: &RequestContext) -> serde_json::Value {
     let mut request_json = serde_json::Map::new();
     if let Some(request_from) = &request.request_from {
         request_json.insert("requestFrom".into(), request_from.as_str().into());
@@ -95,31 +112,72 @@ pub fn apply_shell_transform(
     if let Some(form) = &request.form {
         request_json.insert("form".into(), serde_json::json!(form));
     }
+    serde_json::Value::Object(request_json)
+}
 
-    // Serialize response to JSON for MB_RESPONSE
-    let response_json = serde_json::json!({
-        "statusCode": response_status.to_json(),
-        "body": response_body,
-    });
+/// One JSON text as one shell word: single-quoted, an embedded `'` written `'\''`. Mountebank does
+/// not escape it (`behaviors.js:153-165`), so its command breaks on a `'`; where Mountebank's
+/// works, the word is the same.
+fn quote_for_shell(json: &str) -> String {
+    format!("'{}'", json.replace('\'', r"'\''"))
+}
 
-    // Execute command with environment variables
+/// The command line Mountebank runs (`behaviors.js:181-184`): the command, then the request and
+/// the response JSON as two arguments, unless that line reaches [`MAX_SHELL_COMMAND_LENGTH`]
+/// UTF-16 units, measured as Mountebank writes it (unescaped), when the command runs alone.
+#[must_use]
+pub fn shell_command_line(command: &str, request_json: &str, response_json: &str) -> String {
+    let utf16 = |s: &str| s.encode_utf16().count();
+    // `command 'request' 'response'`: two spaces and four quotes.
+    let mountebank_len = utf16(command) + utf16(request_json) + utf16(response_json) + 6;
+    if mountebank_len >= MAX_SHELL_COMMAND_LENGTH {
+        command.to_string()
+    } else {
+        format!(
+            "{command} {} {}",
+            quote_for_shell(request_json),
+            quote_for_shell(response_json)
+        )
+    }
+}
+
+/// Run a `shellTransform` command as Mountebank does (issue #1589).
+///
+/// `response` is the response as it stands (`statusCode`, `headers`, `body`). The command runs
+/// under `sh -c` with `MB_REQUEST` and `MB_RESPONSE` set to the request and response JSON, and the
+/// same two JSON texts appended as arguments ([`shell_command_line`]). Its stdout is parsed as
+/// JSON and returned: the pipeline reads it as the new response. A non-zero exit, stdout that is
+/// not JSON (empty included) and a JSON `null` are errors.
+pub fn apply_shell_transform(
+    command: &str,
+    request: &RequestContext,
+    response: &serde_json::Value,
+) -> Result<serde_json::Value, ShellTransformError> {
+    use std::process::Command;
+
+    let request_json = shell_request_json(request).to_string();
+    let response_json = response.to_string();
+    let full_command = shell_command_line(command, &request_json, &response_json);
+
     let output = Command::new("sh")
         .arg("-c")
-        .arg(command)
-        .env(
-            "MB_REQUEST",
-            serde_json::Value::Object(request_json).to_string(),
-        )
-        .env("MB_RESPONSE", response_json.to_string())
-        .output()?;
+        .arg(&full_command)
+        .env("MB_REQUEST", &request_json)
+        .env("MB_RESPONSE", &response_json)
+        .output()
+        .map_err(|e| ShellTransformError::Spawn(e.to_string()))?;
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(std::io::Error::other(format!(
-            "Shell transform failed: {stderr}"
-        )))
+    if !output.status.success() {
+        return Err(ShellTransformError::Failed {
+            command: full_command,
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match serde_json::from_str::<serde_json::Value>(&stdout) {
+        Ok(serde_json::Value::Null) => Err(ShellTransformError::Null),
+        Ok(value) => Ok(value),
+        Err(_) => Err(ShellTransformError::InvalidJson(stdout.into_owned())),
     }
 }
 
@@ -322,28 +380,34 @@ pub fn apply_decorate(
 mod tests {
     use super::*;
 
+    fn response(body: &str) -> serde_json::Value {
+        serde_json::json!({ "statusCode": 200, "headers": {}, "body": body })
+    }
+
+    /// The `body` of the response a command printed.
+    fn shell_body(command: &str, request: &RequestContext, body: &str) -> String {
+        let out = apply_shell_transform(command, request, &response(body)).expect("runs");
+        out["body"].as_str().expect("a string body").to_string()
+    }
+
     #[test]
     fn test_apply_shell_transform_echo() {
         let request = RequestContext {
             method: "POST".to_string(),
             path: "/test".to_string(),
-            query: HashMap::new(),
-            headers: HashMap::new(),
             body: Some(r#"{"test": "data"}"#.to_string()),
             ..Default::default()
         };
-
-        // Simple echo command that outputs a fixed string
+        // The trailing `#` discards the two appended JSON arguments, as Mountebank configs do.
         let result = apply_shell_transform(
-            "echo 'hello world'",
+            r#"echo '{"body": "hello world"}' #"#,
             &request,
-            "original body",
-            &ResponseStatus::Code(200),
+            &response("original body"),
         );
-        assert!(result.is_ok(), "Shell transform should succeed");
-        assert!(
-            result.unwrap().contains("hello world"),
-            "Shell transform should output echo result"
+        assert_eq!(
+            result,
+            Ok(serde_json::json!({ "body": "hello world" })),
+            "stdout is the parsed JSON response"
         );
     }
 
@@ -357,50 +421,16 @@ mod tests {
             ..Default::default()
         };
         let output = apply_shell_transform(
-            "printf '%s' \"$MB_REQUEST\"",
+            r#"printf '{"body":%s}' "$MB_REQUEST" #"#,
             &request,
-            "b",
-            &ResponseStatus::Code(200),
+            &response("b"),
         )
         .expect("shell transform runs");
-        let parsed: serde_json::Value = serde_json::from_str(&output).expect("MB_REQUEST is JSON");
-        let fields = parsed.as_object().expect("an object");
+        let fields = output["body"].as_object().expect("MB_REQUEST is an object");
         for key in ["requestFrom", "ip", "form"] {
             assert!(!fields.contains_key(key), "{key} must be absent: {output}");
         }
-        assert_eq!(
-            fields.get("method"),
-            Some(&serde_json::json!("GET")),
-            "{output}"
-        );
-    }
-
-    #[test]
-    fn test_apply_shell_transform_with_env_vars() {
-        let request = RequestContext {
-            method: "GET".to_string(),
-            path: "/users/123".to_string(),
-            query: HashMap::new(),
-            headers: HashMap::new(),
-            body: None,
-            ..Default::default()
-        };
-
-        // Command that outputs the MB_REQUEST env var (which contains JSON)
-        let result = apply_shell_transform(
-            "echo $MB_REQUEST",
-            &request,
-            "test body",
-            &ResponseStatus::Code(200),
-        );
-        assert!(result.is_ok(), "Shell transform should succeed");
-
-        let output = result.unwrap();
-        // The output should contain parts of the request context
-        assert!(
-            output.contains("GET") || output.contains("method"),
-            "MB_REQUEST should contain request method"
-        );
+        assert_eq!(fields.get("method"), Some(&serde_json::json!("GET")));
     }
 
     /// Issue #1365: `MB_REQUEST` carries `"body": ""` for a request without a body, as Mountebank's
@@ -410,20 +440,127 @@ mod tests {
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/nobody".to_string(),
-            query: HashMap::new(),
-            headers: HashMap::new(),
             body: None,
             ..Default::default()
         };
         let out = apply_shell_transform(
-            "printf '%s' \"$MB_REQUEST\"",
+            r#"printf '{"body":%s}' "$MB_REQUEST" #"#,
             &request,
-            "x",
-            &ResponseStatus::Code(200),
+            &response("x"),
         )
         .expect("shell transform runs");
-        let parsed: serde_json::Value = serde_json::from_str(&out).expect("MB_REQUEST is JSON");
-        assert_eq!(parsed["body"], serde_json::json!(""));
+        assert_eq!(out["body"]["body"], serde_json::json!(""));
+    }
+
+    /// Issue #1589: the two appended arguments are the request and the response JSON, one word
+    /// each, and a `'` in either survives the quoting.
+    #[test]
+    fn the_appended_arguments_are_the_request_and_response_json() {
+        let request = RequestContext {
+            method: "POST".to_string(),
+            path: "/it's".to_string(),
+            body: Some("a 'quoted' $HOME `x` body".to_string()),
+            ..Default::default()
+        };
+        let resp = serde_json::json!({
+            "statusCode": 201, "headers": { "X-A": "it's" }, "body": "o'k \"q\""
+        });
+        let out = apply_shell_transform(
+            r#"f() { printf '{"body":[%s,%s,"%s"]}' "$1" "$2" "$#"; }; f"#,
+            &request,
+            &resp,
+        )
+        .expect("runs");
+        let body = &out["body"];
+        assert_eq!(body[0], shell_request_json(&request));
+        assert_eq!(body[1], resp);
+        assert_eq!(body[2], "2", "exactly two arguments");
+    }
+
+    /// Issue #1589: `MB_RESPONSE` is the whole response, headers included.
+    #[test]
+    fn mb_response_is_the_whole_response() {
+        let resp = serde_json::json!({
+            "statusCode": "${code}", "headers": { "X-A": "1", "Set-Cookie": ["a", "b"] }, "body": "o"
+        });
+        let out = apply_shell_transform(
+            r#"printf '{"body":%s}' "$MB_RESPONSE" #"#,
+            &RequestContext::default(),
+            &resp,
+        )
+        .expect("runs");
+        assert_eq!(out["body"], resp);
+    }
+
+    /// Issue #1589: a command line at or above 2048 UTF-16 units runs without the arguments, as
+    /// Mountebank's does; one below keeps them.
+    #[test]
+    fn a_long_command_line_drops_the_arguments() {
+        let padding = format!(": {};", "x".repeat(MAX_SHELL_COMMAND_LENGTH));
+        let command = format!(r#"{padding} f() {{ printf '{{"body":"%s"}}' "$#"; }}; f"#);
+        assert_eq!(shell_body(&command, &RequestContext::default(), "b"), "0");
+        let short = r#"f() { printf '{"body":"%s"}' "$#"; }; f"#;
+        assert_eq!(shell_body(short, &RequestContext::default(), "b"), "2");
+    }
+
+    /// The boundary, measured as Mountebank measures `fullCommand.length`: unescaped, in UTF-16
+    /// units, so a character outside the BMP counts twice.
+    #[test]
+    fn the_length_limit_is_mountebanks() {
+        let (req, resp) = ("{}", "{}");
+        // `cmd '{}' '{}'` is the command plus 10 units.
+        let fits = "c".repeat(MAX_SHELL_COMMAND_LENGTH - 11);
+        assert_eq!(
+            shell_command_line(&fits, req, resp),
+            format!("{fits} '{{}}' '{{}}'")
+        );
+        let reaches = "c".repeat(MAX_SHELL_COMMAND_LENGTH - 10);
+        assert_eq!(shell_command_line(&reaches, req, resp), reaches);
+        // U+1F600 is two UTF-16 units, so this one reaches the limit too.
+        let astral = format!("{}\u{1F600}", "c".repeat(MAX_SHELL_COMMAND_LENGTH - 12));
+        assert_eq!(shell_command_line(&astral, req, resp), astral);
+        // A `'` is escaped as `'\''`, but the limit counts Mountebank's unescaped one.
+        let with_quote = "{\"a\":\"'\"}";
+        assert_eq!(
+            shell_command_line("c", with_quote, "{}"),
+            r#"c '{"a":"'\''"}' '{}'"#
+        );
+        let last_fit = "c".repeat(MAX_SHELL_COMMAND_LENGTH - 1 - 6 - with_quote.len() - 2);
+        assert_ne!(shell_command_line(&last_fit, with_quote, "{}"), last_fit);
+    }
+
+    /// Issue #1589: what stdout is decides the outcome. Any non-null JSON is returned; `null`,
+    /// text, empty output and a non-zero exit are errors carrying Mountebank's message.
+    #[test]
+    fn each_stdout_class() {
+        let run = |command: &str| {
+            apply_shell_transform(command, &RequestContext::default(), &response("b"))
+        };
+        assert_eq!(
+            run(r#"printf '{"body":"x"}' #"#),
+            Ok(serde_json::json!({ "body": "x" }))
+        );
+        assert_eq!(run("printf ' 3\n' #"), Ok(serde_json::json!(3)));
+        assert_eq!(run("printf null #"), Err(ShellTransformError::Null));
+        assert_eq!(
+            run("echo hello #"),
+            Err(ShellTransformError::InvalidJson("hello\n".to_string()))
+        );
+        assert_eq!(
+            run("true"),
+            Err(ShellTransformError::InvalidJson(String::new()))
+        );
+        let failed = run("echo bad >&2; exit 3 #").expect_err("non-zero exit");
+        assert!(
+            matches!(&failed, ShellTransformError::Failed { stderr, .. } if stderr == "bad\n"),
+            "{failed:?}"
+        );
+        assert!(
+            failed
+                .to_string()
+                .starts_with("Command failed: echo bad >&2; exit 3 # '"),
+            "{failed}"
+        );
     }
 
     #[test]

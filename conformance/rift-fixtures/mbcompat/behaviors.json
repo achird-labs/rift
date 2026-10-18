@@ -154,7 +154,7 @@
             "body": "orig"
           },
           "_behaviors": {
-            "shellTransform": "echo \"$MB_REQUEST\" | grep -o '\"method\":\"[A-Z]*\"'"
+            "shellTransform": "printf '{\"body\":%s}' \"$MB_REQUEST\" #"
           }
         }
       ]
@@ -175,6 +175,26 @@
           },
           "_behaviors": {
             "shellTransform": "exit 3"
+          }
+        }
+      ]
+    },
+    {
+      "predicates": [
+        {
+          "equals": {
+            "path": "/shell-text"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "is": {
+            "statusCode": 200,
+            "body": "orig"
+          },
+          "_behaviors": {
+            "shellTransform": "echo hello"
           }
         }
       ]

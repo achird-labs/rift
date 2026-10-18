@@ -299,24 +299,24 @@ in `MB_REQUEST`. Predicates match each value of such a key.
 
 ## shellTransform
 
-Run one or more external shell commands to build the response body. The command reads the request
-and the response from environment variables and writes the new body to its standard output. Useful
-for producing a body with an existing script or CLI tool.
+Run one or more external shell commands that build a new response, as in Mountebank. Each command
+receives the request and the current response as JSON and prints the new response, as JSON, to its
+standard output. Useful for producing a response with an existing script or CLI tool.
 
 `shellTransform` accepts a single command string, or an array of commands that are **chained in
-sequence** (each command's output feeds the next):
+sequence**: each command receives the response the previous one printed.
 
 ```json
 {
   "is": { "statusCode": 200, "body": "hello" },
   "_behaviors": {
-    "shellTransform": "echo \"$MB_RESPONSE\" | tr a-z A-Z"
+    "shellTransform": "jq -nc '$ARGS.positional[1] | fromjson | .body |= ascii_upcase' --args"
   }
 }
 ```
 
-This serves `{"BODY":"HELLO","STATUSCODE":200}`: the command receives no standard input, so a
-command that reads standard input, such as a bare `tr` or `cat`, produces an empty body.
+This serves `HELLO` with status `200`: the command reads the response from its second argument,
+upper-cases the body and prints the result.
 
 ```json
 {
@@ -326,12 +326,33 @@ command that reads standard input, such as a bare `tr` or `cat`, produces an emp
 }
 ```
 
-Each command runs via `sh -c "<command>"` and receives two environment variables:
+### What the command receives
 
-| Variable | JSON shape |
-|:---------|:-----------|
-| `MB_REQUEST` | `{ "requestFrom", "method", "path", "query", "headers", "body", "ip", "form" }` |
-| `MB_RESPONSE` | `{ "statusCode", "body" }` |
+Each command runs via `sh -c` and receives the request and the response twice: as two environment
+variables, and as two arguments appended to the command line. Rift runs
+`<command> '<request JSON>' '<response JSON>'`, as Mountebank does.
+
+| Variable | Argument | JSON shape |
+|:---------|:---------|:-----------|
+| `MB_REQUEST` | `$1` | `{ "requestFrom", "method", "path", "query", "headers", "body", "ip", "form" }` |
+| `MB_RESPONSE` | `$2` | `{ "statusCode", "headers", "body" }` |
+
+Because the arguments are always appended, a command that does not expect them sees two extra
+words: `echo hello` prints `hello` followed by both JSON texts. End such a command with ` #` so the
+shell treats the arguments as a comment, as Mountebank configurations commonly do:
+`printf '{"body":"fixed"}' #`.
+
+When the whole command line reaches 2048 characters (counted as Mountebank counts them, in UTF-16
+units), the two arguments are left off and the command runs alone, as in Mountebank. The
+environment variables are always set, so a command that reads `MB_REQUEST` and `MB_RESPONSE` works
+at any size. Each argument is single-quoted; a `'` inside the JSON is escaped as `'\''`. Mountebank
+does not escape it, so there a request or response containing `'` breaks the command line (see
+[Differences](differences.md#shelltransform-arguments)).
+
+`MB_RESPONSE.headers` holds one string per header, or an array for a header with several lines
+such as `Set-Cookie`. `MB_RESPONSE.body` is the body as text. After a command in the same chain
+printed a JSON body (a number, an object), the next command receives that value unchanged, so
+`body += 1` on a number adds, as in Mountebank.
 
 `MB_REQUEST.headers` holds one string per header name: a header the client sent more than once
 contributes its **first** value, and a header whose value was not valid UTF-8 is absent from the
@@ -342,13 +363,26 @@ object entirely rather than present as `""` (#1040). That is the same view `copy
 `::ffff:127.0.0.1` — see [Client address](differences.md#client-address)). `form` is present only for a non-empty
 `application/x-www-form-urlencoded` body, as `JSON.stringify` leaves out Mountebank's undefined one.
 
-The command's **stdout becomes the new response body**, as text and as written. Rift does not read it
-as a response object, so a command that prints `{"statusCode": 201, "body": "z"}` serves that text
-as the body and keeps the status code. This differs from Mountebank, which reads the output as a
-response object. A non-zero exit is a failure: by default it
-is lenient (the original body is served and an `x-rift-shelltransform-error: true` header is added);
-with `strictBehaviors` / `RIFT_STRICT_BEHAVIORS` it returns `500` (see
-[Error Semantics](#error-semantics)).
+### What the command prints
+
+The command's stdout is parsed as JSON, and the result **replaces** the response:
+
+- **A JSON object** is read as an `is` response: `statusCode`, `headers` and `body`. A field the
+  object leaves out comes from the imposter's `defaultResponse`, or else is `200`, no headers and an
+  empty body. `headers` is taken whole, so a header of the original response that the object does
+  not repeat is gone. A non-string `body` is served the way `is` serves it, so `"body": 3` serves
+  `3`.
+- **Any other JSON value** (a number, a string, an array) replaces the response with an empty one,
+  completed the same way.
+- **Anything else is a failure**: output that is not JSON (plain text, or nothing at all), the JSON
+  `null`, and a non-zero exit. By default the failure is lenient: the response as it was before the
+  command is served, with an `x-rift-shelltransform-error: true` header. With `strictBehaviors` /
+  `RIFT_STRICT_BEHAVIORS` it returns `500`, whose message is Mountebank's (`Shell command returned
+  invalid JSON: '…'`, `Command failed: …`). See [Error Semantics](#error-semantics).
+
+Releases up to 0.23.0 ran the command with no arguments, left `headers` out of `MB_RESPONSE` and
+served stdout as the body text. A command written for them that prints a plain body must now print
+a JSON response, `{"body": "…"}`.
 
 ---
 

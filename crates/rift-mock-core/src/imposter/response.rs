@@ -131,6 +131,15 @@ fn has_content_type(headers: &HashMap<String, Vec<String>>) -> bool {
         .any(|k| k.eq_ignore_ascii_case("content-type"))
 }
 
+/// Whether an `is` body earns the automatic `Content-Type: application/json`: a JSON object or
+/// array. A number or boolean is served as its JSON text without one, as Mountebank serves it.
+fn earns_json_content_type(body: Option<&serde_json::Value>) -> bool {
+    matches!(
+        body,
+        Some(serde_json::Value::Object(_) | serde_json::Value::Array(_))
+    )
+}
+
 /// A response body as the text served: a string as it is, any other JSON value serialized. The one
 /// rendering for a stub's body and for a `defaultResponse` body (issue #1369), so the two cannot
 /// drift.
@@ -204,7 +213,7 @@ pub fn execute_stub_response_with_rift(
             // request. A string body (or no body) has no `rendered_body` and is used as-is.
             let body = match rendered_body {
                 Some(rb) => {
-                    if !has_content_type(&headers) {
+                    if earns_json_content_type(is.body.as_ref()) && !has_content_type(&headers) {
                         headers.insert(
                             "Content-Type".to_string(),
                             vec!["application/json".to_string()],
@@ -338,7 +347,7 @@ impl PreparedResponse {
                 headers.append(header_name.clone(), header_value);
             }
         }
-        if rendered_body.is_some() && !has_content_type {
+        if earns_json_content_type(is.body.as_ref()) && !has_content_type {
             headers.append(
                 hyper::header::CONTENT_TYPE,
                 hyper::header::HeaderValue::from_static("application/json"),
@@ -1515,6 +1524,30 @@ mod prepared_response_tests {
                 prepared_serve(prep),
                 legacy_serve(resp),
                 "fast path diverged from legacy"
+            );
+        }
+    }
+
+    // A number or boolean body is served as its JSON text with no `Content-Type`, on both serve
+    // paths, as in Mountebank; only an object or array earns `application/json`.
+    #[test]
+    fn a_scalar_json_body_earns_no_content_type() {
+        for body in [json!(42), json!(true)] {
+            let resp = StubResponse::new_is(is_response(200, &[], Some(body.clone())), None, None);
+            let (_s, prepared, b) = prepared_serve(prepared_of(&resp).unwrap());
+            assert_eq!(b, body.to_string().into_bytes());
+            assert!(
+                !prepared
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("content-type")),
+                "{body}: {prepared:?}"
+            );
+            let (_s, legacy, _b) = legacy_serve(&resp);
+            assert!(
+                !legacy
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("content-type")),
+                "{body}: {legacy:?}"
             );
         }
     }

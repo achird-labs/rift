@@ -998,26 +998,48 @@
     "rift": "matches folded"
   },
   {
-    "case": "targeted: shellTransform stdout is the body in Rift and a response object in Mountebank",
+    "case": "targeted: a shellTransform that prints plain text fails (#1589)",
     "kind": "documented",
-    "doc": "docs/mountebank/behaviors.md",
-    "quote": "This differs from Mountebank, which reads the output as a response object.",
-    "reason": "Rift serves the command's stdout as the body; Mountebank reads it as a response object",
-    "id": "shell-transform-output#0",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A command that fails, or prints anything other than JSON, is a `500` in Mountebank.",
+    "reason": "`echo hello` prints invalid JSON: Mountebank answers 500 with its error; Rift serves the response as it was, marked x-rift-shelltransform-error (500 only under strictBehaviors)",
+    "id": "shell-transform-failure-lenient#0",
     "location": "step[1].status",
-    "mountebank": "201",
+    "mountebank": "500",
     "rift": "200"
   },
   {
-    "case": "targeted: shellTransform stdout is the body in Rift and a response object in Mountebank",
+    "case": "targeted: a shellTransform that prints plain text fails (#1589)",
     "kind": "documented",
-    "doc": "docs/mountebank/behaviors.md",
-    "quote": "This differs from Mountebank, which reads the output as a response object.",
-    "reason": "Rift serves the command's stdout as the body; Mountebank reads it as a response object",
-    "id": "shell-transform-output#1",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A command that fails, or prints anything other than JSON, is a `500` in Mountebank.",
+    "reason": "`echo hello` prints invalid JSON: Mountebank answers 500 with its error; Rift serves the response as it was, marked x-rift-shelltransform-error (500 only under strictBehaviors)",
+    "id": "shell-transform-failure-lenient#1",
+    "location": "step[1].header.content-type",
+    "mountebank": "application/json",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: a shellTransform that prints plain text fails (#1589)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A command that fails, or prints anything other than JSON, is a `500` in Mountebank.",
+    "reason": "`echo hello` prints invalid JSON: Mountebank answers 500 with its error; Rift serves the response as it was, marked x-rift-shelltransform-error (500 only under strictBehaviors)",
+    "id": "shell-transform-failure-lenient#2",
+    "location": "step[1].header.x-rift-shelltransform-error",
+    "mountebank": "(absent)",
+    "rift": "true"
+  },
+  {
+    "case": "targeted: a shellTransform that prints plain text fails (#1589)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A command that fails, or prints anything other than JSON, is a `500` in Mountebank.",
+    "reason": "`echo hello` prints invalid JSON: Mountebank answers 500 with its error; Rift serves the response as it was, marked x-rift-shelltransform-error (500 only under strictBehaviors)",
+    "id": "shell-transform-failure-lenient#3",
     "location": "step[1].body",
-    "mountebank": "from-shell",
-    "rift": "{\"statusCode\": 201, \"body\": \"from-shell\"}\n"
+    "mountebankMatches": "\\{\"errors\":\\[\"Shell command returned invalid JSON: 'hello .*'\"\\]\\}",
+    "rift": "original"
   },
   {
     "id": "copy-then-lookup",
