@@ -184,15 +184,25 @@ pub async fn handle_list(
     }
 }
 
-/// The `{"imposters": [...]}` body of `GET /imposters` (in the shape `query` selects), shared with
-/// the `PUT /imposters` success reply. A body that cannot render is the `500` to serve instead.
+/// The `{"imposters": [...]}` body of `GET /imposters` (in the shape `query` selects): every
+/// registered imposter, by ascending port. A body that cannot render is the `500` to serve instead.
 fn imposter_list_value(
     manager: &ImposterManager,
     query: Option<&str>,
     base_url: &str,
 ) -> Result<serde_json::Value, Box<Response<Full<Bytes>>>> {
+    imposters_value(&manager.list_imposters(), query, base_url)
+}
+
+/// The `{"imposters": [...]}` body for `imposters`, in the order given and the shape `query`
+/// selects. Shared by `GET /imposters` (ascending) and the `PUT /imposters` success reply (request
+/// order, issue #1563).
+fn imposters_value(
+    imposters: &[Arc<Imposter>],
+    query: Option<&str>,
+    base_url: &str,
+) -> Result<serde_json::Value, Box<Response<Full<Bytes>>>> {
     let params = ImposterQueryParams::parse(query);
-    let imposters = manager.list_imposters();
     let render = |v: Result<serde_json::Value, serde_json::Error>| {
         v.map_err(|e| {
             Box::new(error_response(
@@ -375,14 +385,16 @@ async fn replace_all_from_bytes(
         }
     }
 
-    // Port-less (and port 0) configs are always fresh creates, so only explicit ports can need a
-    // reset. Collected before the configs move into the reconcile.
-    let explicit_ports: Vec<u16> = batch
+    // Each config's explicit port, in body order (`None` for port-less and port 0), collected
+    // before the configs move into the reconcile: the success reply is rendered in this order
+    // (issue #1563). Port-less configs are always fresh creates, so only explicit ports can need
+    // a reset.
+    let body_ports: Vec<Option<u16>> = batch
         .imposters
         .iter()
-        .filter_map(|config| config.port)
-        .filter(|&port| port != 0)
+        .map(ImposterConfig::explicit_port)
         .collect();
+    let explicit_ports: Vec<u16> = body_ports.iter().flatten().copied().collect();
 
     // Reconcile toward the new set instead of delete-all-then-recreate (issue #549): the old
     // wholesale pre-delete meant any create failure (e.g. a transiently-held port) silently lost
@@ -407,8 +419,14 @@ async fn replace_all_from_bytes(
 
     // The report rides beside `imposters` (Mountebank clients read `imposters`; the port lists
     // mirror `POST /admin/reload`). Rendered after the reset, so it shows `numberOfRequests: 0`.
+    // `imposters` lists the body's imposters in request order, as Mountebank does (issue #1563);
+    // one deleted concurrently since the apply is simply absent, as it would be from a list.
     if report.failed.is_empty() {
-        return match imposter_list_value(&manager, None, base_url) {
+        let answered: Vec<Arc<Imposter>> = request_order(&body_ports, &report.created)
+            .into_iter()
+            .filter_map(|port| manager.get_imposter(port).ok())
+            .collect();
+        return match imposters_value(&answered, None, base_url) {
             Ok(mut body) => {
                 if let Some(obj) = body.as_object_mut() {
                     obj.extend(report.port_lists());
@@ -443,6 +461,22 @@ async fn replace_all_from_bytes(
     );
     body.insert("failed".to_owned(), serde_json::json!(failures));
     json_response(status, &serde_json::Value::Object(body))
+}
+
+/// `PUT /imposters` answers in request order, as Mountebank does (issue #1563): an explicit port is
+/// itself; each port-less config takes the next auto-assigned port in `created`, which
+/// `apply_config` lists after the explicit ports, in input order (issue #1112). A port-less slot
+/// with no auto port left is skipped; that only happens when the apply failed, and the failure
+/// reply carries no `imposters`.
+fn request_order(body_ports: &[Option<u16>], created: &[u16]) -> Vec<u16> {
+    let mut auto = created
+        .iter()
+        .copied()
+        .filter(|port| !body_ports.contains(&Some(*port)));
+    body_ports
+        .iter()
+        .filter_map(|slot| slot.or_else(|| auto.next()))
+        .collect()
 }
 
 /// A reconcile whose every failure is the caller's address (taken, not local, not permitted,
@@ -2344,6 +2378,96 @@ mod replace_all_tests {
         assert!(manager.get_imposter(port_b).is_ok());
         assert_eq!(manager.count(), 1);
         manager.delete_all().await;
+    }
+
+    // Issue #1563: a successful PUT answers in request order, as Mountebank does (`Promise.all`
+    // over the body), with the port-less imposter at its own position — not by ascending port.
+    // `GET /imposters` stays ascending.
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn put_success_answers_imposters_in_request_order() {
+        let manager = Arc::new(ImposterManager::new());
+        let mut free = Vec::new();
+        for _ in 0..2 {
+            let config =
+                serde_json::from_value(serde_json::json!({"protocol": "http", "stubs": []}))
+                    .expect("config");
+            free.push(manager.create_imposter(config).await.expect("create"));
+        }
+        let (port_a, port_b) = (free[0].min(free[1]), free[0].max(free[1]));
+        let body = serde_json::json!({"imposters": [
+            {"protocol": "http", "port": port_b, "name": "b", "stubs": []},
+            {"protocol": "http", "port": port_a, "name": "a", "stubs": []},
+            {"protocol": "http", "name": "auto", "stubs": []},
+        ]})
+        .to_string();
+        let resp = replace_all_from_bytes(
+            body.as_bytes(),
+            BASE,
+            Arc::clone(&manager),
+            false,
+            None,
+            false,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let created = ports_in(&json, "created");
+        let auto = *created
+            .iter()
+            .find(|&&p| p != u64::from(port_a) && p != u64::from(port_b))
+            .unwrap_or_else(|| panic!("the port-less imposter must be created: {json}"));
+        let answered: Vec<(u64, &str)> = json["imposters"]
+            .as_array()
+            .expect("imposters array")
+            .iter()
+            .map(|i| {
+                (
+                    i["port"].as_u64().expect("port"),
+                    i["name"].as_str().expect("name"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            answered,
+            vec![
+                (u64::from(port_b), "b"),
+                (u64::from(port_a), "a"),
+                (auto, "auto")
+            ],
+            "PUT answers in request order: {json}"
+        );
+
+        let list = body_json(handle_list(Arc::clone(&manager), None, BASE).await).await;
+        let mut ascending = vec![u64::from(port_a), u64::from(port_b), auto];
+        ascending.sort_unstable();
+        let listed: Vec<u64> = list["imposters"]
+            .as_array()
+            .expect("imposters array")
+            .iter()
+            .filter_map(|i| i["port"].as_u64())
+            .collect();
+        assert_eq!(listed, ascending, "GET stays ascending: {list}");
+        manager.delete_all().await;
+    }
+
+    // Issue #1563: request order is rebuilt from the body's explicit ports and `created`, which
+    // lists explicit ports first (input order) and then auto-assigned ports (input order).
+    #[test]
+    fn request_order_places_each_auto_port_at_its_body_slot() {
+        // Explicit-only, descending: the body order, not the port order.
+        assert_eq!(request_order(&[Some(9), Some(3)], &[9, 3]), vec![9, 3]);
+        // Mixed: each port-less slot takes the next auto port, in input order.
+        assert_eq!(
+            request_order(&[None, Some(62), None, Some(61)], &[62, 61, 1001, 1002]),
+            vec![1001, 62, 1002, 61]
+        );
+        // An unchanged (kept or reset) explicit port is not in `created` but keeps its slot.
+        assert_eq!(
+            request_order(&[Some(7), None, Some(5)], &[5, 1001]),
+            vec![7, 1001, 5]
+        );
     }
 
     fn ports_in(json: &serde_json::Value, field: &str) -> Vec<u64> {

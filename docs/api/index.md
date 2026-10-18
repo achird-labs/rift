@@ -200,6 +200,9 @@ than deleted wholesale and recreated, so a failure never deletes what was runnin
 from the payload are deleted, changed ones are replaced (or stub-patched), and a port that fails is
 reported in `failed` while the rest are applied.
 
+The response lists the body's imposters in request order, as Mountebank does, with each port-less
+imposter at its position; `GET /imposters` lists them by ascending port.
+
 After a successful apply, every imposter in the body starts with fresh runtime state, as in
 Mountebank: response cycles, recorded requests and `numberOfRequests`, injection state, scenario
 and flow state, and saved `proxyOnce` responses. Its listener stays bound. A flow store supplied by
