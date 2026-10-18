@@ -1128,7 +1128,8 @@ request describes an imposter that cannot be created:
 }
 ```
 
-The same `400` / `bad data` answers a port another process already holds (the message reads
+The same `400` / `bad data` answers a port this server's own admin API, `/metrics`, front door or
+intercept listener holds (#1557), a port another process already holds (the message reads
 `Port 4545 is already in use: Address already in use (os error 48)`), a `host` that is not an
 address of this machine, one the process may not bind, and one that does not resolve (`Failed to
 bind port 4545: ...`). `PUT /imposters` answers `400` when every failed imposter is of this kind and

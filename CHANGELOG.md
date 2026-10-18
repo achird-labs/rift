@@ -94,6 +94,17 @@ record.
 
 ### Fixed
 
+- **An imposter can no longer be created on the server's own admin, metrics, front-door or
+  intercept port on macOS** (#1557). Under `--local-only`, with `--host 127.0.0.1`, or with a
+  loopback `--front-door`, the bind used to succeed beside that listener, and the two split the
+  port's loopback clients. It is now `400` `already in use` on every platform, as it already was on
+  Linux and is in Mountebank; auto-assign skips those ports too. The reverse is refused as well: a
+  startup imposter keeps its port, and the metrics server, front door or intercept listener asked
+  for that port fails to bind. An embedder can reserve its own listeners' ports with
+  `ImposterManager::reserve_port` / `PortReservation`; a manager injected into `ServerBuilder`
+  learns the server's ports, and under `with_serve_unbound` an imposter on one is registered without
+  a listener rather than refused.
+
 - **`copy` and `lookup` tokens in `statusCode` are substituted** (#1558). A stub whose
   `is.statusCode` (or `defaultResponse.statusCode`) is a string such as `"${code}"` used to be
   refused with `400 invalid status code string`. It is now stored as written, substituted by

@@ -5,12 +5,32 @@
 //! for `--local-only`, and an exact bind for an explicit `--host`. [`ListenerSet`] accepts on every
 //! listener one address needs, so each accept loop keeps a single loop and a single outcome.
 
+pub(crate) use rift_mock_core::imposter::PortReservation;
+use rift_mock_core::imposter::{ImposterManager, ServerListener};
 use rift_mock_core::proxy::{bind_server_listener, bind_unspecified};
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::task::Poll;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::debug;
+
+/// Refuse to bind a server listener on a port an imposter already accepts on (issue #1557). A
+/// startup imposter loads before the server listeners bind, and on macOS the listener's bind would
+/// otherwise succeed beside the imposter's and split the port's clients with it. Linux refuses the
+/// bind itself. `0` asks the kernel for a free port, which no imposter holds.
+pub(crate) fn refuse_imposter_port(
+    manager: &ImposterManager,
+    port: u16,
+    by: ServerListener,
+) -> io::Result<()> {
+    if port != 0 && manager.imposter_listens_on(port) {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!("port {port} is already in use by an imposter; the {by} cannot bind it"),
+        ));
+    }
+    Ok(())
+}
 
 /// How many kernel-chosen ports `Loopback(0)` tries before giving up, when `[::1]` is taken on the
 /// port `127.0.0.1` was given.

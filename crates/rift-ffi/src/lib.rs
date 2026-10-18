@@ -46,7 +46,8 @@ use rift_http_proxy::intercept_control::{
 use rift_http_proxy::intercept_rules::InterceptRule;
 use rift_http_proxy::server::{RunningMetrics, bind_metrics_server};
 use rift_mock_core::imposter::{
-    ApplyReport, Imposter, ImposterConfig, ImposterManager, Stub, VerifyOptions,
+    ApplyReport, Imposter, ImposterConfig, ImposterManager, PortReservation, ServerListener, Stub,
+    VerifyOptions,
 };
 use rift_mock_core::proxy::truststore::{TrustStorePassword, ca_pem, export_jks, export_pkcs12};
 use serde_json::{Value, json};
@@ -133,6 +134,10 @@ pub struct RiftHandle {
 struct AdminPlane {
     admin: RunningAdminApi,
     metrics: Option<RunningMetrics>,
+    /// The metrics port on the manager's reserved set (issue #1557): no imposter may take it while
+    /// the metrics server runs. Released when the plane is dropped, after its listeners stopped.
+    /// The admin API reserves its own port.
+    _metrics_reservation: Option<PortReservation>,
 }
 
 /// Borrow the handle from a raw pointer, or `None` if null.
@@ -302,12 +307,18 @@ pub extern "C" fn rift_start() -> *mut RiftHandle {
         clear_last_error();
         rift_http_proxy::install_default_crypto_provider();
         match Runtime::new() {
-            Ok(runtime) => Box::into_raw(Box::new(RiftHandle {
-                runtime,
-                manager: Arc::new(ImposterManager::new()),
-                admin: Mutex::new(None),
-                intercept: InterceptControl::default(),
-            })),
+            Ok(runtime) => {
+                let manager = Arc::new(ImposterManager::new());
+                // The intercept listener reserves its port on this manager (issue #1557).
+                let intercept =
+                    InterceptControl::default().with_port_reservations(Arc::clone(&manager));
+                Box::into_raw(Box::new(RiftHandle {
+                    runtime,
+                    manager,
+                    admin: Mutex::new(None),
+                    intercept,
+                }))
+            }
             Err(e) => {
                 set_last_error(format!("rift_start: runtime creation failed: {e}"));
                 std::ptr::null_mut()
@@ -2200,9 +2211,24 @@ async fn build_admin_plane_inner(
     // Bind metrics first (optional), then admin — so if the second bind fails, the first
     // listener is explicitly shut down rather than orphaned holding its port.
     let metrics = match metrics_addr {
+        // An imposter already on the port keeps it (issue #1557): macOS would let the metrics bind
+        // share the port with it.
+        Some(maddr) if maddr.port() != 0 && handle.manager.imposter_listens_on(maddr.port()) => {
+            return Err(anyhow::anyhow!(
+                "metrics bind: port {} is already in use by an imposter",
+                maddr.port()
+            ));
+        }
         Some(maddr) => Some(bind_metrics_server(maddr).await.context("metrics bind")?),
         None => None,
     };
+    let metrics_reservation = metrics.as_ref().map(|running| {
+        PortReservation::new(
+            &handle.manager,
+            running.local_addrs(),
+            ServerListener::Metrics,
+        )
+    });
 
     // Share the handle's intercept slot with the admin plane (issue #493) so `rift_serve_admin`
     // serves the full `/intercept*` surface against the same listener the C-ABI drives: a
@@ -2236,7 +2262,14 @@ async fn build_admin_plane_inner(
     })
     .to_string();
 
-    Ok((AdminPlane { admin, metrics }, response))
+    Ok((
+        AdminPlane {
+            admin,
+            metrics,
+            _metrics_reservation: metrics_reservation,
+        },
+        response,
+    ))
 }
 
 /// Incrementally reconcile the manager toward the given config (issue #316/#343). Input is

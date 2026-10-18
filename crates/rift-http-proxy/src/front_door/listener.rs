@@ -13,8 +13,8 @@
 use crate::front_door::observer::RouteObserver;
 use crate::front_door::route_table::{CompiledRoutes, Route};
 use crate::gateway::apply_tcp_fault;
-use crate::imposter::ImposterManager;
-use crate::listen::{ListenAddr, ListenerSet, http_urls};
+use crate::imposter::{ImposterManager, ServerListener};
+use crate::listen::{ListenAddr, ListenerSet, PortReservation, http_urls, refuse_imposter_port};
 use crate::response::{ErrorKind, error_response_typed};
 use arc_swap::ArcSwap;
 use http_body_util::Full;
@@ -80,11 +80,14 @@ pub(crate) async fn bind_front_door_at(
     routes: Arc<ArcSwap<CompiledRoutes>>,
     observer: Option<Arc<dyn RouteObserver>>,
 ) -> anyhow::Result<RunningFrontDoor> {
+    refuse_imposter_port(&manager, addr.judged().port(), ServerListener::FrontDoor)?;
     let listener = ListenerSet::from_std(addr.bind()?)?;
     let local_addrs = listener.local_addrs()?;
     // `from_std` refuses an empty set, so there is always a first address.
     let local_addr = local_addrs[0];
     info!("Front door listening on {}", http_urls(&local_addrs, ""));
+    // No imposter may take this port while the front door holds it (issue #1557).
+    let reservation = PortReservation::new(&manager, &local_addrs, ServerListener::FrontDoor);
 
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
@@ -113,6 +116,7 @@ pub(crate) async fn bind_front_door_at(
         cancel,
         tracker,
         task: Mutex::new(Some(task)),
+        reservation: Mutex::new(Some(reservation)),
     })
 }
 
@@ -122,6 +126,9 @@ pub struct RunningFrontDoor {
     cancel: CancellationToken,
     tracker: TaskTracker,
     task: Mutex<Option<JoinHandle<anyhow::Result<()>>>>,
+    /// This listener's port on the manager's reserved set (issue #1557), released by `shutdown`
+    /// once the listener has stopped, or when this handle is dropped.
+    reservation: Mutex<Option<PortReservation>>,
 }
 
 impl RunningFrontDoor {
@@ -155,6 +162,13 @@ impl RunningFrontDoor {
                 "Front door shutdown: in-flight connections did not drain within the grace period"
             );
         }
+        // Released only now, with the accept loop gone: an imposter may take the port again.
+        drop(
+            self.reservation
+                .lock()
+                .expect("front door reservation mutex poisoned")
+                .take(),
+        );
     }
 
     /// Run until the accept loop exits (returns immediately if already shut down).
