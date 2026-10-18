@@ -2823,7 +2823,7 @@ fn validate_copy_behavior(file: &Path, copy: &Value, location: &str, result: &mu
 }
 
 /// The engine's `DataSource`: a `csv` object with string `path` and `keyColumn`, and an optional
-/// one-character `delimiter`.
+/// string `delimiter` of any length, as Mountebank's csv-parse takes (issue #1566).
 fn data_source_problem(source: &Value) -> Option<&'static str> {
     let Some(csv) = source.get("csv").and_then(Value::as_object) else {
         return Some("`fromDataSource` must hold a `csv` object");
@@ -2835,9 +2835,9 @@ fn data_source_problem(source: &Value) -> Option<&'static str> {
         return Some("`fromDataSource.csv.keyColumn` must be a string");
     }
     if let Some(delimiter) = csv.get("delimiter")
-        && !delimiter.as_str().is_some_and(|d| d.chars().count() == 1)
+        && !delimiter.is_string()
     {
-        return Some("`fromDataSource.csv.delimiter` must be a single character");
+        return Some("`fromDataSource.csv.delimiter` must be a string");
     }
     None
 }

@@ -1,0 +1,1000 @@
+{"text":"\r\n\"q,r\"\"q,r\"\" \" ","delimiter":",","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||,a\"q,r\"\"aa","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a,\"q,r\"","delimiter":",","rows":[["a","q,r"]],"error":null}
+{"text":"\"\"q,r\"\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\",,\"a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"a,","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\",\r\n||||\r\n,\" ","delimiter":",","rows":[["q,r",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"q,r\"\"q,r\"\"\"q,r\"\"q,r\"\r\n\"q,r\"a\r\n","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"a\"q,r\"\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\na,,||a ","delimiter":",","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"||\"q,r\"\"a\"\"b\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||,||\"\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\r\na,\r\na||aa","delimiter":",","rows":[["||"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\" é\"q,r\",","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":", \"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"\"q,r\"a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":" ,a\"q,r\"\r\n||\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"a\"q,r\",  ||\r\n||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"a,\r\n\r\n\"q,r\"\"\" ,","delimiter":"||","rows":[["a,"],[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||||||","delimiter":",","rows":[["||||||"]],"error":null}
+{"text":"\"q,r\", \r\n\"||a","delimiter":",","rows":[["q,r"," "]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",a||\"\r\n,a\r\n\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"\"\r\n\"||","delimiter":",","rows":[[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",\r\naa\"q,r\" \"","delimiter":",","rows":[["",""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||a \" ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"\"q,r\"\",","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",\r\na||\"","delimiter":",","rows":[["",""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"aa \r\n,","delimiter":",","rows":[["aa "]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\r\n\r\n\"q,r\" \r\n aa\"","delimiter":",","rows":[[""],[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||,\r\n\r\n,\r\n||\r\na","delimiter":",","rows":[["||",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"||||aaa","delimiter":",","rows":[["||||aaa"]],"error":null}
+{"text":",aa\"\r\n\"q,r\"aa,","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a|| \r\n\r\n\"q,r\"\r\n a","delimiter":",","rows":[["a|| "],[""],["q,r"],[" a"]],"error":null}
+{"text":"\"q,r\"a||\"aa\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",\r\n\"","delimiter":"||","rows":[[","]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":" ,\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a\r\n\r\n a\"\"q,r\"|| ","delimiter":"||","rows":[["a"],[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\na\"q,r\" a\"||","delimiter":"||","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":",\"q,r\"\"aa||\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a||a\"q,r\"||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"\r\na\r\n   ||","delimiter":",","rows":[[""],["a"],["   ||"]],"error":null}
+{"text":"\"\"\"\" \"q,r\"a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"|| \"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"\"q,r\",","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",a \r\n||aa\r\n,","delimiter":",","rows":[["","a "]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"a,||\"q,r\"|| \"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",a,\r\n, \"","delimiter":",","rows":[["","a",""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"a||,","delimiter":",","rows":[["a||",""]],"error":null}
+{"text":" \r\n\"","delimiter":",","rows":[[" "]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a||\"q,r\"\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n||\"q,r\" \" ,","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\",a||\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":" \"q,r\",||\"q,r\"\"q,r\" \r\n\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":"\"","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"\"q,r\" \"\"||\"||||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a","delimiter":"||","rows":[["a"]],"error":null}
+{"text":",x\"y ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a\"a\r\n|| \"q,r\" \"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||,||\"q,r\"\"q,r\" a||\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"aa||\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":",\r\n\r\n||\"\"||\"||","delimiter":"||","rows":[[","],[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":" ||,,\"a\r\n","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||a ","delimiter":",","rows":[["||a "]],"error":null}
+{"text":" ,\r\n ||","delimiter":",","rows":[[" ",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"||,,|| ","delimiter":",","rows":[["||","","|| "]],"error":null}
+{"text":" ,\r\n\r\n a\r\n","delimiter":",","rows":[[" ",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"\"q,r\"a  \"q,r\"\r\n||\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",\"q,r\"a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",a,a\" ||||\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"\r\n\"a||\"\"\"\r\n||","delimiter":",","rows":[[""],["a||\""],["||"]],"error":null}
+{"text":"\"q,r\"\"q,r\"||||\"\"","delimiter":"||","rows":[["q,r\"q,r","",""]],"error":null}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":",,\",\"a\r\n||,","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"\r\n\"||\"","delimiter":",","rows":[["q,r"],["||"]],"error":null}
+{"text":" \r\na\" \r\n,","delimiter":",","rows":[[" "]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":"aa\"\r\n\",\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",,a","delimiter":",","rows":[["","","a"]],"error":null}
+{"text":"\r\n \"\"q,r\"||||||\"\"q,r\"","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"aa a\r\naa,\"q,r\"","delimiter":",","rows":[["aa a"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":",\",,\" \r\n\"\"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"  \r\n|| \"q,r\",","delimiter":",","rows":[["  "]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||,,|| \ra\r\n\"q,r\"","delimiter":",","rows":[["||","","|| "]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":",\r\n\"\r\n||\"\"\r\n\"","delimiter":",","rows":[["",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"\r\n\r\n  ","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":" ,||a,","delimiter":",","rows":[[" ","||a",""]],"error":null}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n\"q,r\"\" \"","delimiter":",","rows":[[""],["q,r\" "]],"error":null}
+{"text":"||\"q,r\",  ||||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n,||\"q,r\" ","delimiter":"||","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||a \"||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"\r\n\r\n","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"|| ||||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"\r\n\"q,r\",\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" a\"q,r\"||aa\r\n||\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\"q,r\",aa","delimiter":",","rows":[["","q,r","aa"]],"error":null}
+{"text":"\"a\"q,r\"||éa\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":",, ,\"\"q,r\"||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n||\r\n \"q,r\"","delimiter":",","rows":[[""],["||"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":",, \r\n ","delimiter":",","rows":[["",""," "]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\r\n\",||,\"a","delimiter":",","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a\"a \"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\r\n\",||","delimiter":",","rows":[["||"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":" a\r\n","delimiter":",","rows":[[" a"]],"error":null}
+{"text":"\r\n,||\r\n \"q,r\"a","delimiter":",","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"\"q,r\"\r\n||||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||a||  ","delimiter":",","rows":[["||a||  "]],"error":null}
+{"text":"|| \"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"|| \r\n,\"||\"","delimiter":",","rows":[["|| "]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"||,||\"q,r\"\"q,r\"||||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a,,","delimiter":",","rows":[["a","",""]],"error":null}
+{"text":",a\r\n\"\r\n","delimiter":",","rows":[["","a"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a\r\n||","delimiter":"||","rows":[["a"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\r\n \"q,r\" \r\n\"q,r\"\"\"q,r\"\"","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"a||","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",\"\r\n\"\r\n","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"a, \",","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\na\r\n","delimiter":",","rows":[[""],["a"]],"error":null}
+{"text":" aa||,\"q,r\"\"q,r\",,","delimiter":",","rows":[[" aa||","q,r\"q,r","",""]],"error":null}
+{"text":" ||a|| \"q,r\"\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" \r\na","delimiter":",","rows":[[" "],["a"]],"error":null}
+{"text":"aa\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":"\r\n\",,,","delimiter":",","rows":[[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\na\"a\r\n\r\n,||\r\n","delimiter":"||","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"\"||\"q,r\",\",","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||||\"a\"\"b\"\"q,r\"\"q,r\"a\"q,r\"","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"\"\"q,r\",\"a\"q,r\" ","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n","delimiter":"||","rows":[[""]],"error":null}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"\"\"q,r\" \"||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"\"q,r\"||\r\n\",\r\n,\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" a\"q,r\",,,\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":",\r\n \"q,r\"a","delimiter":",","rows":[["",""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ,,||\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n||\r\n","delimiter":"||","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"a\"\r\n||a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",,\r\n\"q,r\"a\r\n \"q,r\"||","delimiter":",","rows":[["","",""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"\"q,r\"||aé||a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a\",\"\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"\",, \"q,r\"\"q,r\"a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"aa\"q,r\",\"\"q,r\"\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a\"q,r\"\"q,r\"||||\",aa","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"\"q,r\"||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a\r\n,","delimiter":",","rows":[["a"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":",\r\n ,,\"q,r\"a","delimiter":"||","rows":[[","]],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ,,","delimiter":",","rows":[[" ","",""]],"error":null}
+{"text":"\r\naa||,","delimiter":",","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"q,r\",\r\n\r\n,","delimiter":",","rows":[["q,r",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"||,,\r\n\"q,r\" b","delimiter":",","rows":[["||","",""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"|||| \" ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"\r\n,||||||a","delimiter":",","rows":[["q,r"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"a\n\r\n","delimiter":",","rows":[["a"],["\r"]],"error":null}
+{"text":"||\"||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||, \r\n\"\"q,r\"||","delimiter":",","rows":[["||"," "]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"\"||\"\"q,r\"","delimiter":",","rows":[["q,r\"||\"q,r"]],"error":null}
+{"text":" ,\"q,r\"\"q,r\"\r\n","delimiter":",","rows":[[" ","q,r\"q,r"]],"error":null}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"\"\"q,r\",","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"\r\na\r\n,a","delimiter":"||","rows":[[""],["a"],[",a"]],"error":null}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":"a||a\"q,r\"\"q,r\"\" ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ,\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\" \r\n\"q,r\",","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":"\"a ,\"a||\r\n ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"\"q,r\",,\"q,r\"\"q,r\"\r\n||||","delimiter":",","rows":[["q,r\"q,r","","q,r\"q,r"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"aa","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"\",,\"q,r\",","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" aaa,a ","delimiter":",","rows":[[" aaa","a "]],"error":null}
+{"text":"\"q,r\"\"\r\n\r\n,\r\na a","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\",\r\n","delimiter":",","rows":[["q,r",""]],"error":null}
+{"text":"\"\"q,r\"\"a,||\"q,r\"a,","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ,\r\n,\"\"||\"q,r\",","delimiter":",","rows":[[" ",""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||a,\r\n a\"||||","delimiter":",","rows":[["||a",""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a\"\r\n\"||\"q,r\"\"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"\r\n|| ,\" ,||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ","delimiter":"||","rows":[[" "]],"error":null}
+{"text":"\"\"q,r\"a,||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"a,||, ||","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\", ","delimiter":",","rows":[["q,r"," "]],"error":null}
+{"text":"||\r\n,,a","delimiter":",","rows":[["||"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":"aaa\r\n\r\n","delimiter":",","rows":[["aaa"],[""]],"error":null}
+{"text":"\r\n||\"","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"\r\n\"q,r\"\r\n\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\",a","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a||\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" \"q,r\"||\"q,r\"\"q,r\"a\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a,\r\n \r\n\",\"a","delimiter":",","rows":[["a",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":" \"q,r\",","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"\"q,r\",||,,,","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\" \r\n,\"q,r\"\"q,r\" ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"\r\n\"\r\na\"\r\n","delimiter":",","rows":[["q,r"],["\r\na"]],"error":null}
+{"text":"\r\n\"\"q,r\" ||a||","delimiter":",","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"\"\r\n","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"  ,","delimiter":"||","rows":[["  ,"]],"error":null}
+{"text":",a,,a\"\",a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\",||","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||a a\",\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||  ","delimiter":",","rows":[["||  "]],"error":null}
+{"text":"\"\r\n\"","delimiter":",","rows":[["\r\n"]],"error":null}
+{"text":"||a,\"q,r\",a||a\r\n","delimiter":",","rows":[["||a","q,r","a||a"]],"error":null}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"||||,||,||,\"q,r\"||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n\r\n||,|| \"","delimiter":",","rows":[[""],[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":",","delimiter":"||","rows":[[","]],"error":null}
+{"text":"\"q,r\"\"q,r\"a\r\n\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"a\r\n\"q,r\"||\"","delimiter":"||","rows":[["a"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||a a\r\n","delimiter":",","rows":[["||a a"]],"error":null}
+{"text":"a\r\n\"","delimiter":",","rows":[["a"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"\r\n||","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"\r\n\"q,r\"","delimiter":",","rows":[["q,r"],["q,r"]],"error":null}
+{"text":"||a a,||,","delimiter":"||","rows":[["","a a,",","]],"error":null}
+{"text":"\"q,r\"\",||||||\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"\"q,r\"a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ,\"q,r\"\"q,r\"a\r\n,,,","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"|| ","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n\"a||\r\n\"\r\n ,","delimiter":",","rows":[[""],["a||\r\n"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\r\n||\r\n","delimiter":"||","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"  \r\n\"\"q,r\"||a","delimiter":"||","rows":[["  "]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n\"||\r\n||","delimiter":",","rows":[[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"\"q,r\",\r\n\"q,r\", ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n,||,\"q,r\",||","delimiter":",","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"q,r\"||||\"q,r\"\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"\r\n||,a\r\n\",a ","delimiter":",","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":",\"q,r\"||\r\n||\"a|| ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" \"\"q,r\"\"q,r\"\r\n \"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"a||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\",\"q,r\"","delimiter":",","rows":[["q,r","q,r"]],"error":null}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"\r\n \r\n\"\r\n","delimiter":",","rows":[[""],[" "]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"||\"q,r\"a\"q,r\" \"q,r\"\"a||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",,\r\n,\"|| ","delimiter":",","rows":[["","",""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"||  \",a\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||  ","delimiter":",","rows":[["||  "]],"error":null}
+{"text":"  ||\"q,r\" \"\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"a\r\n\r\n||a\"a\r\n\"q,r\"","delimiter":",","rows":[["a"],[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\r\n,a,","delimiter":",","rows":[["",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\r\n\"\"q,r\",  \"","delimiter":",","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a\"\"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"aa\r\n","delimiter":"||","rows":[["aa"]],"error":null}
+{"text":"\r\naa","delimiter":",","rows":[[""],["aa"]],"error":null}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"||,|||| \r\n\r\n\"q,r\"\r\n","delimiter":",","rows":[["||","|||| "]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"\r\n\"\"q,r\"a ","delimiter":",","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":", \r\n\"\"\"q,r\"\"\"q,r\"\r\n","delimiter":",","rows":[[""," "]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n ,a \"\r\n","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":",, ","delimiter":",","rows":[["",""," "]],"error":null}
+{"text":"\"a\"q,r\"\"\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n,\"q,r\"\"\"","delimiter":",","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"q,r\" \r\n \r\n","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n\r\n || ||\"","delimiter":",","rows":[[""],[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\"q,r\"\"q,r\"\"\"q,r\"\"q,r\"\"||||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n","delimiter":"||","rows":[[""]],"error":null}
+{"text":"|| ,","delimiter":",","rows":[["|| ",""]],"error":null}
+{"text":" ||||,\"\"q,r\"||aa","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||\r\n ||,a,\"q,r\"\"","delimiter":",","rows":[["||"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\" \"q,r\"||a\r\n\r\n","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" \"\"\"q,r\"\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n  ","delimiter":",","rows":[[""],["  "]],"error":null}
+{"text":" ,a","delimiter":",","rows":[[" ","a"]],"error":null}
+{"text":" a\"q,r\"\"q,r\"\r\n, ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" \r\n\"\"\r\na||","delimiter":",","rows":[[" "],[""],["a||"]],"error":null}
+{"text":"||,","delimiter":",","rows":[["||",""]],"error":null}
+{"text":"aa,\"\"\r\n ","delimiter":",","rows":[["aa",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":",\"a||\"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\" \r\n||,,\"q,r\" ||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" a \"q,r\"a||\r\n","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"\"q,r\" ","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"  \r\n  ","delimiter":",","rows":[["  "],["  "]],"error":null}
+{"text":"\"q,r\"\r\n\"a ,||","delimiter":",","rows":[["q,r"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\" a||,","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||||\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"a ","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\" \"q,r\"\"q,r\"||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"","delimiter":"||","rows":[["q,r"]],"error":null}
+{"text":"\r\n \"q,r\"||,","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n||,\"a\r\na","delimiter":",","rows":[[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a,\r\na||","delimiter":"||","rows":[["a,"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":" ||,\",\r\n\r\n","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":",,\"q,r\"\r\n\"q,r\"","delimiter":",","rows":[["","","q,r"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"a\r\n\"q,r\"\",,\r\n\"q,r\"\"","delimiter":",","rows":[["a"]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a\r\na ,a\"q,r\"","delimiter":",","rows":[["a"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\" || \r\n","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a||\"a\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a \"q,r\",\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a\",\r\na","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\" a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a\"q,r\" \r\n\"\"q,r\"\"q,r\"a\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a||,|| ","delimiter":",","rows":[["a||","|| "]],"error":null}
+{"text":"a,\r\n","delimiter":",","rows":[["a",""]],"error":null}
+{"text":"\"q,r\"\"q,r\"\r\n\"\"","delimiter":",","rows":[["q,r\"q,r"],[""]],"error":null}
+{"text":" é\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"  \r\n\"||","delimiter":",","rows":[["  "]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",\"q,r\"\"\r\n||a ","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a||,","delimiter":",","rows":[["a||",""]],"error":null}
+{"text":"\"q,r\"||||||||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"\"a\"\r\n||\r\n,\r\n ","delimiter":",","rows":[["a"],["||"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"\r\n\r\n","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||a||\"||\r\n ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",aa\r\n\"q,r\"a\"q,r\"\"q,r\",","delimiter":"||","rows":[[",aa"]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":"\"","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"|||| ||\"q,r\"\"q,r\" ||\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\", ","delimiter":",","rows":[["q,r"," "]],"error":null}
+{"text":",||\r\n,a||\"q,r\"","delimiter":",","rows":[["","||"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":" \" \"q,r\" ||,","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"  a a\"q,r\"||||\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\",a||\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"||||\r\n\r\n\"q,r\"||\"q,r\"\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ,||||,\"q,r\"\r\n","delimiter":",","rows":[[" ","||||","q,r"]],"error":null}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",,||||\"q,r\"a||a\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"|| a\" ||,\",","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"","delimiter":"||","rows":[["q,r"]],"error":null}
+{"text":"||\r\n||a\"q,r\"","delimiter":",","rows":[["||"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a ,a\"\"q,r\" ,\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":", a||a, ","delimiter":",","rows":[[""," a||a"," "]],"error":null}
+{"text":"\"\r\n||","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n  \"\"\"q,r\"\"\r\n ","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"a\"q,r\" ","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"a,||\"\r\naa ","delimiter":"||","rows":[["a,||"],["aa "]],"error":null}
+{"text":",|| \" aa","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n\"aa,\"\" \r\n","delimiter":",","rows":[[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":" ||\"q,r\"||\"q,r\"\"q,r\"||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",, ||a","delimiter":"||","rows":[[",, ","a"]],"error":null}
+{"text":" || \r\n\r\n\"\r\n","delimiter":",","rows":[[" || "],[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||a ||,,||\"q,r\"\"q,r\"","delimiter":"||","rows":[["","a ",",,","q,r\"q,r"]],"error":null}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"||\"q,r\"||||\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"\"q,r\",|| \"q,r\"||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\"q,r\"||","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ||,a||,||a,","delimiter":"||","rows":[[" ",",a",",","a,"]],"error":null}
+{"text":",||a\r\n\"","delimiter":",","rows":[["","||a"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"\"q,r\"a||\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":" || ","delimiter":"||","rows":[[" "," "]],"error":null}
+{"text":"\"\"q,r\" ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ||,||||","delimiter":",","rows":[[" ||","||||"]],"error":null}
+{"text":"  ||\",","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\" ||","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||\"q,r\"\"q,r\" ||","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||||\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"||,","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",\"q,r\" ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"x\"y\" \"q,r\" \"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" \" ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a\r\n\r\na\r\n","delimiter":",","rows":[["a"],[""],["a"]],"error":null}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"  \"q,r\" \"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\"\r\n\"q,r\"\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||,,||\r\n\" a,","delimiter":",","rows":[["||","","||"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n,a||\"||||","delimiter":"||","rows":[[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",,||a\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"  \"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\r\n\"|| ","delimiter":",","rows":[["||"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",,a||||","delimiter":",","rows":[["","","a||||"]],"error":null}
+{"text":"a\r\n || || \" ","delimiter":",","rows":[["a"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a\r\na","delimiter":",","rows":[["a"],["a"]],"error":null}
+{"text":"||\r\n\"q,r\"","delimiter":",","rows":[["||"],["q,r"]],"error":null}
+{"text":"\"\"q,r\"\r\n\r\n\"\",\"q,r\"\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n \"a\"q,r\"","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\"q,r\",\"q,r\"\"q,r\",  \"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n, ||,a||","delimiter":",","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"a a \"\r\n\"q,r\"\" ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a, \r\na","delimiter":",","rows":[["a"," "]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"\"q,r\"\r\n||\r\n,,||\"q,r\"","delimiter":",","rows":[["q,r"],["||"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\" ||\r\n\"a,","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ","delimiter":"||","rows":[[" "]],"error":null}
+{"text":"\"|| ||\r\n,\r\n","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",|||| \"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\",||","delimiter":",","rows":[["q,r","||"]],"error":null}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":",||\"q,r\"\"||, ,a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"a\"\"q,r\"a\"q,r\"\r\n\"\",","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\r\n\"q,r\"||","delimiter":",","rows":[["",""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"  \"q,r\", a a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":", \"\r\n\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",||a,\"||a","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"\"||\r\n\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",\" \r\n\"q,r\",\r\n","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":"\r\n\r\n \r\n \"q,r\"|| ||","delimiter":",","rows":[[""],[""],[" "]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\" a\"q,r\"\"\r\n ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n\"q,r\",\r\n\r\n","delimiter":"||","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"\r\n||||,,\r\n","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"\r\n,\"q,r\",","delimiter":",","rows":[["q,r"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":" \"q,r\",a ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":",\"\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":", \r\n,||\r\n ","delimiter":",","rows":[[""," "],["","||"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"q,r\" \"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",\"q,r\",\r\n,","delimiter":",","rows":[["","q,r",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"||\r\na\r\n","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a||\"q,r\"\r\n||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":"||||\"q,r\",||\"\"","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" \"\"q,r\" a,||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",b\"q,r\"||\"q,r\"\"q,r\"\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\na,","delimiter":",","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a \"\"\r\n||\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n  \"q,r\"||","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ||||  ","delimiter":",","rows":[[" ||||  "]],"error":null}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||","delimiter":"||","rows":[["",""]],"error":null}
+{"text":"||\"q,r\" \r\n\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":"\"\"q,r\"\r\n\"q,r\"a||\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"a\"\r\n\"q,r\",a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"||||a \"a\"||\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\"q,r\"  ||||,","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n\r\n,,\"","delimiter":",","rows":[[""],[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":" \"q,r\"a,\"a\"\"b\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||||\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":" \"\"||a\r\n,, ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"|| ||||a\r\n\"","delimiter":",","rows":[["|| ||||a"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||\"q,r\" ,\",,\"\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\" a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a\"\"a||\"\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n||,a,","delimiter":",","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"a\"\"a,||\"\"q,r\"\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",  ,\"q,r\" \"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"\",a\r\na\"","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n a,,\"\r\n||\r\n","delimiter":",","rows":[[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"  \"q,r\"a\",","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"a\"q,r\"\",,","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||a\"q,r\"\"q,r\"\"q,r\"||a ,","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",","delimiter":"||","rows":[[","]],"error":null}
+{"text":",, ,||a\"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\"\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n||\r\n \"q,r\"","delimiter":",","rows":[[""],["||"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":" \"q,r\"||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"||\" a\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\r\n\r\n||\"q,r\"\r\n\"q,r\"","delimiter":",","rows":[["||"],[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\"||","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"|| \"q,r\"\",\" ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||a||, ","delimiter":",","rows":[["||a||"," "]],"error":null}
+{"text":"a,a","delimiter":",","rows":[["a","a"]],"error":null}
+{"text":"\r\n\r\n,","delimiter":",","rows":[[""],[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\r\n\" ,  \"","delimiter":",","rows":[[""],[" ,  "]],"error":null}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"\r\n||\r\n,\"q,r\", ","delimiter":",","rows":[[""],["||"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":",\r\na\"\" ||\r\n,","delimiter":",","rows":[["",""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":"\r\n   ||","delimiter":",","rows":[[""],["   ||"]],"error":null}
+{"text":"\"q,r\"\r\n\",||","delimiter":",","rows":[["q,r"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\na , ,\"\" ","delimiter":",","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a ||\"q,r\"a,\"q,r\"","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"  \r\na||","delimiter":"||","rows":[["  "]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"||||, a,\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"  ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"||\"\"a\r\n||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n\"q,r\"\r\n \"q,r\"","delimiter":"||","rows":[[""],["q,r"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"||\"\",\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"a\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":" \"q,r\"a\"q,r\"||,a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"||  \"\r\n\"a\"","delimiter":",","rows":[["||  "],["a"]],"error":null}
+{"text":"a a","delimiter":",","rows":[["a a"]],"error":null}
+{"text":"\"q,r\"","delimiter":"||","rows":[["q,r"]],"error":null}
+{"text":"||,\r\n||\"q,r\"","delimiter":",","rows":[["||",""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":" a\"\r\na|| \"\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" \r\na \"q,r\"\",","delimiter":",","rows":[[" "]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":" \"\r\n","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a||\",,\"q,r\"\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" a     ","delimiter":"||","rows":[[" a     "]],"error":null}
+{"text":"\r\na\" \"\"q,r\"\"q,r\"\r\n,","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\"|| \"||||","delimiter":"||","rows":[["","|| ","",""]],"error":null}
+{"text":"\"q,r\"\r\n\"","delimiter":",","rows":[["q,r"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"","delimiter":"||","rows":[["q,r"]],"error":null}
+{"text":"   ,a","delimiter":",","rows":[["   ","a"]],"error":null}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"\"","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\",a\"q,r\"\r\n,\"q,r\"||\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||a,\"\r\n ||","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"\"\"q,r\"\"q,r\"\"q,r\"||,","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"\r\n  ,||","delimiter":"||","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\r\na  \"q,r\"","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n, \r\n\"q,r\"\"q,r\"a","delimiter":",","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\r\n\"\",aaa \r\n","delimiter":"||","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a\r\n, ||","delimiter":",","rows":[["a"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",\"q,r\" ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"||,a,\"q,r\"\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||\"a||||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":"a\",,aa|| \"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a\"aa,","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":",\"q,r\"\r\na\"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"aaaa\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a\r\n\"q,r\"a\r\n","delimiter":",","rows":[["a"]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"\"q,r\"\"a\"q,r\"\r\n||\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\" ,","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a,, \"q,r\"\",a||","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"|| ||,||","delimiter":",","rows":[["|| ||","||"]],"error":null}
+{"text":",||\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":"\"\"q,r\" ||\"q,r\"||\"\"q,r\"||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"\r\n\r\n  ","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n\"q,r\"||","delimiter":"||","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":" \"\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" \r\n\r\n\"a","delimiter":"||","rows":[[" "],[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||\"\"||||,||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\na\r\n\",\r\n||\r\n\"","delimiter":",","rows":[[""],["a"],[",\r\n||\r\n"]],"error":null}
+{"text":"\"q,r\" ,\"q,r\"\"","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ","delimiter":"||","rows":[[" "]],"error":null}
+{"text":"\",\"é \"\r\n","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"aa\r\n,\r\n||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n\r\n,\r\n,\"q,r\"a","delimiter":",","rows":[[""],[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"q,r\",\"\"\"q,r\",\"q,r\"aa","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"\"||\"\"q,r\"","delimiter":",","rows":[["q,r\"||\"q,r"]],"error":null}
+{"text":"||\"q,r\"\"q,r\"\r\n||\r\n\"a ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a||\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",, ","delimiter":",","rows":[["",""," "]],"error":null}
+{"text":"\r\n\r\na\r\n||","delimiter":",","rows":[[""],[""],["a"],["||"]],"error":null}
+{"text":"\r\n ||a\r\n","delimiter":",","rows":[[""],[" ||a"]],"error":null}
+{"text":"||a\r\na","delimiter":"||","rows":[["","a"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":" \r\n\"q,r\"","delimiter":"||","rows":[[" "],["q,r"]],"error":null}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":"\"\"q,r\"\"\"\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a||\"q,r\"\"q,r\"\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",a ","delimiter":",","rows":[["","a "]],"error":null}
+{"text":"\"q,r\"\"a,\r\n","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n,\"q,r\"","delimiter":"||","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"||||||","delimiter":",","rows":[["||||||"]],"error":null}
+{"text":"\"q,r\"\" \",\r\n,,\"","delimiter":",","rows":[["q,r\" ",""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",\"||\r\n||\"\"q,r\"\"q,r\" ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",\" \"|| aa,","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n\"\",||a\"","delimiter":"||","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":" \r\n ","delimiter":"||","rows":[[" "],[" "]],"error":null}
+{"text":"\"||||\"q,r\",","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"\"\"q,r\" ||\", \"||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"\r\n,\"q,r\"\"\r\n\r\n\r\n","delimiter":",","rows":[[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"a\"q,r\" ||\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a\"a","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n\"q,r\",\r\na","delimiter":",","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"||,||\"a||||","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\",,||||\"\"a\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"a,,, \",\"q,r\",","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\naaa\"q,r\"\r\n,","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":",  \"q,r\"a\r\n\"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"||\r\n","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a,,\"\"q,r\"||,\"q,r\",","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"  ,","delimiter":",","rows":[["  ",""]],"error":null}
+{"text":"\"q,r\"\"q,r\"|| a ||\"q,r\"\r\n","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"\r\n,","delimiter":",","rows":[["q,r"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"  ,","delimiter":",","rows":[["  ",""]],"error":null}
+{"text":"a,  ||a ||a","delimiter":",","rows":[["a","  ||a ||a"]],"error":null}
+{"text":" \r\n||, ","delimiter":",","rows":[[" "]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"q,r\"a,\"a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":"\"q,r\"||\r\na\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a,\"\r\n\"q,r\"aa","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\" \"a\r\n|| ","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"||a\",\r\n","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"aa","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":"\"||\"q,r\"\"q,r\"\r\n","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\",\r\n","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"  || ,a\"q,r\"\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n\"q,r\"a \"q,r\"\r\n,a","delimiter":",","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":",\r||a||\"\"q,r\" \"q,r\"","delimiter":",","rows":[["",""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\"||","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":" \r\n||\"q,r\"\r\na\"q,r\"","delimiter":",","rows":[[" "]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n,\"q,r\" || a","delimiter":",","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a||\r\n","delimiter":",","rows":[["a||"]],"error":null}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"\"\"|| \" ||","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"  ||,||a\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":", a","delimiter":",","rows":[[""," a"]],"error":null}
+{"text":"\r\n\r\n  ,\r\n\"||||","delimiter":",","rows":[[""],[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"||\"q,r\"\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",a, ||","delimiter":"||","rows":[[",a, ",""]],"error":null}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"  \"q,r\"\"q,r\" a\"\r\n\"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a\"\"a\" ,","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":", \"\",","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"  \" a  ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a ,","delimiter":",","rows":[["a ",""]],"error":null}
+{"text":"\"q,r\"\r\n\r\n ,","delimiter":",","rows":[["q,r"],[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":" \r\n\"aa\r\n ","delimiter":",","rows":[[" "]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":"|| \"q,r\"a\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"\"\"q,r\"a, \r\n","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",a\"q,r\"  ||  ||","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" a\"q,r\" ,\"q,r\"\r\n||a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ||\r\naa","delimiter":",","rows":[[" ||"],["aa"]],"error":null}
+{"text":"|| ||\"q,r\"\r\n aa ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" \r\n\"q,r\"\"q,r\"\"q,r\" ,","delimiter":",","rows":[[" "]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"\"\"||||\"q,r\" \"\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",a||\r\n\r\n\r\n\"q,r\"","delimiter":",","rows":[["","a||"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":", ||\"\"a|| \"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" a \"q,r\"a ,\r\n\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"a\r\n","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":", \"\" \r,","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\r\n\"q,r\"","delimiter":",","rows":[["",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\r\n\"q,r\" ","delimiter":",","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n\"q,r\"a","delimiter":",","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"||,\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"\r\n,ba\"q,r\"\r\n||","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"\r\na||\",\"q,r\"\"q,r\",","delimiter":",","rows":[["q,r"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\"|| ||","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":", \r\n","delimiter":"||","rows":[[", "]],"error":null}
+{"text":"\"q,r\"||\"a\"q,r\"\"\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||\"q,r\",","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\",\"q,r\"\"q,r\"\r\na\r\n","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" \r\n,,\r\n,||","delimiter":",","rows":[[" "]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"\"q,r\"||\"q,r\"\"a,\r\na\r\n","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a, ","delimiter":",","rows":[["a"," "]],"error":null}
+{"text":"\"a\"\"b\"\"|| \r\n","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||\"q,r\"aa\"q,r\"\"a,\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"\"\r\n||","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||,a,\"||\",\r\n","delimiter":",","rows":[["||","a","||",""]],"error":null}
+{"text":"||\"\r\n\"q,r\"\"||\"q,r\"||a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\"q,r\"\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"||\r\n\"q,r\"a\"\r\n ||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" \"q,r\"\"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\"q,r\"\r\n\" \"q,r\"||","delimiter":",","rows":[["","q,r"]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a\"a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\r\n||","delimiter":",","rows":[["||"],["||"]],"error":null}
+{"text":",,\"q,r\" \"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":" \"q,r\"\r\n,\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"\"q,r\"\"q,r\"","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"a||","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\",,\",\"q,r\"a\",","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"\"q,r\"a,\r\n","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":", ,,\"q,r\"","delimiter":",","rows":[[""," ","","q,r"]],"error":null}
+{"text":"\r\n","delimiter":"||","rows":[[""]],"error":null}
+{"text":"\"a||\r\n\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":"aa,,\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a a\"\"||||||\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"||||\r\na,\r\n","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"a\"||","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\",a\"\"q,r\"\r\n\"a ","delimiter":",","rows":[[",a\"q,r"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"|| ||a\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"||\r\na,\r\n||","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\",||a \"q,r\"\"q,r\"","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||\"q,r\"\"q,r\"\"q,r\"a ,,a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\r\n|| \r\n ,","delimiter":",","rows":[["",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":" \" a\"q,r\"\r\n\"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":" \r\n||","delimiter":",","rows":[[" "],["||"]],"error":null}
+{"text":"||\"\"\r\na  ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",a\"a, \"q,r\"a\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"\"q,r\"||\"q,r\"a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"a \"\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" \"q,r\"aa a\"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ","delimiter":"||","rows":[[" "]],"error":null}
+{"text":"||\r\n   ||\"q,r\"\r\n\r\n","delimiter":",","rows":[["||"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\"\r\n \"","delimiter":"||","rows":[["","\r\n "]],"error":null}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":" ||aaaa \"\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"\"a\"q,r\"||aaa ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":"||,  ","delimiter":",","rows":[["||","  "]],"error":null}
+{"text":"||,\"\"\"q,r\"\"\"\"q,r\",","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ||\"q,r\"\"q,r\"a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":",\r\na\r\n\"q,r\"","delimiter":"||","rows":[[","],["a"],["q,r"]],"error":null}
+{"text":"||a,,a","delimiter":",","rows":[["||a","","a"]],"error":null}
+{"text":"||\", \r\n,\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\",||||a,\r\n","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"\"q,r\"\r\n||||\",\"q,r\" a","delimiter":",","rows":[["q,r"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"||\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\",\r\na\"q,r\"","delimiter":",","rows":[["q,r",""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"a,,a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a||a","delimiter":",","rows":[["a||a"]],"error":null}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a||||||,","delimiter":",","rows":[["a||||||",""]],"error":null}
+{"text":"||\r\n||\r\n,a\r\n\r\n\"q,r\"","delimiter":",","rows":[["||"],["||"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"aa,\"q,r\"\"||\"","delimiter":",","rows":[["aa","q,r\"||"]],"error":null}
+{"text":"a \r\n\r\n|| ||","delimiter":",","rows":[["a "],[""],["|| ||"]],"error":null}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":",\",\r\n\r\n ||\"||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"\"q,r\"  \"\"q,r\" ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"aa\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":",\r\n ||\r\n \"q,r\"\r\n||","delimiter":",","rows":[["",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":",\r\n,\r\n ","delimiter":",","rows":[["",""],["",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"||\"q,r\"\"\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":",  ||a||\"q,r\"\r\n\"q,r\"","delimiter":"||","rows":[[",  ","a","q,r"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"  \"q,r\"|| ||\"q,r\"\r\n,","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n\"q,r\"\r\n \r\n\"q,r\"\"||a","delimiter":",","rows":[[""],["q,r"],[" "]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",a,\"q,r\"||\"||,a","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"aa ||aa||,\r\n","delimiter":"||","rows":[["aa ","aa",","]],"error":null}
+{"text":"\r\n\r\né\"q,r\"\"","delimiter":",","rows":[[""],[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"||\"q,r\",a,","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"\"q,r\"\"\r\n","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a\"q,r\"\r\n||,\r\n ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"a\r\n||,\"q,r\" ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||\r\n\",a\"\"","delimiter":",","rows":[["||"]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",||,","delimiter":",","rows":[["","||",""]],"error":null}
+{"text":"\"q,r\"\"||\r\n,||\r\n\n||","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"a\r\n\r\n\"q,r\" ","delimiter":",","rows":[["a"],[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n a","delimiter":"||","rows":[[""],[" a"]],"error":null}
+{"text":"a\r\n\r\n,  \"q,r\"","delimiter":"||","rows":[["a"],[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"|| \"q,r\"||a||,a\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"a,","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"a\"q,r\"a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||aa\"\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"  ,\"q,r\"a,\r\n","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n\"q,r\"\r\n||a","delimiter":"||","rows":[[""],["q,r"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"a\r\n,\"q,r\"\"q,r\"","delimiter":",","rows":[["a"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"\"\"\"a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a||\"q,r\"\",||,","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n \"q,r\" \"||\r\n ,","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a","delimiter":"||","rows":[["a"]],"error":null}
+{"text":",||a","delimiter":"||","rows":[[",","a"]],"error":null}
+{"text":"a\"\"q,r\"\"q,r\" \"q,r\"\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n,\",,\"a","delimiter":",","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",\r\na\"q,r\"\r\naaa\"q,r\"","delimiter":"||","rows":[[","]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"aa,||,a,","delimiter":",","rows":[["aa","||","a",""]],"error":null}
+{"text":"\"q,r\"\"q,r\" ,,","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"aa a\r\n","delimiter":"||","rows":[["aa a"]],"error":null}
+{"text":" \"q,r\"\"q,r\",,||a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\",a||  \"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\" \"\"q,r\"||\"||\"q,r\"||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"a  \r\n,a\r\n, ","delimiter":",","rows":[["a  "]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"a\"|| \"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\",\"||\"||||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||||\"q,r\"\"q,r\"a\r\n\" a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"a\r\na,\",","delimiter":",","rows":[["a\r\na,",""]],"error":null}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":"||\"\r\n\"q,r\"a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" aa\"\"q,r\" \r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":" \",\"q,r\"\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"a||\"q,r\"\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\",\"\r\n||\"\"","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",a   ","delimiter":",","rows":[["","a   "]],"error":null}
+{"text":",a,","delimiter":",","rows":[["","a",""]],"error":null}
+{"text":"a,\"q,r\"  ,\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||\r\n \" ||,","delimiter":",","rows":[["||"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"\r\n,","delimiter":",","rows":[["q,r"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"\"\"q,r\"\"a\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\",,\"q,r\"a","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":",,\r\n||a,\"","delimiter":",","rows":[["","",""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"\"\"\"q,r\"\"\"q,r\"\r\n,","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"a \"  ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n","delimiter":"||","rows":[[""]],"error":null}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"  \",\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":"|| \"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" a||\" ,||","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\"a\r\n \r\n\r\n","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"||,","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",\"q,r\", a\"q,r\",\"q,r\"\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||,\"\r\n ","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",||\"  ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a, \r\n||,\"q,r\"\"q,r\"a","delimiter":"||","rows":[["a, "]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\na,,\"a, a","delimiter":",","rows":[[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\",\"q,r\"\"q,r\"a|| \r\n\r\n","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||  ||,\r\n,","delimiter":",","rows":[["||  ||",""],["",""]],"error":null}
+{"text":" ,\"q,r\" \"\" ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":" ||||,\"q,r\"||\r\n\r\n\"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n||, a","delimiter":"||","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"a\r\n,||\"q,r\"","delimiter":",","rows":[["a"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":", a\",","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":"a\r\n\r\n,,\"a\"q,r\"\"q,r\"","delimiter":",","rows":[["a"],[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" ","delimiter":"||","rows":[[" "]],"error":null}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":" \"q,r\"\r\n\"q,r\",||\"q,r\"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n\r\n||aa","delimiter":",","rows":[[""],[""],["||aa"]],"error":null}
+{"text":"\r\n\r\n\"q,r\"\"||, \"q,r\"\"q,r\"","delimiter":",","rows":[[""],[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a","delimiter":",","rows":[["a"]],"error":null}
+{"text":"\"q,r\"||||,\" ||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\naa \"","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n","delimiter":",","rows":[[""]],"error":null}
+{"text":",||\"","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||a\"a\"||\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n||\r\n","delimiter":",","rows":[[""],["||"]],"error":null}
+{"text":"\r\n ||,||","delimiter":",","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"||\r\n||\r\n\"q,r\"||||","delimiter":"||","rows":[["",""],["",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"a\"q,r\"\"q,r\"\"\"\r\naa\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a\"q,r\"\"\r\n ,\"\"\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"||\"q,r\" \"q,r\" \"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n\"q,r\"\"q,r\"\",,,\"q,r\"\"","delimiter":",","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"\"\r\na||\" \"q,r\"\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n\"q,r\"\r\n||,a\"q,r\"","delimiter":"||","rows":[[""],["q,r"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a\"a,a,\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"|| a,||","delimiter":",","rows":[["|| a","||"]],"error":null}
+{"text":",\"a\"q,r\" a||\"q,r\"\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\",\r\n\"q,r\"||\"q,r\"\"||||","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" \"q,r\"\r\n\"q,r\"a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":" a,","delimiter":",","rows":[[" a",""]],"error":null}
+{"text":"||a,","delimiter":",","rows":[["||a",""]],"error":null}
+{"text":" ||\r\n,\r\n\r\n ","delimiter":",","rows":[[" ||"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"||\",","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\",a","delimiter":",","rows":[["q,r","a"]],"error":null}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":" \"q,r\"\",||","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\"q,r\" ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n,,\",aa","delimiter":",","rows":[[""]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"q,r\"\r\n\"||\"q,r\"\"q,r\"||a\"","delimiter":",","rows":[["q,r"]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||\r\n\"q,r\",||","delimiter":",","rows":[["||"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":" ||\"\r\n,\"\"q,r\"\r\n\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",\r\n\r\n||\"q,r\",\r\n","delimiter":",","rows":[["",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"a\"\"\"q,r\"\"\r\n\"q,r\"\r\n,","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||  || a\"a\r\n","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"\r\n,\"|| \"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n,|| \"a\r\n","delimiter":"||","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":"\"||\"q,r\"\"q,r\"\"q,r\"||\r\n","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"\",|| a","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"||a|| \"\r\n\",,","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\"q,r\" ,,","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a \"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"\r\n\"\"q,r\",\r\na","delimiter":",","rows":[["\r\n\"q,r",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"|| \"q,r\"||a\"q,r\"a,a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ","delimiter":",","rows":[[" "]],"error":null}
+{"text":" \"q,r\"||\"\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"||,\r\n\",a","delimiter":",","rows":[["||,\r\n","a"]],"error":null}
+{"text":",,\r\n\"q,r\"||","delimiter":",","rows":[["","",""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\na||,||a, ","delimiter":",","rows":[[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"\"\r\na","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"aa,\r\n\r\n","delimiter":"||","rows":[["aa,"],[""]],"error":null}
+{"text":", \"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" ,\"||,||a","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\"\"q,r\"\"q,r\"","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":" \"a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"\"q,r\"\"q,r\" ,||||\"q,r\"\"q,r\"","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"  \"||\",a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"||","delimiter":",","rows":[["||"]],"error":null}
+{"text":",\"q,r\",a\r\n","delimiter":",","rows":[["","q,r","a"]],"error":null}
+{"text":"\"q,r\"","delimiter":"||","rows":[["q,r"]],"error":null}
+{"text":",  ","delimiter":",","rows":[["","  "]],"error":null}
+{"text":"\r\n\r\n\"\"\"q,r\",\"q,r\"","delimiter":"||","rows":[[""],[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a\"q,r\"a\"\"q,r\"a,\"q,r\" ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a||||","delimiter":",","rows":[["a||||"]],"error":null}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"a\"\r\n\"||||\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"||\r\n\r\n","delimiter":",","rows":[["||"],[""]],"error":null}
+{"text":"\"||\" \r\n\"\"\r\na","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a\r\n\r\n||\"\"  ,","delimiter":",","rows":[["a"],[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n, \r\n\"","delimiter":"||","rows":[[""],[", "]],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":"\r\n ,aa\"\"q,r\"","delimiter":",","rows":[[""]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||||a","delimiter":"||","rows":[["","","a"]],"error":null}
+{"text":"\r\n \r\n","delimiter":"||","rows":[[""],[" "]],"error":null}
+{"text":",\r\n||a\r\n\r\n,a\"","delimiter":",","rows":[["",""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"\"\"\"q,r\"","delimiter":"||","rows":[["\"q,r"]],"error":null}
+{"text":"a \"\"q,r\"\r\na||","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"\r\n||a ,,||,","delimiter":"||","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",\"q,r\" || ","delimiter":",","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"a\"q,r\" a ","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"||\r\n||","delimiter":"||","rows":[["",""],["",""]],"error":null}
+{"text":"a\"q,r\"a","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"\",\"a\",\"q,r\"\r\n","delimiter":"||","rows":[],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\"q,r\"","delimiter":",","rows":[["q,r"]],"error":null}
+{"text":"a||a\r\n\"q,r\"\"q,r\",","delimiter":",","rows":[["a||a"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":"a\"q,r\"||||,,\"q,r\"\r\n\"q,r\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":",","delimiter":"||","rows":[[","]],"error":null}
+{"text":"  \"","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":" \r\n\"q,r\"\r\n\"q,r\"\"q,r\",","delimiter":",","rows":[[" "],["q,r"]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":",\" ,,, ","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"","delimiter":",","rows":[],"error":"CSV_QUOTE_NOT_CLOSED"}
+{"text":",\"q,r\"\r\n,||\"\"q,r\"","delimiter":",","rows":[["","q,r"]],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a\"q,r\",,\r\n","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"a \"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\r\n\"q,r\"a \"q,r\"","delimiter":"||","rows":[[""]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"\r\n\r\n\r\n,\r\n\"\"","delimiter":",","rows":[[""],[""],[""]],"error":"CSV_RECORD_INCONSISTENT_FIELDS_LENGTH"}
+{"text":",","delimiter":",","rows":[["",""]],"error":null}
+{"text":"||||||\"q,r\"\"","delimiter":",","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"\r\n\"q,r\"a\"q,r\"a ","delimiter":",","rows":[["q,r"]],"error":"CSV_INVALID_CLOSING_QUOTE"}
+{"text":"aaa|| \"||","delimiter":"||","rows":[],"error":"INVALID_OPENING_QUOTE"}
+{"text":"\"q,r\"\"q,r\"\"q,r\"","delimiter":",","rows":[["q,r\"q,r\"q,r"]],"error":null}
