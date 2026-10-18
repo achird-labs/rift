@@ -39,6 +39,16 @@ impl Spliced {
         }
     }
 
+    /// Text the engine supplied whole, so no pass reads a token in it: a `defaultResponse`
+    /// `statusCode` (issue #1558), which Mountebank merges after the behaviors have run.
+    pub(crate) fn supplied(text: String) -> Self {
+        let mut inserted = Vec::new();
+        if !text.is_empty() {
+            inserted.push(0..text.len());
+        }
+        Self { text, inserted }
+    }
+
     pub(crate) fn as_str(&self) -> &str {
         &self.text
     }

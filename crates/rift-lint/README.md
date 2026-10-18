@@ -149,6 +149,7 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | W020 | A proxy `predicateGenerators` key the engine does not read (a typo such as `matchs`) |
 | W021 | A proxy `predicateGenerators` `jsonpath`, `xpath` or `ignore` the engine cannot use |
 | W022 | A top-level `fault` name the engine does not know; it is ignored at serve time, as in Mountebank |
+| W023 | A `statusCode` string that is not a status code and that no `copy`/`lookup`/`decorate` rewrites; it answers 500, as in Mountebank |
 
 ### Info
 

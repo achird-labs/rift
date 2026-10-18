@@ -26,7 +26,7 @@
     "src/models/behaviorsValidator.js": {"lines": [169, 186], "branches": [39, 48], "functions": [14, 14]},
     "src/models/compatibility.js": {"lines": [122, 133], "branches": [26, 30], "functions": [8, 8]},
     "src/models/dryRunValidator.js": {"lines": [215, 261], "branches": [44, 55], "functions": [18, 22]},
-    "src/models/http/baseHttpServer.js": {"lines": [179, 207], "branches": [40, 43], "functions": [4, 4]},
+    "src/models/http/baseHttpServer.js": {"lines": [179, 207], "branches": [41, 44], "functions": [4, 4]},
     "src/models/http/headersMap.js": {"lines": [87, 87], "branches": [17, 18], "functions": [9, 9]},
     "src/models/http/httpProxy.js": {"lines": [210, 230], "branches": [35, 50], "functions": [11, 11]},
     "src/models/http/httpRequest.js": {"lines": [72, 82], "branches": [15, 17], "functions": [3, 3]},

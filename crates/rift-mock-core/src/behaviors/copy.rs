@@ -81,6 +81,7 @@ pub fn apply_copy_behaviors(
     apply_copy_spliced(
         &mut spliced_body,
         &mut spliced_headers,
+        &mut None,
         behaviors,
         request,
         stub,
@@ -92,9 +93,13 @@ pub fn apply_copy_behaviors(
 /// Apply copy behaviors, replacing only tokens that are not wholly inside text an earlier pass
 /// inserted (issue #1203). What a copy inserts is recorded as inserted, so a later `lookup` never
 /// expands a token the client sent.
+///
+/// `status` is a `statusCode` string (issue #1558): Mountebank's `globalObjectReplace` replaces
+/// tokens in every string field of the response, so it is scanned like a header value.
 pub(crate) fn apply_copy_spliced(
     body: &mut Spliced,
     headers: &mut SplicedHeaders,
+    status: &mut Option<Spliced>,
     behaviors: &[CopyBehavior],
     request: &RequestContext,
     stub: crate::imposter::headers::StubRef<'_>,
@@ -108,12 +113,12 @@ pub(crate) fn apply_copy_spliced(
 
         // Only the indices the response actually spells are extracted and scanned for, so a
         // multi-node selector over a large request costs no more than the tokens written.
-        let indices = written_indices(&behavior.into, body, headers);
+        let indices = written_indices(&behavior.into, body, headers, status.as_ref());
         if indices.is_empty() {
             let Some(bare) = behavior.extraction.extract(&source) else {
                 continue;
             };
-            replace_copy_token(body, headers, &behavior.into, &bare, stub);
+            replace_copy_token(body, headers, status, &behavior.into, &bare, stub);
             continue;
         }
 
@@ -130,19 +135,34 @@ pub(crate) fn apply_copy_spliced(
                 continue;
             };
             let token = format!("{}[{i}]", behavior.into);
-            replace_copy_token(body, headers, &token, value.as_deref().unwrap_or(""), stub);
+            replace_copy_token(
+                body,
+                headers,
+                status,
+                &token,
+                value.as_deref().unwrap_or(""),
+                stub,
+            );
         }
-        replace_copy_token(body, headers, &behavior.into, bare, stub);
+        replace_copy_token(body, headers, status, &behavior.into, bare, stub);
     }
 }
 
 /// The indices of every `${into}[n]` the body and header values spell, `n` written as Mountebank
 /// writes an array index (no sign, no leading zero): Mountebank replaces `${into}[${i}]` for each
 /// value literally, so `$C[01]` is never an indexed token.
-fn written_indices(into: &str, body: &Spliced, headers: &SplicedHeaders) -> BTreeSet<usize> {
+fn written_indices(
+    into: &str,
+    body: &Spliced,
+    headers: &SplicedHeaders,
+    status: Option<&Spliced>,
+) -> BTreeSet<usize> {
     let prefix = format!("{into}[");
     let mut indices = BTreeSet::new();
-    for text in std::iter::once(body).chain(headers.values().flatten()) {
+    for text in std::iter::once(body)
+        .chain(headers.values().flatten())
+        .chain(status)
+    {
         for (at, _) in text.as_str().match_indices(&prefix) {
             let rest = &text.as_str()[at + prefix.len()..];
             let len = rest.bytes().take_while(u8::is_ascii_digit).count();
@@ -169,15 +189,21 @@ fn bare_value<'a>(method: &ExtractionMethod, values: &'a [Option<String>]) -> Op
     }
 }
 
-/// Replace one copy token in the body and in every header value.
+/// Replace one copy token in the body, the `statusCode` string and every header value.
 fn replace_copy_token(
     body: &mut Spliced,
     headers: &mut SplicedHeaders,
+    status: &mut Option<Spliced>,
     token: &str,
     replacement: &str,
     stub: crate::imposter::headers::StubRef<'_>,
 ) {
     body.replace_token(token, replacement);
+    // The status is read as a number when the response is written, and a value that is not one is
+    // quoted back in the 500's JSON body, so it needs no header-value repair.
+    if let Some(status) = status {
+        status.replace_token(token, replacement);
+    }
 
     // Also replace in headers — per value, so multi-value headers (e.g. multiple Set-Cookie)
     // keep their multiplicity (RFC 7230 §3.2.2 forbids folding Set-Cookie).
@@ -1010,7 +1036,7 @@ mod tests {
             vec!["$C[7]".to_string()],
         )]));
         assert_eq!(
-            written_indices("$C", &body, &headers),
+            written_indices("$C", &body, &headers, None),
             BTreeSet::from([0, 7, 12])
         );
     }

@@ -672,11 +672,72 @@ fn e015_not_fired_for_valid_codes() {
 }
 
 #[test]
-fn e016_status_code_not_a_number() {
-    let is_resp = json!({ "statusCode": "ok" });
+fn e016_status_code_neither_an_integer_nor_a_string() {
+    // Issue #1558: any string is kept, so E016 is for what the engine still refuses.
+    for status in [json!(true), json!(404.5), json!({ "code": 404 })] {
+        let is_resp = json!({ "statusCode": status });
+        let mut r = LintResult::new();
+        validate_is_response(path(), &is_resp, "loc", &mut r);
+        assert!(has_code(&r, "E016"), "{status}: {:?}", codes(&r));
+    }
+}
+
+/// Issue #1558: a `statusCode` string that is not a number is kept and read at serve time as
+/// Mountebank reads it. One Node cannot read as 100-999 answers 500 on every request unless a
+/// behavior rewrites it, so it is W023, a warning; with `copy`, `lookup` or `decorate` it is quiet.
+#[test]
+fn w023_status_string_nothing_rewrites() {
+    let lint = |response: Value| {
+        let imposter = make_imposter(json!([{ "responses": [response] }]));
+        let mut r = LintResult::new();
+        validate_imposter(path(), &imposter, &mut r, &opts());
+        r
+    };
+
+    for status in ["${code}", "abc", "4x0", "-404"] {
+        let r = lint(json!({ "is": { "statusCode": status } }));
+        assert_eq!(codes(&r), vec!["W023"], "{status}: {:?}", r.issues);
+        assert_eq!(r.errors, 0);
+        let w023 = &r.issues[0];
+        assert_eq!(w023.severity, Severity::Warning);
+        assert_eq!(
+            w023.location.as_deref(),
+            Some("stubs[0].responses[0].is.statusCode")
+        );
+        assert!(w023.message.contains(status), "{}", w023.message);
+    }
+    // Node reads these as a status; the empty string falls back to the default.
+    for status in [" 404 ", "404.7", "0x194", ""] {
+        let r = lint(json!({ "is": { "statusCode": status } }));
+        assert!(!has_code(&r, "W023"), "{status:?}: {:?}", r.issues);
+    }
+    // A behavior that rewrites the status first.
+    let copy = json!({ "copy": {
+        "from": "path", "into": "${code}", "using": { "method": "regex", "selector": "\\d+" }
+    } });
+    for behaviors in [
+        json!([copy.clone()]),
+        json!({ "decorate": "function (r, s) {}" }),
+    ] {
+        for key in ["behaviors", "_behaviors"] {
+            if key == "behaviors" && behaviors.is_object() {
+                continue;
+            }
+            let r = lint(json!({ "is": { "statusCode": "${code}" }, key: behaviors.clone() }));
+            assert!(!has_code(&r, "W023"), "{key}: {behaviors}: {:?}", r.issues);
+        }
+    }
+
+    // A `defaultResponse` status is never rewritten, as Mountebank merges it after the behaviors.
+    let mut imposter = make_imposter(json!([{ "responses": [{ "is": {}, "behaviors": [copy] }] }]));
+    imposter["defaultResponse"] = json!({ "statusCode": "${code}" });
     let mut r = LintResult::new();
-    validate_is_response(path(), &is_resp, "loc", &mut r);
-    assert!(has_code(&r, "E016"));
+    validate_imposter(path(), &imposter, &mut r, &opts());
+    assert_eq!(codes(&r), vec!["W023"], "{:?}", r.issues);
+    assert_eq!(
+        r.issues[0].location.as_deref(),
+        Some("defaultResponse.statusCode")
+    );
 }
 
 #[test]

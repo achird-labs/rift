@@ -9,10 +9,7 @@ use std::collections::HashMap;
 // intercept rule schema can share them — the imposter path and the intercept path parse the
 // same JSON and must agree about what it means. Re-exported here so every
 // `#[serde(with = "multi_value_headers")]` attribute path in this file resolves unchanged.
-pub(crate) use rift_types::wire::{
-    deserialize_optional_status_code, deserialize_status_code, multi_value_headers,
-    single_value_headers,
-};
+pub(crate) use rift_types::wire::{multi_value_headers, single_value_headers};
 
 // ============================================================================
 // Recorded Request Types
@@ -1139,12 +1136,12 @@ pub(crate) struct StubResponseRaw {
     /// Flat / recorded response form (issue #304): `statusCode`/`headers`/`body`/`_mode` at the
     /// top level with no `is` wrapper (the shape emitted by recorded/migrated mocks). Mountebank
     /// renders these exactly like `is: { … }`. `is` still takes precedence when both are present.
-    #[serde(default, deserialize_with = "deserialize_optional_status_code")]
+    #[serde(default, deserialize_with = "optional_status_value")]
     #[cfg_attr(
         feature = "schema",
-        schemars(with = "Option<rift_types::schema::StatusCode>")
+        schemars(with = "Option<crate::schema::ResponseStatusCode>")
     )]
-    pub status_code: Option<u16>,
+    pub status_code: Option<StatusValue>,
     #[serde(default, deserialize_with = "present_headers")]
     #[cfg_attr(
         feature = "schema",
@@ -1210,11 +1207,62 @@ pub(crate) struct Omitted {
     pub body: bool,
 }
 
+/// A response's `statusCode` as written (issue #1558): a status, or a string Mountebank keeps as
+/// written and reads only when it writes the response — a `copy`/`lookup` token, say, which the
+/// behaviors substitute first.
+///
+/// A string that parses as a `u16` is a [`Code`](Self::Code), so it prints as the number it spells
+/// (#1361) and every stub admitted before keys as it did (#1256). Only the imposter grammar reads
+/// this; the intercept rules keep [`rift_types::wire::deserialize_status_code`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StatusValue {
+    Code(u16),
+    Text(Box<str>),
+}
+
+impl Serialize for StatusValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            StatusValue::Code(code) => serializer.serialize_u16(*code),
+            StatusValue::Text(text) => serializer.serialize_str(text),
+        }
+    }
+}
+
+/// [`StatusValue`] from JSON: any string, or what [`rift_types::wire::deserialize_status_code`]
+/// reads otherwise — a number within `u16` — with its refusals (a boolean, `null`, an object, an
+/// out-of-range number) and their messages unchanged.
+fn status_value<'de, D: serde::Deserializer<'de>>(d: D) -> Result<StatusValue, D::Error> {
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(text) => Ok(match text.parse::<u16>() {
+            Ok(code) => StatusValue::Code(code),
+            Err(_) => StatusValue::Text(text.into_boxed_str()),
+        }),
+        other => rift_types::wire::deserialize_status_code(other)
+            .map(StatusValue::Code)
+            .map_err(serde::de::Error::custom),
+    }
+}
+
 /// `Some(..)` for a field that is present. Serde calls a `deserialize_with` function only for a
 /// present field, so an absent one stays `None` through `#[serde(default)]`, and a present `null`
 /// is judged by the inner decoder exactly as it was before presence was recorded.
-fn present_status_code<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u16>, D::Error> {
-    deserialize_status_code(d).map(Some)
+fn present_status_value<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<StatusValue>, D::Error> {
+    status_value(d).map(Some)
+}
+
+/// The flat form's `statusCode` (issue #304): a `null` is absent, as before.
+fn optional_status_value<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<StatusValue>, D::Error> {
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Null => Ok(None),
+        value => status_value(value)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
 }
 
 fn present_headers<'de, D: serde::Deserializer<'de>>(
@@ -1230,8 +1278,8 @@ fn present_mode<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Respons
 // The published schema documents what an omitted field means. These are read only by
 // `schemars(default = ...)`: at runtime an omitted field stays `None` and is recorded (#1369).
 #[cfg(feature = "schema")]
-fn schema_default_status_code() -> Option<u16> {
-    Some(default_status_code())
+fn schema_default_status_code() -> Option<StatusValue> {
+    Some(StatusValue::Code(default_status_code()))
 }
 
 #[cfg(feature = "schema")]
@@ -1253,10 +1301,13 @@ fn schema_default_mode() -> Option<ResponseMode> {
 )]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IsResponseRaw {
-    #[serde(default, deserialize_with = "present_status_code")]
-    #[cfg_attr(feature = "schema", schemars(with = "rift_types::schema::StatusCode"))]
+    #[serde(default, deserialize_with = "present_status_value")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "crate::schema::ResponseStatusCode")
+    )]
     #[cfg_attr(feature = "schema", schemars(default = "schema_default_status_code"))]
-    pub status_code: Option<u16>,
+    pub status_code: Option<StatusValue>,
     #[serde(default, deserialize_with = "present_headers")]
     #[cfg_attr(
         feature = "schema",
@@ -1300,9 +1351,10 @@ impl From<IsResponseRaw> for IsResponse {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IsResponseOut {
     /// A JSON number (issue #1361), as `defaultResponse.statusCode` and Mountebank's own
-    /// recordings print it; a posted `"202"` therefore prints as `202`.
+    /// recordings print it; a posted `"202"` therefore prints as `202`. A string that is not a
+    /// number prints as written (issue #1558).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status_code: Option<u16>,
+    pub status_code: Option<StatusValue>,
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_present_headers"
@@ -1324,7 +1376,7 @@ pub(crate) struct IsResponseOut {
 impl From<IsResponse> for IsResponseOut {
     fn from(is: IsResponse) -> Self {
         IsResponseOut {
-            status_code: (!is.omitted.status_code).then_some(is.status_code),
+            status_code: (!is.omitted.status_code).then(|| is.status_value()),
             headers: (!is.omitted.headers).then_some(is.headers),
             body: is.body,
             mode: (!is.omitted.mode).then_some(is.mode),
@@ -1947,7 +1999,10 @@ pub enum ResponseMode {
 #[serde(rename_all = "camelCase", from = "DefaultResponseRaw")]
 pub struct IsResponse {
     #[serde(default = "default_status_code")]
-    #[cfg_attr(feature = "schema", schemars(with = "rift_types::schema::StatusCode"))]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "crate::schema::ResponseStatusCode")
+    )]
     pub status_code: u16,
     #[serde(default)]
     #[cfg_attr(
@@ -1963,6 +2018,12 @@ pub struct IsResponse {
     /// hold the defaults.
     #[serde(skip)]
     pub(crate) omitted: Omitted,
+    /// A `statusCode` string that is not a number (issue #1558), kept as written: `copy` and
+    /// `lookup` substitute into it, and it is read at serve time as Mountebank reads it. When set,
+    /// `status_code` holds `200` and is not served.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub(crate) status_text: Option<Box<str>>,
     /// A `proxy` written in `defaultResponse`. Mountebank does not proxy from it and neither does
     /// this engine (`defaultForward` is the feature); it is kept so the printed and persisted
     /// config says what was written, and reported by `ignored_config_keys`. Boxed: it is `None`
@@ -1981,7 +2042,7 @@ pub struct IsResponse {
 #[serde(rename_all = "camelCase")]
 struct DefaultResponseOut<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
-    status_code: Option<u16>,
+    status_code: Option<StatusValue>,
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_present_headers"
@@ -1998,7 +2059,7 @@ struct DefaultResponseOut<'a> {
 impl Serialize for IsResponse {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         DefaultResponseOut {
-            status_code: (!self.omitted.status_code).then_some(self.status_code),
+            status_code: (!self.omitted.status_code).then(|| self.status_value()),
             // As a default, `{}` and no headers both supply none, so `{}` is not printed (#1361).
             // A stub's `is` keeps a written `{}`: it replaces the default's headers (#1369).
             headers: (!self.omitted.headers && !self.headers.is_empty()).then_some(&self.headers),
@@ -2024,10 +2085,13 @@ impl Serialize for IsResponse {
 )]
 #[serde(rename_all = "camelCase")]
 struct DefaultResponseRaw {
-    #[serde(default, deserialize_with = "present_status_code")]
-    #[cfg_attr(feature = "schema", schemars(with = "rift_types::schema::StatusCode"))]
+    #[serde(default, deserialize_with = "present_status_value")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "crate::schema::ResponseStatusCode")
+    )]
     #[cfg_attr(feature = "schema", schemars(default = "schema_default_status_code"))]
-    status_code: Option<u16>,
+    status_code: Option<StatusValue>,
     #[serde(default, deserialize_with = "present_headers")]
     #[cfg_attr(
         feature = "schema",
@@ -2087,6 +2151,7 @@ impl IsResponse {
             body,
             mode,
             omitted: Omitted::default(),
+            status_text: None,
             proxy: None,
             proxy_response_time: None,
         }
@@ -2101,24 +2166,39 @@ impl IsResponse {
     /// A response as decoded from JSON: a field that was not written takes today's default and is
     /// recorded as omitted.
     pub(crate) fn decoded(
-        status_code: Option<u16>,
+        status: Option<StatusValue>,
         headers: Option<HashMap<String, Vec<String>>>,
         body: Option<serde_json::Value>,
         mode: Option<ResponseMode>,
     ) -> Self {
+        let omitted = Omitted {
+            status_code: status.is_none(),
+            headers: headers.is_none(),
+            mode: mode.is_none(),
+            body: body.is_none(),
+        };
+        let (status_code, status_text) = match status {
+            Some(StatusValue::Code(code)) => (code, None),
+            Some(StatusValue::Text(text)) => (default_status_code(), Some(text)),
+            None => (default_status_code(), None),
+        };
         IsResponse {
-            omitted: Omitted {
-                status_code: status_code.is_none(),
-                headers: headers.is_none(),
-                mode: mode.is_none(),
-                body: body.is_none(),
-            },
-            status_code: status_code.unwrap_or_else(default_status_code),
+            omitted,
+            status_code,
+            status_text,
             headers: headers.unwrap_or_default(),
             body,
             mode: mode.unwrap_or_default(),
             proxy: None,
             proxy_response_time: None,
+        }
+    }
+
+    /// The `statusCode` as written: the string when it is not a number (issue #1558).
+    pub(crate) fn status_value(&self) -> StatusValue {
+        match &self.status_text {
+            Some(text) => StatusValue::Text(text.clone()),
+            None => StatusValue::Code(self.status_code),
         }
     }
 
@@ -2152,6 +2232,7 @@ impl IsResponse {
         let mut merged = self.clone();
         if self.omitted.status_code {
             merged.status_code = default.status_code;
+            merged.status_text.clone_from(&default.status_text);
         }
         if self.omitted.headers {
             merged.headers.clone_from(&default.headers);
@@ -3642,11 +3723,9 @@ mod tests {
 
     #[test]
     fn default_response_status_code_refuses_non_numeric() {
-        for bad in [
-            serde_json::json!("abc"),
-            serde_json::json!(true),
-            serde_json::Value::Null,
-        ] {
+        // Issue #1558: a string is any string, as Mountebank stores it; a boolean and `null` are
+        // still refused.
+        for bad in [serde_json::json!(true), serde_json::Value::Null] {
             let parsed = serde_json::from_value::<super::ImposterConfig>(serde_json::json!({
                 "protocol": "http",
                 "defaultResponse": {"statusCode": bad.clone()}
@@ -3665,6 +3744,49 @@ mod tests {
         let printed = serde_json::to_value(config.default_response.expect("defaultResponse"))
             .expect("serializes");
         assert_eq!(printed["statusCode"], serde_json::json!(404));
+    }
+
+    // ===== Issue #1558: any string `statusCode` is kept as written =====
+
+    fn is_of(stub: serde_json::Value) -> super::IsResponse {
+        let stub: super::Stub = serde_json::from_value(stub).expect("stub decodes");
+        match stub.responses.into_iter().next().expect("one response") {
+            super::StubResponse::Is { is, .. } => is,
+            other => panic!("expected an `is` response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_status_token_decodes_prints_back_as_written_and_re_decodes() {
+        let stub = serde_json::json!({"responses": [{"is": {"statusCode": "${code}"}}]});
+        let is = is_of(stub);
+        let printed = serde_json::to_value(super::IsResponseOut::from(is)).expect("prints");
+        assert_eq!(printed["statusCode"], serde_json::json!("${code}"));
+        let again = is_of(serde_json::json!({"responses": [{"is": printed.clone()}]}));
+        assert_eq!(
+            serde_json::to_value(super::IsResponseOut::from(again)).expect("prints"),
+            printed
+        );
+    }
+
+    #[test]
+    fn a_numeric_string_status_still_prints_as_a_number() {
+        let is = is_of(serde_json::json!({"responses": [{"is": {"statusCode": "404"}}]}));
+        assert_eq!(is.status_code, 404);
+        let printed = serde_json::to_value(super::IsResponseOut::from(is)).expect("prints");
+        assert_eq!(printed["statusCode"], serde_json::json!(404));
+    }
+
+    #[test]
+    fn a_default_response_status_token_prints_back_as_written() {
+        let config: super::ImposterConfig = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "defaultResponse": {"statusCode": "${x}"}
+        }))
+        .expect("a token defaultResponse.statusCode is accepted, as Mountebank does");
+        let printed = serde_json::to_value(config.default_response.expect("defaultResponse"))
+            .expect("serializes");
+        assert_eq!(printed["statusCode"], serde_json::json!("${x}"));
     }
 
     // ===== Issue #1369: `defaultResponse` completes what a response omits =====

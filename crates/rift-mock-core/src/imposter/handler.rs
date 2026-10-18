@@ -12,6 +12,7 @@ use super::predicates::parse_query_string;
 use super::response::{
     body_text, complete_from_default, execute_stub_response_with_rift, get_rift_script_config,
 };
+use super::status::{invalid_status_response, resolve as resolve_status};
 use super::types::{
     DebugMatchResult, DebugRequest, DebugResponse, IsResponse, ProxyResponse, RecordedRequest,
     ResponseMode, StubResponse, UpstreamTarget,
@@ -1380,7 +1381,9 @@ async fn handle_request_inner(
                     // the function did not return is completed from `defaultResponse` (issue #1369),
                     // or is `200`, no headers and an empty body when there is none.
                     let authored = IsResponse::decoded(
-                        inject_response.status_code,
+                        inject_response
+                            .status_code
+                            .map(super::types::StatusValue::Code),
                         inject_response.headers.map(|headers| {
                             headers.into_iter().map(|(k, v)| (k, vec![v])).collect()
                         }),
@@ -1397,6 +1400,12 @@ async fn handle_request_inner(
                     );
                     let mut parts = ServedParts {
                         status: completed.status_code,
+                        // The function returns a number, so a string status is the default's,
+                        // which Mountebank merges after the behaviors (issue #1558).
+                        status_text: completed
+                            .status_text
+                            .as_deref()
+                            .map(|text| Spliced::supplied(text.to_string())),
                         headers: completed
                             .headers
                             .iter()
@@ -1437,7 +1446,15 @@ async fn handle_request_inner(
                         }
                     }
 
-                    let mut response = Response::builder().status(parts.status);
+                    let served = match resolve_status(
+                        parts.status,
+                        parts.status_text.as_ref().map(Spliced::as_str),
+                        imposter.config.default_response.as_ref(),
+                    ) {
+                        Ok(served) => served,
+                        Err(value) => return Ok(invalid_status_response(&value)),
+                    };
+                    let mut response = Response::builder().status(served);
                     for (k, values) in &parts.headers {
                         for v in values {
                             response = response.header(k, v.as_str());
@@ -1865,12 +1882,29 @@ async fn handle_request_inner(
             is_fault,
         )) = response.and_then(execute_stub_response_with_rift)
         {
+            // A `statusCode` string (issue #1558): the behaviors substitute into it, and it is read
+            // when the response is written.
+            let mut status_text = match response {
+                Some(StubResponse::Is { is, .. }) => is
+                    .status_text
+                    .as_deref()
+                    .map(|text| Spliced::authored(text.to_string())),
+                _ => None,
+            };
             // Issue #1369: complete the authored response from `defaultResponse` before templating
             // and behaviors run, so a default body expands like a stub body.
             if let (Some(StubResponse::Is { is, .. }), Some(default)) =
                 (response, imposter.config.default_response.as_ref())
                 && is.needs_default(default)
             {
+                // Mountebank merges the default's status after the behaviors, so a token in it is
+                // never substituted (issue #1558).
+                if is.omitted.status_code {
+                    status_text = default
+                        .status_text
+                        .as_deref()
+                        .map(|text| Spliced::supplied(text.to_string()));
+                }
                 complete_from_default(
                     is,
                     default,
@@ -2044,6 +2078,7 @@ async fn handle_request_inner(
                     match run
                         .apply(ServedParts {
                             status,
+                            status_text: status_text.take(),
                             headers: spliced_headers,
                             body: spliced_body,
                         })
@@ -2051,6 +2086,7 @@ async fn handle_request_inner(
                     {
                         BehaviorOutcome::Applied { parts, .. } => {
                             status = parts.status;
+                            status_text = parts.status_text;
                             spliced_headers = parts.headers;
                             spliced_body = parts.body;
                         }
@@ -2060,11 +2096,21 @@ async fn handle_request_inner(
                 body = spliced_body.into_text();
                 headers = plain_headers(spliced_headers);
             }
+            // Read the status as Mountebank writes it (issue #1558): a falsy one takes the
+            // default's, and one Node refuses answers 500.
+            let status = match resolve_status(
+                status,
+                status_text.as_ref().map(Spliced::as_str),
+                imposter.config.default_response.as_ref(),
+            ) {
+                Ok(status) => status,
+                Err(value) => return Ok(invalid_status_response(&value)),
+            };
             // `_rift.conditional` (issue #1280), decided on the status behaviors left. Its
             // validators replace any the response declares.
             let conditional =
                 ConditionalSpec::from_config(rift_ext.and_then(|r| r.conditional.as_ref()))
-                    .filter(|_| conditional::applies(&method, status));
+                    .filter(|_| conditional::applies(&method, status.as_u16()));
             let mut response = Response::builder().status(status);
 
             // One header line per value (issue #238 multi-value headers, e.g. multiple Set-Cookie).
@@ -2459,7 +2505,21 @@ fn build_default_completed(
         ResponseMode::Text => Bytes::from(crate::extensions::apply_date_templates(&body_str)),
     };
 
-    let mut response = Response::builder().status(default.status_code);
+    // A string status is read as Mountebank writes it (issue #1558); a default's is never
+    // substituted, so a token in it answers 500.
+    let status = match resolve_status(default.status_code, default.status_text.as_deref(), None) {
+        Ok(status) => status,
+        Err(value) => {
+            let mut refused = invalid_status_response(&value);
+            if let Some(marker) = marker {
+                refused
+                    .headers_mut()
+                    .insert(marker, hyper::header::HeaderValue::from_static("true"));
+            }
+            return refused;
+        }
+    };
+    let mut response = Response::builder().status(status);
     if binary_decode_failed {
         response = response.header("x-rift-binary-error", "true");
     }

@@ -158,6 +158,9 @@ async fn transform_upstream<SH: BuildHasher>(
     let (parts, mut degraded) = match run
         .apply(ServedParts {
             status,
+            // An upstream's status is a number; a script that leaves a string status here is not
+            // read, as before (issue #1558 reads one on the `is` and `inject` paths).
+            status_text: None,
             // The upstream's body is the author's choice of text (issue #1203): a proxy `lookup`
             // (#1189) exists to expand tokens the upstream returns.
             headers: crate::behaviors::authored_headers(grouped),

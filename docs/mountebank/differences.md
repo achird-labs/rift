@@ -251,7 +251,7 @@ An imposter's `defaultResponse` is served when no stub matches, and it also supp
 
 `defaultResponse` completes a response by the fields it omits: an explicit `"body": ""` is served empty, and a proxied empty body is served as the upstream sent it; Mountebank replaces both with the `defaultResponse` body.
 
-`defaultResponse` is merged before behaviors run. Mountebank merges after them, so there a `decorate` reading `config.response.statusCode` on a response that omits it sees `undefined`; in Rift the decorate sees the completed response, and a default body is expanded like a stub body.
+`defaultResponse` is merged before behaviors run. Mountebank merges after them, so there a `decorate` reading `config.response.statusCode` on a response that omits it sees `undefined`; in Rift the decorate sees the completed response, and a default body is expanded like a stub body. A `statusCode` string the default supplies is the exception: no `copy` or `lookup` substitutes into it, as in Mountebank.
 
 A `proxy` inside `defaultResponse` is kept in the printed and persisted imposter and reported as ignored in `_rift.warnings`: neither engine proxies from it. Use `defaultForward` to forward unmatched requests.
 
@@ -261,7 +261,7 @@ Mountebank prints a stub exactly as it was posted. Rift prints what it parsed, s
 spelled differently from the input while meaning the same thing. Re-posting what Rift prints gives
 the same imposter.
 
-- `statusCode` prints as a JSON number in a stub's `is`, as it already did in `defaultResponse`. A status posted as a string prints as a number (`"202"` prints as `202`).
+- `statusCode` prints as a JSON number in a stub's `is`, as it already did in `defaultResponse`. A status posted as a string prints as a number (`"202"` prints as `202`). A string that is not a number, such as a `copy` token, is kept and printed as written, as Mountebank prints it.
 - A field left empty or at its default is not printed. This covers a stub's empty `predicates`,
   whether written or omitted, an empty `defaultResponse.headers`, and a proxy's default `mode`,
   `predicateGenerators`, `addWaitBehavior` and `injectHeaders`. Each reads back to the same value.

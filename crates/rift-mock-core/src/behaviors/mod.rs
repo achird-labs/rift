@@ -50,7 +50,7 @@ pub use request::{RequestContext, header_to_title_case};
 pub use sequencer::{LocalSequencer, ResponseSequencer, SequenceKey};
 pub(crate) use spliced::{Spliced, SplicedHeaders, authored_headers, plain_headers};
 pub use transform::{
-    DecorateError, apply_decorate, apply_shell_transform, is_js_config_decorate,
+    DecorateError, ResponseStatus, apply_decorate, apply_shell_transform, is_js_config_decorate,
     rewrite_js_config_to_rhai,
 };
 pub use types::{BehaviorProgram, BehaviorStep, CANONICAL_ORDER, ResponseBehaviors};

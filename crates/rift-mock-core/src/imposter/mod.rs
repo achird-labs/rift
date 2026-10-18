@@ -30,6 +30,7 @@ pub(crate) mod predicates;
 pub(crate) mod reconcile;
 mod response;
 mod script_resolve;
+mod status;
 mod types;
 pub(crate) use types::Gate;
 

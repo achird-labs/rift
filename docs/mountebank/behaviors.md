@@ -333,7 +333,9 @@ with `strictBehaviors` / `RIFT_STRICT_BEHAVIORS` it returns `500` (see
 
 ## copy
 
-Copy values from the request to the response. Useful for echoing request data.
+Copy values from the request to the response. Useful for echoing request data. Tokens are replaced
+in the body, in header values and in a `statusCode` string (see
+[Responses: Status Codes](responses.md#status-codes)).
 
 `from` names the request field: `"path"`, `"method"` or `"body"` as a string, or
 `{"query": "<name>"}` / `{"headers": "<name>"}` for one query parameter or header. `using` extracts
@@ -486,6 +488,7 @@ Look up a row in a CSV file, keyed by a value extracted from the request. `key` 
 `from` and `using` as [`copy`](#copy). Each column of the matched row replaces the token
 `<into>[<column>]`, so with `"into": "${row}"` the `email` column fills `${row}[email]`. As in
 Mountebank, the column may also be quoted: `${row}["email"]` and `${row}['email']` are replaced too.
+Tokens are replaced in the body, in header values and in a `statusCode` string, as with `copy`.
 
 `key.index` picks which match keys the row, as in Mountebank. For a `regex`, `0` is the whole
 match and `n` is the `n`th capture group; for `jsonpath` and `xpath`, `n` is the `n`th selected

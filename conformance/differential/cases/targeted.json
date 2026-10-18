@@ -8235,6 +8235,411 @@
           "port": 4545
         }
       ]
+    },
+    {
+      "name": "targeted: statusCode tokens: copy/lookup into is.statusCode (#1558)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/copy/"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": "${code}",
+                      "body": "copied"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "${code}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\d+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/four/"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": "4${code}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "${code}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\d+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/lookup/"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": "${row}[code]",
+                      "body": "looked up"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": "path",
+                            "using": {
+                              "method": "regex",
+                              "selector": "\\w+$"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "../../conformance/differential/data/status-codes.csv",
+                              "keyColumn": "name"
+                            }
+                          },
+                          "into": "${row}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/token"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": "${code}",
+                      "body": "/token"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/abc"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": "abc",
+                      "body": "/abc"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/numeric"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": "404",
+                      "body": "/numeric"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/padded"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": " 404 ",
+                      "body": "/padded"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/fraction"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": "404.7",
+                      "body": "/fraction"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/hex"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": "0x194",
+                      "body": "/hex"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/empty"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": "",
+                      "body": "/empty"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/n99"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 99,
+                      "body": "/n99"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/copy/404"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/copy/abc"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/copy/99"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/copy/1000"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/four/04"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/lookup/mountebank"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/lookup/broken"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/lookup/nobody"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/token"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/abc"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/numeric"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/padded"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/fraction"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/hex"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/empty"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/n99"
+        }
+      ]
+    },
+    {
+      "name": "targeted: statusCode tokens: a defaultResponse token is never substituted (#1558)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": "${code}"
+            },
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/stub/"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "omits status"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "${code}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\d+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/empty"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": "",
+                      "body": "/empty"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/stub/404"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/empty"
+        }
+      ]
     }
   ]
 }

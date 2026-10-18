@@ -155,22 +155,10 @@
       "note": "shellTransform commands get no request/response arguments; after that, the documented output-as-body difference remains"
     },
     {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support copying from request fields using regex",
-      "class": "bug",
-      "issue": "#1558",
-      "note": "a copy token in is.statusCode is refused at load"
-    },
-    {
       "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support copying from request fields using jsonpath",
       "class": "bug",
       "issue": "#1590",
       "note": "copy.from \"BODY\" (upper case) copies nothing; Mountebank reads request field names case-insensitively"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support lookup from CSV file keyed by regex",
-      "class": "bug",
-      "issue": "#1558",
-      "note": "a lookup token in is.statusCode is refused at load; its CSV quoting is fixed by #1566"
     },
     {
       "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should compose multiple behaviors together (old interface for backwards compatibility)",
@@ -239,22 +227,10 @@
       "note": "shellTransform commands get no request/response arguments; after that, the documented output-as-body difference remains"
     },
     {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support copying from request fields using regex",
-      "class": "bug",
-      "issue": "#1558",
-      "note": "a copy token in is.statusCode is refused at load"
-    },
-    {
       "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support copying from request fields using jsonpath",
       "class": "bug",
       "issue": "#1590",
       "note": "copy.from \"BODY\" (upper case) copies nothing; Mountebank reads request field names case-insensitively"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support lookup from CSV file keyed by regex",
-      "class": "bug",
-      "issue": "#1558",
-      "note": "a lookup token in is.statusCode is refused at load; its CSV quoting is fixed by #1566"
     },
     {
       "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should compose multiple behaviors together (old interface for backwards compatibility)",
@@ -799,18 +775,6 @@
       "class": "documented",
       "doc": "docs/mountebank/differences.md#the-admin-api-serves-json-only",
       "note": "no Vary: Accept"
-    },
-    {
-      "id": "docs:/docs/api/behaviors#copy-regex",
-      "class": "bug",
-      "issue": "#1558",
-      "note": "copy token in is.statusCode refused at load"
-    },
-    {
-      "id": "docs:/docs/api/behaviors#lookup",
-      "class": "bug",
-      "issue": "#1558",
-      "note": "lookup token in is.statusCode refused at load"
     },
     {
       "id": "docs:/docs/api/behaviors#shellTransform",

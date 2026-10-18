@@ -2440,9 +2440,33 @@ fn parse_mountebank_response(
 /// Response from a Mountebank decorate function
 #[derive(Debug, Clone)]
 pub struct MountebankDecorateResponse {
-    pub status_code: u16,
+    /// The `statusCode` the script left: a number, or a string (issue #1558).
+    pub status_code: crate::behaviors::ResponseStatus,
     pub headers: std::collections::HashMap<String, String>,
     pub body: String,
+}
+
+/// A decorate script's `response.statusCode` (issue #1558): the string as written while it is one,
+/// as Mountebank hands it over.
+fn status_to_js(status: &crate::behaviors::ResponseStatus) -> JsValue {
+    match status {
+        crate::behaviors::ResponseStatus::Code(code) => JsValue::from(i32::from(*code)),
+        crate::behaviors::ResponseStatus::Text(text) => JsValue::from(js_string!(text.as_str())),
+    }
+}
+
+/// The `statusCode` a decorate script left: a number, or a string, which is read when the response
+/// is written (issue #1558). `None` for anything else, which keeps the status the script was given.
+fn status_from_js(value: Option<JsValue>) -> Option<crate::behaviors::ResponseStatus> {
+    let value = value?;
+    if let Some(text) = value.as_string() {
+        return Some(crate::behaviors::ResponseStatus::Text(
+            text.to_std_string_escaped(),
+        ));
+    }
+    value
+        .as_number()
+        .map(|n| crate::behaviors::ResponseStatus::Code(n as u16))
 }
 
 /// Minimal CommonJS module loader backing the `require()` global (issue #305).
@@ -2584,7 +2608,7 @@ pub fn execute_mountebank_config_decorate(
     decorate_fn: &str,
     request: &MountebankRequest,
     response_body: &str,
-    response_status: u16,
+    response_status: &crate::behaviors::ResponseStatus,
     response_headers: &std::collections::HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
@@ -2592,6 +2616,7 @@ pub fn execute_mountebank_config_decorate(
     let decorate_fn = decorate_fn.to_string();
     let request = request.clone();
     let response_body = response_body.to_string();
+    let response_status = response_status.clone();
     let response_headers = response_headers.clone();
     let stub_id = stub_id.map(str::to_string);
     with_mb_js_thread(move |thread| {
@@ -2600,7 +2625,7 @@ pub fn execute_mountebank_config_decorate(
             &decorate_fn,
             &request,
             &response_body,
-            response_status,
+            &response_status,
             &response_headers,
             imposter_port,
             stub_id.as_deref(),
@@ -2614,7 +2639,7 @@ fn execute_mountebank_config_decorate_in(
     decorate_fn: &str,
     request: &MountebankRequest,
     response_body: &str,
-    response_status: u16,
+    response_status: &crate::behaviors::ResponseStatus,
     response_headers: &std::collections::HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
@@ -2630,7 +2655,7 @@ fn execute_mountebank_config_decorate_in(
     response_obj
         .set(
             js_string!("statusCode"),
-            JsValue::from(response_status as i32),
+            status_to_js(response_status),
             false,
             &mut *context,
         )
@@ -2741,13 +2766,8 @@ fn execute_mountebank_config_decorate_in(
         anyhow!("Config decorate function must leave config.response as an object")
     })?;
 
-    // Get statusCode
-    let status_code = obj
-        .get(js_string!("statusCode"), &mut *context)
-        .ok()
-        .and_then(|v| v.as_number())
-        .map(|n| n as u16)
-        .unwrap_or(response_status);
+    let status_code = status_from_js(obj.get(js_string!("statusCode"), &mut *context).ok())
+        .unwrap_or_else(|| response_status.clone());
 
     // Get headers
     let mut headers = response_headers.clone();
@@ -2812,7 +2832,7 @@ pub fn execute_mountebank_decorate(
     decorate_fn: &str,
     request: &MountebankRequest,
     response_body: &str,
-    response_status: u16,
+    response_status: &crate::behaviors::ResponseStatus,
     response_headers: &std::collections::HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
@@ -2820,6 +2840,7 @@ pub fn execute_mountebank_decorate(
     let decorate_fn = decorate_fn.to_string();
     let request = request.clone();
     let response_body = response_body.to_string();
+    let response_status = response_status.clone();
     let response_headers = response_headers.clone();
     let stub_id = stub_id.map(str::to_string);
     with_mb_js_thread(move |thread| {
@@ -2828,7 +2849,7 @@ pub fn execute_mountebank_decorate(
             &decorate_fn,
             &request,
             &response_body,
-            response_status,
+            &response_status,
             &response_headers,
             imposter_port,
             stub_id.as_deref(),
@@ -2842,7 +2863,7 @@ fn execute_mountebank_decorate_in(
     decorate_fn: &str,
     request: &MountebankRequest,
     response_body: &str,
-    response_status: u16,
+    response_status: &crate::behaviors::ResponseStatus,
     response_headers: &std::collections::HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
@@ -2858,7 +2879,7 @@ fn execute_mountebank_decorate_in(
     response_obj
         .set(
             js_string!("statusCode"),
-            JsValue::from(response_status as i32),
+            status_to_js(response_status),
             false,
             &mut *context,
         )
@@ -2969,13 +2990,8 @@ fn execute_mountebank_decorate_in(
         .as_object()
         .ok_or_else(|| anyhow!("Decorate function must return response object"))?;
 
-    // Get statusCode
-    let status_code = obj
-        .get(js_string!("statusCode"), &mut *context)
-        .ok()
-        .and_then(|v| v.as_number())
-        .map(|n| n as u16)
-        .unwrap_or(response_status);
+    let status_code = status_from_js(obj.get(js_string!("statusCode"), &mut *context).ok())
+        .unwrap_or_else(|| response_status.clone());
 
     // Get headers
     let mut headers = response_headers.clone();
@@ -3568,7 +3584,7 @@ function respond(ctx) {
             script,
             &request,
             "original",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &headers,
             test_port(),
             None,
@@ -3593,7 +3609,7 @@ function respond(ctx) {
                 script,
                 request,
                 "orig",
-                200,
+                &crate::behaviors::ResponseStatus::Code(200),
                 &HashMap::new(),
                 test_port(),
                 None,
@@ -3702,7 +3718,7 @@ function respond(ctx) {
             script,
             &request,
             "original",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &headers,
             test_port(),
             None,
@@ -3754,7 +3770,7 @@ function respond(ctx) {
             &script,
             &config_req(),
             "orig",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &HashMap::new(),
             test_port(),
             None,
@@ -3776,7 +3792,7 @@ function respond(ctx) {
             script,
             &config_req(),
             "orig",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &HashMap::new(),
             test_port(),
             None,
@@ -3793,7 +3809,7 @@ function respond(ctx) {
             script,
             &config_req(),
             "orig",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &HashMap::new(),
             test_port(),
             None,
@@ -3842,7 +3858,7 @@ function respond(ctx) {
             &script,
             &config_req(),
             "orig",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &HashMap::new(),
             test_port(),
             None,
@@ -3865,7 +3881,7 @@ function respond(ctx) {
             script,
             &config_req(),
             "orig",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &HashMap::new(),
             test_port(),
             None,
@@ -3957,7 +3973,7 @@ function respond(ctx) {
             script,
             &mb_req("GET", "/nobody"),
             "original",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &HashMap::new(),
             test_port(),
             None,
@@ -4064,7 +4080,7 @@ function respond(ctx) {
             r#"function(request, response) { response.body = request.headers['content-type']; }"#,
             &mb_req_with_headers(),
             "original",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &HashMap::new(),
             test_port(),
             None,
@@ -4184,7 +4200,7 @@ function respond(ctx) {
             script,
             &mb_req("GET", "/dec-a"),
             "orig",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &HashMap::new(),
             test_port(),
             None,
@@ -4200,7 +4216,7 @@ function respond(ctx) {
             script,
             &mb_req("GET", "/dec-legacy"),
             "orig",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &HashMap::new(),
             test_port(),
             None,
@@ -4216,7 +4232,7 @@ function respond(ctx) {
             script,
             &mb_req("GET", "/dec-flat"),
             "orig",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &HashMap::new(),
             test_port(),
             None,
@@ -4235,7 +4251,7 @@ function respond(ctx) {
             script,
             &mb_req("GET", "/dec-shim"),
             "orig",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &HashMap::new(),
             test_port(),
             None,
@@ -4254,7 +4270,7 @@ function respond(ctx) {
             script,
             &mb_req("GET", "/dec-hybrid"),
             "orig",
-            200,
+            &crate::behaviors::ResponseStatus::Code(200),
             &HashMap::new(),
             test_port(),
             None,
