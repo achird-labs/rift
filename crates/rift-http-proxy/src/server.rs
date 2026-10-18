@@ -9,15 +9,15 @@ use crate::config_loader::ConfigSource;
 use crate::extensions::metrics;
 use crate::front_door::{CompiledRoutes, RouteTable, RunningFrontDoor, bind_front_door_at};
 use crate::imposter::{
-    ImposterConfig, ImposterManager, PeerPolicy, Persistence, ScriptBaseDir, TlsDefaults,
-    resolve_scripts,
+    ImposterConfig, ImposterManager, PeerPolicy, Persistence, ScriptBaseDir, ServerListener,
+    TlsDefaults, resolve_scripts,
 };
 use crate::injection_gate::GATED_SCRIPT_SURFACES;
 use crate::intercept_control::{
     InterceptAuth, InterceptControl, InterceptOrigin, InterceptStartOptions,
 };
 pub use crate::listen::ListenAddr;
-use crate::listen::ListenerSet;
+use crate::listen::{ListenerSet, PortReservation, refuse_imposter_port};
 use crate::sources::{
     self, FileSource, HttpSource, ImposterSource, SourceRef, SourceRegistry, SourceSet,
 };
@@ -1055,13 +1055,27 @@ impl ServerBuilder {
         } else {
             ListenAddr::Any(cli.metrics_port)
         };
-        let metrics = match bind_metrics_listeners(metrics_addr).await {
+        //
+        // A startup imposter already on the metrics port keeps it (issue #1557): the bind is refused
+        // rather than sharing the port with the imposter, which macOS would allow.
+        let metrics =
+            match refuse_imposter_port(&manager, cli.metrics_port, ServerListener::Metrics) {
+                Ok(()) => bind_metrics_listeners(metrics_addr).await,
+                Err(e) => Err(e.into()),
+            };
+        let metrics = match metrics {
             Ok(running) => Some(running),
             Err(e) => {
                 error!("Metrics server error: {e:#}");
                 None
             }
         };
+        // No imposter may take a port this server listens on (issue #1557). Each listener reserves
+        // the port it really bound, so `--metrics-port 0` reserves the kernel's choice. Dropped on
+        // every early return below, which releases it.
+        let metrics_reservation = metrics.as_ref().map(|running| {
+            PortReservation::new(&manager, running.local_addrs(), ServerListener::Metrics)
+        });
 
         // Front door (issue #19 / U-11): one listener serving every imposter, resolved by the
         // `routes` block threaded through above exactly like the `intercept` block is (falling
@@ -1100,7 +1114,13 @@ impl ServerBuilder {
 
         // Bound here, before the intercept listener starts, so `--intercept-port` follows the
         // address the admin plane really got: `0.0.0.0` on a host where `[::]` fell back (#1528).
-        let bound = admin_listen.bind().and_then(|listeners| {
+        let bound = refuse_imposter_port(
+            &manager,
+            admin_listen.judged().port(),
+            ServerListener::Admin,
+        )
+        .and_then(|()| admin_listen.bind())
+        .and_then(|listeners| {
             let addrs = listeners
                 .iter()
                 .map(std::net::TcpListener::local_addr)
@@ -1172,6 +1192,8 @@ impl ServerBuilder {
         // Injection gating is threaded explicitly (issue #342) rather than read from env.
         // `with_exposure_checked`: the issue #863 check already ran above, before the metrics
         // bind. Without this the same startup would log the warning twice.
+        // The intercept listener reserves its port on the same manager (issue #1557).
+        let intercept_manager = Arc::clone(&manager);
         let mut server = AdminApiServer::new(admin_addr, manager, cli.api_key)
             .listen(admin_listen)
             .with_bound_listeners(admin_listeners)
@@ -1214,7 +1236,8 @@ impl ServerBuilder {
         // the clone handed to the admin server, or the runtime door would inherit the default.
         let intercept = InterceptControl::default()
             .with_exposure_policy(cli.require_admin_auth.into())
-            .with_outbound_tls(outbound_tls.clone());
+            .with_outbound_tls(outbound_tls.clone())
+            .with_port_reservations(intercept_manager);
         // The origin travels with the listener so a reload knows whether the file's block owns its
         // rules (issue #1271); the two cannot both be set, which `intercept_block` refuses above.
         let start_options = match (intercept_block, intercept_flag_opts) {
@@ -1273,6 +1296,7 @@ impl ServerBuilder {
         Ok(RunningServer {
             admin,
             metrics,
+            metrics_reservation: Mutex::new(metrics_reservation),
             intercept,
             front_door,
         })
@@ -1284,6 +1308,10 @@ impl ServerBuilder {
 pub struct RunningServer {
     admin: RunningAdminApi,
     metrics: Option<RunningMetrics>,
+    /// The metrics port on the manager's reserved set (issue #1557), released by `shutdown` once
+    /// the metrics listener has stopped, or when this handle is dropped. The admin API, front door
+    /// and intercept listener each hold their own.
+    metrics_reservation: Mutex<Option<PortReservation>>,
     intercept: InterceptControl,
     front_door: Option<RunningFrontDoor>,
 }
@@ -1307,6 +1335,7 @@ impl RunningServer {
         Self {
             admin: crate::admin_api::RunningAdminApi::with_accept_task(loop_body),
             metrics: None,
+            metrics_reservation: Mutex::new(None),
             intercept: InterceptControl::default(),
             front_door: None,
         }
@@ -1375,6 +1404,12 @@ impl RunningServer {
         if let Some(metrics) = &self.metrics {
             metrics.shutdown().await;
         }
+        drop(
+            self.metrics_reservation
+                .lock()
+                .expect("metrics reservation mutex poisoned")
+                .take(),
+        );
         self.intercept.stop().await;
         if let Some(front_door) = &self.front_door {
             front_door.shutdown().await;

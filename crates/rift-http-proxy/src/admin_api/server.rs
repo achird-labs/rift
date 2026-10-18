@@ -8,9 +8,9 @@ use crate::config_loader::ConfigSource;
 use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
 use crate::front_door::FrontDoorRoutes;
 use crate::gateway::apply_tcp_fault;
-use crate::imposter::ImposterManager;
+use crate::imposter::{ImposterManager, ServerListener};
 use crate::intercept_control::InterceptControl;
-use crate::listen::{ListenAddr, ListenerSet, http_urls};
+use crate::listen::{ListenAddr, ListenerSet, PortReservation, http_urls, refuse_imposter_port};
 use crate::sources::{ReloadSource, SourceSet};
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -290,12 +290,22 @@ impl AdminApiServer {
         }
         let listeners = match self.bound {
             Some(listeners) => listeners,
-            None => self.listen.bind()?,
+            None => {
+                refuse_imposter_port(
+                    &self.manager,
+                    self.listen.judged().port(),
+                    ServerListener::Admin,
+                )?;
+                self.listen.bind()?
+            }
         };
         let listeners = ListenerSet::from_std(listeners)?;
         let local_addrs = listeners.local_addrs()?;
         // `from_std` refuses an empty set, so there is always a first address.
         let local_addr = local_addrs[0];
+        // No imposter may take the admin port while this server holds it (issue #1557). Owned by
+        // the accept-loop task, so it is released however that task ends.
+        let reservation = PortReservation::new(&self.manager, &local_addrs, ServerListener::Admin);
         info!(
             "Rift Admin API (Mountebank-compatible) listening on {}",
             http_urls(&local_addrs, "")
@@ -320,6 +330,7 @@ impl AdminApiServer {
         let (task_done, task_outcome) = (done.clone(), Arc::clone(&outcome));
         let release_cancel = cancel.clone();
         let task = tokio::spawn(async move {
+            let _reservation = reservation;
             // Releasing waiters from a drop guard rather than the tail of this block covers every
             // way the loop can end — normal return, panic unwind, and `shutdown`'s abort. Firing
             // only on the normal path would leave `wait()` blocked forever on a panicking accept

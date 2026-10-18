@@ -492,13 +492,6 @@
       "note": "`protocol` is optional and defaults to http (imposters.md), so POST {} creates an imposter"
     },
     {
-      "id": "api/impostersControllerTest.js::POST /imposters should return 400 on port conflict",
-      "class": "bug",
-      "issue": "#1557",
-      "note": "an imposter can take the admin port under --local-only",
-      "flaky": "macOS only: Linux refuses the wildcard imposter bind beside the loopback admin listener, so the test passes there (#1557 triage)"
-    },
-    {
       "id": "api/impostersControllerTest.js::POST /imposters should return 400 on invalid JSON",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#error-envelopes",

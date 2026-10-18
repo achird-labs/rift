@@ -59,6 +59,78 @@ fn loopback_holder(port: u16) -> bool {
     }
 }
 
+/// One of the server's own listeners, holding a port no imposter may take (issue #1557). Named in
+/// the refusal's log line, so an operator sees which listener a `400 already in use` was about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerListener {
+    /// The admin API.
+    Admin,
+    /// `GET /metrics`.
+    Metrics,
+    /// `--front-door`.
+    FrontDoor,
+    /// The intercept (HTTPS forward) proxy.
+    Intercept,
+}
+
+impl std::fmt::Display for ServerListener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Admin => "admin API",
+            Self::Metrics => "metrics endpoint",
+            Self::FrontDoor => "front door",
+            Self::Intercept => "intercept proxy",
+        })
+    }
+}
+
+/// Ports one server listener reserved on an [`ImposterManager`] (issue #1557), released when this
+/// is dropped. The listener's running handle holds it, so the port is the server's for exactly as
+/// long as the listener is: the RAII form of [`ImposterManager::reserve_port`] and
+/// [`ImposterManager::release_port`].
+#[must_use = "dropping the reservation releases the port at once"]
+pub struct PortReservation {
+    manager: Arc<ImposterManager>,
+    ports: Vec<u16>,
+}
+
+impl PortReservation {
+    /// Reserve the ports of `addrs` for `by`. A listener bound on several addresses of one port
+    /// (`--local-only`'s `127.0.0.1` and `[::1]`) reserves it once.
+    pub fn new(
+        manager: &Arc<ImposterManager>,
+        addrs: &[std::net::SocketAddr],
+        by: ServerListener,
+    ) -> Self {
+        let mut ports: Vec<u16> = addrs.iter().map(std::net::SocketAddr::port).collect();
+        ports.sort_unstable();
+        ports.dedup();
+        for &port in &ports {
+            manager.reserve_port(port, by);
+        }
+        Self {
+            manager: Arc::clone(manager),
+            ports,
+        }
+    }
+}
+
+impl std::fmt::Debug for PortReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PortReservation")
+            .field("ports", &self.ports)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for PortReservation {
+    fn drop(&mut self) {
+        for &port in &self.ports {
+            self.manager.release_port(port);
+        }
+    }
+}
+
 /// Server-level TLS defaults for HTTPS imposters that don't carry their own cert/key (issue #206).
 #[derive(Debug, Clone)]
 pub struct TlsDefaults {
@@ -408,6 +480,11 @@ pub struct ImposterManager {
     /// drain before returning anyway with a warning (issue #596). Never configurable at runtime;
     /// overridable only in tests via [`Self::with_conn_drain`].
     conn_drain: Duration,
+    /// Ports the server's own listeners hold (issue #1557). An imposter is refused on any of them,
+    /// at bind time, because imposters bind with `SO_REUSEADDR`: on the BSD family that lets a
+    /// wildcard bind sit beside a listener on a specific address, and the two then split the
+    /// port's clients. Empty unless a listener registers itself with [`Self::reserve_port`].
+    reserved: parking_lot::RwLock<std::collections::BTreeMap<u16, ServerListener>>,
     /// Broadcast of lifecycle + recorded-request events for the admin SSE stream (issue #461).
     /// Created unconditionally (a `broadcast::Sender` with no receivers is ~free); publishing is a
     /// no-op until a client subscribes.
@@ -451,8 +528,76 @@ impl ImposterManager {
             default_host: None,
             peer_policy: PeerPolicy::Any,
             conn_drain: DEFAULT_CONN_DRAIN,
+            reserved: parking_lot::RwLock::new(std::collections::BTreeMap::new()),
             event_bus: Arc::new(super::events::AdminEventBus::new()),
         }
+    }
+
+    /// Mark `port` as held by one of the server's own listeners (issue #1557), so no imposter can
+    /// be created on it: an explicit port is refused with [`ImposterError::PortInUse`], the
+    /// existing `400 already in use`, and auto-assign skips it.
+    ///
+    /// Called by each listener right after it binds, with the port it really got (`--port 0` is
+    /// real), and undone with [`Self::release_port`] when it stops. An embedder that never calls
+    /// it sees no change. Checked when an imposter binds, never when a config is decoded, so stored
+    /// and replayed configs stay decodable.
+    ///
+    /// Under [`Self::with_serve_unbound`] an explicit-port imposter on a reserved port is
+    /// registered without a listener, as a failed bind is, rather than refused.
+    pub fn reserve_port(&self, port: u16, by: ServerListener) {
+        self.reserved.write().insert(port, by);
+    }
+
+    /// Undo [`Self::reserve_port`]: imposters may take `port` again. A no-op for a port that is not
+    /// reserved.
+    pub fn release_port(&self, port: u16) {
+        self.reserved.write().remove(&port);
+    }
+
+    /// Which server listener holds `port`, if one does (issue #1557).
+    #[must_use]
+    pub fn reserved_by(&self, port: u16) -> Option<ServerListener> {
+        self.reserved.read().get(&port).copied()
+    }
+
+    /// Whether an imposter on `port` is accepting on its own listener (issue #1557). A server
+    /// listener checks this before it binds, so a startup imposter that already took the port
+    /// makes that bind fail instead of sharing the port with it on macOS. An imposter registered
+    /// without a listener (serve-unbound, issue #143) holds no socket and does not count.
+    #[must_use]
+    pub fn imposter_listens_on(&self, port: u16) -> bool {
+        self.imposters.get(port).is_some_and(|i| i.is_bound())
+    }
+
+    /// The refusal for an explicit port a server listener holds, logged with the holder's name.
+    fn refuse_reserved(&self, port: u16) -> Result<(), ImposterError> {
+        match self.reserved_by(port) {
+            Some(holder) => {
+                warn!(
+                    port,
+                    "refusing an imposter on port {port}: it is this server's {holder}"
+                );
+                Err(ImposterError::PortInUse(port))
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// The batch pre-check behind `apply_config` and `reload` (issue #1557): a reserved explicit
+    /// port refuses the whole set before anything is torn down or created, as a duplicate port
+    /// does. Skipped under [`Self::with_serve_unbound`], whose per-port create registers such an
+    /// imposter without a listener instead.
+    fn refuse_reserved_in_set<'a>(
+        &self,
+        configs: impl IntoIterator<Item = &'a ImposterConfig>,
+    ) -> Result<(), ImposterError> {
+        if self.serve_unbound {
+            return Ok(());
+        }
+        configs
+            .into_iter()
+            .filter_map(ImposterConfig::explicit_port)
+            .try_for_each(|port| self.refuse_reserved(port))
     }
 
     /// Keep serving an imposter whose port bind failed, instead of dropping it (issue #143).
@@ -972,11 +1117,20 @@ impl ImposterManager {
         // One fallible bind phase covering BOTH binds — the port probe and the fan-out listener
         // group — because either can fail with `BindError` and the degradation below has to cover
         // the fan-out topology too (that is the one clustered deployments actually run).
-        let (port, listeners, bind_failure) = match (
-            self.bind_for_create(bind_host.as_deref(), explicit_port)
-                .await,
-            explicit_port,
-        ) {
+        // A port the server's own listeners hold (issue #1557) is, to a serve-unbound apply, a bind
+        // that failed: on Linux that is exactly what it was before the reserved set existed.
+        let reserved = explicit_port.and_then(|p| self.reserved_by(p).map(|holder| (p, holder)));
+        let bound = match reserved {
+            Some((p, holder)) if allow_unbound => Err(ImposterError::BindError(
+                p,
+                anyhow::anyhow!("port {p} is this server's {holder}"),
+            )),
+            _ => {
+                self.bind_for_create(bind_host.as_deref(), explicit_port)
+                    .await
+            }
+        };
+        let (port, listeners, bind_failure) = match (bound, explicit_port) {
             (Ok((port, listeners)), _) => (port, Some(listeners), None),
             // Only a socket-level failure on an explicit port may degrade to serving unbound:
             // an auto-assigned port minted from a failed bind has no identity to register
@@ -1125,6 +1279,7 @@ impl ImposterManager {
                 if self.imposters.contains(p) {
                     return Err(ImposterError::PortInUse(p));
                 }
+                self.refuse_reserved(p)?;
                 (p, Self::bind_probe(bind_host, p).await?)
             }
             None => self.bind_auto_port(bind_host).await?,
@@ -1304,6 +1459,13 @@ impl ImposterManager {
                 anyhow::anyhow!("imposter has no shutdown channel to drive an accept loop"),
             ));
         };
+        // Still a server listener's port (issue #1557): stay unbound, as a failed bind does.
+        if let Some(holder) = self.reserved_by(port) {
+            return Err(ImposterError::BindError(
+                port,
+                anyhow::anyhow!("port {port} is this server's {holder}"),
+            ));
+        }
 
         // The group binds the address the probe took, so a host-less imposter that fell back to
         // IPv4 rebinds IPv4 throughout.
@@ -1581,6 +1743,7 @@ impl ImposterManager {
             let port = bound.port();
             let v4_wildcard = bound.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
             if self.imposters.contains(port)
+                || self.reserved_by(port).is_some()
                 || (v4_wildcard && crate::proxy::network::ipv6_only_listener_holds(port))
                 || (bound.ip().is_unspecified() && loopback_holder(port))
             {
@@ -1764,6 +1927,7 @@ impl ImposterManager {
     )]
     pub async fn reload(&self, mut configs: Vec<ImposterConfig>) -> Result<(), ImposterError> {
         Self::validate_config_set(&configs)?;
+        self.refuse_reserved_in_set(&configs)?;
         Self::explicit_ports_first(&mut configs);
 
         // An imposter whose datadir file could not be removed is still serving (issue #1124); creating
@@ -1867,6 +2031,7 @@ impl ImposterManager {
         mut desired: Vec<(ImposterConfig, Option<Persistence>)>,
     ) -> Result<ApplyReport, ImposterError> {
         Self::validate_config_set(desired.iter().map(|(config, _)| config))?;
+        self.refuse_reserved_in_set(desired.iter().map(|(config, _)| config))?;
 
         let mut report = ApplyReport::default();
 
@@ -1949,6 +2114,7 @@ impl ImposterManager {
             .explicit_port()
             .ok_or(ImposterError::ExplicitPortRequired)?;
         Self::validate_config_set(std::iter::once(&config))?;
+        self.refuse_reserved_in_set(std::iter::once(&config))?;
         let mut report = ApplyReport::default();
         self.apply_entry(port, config, requested, &mut report).await;
         Ok(report)
@@ -8508,6 +8674,134 @@ mod tests {
                 served(&response),
                 "{remote}:{port} must be served: {response:?}"
             );
+            manager.delete_all().await;
+        }
+    }
+
+    // Issue #1557: a port the server's own listeners hold is refused to every imposter.
+    mod reserved_ports {
+        use super::*;
+
+        fn cfg(port: u16) -> ImposterConfig {
+            imposter_cfg(json!({
+                "protocol": "http", "port": port, "stubs": [stub_json("imposter")]
+            }))
+        }
+
+        #[tokio::test]
+        async fn a_reserved_port_is_refused_on_every_explicit_door() {
+            let manager = ImposterManager::new();
+            let port = free_port();
+            manager.reserve_port(port, ServerListener::Admin);
+            assert_eq!(manager.reserved_by(port), Some(ServerListener::Admin));
+
+            let created = manager.create_imposter(cfg(port)).await;
+            assert!(
+                matches!(created, Err(ImposterError::PortInUse(p)) if p == port),
+                "create: {created:?}"
+            );
+            let applied = manager.apply_config(vec![cfg(port)]).await;
+            assert!(
+                matches!(applied, Err(ImposterError::PortInUse(p)) if p == port),
+                "apply_config: {applied:?}"
+            );
+            let one = manager.apply_one(cfg(port)).await;
+            assert!(
+                matches!(one, Err(ImposterError::PortInUse(p)) if p == port),
+                "apply_one: {one:?}"
+            );
+            assert!(!manager.imposters.contains(port), "nothing was created");
+
+            manager.release_port(port);
+            assert_eq!(manager.reserved_by(port), None);
+            let created = manager.create_imposter(cfg(port)).await;
+            assert!(matches!(created, Ok(p) if p == port), "{created:?}");
+            assert!(manager.imposter_listens_on(port));
+            manager.delete_all().await;
+        }
+
+        // The batch pre-check refuses the whole set before anything is touched, as a duplicate
+        // port does: the running imposter survives a `PUT` that names a reserved port beside it.
+        #[tokio::test]
+        async fn apply_config_refuses_the_whole_set_before_touching_anything() {
+            let manager = ImposterManager::new();
+            let running = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "stubs": [stub_json("a")]
+                })))
+                .await
+                .expect("create");
+            let reserved = free_port();
+            manager.reserve_port(reserved, ServerListener::Metrics);
+
+            let applied = manager.apply_config(vec![cfg(reserved)]).await;
+            assert!(
+                matches!(applied, Err(ImposterError::PortInUse(p)) if p == reserved),
+                "{applied:?}"
+            );
+            assert!(
+                manager.imposters.contains(running),
+                "the refused set must not delete the running imposter"
+            );
+            manager.delete_all().await;
+        }
+
+        // Every port reserved: auto-assign refuses each kernel pick and runs out of attempts,
+        // rather than handing out a port the server holds.
+        #[tokio::test]
+        async fn auto_assign_never_hands_out_a_reserved_port() {
+            let manager = ImposterManager::new();
+            for port in 1..=u16::MAX {
+                manager.reserve_port(port, ServerListener::FrontDoor);
+            }
+            let created = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "stubs": [stub_json("a")]
+                })))
+                .await;
+            assert!(
+                matches!(created, Err(ImposterError::BindError(0, _))),
+                "every candidate is reserved: {created:?}"
+            );
+
+            for port in 1..=u16::MAX {
+                manager.release_port(port);
+            }
+            let port = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "stubs": [stub_json("a")]
+                })))
+                .await
+                .expect("create once released");
+            assert!(port != 0);
+            manager.delete_all().await;
+        }
+
+        // Under serve-unbound a reserved port is a failed bind, as `EADDRINUSE` made it on Linux
+        // before the set existed: the imposter is registered without a listener and heals once the
+        // port is released.
+        #[tokio::test]
+        async fn serve_unbound_registers_a_reserved_port_without_a_listener() {
+            let manager = ImposterManager::new().with_serve_unbound(true);
+            let port = free_port();
+            manager.reserve_port(port, ServerListener::Admin);
+
+            let report = manager.apply_config(vec![cfg(port)]).await.expect("apply");
+            assert!(
+                report
+                    .failed
+                    .iter()
+                    .any(|(p, e)| *p == port && matches!(e, ImposterError::BindError(..))),
+                "{report:?}"
+            );
+            let registered = manager.imposters.get(port).expect("registered");
+            assert!(!registered.is_bound());
+            assert!(!manager.imposter_listens_on(port));
+
+            manager.release_port(port);
+            let report = manager.apply_config(vec![cfg(port)]).await.expect("apply");
+            assert!(report.created.contains(&port), "{report:?}");
+            assert!(manager.imposter_listens_on(port));
             manager.delete_all().await;
         }
     }

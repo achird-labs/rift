@@ -302,6 +302,11 @@ Three differences:
   every interface and refuses non-local clients. Rift's front door, which Mountebank has no
   counterpart for, refuses the same clients as the imposters.
 
+An imposter cannot take a port this server already listens on: the admin port, `--metrics-port`,
+`--front-door` or `--intercept-port`. Such a port is refused with `400` `already in use` on every
+platform, with or without `--local-only` (#1557). Mountebank has only the admin listener and refuses
+it the same way.
+
 `--ip-whitelist` remains not enforced (#879).
 
 ## HTTP framing

@@ -110,6 +110,27 @@ ServerBuilder::from_cli(Cli::parse())
     .await?;
 ```
 
+### Reserving the server's own ports
+
+No imposter may take a port the server's own listeners hold (#1557). `ServerBuilder` registers
+its admin API, `/metrics`, front door and intercept listener on the manager it serves, an injected
+one included, with the port each one really bound, and releases them at shutdown. So do
+`AdminApiServer::bind` and `bind_front_door` on the manager they are given. A listener the embedder
+binds itself is registered like this:
+
+```rust
+use rift_mock_core::imposter::{PortReservation, ServerListener};
+
+// Held for as long as the listener runs; dropping it releases the port.
+let reservation = PortReservation::new(&manager, &[listener.local_addr()?], ServerListener::Admin);
+```
+
+`reserve_port(port, by)` and `release_port(port)` are the same thing without the guard. An explicit
+imposter port that is reserved is refused with `ImposterError::PortInUse`, the `400` `already in
+use`; auto-assign skips it. Under `with_serve_unbound(true)` the imposter is instead registered
+without a listener, as a failed bind is. The check runs when an imposter binds, never when a config
+is decoded, so stored configs stay decodable.
+
 ### Reconciling one imposter (`apply_one`)
 
 `ImposterManager::apply_config` reconciles the whole imposter set: it deletes every running port the

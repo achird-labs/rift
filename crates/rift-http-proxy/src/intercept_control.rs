@@ -13,10 +13,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::admin_api::{AdminExposurePolicy, check_intercept_exposure};
+use crate::imposter::{ImposterManager, ServerListener};
 use crate::intercept::InterceptListener;
 use crate::intercept_rules::{
     InterceptRule, InterceptRules, InterceptState, RulesAtCapacity, SeededReplaced,
 };
+use crate::listen::{PortReservation, refuse_imposter_port};
 use rift_mock_core::proxy::OutboundTls;
 use rift_mock_core::proxy::intercept_ca::{
     CaInputs, CaSource, CertificateAuthority, SniCertResolver,
@@ -47,6 +49,9 @@ pub struct InterceptPlane {
     /// file's `intercept` block against before touching the rules (issue #1271).
     origin: InterceptOrigin,
     spec: ListenerSpec,
+    /// This listener's port on the manager's reserved set (issue #1557), taken when the plane is
+    /// installed and released when it is dropped, after `stop` has shut the listener down.
+    reservation: Option<PortReservation>,
 }
 
 /// The door a running listener was started through (issue #1271). Only a listener the config file
@@ -168,6 +173,10 @@ pub struct InterceptControl {
     /// `rift_serve_admin` learns `requireAdminAuth`, so a policy stored per clone would be fixed at
     /// its default before the operator ever stated one.
     policy: Arc<Mutex<InterceptPolicy>>,
+    /// The imposter manager this control's listener reserves its port on (issue #1557), so no
+    /// imposter can be created on the intercept port. Shared across clones like `policy`; `None`
+    /// reserves nothing.
+    reservations: Arc<Mutex<Option<Arc<ImposterManager>>>>,
 }
 
 /// The operator's deployment policy for this control's listener.
@@ -429,6 +438,19 @@ impl InterceptControl {
         self.policy_lock().outbound_tls.clone()
     }
 
+    /// Reserve every listener started through this control — and through every clone of it — on
+    /// `manager`, so no imposter can be created on the intercept port while it runs (issue #1557).
+    /// A start on a port an imposter of `manager` already accepts on is refused.
+    #[must_use]
+    pub fn with_port_reservations(self, manager: Arc<ImposterManager>) -> Self {
+        *self.reservations_lock() = Some(manager);
+        self
+    }
+
+    fn reservations_lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<ImposterManager>>> {
+        self.reservations.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn policy_lock(&self) -> std::sync::MutexGuard<'_, InterceptPolicy> {
         self.policy.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -463,7 +485,10 @@ impl InterceptControl {
     /// Lock order is `plane` then `policy`, and nothing takes them the other way round: every other
     /// `policy_lock()` is a statement-scoped temporary, and `check_running_exposure` copies the
     /// policy out before it touches `plane`.
-    fn install(&self, plane: InterceptPlane) -> Result<(), InstallRefused> {
+    ///
+    /// The port is reserved here too (issue #1557), under the same lock, so only the listener that
+    /// took the slot ever reserves.
+    fn install(&self, mut plane: InterceptPlane) -> Result<(), InstallRefused> {
         let mut slot = self.lock();
         if slot.is_some() {
             return Err(InstallRefused::AlreadyRunning(plane.listener));
@@ -473,6 +498,13 @@ impl InterceptControl {
             check_intercept_exposure(plane.listener.local_addr(), plane.has_auth, exposure)
         {
             return Err(InstallRefused::Exposed(plane.listener, format!("{e:#}")));
+        }
+        if let Some(manager) = self.reservations_lock().as_ref() {
+            plane.reservation = Some(PortReservation::new(
+                manager,
+                &[plane.listener.local_addr()],
+                ServerListener::Intercept,
+            ));
         }
         *slot = Some(plane);
         Ok(())
@@ -573,6 +605,18 @@ impl InterceptControl {
             InterceptStartError::Rules(e)
         })?;
 
+        // An imposter already accepting on this port would share it with the listener on macOS
+        // (issue #1557); Linux refuses the bind itself.
+        let reserving = self.reservations_lock().clone();
+        if let Some(manager) = reserving {
+            refuse_imposter_port(&manager, addr.port(), ServerListener::Intercept).map_err(
+                |e| {
+                    let e = anyhow::Error::new(e);
+                    warn_intercept_start_failure(&e, "bind failed");
+                    InterceptStartError::Bind(e)
+                },
+            )?;
+        }
         let resolver = Arc::new(SniCertResolver::new(ca.clone()));
         let listener =
             InterceptListener::bind(addr, resolver, rules.clone(), auth, policy.outbound_tls)
@@ -589,6 +633,7 @@ impl InterceptControl {
             has_auth: auth_required,
             origin,
             spec,
+            reservation: None,
         }) {
             Ok(()) => Ok(StartedIntercept {
                 addr: bound,
@@ -1251,6 +1296,7 @@ mod tests {
             has_auth: false,
             origin: InterceptOrigin::Runtime,
             spec: ListenerSpec::of(&InterceptStartOptions::default()),
+            reservation: None,
         }
     }
 
