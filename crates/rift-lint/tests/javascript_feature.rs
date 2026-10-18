@@ -138,6 +138,38 @@ fn a_javascript_decorate_is_still_syntax_checked() {
     );
 }
 
+// Issue #1567: the engine runs every arrow decorate as JavaScript, whatever its parameters are
+// named, so the linter parses it as JavaScript too: a valid one is clean, a broken one is E028.
+#[cfg(feature = "javascript")]
+#[test]
+fn an_arrow_decorate_is_linted_as_javascript() {
+    for script in [
+        "(request, response) => { response.body = 'mutated ' + request.path; }",
+        "request => { request.response.body = 'si'; }",
+        "async (req, res) => { res.body = 'a'; }",
+    ] {
+        let result = lint_json(&decorate_doc(script), "a.json", &LintOptions::default());
+        assert!(
+            !result
+                .issues
+                .iter()
+                .any(|i| i.code == "E028" || i.code == "W009"),
+            "{script}: {:?}",
+            result.issues
+        );
+    }
+    let result = lint_json(
+        &decorate_doc("(req, res) => { res.statusCode = ; }"),
+        "a.json",
+        &LintOptions::default(),
+    );
+    assert!(
+        result.issues.iter().any(|i| i.code == "E028"),
+        "a broken arrow decorate is a JavaScript syntax error: {:?}",
+        result.issues
+    );
+}
+
 /// Issue #1170: an `inject` is JavaScript the engine runs, so an opt-out build must disclose that
 /// it did not check one — the fixture #1156 wanted and could not use.
 #[cfg(not(feature = "javascript"))]

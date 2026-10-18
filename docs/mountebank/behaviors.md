@@ -196,7 +196,28 @@ This format is supported and the function is evaluated to compute the delay.
 
 ## decorate
 
-Transform responses using JavaScript. The function receives request and response, and must return the modified response.
+Transform responses using JavaScript. The function is called as `fn(config, response, logger)`,
+as in Mountebank, so any function form works: `function (request, response) { ... }`,
+`(req, res) => { ... }`, `config => { ... }`, or an `async` function. The parameter names do not
+matter: the first argument is `config`, which carries `request`, `response`, `state` and `logger`
+and has every request field (`method`, `path`, `headers`, ...) copied onto it, so code written
+against `request.path` works. The second argument is the same object as `config.response`. Rift
+also passes `state` as a fourth argument.
+
+The function changes the response in one of two ways:
+
+- **Mutate it.** Change `response.statusCode`, `response.headers` or `response.body` and return
+  nothing (or anything falsy). The headers sent are exactly the ones `response.headers` holds when
+  the function ends, so `delete response.headers['X-Old']` removes that header.
+- **Return a new one.** A returned object replaces the response; nothing of the original is kept.
+  A field it leaves out is taken from the imposter's `defaultResponse`, or is `200`, no headers and
+  an empty body when there is none, as in Mountebank. An `async` function's promise is settled
+  first and the same rule applies to its value. Returning anything truthy that is not an object
+  fails the decorate.
+
+A decorate that is neither a function value nor a bare body using `config.request` or
+`config.response` (which Rift wraps in `function (config) { ... }`) runs as a Rhai script; see
+[differences](differences.md#decorate-and-a-response-without-headers).
 
 `response.body` arrives as a **string**, even when the stub's `body` is a JSON object, so parse it
 before changing fields. If the function sets `response.body` to an object, Rift serializes it back

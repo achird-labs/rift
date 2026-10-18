@@ -2578,11 +2578,12 @@ pub fn validate_behavior(
 
 /// Whether the engine runs a `decorate` script as **JavaScript** rather than Rhai.
 ///
-/// Mirrors the engine's routing in `rift_mock_core::imposter::response::apply_js_or_rhai_decorate`:
-/// the Mountebank `config` convention (`rift_mock_core::behaviors::is_js_config_decorate`) or a
-/// script starting with `function`; anything else runs as Rhai. `rift-lint` does not depend on the
-/// engine, so this is a copy of that rule — and a copy of a routing rule is exactly what drifts, so
-/// `crates/rift-http-proxy/tests/issue_1156_decorate_routing.rs` pins the two against each other.
+/// Mirrors the engine's routing, `rift_mock_core::behaviors::is_javascript_decorate`: a function
+/// value (`function`, an arrow with any parameter names, either optionally `async`; issue #1567) or
+/// a bare body in the Mountebank `config` convention; anything else runs as Rhai. `rift-lint` does
+/// not depend on the engine, so this is a copy of that rule — and a copy of a routing rule is
+/// exactly what drifts, so `crates/rift-http-proxy/tests/issue_1156_decorate_routing.rs` pins the
+/// two against each other.
 ///
 /// Issue #1156: the linter used to Boa-parse **every** decorate. That never shipped only because
 /// releases lacked the `javascript` feature; turning it on by default made valid Rhai fail E028.
@@ -2597,7 +2598,34 @@ pub fn is_javascript_decorate(script: &str) -> bool {
         || t.starts_with("function (config)")
         || t.contains("config.request.")
         || t.contains("config.response.");
-    config_convention || script.trim().starts_with("function")
+    config_convention || is_js_function_head(t)
+}
+
+/// `function`, `(<anything without ')'>) =>` or `<identifier> =>`, optionally after `async`.
+fn is_js_function_head(t: &str) -> bool {
+    fn head(t: &str) -> bool {
+        if t.starts_with("function") {
+            return true;
+        }
+        let rest = if let Some(inner) = t.strip_prefix('(') {
+            match inner.find(')') {
+                Some(close) => &inner[close + 1..],
+                None => return false,
+            }
+        } else {
+            let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+            let end = t.find(|c: char| !is_ident(c)).unwrap_or(t.len());
+            if end == 0 || t.starts_with(|c: char| c.is_ascii_digit()) {
+                return false;
+            }
+            &t[end..]
+        };
+        rest.trim_start().starts_with("=>")
+    }
+    head(t)
+        || t.strip_prefix("async")
+            .filter(|rest| rest.starts_with(|c: char| c.is_whitespace() || c == '('))
+            .is_some_and(|rest| head(rest.trim_start()))
 }
 
 /// Where a script sits, which decides how the engine reads it.

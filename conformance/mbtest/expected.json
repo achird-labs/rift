@@ -107,42 +107,6 @@
       "note": "a wait written as an arrow function (`() => 1000`) waits about 100 ms; a `function () { return 1000; }` waits 1000 ms"
     },
     {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support post-processing when using behaviors.decorate (old interface)",
-      "class": "bug",
-      "issue": "#1567",
-      "note": "old two-argument decorate is a silent no-op"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should fix content-length if set and adjusted using decoration (issue #155)",
-      "class": "bug",
-      "issue": "#1554",
-      "note": "a stale Content-Length after decorate (Mountebank #155); the decorator is the old two-argument form, so #1567 must land first"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support using request parameters during decorating (old interface)",
-      "class": "bug",
-      "issue": "#1567",
-      "note": "old two-argument decorate is a silent no-op"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support using request parameters during decorating multiple times (issue #173)",
-      "class": "bug",
-      "issue": "#1567",
-      "note": "old two-argument decorate is a silent no-op"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support decorate functions that return a value (old interface)",
-      "class": "bug",
-      "issue": "#1567",
-      "note": "a decorate that returns a new response is ignored"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support decorate functions that return a value",
-      "class": "bug",
-      "issue": "#1567",
-      "note": "a decorate that returns a new response is ignored"
-    },
-    {
       "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support shell transform without array for backwards compatibility",
       "class": "bug",
       "issue": "#1589",
@@ -177,42 +141,6 @@
       "class": "bug",
       "issue": "#1588",
       "note": "a wait written as an arrow function (`() => 1000`) waits about 100 ms; a `function () { return 1000; }` waits 1000 ms"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support post-processing when using behaviors.decorate (old interface)",
-      "class": "bug",
-      "issue": "#1567",
-      "note": "old two-argument decorate is a silent no-op"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should fix content-length if set and adjusted using decoration (issue #155)",
-      "class": "bug",
-      "issue": "#1554",
-      "note": "a stale Content-Length after decorate (Mountebank #155); the decorator is the old two-argument form, so #1567 must land first"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support using request parameters during decorating (old interface)",
-      "class": "bug",
-      "issue": "#1567",
-      "note": "old two-argument decorate is a silent no-op"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support using request parameters during decorating multiple times (issue #173)",
-      "class": "bug",
-      "issue": "#1567",
-      "note": "old two-argument decorate is a silent no-op"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support decorate functions that return a value (old interface)",
-      "class": "bug",
-      "issue": "#1567",
-      "note": "a decorate that returns a new response is ignored"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support decorate functions that return a value",
-      "class": "bug",
-      "issue": "#1567",
-      "note": "a decorate that returns a new response is ignored"
     },
     {
       "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support shell transform without array for backwards compatibility",
@@ -361,9 +289,9 @@
     },
     {
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should persist decorated proxy responses and only run decorator once",
-      "class": "bug",
-      "issue": "#1567",
-      "note": "old two-argument decorate is a silent no-op"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#a-proxy-without-generators-records-into-a-store-not-a-stub",
+      "note": "the decorate now applies (#1567); a proxy without predicateGenerators records into a store, not a stub, so stubs[0].responses[0].is is absent"
     },
     {
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should support http proxy to https server",
@@ -376,18 +304,6 @@
       "class": "bug",
       "issue": "#1597",
       "note": "Rift writes every response header name in lower case on the wire, configured and proxied alike"
-    },
-    {
-      "id": "api/http/httpProxyStubTest.js::http proxy stubs should inject proxy headers if specified",
-      "class": "bug",
-      "issue": "#1567",
-      "note": "the mirror imposter's old two-argument decorate is a silent no-op"
-    },
-    {
-      "id": "api/http/httpProxyStubTest.js::http proxy stubs should add decorate behaviors to newly created response",
-      "class": "bug",
-      "issue": "#1567",
-      "note": "addDecorateBehavior with an old two-argument decorate is a silent no-op"
     },
     {
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should save JSON bodies as JSON instead of text (issue #656)",

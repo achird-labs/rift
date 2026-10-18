@@ -8640,6 +8640,360 @@
           "path": "/empty"
         }
       ]
+    },
+    {
+      "name": "targeted: decorate: every function form is applied, whatever its parameters are named (#1567)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/two"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-Orig": "1"
+                      },
+                      "body": "orig"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "(request, response) => { response.body = 'mutated ' + request.path; }"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/short"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-Orig": "1"
+                      },
+                      "body": "orig"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "(req, res) => { res.body = 'a'; }"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/single"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-Orig": "1"
+                      },
+                      "body": "orig"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "request => { request.response.body = 'si'; }"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/fn"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-Orig": "1"
+                      },
+                      "body": "orig"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "function (request, response, logger) { logger.info('x'); response.body = 'fn'; }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/two"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/short"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/single"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/fn"
+        }
+      ]
+    },
+    {
+      "name": "targeted: decorate: a returned object replaces the response and is completed from defaultResponse (#1567)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/ret"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 404,
+                      "headers": {
+                        "X-Orig": "1"
+                      },
+                      "body": "orig"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "function (request, response) { return { body: 'returned' }; }"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/status"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-Orig": "1"
+                      },
+                      "body": "orig"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "config => ({ statusCode: 201, body: 'cfgret' })"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/hdrs"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 404,
+                      "headers": {
+                        "X-Orig": "1"
+                      },
+                      "body": "orig"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "config => ({ headers: { 'X-New': 'n' }, body: 'b' })"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/falsy"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-Orig": "1"
+                      },
+                      "body": "orig"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "config => { config.response.body = 'mut'; return 0; }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "defaultResponse": {
+              "statusCode": 418,
+              "headers": {
+                "X-Def": "d"
+              }
+            }
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/ret"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/status"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/hdrs"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/falsy"
+        }
+      ]
+    },
+    {
+      "name": "targeted: decorate: a deleted header is not sent (#1567)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/cfg"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-Orig": "1"
+                      },
+                      "body": "orig"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "config => { delete config.response.headers['X-Orig']; config.response.body = 'd'; }"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/fn"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-Orig": "1"
+                      },
+                      "body": "orig"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "function (request, response) { delete response.headers['X-Orig']; response.body = 'd'; }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/cfg"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/fn"
+        }
+      ]
     }
   ]
 }

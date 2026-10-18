@@ -6,9 +6,10 @@
 
 use super::handler::SCRIPT_TIMEOUT_HEADER;
 use super::headers::StubRef;
-use super::response::apply_decorate_bounded;
+use super::response::{apply_decorate_bounded, body_text};
+use super::types::{IsResponse, StatusValue};
 use crate::behaviors::{
-    BehaviorProgram, BehaviorStep, CsvCache, RequestContext, ResponseStatus, Spliced,
+    BehaviorProgram, BehaviorStep, CsvCache, Decorated, RequestContext, ResponseStatus, Spliced,
     SplicedHeaders, apply_copy_spliced, apply_lookup_spliced, apply_shell_transform,
 };
 use crate::util::build_response_with_headers;
@@ -36,6 +37,42 @@ pub(crate) struct ServedParts {
     /// Multi-value (issue #238): one entry per header name, one element per header line.
     pub headers: SplicedHeaders,
     pub body: Spliced,
+}
+
+impl ServedParts {
+    /// A response a script wrote, completed from the imposter's `defaultResponse` (issue #1369)
+    /// or, without one, from the built-in `200`, no headers and an empty body. What the script
+    /// wrote is its own text (issue #1203); a string status taken from the default is supplied
+    /// whole, since Mountebank merges the default after the behaviors (issue #1558).
+    pub(crate) fn completed(authored: &IsResponse, default: Option<&IsResponse>) -> Self {
+        let fallback = IsResponse::default();
+        let completed = authored.completed_by(default.unwrap_or(&fallback));
+        let status_text = completed.status_text.as_deref().map(|text| {
+            if authored.omitted.status_code {
+                Spliced::supplied(text.to_string())
+            } else {
+                Spliced::authored(text.to_string())
+            }
+        });
+        ServedParts {
+            status: completed.status_code,
+            status_text,
+            headers: completed
+                .headers
+                .iter()
+                .map(|(k, values)| {
+                    (
+                        k.clone(),
+                        values
+                            .iter()
+                            .map(|v| Spliced::authored(v.clone()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            body: Spliced::authored(body_text(completed.body.as_ref())),
+        }
+    }
 }
 
 /// What running the pipeline produced. A dropped `StrictFailure` would serve the response the
@@ -66,6 +103,9 @@ pub(crate) struct BehaviorRun<'a, SH> {
     pub csv_cache: &'a CsvCache,
     pub script_timeout: Duration,
     pub strict: bool,
+    /// The imposter's `defaultResponse`: it completes a response a `decorate` returned (issue
+    /// #1567), as Mountebank completes every response it serves.
+    pub default_response: Option<&'a IsResponse>,
 }
 
 impl<SH: BuildHasher> BehaviorRun<'_, SH> {
@@ -185,9 +225,41 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     )
                     .await
                     {
+                        // A returned object replaces the response (issue #1567). Mountebank keeps
+                        // nothing of the original, Set-Cookie included, and completes what the
+                        // object leaves out from `defaultResponse`.
+                        Ok(Decorated {
+                            status_code,
+                            headers: single,
+                            body: new_body,
+                            returned: Some(omits),
+                        }) => {
+                            let authored = IsResponse::decoded(
+                                (!omits.status_code).then(|| match status_code {
+                                    ResponseStatus::Code(code) => StatusValue::Code(code),
+                                    ResponseStatus::Text(text) => StatusValue::Text(text.into()),
+                                }),
+                                (!omits.headers).then(|| {
+                                    single.into_iter().map(|(k, v)| (k, vec![v])).collect()
+                                }),
+                                (!omits.body).then_some(serde_json::Value::String(new_body)),
+                                None,
+                            );
+                            let completed =
+                                ServedParts::completed(&authored, self.default_response);
+                            status = completed.status;
+                            status_text = completed.status_text;
+                            headers = completed.headers;
+                            body = completed.body;
+                        }
                         // A script's output is the author's text (issue #1203): ranges cannot
                         // survive an arbitrary rewrite, and the script is configuration.
-                        Ok((new_body, new_status, single)) => {
+                        Ok(Decorated {
+                            status_code: new_status,
+                            headers: single,
+                            body: new_body,
+                            returned: None,
+                        }) => {
                             body = Spliced::authored(new_body);
                             match new_status {
                                 ResponseStatus::Code(code) => {
@@ -361,6 +433,14 @@ mod tests {
     }
 
     async fn run(block: serde_json::Value, strict: bool) -> BehaviorOutcome {
+        run_with_default(block, strict, None).await
+    }
+
+    async fn run_with_default(
+        block: serde_json::Value,
+        strict: bool,
+        default_response: Option<&IsResponse>,
+    ) -> BehaviorOutcome {
         let behaviors = behaviors(block);
         let uri: hyper::Uri = "/users/42?x=1".parse().expect("fixture uri");
         let request_headers: HashMap<String, Vec<String>> = HashMap::new();
@@ -377,6 +457,7 @@ mod tests {
             csv_cache: &csv_cache,
             script_timeout: Duration::from_secs(5),
             strict,
+            default_response,
         }
         .apply(original())
         .await
@@ -470,5 +551,59 @@ mod tests {
             run(block, true).await,
             BehaviorOutcome::StrictFailure(_)
         ));
+    }
+
+    // Issue #1567: a decorate's returned object replaces the response, Set-Cookie included, and
+    // what it leaves out comes from `defaultResponse`, as in Mountebank.
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn a_returned_decorate_object_is_completed_from_the_default_response() {
+        let default: IsResponse = serde_json::from_value(json!({
+            "statusCode": 418, "headers": { "X-Def": "d" }, "body": "dflt"
+        }))
+        .expect("default response");
+        let block = json!({ "decorate": "config => ({ body: 'ret' })" });
+        match run_with_default(block.clone(), false, Some(&default)).await {
+            BehaviorOutcome::Applied { parts, degraded } => {
+                assert!(!degraded);
+                assert_eq!(parts.status, 418);
+                assert_eq!(parts.body, "ret");
+                assert_eq!(parts.headers.len(), 1, "{:?}", parts.headers);
+                assert_eq!(parts.headers["X-Def"], vec!["d"]);
+            }
+            BehaviorOutcome::StrictFailure(_) => panic!("nothing failed"),
+        }
+        // Without a default: the built-in 200, no headers.
+        match run(block, false).await {
+            BehaviorOutcome::Applied { parts, .. } => {
+                assert_eq!(parts.status, 200);
+                assert_eq!(parts.body, "ret");
+                assert!(parts.headers.is_empty(), "{:?}", parts.headers);
+            }
+            BehaviorOutcome::StrictFailure(_) => panic!("nothing failed"),
+        }
+    }
+
+    // A mutated response keeps its held-aside Set-Cookie lines; a deleted header is gone.
+    // Returning the response it was given (`return response;`, `return config.response;`) is a
+    // mutation too, not a replacement.
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn a_mutating_decorate_keeps_set_cookie_and_drops_deleted_headers() {
+        for script in [
+            "(request, response) => { response.headers['X-A'] = '1'; delete response.headers['X-A']; response.body = 'm'; }",
+            "function (request, response) { response.headers['X-A'] = '1'; delete response.headers['X-A']; response.body = 'm'; return response; }",
+            "config => { config.response.headers['X-A'] = '1'; delete config.response.headers['X-A']; config.response.body = 'm'; return config.response; }",
+        ] {
+            match run(json!({ "decorate": script }), false).await {
+                BehaviorOutcome::Applied { parts, degraded } => {
+                    assert!(!degraded, "{script}");
+                    assert_eq!((parts.status, parts.body.as_str()), (201, "m"), "{script}");
+                    assert!(!parts.headers.contains_key("X-A"), "{script}");
+                    assert_eq!(parts.headers["set-cookie"], vec!["a=1", "b=2"], "{script}");
+                }
+                BehaviorOutcome::StrictFailure(_) => panic!("nothing failed: {script}"),
+            }
+        }
     }
 }
