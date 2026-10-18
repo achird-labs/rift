@@ -105,6 +105,9 @@ record.
   behaviors as Mountebank does, on every listener and over HTTP/2 too, drops it beside
   `Transfer-Encoding` and on a `204`, and decodes a binary body that contains line breaks. `rift-lint`
   no longer warns W015 on such a body.
+- **`PUT /imposters` answers with the imposters in request order**, as Mountebank does, each
+  port-less imposter at its own position; it listed them by port (#1563). The answer now lists only
+  the body's imposters, so one created concurrently by `POST /imposters` no longer appears in it.
 
 ### Testing
 

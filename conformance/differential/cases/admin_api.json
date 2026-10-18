@@ -190,6 +190,40 @@
       ]
     },
     {
+      "name": "admin_api: PUT answers imposters in request order",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4547,
+                "protocol": "http",
+                "name": "c"
+              },
+              {
+                "port": 4545,
+                "protocol": "http",
+                "name": "a"
+              },
+              {
+                "port": 4546,
+                "protocol": "http",
+                "name": "b"
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters"
+        }
+      ]
+    },
+    {
       "name": "admin_api: Delete all imposters",
       "steps": [
         {
