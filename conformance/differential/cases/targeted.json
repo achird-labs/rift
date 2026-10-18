@@ -7171,6 +7171,178 @@
           "path": "/foo?a=1"
         }
       ]
+    },
+    {
+      "name": "targeted: a stub index that is not an existing array position is refused with Mountebank's 404 (#1552)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "a"
+                    }
+                  }
+                ]
+              },
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "b"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs/abc",
+          "body": {
+            "responses": [
+              {
+                "is": {
+                  "body": "new"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs/-1",
+          "body": {
+            "responses": [
+              {
+                "is": {
+                  "body": "new"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs/1.0",
+          "body": {
+            "responses": [
+              {
+                "is": {
+                  "body": "new"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs/01",
+          "body": {
+            "responses": [
+              {
+                "is": {
+                  "body": "new"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs/+1",
+          "body": {
+            "responses": [
+              {
+                "is": {
+                  "body": "new"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs/2",
+          "body": {
+            "responses": [
+              {
+                "is": {
+                  "body": "new"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs/5",
+          "body": {
+            "responses": [
+              {
+                "is": false
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545/stubs/abc"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545/stubs/00"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545/stubs/18446744073709551616"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545/stubs/2"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/9999/stubs/abc",
+          "body": {
+            "responses": [
+              {
+                "is": {}
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/9999/stubs/abc"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
     }
   ]
 }

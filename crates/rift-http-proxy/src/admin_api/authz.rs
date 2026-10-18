@@ -284,8 +284,10 @@ fn classify_imposter(method: &Method, rest: &str) -> Option<AuthzTarget> {
             base(actions::IMPOSTER_WRITE)
         }
 
+        // The raw path segment (issue #1552): an index that names no current position still
+        // reaches the authorizer, and the handler then refuses it without mutating anything.
         ImposterRoute::StubByIndex(index) => {
-            base(imposter_action(method)).with_param("stubIndex", &index.to_string())
+            base(imposter_action(method)).with_param("stubIndex", &index)
         }
         ImposterRoute::StubById(id) => base(imposter_action(method)).with_param("stubId", &id),
 
@@ -423,8 +425,10 @@ mod tests {
         assert_eq!(classify(&Method::GET, "/nope"), None);
         assert_eq!(classify(&Method::GET, "/imposters/abc"), None);
         assert_eq!(classify(&Method::GET, "/imposters/4545/nope"), None);
-        // A non-numeric stub index is not a route.
-        assert_eq!(classify(&Method::GET, "/imposters/4545/stubs/xyz"), None);
+        // A non-numeric stub index *is* the stub-by-index route (issue #1552), so it is
+        // classified; an empty one is not.
+        assert!(classify(&Method::GET, "/imposters/4545/stubs/xyz").is_some());
+        assert_eq!(classify(&Method::GET, "/imposters/4545/stubs//x"), None);
     }
 
     #[test]
@@ -493,6 +497,26 @@ mod tests {
 
         let by_index = classify(&Method::DELETE, "/imposters/4545/stubs/7").unwrap();
         assert!(by_index.params.contains(&("stubIndex", "7".to_string())));
+
+        // Issue #1552: every segment names the stub-by-index route, so it is classified, with the
+        // raw segment as its parameter, on the path the router normalises (#1481, #1484).
+        for path in [
+            "/imposters/4545/stubs/01",
+            "/imposters/4545/stubs/01/",
+            "/IMPOSTERS/4545/STUBS/01",
+        ] {
+            let by_raw_index = classify(&Method::DELETE, path).unwrap();
+            assert_eq!(by_raw_index.action, actions::IMPOSTER_DELETE, "{path}");
+            assert!(
+                by_raw_index
+                    .params
+                    .contains(&("stubIndex", "01".to_string())),
+                "{path}"
+            );
+        }
+        let by_word = classify(&Method::PUT, "/imposters/4545/stubs/abc").unwrap();
+        assert_eq!(by_word.action, actions::IMPOSTER_WRITE);
+        assert!(by_word.params.contains(&("stubIndex", "abc".to_string())));
 
         let scenario = classify(&Method::PUT, "/imposters/4545/scenarios/checkout/state").unwrap();
         assert!(

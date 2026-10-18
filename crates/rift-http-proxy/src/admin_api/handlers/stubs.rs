@@ -10,7 +10,8 @@ use crate::admin_api::types::{
     json_response, make_stub_links,
 };
 use crate::extensions::stub_analysis::analyze_new_stub;
-use crate::imposter::{ImposterManager, Stub, resolve_stub_scripts};
+use crate::imposter::{ImposterError, ImposterManager, Stub, resolve_stub_scripts};
+use crate::response::{ErrorKind, error_response_typed};
 use crate::scripting::{validate_stub, validate_stubs};
 use bytes::Bytes;
 use http_body_util::Full;
@@ -217,13 +218,79 @@ pub async fn handle_get_all(
     }
 }
 
+/// Mountebank's answer to a stub index that is not a current array position, verbatim
+/// (`validateStubIndex`, `imposterController.js`). `PUT` and `DELETE` share the text.
+const STUB_INDEX_MESSAGE: &str = "'stubIndex' must be a valid integer, representing the array index position of the stub to replace";
+
+/// A stub index as Mountebank reads one: the canonical decimal of an existing position (issue
+/// #1552). Mountebank looks the raw path string up in the stub array, so only `"0"`, `"1"`, … up
+/// to the last position name a stub: `01`, `+1`, `-0`, `1.0`, an overflow and an out-of-range
+/// number do not. Its `length` quirk (the array's own property) is deliberately not reproduced.
+fn stub_position(raw: &str, len: usize) -> Option<usize> {
+    // Domain-optional parse: a segment that is not a decimal names no position.
+    let n: usize = raw.parse().ok()?;
+    (n.to_string() == raw && n < len).then_some(n)
+}
+
+/// Mountebank's `404` `bad data` for an index that names no current position.
+fn bad_stub_index() -> Response<Full<Bytes>> {
+    error_response_typed(
+        StatusCode::NOT_FOUND,
+        ErrorKind::BadData,
+        STUB_INDEX_MESSAGE,
+    )
+}
+
+/// Why an index-addressed request names no stub.
+#[derive(Debug)]
+enum IndexRefusal {
+    /// The imposter is absent: it keeps its own answer.
+    Imposter(ImposterError),
+    /// The index is not a current position.
+    NotAPosition,
+}
+
+impl From<IndexRefusal> for Response<Full<Bytes>> {
+    fn from(refusal: IndexRefusal) -> Self {
+        match refusal {
+            IndexRefusal::Imposter(e) => e.into(),
+            IndexRefusal::NotAPosition => bad_stub_index(),
+        }
+    }
+}
+
+/// Resolves `raw` against the imposter's current stubs, imposter first, as Mountebank checks:
+/// an absent imposter keeps its own answer, then an index that names no position is refused.
+fn resolve_stub_index(
+    manager: &ImposterManager,
+    port: u16,
+    raw: &str,
+) -> Result<usize, IndexRefusal> {
+    let imposter = manager.get_imposter(port).map_err(IndexRefusal::Imposter)?;
+    stub_position(raw, imposter.stub_count()).ok_or(IndexRefusal::NotAPosition)
+}
+
+/// An error from an index-addressed manager call. The index was resolved a moment earlier, so
+/// `StubIndexOutOfBounds` here means the stubs shrank in between: it is answered as the bad index
+/// it now is. Only these handlers do so; the shared mapping stays (`move_stub` and embedders).
+fn stub_index_error(err: ImposterError) -> Response<Full<Bytes>> {
+    match err {
+        ImposterError::StubIndexOutOfBounds(_) => bad_stub_index(),
+        other => other.into(),
+    }
+}
+
 /// GET /imposters/:port/stubs/:index - Get a specific stub
 pub async fn handle_get(
     port: u16,
-    index: usize,
+    raw_index: &str,
     base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
+    let index = match resolve_stub_index(&manager, port, raw_index) {
+        Ok(index) => index,
+        Err(refusal) => return refusal.into(),
+    };
     match manager.get_stub(port, index) {
         Ok(stub) => {
             let stub_with_links = StubWithLinks {
@@ -232,20 +299,26 @@ pub async fn handle_get(
             };
             json_response(StatusCode::OK, &stub_with_links)
         }
-        Err(e) => e.into(),
+        Err(e) => stub_index_error(e),
     }
 }
 
 /// PUT /imposters/:port/stubs/:index - Replace a specific stub
 pub async fn handle_replace(
     port: u16,
-    index: usize,
+    raw_index: &str,
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
+    // The index is checked before the body is read, as Mountebank checks it (issue #1552).
+    let index = match resolve_stub_index(&manager, port, raw_index) {
+        Ok(index) => index,
+        Err(refusal) => return refusal.into(),
+    };
+
     let body = match collect_body(req, &manager.body_guard()).await {
         Ok(b) => b,
         Err(e) => return e.into_response(),
@@ -289,20 +362,24 @@ pub async fn handle_replace(
 
     match manager.replace_stub(port, index, stub).await {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
-        Err(e) => e.into(),
+        Err(e) => stub_index_error(e),
     }
 }
 
 /// DELETE /imposters/:port/stubs/:index - Delete a specific stub
 pub async fn handle_delete(
     port: u16,
-    index: usize,
+    raw_index: &str,
     base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
+    let index = match resolve_stub_index(&manager, port, raw_index) {
+        Ok(index) => index,
+        Err(refusal) => return refusal.into(),
+    };
     match manager.delete_stub(port, index).await {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
-        Err(e) => e.into(),
+        Err(e) => stub_index_error(e),
     }
 }
 
@@ -381,5 +458,35 @@ pub async fn handle_delete_by_id(
     match manager.delete_stub_by_id(port, id).await {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
         Err(e) => e.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stub_position;
+
+    /// Issue #1552: only the canonical decimal of an existing position names a stub.
+    #[test]
+    fn stub_position_accepts_only_a_canonical_existing_position() {
+        assert_eq!(stub_position("0", 2), Some(0));
+        assert_eq!(stub_position("1", 2), Some(1));
+        for raw in [
+            "2",
+            "5",
+            "01",
+            "00",
+            "+1",
+            "-0",
+            "-1",
+            "1.0",
+            " 1",
+            "abc",
+            "length",
+            "",
+            "18446744073709551616",
+        ] {
+            assert_eq!(stub_position(raw, 2), None, "{raw:?}");
+        }
+        assert_eq!(stub_position("0", 0), None);
     }
 }

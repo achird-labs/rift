@@ -20,7 +20,7 @@
   },
   "baseline": {
     "src/controllers/configController.js": {"lines": [64, 64], "branches": [6, 6], "functions": [3, 4]},
-    "src/controllers/imposterController.js": {"lines": [316, 328], "branches": [44, 44], "functions": [17, 22]},
+    "src/controllers/imposterController.js": {"lines": [316, 328], "branches": [43, 43], "functions": [17, 22]},
     "src/controllers/impostersController.js": {"lines": [213, 215], "branches": [41, 44], "functions": [15, 16]},
     "src/models/behaviors.js": {"lines": [517, 553], "branches": [77, 89], "functions": [29, 29]},
     "src/models/behaviorsValidator.js": {"lines": [169, 186], "branches": [39, 48], "functions": [14, 14]},

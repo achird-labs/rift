@@ -418,6 +418,12 @@ curl -X POST http://localhost:2525/imposters/4545/stubs \
 
 Get a single stub by its array index, with its `_links`.
 
+An `{index}` must be the decimal position of an existing stub: `0`, `1`, and so on, never `01` or
+`+1`. On this route and on `PUT` and `DELETE` below, any other index is answered `404` with
+`type: "bad data"` and Mountebank's message, `'stubIndex' must be a valid integer, representing the
+array index position of the stub to replace`. An absent imposter is answered first, with its own
+`404`, and a `PUT` checks the index before it reads the body.
+
 ---
 
 ### PUT /imposters/{port}/stubs/{index}

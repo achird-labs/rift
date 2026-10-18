@@ -187,7 +187,8 @@ Feature: Error-response envelope — the standard {"errors":[{code,message}]} co
   # client's decoder (or never), with nothing server-side to correlate. Each row was probed with
   # curl against 0.18.0 first; status and `type` are the observed literals. `{port}` is this
   # scenario's imposter (admin/base, one stub at index 0), `{unknownPort}` a port with no imposter,
-  # `{newPort}` a fresh port for a create.
+  # `{newPort}` a fresh port for a create. A stub index that names no current position answers
+  # `bad data`, as Mountebank's `validateStubIndex` does (rift#1552).
   Scenario Outline: the admin door "<door>" refuses with <status> and the envelope
     Given a fresh imposter from fixture "admin/base"
     When the client sends admin "<method>" "<path>" with payload "<payload>"
@@ -208,10 +209,11 @@ Feature: Error-response envelope — the standard {"errors":[{code,message}]} co
       | add a stub to an unknown imposter      | POST   | /imposters/{unknownPort}/stubs            | admin-doors/stub-envelope           | 404    | no such resource |
       | add a stub without its envelope        | POST   | /imposters/{port}/stubs                   | admin-doors/bare-stub               | 400    | bad data         |
       | add a stub at an out-of-range index    | POST   | /imposters/{port}/stubs                   | admin-doors/stub-index-out-of-range | 400    | bad data         |
-      | get an unknown stub index              | GET    | /imposters/{port}/stubs/7                 | -                                   | 404    | no such resource |
-      | replace an unknown stub index          | PUT    | /imposters/{port}/stubs/7                 | admin-doors/bare-stub               | 404    | no such resource |
+      | get an unknown stub index              | GET    | /imposters/{port}/stubs/7                 | -                                   | 404    | bad data         |
+      | replace an unknown stub index          | PUT    | /imposters/{port}/stubs/7                 | admin-doors/bare-stub               | 404    | bad data         |
+      | replace a non-integer stub index       | PUT    | /imposters/{port}/stubs/abc               | admin-doors/bare-stub               | 404    | bad data         |
       | replace a stub with non-JSON           | PUT    | /imposters/{port}/stubs/0                 | admin-doors/not-json                | 400    | bad data         |
-      | delete an unknown stub index           | DELETE | /imposters/{port}/stubs/7                 | -                                   | 404    | no such resource |
+      | delete an unknown stub index           | DELETE | /imposters/{port}/stubs/7                 | -                                   | 404    | bad data         |
       | clear requests of an unknown imposter  | DELETE | /imposters/{unknownPort}/savedRequests    | -                                   | 404    | no such resource |
       | clear requests with a bad match clause | DELETE | /imposters/{port}/savedRequests?match=bad | -                                   | 400    | bad data         |
       | verify with non-JSON                   | POST   | /imposters/{port}/verify                  | admin-doors/not-json                | 400    | bad data         |

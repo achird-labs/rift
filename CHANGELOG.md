@@ -38,6 +38,11 @@ record.
   longer becomes an `Authorization` header, which Mountebank never sends either; use `injectHeaders`.
   `defaultForward` keeps its base path but no longer doubles a trailing `/`, and ignores a query or
   fragment on it.
+- **A stub index that is not an existing position now answers Mountebank's JSON `404`**
+  (`type: "bad data"`, "'stubIndex' must be a valid integer…") on `PUT`, `DELETE` and
+  `GET /imposters/:port/stubs/:index` (#1552). A non-integer used to answer the HTML "Cannot PUT"
+  page, `01` and `+1` were read as `1`, an out-of-range index answered `no such resource`, and a
+  `PUT` checked its body before its index.
 
 ### Testing
 

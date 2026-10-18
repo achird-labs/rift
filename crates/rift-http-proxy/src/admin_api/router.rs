@@ -27,8 +27,10 @@ pub(crate) enum ImposterRoute {
     Root,
     /// POST/PUT/GET /imposters/:port/stubs
     Stubs,
-    /// GET/PUT/DELETE /imposters/:port/stubs/:index
-    StubByIndex(usize),
+    /// GET/PUT/DELETE /imposters/:port/stubs/:index. The segment is kept as it came: any
+    /// non-empty segment names the route, as Express's `:stubIndex` does, and the handler answers
+    /// one that is not a current position with Mountebank's `bad data` (issue #1552).
+    StubByIndex(String),
     /// GET/PUT/DELETE /imposters/:port/stubs/by-id/:id (issue #202)
     StubById(String),
     /// DELETE /imposters/:port/savedRequests
@@ -60,7 +62,9 @@ impl ImposterRoute {
             [] => Some(ImposterRoute::Root),
             ["stubs"] => Some(ImposterRoute::Stubs),
             ["stubs", "by-id", id] => Some(ImposterRoute::StubById((*id).to_string())),
-            ["stubs", index_str] => index_str.parse().ok().map(ImposterRoute::StubByIndex),
+            ["stubs", index] if !index.is_empty() => {
+                Some(ImposterRoute::StubByIndex((*index).to_string()))
+            }
             ["savedRequests"] | ["requests"] => Some(ImposterRoute::SavedRequests),
             ["verify"] => Some(ImposterRoute::Verify),
             ["savedProxyResponses"] => Some(ImposterRoute::SavedProxyResponses),
@@ -622,12 +626,12 @@ async fn route_imposter(
 
         // /imposters/:port/stubs/:index
         (&Method::GET, ImposterRoute::StubByIndex(index)) => {
-            stubs::handle_get(port, index, base_url, manager).await
+            stubs::handle_get(port, &index, base_url, manager).await
         }
         (&Method::PUT, ImposterRoute::StubByIndex(index)) => {
             stubs::handle_replace(
                 port,
-                index,
+                &index,
                 req,
                 base_url,
                 manager,
@@ -637,7 +641,7 @@ async fn route_imposter(
             .await
         }
         (&Method::DELETE, ImposterRoute::StubByIndex(index)) => {
-            stubs::handle_delete(port, index, base_url, manager).await
+            stubs::handle_delete(port, &index, base_url, manager).await
         }
 
         // /imposters/:port/stubs/by-id/:id (issue #202)
@@ -747,11 +751,11 @@ mod tests {
         ));
         assert!(matches!(
             ImposterRoute::parse(&["stubs", "0"]),
-            Some(ImposterRoute::StubByIndex(0))
+            Some(ImposterRoute::StubByIndex(i)) if i == "0"
         ));
         assert!(matches!(
             ImposterRoute::parse(&["stubs", "5"]),
-            Some(ImposterRoute::StubByIndex(5))
+            Some(ImposterRoute::StubByIndex(i)) if i == "5"
         ));
         assert!(matches!(
             ImposterRoute::parse(&["savedRequests"]),
@@ -776,7 +780,43 @@ mod tests {
 
         // Invalid routes
         assert!(ImposterRoute::parse(&["unknown"]).is_none());
-        assert!(ImposterRoute::parse(&["stubs", "invalid"]).is_none());
+        assert!(ImposterRoute::parse(&["stubs", ""]).is_none());
+    }
+
+    /// Issue #1552: any non-empty segment names the stub-by-index route, kept verbatim for the
+    /// handler to judge, as Express's `:stubIndex` does; the `by-id` route still wins.
+    #[test]
+    fn any_stub_index_segment_names_the_route() {
+        for index in [
+            "invalid",
+            "abc",
+            "01",
+            "+1",
+            "-1",
+            "1.0",
+            "18446744073709551616",
+        ] {
+            assert!(
+                matches!(
+                    ImposterRoute::parse(&["stubs", index]),
+                    Some(ImposterRoute::StubByIndex(ref i)) if i == index
+                ),
+                "{index}"
+            );
+            assert_eq!(
+                template_of(&format!("/imposters/4545/stubs/{index}")),
+                Some("/imposters/{port}/stubs/{stubIndex}"),
+                "{index}"
+            );
+        }
+        assert!(matches!(
+            ImposterRoute::parse(&["stubs", "by-id", "x"]),
+            Some(ImposterRoute::StubById(ref id)) if id == "x"
+        ));
+        assert_eq!(
+            template_of("/imposters/4545/stubs/by-id/x"),
+            Some("/imposters/{port}/stubs/by-id/{stubId}")
+        );
     }
 
     #[test]
