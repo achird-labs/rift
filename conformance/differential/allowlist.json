@@ -66,6 +66,17 @@
     "rift": "true"
   },
   {
+    "id": "marker-x-rift-wait-error",
+    "case": "*",
+    "location": "step*.header.x-rift-wait-error",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "| `x-rift-wait-error: true` | A `wait` function threw; the body is Mountebank's `invalid wait injection` error (see [Behaviors](behaviors.md#how-a-wait-string-is-read)) |",
+    "reason": "Rift marker header x-rift-wait-error",
+    "mountebank": "(absent)",
+    "rift": "true"
+  },
+  {
     "id": "marker-x-rift-proxy-latency",
     "case": "*",
     "location": "step*.header.x-rift-proxy-latency",

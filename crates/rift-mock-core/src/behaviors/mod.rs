@@ -57,4 +57,4 @@ pub use transform::{
 };
 pub use types::{BehaviorProgram, BehaviorStep, CANONICAL_ORDER, ResponseBehaviors};
 #[allow(unused_imports)]
-pub use wait::WaitBehavior;
+pub use wait::{WaitBehavior, WaitScriptError};

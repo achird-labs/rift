@@ -314,6 +314,10 @@ for any in-flight response. So once `DELETE` returns you can immediately re-`POS
 same port without racing the old one: a pooled client connection gets a clean close and reconnects to
 the new imposter, never the deleted one's state.
 
+A request still in a `wait` behavior is cut off, as in Mountebank: its connection closes without a
+response (over HTTP/2, the whole connection closes), so the delete does not wait for it and the
+deleted imposter never answers it. Any other in-flight response is still finished.
+
 The handler reads no query parameters.
 
 With `--datadir`, the imposter's `<datadir>/<port>.json` is removed first. If that fails, the call
@@ -1046,7 +1050,7 @@ Six are Mountebank's own error types, so a client that already maps Mountebank e
 | `insufficient access` | 403 |
 | `no such resource` | 404 |
 | `resource conflict` | 409 |
-| `invalid injection` | 400 |
+| `invalid injection` | 400; 500 for a `wait` function that throws |
 
 The rest name doors Mountebank does not have:
 

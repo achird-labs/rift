@@ -10,8 +10,8 @@ use super::response::{apply_decorate_bounded, body_text};
 use super::types::{IsResponse, StatusValue};
 use crate::behaviors::{
     BehaviorProgram, BehaviorStep, CsvCache, Decorated, RequestContext, ResponseStatus,
-    ShellTransformError, Spliced, SplicedHeaders, apply_copy_spliced, apply_lookup_spliced,
-    apply_shell_transform,
+    ShellTransformError, Spliced, SplicedHeaders, WaitScriptError, apply_copy_spliced,
+    apply_lookup_spliced, apply_shell_transform,
 };
 use crate::util::build_response_with_headers;
 use bytes::Bytes;
@@ -85,8 +85,59 @@ pub(crate) enum BehaviorOutcome {
     /// contract (#269/#323): the response is served, but carries a signal header and is not the
     /// response the configuration asked for.
     Applied { parts: ServedParts, degraded: bool },
-    /// A behavior failed under `strictBehaviors` (#375): serve this error response instead.
+    /// A behavior failed under `strictBehaviors` (#375), or failed in a way Mountebank always
+    /// answers with an error, as a `wait` function that throws (#1616): serve this error response
+    /// instead.
     StrictFailure(Response<Full<Bytes>>),
+    /// The imposter was torn down while a `wait` was sleeping (issue #1616): close the connection
+    /// with no response, with [`aborted_response`].
+    Aborted,
+}
+
+/// The response for [`BehaviorOutcome::Aborted`]: a `TcpFaultKind::Empty` carrier, so the listener
+/// closes the connection without writing a byte (issue #1616), the one mechanism that already
+/// aborts a connection from a response. Over HTTP/1 the client sees the connection close before a
+/// response, as when Mountebank destroys an imposter's sockets; over HTTP/2 the imposter's
+/// listener aborts the whole connection, whose streams all belong to the deleted imposter, and
+/// the `/__rift/` gateway and the front door reset the one stream. An in-process caller sees the
+/// carrier, which [`tcp_fault_carrier`](super::fault_io::tcp_fault_carrier) names
+/// `EMPTY_RESPONSE`.
+pub(crate) fn aborted_response() -> Response<Full<Bytes>> {
+    let mut response = build_response_with_headers(
+        StatusCode::SERVICE_UNAVAILABLE,
+        [("x-rift-imposter", "true")],
+        Bytes::new(),
+    );
+    response
+        .extensions_mut()
+        .insert(super::fault_io::TcpFaultKind::Empty);
+    response
+}
+
+/// Mountebank's answer to a `wait` function that throws (issue #1616): `500` with
+/// `{"errors":[{"code":"invalid injection","message":"invalid wait injection","data":...}]}`, as
+/// its HTTP server writes an `InjectionError`. `data` is the thrown message, left out when the
+/// thrown value has none. `type` reuses the frozen `invalid injection` slug (#797); `source`,
+/// `name` and `stack` are left out, as on every Rift error envelope.
+fn wait_error_response(e: &WaitScriptError) -> Response<Full<Bytes>> {
+    let kind = crate::response::ErrorKind::InvalidInjection.slug();
+    let mut error = serde_json::json!({
+        "code": kind,
+        "type": kind,
+        "message": "invalid wait injection",
+    });
+    if let Some(data) = &e.data {
+        error["data"] = data.as_str().into();
+    }
+    build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [
+            ("x-rift-imposter", "true"),
+            ("x-rift-wait-error", "true"),
+            ("content-type", "application/json"),
+        ],
+        serde_json::json!({ "errors": [error] }).to_string(),
+    )
 }
 
 /// Everything the pipeline reads besides the response itself.
@@ -107,6 +158,9 @@ pub(crate) struct BehaviorRun<'a, SH> {
     /// The imposter's `defaultResponse`: it completes a response a `decorate` returned (issue
     /// #1567), as Mountebank completes every response it serves.
     pub default_response: Option<&'a IsResponse>,
+    /// The imposter's teardown signal, which cuts a sleeping `wait` off (issue #1616). `None` for
+    /// an imposter that was never started by a manager.
+    pub shutdown: Option<&'a tokio::sync::broadcast::Sender<()>>,
 }
 
 /// The response's headers as a script sees them in `MB_RESPONSE` (issue #1589): one string per
@@ -187,9 +241,29 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
         for step in &self.behaviors.steps {
             match step {
                 BehaviorStep::Wait(wait) => {
-                    let wait_ms = wait.get_duration_ms();
+                    // A wait function that throws is the response (issue #1616), with or without
+                    // `strictBehaviors`: Mountebank has no lenient mode for it.
+                    let wait_ms = match wait.get_duration_ms() {
+                        Ok(ms) => ms,
+                        Err(e) => return BehaviorOutcome::StrictFailure(wait_error_response(&e)),
+                    };
                     if wait_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                        let sleep = tokio::time::sleep(Duration::from_millis(wait_ms));
+                        // Raced against the imposter's teardown (issue #1616): a delete cuts the
+                        // wait off, as Mountebank destroys the socket, instead of answering from
+                        // the deleted imposter when the wait ends. Subscribed when the wait
+                        // starts, so a delete that lands between the request's arrival and this
+                        // point is missed: that request sleeps on, and the delete's bounded drain
+                        // (#596) still caps how long it waits for it.
+                        match self.shutdown.map(tokio::sync::broadcast::Sender::subscribe) {
+                            Some(mut shutdown) => tokio::select! {
+                                () = sleep => {}
+                                // `Err(Closed)` means the imposter's sender is gone, which is a
+                                // teardown too.
+                                _ = shutdown.recv() => return BehaviorOutcome::Aborted,
+                            },
+                            None => sleep.await,
+                        }
                     }
                 }
                 BehaviorStep::Copy(copy) => {
@@ -512,9 +586,84 @@ mod tests {
             script_timeout: Duration::from_secs(5),
             strict,
             default_response,
+            shutdown: None,
         }
         .apply(original())
         .await
+    }
+
+    /// Run `block` with the imposter teardown signal `shutdown` wired in.
+    async fn run_with_shutdown(
+        block: serde_json::Value,
+        shutdown: &tokio::sync::broadcast::Sender<()>,
+    ) -> BehaviorOutcome {
+        let behaviors = behaviors(block);
+        let uri: hyper::Uri = "/".parse().expect("fixture uri");
+        let request_headers: HashMap<String, Vec<String>> = HashMap::new();
+        let csv_cache = CsvCache::new();
+        BehaviorRun {
+            behaviors: &behaviors,
+            method: "GET",
+            uri: &uri,
+            request_headers: &request_headers,
+            request_body: None,
+            client_addr: None,
+            script_state_key: 4545,
+            stub: STUB,
+            csv_cache: &csv_cache,
+            script_timeout: Duration::from_secs(5),
+            strict: false,
+            default_response: None,
+            shutdown: Some(shutdown),
+        }
+        .apply(original())
+        .await
+    }
+
+    // Issue #1616: a teardown signal during a `wait` ends the pipeline with `Aborted`, and the
+    // response for it is the `Empty` carrier the listener turns into a closed connection. Paused
+    // time: the hour-long wait is never slept.
+    #[tokio::test(start_paused = true)]
+    async fn a_teardown_during_a_wait_aborts_the_response() {
+        let (shutdown, _keep) = tokio::sync::broadcast::channel(1);
+        let started = tokio::time::Instant::now();
+        // The step subscribes when it starts sleeping; the teardown comes 10 ms later.
+        let teardown = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            shutdown.send(()).expect("the wait is subscribed");
+            std::future::pending::<()>().await;
+        };
+        let outcome = tokio::select! {
+            outcome = run_with_shutdown(json!({ "wait": 3_600_000 }), &shutdown) => outcome,
+            () = teardown => unreachable!("the teardown future never completes"),
+        };
+        assert!(matches!(outcome, BehaviorOutcome::Aborted), "{outcome:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "aborted at the teardown, not after the wait: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            crate::imposter::fault_io::tcp_fault_carrier(&aborted_response()),
+            Some("EMPTY_RESPONSE")
+        );
+    }
+
+    // Issue #1616: with no teardown, a wait still runs to its end and the response is served.
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_without_a_teardown_is_served() {
+        let (shutdown, _keep) = tokio::sync::broadcast::channel(1);
+        let outcome = run_with_shutdown(json!({ "wait": 3_600_000 }), &shutdown).await;
+        assert!(
+            matches!(
+                outcome,
+                BehaviorOutcome::Applied {
+                    degraded: false,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
     }
 
     #[tokio::test]
@@ -528,7 +677,9 @@ mod tests {
                 // The printed response replaces the original, headers included (#1589).
                 assert!(parts.headers.is_empty(), "{:?}", parts.headers);
             }
-            BehaviorOutcome::StrictFailure(_) => panic!("nothing failed"),
+            BehaviorOutcome::StrictFailure(_) | BehaviorOutcome::Aborted => {
+                panic!("nothing failed")
+            }
         }
     }
 
@@ -542,7 +693,9 @@ mod tests {
                 assert_eq!(parts.headers["x-rift-shelltransform-error"], vec!["true"]);
                 assert_eq!(parts.headers["set-cookie"], vec!["a=1", "b=2"]);
             }
-            BehaviorOutcome::StrictFailure(_) => panic!("lenient mode must not fail the response"),
+            BehaviorOutcome::StrictFailure(_) | BehaviorOutcome::Aborted => {
+                panic!("lenient mode must not fail the response")
+            }
         }
     }
 
@@ -564,7 +717,9 @@ mod tests {
                     "{text}"
                 );
             }
-            BehaviorOutcome::Applied { .. } => panic!("strict mode must fail the response"),
+            BehaviorOutcome::Applied { .. } | BehaviorOutcome::Aborted => {
+                panic!("strict mode must fail the response")
+            }
         }
     }
 
@@ -581,14 +736,18 @@ mod tests {
                 assert_eq!(parts.headers["x-rift-decorate-error"], vec!["true"]);
                 assert_eq!(parts.headers["set-cookie"], vec!["a=1", "b=2"]);
             }
-            BehaviorOutcome::StrictFailure(_) => panic!("lenient mode must not fail the response"),
+            BehaviorOutcome::StrictFailure(_) | BehaviorOutcome::Aborted => {
+                panic!("lenient mode must not fail the response")
+            }
         }
         match run(block, true).await {
             BehaviorOutcome::StrictFailure(response) => {
                 assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
                 assert_eq!(response.headers()["x-rift-decorate-error"], "true");
             }
-            BehaviorOutcome::Applied { .. } => panic!("strict mode must fail the response"),
+            BehaviorOutcome::Applied { .. } | BehaviorOutcome::Aborted => {
+                panic!("strict mode must fail the response")
+            }
         }
     }
 
@@ -601,7 +760,9 @@ mod tests {
                 assert!(degraded);
                 assert_eq!(parts.body, "second");
             }
-            BehaviorOutcome::StrictFailure(_) => panic!("lenient mode must not fail"),
+            BehaviorOutcome::StrictFailure(_) | BehaviorOutcome::Aborted => {
+                panic!("lenient mode must not fail")
+            }
         }
         assert!(matches!(
             run(block, true).await,
@@ -612,7 +773,9 @@ mod tests {
     fn applied(outcome: BehaviorOutcome) -> (ServedParts, bool) {
         match outcome {
             BehaviorOutcome::Applied { parts, degraded } => (parts, degraded),
-            BehaviorOutcome::StrictFailure(_) => panic!("nothing should fail"),
+            BehaviorOutcome::StrictFailure(_) | BehaviorOutcome::Aborted => {
+                panic!("nothing should fail")
+            }
         }
     }
 
@@ -723,7 +886,9 @@ mod tests {
                     let text = String::from_utf8_lossy(&body);
                     assert!(text.contains(message), "{command}: {text}");
                 }
-                BehaviorOutcome::Applied { .. } => panic!("strict mode must fail: {command}"),
+                BehaviorOutcome::Applied { .. } | BehaviorOutcome::Aborted => {
+                    panic!("strict mode must fail: {command}")
+                }
             }
         }
     }
@@ -746,7 +911,9 @@ mod tests {
                 assert_eq!(parts.headers.len(), 1, "{:?}", parts.headers);
                 assert_eq!(parts.headers["X-Def"], vec!["d"]);
             }
-            BehaviorOutcome::StrictFailure(_) => panic!("nothing failed"),
+            BehaviorOutcome::StrictFailure(_) | BehaviorOutcome::Aborted => {
+                panic!("nothing failed")
+            }
         }
         // Without a default: the built-in 200, no headers.
         match run(block, false).await {
@@ -755,7 +922,9 @@ mod tests {
                 assert_eq!(parts.body, "ret");
                 assert!(parts.headers.is_empty(), "{:?}", parts.headers);
             }
-            BehaviorOutcome::StrictFailure(_) => panic!("nothing failed"),
+            BehaviorOutcome::StrictFailure(_) | BehaviorOutcome::Aborted => {
+                panic!("nothing failed")
+            }
         }
     }
 
@@ -777,7 +946,9 @@ mod tests {
                     assert!(!parts.headers.contains_key("X-A"), "{script}");
                     assert_eq!(parts.headers["set-cookie"], vec!["a=1", "b=2"], "{script}");
                 }
-                BehaviorOutcome::StrictFailure(_) => panic!("nothing failed: {script}"),
+                BehaviorOutcome::StrictFailure(_) | BehaviorOutcome::Aborted => {
+                    panic!("nothing failed: {script}")
+                }
             }
         }
     }

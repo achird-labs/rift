@@ -17,6 +17,7 @@ the response configures. Some responses carry one more marker:
 | `x-rift-proxy: true` | The response came from a `proxy` |
 | `x-rift-proxy-latency: <ms>` | A proxied response, with the upstream's time in milliseconds |
 | `x-rift-proxy-error: true` | The proxy could not reach the upstream (see [Proxy](proxy.md)) |
+| `x-rift-wait-error: true` | A `wait` function threw; the body is Mountebank's `invalid wait injection` error (see [Behaviors](behaviors.md#how-a-wait-string-is-read)) |
 | `x-rift-inject: true` | An `inject` response produced it |
 | `x-rift-default-response: true` | No stub matched and the imposter's `defaultResponse` answered |
 | `x-rift-no-match: true` | No stub matched and the imposter has no `defaultResponse` |
@@ -73,11 +74,6 @@ JavaScript stack trace in the body (its error handler fails while logging the re
 the undecorated response with `x-rift-decorate-error: true` instead, and `500` only under
 `strictBehaviors` — see [Behaviors](behaviors.md). A decorate that is not a function at all (`42`,
 a bare expression) answers `500` in Mountebank; Rift runs it as a Rhai script, so it may succeed.
-
-## A `wait` function that throws
-
-A `wait` function that throws answers `500` (`invalid wait injection`) in Mountebank. Rift waits
-100ms, logs a warning and serves the response. See [Behaviors](behaviors.md#how-a-wait-string-is-read).
 
 ## `shellTransform` arguments
 

@@ -174,10 +174,25 @@ A string `wait`, bare or in `{"inject": ...}`, is read the way Mountebank reads 
    parenthesised function.
 
 The result is read as Node's `setTimeout` reads a delay: a number is floored, and a result that is
-not a number, is negative, or is `NaN` or infinite means no delay. A function that throws falls
-back to 100ms and logs a warning; Mountebank answers `500` instead (see
-[Differences](differences.md#a-wait-function-that-throws)). A string `wait` needs
-`--allowInjection` in both engines, even a numeric one.
+not a number, is negative, or is `NaN` or infinite means no delay. A wait function that throws,
+or does not parse, answers `500` with `invalid wait injection`, as Mountebank does, with or without
+`strictBehaviors`:
+
+```json
+{
+  "errors": [{
+    "code": "invalid injection",
+    "type": "invalid injection",
+    "message": "invalid wait injection",
+    "data": "nosuch is not defined"
+  }]
+}
+```
+
+`data` is the thrown error's message, and is left out when the thrown value has none
+(`throw 'text'`). The response carries `x-rift-wait-error: true`. A build without the `javascript`
+feature cannot run the function: there a body the fallback does not recognise waits 100ms and logs
+a warning. A string `wait` needs `--allowInjection` in both engines, even a numeric one.
 
 ### Use Cases
 
