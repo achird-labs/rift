@@ -8,7 +8,8 @@ use super::types::{
     StubResponse,
 };
 use crate::behaviors::{
-    DecorateError, HasRepeatBehavior, RequestContext, apply_decorate, is_js_config_decorate,
+    DecorateError, HasRepeatBehavior, RequestContext, ResponseStatus, apply_decorate,
+    is_js_config_decorate,
 };
 // Fallback-only (issue #357 Item 6): the real JS `config =>` decorate path is Boa
 // (`execute_mountebank_config_decorate`); this textual transpiler is used only when the
@@ -70,7 +71,8 @@ pub fn create_response_preview(response: &StubResponse) -> DebugResponsePreview 
             };
             DebugResponsePreview {
                 response_type: "is".to_string(),
-                status_code: Some(is.status_code),
+                // A string status (issue #1558) has no code until it is served.
+                status_code: is.status_text.is_none().then_some(is.status_code),
                 headers,
                 body_preview,
             }
@@ -283,7 +285,8 @@ impl PreparedResponse {
     ) -> Option<PreparedResponse> {
         // Binary mode (base64 decode + its failure signaling) and every `_rift` serving effect and
         // `_behaviors` block stay on the slow path — the fast path serves only inert `is` bodies.
-        if is.mode != ResponseMode::Text || behaviors_present {
+        // A string `statusCode` (issue #1558) is read at serve time, and may answer 500.
+        if is.mode != ResponseMode::Text || behaviors_present || is.status_text.is_some() {
             return None;
         }
         if let Some(r) = rift
@@ -517,11 +520,11 @@ pub fn apply_js_or_rhai_decorate(
     script: &str,
     request: &RequestContext,
     body: &str,
-    status: u16,
+    status: &ResponseStatus,
     headers: &mut HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
-) -> Result<(String, u16), DecorateError> {
+) -> Result<(String, ResponseStatus), DecorateError> {
     // Only the JS engine call sites below consume `imposter_port`/`stub_id`; without the feature
     // the parameters would otherwise be unused.
     #[cfg(not(feature = "javascript"))]
@@ -670,12 +673,12 @@ pub async fn apply_decorate_bounded(
     script: String,
     request: RequestContext,
     body: String,
-    status: u16,
+    status: ResponseStatus,
     mut headers: HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<String>,
     timeout: std::time::Duration,
-) -> Result<(String, u16, HashMap<String, String>), DecorateError> {
+) -> Result<(String, ResponseStatus, HashMap<String, String>), DecorateError> {
     let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
     // Deliberately a plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987): the
     // decorate script has no `ctx.state`, so nothing on this thread can annotate. What makes that
@@ -690,7 +693,7 @@ pub async fn apply_decorate_bounded(
             &script,
             &request,
             &body,
-            status,
+            &status,
             &mut headers,
             imposter_port,
             stub_id.as_deref(),
@@ -740,14 +743,14 @@ mod tests {
             "config => { config.response.body = 'hello'; }",
             &decorate_req(),
             "original",
-            200,
+            &ResponseStatus::Code(200),
             &mut headers,
             test_port(),
             None,
         )
         .unwrap();
         assert_eq!(body, "hello");
-        assert_eq!(status, 200);
+        assert_eq!(status, ResponseStatus::Code(200));
     }
 
     #[test]
@@ -757,7 +760,7 @@ mod tests {
             "config => { config.response.body = config.request.body; }",
             &decorate_req(),
             "original",
-            200,
+            &ResponseStatus::Code(200),
             &mut headers,
             test_port(),
             None,
@@ -790,7 +793,7 @@ mod tests {
             &script,
             &decorate_req(),
             "original",
-            200,
+            &ResponseStatus::Code(200),
             &mut headers,
             test_port(),
             None,
@@ -828,7 +831,7 @@ mod tests {
             script,
             &request,
             "original",
-            200,
+            &ResponseStatus::Code(200),
             &mut headers,
             test_port(),
             None,
@@ -864,7 +867,7 @@ mod tests {
             script,
             &request,
             "original",
-            200,
+            &ResponseStatus::Code(200),
             &mut headers,
             test_port(),
             None,
@@ -881,13 +884,13 @@ mod tests {
             "config => { config.response.statusCode = 404; }",
             &decorate_req(),
             "original",
-            200,
+            &ResponseStatus::Code(200),
             &mut headers,
             test_port(),
             None,
         )
         .unwrap();
-        assert_eq!(status, 404);
+        assert_eq!(status, ResponseStatus::Code(404));
     }
 
     #[test]
@@ -899,7 +902,7 @@ mod tests {
             "function(config) { config.response.body = 'fn'; }",
             &decorate_req(),
             "original",
-            200,
+            &ResponseStatus::Code(200),
             &mut headers,
             test_port(),
             None,
@@ -917,7 +920,7 @@ mod tests {
             "config.response.body = 'bare';",
             &decorate_req(),
             "original",
-            200,
+            &ResponseStatus::Code(200),
             &mut headers,
             test_port(),
             None,
@@ -933,7 +936,7 @@ mod tests {
             "response.body = request.path;",
             &decorate_req(),
             "original",
-            200,
+            &ResponseStatus::Code(200),
             &mut headers,
             test_port(),
             None,
@@ -1267,7 +1270,7 @@ mod tests {
                 .to_string(),
             decorate_req(),
             "orig".to_string(),
-            200,
+            ResponseStatus::Code(200),
             std::collections::HashMap::new(),
             test_port(),
             None,
@@ -1276,7 +1279,7 @@ mod tests {
         .await
         .expect("fast decorate");
         assert_eq!(body, "orig-decorated");
-        assert_eq!(status, 200);
+        assert_eq!(status, ResponseStatus::Code(200));
     }
 
     // AC2: a runaway decorate yields DecorateError::Timeout near the deadline instead of
@@ -1290,7 +1293,7 @@ mod tests {
                 .to_string(),
             decorate_req(),
             "orig".to_string(),
-            200,
+            ResponseStatus::Code(200),
             std::collections::HashMap::new(),
             test_port(),
             None,

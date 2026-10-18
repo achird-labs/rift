@@ -94,6 +94,16 @@ record.
 
 ### Fixed
 
+- **`copy` and `lookup` tokens in `statusCode` are substituted** (#1558). A stub whose
+  `is.statusCode` (or `defaultResponse.statusCode`) is a string such as `"${code}"` used to be
+  refused with `400 invalid status code string`. It is now stored as written, substituted by
+  `copy`/`lookup`, and read at serve time as Mountebank reads it. A value that is not a status code
+  answers `500` `ERR_HTTP_INVALID_STATUS_CODE`, and so does a number outside 100–999 such as `99`,
+  which used to answer `500` `Response build error`. An empty string, or `0`, falls back to
+  `defaultResponse.statusCode`, then `200`. `decorate` and `shellTransform` see a string status as a
+  string. A numeric string still prints as a number, so stored imposters and their stub keys do not
+  change. `rift-lint`'s `E016` is now only for a status that is neither an integer nor a string, and
+  the new `W023` warns about a string that nothing rewrites and that always answers `500`.
 - **A `lookup` reads quoted CSV cells as Mountebank does** (#1566). A cell in double quotes may
   hold the delimiter and line breaks, and `""` is one `"`; Rift used to split on every delimiter and
   line break and serve the quotes. `csv.delimiter` may now be several characters (`"||"`), which

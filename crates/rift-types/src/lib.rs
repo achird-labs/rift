@@ -3,11 +3,13 @@
 //! Pure, serde-friendly data types with no behaviour, so they can be depended on by
 //! `rift-http-proxy`, `rift-lint`, and `rift-tui` without circular dependencies. The one
 //! exception is [`wire`], which carries the shared serde rules for how those types are spelled on
-//! the wire — it lives here for the same reason the types do: so no two crates can disagree.
+//! the wire — it lives here for the same reason the types do: so no two crates can disagree. So
+//! does [`status`], which reads a `statusCode` string the way Mountebank serves it.
 
 pub mod predicate;
 #[cfg(feature = "schema")]
 pub mod schema;
+pub mod status;
 pub mod wire;
 
 pub use predicate::{

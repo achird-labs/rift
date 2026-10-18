@@ -218,6 +218,30 @@ pub(crate) fn behaviors_block(generator: &mut SchemaGenerator) -> Schema {
     })
 }
 
+/// A response's `statusCode` as the imposter grammar reads it (issue #1558): a number within `u16`,
+/// or any string. It replaces the shared `rift_types::schema::StatusCode` here because the intercept
+/// rules still take only a numeric string; the definition keeps that name, so every `$ref` stays.
+pub(crate) struct ResponseStatusCode;
+
+impl schemars::JsonSchema for ResponseStatusCode {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "StatusCode".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "An HTTP status code, as a number or a string. A numeric string is that \
+                            status; any other string is kept as written, `copy` and `lookup` \
+                            substitute into it, and it is read when the response is written, as \
+                            Mountebank reads it: one that is not 100-999 answers 500.",
+            "anyOf": [
+                { "type": "integer", "minimum": 0, "maximum": 65535 },
+                { "type": "string" }
+            ]
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,7 +516,7 @@ mod tests {
             }]
         }));
         // `defaultResponse` reads `statusCode` like an `is` response does (#1377): a number or a
-        // numeric string, nothing else.
+        // string, which since #1558 is any string; a boolean is refused.
         valid(json!({ "protocol": "http", "defaultResponse": { "statusCode": 404 } }));
         let default_string =
             json!({ "protocol": "http", "defaultResponse": { "statusCode": "404" } });
@@ -502,11 +526,18 @@ mod tests {
             "the engine accepts it too"
         );
         let default_word =
-            json!({ "protocol": "http", "defaultResponse": { "statusCode": "abc" } });
-        refused(default_word.clone());
+            json!({ "protocol": "http", "defaultResponse": { "statusCode": "${code}" } });
+        valid(default_word.clone());
         assert!(
-            serde_json::from_value::<ImposterConfig>(default_word).is_err(),
-            "the engine refuses a non-numeric string too"
+            serde_json::from_value::<ImposterConfig>(default_word).is_ok(),
+            "the engine keeps a non-numeric string too"
+        );
+        valid(imposter(json!({ "is": { "statusCode": "${code}" } })));
+        let default_bool = json!({ "protocol": "http", "defaultResponse": { "statusCode": true } });
+        refused(default_bool.clone());
+        assert!(
+            serde_json::from_value::<ImposterConfig>(default_bool).is_err(),
+            "the engine refuses a boolean too"
         );
         // `repeat` is a u32 wherever it is read.
         valid(imposter(json!({ "is": {}, "repeat": 3 })));

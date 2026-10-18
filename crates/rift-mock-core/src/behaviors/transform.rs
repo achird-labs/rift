@@ -3,6 +3,32 @@
 use super::request::RequestContext;
 use std::collections::HashMap;
 
+/// A response's `statusCode` as a behavior script sees and leaves it (issue #1558): a number, or a
+/// string, which Mountebank keeps as written until it writes the response. A `statusCode` written
+/// as a token is a string to `decorate` and `shellTransform`, as in Mountebank.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResponseStatus {
+    Code(u16),
+    Text(String),
+}
+
+impl From<u16> for ResponseStatus {
+    fn from(code: u16) -> Self {
+        ResponseStatus::Code(code)
+    }
+}
+
+impl ResponseStatus {
+    /// The status as JSON: a number, or the string.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            ResponseStatus::Code(code) => (*code).into(),
+            ResponseStatus::Text(text) => text.as_str().into(),
+        }
+    }
+}
+
 /// Error executing a `decorate` behavior script.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DecorateError {
@@ -24,7 +50,7 @@ pub fn apply_shell_transform(
     command: &str,
     request: &RequestContext,
     response_body: &str,
-    response_status: u16,
+    response_status: &ResponseStatus,
 ) -> Result<String, std::io::Error> {
     use std::process::Command;
 
@@ -50,7 +76,7 @@ pub fn apply_shell_transform(
 
     // Serialize response to JSON for MB_RESPONSE
     let response_json = serde_json::json!({
-        "statusCode": response_status,
+        "statusCode": response_status.to_json(),
         "body": response_body,
     });
 
@@ -128,9 +154,9 @@ pub fn apply_decorate(
     script: &str,
     request: &RequestContext,
     response_body: &str,
-    response_status: u16,
+    response_status: &ResponseStatus,
     response_headers: &mut HashMap<String, String>,
-) -> Result<(String, u16), DecorateError> {
+) -> Result<(String, ResponseStatus), DecorateError> {
     use rhai::{Dynamic, Engine, Map, Scope};
 
     let engine = Engine::new();
@@ -159,7 +185,11 @@ pub fn apply_decorate(
 
     // Create response map for Rhai
     let mut resp_map = Map::new();
-    resp_map.insert("statusCode".into(), Dynamic::from(response_status as i64));
+    let status = match response_status {
+        ResponseStatus::Code(code) => Dynamic::from(i64::from(*code)),
+        ResponseStatus::Text(text) => Dynamic::from(text.clone()),
+    };
+    resp_map.insert("statusCode".into(), status);
     resp_map.insert("body".into(), Dynamic::from(response_body.to_string()));
 
     let mut resp_headers_map = Map::new();
@@ -182,11 +212,19 @@ pub fn apply_decorate(
                         .and_then(|v| v.clone().try_cast::<String>())
                         .unwrap_or_else(|| response_body.to_string());
 
+                    // A number or a string, as the script left it; anything else keeps the
+                    // status it was given.
                     let new_status = response
                         .get("statusCode")
-                        .and_then(|v| v.clone().try_cast::<i64>())
-                        .map(|s| s as u16)
-                        .unwrap_or(response_status);
+                        .and_then(|v| {
+                            v.clone()
+                                .try_cast::<i64>()
+                                .map(|s| ResponseStatus::Code(s as u16))
+                                .or_else(|| {
+                                    v.clone().try_cast::<String>().map(ResponseStatus::Text)
+                                })
+                        })
+                        .unwrap_or_else(|| response_status.clone());
 
                     // Update headers from response map
                     if let Some(headers) = response.get("headers")
@@ -201,7 +239,7 @@ pub fn apply_decorate(
 
                     Ok((new_body, new_status))
                 }
-                _ => Ok((response_body.to_string(), response_status)),
+                _ => Ok((response_body.to_string(), response_status.clone())),
             }
         }
         Err(e) => Err(DecorateError::Rhai(e.to_string())),
@@ -224,7 +262,12 @@ mod tests {
         };
 
         // Simple echo command that outputs a fixed string
-        let result = apply_shell_transform("echo 'hello world'", &request, "original body", 200);
+        let result = apply_shell_transform(
+            "echo 'hello world'",
+            &request,
+            "original body",
+            &ResponseStatus::Code(200),
+        );
         assert!(result.is_ok(), "Shell transform should succeed");
         assert!(
             result.unwrap().contains("hello world"),
@@ -241,8 +284,13 @@ mod tests {
             path: "/p".to_string(),
             ..Default::default()
         };
-        let output = apply_shell_transform("printf '%s' \"$MB_REQUEST\"", &request, "b", 200)
-            .expect("shell transform runs");
+        let output = apply_shell_transform(
+            "printf '%s' \"$MB_REQUEST\"",
+            &request,
+            "b",
+            &ResponseStatus::Code(200),
+        )
+        .expect("shell transform runs");
         let parsed: serde_json::Value = serde_json::from_str(&output).expect("MB_REQUEST is JSON");
         let fields = parsed.as_object().expect("an object");
         for key in ["requestFrom", "ip", "form"] {
@@ -267,7 +315,12 @@ mod tests {
         };
 
         // Command that outputs the MB_REQUEST env var (which contains JSON)
-        let result = apply_shell_transform("echo $MB_REQUEST", &request, "test body", 200);
+        let result = apply_shell_transform(
+            "echo $MB_REQUEST",
+            &request,
+            "test body",
+            &ResponseStatus::Code(200),
+        );
         assert!(result.is_ok(), "Shell transform should succeed");
 
         let output = result.unwrap();
@@ -290,8 +343,13 @@ mod tests {
             body: None,
             ..Default::default()
         };
-        let out = apply_shell_transform("printf '%s' \"$MB_REQUEST\"", &request, "x", 200)
-            .expect("shell transform runs");
+        let out = apply_shell_transform(
+            "printf '%s' \"$MB_REQUEST\"",
+            &request,
+            "x",
+            &ResponseStatus::Code(200),
+        )
+        .expect("shell transform runs");
         let parsed: serde_json::Value = serde_json::from_str(&out).expect("MB_REQUEST is JSON");
         assert_eq!(parsed["body"], serde_json::json!(""));
     }
@@ -315,11 +373,17 @@ mod tests {
             response.body = "modified body";
         "#;
 
-        let result = apply_decorate(script, &request, "original body", 200, &mut headers);
+        let result = apply_decorate(
+            script,
+            &request,
+            "original body",
+            &ResponseStatus::Code(200),
+            &mut headers,
+        );
         assert!(result.is_ok());
         let (body, status) = result.unwrap();
         assert_eq!(body, "modified body");
-        assert_eq!(status, 200);
+        assert_eq!(status, ResponseStatus::Code(200));
     }
 
     #[test]
@@ -340,11 +404,17 @@ mod tests {
             response.statusCode = 201;
         "#;
 
-        let result = apply_decorate(script, &request, "body", 200, &mut headers);
+        let result = apply_decorate(
+            script,
+            &request,
+            "body",
+            &ResponseStatus::Code(200),
+            &mut headers,
+        );
         assert!(result.is_ok());
         let (body, status) = result.unwrap();
         assert_eq!(body, "body");
-        assert_eq!(status, 201);
+        assert_eq!(status, ResponseStatus::Code(201));
     }
 
     #[test]
@@ -365,7 +435,13 @@ mod tests {
             response.body = "Method: " + request.method + ", Path: " + request.path;
         "#;
 
-        let result = apply_decorate(script, &request, "original", 200, &mut headers);
+        let result = apply_decorate(
+            script,
+            &request,
+            "original",
+            &ResponseStatus::Code(200),
+            &mut headers,
+        );
         assert!(result.is_ok());
         let (body, _status) = result.unwrap();
         assert!(body.contains("Method: POST"));
@@ -391,7 +467,13 @@ mod tests {
             response.headers["x-custom"] = "custom-value";
         "#;
 
-        let result = apply_decorate(script, &request, "body", 200, &mut headers);
+        let result = apply_decorate(
+            script,
+            &request,
+            "body",
+            &ResponseStatus::Code(200),
+            &mut headers,
+        );
         assert!(result.is_ok());
         assert_eq!(headers.get("x-custom"), Some(&"custom-value".to_string()));
     }
@@ -412,7 +494,13 @@ mod tests {
         // Invalid script with syntax error
         let script = "this is not valid rhai {{{";
 
-        let result = apply_decorate(script, &request, "body", 200, &mut headers);
+        let result = apply_decorate(
+            script,
+            &request,
+            "body",
+            &ResponseStatus::Code(200),
+            &mut headers,
+        );
         assert!(result.is_err());
         assert!(
             result

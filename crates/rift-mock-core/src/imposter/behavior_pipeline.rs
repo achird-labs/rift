@@ -8,8 +8,8 @@ use super::handler::SCRIPT_TIMEOUT_HEADER;
 use super::headers::StubRef;
 use super::response::apply_decorate_bounded;
 use crate::behaviors::{
-    BehaviorProgram, BehaviorStep, CsvCache, RequestContext, Spliced, SplicedHeaders,
-    apply_copy_spliced, apply_lookup_spliced, apply_shell_transform,
+    BehaviorProgram, BehaviorStep, CsvCache, RequestContext, ResponseStatus, Spliced,
+    SplicedHeaders, apply_copy_spliced, apply_lookup_spliced, apply_shell_transform,
 };
 use crate::util::build_response_with_headers;
 use bytes::Bytes;
@@ -27,7 +27,12 @@ use tracing::warn;
 /// `lookup` never expand a token that arrived inside request text.
 #[derive(Debug)]
 pub(crate) struct ServedParts {
+    /// The status, unless `status_text` is set.
     pub status: u16,
+    /// A `statusCode` string that is not a number (issue #1558): `copy` and `lookup` substitute
+    /// into it, `decorate` and `shellTransform` see it as a string, and it is read when the
+    /// response is written ([`super::status::resolve`]).
+    pub status_text: Option<Spliced>,
     /// Multi-value (issue #238): one entry per header name, one element per header line.
     pub headers: SplicedHeaders,
     pub body: Spliced,
@@ -70,9 +75,15 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
     pub(crate) async fn apply(&self, parts: ServedParts) -> BehaviorOutcome {
         let ServedParts {
             mut status,
+            mut status_text,
             mut headers,
             mut body,
         } = parts;
+        // What `decorate` and `shellTransform` see as `statusCode`, as Mountebank hands it over.
+        let script_status = |status: u16, text: &Option<Spliced>| match text {
+            Some(text) => ResponseStatus::Text(text.as_str().to_string()),
+            None => ResponseStatus::Code(status),
+        };
         let mut degraded = false;
 
         // Lazy request context (issue #561): only copy/lookup/decorate/shellTransform read
@@ -112,6 +123,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     apply_copy_spliced(
                         &mut body,
                         &mut headers,
+                        &mut status_text,
                         std::slice::from_ref(copy),
                         request_context.get_or_init(build_request_context),
                         self.stub,
@@ -121,6 +133,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     apply_lookup_spliced(
                         &mut body,
                         &mut headers,
+                        &mut status_text,
                         std::slice::from_ref(lookup),
                         request_context.get_or_init(build_request_context),
                         self.csv_cache,
@@ -164,7 +177,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                         decorate_script.clone(),
                         request_context.get_or_init(build_request_context).clone(),
                         body.as_str().to_string(),
-                        status,
+                        script_status(status, &status_text),
                         single,
                         self.script_state_key,
                         self.stub.id.map(str::to_owned),
@@ -176,7 +189,15 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                         // survive an arbitrary rewrite, and the script is configuration.
                         Ok((new_body, new_status, single)) => {
                             body = Spliced::authored(new_body);
-                            status = new_status;
+                            match new_status {
+                                ResponseStatus::Code(code) => {
+                                    status = code;
+                                    status_text = None;
+                                }
+                                ResponseStatus::Text(text) => {
+                                    status_text = Some(Spliced::authored(text));
+                                }
+                            }
                             // Restore the held-aside Set-Cookie lines unless the script set its
                             // own (case-insensitively) — a script override wins deterministically.
                             let script_set_cookie = single.keys().any(|k| is_set_cookie(k));
@@ -249,11 +270,12 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                         let cmd = cmd.clone();
                         let rc = request_context.get_or_init(build_request_context).clone();
                         let body_in = body.as_str().to_string();
+                        let status_in = script_status(status, &status_text);
                         // Plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987):
                         // `apply_shell_transform` is a fork/exec of an external command and never
                         // touches a `FlowStore`, so nothing here can annotate.
                         tokio::task::spawn_blocking(move || {
-                            apply_shell_transform(&cmd, &rc, &body_in, status)
+                            apply_shell_transform(&cmd, &rc, &body_in, &status_in)
                         })
                         .await
                         .unwrap_or_else(|e| {
@@ -301,6 +323,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
         BehaviorOutcome::Applied {
             parts: ServedParts {
                 status,
+                status_text,
                 headers,
                 body,
             },
@@ -328,6 +351,7 @@ mod tests {
     fn original() -> ServedParts {
         ServedParts {
             status: 201,
+            status_text: None,
             headers: crate::behaviors::authored_headers(HashMap::from([(
                 "set-cookie".to_string(),
                 vec!["a=1".to_string(), "b=2".to_string()],

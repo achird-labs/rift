@@ -103,6 +103,26 @@ Status codes can also be specified as strings for compatibility with some tools:
 { "is": { "statusCode": "404" } }
 ```
 
+`statusCode` may be any string, in `is` and in `defaultResponse`. A `copy` or `lookup` token in it
+is substituted, and the result is read as Node reads a status code when Mountebank writes the
+response: surrounding whitespace is ignored, a fraction is truncated and `0x194` is `404`. One
+outside 100–999 answers `500` with `{"errors": [{"code": "ERR_HTTP_INVALID_STATUS_CODE",
+"message": "Invalid status code: <value>", "name": "RangeError"}]}`, as Mountebank does, and so does
+a token no behavior filled in. Mountebank's error also carries the Node `stack`, which Rift leaves out. An empty string falls back to `defaultResponse.statusCode`, then
+`200`. A numeric string is stored as the number; any other string is stored as written.
+
+```json
+{
+  "is": { "statusCode": "${code}" },
+  "behaviors": [{ "copy": { "from": "path", "into": "${code}", "using": { "method": "regex", "selector": "\\d+" } } }]
+}
+```
+
+A `GET /404` against that stub answers `404`, and a `GET /abc` answers `500`. A token in
+`defaultResponse.statusCode` is never substituted, since Mountebank merges the default after the
+behaviors run. `rift-lint` warns (`W023`) about a string that no behavior rewrites and that is not a
+status code.
+
 ### Headers
 
 ```json

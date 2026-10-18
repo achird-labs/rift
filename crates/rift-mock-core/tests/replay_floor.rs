@@ -80,7 +80,11 @@ const LEDGER: &[(&str, &str, usize)] = &[
     (
         "crates/rift-mock-core/src/imposter/types.rs",
         "::custom",
-        13,
+        // #1558 `status_value` widens `statusCode` from a numeric string to any string, and hands
+        // every other value to the shared `deserialize_status_code` it replaces: its two `custom`s
+        // re-wrap that decoder's errors (a boolean, `null`, an out-of-range number) unchanged.
+        // Fewer refusals, none new.
+        15,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",
@@ -102,6 +106,9 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // `_mode: null` are refused exactly as before, so four more attributes, no new refusal.
         // #1519 `present_value` on `_proxyResponseTime` decodes any JSON value, `null` included:
         // one more attribute, no refusal.
+        // #1558 renames the three `present_status_code` and the flat form's
+        // `deserialize_optional_status_code` to `present_status_value`/`optional_status_value`,
+        // which accept any string: same count, fewer refusals.
         18,
     ),
     (

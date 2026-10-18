@@ -507,6 +507,7 @@ pub fn apply_lookup_behaviors(
     apply_lookup_spliced(
         &mut spliced_body,
         &mut spliced_headers,
+        &mut None,
         behaviors,
         request,
         csv_cache,
@@ -522,9 +523,13 @@ pub fn apply_lookup_behaviors(
 ///
 /// Each cell is recorded as inserted too, so a cell holding another column's token is served as
 /// written — regardless of the order the row's columns are visited in.
+///
+/// `status` is a `statusCode` string (issue #1558), scanned like a header value, as Mountebank's
+/// `globalObjectReplace` replaces tokens in every string field of the response.
 pub(crate) fn apply_lookup_spliced(
     body: &mut Spliced,
     headers: &mut SplicedHeaders,
+    status: &mut Option<Spliced>,
     behaviors: &[LookupBehavior],
     request: &RequestContext,
     csv_cache: &CsvCache,
@@ -556,7 +561,7 @@ pub(crate) fn apply_lookup_spliced(
                         format!("{into}['{column}']"),
                         format!("{into}[{column}]"),
                     ] {
-                        replace_lookup_token(body, headers, &full_token, &value, stub);
+                        replace_lookup_token(body, headers, status, &full_token, &value, stub);
                     }
                 }
             }
@@ -564,15 +569,21 @@ pub(crate) fn apply_lookup_spliced(
     }
 }
 
-/// Replace one lookup token with a CSV cell in the body and every header value.
+/// Replace one lookup token with a CSV cell in the body, the `statusCode` string and every header
+/// value.
 fn replace_lookup_token(
     body: &mut Spliced,
     headers: &mut SplicedHeaders,
+    status: &mut Option<Spliced>,
     full_token: &str,
     value: &str,
     stub: crate::imposter::headers::StubRef<'_>,
 ) {
     body.replace_token(full_token, value);
+    // Read as a number when the response is written; no header-value repair applies.
+    if let Some(status) = status {
+        status.replace_token(full_token, value);
+    }
     // Per value, so multi-value headers keep their multiplicity (RFC 7230 §3.2.2 forbids folding
     // Set-Cookie).
     //

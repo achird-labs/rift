@@ -133,7 +133,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E011 | JSONPath missing `selector` field | `"jsonpath": {}` |
 | E014 | Response has no response type — the engine refuses it with `unrecognized response type`, as Mountebank does. A `null`, or an empty `inject`/`fault` string, counts as absent | Neither `is`, `proxy`, `inject`, `fault`, `_rift` nor a flat `statusCode`/`headers`/`body`: `{}`, `{"fault": ""}`, only `behaviors` |
 | E015 | Invalid HTTP status code | `"statusCode": 999` |
-| E016 | `statusCode` is not a number or numeric string | `"statusCode": true` |
+| E016 | `statusCode` is neither an integer within 0-65535 nor a string. The engine refuses the file | `"statusCode": true` |
 | E017 | Empty header name | `"headers": {"": "value"}` |
 | E021 | Headers is not an object | `"headers": []` |
 | E022 | Proxy `to` URL does not start with `http://` or `https://` | `"to": "ftp://host/x"` |
@@ -196,6 +196,7 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | W020 | A proxy `predicateGenerators` entry with a key the engine does not read — it reads `inject`, `matches`, `caseSensitive`, `predicateOperator`, `except`, `jsonpath`, `xpath` and `ignore`. The imposter loads and the key is ignored when recording; the engine reports the same keys as `config_key_ignored` in `_rift.warnings` | `{"matchs": {"path": true}}` |
 | W021 | A proxy `predicateGenerators` `jsonpath` or `xpath` that is not an object with a string `selector` (and, for `xpath`, an `ns` object of strings), or an `ignore` that is not an object mapping a field to a key, an array of keys or a nested object. The engine records the whole body (or ignores the filter) instead | `"jsonpath": "$.id"` |
 | W022 | A top-level `fault` whose name the engine does not know. Names are case-sensitive, as in Mountebank. The imposter loads, and the fault is ignored at serve time, as in Mountebank: the stub answers an empty response completed by `defaultResponse`. The engine logs the same warning at load and reports it as `config_key_ignored` in `_rift.warnings`. An empty name is E014's | `{"fault": "NON_EXISTENT_FAULT"}` |
+| W023 | A `statusCode` string, in `is` or `defaultResponse`, that is not a status code and that no `copy`, `lookup` or `decorate` on the response rewrites. The engine keeps it, as Mountebank does, and reads it when it writes the response, so every request answers `500` `ERR_HTTP_INVALID_STATUS_CODE`. A `defaultResponse` status is never rewritten. A string Node reads as 100-999 (`" 404 "`, `"0x194"`) and the empty string are not flagged | `"statusCode": "${code}"` with no `copy` |
 | W018 | A `behaviors` array element that sets more than one behavior (`wait`, `lookup`, `copy`, `shellTransform`, `decorate`). The engine runs them in a fixed order — the order the object form uses — not the order they were written in, which Mountebank uses. Put each behavior in its own element, in the order it should run. `repeat` does not count: it is not a step | `"behaviors": [{"decorate": "…", "copy": {…}}]` |
 
 ### Info

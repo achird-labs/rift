@@ -22,6 +22,8 @@ schemars = { workspace = true, optional = true }
 [dev-dependencies]
 # The schema carriers' tests validate literal shapes against them (issue #1342).
 jsonschema.workspace = true
+# Issue #1558: the Node status reading is checked against generated inputs.
+proptest.workspace = true
 
 [features]
 # `JsonSchema` on the wire types, plus the hand-written `Predicate` schema (issue #1342).

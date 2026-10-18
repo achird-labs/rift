@@ -4007,6 +4007,7 @@ name = "rift-types"
 version = "0.1.0"
 dependencies = [
  "jsonschema",
+ "proptest",
  "schemars",
  "serde",
  "serde_json",

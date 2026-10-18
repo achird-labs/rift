@@ -43,6 +43,10 @@ pub(crate) const CARRIER_FIELDS: [&str; 2] = ["dataset", "sequencing"];
 pub(crate) const BODY_REWRITING_BEHAVIORS: [&str; 4] =
     ["decorate", "copy", "lookup", "shellTransform"];
 
+/// The behaviors that can rewrite a `statusCode` string before it is read (issue #1558): `copy` and
+/// `lookup` substitute tokens into it, and `decorate` can set it.
+const STATUS_REWRITING_BEHAVIORS: [&str; 3] = ["decorate", "copy", "lookup"];
+
 /// The canonical proxy `mode` spellings.
 pub(crate) const PROXY_MODES: [&str; 3] = ["proxyOnce", "proxyAlways", "proxyTransparent"];
 
@@ -543,6 +547,10 @@ pub fn validate_imposter(
 
     if let Some(default) = imposter.get("defaultResponse") {
         check_binary_body(file, default, "defaultResponse", result);
+        // Mountebank merges `defaultResponse` after the behaviors, so nothing rewrites its status.
+        if let Some(status) = default.get("statusCode") {
+            check_status_code(file, status, "defaultResponse.statusCode", result, false);
+        }
         if let Some(headers) = default.get("headers") {
             validate_headers(file, headers, "defaultResponse.headers", result);
         }
@@ -560,18 +568,19 @@ fn body_rewritten_before_decode(response: &Value) -> bool {
         .and_then(|rift| rift.get("templated"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let behavior_rewrites = |block: &Value| match block {
-        Value::Object(map) => BODY_REWRITING_BEHAVIORS
-            .iter()
-            .any(|k| map.contains_key(*k)),
+    templated || has_behavior(response, &BODY_REWRITING_BEHAVIORS)
+}
+
+/// Whether the response's `_behaviors` or `behaviors` block names any of `keys`.
+fn has_behavior(response: &Value, keys: &[&str]) -> bool {
+    let names = |block: &Value| match block {
+        Value::Object(map) => keys.iter().any(|k| map.contains_key(*k)),
         Value::Array(entries) => entries
             .iter()
-            .any(|e| BODY_REWRITING_BEHAVIORS.iter().any(|k| e.get(*k).is_some())),
+            .any(|e| keys.iter().any(|k| e.get(*k).is_some())),
         _ => false,
     };
-    templated
-        || response.get("_behaviors").is_some_and(behavior_rewrites)
-        || response.get("behaviors").is_some_and(behavior_rewrites)
+    response.get("_behaviors").is_some_and(names) || response.get("behaviors").is_some_and(names)
 }
 
 /// W015: a `_mode: "binary"` body the engine cannot decode (issue #1151).
@@ -1628,6 +1637,7 @@ pub fn validate_response(
             &format!("{location}.is"),
             result,
             body_rewritten_before_decode(response),
+            has_behavior(response, &STATUS_REWRITING_BEHAVIORS),
         );
     }
 
@@ -1869,6 +1879,70 @@ fn json_kind(value: &Value) -> &'static str {
     }
 }
 
+/// E015/E016/W023: a `statusCode`. A number or a numeric string is a status (E015 when it is not
+/// 100–599). Any other string is kept and read at serve time as Mountebank reads it (issue #1558):
+/// one Node cannot read as 100–999 answers 500 on every request, unless a behavior rewrites it
+/// first (W023). The empty string falls back to `defaultResponse`, then 200, so it is not flagged.
+/// Anything else is refused by the engine (E016).
+fn check_status_code(
+    file: &Path,
+    status: &Value,
+    location: &str,
+    result: &mut LintResult,
+    rewritten: bool,
+) {
+    let status_num = status
+        .as_u64()
+        .or_else(|| status.as_str().and_then(|s| s.parse().ok()));
+    match (status_num, status) {
+        (Some(code), _) if !(100..=599).contains(&code) => {
+            result.add_issue(
+                LintIssue::error(
+                    "E015",
+                    format!("Invalid HTTP status code: {code}"),
+                    file.to_path_buf(),
+                )
+                .with_location(location)
+                .with_suggestion("Use a valid HTTP status code (100-599)"),
+            );
+        }
+        (Some(_), _) => {}
+        (None, Value::String(text)) => {
+            if !rewritten
+                && !text.is_empty()
+                && rift_types::status::node_status_code(text).is_none()
+            {
+                result.add_issue(
+                    LintIssue::warning(
+                        "W023",
+                        format!(
+                            "statusCode '{text}' is not a status code and nothing rewrites it: \
+                             every request answers 500 ERR_HTTP_INVALID_STATUS_CODE, as in \
+                             Mountebank"
+                        ),
+                        file.to_path_buf(),
+                    )
+                    .with_location(location)
+                    .with_suggestion(
+                        "Write a number, or fill the token in with a `copy` or `lookup` behavior \
+                         on this response",
+                    ),
+                );
+            }
+        }
+        (None, _) => {
+            result.add_issue(
+                LintIssue::error(
+                    "E016",
+                    "statusCode must be an integer within 0-65535 or a string",
+                    file.to_path_buf(),
+                )
+                .with_location(location),
+            );
+        }
+    }
+}
+
 /// Validate an "is" response.
 pub fn validate_is_response(
     file: &Path,
@@ -1876,7 +1950,7 @@ pub fn validate_is_response(
     location: &str,
     result: &mut LintResult,
 ) {
-    check_is_response(file, is_response, location, result, false);
+    check_is_response(file, is_response, location, result, false, false);
 }
 
 /// [`validate_is_response`], told whether the body is rewritten before it is served (see
@@ -1888,36 +1962,16 @@ fn check_is_response(
     location: &str,
     result: &mut LintResult,
     body_rewritten: bool,
+    status_rewritten: bool,
 ) {
     if let Some(status) = is_response.get("statusCode") {
-        let status_num = status
-            .as_u64()
-            .or_else(|| status.as_str().and_then(|s| s.parse().ok()));
-
-        match status_num {
-            Some(code) if !(100..=599).contains(&code) => {
-                result.add_issue(
-                    LintIssue::error(
-                        "E015",
-                        format!("Invalid HTTP status code: {code}"),
-                        file.to_path_buf(),
-                    )
-                    .with_location(format!("{location}.statusCode"))
-                    .with_suggestion("Use a valid HTTP status code (100-599)"),
-                );
-            }
-            None => {
-                result.add_issue(
-                    LintIssue::error(
-                        "E016",
-                        "statusCode must be a number or numeric string",
-                        file.to_path_buf(),
-                    )
-                    .with_location(format!("{location}.statusCode")),
-                );
-            }
-            _ => {}
-        }
+        check_status_code(
+            file,
+            status,
+            &format!("{location}.statusCode"),
+            result,
+            status_rewritten,
+        );
     }
 
     if let Some(headers) = is_response.get("headers") {

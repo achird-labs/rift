@@ -505,6 +505,21 @@ mod tests {
         assert_eq!(stub_key(&one_resp("a"), 0), "~e2d14a5a1776f053#0");
     }
 
+    /// Issue #1558 widened `statusCode` to any string, but a numeric string still decodes to the
+    /// number it spells and prints as it did, so a stub admitted before keys as before.
+    #[test]
+    fn a_numeric_string_status_keys_as_before() {
+        let parse = |status: serde_json::Value| -> Stub {
+            serde_json::from_value(serde_json::json!({
+                "responses": [{"is": {"statusCode": status, "body": "a"}}]
+            }))
+            .expect("stub")
+        };
+        let key = stub_key(&parse(serde_json::json!("404")), 0);
+        assert_eq!(key, stub_key(&parse(serde_json::json!(404)), 0));
+        assert_eq!(key, "~03fc7688c0fb7a8d#0");
+    }
+
     /// Issue #1362: a stub's `name` is kept and hashed like any other field. An unnamed stub's key
     /// does not move; naming a stub is a content edit, so its key does.
     #[test]
