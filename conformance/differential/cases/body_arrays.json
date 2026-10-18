@@ -1,0 +1,3885 @@
+{
+  "source": "issue #1579 (Mountebank predicates.js predicateSatisfied/deepEquals over JSON body arrays, nulls and numbers)",
+  "cases": [
+    {
+      "name": "body arrays: B1 deepEquals arr-of-obj reordered",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "items": [
+                          {
+                            "id": 1
+                          },
+                          {
+                            "id": 2
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"items\": [{\"id\": 2}, {\"id\": 1}]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: B1c deepEquals arr-of-obj same order",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "items": [
+                          {
+                            "id": 1
+                          },
+                          {
+                            "id": 2
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"items\": [{\"id\": 1}, {\"id\": 2}]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: B2 equals subset array",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "tags": [
+                          "a",
+                          "c"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"tags\": [\"a\", \"b\", \"c\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: B3 equals obj vs top-level array of obj",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "name": "x"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[{\"name\": \"y\"}, {\"name\": \"x\"}]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: B4 deepEquals null vs \"null\"",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "a": null,
+                        "b": "1"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": \"null\", \"b\": \"1\"}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals scalar arr reordered",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "t": [
+                          "b",
+                          "a"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"a\", \"b\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals nested scalar arr reordered",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "m": [
+                          [
+                            2,
+                            1
+                          ],
+                          [
+                            3
+                          ]
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"m\": [[3], [1, 2]]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals arr dup multiset",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "t": [
+                          "a",
+                          "a",
+                          "b"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"a\", \"b\", \"b\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals arr length differs",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "t": [
+                          "a"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"a\", \"a\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals top-level arr reordered",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": [
+                        1,
+                        2
+                      ]
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[2, 1]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals null vs \"\"",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "a": null
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": \"\"}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals null vs null",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "a": null
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": null}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals \"null\" vs null",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "a": "null"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": null}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals num vs str",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "a": 1
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": \"1\"}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals bool vs str",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "a": true
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": \"true\"}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals null vs null",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": null
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": null}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals null vs \"\"",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": null
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": \"\"}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals null vs \"null\"",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": null
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": \"null\"}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals null vs missing",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": null
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"b\": 1}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals num vs str",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": 1
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": \"1\"}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals array exact",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "t": [
+                          "a",
+                          "b"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"a\", \"b\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals array reordered",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "t": [
+                          "b",
+                          "a"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"a\", \"b\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals array superset expected",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "t": [
+                          "a",
+                          "z"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"a\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals scalar vs array field",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "t": "b"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"a\", \"b\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals arr-of-obj subset",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "i": [
+                          {
+                            "id": 2
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"i\": [{\"id\": 1, \"x\": 0}, {\"id\": 2, \"x\": 1}]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals obj vs nested array of obj",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "i": {
+                          "id": 2
+                        }
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"i\": [{\"id\": 1}, {\"id\": 2}]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals top-level arr subset",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": [
+                        "b"
+                      ]
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[\"a\", \"b\"]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: contains on array field",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "contains": {
+                      "body": {
+                        "t": "b"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"xa\", \"xbx\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: contains array expected",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "contains": {
+                      "body": {
+                        "t": [
+                          "b"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"xa\", \"xbx\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: startsWith on array field",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "body": {
+                        "t": "xb"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"xa\", \"xbx\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: startsWith arr-of-obj top",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "body": {
+                        "n": "ab"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[{\"n\": \"zz\"}, {\"n\": \"abc\"}]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: matches on array field",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "body": {
+                        "t": "^b$"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"a\", \"b\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals keyCaseSensitive false arr",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "T": [
+                          "a"
+                        ]
+                      }
+                    },
+                    "keyCaseSensitive": false
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"A\", \"b\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals caseSensitive arr reordered",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "t": [
+                          "B",
+                          "a"
+                        ]
+                      }
+                    },
+                    "caseSensitive": true
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"a\", \"B\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals except arr reordered",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "t": [
+                          "b",
+                          "a"
+                        ]
+                      }
+                    },
+                    "except": "x"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"ax\", \"bx\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals except subset",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "t": [
+                          "a"
+                        ]
+                      }
+                    },
+                    "except": "x"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"ax\", \"bx\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals arr-of-obj with null reordered",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": [
+                        {
+                          "a": null
+                        },
+                        {
+                          "a": "z"
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[{\"a\": \"z\"}, {\"a\": \"null\"}]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals stringified-json body? (string expected)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": "[1,2]"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[1,2]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals top arr prefix ['a'] vs [a,b]",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": [
+                        "a"
+                      ]
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[\"a\", \"b\"]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals top arr [b,a] vs [a,b]",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": [
+                        "b",
+                        "a"
+                      ]
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[\"a\", \"b\"]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals top arr [a,b] vs [b,a]",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": [
+                        "a",
+                        "b"
+                      ]
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[\"b\", \"a\"]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals top arr [a,b] vs [a,b]",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": [
+                        "a",
+                        "b"
+                      ]
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[\"a\", \"b\"]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals 1 vs 1.0",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "a": 1
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\":1.0}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals 1 vs 1.0",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": 1
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\":1.0}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals obj key order in arr",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": [
+                        {
+                          "a": 1,
+                          "b": 2
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[{\"b\": 2, \"a\": 1}]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals arr of obj extra key",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "i": [
+                          {
+                            "id": 1
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"i\": [{\"id\": 1, \"x\": 2}]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals case-insens arr reorder",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "t": [
+                          "B",
+                          "a"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"b\", \"A\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals mixed obj/str arr reorder",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "t": [
+                          {
+                            "k": 1
+                          },
+                          "s"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"s\", {\"k\": 1}]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: contains false positive across elements",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "contains": {
+                      "body": {
+                        "t": "a\",\"b"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"a\", \"b\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals arr-of-obj vs obj (nested key)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "i": {
+                          "id": 3
+                        }
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"i\": [{\"id\": 1}, {\"id\": 2}]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: not equals scalar vs array field",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "not": {
+                      "equals": {
+                        "body": {
+                          "t": "b"
+                        }
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"a\", \"b\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals empty arr expected",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "t": []
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"a\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals empty arr vs empty",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "t": []
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": []}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals null elem in arr",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "t": [
+                          null
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [null, \"a\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals 2 stubs-ish: jsonpath arr",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": [
+                        "2",
+                        "1"
+                      ]
+                    },
+                    "jsonpath": {
+                      "selector": "$.t[*]"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [1, 2]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals jsonpath multi",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "2"
+                    },
+                    "jsonpath": {
+                      "selector": "$.t[*]"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [1, 2]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals nested json-string leaf",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "a": {
+                          "b": "1"
+                        }
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": \"{\\\"b\\\": 1}\"}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals nested json-string leaf",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": {
+                          "b": "1"
+                        }
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": \"{\\\"b\\\": 1}\"}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals whole body json-string (expected obj)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "b": "1"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"b\": 1}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals 1e2 vs 100",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "a": 100
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\":1e2}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals 0.1 vs 0.10",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": "0.1"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\":0.10}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: matches arr expected subset",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "body": {
+                        "t": [
+                          "^a",
+                          "^b"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"bz\", \"az\", \"c\"]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: endsWith on arr-of-obj field",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "endsWith": {
+                      "body": {
+                        "i": {
+                          "n": "z"
+                        }
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"i\": [{\"n\": \"az\"}]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals arr-of-obj top reordered",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": [
+                        {
+                          "id": 1
+                        },
+                        {
+                          "id": 2
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[{\"id\": 2}, {\"id\": 1}]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals '' vs null actual",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": ""
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": null}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals obj vs top arr, 2 fields split",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": "1",
+                        "b": "2"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[{\"a\": \"1\"}, {\"b\": \"2\"}]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals top obj vs top arr scalars",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": "1"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[\"x\"]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals obj vs top arr of obj",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "name": "x"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "[{\"name\": \"x\"}]"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals empty-string leaf vs missing field",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": ""
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"b\": 1}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals empty-string leaf vs non-JSON body",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": ""
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "plain text"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: matches null leaf as the text null",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "body": {
+                        "a": "^null$"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": null}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: matches empty pattern-anchors vs null leaf",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "body": {
+                        "a": "^$"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\": null}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals nested container vs missing field",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": {
+                          "b": ""
+                        }
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"c\": 1}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals 1e2 vs 100",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "a": 100
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"a\":1e2}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals object vs array field, element match left off",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "o": {
+                          "k": "v",
+                          "x": "y"
+                        }
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"o\": [{\"k\": \"v\"}, {\"x\": \"y\"}]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: deepEquals nested arrays of objects reordered",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "g": [
+                          {
+                            "m": [
+                              3,
+                              1
+                            ]
+                          },
+                          {
+                            "m": [
+                              2
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"g\": [{\"m\": [2]}, {\"m\": [1, 3]}]}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: equals subset inside JSON-string array field",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": {
+                        "s": [
+                          "b"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"s\": \"[\\\"a\\\", \\\"b\\\"]\"}"
+        }
+      ]
+    },
+    {
+      "name": "body arrays: first of several deepEquals stubs differing only in array order",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "t": [
+                          "z"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "s0"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "t": [
+                          "c",
+                          "b",
+                          "a"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "s1"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "t": [
+                          "a",
+                          "b",
+                          "c"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "s2"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "t": [
+                          "b",
+                          "a",
+                          "c"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "s3"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"b\", \"c\", \"a\"]}"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/p",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"t\": [\"z\"]}"
+        }
+      ]
+    }
+  ]
+}

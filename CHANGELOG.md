@@ -27,6 +27,16 @@ record.
 
 ### Changed
 
+- **JSON-body arrays match as in Mountebank** (#1579). `deepEquals` ignores array order;
+  `equals`, `contains`, `startsWith`, `endsWith` and `matches` treat an expected array as a subset
+  and match a scalar or object against any element of an array, including a top-level array of
+  objects; `deepEquals` treats `null` as `"null"`; numbers compare as JavaScript prints them (`1.0`
+  is `1`). Predicates that relied on the old behaviour can stop matching: `equals {"a": null}` no
+  longer matches `""`, a string `contains` no longer matches across array elements, and `deepEquals`
+  no longer reads a JSON string nested in the body as the object it encodes. A missing body field
+  now reads as `""`, so `equals {"a": ""}` matches a body without `a`. A top-level expected array
+  is compared by position, so `equals [1, 2]` matches `[1, 2, 3]`.
+
 - **A repeated query or form key is matched value by value, as in Mountebank** (#1553):
   `equals {"key": "first"}` now matches `?key=first&key=second`, an array expectation needs each of
   its elements among the values (any order, other values allowed), `deepEquals` needs the same

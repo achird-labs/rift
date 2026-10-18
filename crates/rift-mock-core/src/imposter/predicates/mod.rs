@@ -492,6 +492,8 @@ where
                 &apply_except,
                 str_equals,
                 kind == LeafKind::DeepEquals,
+                case_sensitive,
+                NullLeaf::Identity,
                 request_from,
                 client_ip,
                 form,
@@ -508,6 +510,8 @@ where
                 &apply_except,
                 |expected, actual| str_contains(actual, expected),
                 false,
+                case_sensitive,
+                NullLeaf::NoText,
                 request_from,
                 client_ip,
                 form,
@@ -524,6 +528,8 @@ where
                 &apply_except,
                 |expected, actual| str_starts_with(actual, expected),
                 false,
+                case_sensitive,
+                NullLeaf::NoText,
                 request_from,
                 client_ip,
                 form,
@@ -540,6 +546,8 @@ where
                 &apply_except,
                 |expected, actual| str_ends_with(actual, expected),
                 false,
+                case_sensitive,
+                NullLeaf::NoText,
                 request_from,
                 client_ip,
                 form,
@@ -707,7 +715,7 @@ mod fields;
 pub(crate) mod json;
 pub(crate) mod regex_cache;
 use fields::{check_predicate_fields, check_predicate_fields_regex};
-use json::check_exists_predicate;
+use json::{NullLeaf, check_exists_predicate};
 use regex_cache::cached_regex;
 
 /// Whether a case-insensitive XPath predicate with this operator selects from the name-folded
@@ -2899,7 +2907,7 @@ mod tests {
         );
     }
 
-    // Fix #105: except is now applied to leaf values inside compare_json_recursive,
+    // Fix #105: except is now applied to leaf values inside the JSON comparators (`Satisfy`),
     // not to the raw JSON string before parsing.
     #[test]
     fn test_except_applied_to_leaf_values_not_raw_json() {
@@ -3003,9 +3011,10 @@ mod tests {
         );
     }
 
-    // Fix #100: equals array matching now checks array length
+    // Fix #100 made this a miss; Mountebank compares a top-level expected array by position, so a
+    // longer actual whose prefix matches is a hit (issue #1579, verified against 2.9.5).
     #[test]
-    fn test_equals_body_array_rejects_longer_actual() {
+    fn test_equals_body_array_matches_a_longer_actual_by_prefix() {
         let fields: HashMap<String, serde_json::Value> =
             [("body".to_string(), json!([1, 2]))].into_iter().collect();
 
@@ -3026,8 +3035,8 @@ mod tests {
         .unwrap();
 
         assert!(
-            !result,
-            "equals [1, 2] should not match [1, 2, 3] — arrays have different lengths"
+            result,
+            "equals [1, 2] matches [1, 2, 3] by position, as in Mountebank"
         );
     }
 

@@ -136,6 +136,34 @@ Works on all request fields - useful for strict matching:
 }
 ```
 
+### Arrays in a JSON body
+
+When a `body` expectation is an object or array, the body is read as JSON and compared field by
+field, by the rules of Mountebank's `predicates.js`:
+
+- **`equals`, `contains`, `startsWith`, `endsWith` and `matches`** treat an expected array as a
+  subset, in any order: `{"tags": ["a", "c"]}` matches `{"tags": ["a", "b", "c"]}`, and `[]`
+  matches any array. A superset (`["a", "z"]` against `["a"]`) does not match.
+- A scalar or object expectation against an array matches **any element**: `{"tags": "b"}` matches
+  `{"tags": ["a", "b"]}`, and `{"items": {"id": 2}}` matches `{"items": [{"id": 1}, {"id": 2}]}`.
+  `contains` compares each element on its own, so `{"tags": "a\",\"b"}` does not match across
+  `["a", "b"]`, and `not` of such a predicate does not match either.
+- An object expectation against an **array of objects** matches when one element satisfies the
+  whole object: `{"name": "x"}` matches `[{"name": "y"}, {"name": "x"}]`, but
+  `{"a": "1", "b": "2"}` does not match `[{"a": "1"}, {"b": "2"}]`.
+- A **top-level** expected array (`"body": ["a"]`) is compared by position after sorting the
+  expected side, so `["a"]` matches `["a", "b"]` and `["b", "a"]` matches `["a", "b"]`, but
+  `["a", "b"]` does not match `["b", "a"]`. The same holds for a field whose value is a string
+  holding a JSON array.
+- **`deepEquals`** compares arrays as multisets: `{"items": [{"id": 1}, {"id": 2}]}` matches the
+  reordered `{"items": [{"id": 2}, {"id": 1}]}`, but `["a", "a", "b"]` does not match
+  `["a", "b", "b"]`, and the lengths must agree. A JSON string nested in the body stays a string.
+- **`null`** equals only `null` under `equals` (not `""`, not `"null"`, not a missing field), and
+  equals `"null"` under `deepEquals`, which compares every value as text. A field the body does not
+  have reads as `""`, so `{"equals": {"body": {"a": ""}}}` matches `{}`.
+- **Numbers** compare as JavaScript prints them: `1.0` is `1` and `1e2` is `100`, under every
+  operator.
+
 ### contains
 
 Partial match - checks if value is contained:
