@@ -112,9 +112,17 @@ the array `["1", "2"]`.
 ## An array expectation against a single value
 
 An array expectation is not matched against a single string by its characters:
-`{"equals": {"query": {"key": ["f"]}}}` does not match `?key=first`. Mountebank reads the array's
-indexes as fields of the string, so `["f"]` matches there because the first character of `first`
-is `f`. A value that is a JSON array (a body, or `?key=["f"]`) is still compared as one.
+`{"equals": {"query": {"key": ["f"]}}}` does not match `?key=first`, and
+`{"equals": {"body": {"t": ["a"]}}}` does not match `{"t": "abc"}` or `{"t": "a"}`. Mountebank
+reads the array's indexes as fields of the string, so `["f"]` matches there because the first
+character of `first` is `f`. A value that is a JSON array (a body, a body field holding one, or
+`?key=["f"]`) is still compared as one. See [Arrays in a JSON body](predicates.md#arrays-in-a-json-body).
+
+## `contains` against a JSON `null`
+
+`{"contains": {"body": {"a": "x"}}}` against `{"a": null}` does not match in Rift. Mountebank
+answers `500` (`TypeError: Cannot read properties of null`), as it does for `startsWith` and
+`endsWith`; a `null` has no text to search.
 
 ## `except` with an `xpath` or `jsonpath` selector
 

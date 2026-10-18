@@ -426,12 +426,6 @@
       "note": "an object body is served with Content-Type: application/json, so the client parses it"
     },
     {
-      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should support treating the body as a JSON object for predicate matching",
-      "class": "bug",
-      "issue": "#1579",
-      "note": "deepEquals on an array is order-sensitive and equals on an array is not a subset match"
-    },
-    {
       "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should handle JSON null values",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#a-json-body-gets-content-type-applicationjson",
@@ -440,8 +434,8 @@
     {
       "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should support predicate from gzipped request (issue #499)",
       "class": "bug",
-      "issue": "#1579",
-      "note": "the same predicates as the JSON-object test, on a gzipped body"
+      "issue": "#1584",
+      "note": "a valid gzip request body is not decoded, so no body predicate matches; the array predicates themselves match since #1579"
     },
     {
       "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should support adding single stub without restarting the imposter",
@@ -468,12 +462,6 @@
       "note": "an object body is served with Content-Type: application/json, so the client parses it"
     },
     {
-      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should support treating the body as a JSON object for predicate matching",
-      "class": "bug",
-      "issue": "#1579",
-      "note": "deepEquals on an array is order-sensitive and equals on an array is not a subset match"
-    },
-    {
       "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should handle JSON null values",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#a-json-body-gets-content-type-applicationjson",
@@ -482,8 +470,8 @@
     {
       "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should support predicate from gzipped request (issue #499)",
       "class": "bug",
-      "issue": "#1579",
-      "note": "the same predicates as the JSON-object test, on a gzipped body"
+      "issue": "#1584",
+      "note": "a valid gzip request body is not decoded, so no body predicate matches; the array predicates themselves match since #1579"
     },
     {
       "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should support adding single stub without restarting the imposter",

@@ -8,6 +8,23 @@
 //! `rift-mock-core` as `pub(crate)`, which is exactly why the intercept path drifted (issue #933
 //! for `body`, this issue for `statusCode`/`headers`).
 
+/// A number as JS `String()` writes it, which is what Mountebank serves and compares (issues
+/// #1358, #1579): an integral float below 1e21 loses its fraction (`124.0` → `124`, `1e2` → `100`,
+/// `-0.0` → `0`); anything else keeps `serde_json`'s spelling.
+#[must_use]
+pub fn js_number_string(n: &serde_json::Number) -> String {
+    match n.as_f64() {
+        Some(f) if n.is_f64() && f.is_finite() && f.fract() == 0.0 && f.abs() < 1e21 => {
+            if f == 0.0 {
+                "0".to_string()
+            } else {
+                format!("{f:.0}")
+            }
+        }
+        _ => n.to_string(),
+    }
+}
+
 /// Serde for multi-value headers (issue #238). Accepts the Mountebank-style `"k": "v"` *and*
 /// `"k": ["v1", "v2"]` on the wire; serializes a single value back as a plain string and multiple
 /// values as an array, so existing single-value consumers are unaffected.
@@ -77,27 +94,11 @@ pub mod multi_value_headers {
         Bool(bool),
     }
 
-    /// A number as JS `String()` writes it, which is what Mountebank serves (issue #1358): an
-    /// integral float below 1e21 loses its fraction (`124.0` → `124`, `-0.0` → `0`); anything
-    /// else keeps `serde_json`'s spelling.
-    fn js_number_string(n: &serde_json::Number) -> String {
-        match n.as_f64() {
-            Some(f) if n.is_f64() && f.is_finite() && f.fract() == 0.0 && f.abs() < 1e21 => {
-                if f == 0.0 {
-                    "0".to_string()
-                } else {
-                    format!("{f:.0}")
-                }
-            }
-            _ => n.to_string(),
-        }
-    }
-
     impl Scalar {
         fn into_string(self) -> String {
             match self {
                 Scalar::Str(s) => s,
-                Scalar::Num(n) => js_number_string(&n),
+                Scalar::Num(n) => super::js_number_string(&n),
                 Scalar::Bool(b) => b.to_string(),
             }
         }

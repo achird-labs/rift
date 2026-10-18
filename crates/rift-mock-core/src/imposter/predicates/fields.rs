@@ -3,7 +3,7 @@
 
 use super::RequestHeaders;
 use super::arrays::{deep_equals_array, satisfied_by_array};
-use super::json::compare_json_recursive;
+use super::json::{DeepEquals, NullLeaf, Satisfy, leaf_text};
 use super::regex_cache::cached_regex;
 use crate::util::MultiValueMap;
 use std::collections::HashMap;
@@ -52,6 +52,9 @@ pub(crate) fn check_predicate_fields<F, H>(
     apply_except: &impl for<'a> Fn(&'a str) -> std::borrow::Cow<'a, str>,
     compare: F,
     deep_equals: bool,
+    // `caseSensitive`, and how the operator reads a JSON `null` leaf (issue #1579).
+    case_sensitive: bool,
+    nulls: NullLeaf,
     request_from: Option<&str>,
     client_ip: Option<&str>,
     // Concretely `FastMap` — see `predicate_matches_inner`.
@@ -83,34 +86,38 @@ where
         }
     };
 
-    // Helper: check a string field against expected value.
-    // When expected is an object/array, parse actual as JSON and compare recursively (Mountebank compat).
-    // except is applied to leaf values inside compare_json_recursive, not to raw JSON.
-    // When expected is a string/primitive, compare directly with except applied.
+    // Mountebank's two comparators (issue #1579): `deepEquals` canonicalises both sides and
+    // compares them whole; the other operators walk the expectation (`predicateSatisfied`).
+    // `except` is applied to leaf values, not to the raw JSON text (#105).
+    let satisfy = Satisfy {
+        compare: &compare,
+        except: apply_except,
+        key_case_sensitive,
+        case_sensitive,
+        nulls,
+    };
+    let deep = DeepEquals {
+        except: apply_except,
+        case_sensitive,
+        key_case_sensitive,
+    };
+
+    // Helper: check a string field against expected value. An object or array expectation reads
+    // the field as JSON; a scalar one compares its text.
     let check_string_field = |expected: &serde_json::Value,
                               actual: &str,
                               pre_parsed: &crate::behaviors::LazyJson<'_>|
      -> bool {
         match expected {
-            serde_json::Value::Object(_) | serde_json::Value::Array(_) => compare_json_recursive(
-                expected,
-                actual,
-                &compare,
-                deep_equals,
-                key_case_sensitive,
-                &apply_except,
-                pre_parsed.get(),
-            ),
-            _ => {
-                let actual = apply_except(actual);
-                match expected {
-                    serde_json::Value::String(s) => compare(s, &actual),
-                    _ => {
-                        let expected_str = expected.to_string();
-                        compare(&expected_str, &actual)
-                    }
-                }
+            serde_json::Value::Object(_) | serde_json::Value::Array(_) if deep_equals => {
+                deep.text(expected, actual, pre_parsed.get())
             }
+            serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                satisfy.text(expected, actual, pre_parsed.get())
+            }
+            // `forceStrings`: a null expectation is the text `null` under deepEquals.
+            _ if deep_equals => compare(&leaf_text(expected), &apply_except(actual)),
+            _ => satisfy.leaf_against_text(expected, actual),
         }
     };
 
@@ -221,46 +228,30 @@ where
         }
     };
 
-    // Helper: check a field against expected value for regex matching.
-    // When expected is an object/array, recurse via compare_json_recursive with regex comparator.
-    // When expected is a string, build regex and match directly.
+    // Helper: check a field against expected value for regex matching, through Mountebank's
+    // `predicateSatisfied` like the other operators (issue #1579). A pattern is a leaf's text
+    // (`leaf_text` borrows a string pattern, issue #294); the regex is compiled once via
+    // `cached_regex`.
+    let regex_compare = |pattern: &str, actual: &str| -> bool {
+        build_regex(pattern).is_some_and(|re| re.is_match(actual))
+    };
+    let satisfy = Satisfy {
+        compare: &regex_compare,
+        except: apply_except,
+        key_case_sensitive,
+        // `matches` normalizes its patterns case sensitively, so they are ordered as written.
+        case_sensitive: true,
+        nulls: NullLeaf::Text,
+    };
     let check_regex_field = |expected: &serde_json::Value,
                              actual: &str,
                              pre_parsed: &crate::behaviors::LazyJson<'_>|
      -> bool {
         match expected {
             serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                let regex_compare = |pattern: &str, actual: &str| -> bool {
-                    match build_regex(pattern) {
-                        Some(re) => re.is_match(actual),
-                        None => false,
-                    }
-                };
-                compare_json_recursive(
-                    expected,
-                    actual,
-                    &regex_compare,
-                    false,
-                    key_case_sensitive,
-                    &apply_except,
-                    pre_parsed.get(),
-                )
+                satisfy.text(expected, actual, pre_parsed.get())
             }
-            _ => {
-                // Borrow a String value's pattern directly; only a non-string value needs an owned
-                // render (issue #294). The regex itself is compiled-once via `cached_regex`.
-                let pattern: std::borrow::Cow<str> = match expected {
-                    serde_json::Value::String(s) => std::borrow::Cow::Borrowed(s.as_str()),
-                    _ => std::borrow::Cow::Owned(expected.to_string()),
-                };
-                match build_regex(&pattern) {
-                    Some(re) => {
-                        let actual = apply_except(actual);
-                        re.is_match(&actual)
-                    }
-                    None => false,
-                }
-            }
+            _ => satisfy.leaf_against_text(expected, actual),
         }
     };
 
