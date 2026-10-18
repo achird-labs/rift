@@ -292,7 +292,7 @@ mod tests {
         let every_variant = [
             ImposterRoute::Root,
             ImposterRoute::Stubs,
-            ImposterRoute::StubByIndex(0),
+            ImposterRoute::StubByIndex(String::new()),
             ImposterRoute::StubById(String::new()),
             ImposterRoute::SavedRequests,
             ImposterRoute::Verify,

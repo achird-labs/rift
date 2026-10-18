@@ -381,7 +381,7 @@ async fn get_stub_by_index() {
 /// Ported from tests/compatibility/features/admin_api.feature: "Get stubs for non-existent imposter
 /// returns 404", "Get stub for non-existent imposter returns 404" and "Get stub with out-of-range
 /// index returns 404". Mountebank 2.9.1 has no `GET .../stubs` route, so these are Rift-only and
-/// left the differential harness.
+/// left the differential harness. A bad index answers as `PUT`/`DELETE` do there (issue #1552).
 #[tokio::test]
 async fn stub_reads_answer_404_for_a_missing_imposter_or_index() {
     let rift = Rift::start().await;
@@ -403,15 +403,24 @@ async fn stub_reads_answer_404_for_a_missing_imposter_or_index() {
             "stubs": [{"responses": [{"is": {"statusCode": 200}}]}]
         }))
         .await;
-    let resp = rift
-        .client
-        .get(rift.admin_url(&format!("/imposters/{port}/stubs/99")))
-        .send()
-        .await
-        .expect("GET out-of-range stub");
-    assert_eq!(resp.status().as_u16(), 404);
-    let v: Value = resp.json().await.expect("error JSON");
-    assert_eq!(v["errors"][0]["message"], "Stub index 99 not found");
+    // Every index that is not a current position answers as PUT and DELETE do, with Mountebank's
+    // `bad data` (issue #1552): out of range, non-integer and non-canonical alike.
+    for index in ["99", "5", "abc", "01", "+1"] {
+        let resp = rift
+            .client
+            .get(rift.admin_url(&format!("/imposters/{port}/stubs/{index}")))
+            .send()
+            .await
+            .expect("GET stub by a bad index");
+        assert_eq!(resp.status().as_u16(), 404, "{index}");
+        let v: Value = resp.json().await.expect("error JSON");
+        assert_eq!(v["errors"][0]["type"], "bad data", "{index}");
+        assert_eq!(
+            v["errors"][0]["message"],
+            "'stubIndex' must be a valid integer, representing the array index position of the stub to replace",
+            "{index}"
+        );
+    }
 }
 
 // =============================================================================

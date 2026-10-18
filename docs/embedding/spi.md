@@ -635,7 +635,9 @@ copy of the stub-field list goes stale when a field is added, and then rejects v
 also needs "what requests exist", so it can check that every one is handled on one side.
 `rift_http_proxy::admin_api::ADMIN_ROUTES` is that set: every `(method, path)` pair the admin
 listener dispatches, with each path parameter named as `classify` reports it in
-`AuthzTarget::params` (`{port}`, `{space}`, `{stubIndex}`, `{stubId}`, `{scenario}`, `{key}`). The two
+`AuthzTarget::params` (`{port}`, `{space}`, `{stubIndex}`, `{stubId}`, `{scenario}`, `{key}`).
+`{stubIndex}` is the raw path segment: any non-empty one names the route, including `abc` or `01`,
+which the handler then refuses with a `404` without changing anything. The two
 event streams (`/events` and `/imposters/{port}/savedRequests/stream`) are `GET` only.
 
 ```rust
