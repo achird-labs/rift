@@ -4,6 +4,9 @@
 //! computes `statusCode |= 0` — JavaScript's `ToInt32(Number(value))` — and throws
 //! `ERR_HTTP_INVALID_STATUS_CODE` for a result outside 100–999. The engine resolves a string status
 //! with these functions, and `rift-lint` judges one with them, so the two cannot disagree.
+//!
+//! [`js_parse_int`] lives here for the same reason: Mountebank reads a `wait` string with
+//! `parseInt` (issue #1588), and the engine and `rift-lint` both need that one reading.
 
 /// The status Node serves for `text`, or `None` when Node refuses it (outside 100–999).
 ///
@@ -44,6 +47,28 @@ pub fn js_string_to_number(text: &str) -> f64 {
     }
     // The grammar check above leaves only what Rust's float parser reads the same way.
     unsigned.parse::<f64>().map_or(f64::NAN, |n| sign * n)
+}
+
+/// JavaScript's `parseInt(text)` with no radix: leading whitespace is skipped, then an optional
+/// sign, then a `0x`/`0X` prefix selects hexadecimal; the result is the longest run of digits that
+/// follows, and anything after it is ignored (`"800ms"` is `800`, `"1e3"` is `1`). No digits at all
+/// is `NaN`.
+#[must_use]
+pub fn js_parse_int(text: &str) -> f64 {
+    let rest = text.trim_start_matches(is_js_whitespace);
+    let (sign, rest) = match rest.as_bytes().first() {
+        Some(b'+') => (1.0, &rest[1..]),
+        Some(b'-') => (-1.0, &rest[1..]),
+        _ => (1.0, rest),
+    };
+    let (radix, digits) = match rest.get(..2) {
+        Some("0x" | "0X") => (16, &rest[2..]),
+        _ => (10, rest),
+    };
+    let run = digits
+        .find(|c: char| !c.is_digit(radix))
+        .map_or(digits, |end| &digits[..end]);
+    sign * radix_integer(run, radix)
 }
 
 /// JavaScript's `ToInt32`: `NaN` and the infinities are `0`; anything else is truncated and wrapped
@@ -123,6 +148,42 @@ fn is_unsigned_decimal_literal(text: &str) -> bool {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// `parseInt(s)` as Node 22 prints it, for each input (issue #1588).
+    #[test]
+    fn parse_int_matches_node_for_a_table_of_inputs() {
+        for (text, node) in [
+            ("1000", 1000.0),
+            ("800ms", 800.0),
+            ("  \t\n250  ", 250.0),
+            ("\u{feff}7", 7.0),
+            ("+12", 12.0),
+            ("-5", -5.0),
+            ("0x10", 16.0),
+            ("0XfF", 255.0),
+            ("-0x10", -16.0),
+            ("1e3", 1.0),
+            ("12.9", 12.0),
+            ("007", 7.0),
+            ("4294967296", 4_294_967_296.0),
+        ] {
+            assert_eq!(js_parse_int(text), node, "parseInt({text:?})");
+        }
+        for text in [
+            "",
+            "  ",
+            "ms",
+            "-",
+            "+",
+            "0x",
+            "0xg",
+            ".5",
+            "() => 1000",
+            "function () { return 1; }",
+        ] {
+            assert!(js_parse_int(text).is_nan(), "parseInt({text:?}) is NaN");
+        }
+    }
 
     /// `Number(s) | 0` as Node 22 prints it, for each input.
     #[test]

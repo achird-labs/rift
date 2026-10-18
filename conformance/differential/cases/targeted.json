@@ -9108,6 +9108,130 @@
           "path": "/fn"
         }
       ]
+    },
+    {
+      "name": "targeted: a wait string is read with parseInt, else called as any function expression (#1588)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/arrow"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "arrow"
+                    },
+                    "behaviors": [
+                      {
+                        "wait": "() => 0"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/number"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "number"
+                    },
+                    "behaviors": [
+                      {
+                        "wait": "0"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/unit"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "unit"
+                    },
+                    "behaviors": [
+                      {
+                        "wait": "0ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/paren"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "paren"
+                    },
+                    "behaviors": [
+                      {
+                        "wait": "(function () { return 0; })"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/arrow"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/number"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/unit"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/paren"
+        }
+      ]
     }
   ]
 }

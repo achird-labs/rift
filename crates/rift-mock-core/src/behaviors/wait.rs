@@ -94,18 +94,22 @@ impl WaitBehavior {
         }
     }
 
-    /// Execute a JavaScript wait function.
+    /// Compute the delay for a string `wait` the way Mountebank does (`behaviors.js` `wait`,
+    /// issue #1588): `parseInt` first, so `"1000"` is 1000 and `"800ms"` is 800; otherwise the
+    /// source is called as a function, `(<source>)()`, so any callable expression works — a
+    /// `function`, an arrow, `async`, a parenthesised function. There is deliberately no prefix
+    /// check: Mountebank has none, and a copied routing rule is what kept arrows at 100 ms.
     ///
-    /// When the `javascript` feature is enabled, this actually runs the function body on a
-    /// bounded Boa `Context` (issue #355 Item 6) rather than pattern-matching a couple of known
-    /// `Math.random` shapes — so any wait function (not just the ones the old regex recognized)
-    /// produces a correct value. Without the feature, falls back to the original regex-based
-    /// extraction so `--no-default-features` still builds and works for the common patterns.
+    /// When the `javascript` feature is enabled the call runs on a bounded Boa `Context` (issue
+    /// #355 Item 6). Without it, a regex fallback reads the common shapes, so
+    /// `--no-default-features` still builds and works for them. `None` means the source threw or
+    /// could not be evaluated, and the caller takes its logged 100 ms fallback.
     fn execute_js_wait_function(js_func: &str) -> Option<u64> {
-        let trimmed = js_func.trim();
-        if !trimmed.starts_with("function") {
-            return None;
+        let parsed = rift_types::status::js_parse_int(js_func);
+        if !parsed.is_nan() {
+            return Some(node_timeout_ms(parsed));
         }
+        let trimmed = js_func.trim();
 
         #[cfg(feature = "javascript")]
         {
@@ -117,9 +121,9 @@ impl WaitBehavior {
         Self::execute_js_wait_function_regex(trimmed)
     }
 
-    /// Run the wait function body for real on a bounded Boa `Context`: evaluate `(<js_func>)()`
-    /// and coerce the numeric result to a `u64` delay: a non-finite result is refused, a negative one
-    /// clamps to 0, the rest is floored, and a result beyond `u64` saturates to `u64::MAX`.
+    /// Run the wait function for real on a bounded Boa `Context`: evaluate `(<js_func>)()` and
+    /// read the result as Node's `setTimeout` reads a delay ([`node_timeout_ms`]). `None` only for
+    /// a script that throws or does not parse, including a throw while converting the result.
     #[cfg(feature = "javascript")]
     fn execute_js_wait_function_boa(js_func: &str) -> Option<u64> {
         let mut context = crate::scripting::bounded_js_context();
@@ -133,25 +137,20 @@ impl WaitBehavior {
                 return None;
             }
         };
+        // `to_number` fails only when the conversion itself throws (a `valueOf` that throws, a
+        // Symbol) — a throw, like the one above. A string, a Promise or `undefined` converts to
+        // `NaN`, which is a value, not an error.
         let n = match result.to_number(&mut context) {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!(
                     target: "rift::script",
-                    "wait function returned a non-numeric result: {e}"
+                    "wait function result could not be converted to a number: {e}"
                 );
                 return None;
             }
         };
-        if !n.is_finite() {
-            tracing::warn!(
-                target: "rift::script",
-                "wait function returned a non-finite number: {n}"
-            );
-            return None;
-        }
-        let ms = n.max(0.0).floor() as u64;
-        Some(ms)
+        Some(node_timeout_ms(n))
     }
 
     /// Regex-based fallback: used as the sole path when the `javascript` feature is disabled,
@@ -193,7 +192,15 @@ impl WaitBehavior {
             // fallback (issue #490).
             body.trim().parse::<i64>().ok().map(|v| v.max(0) as u64)
         } else {
-            None
+            // An arrow with a bare numeric body, `() => 250` (issue #1588). Only a literal: this
+            // fallback is not a JavaScript parser.
+            let (_, body) = trimmed.split_once("=>")?;
+            body.trim()
+                .trim_end_matches(';')
+                .trim_end()
+                .parse::<i64>()
+                .ok()
+                .map(|v| v.max(0) as u64)
         }
     }
 
@@ -223,6 +230,19 @@ impl WaitBehavior {
             Some(min_val)
         }
     }
+}
+
+/// A computed delay as Node's `setTimeout` reads it (issue #1588): `NaN`, an infinity or a
+/// negative number is no delay; anything else is floored, and a value beyond `u64` saturates to
+/// `u64::MAX`, which `tokio::time::sleep` saturates to its far-future deadline (issue #1612).
+fn node_timeout_ms(n: f64) -> u64 {
+    if !n.is_finite() || n <= 0.0 {
+        return 0;
+    }
+    // Finite and positive: `as` floors and saturates at `u64::MAX`, which is the intent.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let ms = n.floor() as u64;
+    ms
 }
 
 /// Extract function body from JavaScript function string: the text between the first `{` and the
@@ -486,9 +506,7 @@ mod tests {
         assert!(matches!(solo, Some(d) if (50..=100).contains(&d)));
 
         // Issue #490: a negative literal clamps to 0 in the regex fallback (was: parse::<u64> ->
-        // None -> 100ms), matching the Boa path. The huge-value cap is applied at the
-        // get_duration_ms boundary (see wait_function_huge_value_is_capped, which exercises this
-        // fallback under --no-default-features).
+        // None -> 100ms), matching the Boa path.
         assert_eq!(
             WaitBehavior::execute_js_wait_function_regex("function() { return -5; }"),
             Some(0)
@@ -504,14 +522,101 @@ mod tests {
         assert_eq!(wait.get_duration_ms(), 42);
     }
 
-    // Issue #1384: a non-finite result is unusable, so it takes the loud 100ms fallback rather than
-    // saturating to `u64::MAX` (`Infinity`) or flooring to 0 (`NaN`).
+    // Issue #1384, revised by #1588: a non-finite result does not saturate to `u64::MAX`
+    // (`Infinity`). Node's `setTimeout` reads it as no delay, so Rift does too — it used to take
+    // the 100 ms fallback. Boa only: the regex fallback does not read these names.
+    #[cfg(feature = "javascript")]
     #[test]
-    fn a_non_finite_wait_falls_back_to_100ms() {
+    fn a_non_finite_wait_is_no_delay() {
         for body in ["Infinity", "NaN"] {
             let wait = WaitBehavior::Function(format!("function() {{ return {body}; }}"));
-            assert_eq!(wait.get_duration_ms(), 100, "return {body}");
+            assert_eq!(wait.get_duration_ms(), 0, "return {body}");
         }
+    }
+
+    // Issue #1588: Mountebank's `wait` reads a string with `parseInt` first and only otherwise
+    // evaluates `(<source>)()`, so any callable expression is a wait function — not just one that
+    // starts with `function`. Measured as the computed delay, never as wall time.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn any_callable_wait_expression_runs_like_mountebank() {
+        for (source, ms) in [
+            ("() => 1000", 1000),
+            ("() => { return 700; }", 700),
+            ("x => 300", 300),
+            ("(function(){return 400})", 400),
+            ("async function () { return 5; }", 0),
+            ("function () { return '500'; }", 500),
+        ] {
+            let wait = WaitBehavior::Function(source.to_string());
+            assert_eq!(wait.get_duration_ms(), ms, "wait {source:?}");
+        }
+    }
+
+    // Issue #1588: Node's `setTimeout` treats a non-number, `NaN`, an infinity or a negative delay
+    // as no delay, so these answer at once in Mountebank instead of taking the 100 ms fallback.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn a_non_numeric_wait_result_is_no_delay() {
+        for source in [
+            "async () => 1",
+            "() => 'abc'",
+            "() => -5",
+            "function() { return Infinity; }",
+            "function() { return -Infinity; }",
+            "function() { return NaN; }",
+            "() => undefined",
+        ] {
+            let wait = WaitBehavior::Function(source.to_string());
+            assert_eq!(wait.get_duration_ms(), 0, "wait {source:?}");
+        }
+    }
+
+    // Issue #1588: a throwing wait function still takes the 100 ms fallback, and is not mistaken
+    // for a non-numeric result (no delay). Mountebank answers 500 here; that is #1616.
+    #[test]
+    fn a_throwing_wait_function_falls_back_to_100ms() {
+        let wait = WaitBehavior::Function("() => { throw new Error('x'); }".to_string());
+        assert_eq!(wait.get_duration_ms(), 100);
+    }
+
+    // Issue #1588: `parseInt` runs first, so a numeric string is its number, a trailing unit is
+    // ignored, and none of it needs a JavaScript engine — this holds in a no-`javascript` build.
+    #[test]
+    fn a_numeric_wait_string_is_read_with_parse_int() {
+        for (source, ms) in [
+            ("1000", 1000),
+            ("800ms", 800),
+            ("  250  ", 250),
+            ("0", 0),
+            ("-5", 0),
+            ("0x10", 16),
+            ("1e3", 1),
+        ] {
+            let wait = WaitBehavior::Function(source.to_string());
+            assert_eq!(wait.get_duration_ms(), ms, "wait {source:?}");
+            let inject = WaitBehavior::Inject {
+                inject: source.to_string(),
+            };
+            assert_eq!(inject.get_duration_ms(), ms, "inject {source:?}");
+        }
+    }
+
+    // Issue #1588: without Boa, the regex fallback also reads an arrow with a bare numeric body.
+    #[test]
+    fn the_regex_fallback_reads_a_bare_arrow_body() {
+        assert_eq!(
+            WaitBehavior::execute_js_wait_function_regex("() => 250"),
+            Some(250)
+        );
+        assert_eq!(
+            WaitBehavior::execute_js_wait_function_regex("x => 300;"),
+            Some(300)
+        );
+        assert_eq!(
+            WaitBehavior::execute_js_wait_function_regex("() => { return 700; }"),
+            Some(700)
+        );
     }
 
     // Issue #1384: the solo pattern needs both `var min` and `var max`; `min` alone is not it.

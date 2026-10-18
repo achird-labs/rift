@@ -101,22 +101,10 @@
   ],
   "expected": [
     {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should add latency when using behaviors.wait as a function",
-      "class": "bug",
-      "issue": "#1588",
-      "note": "a wait written as an arrow function (`() => 1000`) waits about 100 ms; a `function () { return 1000; }` waits 1000 ms"
-    },
-    {
       "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support copying from request fields using jsonpath",
       "class": "bug",
       "issue": "#1590",
       "note": "copy.from \"BODY\" (upper case) copies nothing; Mountebank reads request field names case-insensitively"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should add latency when using behaviors.wait as a function",
-      "class": "bug",
-      "issue": "#1588",
-      "note": "a wait written as an arrow function (`() => 1000`) waits about 100 ms; a `function () { return 1000; }` waits 1000 ms"
     },
     {
       "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support copying from request fields using jsonpath",
