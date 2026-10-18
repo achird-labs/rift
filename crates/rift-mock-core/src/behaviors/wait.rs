@@ -4,11 +4,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
-/// Hard cap on a computed wait delay (issues #355, #490): a wait function that returns a huge
-/// value must not sleep the worker unbounded. Applied at the `get_duration_ms` boundary so BOTH
-/// the Boa path and the no-`javascript` regex fallback share one bound.
-const MAX_WAIT_MS: u64 = 60_000;
-
 // Fixed patterns for the no-`javascript`-feature wait fallback (issue #481): compile once at
 // first use instead of on every request. These are compile-time-constant patterns, so a compile
 // failure is a programming error caught immediately by tests, not a data-dependent runtime error.
@@ -79,23 +74,22 @@ impl WaitBehavior {
                 }
             }
             // Both spellings of a JS-function wait run the identical path (issue #608): same Boa
-            // execution, same cap, same loud fallback.
+            // execution, same loud fallback.
             WaitBehavior::Function(js_func) | WaitBehavior::Inject { inject: js_func } => {
                 // Parse JavaScript function and execute
                 // Format: "function() { return Math.floor(Math.random() * 100) + 50; }"
                 // A failed/unusable wait function falls back to 100ms — but loudly, so it is
                 // distinguishable from a genuine 100ms wait (B4, issue #355).
-                // Cap here (issue #490) so both the Boa path and the no-`javascript` regex
-                // fallback share the one bound — the fallback used to return the raw parsed value.
-                Self::execute_js_wait_function(js_func)
-                    .map(|ms| ms.min(MAX_WAIT_MS))
-                    .unwrap_or_else(|| {
-                        tracing::warn!(
-                            target: "rift::script",
-                            "wait function produced no usable delay; falling back to 100ms"
-                        );
-                        100
-                    })
+                // No cap (issue #1612): like a numeric `wait` and like Mountebank, the computed
+                // delay is honoured as written. The sleep is an async `tokio::time::sleep`, which
+                // saturates an overflowing deadline, so a huge value holds no worker thread.
+                Self::execute_js_wait_function(js_func).unwrap_or_else(|| {
+                    tracing::warn!(
+                        target: "rift::script",
+                        "wait function produced no usable delay; falling back to 100ms"
+                    );
+                    100
+                })
             }
         }
     }
@@ -124,8 +118,8 @@ impl WaitBehavior {
     }
 
     /// Run the wait function body for real on a bounded Boa `Context`: evaluate `(<js_func>)()`
-    /// and coerce the numeric result to a `u64` delay, floored and capped at 60s so a
-    /// pathological/negative/huge result can't turn into an enormous or nonsensical sleep.
+    /// and coerce the numeric result to a `u64` delay: a non-finite result is refused, a negative one
+    /// clamps to 0, the rest is floored, and a result beyond `u64` saturates to `u64::MAX`.
     #[cfg(feature = "javascript")]
     fn execute_js_wait_function_boa(js_func: &str) -> Option<u64> {
         let mut context = crate::scripting::bounded_js_context();
@@ -157,7 +151,7 @@ impl WaitBehavior {
             return None;
         }
         let ms = n.max(0.0).floor() as u64;
-        Some(ms.min(MAX_WAIT_MS))
+        Some(ms)
     }
 
     /// Regex-based fallback: used as the sole path when the `javascript` feature is disabled,
@@ -296,16 +290,20 @@ mod tests {
         assert_eq!(object.get_duration_ms(), 250);
     }
 
-    // AC 608-2: the 60s cap and the loud fallback apply to the object form too (issues #355/#490).
+    // AC 608-2: the object form gives the same delay as the bare string for a large value (no cap,
+    // issue #1612) and shares the loud fallback (issue #355).
     #[test]
-    fn wait_inject_shares_cap_and_fallback() {
+    fn wait_inject_shares_value_and_fallback() {
+        let js = "function() { return 999999999; }";
         let huge = WaitBehavior::Inject {
-            inject: "function() { return 999999999; }".to_string(),
+            inject: js.to_string(),
         };
-        assert!(
-            huge.get_duration_ms() <= MAX_WAIT_MS,
-            "the object form must share the 60s cap"
+        assert_eq!(
+            huge.get_duration_ms(),
+            WaitBehavior::Function(js.to_string()).get_duration_ms(),
+            "the object form must give the same delay as the bare string form"
         );
+        assert_eq!(huge.get_duration_ms(), 999_999_999);
 
         let unusable = WaitBehavior::Inject {
             inject: "not a function at all".to_string(),
@@ -365,7 +363,7 @@ mod tests {
     }
 
     // Adjacent unchecked `u64` add on two `\d+` captures. Driven at the regex fallback directly:
-    // with the `javascript` feature on, Boa answers first and caps the result, so going through
+    // with the `javascript` feature on, Boa answers first and never reaches it, so going through
     // `get_duration_ms` would pass against the unfixed code and prove nothing. The fallback is the
     // *sole* path in a build without that feature — which, per #1156, is every released artifact.
     #[test]
@@ -445,11 +443,22 @@ mod tests {
         assert_eq!(wait.get_duration_ms(), 0);
     }
 
-    // A huge return value is capped rather than producing an unbounded sleep.
+    // Issue #1612: a function wait is honoured as written, like a numeric `wait` and like
+    // Mountebank (`setTimeout(resolve, milliseconds)`, no cap). It used to clamp to 60 s.
     #[test]
-    fn wait_function_huge_value_is_capped() {
+    fn wait_function_huge_value_is_honoured() {
         let wait = WaitBehavior::Function("function() { return 999999999; }".to_string());
-        assert_eq!(wait.get_duration_ms(), 60_000);
+        assert_eq!(wait.get_duration_ms(), 999_999_999);
+    }
+
+    // Issue #1612: a result beyond u64 saturates to u64::MAX rather than panicking or wrapping;
+    // `tokio::time::sleep` saturates that to its far-future deadline, the same as a numeric
+    // `wait` of u64::MAX. Boa only: the regex fallback does not read exponent literals.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn wait_function_beyond_u64_saturates() {
+        let wait = WaitBehavior::Function("function() { return 1e300; }".to_string());
+        assert_eq!(wait.get_duration_ms(), u64::MAX);
     }
 
     // Issue #481: the no-`javascript`-feature regex fallback now uses shared LazyLock statics.
@@ -496,7 +505,7 @@ mod tests {
     }
 
     // Issue #1384: a non-finite result is unusable, so it takes the loud 100ms fallback rather than
-    // saturating to the 60s cap (`Infinity`) or flooring to 0 (`NaN`).
+    // saturating to `u64::MAX` (`Infinity`) or flooring to 0 (`NaN`).
     #[test]
     fn a_non_finite_wait_falls_back_to_100ms() {
         for body in ["Infinity", "NaN"] {
