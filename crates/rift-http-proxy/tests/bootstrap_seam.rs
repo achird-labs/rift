@@ -305,13 +305,17 @@ fn rcfile_malformed_json_names_the_path() {
     );
 }
 
-// AC5: stop_server reports a missing pidfile rather than exiting successfully.
+// Issue #1559: a missing pidfile means nothing is running, so `stop` succeeds, as `mb stop` does
+// (`bin/mb` resolves `true` when the file does not exist). `restart` relies on the same answer
+// (#827). Nothing is created on the way.
 #[test]
-fn stop_server_missing_pidfile_is_an_error() {
+fn stop_server_missing_pidfile_is_ok() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let err = bootstrap::stop_server(&dir.path().join("absent.pid"))
-        .expect_err("a missing pidfile must be an error");
-    assert!(err.to_string().contains("PID file not found"), "got: {err}");
+    let absent = dir.path().join("absent.pid");
+    bootstrap::stop_server(&absent).expect("a missing pidfile means nothing to stop");
+    bootstrap::stop_server_within(&absent, std::time::Duration::from_millis(1))
+        .expect("the ceiling variant answers the same");
+    assert!(!absent.exists(), "nothing is created by the no-op path");
 }
 
 #[test]
@@ -810,41 +814,6 @@ fn pidfile_is_one_global_binding_with_no_default() {
         cli(&[]).pidfile,
         None,
         "a plain start must not acquire a pidfile default"
-    );
-}
-
-// AC2: restart with no PID file is a satisfied precondition (nothing to stop, go start), while
-// bare `stop` keeps its hard error — the asymmetry is the point.
-#[test]
-fn stop_for_restart_missing_pidfile_is_ok_but_stop_still_errors() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let absent = dir.path().join("absent.pid");
-
-    bootstrap::stop_for_restart(&absent).expect("restart tolerates a missing pidfile");
-    assert!(!absent.exists(), "nothing is created by the no-op path");
-
-    bootstrap::stop_server(&absent).expect_err("bare stop still errors on a missing pidfile");
-}
-
-// AC3: when a process IS named, stop_for_restart behaves exactly like stop_server.
-#[cfg(unix)]
-#[test]
-fn stop_for_restart_stops_a_live_process() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut child = std::process::Command::new("sleep")
-        .arg("60")
-        .spawn()
-        .expect("spawn a stand-in server process");
-    let pidfile = dir.path().join("server.pid");
-    std::fs::write(&pidfile, child.id().to_string()).expect("write pidfile");
-
-    bootstrap::stop_for_restart(&pidfile).expect("stop_for_restart succeeds");
-
-    assert!(!pidfile.exists(), "the pidfile must be removed");
-    let status = child.wait().expect("reap the stand-in process");
-    assert!(
-        !status.success(),
-        "the process should have been signalled, got: {status:?}"
     );
 }
 

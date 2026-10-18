@@ -302,6 +302,10 @@ Rift's answer as JSON and Mountebank's as text.
 
 ## Command line
 
+- `--logfile` (an alias of `--log`) has no default. `mb` writes `mb.log` unless told otherwise;
+  Rift writes no log file unless one is named.
+- `--ipWhitelist` (an alias of `--ip-whitelist`) is accepted and not enforced: Rift applies no IP
+  filtering (#879, see the [CLI reference](../configuration/cli.md#--ip-whitelist-does-not-filter-anything)).
 - `--formatter` is accepted and ignored: Rift does not load Mountebank's JavaScript formatter
   modules, so `rift save` always writes JSON (see the [CLI reference](../configuration/cli.md)).
 - `rift replay --configfile <file>` starts a server with that file loaded. `mb replay` switches a

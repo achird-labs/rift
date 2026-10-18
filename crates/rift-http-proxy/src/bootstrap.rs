@@ -299,25 +299,14 @@ fn expected_rcfile_type(key: &str) -> Option<RcfileType> {
 /// it never wrote before (issue #827).
 pub const DEFAULT_PIDFILE: &str = "rift.pid";
 
-/// Stop a running server for `restart`: a missing PID file is a satisfied precondition.
-///
-/// `restart` means "end up running". If there is no PID file there is nothing to stop and the
-/// desired end state already holds, so this reports `Ok` and lets the caller start — whereas bare
-/// [`stop_server`] keeps its hard error, since a `stop` with nothing to stop is a user error
-/// (issue #827).
-pub fn stop_for_restart(pidfile: &Path) -> Result<(), anyhow::Error> {
-    if !pidfile.exists() {
-        info!("no PID file at {pidfile:?}; nothing to stop, starting fresh");
-        return Ok(());
-    }
-    stop_server(pidfile)
-}
-
 /// Stop a running server by PID file.
 ///
-/// Idempotent about the end state, loud about everything else: a stale pidfile (the process is
-/// already gone) is cleaned up and reported `Ok`, but a signal that is denied (the process is not
-/// ours) or fails unexpectedly is an error and the pidfile is left in place — it is not stale.
+/// Idempotent about the end state, loud about everything else: a missing pidfile means nothing is
+/// running and is reported `Ok`, as `mb stop` does (issue #1559) — which is also what `restart`
+/// needs, since "end up running" holds once there is nothing to stop (issue #827). A stale pidfile
+/// (the process is already gone) is cleaned up and reported `Ok`. But a signal that is denied (the
+/// process is not ours) or fails unexpectedly is an error and the pidfile is left in place — it is
+/// not stale.
 /// A pidfile whose PID is non-positive is rejected outright (it names a process *group*, not a
 /// process) and likewise kept.
 ///
@@ -344,7 +333,8 @@ pub fn stop_server_within(
     #[cfg_attr(not(unix), allow(unused_variables))] ceiling: std::time::Duration,
 ) -> Result<(), anyhow::Error> {
     if !pidfile.exists() {
-        return Err(anyhow::anyhow!("PID file not found: {pidfile:?}"));
+        info!("no PID file at {pidfile:?}; nothing to stop");
+        return Ok(());
     }
 
     let pid_str = std::fs::read_to_string(pidfile)?;

@@ -86,9 +86,9 @@ Map Mountebank CLI options to Rift environment variables:
 | `--localOnly` | `--local-only` (CLI) or `MB_LOCAL_ONLY=true` |
 | `--rcfile` | `--rcfile` (CLI) — a subset of keys, see the [CLI Reference](../configuration/cli.md#rc-file---rcfile) |
 
-Rift's flags are kebab-case. Of Mountebank's camelCase spellings, only `--allowInjection` and
-`--noParse` are accepted as aliases — `--localOnly`, `--apikey` and `--ipWhitelist` must be written
-`--local-only`, `--api-key` and `--ip-whitelist`, and Mountebank's `--logfile` is `--log`.
+Rift's flags are kebab-case. Mountebank's spellings `--allowInjection`, `--noParse`, `--localOnly`,
+`--ipWhitelist`, `--logfile` and `save --removeProxies` are accepted as aliases (`--logfile` is
+`--log`, with no default file). `--apikey` must still be written `--api-key`.
 `--ip-whitelist`, `--origin`, `--mock`, `--formatter` and `--protofile` are accepted but do nothing.
 An unrecognised `--loglevel` value is refused at startup instead of being ignored.
 

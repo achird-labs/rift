@@ -38,11 +38,10 @@ and runs the phases one at a time.
 | `cli` | `cli/*` | None: every test spawns `MB_EXECUTABLE` itself. |
 | `docs` | [`docsScenarios.js`](docsScenarios.js): every scenario on the 14 pages `web/docsIntegrityTest.js` checks, one test each | One engine on 2525; the pages from a snapshot on 2600. |
 
-For Rift, `MB_EXECUTABLE` is [`rift-as-mb`](rift-as-mb), which makes exactly two translations:
-`--logfile` becomes `--log` (until #1559 adds the alias), and every start gets its own
-`--metrics-port`, since Rift binds a second listener that Mountebank has no counterpart for. It
-translates nothing else and never hides a failure: a flag Rift refuses, or a `rift stop` that
-exits 1, is a finding.
+For Rift, `MB_EXECUTABLE` is [`rift-as-mb`](rift-as-mb), which makes exactly one change: every
+start gets its own `--metrics-port`, since Rift binds a second listener that Mountebank has no
+counterpart for. It translates nothing else and never hides a failure: a flag Rift refuses, or a
+`rift stop` that exits 1, is a finding.
 
 **The docs snapshot.** Rift serves no HTML, so [`docs-snapshot.sh`](docs-snapshot.sh) starts
 Mountebank on 2525, saves the 14 pages, and stops it; [`snapserve.py`](snapserve.py) serves them on
