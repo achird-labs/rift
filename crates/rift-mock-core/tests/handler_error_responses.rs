@@ -677,11 +677,12 @@ async fn unresolved_script_door_declares_json() {
     let _ = manager.delete_imposter(port).await;
 }
 
-// The counter-case: an unrecognised `fault` serves a PLAIN-TEXT body, so the sweep that added
-// content-type to the envelope doors must not have labelled it `application/json` — which would be
-// a lie a client would act on. Pins the boundary of the #687 change, not the change itself.
+// Issue #1556: an unrecognised `fault` is ignored, as in Mountebank (`helpers.js:104-106` logs it
+// and writes nothing, then `baseHttpServer.js` writes the post-processed response). So the answer
+// is an empty response, `200` with no body when the imposter has no `defaultResponse`. It is not a
+// fault, so it carries no `x-rift-fault`, and not an error, so it is no envelope either.
 #[tokio::test]
-async fn unknown_fault_door_is_not_labelled_json() {
+async fn unknown_fault_is_ignored_as_an_empty_200() {
     let manager = ImposterManager::new();
     let port = create(
         &manager,
@@ -694,16 +695,113 @@ async fn unknown_fault_door_is_not_labelled_json() {
     .await;
 
     let resp = get(port).await;
-    assert_eq!(resp.status(), 500);
+    assert_eq!(resp.status(), 200, "an unknown fault is ignored, not a 500");
+    assert!(
+        !resp.headers().contains_key("x-rift-fault"),
+        "no fault fired, so no fault header"
+    );
+    assert!(resp.headers().contains_key("x-rift-imposter"));
     assert_ne!(
         resp.headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok()),
         Some("application/json"),
-        "this door serves plain text; claiming JSON would be a lie"
+        "nothing was written, so nothing is labelled JSON"
     );
-    let body = resp.text().await.expect("body");
-    assert!(body.contains("Unknown fault"), "got: {body}");
+    assert_eq!(resp.text().await.expect("body"), "");
+
+    let _ = manager.delete_imposter(port).await;
+}
+
+// Issue #1556: the empty response is completed by `defaultResponse` (Mountebank's `postProcess`),
+// and it is a matched stub's answer, so it carries no `x-rift-default-response` marker.
+#[tokio::test]
+async fn unknown_fault_is_completed_by_default_response() {
+    let manager = ImposterManager::new();
+    let port = create(
+        &manager,
+        serde_json::json!({
+            "protocol": "http",
+            "defaultResponse": { "statusCode": 418, "headers": { "X-D": "1" }, "body": "dflt" },
+            "stubs": [ { "responses": [{ "fault": "NOPE" }] } ]
+        }),
+    )
+    .await;
+
+    let resp = get(port).await;
+    assert_eq!(
+        resp.status(),
+        418,
+        "the defaultResponse status completes it"
+    );
+    assert_eq!(
+        resp.headers().get("x-d").and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    assert!(!resp.headers().contains_key("x-rift-fault"));
+    assert!(
+        !resp.headers().contains_key("x-rift-default-response"),
+        "a stub matched, so this is not a default-response answer"
+    );
+    assert_eq!(resp.text().await.expect("body"), "dflt");
+
+    let _ = manager.delete_imposter(port).await;
+}
+
+// Issue #1556: `repeat` still counts on an ignored fault, so the cycle advances after two.
+#[tokio::test]
+async fn unknown_fault_honours_repeat() {
+    let manager = ImposterManager::new();
+    let port = create(
+        &manager,
+        serde_json::json!({
+            "protocol": "http",
+            "defaultResponse": { "statusCode": 418 },
+            "stubs": [ { "responses": [
+                { "fault": "NOPE", "repeat": 2 },
+                { "is": { "body": "second" } }
+            ] } ]
+        }),
+    )
+    .await;
+
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let resp = get(port).await;
+        let status = resp.status().as_u16();
+        seen.push((status, resp.text().await.expect("body")));
+    }
+    assert_eq!(
+        seen,
+        vec![
+            (418, String::new()),
+            (418, String::new()),
+            (418, "second".to_string())
+        ]
+    );
+
+    let _ = manager.delete_imposter(port).await;
+}
+
+// Issue #1556: a binary `defaultResponse` completes the ignored fault decoded, as it does an
+// unmatched request.
+#[tokio::test]
+async fn unknown_fault_decodes_a_binary_default_response() {
+    let manager = ImposterManager::new();
+    let port = create(
+        &manager,
+        serde_json::json!({
+            "protocol": "http",
+            "defaultResponse": { "body": "aGk=", "_mode": "binary" },
+            "stubs": [ { "responses": [{ "fault": "NOPE" }] } ]
+        }),
+    )
+    .await;
+
+    let resp = get(port).await;
+    assert_eq!(resp.status(), 200);
+    assert!(!resp.headers().contains_key("x-rift-binary-error"));
+    assert_eq!(resp.bytes().await.expect("body").as_ref(), b"hi");
 
     let _ = manager.delete_imposter(port).await;
 }

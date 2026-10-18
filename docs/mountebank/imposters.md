@@ -614,9 +614,8 @@ The `400`/`413` split matters when you are debugging a flaky client: **`413` mea
 big, `400` means the connection failed to deliver the body it promised.** Earlier releases answered `413` for both,
 which reported every mid-stream network failure as "body too large" (#694).
 
-Two doors deliberately do **not** use the envelope: the `Unknown fault` diagnostic (a plain-text
-fault-injection marker) and the last-resort internal error emitted when the envelope itself cannot
-be constructed.
+One door deliberately does **not** use the envelope: the last-resort internal error emitted when
+the envelope itself cannot be constructed.
 
 ---
 

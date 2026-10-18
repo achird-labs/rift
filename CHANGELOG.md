@@ -27,6 +27,11 @@ record.
 
 ### Changed
 
+- **An unrecognised `fault` is ignored, as in Mountebank** (#1556). It used to answer `500 Unknown
+  fault`; it now serves an empty response completed by the imposter's `defaultResponse`, and
+  `repeat` still applies. Rift warns at load, and rift-lint reports it as the warning `W022`.
+  `CONNECTION_RESET_BY_PEER`, `RANDOM_DATA_THEN_CLOSE` and Rift's extra fault names are unchanged.
+
 - **`allowCORS` answers a preflight as Mountebank does** (#1555): an `OPTIONS` carrying `Origin`,
   `Access-Control-Request-Method` and `Access-Control-Request-Headers` gets those values echoed
   back, on whatever the stub or `defaultResponse` answers. Other requests no longer get

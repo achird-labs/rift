@@ -1877,9 +1877,16 @@ async fn handle_request_inner(
                     &mut response_mode,
                 );
             }
-            // Handle faults - simulate connection errors
+            // Handle faults - simulate connection errors. A name Rift does not know is ignored, as
+            // in Mountebank (issue #1556): the stub's answer is an empty response completed by
+            // `defaultResponse`. No behavior or `_rift` runs on it, and `repeat` already counted.
             if is_fault {
-                return handle_fault_response(&body);
+                return Ok(handle_fault_response(&body).unwrap_or_else(|| {
+                    ignored_fault_response(
+                        imposter.config.default_response.as_ref(),
+                        strict_behaviors_for(&imposter.config),
+                    )
+                }));
             }
 
             // Apply _rift.fault extensions (probabilistic faults)
@@ -2231,54 +2238,11 @@ async fn handle_request_inner(
     // with an empty body below (Mountebank parity — Rift never returns 404 for an unmatched
     // request). A `defaultForward` upstream, if configured, was already handled above.
     if let Some(ref default) = imposter.config.default_response {
-        // The same completion a stub's `is` gets, applied to a response that writes nothing, so
-        // the two paths cannot drift (issue #1369).
-        let empty = IsResponse::empty();
-        let default = empty.completed_by(default);
-        let body_str = body_text(default.body.as_ref());
-
-        // The same decode — and so the same contract — as a stub's `is` body (issue #1151). This
-        // site used to re-implement it inline, without the #323 header and without #375's strict
-        // path, so a bad binary default body was served as its own raw text with only a log line.
-        let mut binary_decode_failed = false;
-        let body_bytes = match default.mode {
-            ResponseMode::Binary => {
-                match decode_binary_body(body_str, strict_behaviors_for(&imposter.config)) {
-                    Ok(BinaryBody::Decoded(bytes)) => bytes,
-                    Ok(BinaryBody::RawFallback(bytes)) => {
-                        binary_decode_failed = true;
-                        bytes
-                    }
-                    // Mark it, so a client or operator can tell a failing default response from a
-                    // failing stub: the shared helper builds the same 500 for both.
-                    Err(strict_failure) => {
-                        let mut strict_failure = *strict_failure;
-                        strict_failure.headers_mut().insert(
-                            "x-rift-default-response",
-                            hyper::header::HeaderValue::from_static("true"),
-                        );
-                        return Ok(strict_failure);
-                    }
-                }
-            }
-            ResponseMode::Text => Bytes::from(crate::extensions::apply_date_templates(&body_str)),
-        };
-
-        let mut response = Response::builder().status(default.status_code);
-        if binary_decode_failed {
-            response = response.header("x-rift-binary-error", "true");
-        }
-        for (k, values) in &default.headers {
-            for v in values {
-                response = response.header(k, v);
-            }
-        }
-        response = response.header("x-rift-imposter", "true");
-        response = response.header("x-rift-default-response", "true");
-
-        return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|e| {
-            build_failure_response(&e, "defaultResponse build failed (bad default header?)")
-        }));
+        return Ok(build_default_completed(
+            default,
+            strict_behaviors_for(&imposter.config),
+            Some("x-rift-default-response"),
+        ));
     }
 
     // No match and no default - Mountebank returns 200 with empty body
@@ -2422,24 +2386,92 @@ fn debug_serialize_or_500<T: serde::Serialize>(payload: &T) -> (StatusCode, Stri
 /// it reuses the real `_rift.fault.tcp` path (issue #309): the parsed [`TcpFaultKind`] is attached
 /// as a response extension that the serve loop's `FaultIo` applies as a real reset/close/etc.,
 /// instead of framing a clean HTTP 502 (which a migrated Mountebank config would not expect).
-fn handle_fault_response(fault_type: &str) -> Result<Response<Full<Bytes>>, Infallible> {
-    if let Some(kind) = super::fault_io::TcpFaultKind::parse(fault_type) {
-        // Carrier response: `FaultIo` aborts the connection before this is sent, so the
-        // status/body here are never observed by the client (mirrors the `_rift.fault.tcp` path).
-        let mut response = build_response_with_headers(
-            StatusCode::BAD_GATEWAY,
-            [("x-rift-fault", fault_type)],
-            Bytes::new(),
-        );
-        response.extensions_mut().insert(kind);
-        return Ok(response);
-    }
-    // Unrecognized fault type: a defined error, never a silent connection drop.
-    Ok(build_response_with_headers(
-        StatusCode::INTERNAL_SERVER_ERROR,
+///
+/// `None` for a name Rift does not know: that is no fault at all, and the caller serves
+/// [`ignored_fault_response`] (issue #1556).
+fn handle_fault_response(fault_type: &str) -> Option<Response<Full<Bytes>>> {
+    let kind = super::fault_io::TcpFaultKind::parse(fault_type)?;
+    // Carrier response: `FaultIo` aborts the connection before this is sent, so the status/body
+    // here are never observed by the client (mirrors the `_rift.fault.tcp` path).
+    let mut response = build_response_with_headers(
+        StatusCode::BAD_GATEWAY,
         [("x-rift-fault", fault_type)],
-        format!("Unknown fault: {fault_type}"),
-    ))
+        Bytes::new(),
+    );
+    response.extensions_mut().insert(kind);
+    Some(response)
+}
+
+/// The answer to a `fault` whose name Rift does not know (issue #1556). Mountebank logs
+/// `Unexpected fault type`, writes nothing (`helpers.js:104-106`) and then serves the
+/// post-processed response, which `postProcess` fills from `defaultResponse`
+/// (`baseHttpServer.js:21-29`). So it is an empty response completed by `default`, else `200` with
+/// an empty body. A stub matched, so it is no default-response answer and carries no
+/// `x-rift-default-response`; no fault fired, so it carries no `x-rift-fault` either.
+fn ignored_fault_response(default: Option<&IsResponse>, strict: bool) -> Response<Full<Bytes>> {
+    match default {
+        Some(default) => build_default_completed(default, strict, None),
+        None => {
+            build_response_with_headers(StatusCode::OK, [("x-rift-imposter", "true")], Bytes::new())
+        }
+    }
+}
+
+/// An empty response completed by `default` — the answer to an unmatched request, and to an
+/// ignored `fault` (issue #1556). It is the same completion a stub's `is` gets, applied to a
+/// response that writes nothing, so the paths cannot drift (issue #1369). `marker`, when set, is a
+/// header stamped `true` on the response and on a strict decode failure, so a client or operator can
+/// tell which door answered.
+fn build_default_completed(
+    default: &IsResponse,
+    strict: bool,
+    marker: Option<&'static str>,
+) -> Response<Full<Bytes>> {
+    let empty = IsResponse::empty();
+    let default = empty.completed_by(default);
+    let body_str = body_text(default.body.as_ref());
+
+    // The same decode — and so the same contract — as a stub's `is` body (issue #1151). This site
+    // used to re-implement it inline, without the #323 header and without #375's strict path, so a
+    // bad binary default body was served as its own raw text with only a log line.
+    let mut binary_decode_failed = false;
+    let body_bytes = match default.mode {
+        ResponseMode::Binary => match decode_binary_body(body_str, strict) {
+            Ok(BinaryBody::Decoded(bytes)) => bytes,
+            Ok(BinaryBody::RawFallback(bytes)) => {
+                binary_decode_failed = true;
+                bytes
+            }
+            // The shared helper builds the same 500 for every door; the marker says which.
+            Err(strict_failure) => {
+                let mut strict_failure = *strict_failure;
+                if let Some(marker) = marker {
+                    strict_failure
+                        .headers_mut()
+                        .insert(marker, hyper::header::HeaderValue::from_static("true"));
+                }
+                return strict_failure;
+            }
+        },
+        ResponseMode::Text => Bytes::from(crate::extensions::apply_date_templates(&body_str)),
+    };
+
+    let mut response = Response::builder().status(default.status_code);
+    if binary_decode_failed {
+        response = response.header("x-rift-binary-error", "true");
+    }
+    for (k, values) in &default.headers {
+        for v in values {
+            response = response.header(k, v);
+        }
+    }
+    response = response.header("x-rift-imposter", "true");
+    if let Some(marker) = marker {
+        response = response.header(marker, "true");
+    }
+    response.body(Full::new(body_bytes)).unwrap_or_else(|e| {
+        build_failure_response(&e, "defaultResponse build failed (bad default header?)")
+    })
 }
 
 /// Apply Rift fault configuration (probabilistic faults)
@@ -3008,7 +3040,10 @@ mod debug_serialize_tests {
 mod fault_precedence_tests {
     use super::super::fault_io::{TcpFaultKind, tcp_fault_carrier};
     use super::super::types::{RiftErrorFault, RiftFaultConfig, RiftLatencyFault, RiftTcpFault};
-    use super::{Bytes, Full, Response, StatusCode, apply_rift_fault, handle_fault_response};
+    use super::{
+        Bytes, Full, Response, StatusCode, apply_rift_fault, handle_fault_response,
+        ignored_fault_response,
+    };
     use std::time::Instant;
 
     // Issue #309: a top-level `fault` response must reset/close the connection (via the same
@@ -3016,14 +3051,14 @@ mod fault_precedence_tests {
     // framed HTTP 502. Before the fix `handle_fault_response` attached no extension.
     #[test]
     fn top_level_fault_carries_real_tcp_fault_extension() {
-        let reset = handle_fault_response("CONNECTION_RESET_BY_PEER").expect("infallible");
+        let reset = handle_fault_response("CONNECTION_RESET_BY_PEER").expect("a known fault");
         assert_eq!(
             reset.extensions().get::<TcpFaultKind>().copied(),
             Some(TcpFaultKind::Reset),
             "CONNECTION_RESET_BY_PEER must carry a real TCP-reset fault, not a plain 502"
         );
 
-        let random = handle_fault_response("RANDOM_DATA_THEN_CLOSE").expect("infallible");
+        let random = handle_fault_response("RANDOM_DATA_THEN_CLOSE").expect("a known fault");
         assert_eq!(
             random.extensions().get::<TcpFaultKind>().copied(),
             Some(TcpFaultKind::RandomData),
@@ -3031,21 +3066,20 @@ mod fault_precedence_tests {
         );
 
         // The two remaining WireMock kinds also route to a real transport fault (unified on the
-        // same parser as `_rift.fault.tcp`), no longer falling into the 500 "Unknown fault" branch.
-        let empty = handle_fault_response("EMPTY_RESPONSE").expect("infallible");
+        // same parser as `_rift.fault.tcp`), not ignored as an unknown name.
+        let empty = handle_fault_response("EMPTY_RESPONSE").expect("a known fault");
         assert_eq!(
             empty.extensions().get::<TcpFaultKind>().copied(),
             Some(TcpFaultKind::Empty)
         );
-        let malformed = handle_fault_response("MALFORMED_RESPONSE_CHUNK").expect("infallible");
+        let malformed = handle_fault_response("MALFORMED_RESPONSE_CHUNK").expect("a known fault");
         assert_eq!(
             malformed.extensions().get::<TcpFaultKind>().copied(),
             Some(TcpFaultKind::MalformedChunk)
         );
 
-        // An unrecognized fault type stays a defined error, not a silent transport fault.
-        let unknown = handle_fault_response("NOT_A_FAULT").expect("infallible");
-        assert!(unknown.extensions().get::<TcpFaultKind>().is_none());
+        // An unrecognized fault type is no transport fault: the caller ignores it (issue #1556).
+        assert!(handle_fault_response("NOT_A_FAULT").is_none());
     }
 
     /// Issue #965, carrier site A. `x-rift-fault` echoes whatever the config author typed, which is
@@ -3053,7 +3087,7 @@ mod fault_precedence_tests {
     /// alias onto the one canonical name so that list can be deleted.
     #[test]
     fn carrier_seam_maps_a_top_level_fault_alias_to_one_canonical_name() {
-        let alias = handle_fault_response("garbage").expect("infallible");
+        let alias = handle_fault_response("garbage").expect("a known fault");
         assert_eq!(
             alias.headers().get("x-rift-fault").unwrap(),
             "garbage",
@@ -3061,24 +3095,39 @@ mod fault_precedence_tests {
         );
         assert_eq!(tcp_fault_carrier(&alias), Some("RANDOM_DATA_THEN_CLOSE"));
 
-        let canonical = handle_fault_response("RANDOM_DATA_THEN_CLOSE").expect("infallible");
+        let canonical = handle_fault_response("RANDOM_DATA_THEN_CLOSE").expect("a known fault");
         assert_eq!(
             tcp_fault_carrier(&canonical),
             Some("RANDOM_DATA_THEN_CLOSE")
         );
     }
 
-    /// An unknown fault type is a framed 500 the client really receives, not a carrier — even
-    /// though it carries an `x-rift-fault` header.
+    /// Issue #1556: an unknown fault type is ignored, as in Mountebank. Its answer is an empty
+    /// response the client really receives — not a carrier, and with no `x-rift-fault`, since no
+    /// fault fired.
     #[test]
     fn carrier_seam_rejects_an_unknown_top_level_fault() {
-        let unknown = handle_fault_response("NOT_A_FAULT").expect("infallible");
-        assert_eq!(unknown.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            unknown.headers().get("x-rift-fault").unwrap(),
-            "NOT_A_FAULT"
-        );
+        let unknown = ignored_fault_response(None, false);
+        assert_eq!(unknown.status(), StatusCode::OK);
+        assert!(unknown.headers().get("x-rift-fault").is_none());
+        assert_eq!(unknown.headers().get("x-rift-imposter").unwrap(), "true");
         assert_eq!(tcp_fault_carrier(&unknown), None);
+    }
+
+    /// Issue #1556: with a `defaultResponse`, the ignored fault is completed by it, and carries
+    /// no default-response marker, since a stub matched.
+    #[test]
+    fn an_ignored_fault_is_completed_by_the_default_response() {
+        let default: super::IsResponse = serde_json::from_value(serde_json::json!({
+            "statusCode": 418, "headers": { "X-D": "1" }, "body": "dflt"
+        }))
+        .expect("is");
+        let ignored = ignored_fault_response(Some(&default), false);
+        assert_eq!(ignored.status().as_u16(), 418);
+        assert_eq!(ignored.headers().get("x-d").unwrap(), "1");
+        assert!(ignored.headers().get("x-rift-default-response").is_none());
+        assert!(ignored.headers().get("x-rift-fault").is_none());
+        assert_eq!(tcp_fault_carrier(&ignored), None);
     }
 
     /// Issue #965, carrier site B: the `_rift.fault.tcp` path.

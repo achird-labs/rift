@@ -4215,3 +4215,53 @@ fn w020_w021_predicate_generator_keys() {
         );
     }
 }
+
+/// Issue #1556: a top-level `fault` whose name the engine does not know is W022, at the `fault`
+/// key. Mountebank admits it and ignores it at serve time, so it is a warning, not an error.
+/// Mountebank's two names and Rift's aliases are quiet.
+#[test]
+fn w022_unknown_top_level_fault() {
+    let lint = |fault: &str| {
+        let imposter = make_imposter(json!([{ "responses": [{ "fault": fault }] }]));
+        let mut r = LintResult::new();
+        validate_imposter(path(), &imposter, &mut r, &opts());
+        r
+    };
+
+    for name in [
+        "NON_EXISTENT_FAULT",
+        // Mountebank's names are case-sensitive, so the lower-case spelling is unknown there too.
+        "connection_reset_by_peer",
+    ] {
+        let r = lint(name);
+        assert_eq!(codes(&r), vec!["W022"], "{name}: {:?}", r.issues);
+        assert_eq!(r.errors, 0);
+        let w022 = &r.issues[0];
+        assert_eq!(w022.severity, Severity::Warning);
+        assert_eq!(
+            w022.location.as_deref(),
+            Some("stubs[0].responses[0].fault")
+        );
+        assert!(w022.message.contains(name), "{}", w022.message);
+        let suggestion = w022.suggestion.as_deref().expect("a suggestion");
+        assert!(
+            suggestion.contains("CONNECTION_RESET_BY_PEER")
+                && suggestion.contains("RANDOM_DATA_THEN_CLOSE"),
+            "{suggestion}"
+        );
+    }
+
+    for name in [
+        "CONNECTION_RESET_BY_PEER",
+        "RANDOM_DATA_THEN_CLOSE",
+        "EMPTY_RESPONSE",
+        "MALFORMED_RESPONSE_CHUNK",
+        "reset",
+        "empty",
+        "garbage",
+        "random",
+        "malformed",
+    ] {
+        assert!(!has_code(&lint(name), "W022"), "{name}");
+    }
+}

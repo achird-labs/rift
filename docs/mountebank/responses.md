@@ -62,8 +62,12 @@ Break the connection instead of answering, as Mountebank's `fault` response does
 
 `CONNECTION_RESET_BY_PEER` and `RANDOM_DATA_THEN_CLOSE` are Mountebank's names; Rift also accepts
 `EMPTY_RESPONSE`, `MALFORMED_RESPONSE_CHUNK` and the short aliases listed in
-[Fault Injection](../features/fault-injection.md). An unrecognised name is served as a
-`500` with an `Unknown fault` body.
+[Fault Injection](../features/fault-injection.md). An unrecognised name is ignored, as in
+Mountebank: the response is served as an empty response completed by the imposter's
+`defaultResponse` (else `200` with an empty body), and `repeat` still applies. Rift warns when the
+imposter loads, and rift-lint reports it as
+[W022](../features/linting.md#warnings). The names are case-sensitive, as in Mountebank:
+`connection_reset_by_peer` is not `CONNECTION_RESET_BY_PEER`.
 
 ### Where behaviors and `_rift` apply
 

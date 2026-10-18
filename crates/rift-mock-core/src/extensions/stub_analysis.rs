@@ -249,7 +249,51 @@ pub fn ignored_config_keys(config: &ImposterConfig, stubs: &[Stub]) -> Vec<StubW
     if let Some(warning) = unread_generator_keys_warning(stubs) {
         warnings.push(warning);
     }
+    if let Some(warning) = unknown_fault_warning(stubs) {
+        warnings.push(warning);
+    }
     warnings
+}
+
+/// One entry for every top-level `fault` name the engine does not know (issue #1556), naming the
+/// names and the stubs. Mountebank admits such a config and ignores the fault at serve time (an
+/// empty response, completed by `defaultResponse`), so Rift does too, and says so once at load
+/// rather than per request.
+fn unknown_fault_warning(stubs: &[Stub]) -> Option<StubWarning> {
+    let mut names: Vec<&str> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    for (index, stub) in stubs.iter().enumerate() {
+        let mut unknown_here = false;
+        for response in &stub.responses {
+            if let StubResponse::Fault { fault, .. } = response
+                && crate::imposter::fault_io::TcpFaultKind::parse(fault).is_none()
+            {
+                unknown_here = true;
+                if !names.contains(&fault.as_str()) {
+                    names.push(fault);
+                }
+            }
+        }
+        if unknown_here {
+            indices.push(index);
+        }
+    }
+    let (first, listed) = listed_stubs(&indices)?;
+    let names = names
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(StubWarning {
+        warning_type: WarningType::ConfigKeyIgnored,
+        message: format!(
+            "`fault` {names} is not a fault Rift knows: it is ignored and the response is served as \
+             an empty response completed by `defaultResponse`, as in Mountebank (stubs {listed})"
+        ),
+        stub_index: Some(first),
+        stub_id: stubs[first].id.clone(),
+        shadowed_by_index: None,
+    })
 }
 
 /// One entry for every proxy `predicateGenerators` key the engine does not read (issue #1327),
@@ -1514,5 +1558,37 @@ mod tests {
              xpath and ignore (stubs 1, 2)"
         );
         assert!(ignored_config_keys(&config, &stubs[..1]).is_empty());
+    }
+
+    /// Issue #1556: an unknown top-level `fault` name is one load-time entry naming the names and
+    /// the stubs; Mountebank's two names and Rift's aliases add nothing.
+    #[test]
+    fn an_unknown_fault_name_is_reported_once() {
+        let fault = |name: &str| -> Stub {
+            serde_json::from_value(json!({ "responses": [{ "fault": name }] })).expect("valid stub")
+        };
+        let stubs = [
+            fault("CONNECTION_RESET_BY_PEER"),
+            fault("NON_EXISTENT_FAULT"),
+            fault("RANDOM_DATA_THEN_CLOSE"),
+            fault("reset"),
+            fault("EMPTY_RESPONSE"),
+            fault("connection_reset_by_peer"),
+            fault("NON_EXISTENT_FAULT"),
+        ];
+        let config: ImposterConfig =
+            serde_json::from_value(json!({ "port": 0, "protocol": "http" })).expect("config");
+        let warnings = ignored_config_keys(&config, &stubs);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].warning_type, WarningType::ConfigKeyIgnored);
+        assert_eq!(warnings[0].stub_index, Some(1));
+        assert_eq!(
+            warnings[0].message,
+            "`fault` `NON_EXISTENT_FAULT`, `connection_reset_by_peer` is not a fault Rift knows: \
+             it is ignored and the response is served as an empty response completed by \
+             `defaultResponse`, as in Mountebank (stubs 1, 5, 6)"
+        );
+        assert!(ignored_config_keys(&config, &stubs[..1]).is_empty());
+        assert!(ignored_config_keys(&config, &stubs[2..5]).is_empty());
     }
 }

@@ -148,6 +148,7 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | W019 | `_rift.conditional` that can never answer 304 (script-only response, or a `method` predicate excluding GET and HEAD) |
 | W020 | A proxy `predicateGenerators` key the engine does not read (a typo such as `matchs`) |
 | W021 | A proxy `predicateGenerators` `jsonpath`, `xpath` or `ignore` the engine cannot use |
+| W022 | A top-level `fault` name the engine does not know; it is ignored at serve time, as in Mountebank |
 
 ### Info
 
