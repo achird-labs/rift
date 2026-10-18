@@ -27,6 +27,13 @@ record.
 
 ### Changed
 
+- **A `lookup` CSV file's cells and headers are no longer trimmed** (#1566), as in Mountebank. A
+  file with padded headers (`name, location`) that used to match now names the column ` location`,
+  so `${row}[location]` is left in place; a padded cell (` Bob `) matches only a padded key. A
+  malformed row (a different cell count than the header, including a blank line, or a stray quote)
+  now ends the file at that row: rows after it are not found, and a warning names the file and
+  line. Mountebank's parser stops at the same row.
+
 - **JSON-body arrays match as in Mountebank** (#1579). `deepEquals` ignores array order;
   `equals`, `contains`, `startsWith`, `endsWith` and `matches` treat an expected array as a subset
   and match a scalar or object against any element of an array, including a top-level array of
@@ -87,6 +94,11 @@ record.
 
 ### Fixed
 
+- **A `lookup` reads quoted CSV cells as Mountebank does** (#1566). A cell in double quotes may
+  hold the delimiter and line breaks, and `""` is one `"`; Rift used to split on every delimiter and
+  line break and serve the quotes. `csv.delimiter` may now be several characters (`"||"`), which
+  Mountebank accepts and Rift refused with `400`; an empty `delimiter` means `,`. `rift-lint` and the
+  imposter JSON Schema accept any string delimiter.
 - **A proxy forwards the request's own path and query to the upstream** whatever follows the host
   in `to`, as Mountebank does (#1550). A `to` ending in `/` used to send `//path`, one with `?query`
   folded the request into the query, and one with `#fragment` dropped the path. Userinfo in `to` no

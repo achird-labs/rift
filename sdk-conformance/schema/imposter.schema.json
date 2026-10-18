@@ -83,9 +83,7 @@
       "properties": {
         "delimiter": {
           "default": ",",
-          "description": "Delimiter character (default: ',')",
-          "maxLength": 1,
-          "minLength": 1,
+          "description": "Field delimiter (default: `,`). It may be several characters, as Mountebank's csv-parse\nallows, and an empty string means `,` (issue #1566).",
           "type": "string"
         },
         "keyColumn": {

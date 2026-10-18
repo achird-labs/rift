@@ -1167,6 +1167,256 @@
       ]
     },
     {
+      "name": "targeted: a lookup reads a quoted CSV cell holding the delimiter and a doubled quote (#1566)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "loc=${R}[location] quote=${R}[quote]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": {
+                              "query": "name"
+                            },
+                            "using": {
+                              "method": "regex",
+                              "selector": ".*"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "../../conformance/differential/data/quoted.csv",
+                              "keyColumn": "name"
+                            }
+                          },
+                          "into": "${R}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?name=The%20Price%20Is%20Right"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a lookup keeps an unquoted CSV cell's padding and a quoted cell's newline (#1566)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "loc=${R}[location] quote=${R}[quote]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": {
+                              "query": "name"
+                            },
+                            "using": {
+                              "method": "regex",
+                              "selector": ".*"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "../../conformance/differential/data/quoted.csv",
+                              "keyColumn": "name"
+                            }
+                          },
+                          "into": "${R}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?name=%20padded%20"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a lookup splits CSV cells on a multi-character delimiter (#1566)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "1=${A}[name] 2=${B}[name]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": {
+                              "query": "a"
+                            },
+                            "using": {
+                              "method": "regex",
+                              "selector": ".*"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "../../conformance/differential/data/pipes.csv",
+                              "keyColumn": "id",
+                              "delimiter": "||"
+                            }
+                          },
+                          "into": "${A}"
+                        }
+                      },
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": {
+                              "query": "b"
+                            },
+                            "using": {
+                              "method": "regex",
+                              "selector": ".*"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "../../conformance/differential/data/pipes.csv",
+                              "keyColumn": "id",
+                              "delimiter": "||"
+                            }
+                          },
+                          "into": "${B}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?a=1&b=2"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a ragged CSV row ends the file, so a lookup serves rows before it and misses rows after (#1566)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "1=${A}[name] 3=${C}[name]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": {
+                              "query": "a"
+                            },
+                            "using": {
+                              "method": "regex",
+                              "selector": ".*"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "../../conformance/differential/data/ragged.csv",
+                              "keyColumn": "id"
+                            }
+                          },
+                          "into": "${A}"
+                        }
+                      },
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": {
+                              "query": "c"
+                            },
+                            "using": {
+                              "method": "regex",
+                              "selector": ".*"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "../../conformance/differential/data/ragged.csv",
+                              "keyColumn": "id"
+                            }
+                          },
+                          "into": "${C}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?a=1&c=3"
+        }
+      ]
+    },
+    {
       "name": "targeted: a copy whose regex does not match leaves its token in body and header (#1402)",
       "steps": [
         {

@@ -7,8 +7,7 @@ use super::spliced::{Spliced, SplicedHeaders, authored_headers, plain_headers};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -75,13 +74,14 @@ pub struct CsvDataSource {
     /// Column to use as lookup key
     #[serde(rename = "keyColumn")]
     pub key_column: String,
-    /// Delimiter character (default: ',')
+    /// Field delimiter (default: `,`). It may be several characters, as Mountebank's csv-parse
+    /// allows, and an empty string means `,` (issue #1566).
     #[serde(default = "default_delimiter")]
-    pub delimiter: char,
+    pub delimiter: String,
 }
 
-fn default_delimiter() -> char {
-    ','
+fn default_delimiter() -> String {
+    ",".to_string()
 }
 
 /// A `_rift.dataset` block: a [`LookupBehavior`] named by *dataset* instead of by file path.
@@ -143,7 +143,7 @@ impl CsvCache {
     }
 
     /// Get or load CSV data
-    pub fn get_or_load(&self, path: &str, delimiter: char) -> Option<Arc<CsvData>> {
+    pub fn get_or_load(&self, path: &str, delimiter: &str) -> Option<Arc<CsvData>> {
         // Check cache first
         {
             let cache = self.data.read();
@@ -192,40 +192,60 @@ pub struct CsvData {
 }
 
 impl CsvData {
-    /// Load CSV from file
-    pub fn load<P: AsRef<Path>>(path: P, delimiter: char) -> Result<Self, std::io::Error> {
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
-        let mut lines = reader.lines();
-
-        // Parse header row
-        let header_line = lines
-            .next()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "Empty CSV"))??;
-        let headers: Vec<String> = header_line
-            .split(delimiter)
-            .map(|s| s.trim().to_string())
-            .collect();
-
-        // Parse data rows
-        let mut rows = Vec::new();
-        let mut first_column = HashMap::new();
-        for line in lines {
-            let line = line?;
-            let values: Vec<String> = line
-                .split(delimiter)
-                .map(|s| s.trim().to_string())
-                .collect();
-            // `split` always yields at least one item, so every line is a row.
-            first_column.entry(values[0].clone()).or_insert(rows.len());
-            rows.push(values);
+    /// Read the CSV file at `path` and parse it with [`CsvData::parse`].
+    ///
+    /// A missing, unreadable, non-UTF-8 or empty file is an error. A file that stops parsing
+    /// part-way is not: the rows before the fault are kept and one warning names the file, the
+    /// line and the reason (issue #1566).
+    pub fn load<P: AsRef<Path>>(path: P, delimiter: &str) -> Result<Self, std::io::Error> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path)?;
+        if text.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Empty CSV",
+            ));
         }
+        let (data, error) = Self::parse(&text, delimiter);
+        if let Some(error) = error {
+            tracing::warn!(
+                "lookup behavior: CSV data source '{}' stops at line {}: {}; rows from there on \
+                 are not read, as in Mountebank",
+                path.display(),
+                error.line,
+                error.kind
+            );
+        }
+        Ok(data)
+    }
 
-        Ok(Self {
-            headers,
-            rows,
-            first_column,
-        })
+    /// Parse CSV `text` as Mountebank's csv-parse 7.0.2 does, and index it for lookups. The first
+    /// record is the header row. Rows after the first parse error do not exist, which is what
+    /// Mountebank's streamed parse observably does; the error is returned for the caller to report.
+    ///
+    /// Takes text, not a path, so file access stays the caller's (see [`CsvData::load`]).
+    pub fn parse(text: &str, delimiter: &str) -> (Self, Option<CsvParseError>) {
+        let ParsedCsv { records, error } = parse_csv(text, delimiter);
+        let mut records = records.into_iter();
+        // Domain-optional: a file whose header row itself fails has no headers, so every lookup
+        // misses, as in Mountebank.
+        let headers = records.next().unwrap_or_default();
+        let rows: Vec<Vec<String>> = records.collect();
+        let mut first_column = HashMap::new();
+        for (index, values) in rows.iter().enumerate() {
+            // Every parsed record holds at least one cell, so `first` is always present.
+            if let Some(first) = values.first() {
+                first_column.entry(first.clone()).or_insert(index);
+            }
+        }
+        (
+            Self {
+                headers,
+                rows,
+                first_column,
+            },
+            error,
+        )
     }
 
     /// Look up the first row, in file order, whose `key_column` cell equals `key`, and return its
@@ -250,6 +270,225 @@ impl CsvData {
             .zip(values)
             .map(|(header, value)| (format!("[{header}]"), value.clone()))
             .collect()
+    }
+}
+
+/// Why a CSV file stopped being read, named after csv-parse's error codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CsvErrorKind {
+    /// `CSV_QUOTE_NOT_CLOSED`: a quoted cell runs to the end of the file.
+    QuoteNotClosed,
+    /// `CSV_INVALID_CLOSING_QUOTE`: something other than a delimiter, a record end or the end of
+    /// the file follows a closing quote.
+    InvalidClosingQuote,
+    /// `INVALID_OPENING_QUOTE`: a `"` inside an unquoted cell.
+    InvalidOpeningQuote,
+    /// `CSV_RECORD_INCONSISTENT_FIELDS_LENGTH`: a record whose width differs from the first's.
+    InconsistentFieldsLength,
+}
+
+impl fmt::Display for CsvErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::QuoteNotClosed => "quoted field not terminated",
+            Self::InvalidClosingQuote => "text after a closing quote",
+            Self::InvalidOpeningQuote => "quote inside an unquoted field",
+            Self::InconsistentFieldsLength => "record width differs from the header row",
+        })
+    }
+}
+
+/// A CSV parse error and the 1-based line it is reported at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CsvParseError {
+    /// What went wrong.
+    pub kind: CsvErrorKind,
+    /// The line of the fault: an unclosed quote's opening line, a ragged record's first line.
+    pub line: usize,
+}
+
+/// The records parsed before the first error, and that error.
+struct ParsedCsv {
+    records: Vec<Vec<String>>,
+    error: Option<CsvParseError>,
+}
+
+/// Parse `text` into records with csv-parse 7.0.2's default rules (issue #1566):
+///
+/// 1. A field starting with `"` is quoted: `""` inside is one `"`, and the delimiter and line
+///    breaks are literal. The end of the file inside the quotes is an error.
+/// 2. After a closing quote only the delimiter, the record end or the end of the file may follow.
+/// 3. A `"` inside an unquoted field is an error.
+/// 4. The record end is the first of `\r\n`, `\n` or `\r` seen outside quotes; after that only
+///    that sequence ends a record.
+/// 5. Nothing is trimmed.
+/// 6. The first record fixes the width; a record of another width is an error. A blank line is
+///    a record of one empty cell.
+/// 7. A record end at the end of the file does not start another record.
+///
+/// Parsing stops at the first error, keeping the records before it.
+fn parse_csv(text: &str, delimiter: &str) -> ParsedCsv {
+    // Mountebank passes `csvConfig.delimiter || ','`, so an empty delimiter is a comma.
+    let delimiter = if delimiter.is_empty() { "," } else { delimiter };
+    let mut parser = CsvParser {
+        text,
+        delimiter: delimiter.as_bytes(),
+        pos: 0,
+        record_end: None,
+    };
+    let mut records = Vec::new();
+    let mut width = None;
+    while parser.pos < text.len() {
+        let start = parser.pos;
+        let fail = |kind, offset| CsvParseError {
+            kind,
+            line: line_at(text, offset),
+        };
+        let record = match parser.record() {
+            Ok(record) => record,
+            Err((kind, offset)) => {
+                return ParsedCsv {
+                    records,
+                    error: Some(fail(kind, offset)),
+                };
+            }
+        };
+        match width {
+            None => width = Some(record.len()),
+            Some(width) if width != record.len() => {
+                return ParsedCsv {
+                    records,
+                    error: Some(fail(CsvErrorKind::InconsistentFieldsLength, start)),
+                };
+            }
+            Some(_) => {}
+        }
+        records.push(record);
+    }
+    ParsedCsv {
+        records,
+        error: None,
+    }
+}
+
+/// The 1-based line `offset` is on, counting `\r\n`, `\n` and a lone `\r` as one break each.
+fn line_at(text: &str, offset: usize) -> usize {
+    let bytes = &text.as_bytes()[..offset];
+    let breaks = bytes
+        .iter()
+        .enumerate()
+        .filter(|&(i, &b)| b == b'\n' || (b == b'\r' && bytes.get(i + 1) != Some(&b'\n')))
+        .count();
+    breaks + 1
+}
+
+/// Cursor over the CSV text. It scans bytes: the quote, the line breaks and the start of a
+/// (valid UTF-8) delimiter all sit on character boundaries, so every slice it takes is one.
+struct CsvParser<'a> {
+    text: &'a str,
+    delimiter: &'a [u8],
+    pos: usize,
+    /// The record-end sequence, fixed by the first one seen outside quotes.
+    record_end: Option<&'static [u8]>,
+}
+
+impl CsvParser<'_> {
+    fn rest(&self) -> &[u8] {
+        &self.text.as_bytes()[self.pos..]
+    }
+
+    fn at_delimiter(&self) -> bool {
+        self.rest().starts_with(self.delimiter)
+    }
+
+    /// The length of the record end at the cursor, or 0. The first line break seen fixes the
+    /// sequence for the rest of the file.
+    fn record_end_len(&mut self) -> usize {
+        let rest = self.rest();
+        let end: &'static [u8] = match self.record_end {
+            Some(end) => end,
+            None if rest.starts_with(b"\r\n") => b"\r\n",
+            None if rest.starts_with(b"\n") => b"\n",
+            None if rest.starts_with(b"\r") => b"\r",
+            None => return 0,
+        };
+        if rest.starts_with(end) {
+            self.record_end = Some(end);
+            end.len()
+        } else {
+            0
+        }
+    }
+
+    /// Read one record, consuming its record end. The error carries the offset it is reported at.
+    fn record(&mut self) -> Result<Vec<String>, (CsvErrorKind, usize)> {
+        let mut fields = Vec::new();
+        loop {
+            let quoted = self.rest().first() == Some(&b'"');
+            fields.push(if quoted {
+                self.quoted()?
+            } else {
+                self.unquoted()?
+            });
+            if self.pos >= self.text.len() {
+                return Ok(fields);
+            }
+            if self.at_delimiter() {
+                self.pos += self.delimiter.len();
+                continue;
+            }
+            let end = self.record_end_len();
+            if end > 0 {
+                self.pos += end;
+                return Ok(fields);
+            }
+            // An unquoted field only stops at the delimiter, a record end or the end of the file,
+            // so this is text after a closing quote.
+            return Err((CsvErrorKind::InvalidClosingQuote, self.pos));
+        }
+    }
+
+    /// Read a quoted field; the cursor is on its opening quote.
+    fn quoted(&mut self) -> Result<String, (CsvErrorKind, usize)> {
+        let open = self.pos;
+        let bytes = self.text.as_bytes();
+        self.pos += 1;
+        let mut field = String::new();
+        let mut segment = self.pos;
+        loop {
+            match bytes.get(self.pos) {
+                None => return Err((CsvErrorKind::QuoteNotClosed, open)),
+                Some(b'"') if bytes.get(self.pos + 1) == Some(&b'"') => {
+                    field.push_str(&self.text[segment..=self.pos]);
+                    self.pos += 2;
+                    segment = self.pos;
+                }
+                Some(b'"') => {
+                    field.push_str(&self.text[segment..self.pos]);
+                    self.pos += 1;
+                    return Ok(field);
+                }
+                Some(_) => self.pos += 1,
+            }
+        }
+    }
+
+    /// Read an unquoted field, up to the delimiter, a record end or the end of the file.
+    fn unquoted(&mut self) -> Result<String, (CsvErrorKind, usize)> {
+        let start = self.pos;
+        while let Some(&byte) = self.text.as_bytes().get(self.pos) {
+            if self.at_delimiter() {
+                break;
+            }
+            if matches!(byte, b'\r' | b'\n') && self.record_end_len() > 0 {
+                break;
+            }
+            if byte == b'"' {
+                return Err((CsvErrorKind::InvalidOpeningQuote, self.pos));
+            }
+            self.pos += 1;
+        }
+        Ok(self.text[start..self.pos].to_string())
     }
 }
 
@@ -299,7 +538,7 @@ pub(crate) fn apply_lookup_spliced(
             // Load CSV data
             if let Some(csv_data) = csv_cache.get_or_load(
                 &behavior.from_data_source.csv.path,
-                behavior.from_data_source.csv.delimiter,
+                &behavior.from_data_source.csv.delimiter,
             ) {
                 // Lookup row
                 let replacements = csv_data.lookup(&key, &behavior.from_data_source.csv.key_column);
@@ -405,7 +644,7 @@ mod tests {
                 csv: CsvDataSource {
                     path: path.to_string_lossy().into_owned(),
                     key_column: "id".to_string(),
-                    delimiter: ',',
+                    delimiter: ",".to_string(),
                 },
             },
             into: "${row}".to_string(),
@@ -466,7 +705,7 @@ mod tests {
                 csv: CsvDataSource {
                     path: path.to_string_lossy().into_owned(),
                     key_column: "id".to_string(),
-                    delimiter: ',',
+                    delimiter: ",".to_string(),
                 },
             },
             into: "${row}".to_string(),
@@ -540,7 +779,7 @@ mod tests {
                 csv: CsvDataSource {
                     path: path.to_string_lossy().into_owned(),
                     key_column: "id".to_string(),
-                    delimiter: ',',
+                    delimiter: ",".to_string(),
                 },
             },
             into: "${row}".to_string(),
@@ -605,7 +844,7 @@ mod tests {
                 csv: CsvDataSource {
                     path: path.to_string_lossy().into_owned(),
                     key_column: "id".to_string(),
-                    delimiter: ',',
+                    delimiter: ",".to_string(),
                 },
             },
             into: "${row}".to_string(),
@@ -664,7 +903,7 @@ mod tests {
                 csv: CsvDataSource {
                     path: path.to_string_lossy().into_owned(),
                     key_column: "id".to_string(),
-                    delimiter: ',',
+                    delimiter: ",".to_string(),
                 },
             },
             into: "${row}".to_string(),
@@ -911,7 +1150,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("rift_lookup_1384_{tag}_{}.csv", std::process::id()));
         std::fs::write(&path, contents).expect("write csv");
-        let data = CsvData::load(&path, ',').expect("load csv");
+        let data = CsvData::load(&path, ",").expect("load csv");
         let _ = std::fs::remove_file(&path);
         data
     }
@@ -950,7 +1189,7 @@ mod tests {
         let cache = CsvCache::default();
         let name = |cache: &CsvCache| {
             cache
-                .get_or_load(&path_str, ',')
+                .get_or_load(&path_str, ",")
                 .expect("loads")
                 .lookup("1", "id")["[name]"]
                 .clone()
@@ -967,6 +1206,238 @@ mod tests {
         cache.clear();
         assert_eq!(name(&cache), "new", "clear forces a reload");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Writes `contents` to a per-process temp CSV named after `tag` and loads it with
+    /// `delimiter`, as a `lookup` whose `csv.delimiter` is that string would (issue #1566).
+    fn csv_with(tag: &str, contents: &str, delimiter: &str) -> CsvData {
+        let path =
+            std::env::temp_dir().join(format!("rift_lookup_1566_{tag}_{}.csv", std::process::id()));
+        std::fs::write(&path, contents).expect("write csv");
+        let data = CsvData::load(&path, delimiter).expect("load csv");
+        let _ = std::fs::remove_file(&path);
+        data
+    }
+
+    /// Issue #1566: a quoted cell keeps the delimiter it holds, as csv-parse reads it.
+    #[test]
+    fn a_quoted_cell_keeps_the_delimiter_it_holds() {
+        let data = csv_with(
+            "quoted_delim",
+            "name,location\n\"The Price Is Right\",\"Darrington, Washington\"\n",
+            ",",
+        );
+        let row = data.lookup("The Price Is Right", "name");
+        assert_eq!(row["[location]"], "Darrington, Washington");
+    }
+
+    /// Issue #1566: `""` inside a quoted cell is one literal `"`.
+    #[test]
+    fn a_doubled_quote_in_a_quoted_cell_is_one_quote() {
+        let data = csv_with("dq", "id,text\n1,\"He said \"\"hi\"\"\"\n", ",");
+        assert_eq!(data.lookup("1", "id")["[text]"], "He said \"hi\"");
+    }
+
+    /// Issue #1566: a quoted cell may hold a newline; the record goes on past it.
+    #[test]
+    fn a_quoted_cell_may_hold_a_newline() {
+        let data = csv_with("qnl", "id,text\n1,\"line1\nline2\"\n2,next\n", ",");
+        assert_eq!(data.lookup("1", "id")["[text]"], "line1\nline2");
+        assert_eq!(data.lookup("2", "id")["[text]"], "next");
+    }
+
+    /// Issue #1566: unquoted cells are not trimmed, so a padded key matches only padded.
+    #[test]
+    fn unquoted_cells_keep_their_spaces() {
+        let data = csv_with("spaces", "id,name\n padded , Spacey \n", ",");
+        assert_eq!(data.lookup(" padded ", "id")["[name]"], " Spacey ");
+        assert!(data.lookup("padded", "id").is_empty());
+    }
+
+    /// Issue #1566: headers are not trimmed either, so `[location]` is not ` location`'s token.
+    #[test]
+    fn headers_keep_their_spaces() {
+        let data = csv_with(
+            "hdr",
+            "name, code,occupation, location\nbob,1,tgt,here\n",
+            ",",
+        );
+        let row = data.lookup("tgt", "occupation");
+        assert_eq!(row["[ location]"], "here");
+        assert!(!row.contains_key("[location]"));
+        assert!(data.lookup("1", "code").is_empty(), "` code` is the header");
+    }
+
+    /// Issue #1566: a row of another width than the header ends the file there, so a row after it
+    /// does not exist, as in Mountebank's streamed parse.
+    #[test]
+    fn a_ragged_row_before_the_match_hides_it() {
+        let data = csv_with("ragged_before", "id,name\n1,a,extra\n2,b\n", ",");
+        assert!(data.lookup("2", "id").is_empty());
+        assert!(data.lookup("1", "id").is_empty());
+    }
+
+    /// Issue #1566: a ragged row after the match leaves the rows before it served.
+    #[test]
+    fn a_ragged_row_after_the_match_still_serves_it() {
+        let data = csv_with("ragged_after", "id,name\n1,a\n2,b,extra\n3,c\n", ",");
+        assert_eq!(data.lookup("1", "id")["[name]"], "a");
+        assert!(data.lookup("2", "id").is_empty());
+        assert!(data.lookup("3", "id").is_empty());
+    }
+
+    /// Issue #1566: a `"` inside an unquoted cell is an error (`INVALID_OPENING_QUOTE`).
+    #[test]
+    fn a_quote_inside_an_unquoted_cell_ends_the_file() {
+        let data = csv_with("midquote", "id,name\nba\"d,x\n2,b\n", ",");
+        assert!(data.lookup("2", "id").is_empty());
+        assert!(data.lookup("ba\"d", "id").is_empty());
+    }
+
+    /// Issue #1566: after a closing quote only a delimiter, a record end or EOF may follow
+    /// (`CSV_INVALID_CLOSING_QUOTE`).
+    #[test]
+    fn text_after_a_closing_quote_ends_the_file() {
+        let data = csv_with("after_close", "id,name\n\"tgt\" ,y\n2,b\n", ",");
+        assert!(data.lookup("tgt", "id").is_empty());
+        assert!(data.lookup("2", "id").is_empty());
+    }
+
+    /// Issue #1566: a quote left open to EOF is an error, but the rows before it are served.
+    #[test]
+    fn an_unclosed_quote_keeps_the_rows_before_it() {
+        let data = csv_with("unclosed", "id,name\n1,a\n\"x,2\n", ",");
+        assert_eq!(data.lookup("1", "id")["[name]"], "a");
+        assert!(data.lookup("x,2\n", "id").is_empty());
+    }
+
+    /// Issue #1566: CRLF and lone-CR record ends both work; the cell carries no `\r`.
+    #[test]
+    fn crlf_and_cr_record_ends_are_read() {
+        let crlf = csv_with("crlf", "id,name\r\n1,a\r\n2,b\r\n", ",");
+        assert_eq!(crlf.lookup("2", "id")["[name]"], "b");
+        let cr = csv_with("cr", "id,name\r1,a\r2,b\r", ",");
+        assert_eq!(cr.lookup("2", "id")["[name]"], "b");
+    }
+
+    /// Issue #1566: the first record end seen fixes the sequence, so a later `\n` in a CRLF file
+    /// is cell text, and the widened record ends the file (csv-parse's length error).
+    #[test]
+    fn the_first_record_end_fixes_the_sequence() {
+        let data = csv_with("mixed", "id,name\r\n1,a\n2,b\n", ",");
+        assert!(data.lookup("1", "id").is_empty());
+        assert!(data.lookup("2", "id").is_empty());
+    }
+
+    /// Issue #1566: a blank line is a one-cell record, a width error after a wider header.
+    #[test]
+    fn a_blank_line_ends_the_file() {
+        let data = csv_with("blank", "id,name\n1,a\n\n2,b\n", ",");
+        assert_eq!(data.lookup("1", "id")["[name]"], "a");
+        assert!(data.lookup("2", "id").is_empty());
+    }
+
+    /// Issue #1566: a UTF-8 BOM stays part of the first header, as csv-parse's default leaves it.
+    #[test]
+    fn a_bom_stays_in_the_first_header() {
+        let data = csv_with("bom", "\u{feff}id,name\n1,a\n", ",");
+        assert!(data.lookup("1", "id").is_empty());
+        assert_eq!(data.lookup("1", "\u{feff}id")["[name]"], "a");
+    }
+
+    /// Issue #1566: a header row that fails to parse leaves no headers, so nothing matches.
+    #[test]
+    fn a_broken_header_row_matches_nothing() {
+        let data = csv_with("bad_header", "i\"d,name\n1,a\n", ",");
+        assert!(data.lookup("1", "name").is_empty());
+        assert!(data.lookup("a", "name").is_empty());
+    }
+
+    /// Issue #1566: `delimiter` may be several characters, as csv-parse allows, and decodes.
+    #[test]
+    fn a_multi_character_delimiter_is_accepted() {
+        let source: CsvDataSource = serde_json::from_value(serde_json::json!({
+            "path": "x.csv", "keyColumn": "id", "delimiter": "||"
+        }))
+        .expect("a multi-character delimiter decodes");
+        assert_eq!(
+            serde_json::to_value(&source).expect("serializes")["delimiter"],
+            "||"
+        );
+        let data = csv_with("multi", "id||name\n1||a|b\n2||\"x||y\"\n", "||");
+        assert_eq!(data.lookup("1", "id")["[name]"], "a|b");
+        assert_eq!(data.lookup("2", "id")["[name]"], "x||y");
+    }
+
+    /// Issue #1566: an empty `delimiter` means `,`, as Mountebank's `delimiter || ','` does.
+    #[test]
+    fn an_empty_delimiter_means_comma() {
+        let source: CsvDataSource = serde_json::from_value(serde_json::json!({
+            "path": "x.csv", "keyColumn": "id", "delimiter": ""
+        }))
+        .expect("an empty delimiter decodes");
+        assert_eq!(source.path, "x.csv");
+        let data = csv_with("empty_delim", "id,name\n1,a\n", "");
+        assert_eq!(data.lookup("1", "id")["[name]"], "a");
+    }
+
+    /// Issue #1566: on 1000 seeded inputs (quotes, doubled quotes, `,` and `||`, every line
+    /// break, spaces, non-ASCII), the parser keeps exactly the rows csv-parse 7.0.2 emits before
+    /// its first error, and stops with the same error. `testdata/gen_csv_parse_oracle.js`
+    /// regenerates the fixture.
+    #[test]
+    fn the_parser_agrees_with_csv_parse_7_0_2() {
+        let fixture = include_str!("testdata/csv_parse_7_0_2.jsonl");
+        let mut cases = 0;
+        for line in fixture.lines() {
+            let case: serde_json::Value = serde_json::from_str(line).expect("fixture line");
+            let text = case["text"].as_str().expect("text");
+            let delimiter = case["delimiter"].as_str().expect("delimiter");
+            let expected_rows: Vec<Vec<String>> =
+                serde_json::from_value(case["rows"].clone()).expect("rows");
+            let expected_error = case["error"].as_str().map(|code| match code {
+                "CSV_QUOTE_NOT_CLOSED" => CsvErrorKind::QuoteNotClosed,
+                "CSV_INVALID_CLOSING_QUOTE" => CsvErrorKind::InvalidClosingQuote,
+                "INVALID_OPENING_QUOTE" => CsvErrorKind::InvalidOpeningQuote,
+                "CSV_RECORD_INCONSISTENT_FIELDS_LENGTH" => CsvErrorKind::InconsistentFieldsLength,
+                other => panic!("unmapped csv-parse code {other}"),
+            });
+            let parsed = parse_csv(text, delimiter);
+            assert_eq!(
+                parsed.records, expected_rows,
+                "rows for {text:?} / {delimiter:?}"
+            );
+            assert_eq!(
+                parsed.error.map(|e| e.kind),
+                expected_error,
+                "error for {text:?} / {delimiter:?}"
+            );
+            cases += 1;
+        }
+        assert_eq!(cases, 1000);
+    }
+
+    /// Issue #1566: the reported line is the fault's, counting every line-break spelling.
+    #[test]
+    fn a_parse_error_names_its_line() {
+        let ragged = parse_csv("id,name\r\n1,a\r\n2\r\n", ",")
+            .error
+            .expect("ragged");
+        assert_eq!(ragged.kind, CsvErrorKind::InconsistentFieldsLength);
+        assert_eq!(ragged.line, 3);
+        let open = parse_csv("id,name\n1,\"a\nb\nc", ",")
+            .error
+            .expect("unclosed");
+        assert_eq!(open.kind, CsvErrorKind::QuoteNotClosed);
+        assert_eq!(open.line, 2, "an unclosed quote is reported where it opens");
+    }
+
+    /// Issue #1566: a trailing comma is an empty last cell; a missing final newline is fine.
+    #[test]
+    fn a_trailing_delimiter_is_an_empty_cell() {
+        let data = csv_with("trailing", "id,name\n1,\n2,b", ",");
+        assert_eq!(data.lookup("1", "id")["[name]"], "");
+        assert_eq!(data.lookup("2", "id")["[name]"], "b");
     }
 
     /// Serves `template` in both the body and an `X-Row` header for a lookup keyed by the path

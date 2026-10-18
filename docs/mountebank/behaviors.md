@@ -540,10 +540,25 @@ When several rows match, the first one in the file is used, as in Mountebank. Re
 0.21.0 served the last row for a repeated value in the first column, and an arbitrary one for a
 repeated value in any other column.
 
-`csv.delimiter` sets a single-character separator (default `,`). The file is read once and cached;
-its path is resolved relative to the server's working directory. Cells are split on the delimiter
-without CSV quoting rules, so a quoted cell containing the delimiter is not supported. If the file
-cannot be read, a warning is logged and the tokens are left in place.
+`csv.delimiter` sets the field separator (default `,`). It may be several characters, such as
+`||`, and an empty string means `,`. The file is read once and cached; its path is resolved
+relative to the server's working directory. If the file cannot be read, a warning is logged and
+the tokens are left in place.
+
+The file is parsed as Mountebank's parser (csv-parse) parses it:
+
+- A cell in double quotes may hold the delimiter and line breaks, and `""` inside it is one `"`.
+- Nothing is trimmed: ` Bob ` is not `Bob`, and a header written `name, location` names the
+  column ` location`, so `${row}[location]` is left in place.
+- The first line break in the file (`\n`, `\r\n` or `\r`) is the one that ends rows.
+- Every row must have as many cells as the header row; a blank line is a row of one empty cell.
+- A malformed row — a different cell count, a `"` inside an unquoted cell, text after a closing
+  quote, or a quote left open — ends the file at that row. Rows before it are served; rows after
+  it are not found, and a warning names the file and the line. In Mountebank the rows after it
+  do not exist either.
+
+Releases up to 0.23.0 split rows on line breaks and cells on a single-character delimiter, with no
+quoting, and trimmed every cell and header.
 
 ---
 

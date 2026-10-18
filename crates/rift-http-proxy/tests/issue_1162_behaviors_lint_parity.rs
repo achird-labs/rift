@@ -126,6 +126,17 @@ fn blocks() -> Vec<Value> {
             json!({ "csv": { "path": "x.csv", "keyColumn": "id", "delimiter": ";" } }),
             json!("${R}"),
         ),
+        // Issue #1566: any string is a delimiter, as in Mountebank; a non-string is refused.
+        lookup_with(
+            json!({ "from": "path", "using": using() }),
+            json!({ "csv": { "path": "x.csv", "keyColumn": "id", "delimiter": "" } }),
+            json!("${R}"),
+        ),
+        lookup_with(
+            json!({ "from": "path", "using": using() }),
+            json!({ "csv": { "path": "x.csv", "keyColumn": "id", "delimiter": 5 } }),
+            json!("${R}"),
+        ),
         lookup_with(json!({ "from": "path", "using": using() }), csv(), json!(5)),
         json!({ "lookup": { "fromDataSource": csv(), "into": "${R}" } }),
         json!({ "lookup": [5] }),
