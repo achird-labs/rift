@@ -125,6 +125,12 @@ record.
   was silently ignored now fails at serve time; a build without the `javascript` feature still
   takes the logged 100 ms fallback, since it cannot run the function.
 
+- **Deleting an imposter now closes connections held by an in-flight `wait` at once** (#1616), as
+  Mountebank does. They used to hold `DELETE` for its 5 s drain, and were then answered by the
+  deleted imposter when the wait ended. The client sees the connection close with no response
+  (over HTTP/2 the connection closes); other in-flight responses still finish. The same applies to
+  a request that reached the imposter through the `/__rift/` gateway or the front door.
+
 - **A `wait` string is read as Mountebank reads it** (#1588): with `parseInt` first, so `"1000"`
   waits 1000 ms and `"800ms"` 800 ms, and otherwise called as any function expression, so an arrow
   (`() => 1000`), an `async` function or a parenthesised function now runs. Rift ran only a string

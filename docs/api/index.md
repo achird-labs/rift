@@ -314,6 +314,10 @@ for any in-flight response. So once `DELETE` returns you can immediately re-`POS
 same port without racing the old one: a pooled client connection gets a clean close and reconnects to
 the new imposter, never the deleted one's state.
 
+A request still in a `wait` behavior is cut off, as in Mountebank: its connection closes without a
+response (over HTTP/2, the whole connection closes), so the delete does not wait for it and the
+deleted imposter never answers it. Any other in-flight response is still finished.
+
 The handler reads no query parameters.
 
 With `--datadir`, the imposter's `<datadir>/<port>.json` is removed first. If that fails, the call

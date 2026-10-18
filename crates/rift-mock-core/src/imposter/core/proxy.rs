@@ -47,7 +47,8 @@ pub(crate) struct ProxiedResponse {
 #[must_use]
 pub(crate) enum ProxyOutcome {
     Served(ProxiedResponse),
-    /// A behavior on the proxy response failed under `strictBehaviors` (#375): serve this instead.
+    /// A behavior on the proxy response failed under `strictBehaviors` (#375), a `wait` function
+    /// threw, or the imposter was torn down during a `wait` (#1616): serve this instead.
     StrictFailure(hyper::Response<http_body_util::Full<bytes::Bytes>>),
 }
 
@@ -170,6 +171,12 @@ async fn transform_upstream<SH: BuildHasher>(
     {
         BehaviorOutcome::Applied { parts, degraded } => (parts, degraded),
         BehaviorOutcome::StrictFailure(response) => return Transformed::StrictFailure(response),
+        // Served in place of the upstream's response, and recorded nowhere (issue #1616).
+        BehaviorOutcome::Aborted => {
+            return Transformed::StrictFailure(
+                crate::imposter::behavior_pipeline::aborted_response(),
+            );
+        }
     };
     let mut headers: Vec<(String, String)> = parts
         .headers

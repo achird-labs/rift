@@ -493,7 +493,8 @@ pub struct ImposterManager {
 
 /// Default bound for the post-delete connection drain (issue #596). Generous: normal graceful
 /// shutdown of idle/short connections completes in milliseconds, so this only caps a genuinely
-/// stalled in-flight request (e.g. a long `wait` behavior) rather than hanging the delete.
+/// stalled in-flight request (e.g. a slow proxy upstream) rather than hanging the delete. A `wait`
+/// behavior does not reach it: the teardown signal cuts the wait off (issue #1616).
 const DEFAULT_CONN_DRAIN: Duration = Duration::from_secs(5);
 
 impl ImposterManager {
@@ -1833,9 +1834,10 @@ impl ImposterManager {
             }
         }
         // Drain in-flight connections within a bound. Each reacts to the signal above with a hyper
-        // graceful shutdown (finish the in-flight response, then close), so this is normally
-        // sub-millisecond; a genuinely stalled request (e.g. a long `wait`) is capped rather than
-        // hanging the delete.
+        // graceful shutdown (finish the in-flight response, then close), and a request sleeping in
+        // a `wait` is cut off by the same signal with its connection closed (issue #1616), so this
+        // is normally sub-millisecond; a genuinely stalled request (e.g. a slow proxy upstream) is
+        // capped rather than hanging the delete.
         imposter.conn_tracker.close();
         if tokio::time::timeout(self.conn_drain, imposter.conn_tracker.wait())
             .await
@@ -3687,22 +3689,62 @@ mod tests {
         }
     }
 
+    /// A plain HTTP/1 upstream on an ephemeral port that reads each request head and answers
+    /// `200 done` after `delay`, or never answers when `delay` is `None`: an in-flight response
+    /// that is slow for a reason other than a `wait` behavior, which a delete aborts (issue #1616).
+    async fn slow_upstream(delay: Option<std::time::Duration>) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let port = listener.local_addr().expect("upstream addr").port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match socket.read(&mut buf).await {
+                            Ok(n) if n > 0 => head.extend_from_slice(&buf[..n]),
+                            _ => return,
+                        }
+                    }
+                    match delay {
+                        Some(delay) => {
+                            tokio::time::sleep(delay).await;
+                            let _ = socket
+                                .write_all(
+                                    b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\nconnection: close\r\n\r\ndone",
+                                )
+                                .await;
+                        }
+                        // Hold the socket open without answering until the test ends.
+                        None => std::future::pending::<()>().await,
+                    }
+                });
+            }
+        });
+        port
+    }
+
     // Issue #596: `delete` must await the in-flight generation's quiesce, not fire-and-forget. With
-    // a request in flight behind a `wait` behavior, delete cannot return until that response has
-    // been served and the connection drained — so a returning delete is proof the old generation is
+    // a request in flight on a slow upstream, delete cannot return until that response has been
+    // served and the connection drained — so a returning delete is proof the old generation is
     // gone. Deterministic: pre-fix `delete` returns in ~0ms; post-fix it blocks for the in-flight
-    // response.
+    // response. Issue #1616: the slow response is a proxy, not a `wait`, which a delete now cuts
+    // off; every other in-flight response still finishes (#207).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_blocks_until_inflight_response_drains() {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpStream;
 
         let manager = ImposterManager::new();
+        let upstream = slow_upstream(Some(std::time::Duration::from_millis(1500))).await;
         let config: ImposterConfig = serde_json::from_value(serde_json::json!({
             "protocol": "http",
             "stubs": [{
                 "predicates": [{"equals": {"path": "/slow"}}],
-                "responses": [{"is": {"statusCode": 200, "body": "done"}, "_behaviors": {"wait": 1500}}]
+                "responses": [{"proxy": {"to": format!("http://127.0.0.1:{upstream}")}}]
             }]
         }))
         .unwrap();
@@ -3716,8 +3758,8 @@ mod tests {
         // concurrent test's auto-assign — see `delete_then_recreate_same_port_serves_new_generation`.
         let port = manager.create_imposter(config).await.expect("create");
 
-        // Send a request that will spend ~1.5s in the imposter's `wait` before its response is
-        // written; don't read yet — the response is still in flight on this connection.
+        // Send a request that will spend ~1.5s on the upstream before its response is written;
+        // don't read yet — the response is still in flight on this connection.
         let mut stream = TcpStream::connect(("127.0.0.1", port))
             .await
             .expect("connect");
@@ -3757,11 +3799,13 @@ mod tests {
         use tokio::net::TcpStream;
 
         let manager = ImposterManager::new().with_conn_drain(std::time::Duration::from_millis(150));
+        // An upstream that never answers (issue #1616: a `wait` no longer stalls a delete).
+        let upstream = slow_upstream(None).await;
         let config: ImposterConfig = serde_json::from_value(serde_json::json!({
             "protocol": "http",
             "stubs": [{
                 "predicates": [{"equals": {"path": "/stall"}}],
-                "responses": [{"is": {"statusCode": 200, "body": "eventually"}, "_behaviors": {"wait": 3000}}]
+                "responses": [{"proxy": {"to": format!("http://127.0.0.1:{upstream}")}}]
             }]
         }))
         .unwrap();
@@ -3782,7 +3826,7 @@ mod tests {
 
         assert!(
             elapsed < std::time::Duration::from_secs(1),
-            "delete must return within the drain bound (~150ms), not the full 3s stall; took {elapsed:?}"
+            "delete must return within the drain bound (~150ms), not wait out the stall; took {elapsed:?}"
         );
         assert!(
             elapsed >= std::time::Duration::from_millis(100),
@@ -3837,6 +3881,185 @@ mod tests {
         assert!(
             resp.contains("new") && !resp.contains("old"),
             "same-port re-create must serve the new generation, never the deleted one; got: {resp:?}"
+        );
+    }
+
+    /// An imposter whose one stub answers `200 ok` after a `wait` no test ever sits through.
+    fn long_wait_config(port: Option<u16>, body: &str) -> ImposterConfig {
+        let mut config: ImposterConfig = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "body": body}, "_behaviors": {"wait": 60000}}]}]
+        }))
+        .expect("long-wait config");
+        config.port = port;
+        config
+    }
+
+    // Issue #1616: deleting an imposter cuts off a request still in its `wait`, over HTTP/1: the
+    // connection closes with no response bytes, as Mountebank destroys the socket. It used to hold
+    // the delete for the whole 5 s drain and then answer the client from the deleted generation
+    // when the wait ended.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_aborts_an_inflight_wait_over_http1() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let manager = ImposterManager::new();
+        let port = manager
+            .create_imposter(long_wait_config(None, "ok"))
+            .await
+            .expect("create");
+        let imposter = manager.get_imposter(port).expect("imposter");
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write request");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let started = std::time::Instant::now();
+        manager.delete_imposter(port).await.expect("delete");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "delete must cut the wait off, not drain it; took {elapsed:?}"
+        );
+        assert!(
+            imposter.conn_tracker.is_empty(),
+            "the waiting connection's task has ended, releasing its permit"
+        );
+
+        // Closed with no response: EOF or a reset, and never a byte of the stub's `200`.
+        let mut received = Vec::new();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            stream.read_to_end(&mut received),
+        )
+        .await
+        .expect("the connection is closed within 1s, not left open");
+        assert!(
+            received.is_empty(),
+            "no response bytes may be written, got {:?} ({read:?})",
+            String::from_utf8_lossy(&received)
+        );
+    }
+
+    // Issue #1616, over HTTP/2 prior knowledge: the `TcpFaultKind::Empty` carrier aborts the whole
+    // connection beneath hyper, so the waiting stream fails instead of being answered. Every stream
+    // on it belongs to the deleted imposter, so nothing else is lost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_aborts_an_inflight_wait_over_http2() {
+        use http_body_util::Empty;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+
+        let manager = ImposterManager::new();
+        let port = manager
+            .create_imposter(long_wait_config(None, "ok"))
+            .await
+            .expect("create");
+        let imposter = manager.get_imposter(port).expect("imposter");
+
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        let (mut sender, conn) =
+            hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
+                .await
+                .expect("h2 handshake");
+        let conn = tokio::spawn(conn);
+        let request = hyper::Request::get(format!("http://127.0.0.1:{port}/"))
+            .body(Empty::<bytes::Bytes>::new())
+            .expect("request");
+        let response = tokio::spawn(sender.send_request(request));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let started = std::time::Instant::now();
+        manager.delete_imposter(port).await.expect("delete");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "delete must cut the h2 wait off, not drain it; took {elapsed:?}"
+        );
+        assert!(
+            imposter.conn_tracker.is_empty(),
+            "the h2 connection task ended"
+        );
+
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(1), response)
+            .await
+            .expect("the stream ends within 1s")
+            .expect("request task");
+        assert!(
+            answer.is_err(),
+            "the waiting h2 stream must fail, not be answered: {:?}",
+            answer.map(|r| r.status())
+        );
+        // Probed (issue #1616): the server sends its graceful-shutdown GOAWAY, then the carrier
+        // aborts the socket, so the stream fails with a closed connection (`BrokenPipe`), not a
+        // per-stream RST_STREAM, and the client's connection task ends cleanly.
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(1), conn).await;
+        assert!(ended.is_ok(), "the h2 connection is closed, not left open");
+    }
+
+    // Issue #1616: a same-port re-create after a delete that cut off a wait serves the new
+    // generation, and the old waiter never gets the old generation's answer (extends #596).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recreate_after_an_aborted_wait_serves_only_the_new_generation() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        // Fixed port: re-bound after the delete (see the #809 note on the #596 test above).
+        let port_0 = free_port();
+        let manager = ImposterManager::new();
+        manager
+            .create_imposter(long_wait_config(Some(port_0), "old"))
+            .await
+            .expect("create old");
+        let mut waiter = TcpStream::connect(("127.0.0.1", port_0))
+            .await
+            .expect("connect");
+        waiter
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write request");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        manager.delete_imposter(port_0).await.expect("delete");
+        let new: ImposterConfig = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "port": port_0,
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "new"}}]}]
+        }))
+        .expect("new config");
+        manager.create_imposter(new).await.expect("recreate");
+
+        let mut fresh = TcpStream::connect(("127.0.0.1", port_0))
+            .await
+            .expect("connect to the re-created imposter");
+        fresh
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write request");
+        let resp = read_until(&mut fresh, "new").await;
+        assert!(
+            resp.contains("new"),
+            "the new generation answers, got {resp:?}"
+        );
+
+        let mut old = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            waiter.read_to_end(&mut old),
+        )
+        .await
+        .expect("the old waiter's connection is closed");
+        assert!(
+            old.is_empty(),
+            "the deleted generation must answer nothing, got {:?}",
+            String::from_utf8_lossy(&old)
         );
     }
 

@@ -3,7 +3,7 @@
 //! This module handles incoming HTTP requests to imposters, including
 //! debug mode, proxy handling, inject execution, and response generation.
 
-use super::behavior_pipeline::{BehaviorOutcome, BehaviorRun, ServedParts};
+use super::behavior_pipeline::{BehaviorOutcome, BehaviorRun, ServedParts, aborted_response};
 use super::conditional::{self, ConditionalSpec};
 use super::core::Imposter;
 use super::core::{ProxiedResponse, ProxyBody, ProxyOutcome};
@@ -1273,6 +1273,7 @@ async fn handle_request_inner(
                     script_timeout,
                     strict: strict_behaviors_for(&imposter.config),
                     default_response: imposter.config.default_response.as_ref(),
+                    shutdown: imposter.shutdown_tx.as_ref(),
                 });
             // Per-request entry announcement — `trace!` so it compiles out of release (issue #706);
             // the outcome (status/latency) is captured by metrics and the response's x-rift-* headers.
@@ -1412,10 +1413,12 @@ async fn handle_request_inner(
                             script_timeout,
                             strict: strict_behaviors_for(&imposter.config),
                             default_response: imposter.config.default_response.as_ref(),
+                            shutdown: imposter.shutdown_tx.as_ref(),
                         };
                         match run.apply(parts).await {
                             BehaviorOutcome::Applied { parts: applied, .. } => parts = applied,
                             BehaviorOutcome::StrictFailure(response) => return Ok(response),
+                            BehaviorOutcome::Aborted => return Ok(aborted_response()),
                         }
                     }
 
@@ -2048,6 +2051,7 @@ async fn handle_request_inner(
                         script_timeout,
                         strict: strict_behaviors,
                         default_response: imposter.config.default_response.as_ref(),
+                        shutdown: imposter.shutdown_tx.as_ref(),
                     };
                     match run
                         .apply(ServedParts {
@@ -2065,6 +2069,7 @@ async fn handle_request_inner(
                             spliced_body = parts.body;
                         }
                         BehaviorOutcome::StrictFailure(response) => return Ok(response),
+                        BehaviorOutcome::Aborted => return Ok(aborted_response()),
                     }
                 }
                 body = spliced_body.into_text();
