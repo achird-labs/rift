@@ -17,6 +17,14 @@ record.
   are accepted** as aliases of `--log`, `--local-only`, `--ip-whitelist` and `--remove-proxies`
   (#1559). `--logfile` has no default file, and `--ipWhitelist` stays the #879 no-op.
 
+- **The admin API accepts the `--api-key` token in Mountebank's `x-api-key` header**, as well as in
+  `Authorization` (#1565), and `--apikey` is accepted as an alias of `--api-key`. A Mountebank client
+  sending `x-api-key` got `401` from Rift with a key that worked against `mb`. When a request sends
+  both headers, `Authorization` decides alone and `x-api-key` is ignored, so a wrong
+  `Authorization` is never rescued by a right `x-api-key`. The comparison is the same constant-time
+  one and still fails closed on a blank key; the `/__rift/` gateway needs neither header; `rift
+  healthcheck`, `save` and `replay` still send `Authorization`.
+
 ### Changed
 
 - **`rift stop` with no PID file now exits 0**, as `mb stop` does (#1559). Every other stop failure

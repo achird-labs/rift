@@ -210,7 +210,7 @@ println!("admin bound to {}", running.local_addr());
 
 | Item | Signature | Purpose |
 |:-----|:----------|:--------|
-| `AdminApiServer::new` | `fn new(addr: SocketAddr, manager: Arc<ImposterManager>, api_key: Option<String>) -> Self` | Construct the admin server; `api_key` (when `Some`) gates the admin API via the `Authorization` header. |
+| `AdminApiServer::new` | `fn new(addr: SocketAddr, manager: Arc<ImposterManager>, api_key: Option<String>) -> Self` | Construct the admin server; `api_key` (when `Some`) gates the admin API via the `Authorization` header, or Mountebank's `x-api-key` when `Authorization` is absent (issue #1565). |
 | `with_config_source` | `fn with_config_source(self, source: ConfigSource) -> Self` | Retain the load source so `POST /admin/reload` can re-read it. |
 | `with_imposter_sources` | `fn with_imposter_sources(self, sources: Arc<SourceSet>, datadir: Option<PathBuf>) -> Self` | Retain an `--imposters` source set, and the `--datadir` loaded beside it, so `POST /admin/reload` re-reads both and applies them as one set. Source imposters are applied as `Persistence::Ephemeral` and never written to the datadir (issue #1122). `ImposterManager::apply_config` keeps a running imposter in the store it is in: it persists what it creates, and changes to imposters already in the datadir. |
 | `with_allow_injection` | `fn with_allow_injection(self, allow: bool) -> Self` | Admit scripted configs (`inject`, `decorate`, `shellTransform`, `_rift.script`, …) submitted through this admin API, and report the setting from `GET /config`. The embedder spelling of `--allowInjection`; default `false`. |

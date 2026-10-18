@@ -731,18 +731,13 @@ async fn accept_loop(
                         // imposter traffic, not the admin control plane — it mirrors direct
                         // per-imposter-port access and so is NOT gated by the admin `--apikey`
                         // (which would otherwise force app-under-test traffic to carry the admin
-                        // key and would leak that Authorization header into imposter predicates).
+                        // key, in `Authorization` or `x-api-key`, and would leak it into imposter
+                        // predicates).
                         if let Some(ref key) = api_key
                             && !is_gateway
+                            && !admin_key_accepted(req.headers(), key.as_str())
                         {
-                            let auth = req
-                                .headers()
-                                .get("authorization")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("");
-                            if !api_key_matches(auth, key.as_str()) {
-                                return Ok::<_, hyper::Error>(box_full(unauthorized_response()));
-                            }
+                            return Ok::<_, hyper::Error>(box_full(unauthorized_response()));
                         }
                         // Dropping a `/` from a path hyper accepted, or respelling its route names
                         // in other ASCII letters, cannot make it invalid; if it
@@ -960,6 +955,22 @@ async fn accept_loop(
     Ok(())
 }
 
+/// Whether a request's headers carry the admin API key.
+///
+/// The key is read from `Authorization` (raw, no scheme) or, as Mountebank's `--apikey` reads it,
+/// from `x-api-key` (issue #1565). When `Authorization` is present it decides alone and
+/// `x-api-key` is ignored: accepting whichever of two headers happens to match would let a request
+/// carrying a wrong `Authorization` authenticate on the other one. A header that is not visible
+/// ASCII reads as `""` (fails closed: no key matches it, a blank one included).
+fn admin_key_accepted(headers: &hyper::HeaderMap, expected: &str) -> bool {
+    let presented = headers
+        .get(hyper::header::AUTHORIZATION)
+        .or_else(|| headers.get("x-api-key"))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    api_key_matches(presented, expected)
+}
+
 /// Constant-time equality for the admin API key.
 ///
 /// A plain `!=` short-circuits at the first differing byte, letting a network
@@ -967,8 +978,8 @@ async fn accept_loop(
 /// (issue #548). `ConstantTimeEq` compares every byte regardless of where the
 /// mismatch is; the length check it performs first is not secret.
 fn api_key_matches(provided: &str, expected: &str) -> bool {
-    // Fail closed on a blank configured key (issue #844). A request with no `authorization` header
-    // reaches here as `""`, so comparing it against a blank key returns true and authenticates
+    // Fail closed on a blank configured key (issue #844). A request with no key header reaches
+    // here as `""`, so comparing it against a blank key returns true and authenticates
     // everyone — on the configuration that most looks like it should fail closed. A classifier that
     // cannot tell callers apart must treat them as unauthenticated.
     //
@@ -1301,6 +1312,59 @@ mod tests {
             !api_key_matches("padded", " padded "),
             "the comparison must not trim; a trimmed guess is a different key"
         );
+    }
+
+    fn headers(pairs: &[(&'static str, &str)]) -> hyper::HeaderMap {
+        let mut map = hyper::HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                *name,
+                hyper::header::HeaderValue::from_str(value).expect("value"),
+            );
+        }
+        map
+    }
+
+    // Issue #1565: Mountebank's x-api-key carries the key when Authorization is absent.
+    #[test]
+    fn x_api_key_carries_the_key_when_authorization_is_absent() {
+        assert!(admin_key_accepted(&headers(&[("x-api-key", "k")]), "k"));
+        assert!(admin_key_accepted(&headers(&[("authorization", "k")]), "k"));
+        assert!(!admin_key_accepted(&headers(&[("x-api-key", "no")]), "k"));
+        assert!(!admin_key_accepted(&headers(&[]), "k"));
+    }
+
+    // Issue #1565: Authorization, when present, decides alone, in both directions.
+    #[test]
+    fn authorization_wins_over_x_api_key() {
+        let both = |auth, xkey| headers(&[("authorization", auth), ("x-api-key", xkey)]);
+        assert!(!admin_key_accepted(&both("no", "k"), "k"));
+        assert!(!admin_key_accepted(&both("", "k"), "k"));
+        assert!(admin_key_accepted(&both("k", "no"), "k"));
+
+        // Presence is the claim: an Authorization that will not read as a string is refused, not
+        // treated as absent and passed over for x-api-key.
+        let mut map = headers(&[("x-api-key", "k")]);
+        map.insert(
+            hyper::header::AUTHORIZATION,
+            hyper::header::HeaderValue::from_bytes(b"\x80k").expect("opaque bytes"),
+        );
+        assert!(!admin_key_accepted(&map, "k"));
+    }
+
+    // Issue #844 holds for the second header: a blank configured key matches nothing, an empty or
+    // absent x-api-key included.
+    #[test]
+    fn a_blank_key_fails_closed_through_either_header() {
+        for key in ["", "   "] {
+            assert!(!admin_key_accepted(&headers(&[]), key));
+            assert!(!admin_key_accepted(&headers(&[("x-api-key", "")]), key));
+            assert!(!admin_key_accepted(&headers(&[("x-api-key", key)]), key));
+            assert!(!admin_key_accepted(
+                &headers(&[("authorization", key)]),
+                key
+            ));
+        }
     }
 
     // ── issue #863: the keyless off-host admin plane ─────────────────────────────────────────

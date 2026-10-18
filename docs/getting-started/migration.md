@@ -82,13 +82,14 @@ Map Mountebank CLI options to Rift environment variables:
 | `--configfile` | `--configfile` (CLI) or `MB_CONFIGFILE` |
 | `--datadir` | `--datadir` (CLI) or `MB_DATADIR` |
 | `--loglevel debug` | `--loglevel debug` or `MB_LOGLEVEL=debug` |
-| `--apikey` | `--api-key` (CLI) or `MB_APIKEY` |
+| `--apikey` | `--apikey` / `--api-key` (CLI) or `MB_APIKEY`; the key is read from `x-api-key` or `Authorization` |
 | `--localOnly` | `--local-only` (CLI) or `MB_LOCAL_ONLY=true` |
 | `--rcfile` | `--rcfile` (CLI) — a subset of keys, see the [CLI Reference](../configuration/cli.md#rc-file---rcfile) |
 
 Rift's flags are kebab-case. Mountebank's spellings `--allowInjection`, `--noParse`, `--localOnly`,
-`--ipWhitelist`, `--logfile` and `save --removeProxies` are accepted as aliases (`--logfile` is
-`--log`, with no default file). `--apikey` must still be written `--api-key`.
+`--ipWhitelist`, `--logfile`, `--apikey` and `save --removeProxies` are accepted as aliases
+(`--logfile` is `--log`, with no default file). A Mountebank client that sends the key in
+`x-api-key` needs no change; Rift also accepts it in `Authorization`, which wins when both are sent.
 `--ip-whitelist`, `--origin`, `--mock`, `--formatter` and `--protofile` are accepted but do nothing.
 An unrecognised `--loglevel` value is refused at startup instead of being ignored.
 

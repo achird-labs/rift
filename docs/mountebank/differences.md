@@ -304,6 +304,9 @@ Rift's answer as JSON and Mountebank's as text.
 
 - `--logfile` (an alias of `--log`) has no default. `mb` writes `mb.log` unless told otherwise;
   Rift writes no log file unless one is named.
+- `--apikey` (an alias of `--api-key`) reads the key from `x-api-key`, as `mb` does, and also from
+  `Authorization`, which `mb` refuses with `401`. When a request sends both, `Authorization`
+  decides alone.
 - `--ipWhitelist` (an alias of `--ip-whitelist`) is accepted and not enforced: Rift applies no IP
   filtering (#879, see the [CLI reference](../configuration/cli.md#--ip-whitelist-does-not-filter-anything)).
 - `--formatter` is accepted and ignored: Rift does not load Mountebank's JavaScript formatter
