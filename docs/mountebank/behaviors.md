@@ -149,8 +149,7 @@ extension; Mountebank's own spelling is the bare function string shown in the ne
 }
 ```
 
-Returns random delay between 500-1500ms. A function that throws or returns no usable number falls
-back to 100ms and logs a warning.
+Returns random delay between 500-1500ms.
 
 ### JavaScript Function String
 
@@ -164,7 +163,21 @@ Some tools generate wait as a direct JavaScript function string:
 }
 ```
 
-This format is supported and the function is evaluated to compute the delay.
+### How a wait string is read
+
+A string `wait`, bare or in `{"inject": ...}`, is read the way Mountebank reads it:
+
+1. **`parseInt` first.** When the string starts with a number, that number is the delay and
+   nothing is run: `"1000"` waits 1000ms, `"800ms"` waits 800ms.
+2. **Otherwise it is called as a function with no arguments**, as `(<string>)()`. Any callable
+   expression works: `function () { ... }`, an arrow (`() => 1000`, `x => 300`), `async`, or a
+   parenthesised function.
+
+The result is read as Node's `setTimeout` reads a delay: a number is floored, and a result that is
+not a number, is negative, or is `NaN` or infinite means no delay. A function that throws falls
+back to 100ms and logs a warning; Mountebank answers `500` instead (see
+[Differences](differences.md#a-wait-function-that-throws)). A string `wait` needs
+`--allowInjection` in both engines, even a numeric one.
 
 ### Use Cases
 

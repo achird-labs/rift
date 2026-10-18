@@ -41,6 +41,9 @@ record.
 
 - A `wait` computed by a JavaScript function is no longer capped at 60 s, matching Mountebank and
   the numeric form (#1612).
+- A `wait` function whose result is not a number, is negative, or is `NaN` or infinite now waits
+  0 ms, as Node's `setTimeout` reads it in Mountebank. It used to take the 100 ms fallback, which
+  is now kept for a function that throws (#1588).
 - **A `decorate` that returns an object now replaces the response** (#1567), as in Mountebank. The
   return value used to be ignored, so `return { body: 'x' }` changed nothing. A field the returned
   object leaves out is taken from the imposter's `defaultResponse`, or is `200`, no headers and an
@@ -113,6 +116,12 @@ record.
   reports it as `E057`.
 
 ### Fixed
+
+- **A `wait` string is read as Mountebank reads it** (#1588): with `parseInt` first, so `"1000"`
+  waits 1000 ms and `"800ms"` 800 ms, and otherwise called as any function expression, so an arrow
+  (`() => 1000`), an `async` function or a parenthesised function now runs. Rift ran only a string
+  starting with `function`, and every other form waited 100 ms. `rift-lint` no longer warns `W009`
+  for these forms; it still warns for a string that is neither a number nor callable.
 
 - **A number or boolean `is` body no longer gets `Content-Type: application/json`** (#1589). The
   automatic header is documented for an object or array body only, and Mountebank adds none; a

@@ -143,6 +143,11 @@ mod js_validator {
         parse(&format!("var __injectFn = {script};"))
     }
 
+    /// Parse a `wait` script exactly as the engine calls it: `(<script>)()` (issue #1588).
+    pub fn validate_wait_call(script: &str) -> Result<(), super::JsSyntaxError> {
+        parse(&format!("({script})()"))
+    }
+
     fn parse(source: &str) -> Result<(), super::JsSyntaxError> {
         let mut context = Context::default();
         Script::parse(Source::from_bytes(source), None, &mut context)
@@ -160,6 +165,11 @@ mod js_validator {
 
     #[allow(dead_code)]
     pub fn validate_javascript_expression(_script: &str) -> Result<(), super::JsSyntaxError> {
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn validate_wait_call(_script: &str) -> Result<(), super::JsSyntaxError> {
         Ok(())
     }
 }
@@ -2652,21 +2662,30 @@ fn validate_javascript_behavior(
     result: &mut LintResult,
     site: ScriptSite,
 ) {
-    let script_trimmed = script.trim();
-
-    if site == ScriptSite::Wait
-        && !script_trimmed.starts_with("function")
-        && !script_trimmed.is_empty()
-    {
-        result.add_issue(
-            LintIssue::warning(
-                "W009",
-                "JavaScript behavior should be a function expression",
-                file.to_path_buf(),
-            )
-            .with_location(location)
-            .with_suggestion("Wrap code in: function() { ... }"),
-        );
+    if site == ScriptSite::Wait {
+        // The engine, like Mountebank, reads a `wait` string with `parseInt` first (issue #1588):
+        // a number, with or without a trailing unit, is never run as JavaScript.
+        if !rift_types::status::js_parse_int(script).is_nan() {
+            return;
+        }
+        // Otherwise it is called as `(<script>)()`, so W009 asks exactly that: does the call
+        // parse? Any callable expression does — an arrow, `async`, a parenthesised function — and
+        // no prefix list is copied here. Only a real parse can answer, so a build without the
+        // `javascript` feature does not guess (I004 below says nothing was parsed).
+        if cfg!(feature = "javascript")
+            && !script.trim().is_empty()
+            && js_validator::validate_wait_call(script).is_err()
+        {
+            result.add_issue(
+                LintIssue::warning(
+                    "W009",
+                    "JavaScript behavior should be a function expression",
+                    file.to_path_buf(),
+                )
+                .with_location(location)
+                .with_suggestion("Wrap code in: function() { ... }"),
+            );
+        }
     }
 
     // A Rhai `decorate` is not JavaScript: Boa would reject it, and it needs no I004.
@@ -3108,6 +3127,7 @@ mod js_behavior_tests {
         assert!(!has_code(&lint_decorate(script), "W009"));
     }
 
+    #[cfg(feature = "javascript")]
     #[test]
     fn w009_still_fired_for_non_function_junk() {
         // `wait` is JS-only (`ScriptSite::Wait`): any non-function, non-empty script warns.
@@ -3121,6 +3141,33 @@ mod js_behavior_tests {
                 "W009 should fire for: {script}"
             );
         }
+    }
+
+    // Issue #1588: the engine, like Mountebank, reads a `wait` string with `parseInt` first and
+    // otherwise calls it as a function — any callable expression, not just `function …`. None of
+    // these is worth a warning, and a numeric string is never parsed as JavaScript at all.
+    #[test]
+    fn w009_not_fired_for_a_number_or_any_callable_wait() {
+        for script in [
+            "() => 1000",
+            "x => 300",
+            "async () => 600",
+            "(function(){return 400})",
+            "1000",
+            "800ms",
+            "function () { return 1000; }",
+        ] {
+            let result = lint(script);
+            assert!(!has_code(&result, "W009"), "W009 fired for: {script}");
+            assert!(!has_code(&result, "E028"), "E028 fired for: {script}");
+        }
+    }
+
+    // Issue #1588: a source that is neither a number nor callable still warns. Needs the parse.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn w009_still_fired_for_a_wait_that_is_neither_number_nor_callable() {
+        assert!(has_code(&lint("return 5"), "W009"));
     }
 
     fn lint_decorate(script: &str) -> LintResult {

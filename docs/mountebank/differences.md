@@ -74,6 +74,11 @@ the undecorated response with `x-rift-decorate-error: true` instead, and `500` o
 `strictBehaviors` — see [Behaviors](behaviors.md). A decorate that is not a function at all (`42`,
 a bare expression) answers `500` in Mountebank; Rift runs it as a Rhai script, so it may succeed.
 
+## A `wait` function that throws
+
+A `wait` function that throws answers `500` (`invalid wait injection`) in Mountebank. Rift waits
+100ms, logs a warning and serves the response. See [Behaviors](behaviors.md#how-a-wait-string-is-read).
+
 ## `shellTransform` arguments
 
 `shellTransform` appends the request and response JSON to the command as two single-quoted

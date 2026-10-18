@@ -1556,11 +1556,15 @@ fn w008_not_fired_for_safe_command() {
     assert!(!has_code(&r, "W008"));
 }
 
+// W009 for `wait` needs a real parse (#1588), so only a `javascript` build reports it.
+#[cfg(feature = "javascript")]
 #[test]
 fn w009_js_behavior_not_function_expression() {
     // W009 ("should be a function expression") applies to JS-only behaviors. `decorate` also
-    // accepts Rhai (issue #257), so the check is scoped to `wait` here.
-    let behavior = json!({ "wait": "console.log('hi')" });
+    // accepts Rhai (issue #257), so the check is scoped to `wait` here. Since #1588 W009 asks
+    // whether `(<wait>)()` parses, as the engine calls it: a statement cannot be called. (A bare
+    // expression such as `console.log('hi')` parses as a call and fails only at run time.)
+    let behavior = json!({ "wait": "console.log('hi');" });
     let mut r = LintResult::new();
     validate_behavior(path(), &behavior, "loc", &mut r, &opts());
     assert!(has_code(&r, "W009"));
@@ -2463,6 +2467,8 @@ fn w009_not_fired_for_rhai_decorate_through_behavior() {
     );
 }
 
+// W009 for `wait` needs a real parse (#1588), so only a `javascript` build reports it.
+#[cfg(feature = "javascript")]
 #[test]
 fn w009_still_fired_for_non_function_wait_through_behavior() {
     // wait is JS-only — a non-function wait script still warns (regression guard).
