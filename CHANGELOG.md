@@ -27,6 +27,12 @@ record.
 
 ### Changed
 
+- **`allowCORS` answers a preflight as Mountebank does** (#1555): an `OPTIONS` carrying `Origin`,
+  `Access-Control-Request-Method` and `Access-Control-Request-Headers` gets those values echoed
+  back, on whatever the stub or `defaultResponse` answers. Other requests no longer get
+  `Access-Control-Allow-*: *`. An `OPTIONS` request is now matched against stubs and recorded,
+  instead of being answered `200` before either.
+
 - **`rift stop` with no PID file now exits 0**, as `mb stop` does (#1559). Every other stop failure
   — a non-positive PID, a process `rift` may not signal, one still running after the wait — is still
   an error. For embedders, `bootstrap::stop_server` returns `Ok` for a missing PID file, and

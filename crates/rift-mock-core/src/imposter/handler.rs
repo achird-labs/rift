@@ -476,7 +476,12 @@ pub async fn handle_imposter_request(
     imposter: Arc<Imposter>,
     client_addr: SocketAddr,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    let allow_cors = imposter.config.allow_cors.enabled();
+    // Read before `req` is consumed; the echo is applied to the finished response below (#1555).
+    let cors_preflight = if imposter.config.allow_cors.enabled() {
+        CorsPreflight::of(&req)
+    } else {
+        None
+    };
     // Capture the method before `req` is consumed so we can record the request metric (issue #269).
     let method = req.method().to_string();
     /*
@@ -506,11 +511,12 @@ pub async fn handle_imposter_request(
     // Issue #966: the response-side hook of an installed exchange inspector runs HERE — the one
     // funnel every path shares (the serve loop, the `/__rift/` gateway and an embedder's
     // in-process dispatch all call `handle_imposter_request`), after the response is built and
-    // before the metric below, the journal outcome and the decorator/CORS, so the journal and the
-    // client agree on the status actually served. Skipped when `inspection` is absent: no
-    // inspector installed, an early exit before there was anything to inspect, or the request-side
-    // hook already replaced the response itself (a verdict the inspector produced is not offered
-    // back to it for a second opinion).
+    // before the metric below, the journal outcome, the CORS echo and the decorator, so the
+    // journal and the client agree on the status actually served. A CORS preflight is no early
+    // exit (#1555): it is matched and inspected like any request. Skipped when `inspection` is
+    // absent: no inspector installed, an early exit before there was anything to inspect, or the
+    // request-side hook already replaced the response itself (a verdict the inspector produced is
+    // not offered back to it for a second opinion).
     if let Some(inspector) = &imposter.exchange_inspector
         && let Some(seen) = inspection.as_ref()
     {
@@ -552,7 +558,7 @@ pub async fn handle_imposter_request(
     if let Some(index) = journal_index
         && is_served_answer(&response)
     {
-        // Measured before CORS injection below, which is a header edit this node performs after
+        // Measured before the CORS echo below, which is a header edit this node performs after
         // the imposter has finished — counting it would report the engine as slower than it was.
         imposter.attach_response_outcome(
             index,
@@ -562,8 +568,8 @@ pub async fn handle_imposter_request(
             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         );
     }
-    if allow_cors {
-        inject_cors_headers(response.headers_mut());
+    if let Some(preflight) = cors_preflight {
+        preflight.apply(response.headers_mut());
     }
     Ok(response)
 }
@@ -581,17 +587,49 @@ fn is_served_answer<B>(response: &Response<B>) -> bool {
         && super::fault_io::tcp_fault_carrier(response).is_none()
 }
 
-fn inject_cors_headers(headers: &mut hyper::HeaderMap) {
-    use hyper::header::{HeaderName, HeaderValue};
-    for (name, value) in [
-        ("access-control-allow-origin", "*"),
-        ("access-control-allow-headers", "*"),
-        ("access-control-allow-methods", "*"),
-    ] {
-        let header_name = HeaderName::from_static(name);
-        if !headers.contains_key(&header_name) {
-            headers.insert(header_name, HeaderValue::from_static(value));
+/// A CORS preflight on an `allowCORS` imposter, as Mountebank recognises one
+/// (`baseHttpServer.js:39-51`, issue #1555): an `OPTIONS` whose `Origin`,
+/// `Access-Control-Request-Method` and `Access-Control-Request-Headers` are all present and
+/// non-empty (JavaScript truthiness). Any other request gets no CORS headers at all.
+#[derive(Debug)]
+struct CorsPreflight {
+    origin: hyper::header::HeaderValue,
+    method: hyper::header::HeaderValue,
+    headers: hyper::header::HeaderValue,
+}
+
+impl CorsPreflight {
+    fn of<B>(req: &Request<B>) -> Option<Self> {
+        use hyper::header::{
+            ACCESS_CONTROL_REQUEST_HEADERS, ACCESS_CONTROL_REQUEST_METHOD, HeaderName, ORIGIN,
+        };
+        if req.method() != hyper::Method::OPTIONS {
+            return None;
         }
+        // The first value of a repeated header. Node would join duplicates with `, `, which no
+        // browser sends on a preflight.
+        let present = |name: &HeaderName| {
+            req.headers()
+                .get(name)
+                .filter(|value| !value.is_empty())
+                .cloned()
+        };
+        Some(Self {
+            origin: present(&ORIGIN)?,
+            method: present(&ACCESS_CONTROL_REQUEST_METHOD)?,
+            headers: present(&ACCESS_CONTROL_REQUEST_HEADERS)?,
+        })
+    }
+
+    /// Echo the request's values, verbatim, over whatever the stub or `defaultResponse` set:
+    /// Mountebank's `headersMap.set` overwrites a stub's own value.
+    fn apply(self, headers: &mut hyper::HeaderMap) {
+        use hyper::header::{
+            ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+        };
+        headers.insert(ACCESS_CONTROL_ALLOW_HEADERS, self.headers);
+        headers.insert(ACCESS_CONTROL_ALLOW_METHODS, self.method);
+        headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, self.origin);
     }
 }
 
@@ -818,14 +856,6 @@ async fn handle_request_inner(
         crate::imposter::headers::collect_request_headers(&raw_headers, header_to_title_case);
     let path = uri.path().to_string();
     let query_str = uri.query().unwrap_or("").to_string();
-
-    if method.eq_ignore_ascii_case("OPTIONS") && imposter.config.allow_cors.enabled() {
-        return Ok(build_response_with_headers(
-            StatusCode::OK,
-            [("x-rift-imposter", "true")],
-            Bytes::new(),
-        ));
-    }
 
     // Collect the body under the shared limits (issue #1439): over the ceiling is a 413, the
     // in-flight budget exhausted a 503. A transport failure mid-read (connection reset, truncated

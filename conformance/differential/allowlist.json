@@ -373,39 +373,6 @@
     "rift": "{\"virtualServiceInfo\":{\"realEndpoint\":\"https://api.example.com/lenders\",\"serviceName\":\"LenderDetails-v1-lenders\"}}"
   },
   {
-    "id": "cors-access-control-allow-origin",
-    "case": "*",
-    "location": "step*.header.access-control-allow-origin",
-    "kind": "documented",
-    "doc": "docs/configuration/mountebank.md",
-    "quote": "| `allowCORS` | any | Add CORS headers to responses when JavaScript-truthy; printed back in every view as configured |",
-    "reason": "allowCORS adds CORS headers to every response",
-    "mountebank": "(absent)",
-    "rift": "*"
-  },
-  {
-    "id": "cors-access-control-allow-methods",
-    "case": "*",
-    "location": "step*.header.access-control-allow-methods",
-    "kind": "documented",
-    "doc": "docs/configuration/mountebank.md",
-    "quote": "| `allowCORS` | any | Add CORS headers to responses when JavaScript-truthy; printed back in every view as configured |",
-    "reason": "allowCORS adds CORS headers to every response",
-    "mountebank": "(absent)",
-    "rift": "*"
-  },
-  {
-    "id": "cors-access-control-allow-headers",
-    "case": "*",
-    "location": "step*.header.access-control-allow-headers",
-    "kind": "documented",
-    "doc": "docs/configuration/mountebank.md",
-    "quote": "| `allowCORS` | any | Add CORS headers to responses when JavaScript-truthy; printed back in every view as configured |",
-    "reason": "allowCORS adds CORS headers to every response",
-    "mountebank": "(absent)",
-    "rift": "*"
-  },
-  {
     "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
     "kind": "documented",
     "doc": "docs/mountebank/imposters.md",

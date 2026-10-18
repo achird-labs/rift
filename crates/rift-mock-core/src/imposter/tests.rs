@@ -2937,89 +2937,246 @@ fn assert_cors_header(response: &reqwest::Response, name: &str, expected: Option
     assert_eq!(actual, expected);
 }
 
-#[tokio::test]
-async fn test_cors_options_preflight() {
-    let manager = ImposterManager::new();
-    let config = ImposterConfig {
-        port: None,
-        protocol: "http".to_string(),
-        allow_cors: true.into(),
-        stubs: vec![],
-        ..Default::default()
-    };
-    let port = manager
+/// Issue #1555: what a browser sends as a CORS preflight.
+const PREFLIGHT: [(&str, &str); 3] = [
+    ("origin", "http://x.test"),
+    ("access-control-request-method", "PUT"),
+    ("access-control-request-headers", "X-Custom-Header"),
+];
+
+/// An `allowCORS` imposter on an ephemeral port, from Mountebank-shaped JSON.
+async fn cors_imposter(manager: &ImposterManager, extra: serde_json::Value) -> u16 {
+    let mut doc =
+        serde_json::json!({"protocol": "http", "allowCORS": true, "recordRequests": true});
+    if let (Some(doc), Some(extra)) = (doc.as_object_mut(), extra.as_object()) {
+        doc.extend(extra.clone());
+    }
+    let config: ImposterConfig = serde_json::from_value(doc).expect("valid imposter config");
+    manager
         .create_imposter(config)
         .await
-        .expect("failed to create CORS imposter");
+        .expect("failed to create CORS imposter")
+}
 
-    let client = reqwest::Client::new();
-    let response = client
-        .request(
-            reqwest::Method::OPTIONS,
-            format!("http://127.0.0.1:{port}/any/path"),
-        )
-        .send()
-        .await
-        .expect("OPTIONS request failed");
+async fn send_with(
+    port: u16,
+    method: reqwest::Method,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> reqwest::Response {
+    let mut request =
+        reqwest::Client::new().request(method, format!("http://127.0.0.1:{port}{path}"));
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    request.send().await.expect("request failed")
+}
+
+fn assert_no_cors_headers(response: &reqwest::Response) {
+    assert_cors_header(response, "access-control-allow-origin", None);
+    assert_cors_header(response, "access-control-allow-headers", None);
+    assert_cors_header(response, "access-control-allow-methods", None);
+}
+
+fn assert_preflight_echoed(response: &reqwest::Response) {
+    assert_cors_header(
+        response,
+        "access-control-allow-origin",
+        Some("http://x.test"),
+    );
+    assert_cors_header(response, "access-control-allow-methods", Some("PUT"));
+    assert_cors_header(
+        response,
+        "access-control-allow-headers",
+        Some("X-Custom-Header"),
+    );
+}
+
+#[tokio::test]
+async fn test_cors_options_preflight() {
+    // Mountebank's `baseHttpServer.js:39-51`: a full preflight gets its own three values back.
+    let manager = ImposterManager::new();
+    let port = cors_imposter(&manager, serde_json::json!({})).await;
+
+    let response = send_with(port, reqwest::Method::OPTIONS, "/any/path", &PREFLIGHT).await;
 
     assert_eq!(response.status(), 200);
-    assert_cors_header(&response, "access-control-allow-origin", Some("*"));
-    assert_cors_header(&response, "access-control-allow-headers", Some("*"));
-    assert_cors_header(&response, "access-control-allow-methods", Some("*"));
+    assert_preflight_echoed(&response);
+
+    let _ = manager.delete_imposter(port).await;
+}
+
+#[tokio::test]
+async fn test_cors_preflight_missing_any_header_gets_no_cors_headers() {
+    let manager = ImposterManager::new();
+    let port = cors_imposter(&manager, serde_json::json!({})).await;
+
+    for (missing, _) in PREFLIGHT {
+        let headers: Vec<_> = PREFLIGHT
+            .into_iter()
+            .filter(|(name, _)| *name != missing)
+            .collect();
+        let response = send_with(port, reqwest::Method::OPTIONS, "/", &headers).await;
+        assert_eq!(response.status(), 200, "without {missing}");
+        assert_no_cors_headers(&response);
+    }
+
+    let _ = manager.delete_imposter(port).await;
+}
+
+#[tokio::test]
+async fn test_cors_preflight_with_an_empty_header_gets_no_cors_headers() {
+    // Mountebank tests each header for JavaScript truthiness, so `""` does not count.
+    let manager = ImposterManager::new();
+    let port = cors_imposter(&manager, serde_json::json!({})).await;
+
+    for (empty, _) in PREFLIGHT {
+        let headers = PREFLIGHT.map(|(name, value)| (name, if name == empty { "" } else { value }));
+        let response = send_with(port, reqwest::Method::OPTIONS, "/", &headers).await;
+        assert_eq!(response.status(), 200, "empty {empty}");
+        assert_no_cors_headers(&response);
+    }
 
     let _ = manager.delete_imposter(port).await;
 }
 
 #[tokio::test]
 async fn test_cors_headers_on_stub_response() {
+    // A non-preflight request gets no CORS headers, even with `Origin` and a matching stub.
     let manager = ImposterManager::new();
-    let stub = Stub {
-        name: None,
-        id: None,
-        route_pattern: None,
-        predicates: predicates_from_jsons(vec![serde_json::json!({
-            "equals": {"method": "GET", "path": "/test"}
-        })]),
-        responses: vec![StubResponse::new_is(
-            IsResponse {
-                status_code: 200,
-                headers: HashMap::new(),
-                body: Some(serde_json::json!("ok")),
-                ..Default::default()
-            },
-            None,
-            None,
-        )],
-        scenario_name: None,
-        required_scenario_state: None,
-        new_scenario_state: None,
-        space: None,
-        recorded_from: None,
-        verify: None,
-    };
-    let config = ImposterConfig {
-        port: None,
-        protocol: "http".to_string(),
-        allow_cors: true.into(),
-        stubs: vec![stub],
-        ..Default::default()
-    };
-    let port = manager
-        .create_imposter(config)
-        .await
-        .expect("failed to create CORS imposter with stub");
+    let port = cors_imposter(
+        &manager,
+        serde_json::json!({"stubs": [{
+            "predicates": [{"equals": {"method": "GET", "path": "/test"}}],
+            "responses": [{"is": {"statusCode": 200, "body": "ok"}}]
+        }]}),
+    )
+    .await;
 
-    let client = reqwest::Client::new();
-    let response = client
-        .get(format!("http://127.0.0.1:{port}/test"))
-        .send()
-        .await
-        .expect("GET request failed");
-
+    let response = send_with(
+        port,
+        reqwest::Method::GET,
+        "/test",
+        &[("origin", "http://x.test")],
+    )
+    .await;
     assert_eq!(response.status(), 200);
-    assert_cors_header(&response, "access-control-allow-origin", Some("*"));
-    assert_cors_header(&response, "access-control-allow-headers", Some("*"));
-    assert_cors_header(&response, "access-control-allow-methods", Some("*"));
+    assert_no_cors_headers(&response);
+    assert_eq!(response.text().await.unwrap(), "ok");
+
+    let response = send_with(port, reqwest::Method::GET, "/test", &[]).await;
+    assert_no_cors_headers(&response);
+
+    let _ = manager.delete_imposter(port).await;
+}
+
+#[tokio::test]
+async fn test_cors_options_stub_is_served_preflight_or_not() {
+    // OPTIONS reaches stub matching: the stub answers, and a preflight only adds the echo.
+    let manager = ImposterManager::new();
+    let port = cors_imposter(
+        &manager,
+        serde_json::json!({"stubs": [{
+            "predicates": [{"equals": {"method": "OPTIONS", "path": "/opt"}}],
+            "responses": [{"is": {"statusCode": 204, "headers": {"X-Stub": "yes"}}}]
+        }, {
+            "predicates": [{"equals": {"method": "OPTIONS", "path": "/body"}}],
+            "responses": [{"is": {"statusCode": 200, "body": "ok"}}]
+        }]}),
+    )
+    .await;
+
+    let response = send_with(port, reqwest::Method::OPTIONS, "/opt", &PREFLIGHT).await;
+    assert_eq!(response.status(), 204);
+    assert_cors_header(&response, "x-stub", Some("yes"));
+    assert_preflight_echoed(&response);
+
+    let response = send_with(port, reqwest::Method::OPTIONS, "/opt", &[]).await;
+    assert_eq!(response.status(), 204);
+    assert_cors_header(&response, "x-stub", Some("yes"));
+    assert_no_cors_headers(&response);
+
+    let response = send_with(port, reqwest::Method::OPTIONS, "/body", &PREFLIGHT).await;
+    assert_preflight_echoed(&response);
+    assert_eq!(response.text().await.unwrap(), "ok");
+
+    let _ = manager.delete_imposter(port).await;
+}
+
+#[tokio::test]
+async fn test_cors_preflight_overwrites_a_stubs_own_allow_origin() {
+    // Mountebank `set`s the three headers on a preflight, and adds nothing otherwise.
+    let manager = ImposterManager::new();
+    let port = cors_imposter(
+        &manager,
+        serde_json::json!({"stubs": [{
+            "predicates": [{"equals": {"path": "/own"}}],
+            "responses": [{"is": {"headers": {"Access-Control-Allow-Origin": "http://own.test"}}}]
+        }]}),
+    )
+    .await;
+
+    let response = send_with(port, reqwest::Method::OPTIONS, "/own", &PREFLIGHT).await;
+    assert_preflight_echoed(&response);
+    assert_eq!(
+        response
+            .headers()
+            .get_all("access-control-allow-origin")
+            .iter()
+            .count(),
+        1,
+        "overwritten, not appended"
+    );
+
+    let response = send_with(
+        port,
+        reqwest::Method::GET,
+        "/own",
+        &[("origin", "http://x.test")],
+    )
+    .await;
+    assert_cors_header(
+        &response,
+        "access-control-allow-origin",
+        Some("http://own.test"),
+    );
+    assert_cors_header(&response, "access-control-allow-methods", None);
+    assert_cors_header(&response, "access-control-allow-headers", None);
+
+    let _ = manager.delete_imposter(port).await;
+}
+
+#[tokio::test]
+async fn test_cors_preflight_echo_rides_on_the_default_response() {
+    let manager = ImposterManager::new();
+    let port = cors_imposter(
+        &manager,
+        serde_json::json!({"defaultResponse": {"statusCode": 404}}),
+    )
+    .await;
+
+    let response = send_with(port, reqwest::Method::OPTIONS, "/", &PREFLIGHT).await;
+    assert_eq!(response.status(), 404);
+    assert_preflight_echoed(&response);
+
+    let _ = manager.delete_imposter(port).await;
+}
+
+#[tokio::test]
+async fn test_cors_options_requests_are_journaled() {
+    // The journal used to list only the non-OPTIONS requests while counting all of them.
+    let manager = ImposterManager::new();
+    let port = cors_imposter(&manager, serde_json::json!({})).await;
+
+    send_with(port, reqwest::Method::OPTIONS, "/a", &PREFLIGHT).await;
+    send_with(port, reqwest::Method::OPTIONS, "/b", &[]).await;
+    send_with(port, reqwest::Method::GET, "/c", &[]).await;
+
+    let imposter = manager.get_imposter(port).expect("imposter exists");
+    let recorded = imposter.get_recorded_requests();
+    assert_eq!(recorded.len() as u64, imposter.get_request_count());
+    let methods: Vec<_> = recorded.iter().map(|r| r.method.as_str()).collect();
+    assert_eq!(methods, ["OPTIONS", "OPTIONS", "GET"]);
 
     let _ = manager.delete_imposter(port).await;
 }

@@ -431,7 +431,11 @@ Enable CORS for browser-based testing with `allowCORS`:
 }
 ```
 
-This automatically adds CORS headers to responses and handles preflight OPTIONS requests.
+A CORS preflight (an `OPTIONS` carrying `Origin`, `Access-Control-Request-Method` and
+`Access-Control-Request-Headers`) then gets those values echoed back as
+`Access-Control-Allow-Origin`, `-Methods` and `-Headers`, on whatever the matching stub or
+`defaultResponse` answers. Other requests get no CORS headers, so a browser's actual cross-origin
+request still needs `Access-Control-Allow-Origin` in the stub's own headers, as with Mountebank.
 
 ---
 

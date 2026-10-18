@@ -287,34 +287,10 @@
       "note": "an unknown fault answers 500"
     },
     {
-      "id": "api/http/httpImposterTest.js::http imposter POST /imposters/:id should support CORS preflight requests if \"allowCORS\" option is enabled",
-      "class": "bug",
-      "issue": "#1555",
-      "note": "allowCORS answers wildcards"
-    },
-    {
-      "id": "api/http/httpImposterTest.js::http imposter POST /imposters/:id should not handle non-preflight requests when \"allowCORS\" is enabled",
-      "class": "bug",
-      "issue": "#1555",
-      "note": "allowCORS adds headers to non-preflight requests"
-    },
-    {
       "id": "api/http/httpImposterTest.js::http imposter DELETE /imposters/:id supports returning a replayable body with proxies removed",
       "class": "bug",
       "issue": "#1591",
       "note": "DELETE /imposters/:id ignores ?replayable and ?removeProxies"
-    },
-    {
-      "id": "api/http/httpImposterTest.js::https imposter POST /imposters/:id should support CORS preflight requests if \"allowCORS\" option is enabled",
-      "class": "bug",
-      "issue": "#1555",
-      "note": "allowCORS answers wildcards"
-    },
-    {
-      "id": "api/http/httpImposterTest.js::https imposter POST /imposters/:id should not handle non-preflight requests when \"allowCORS\" is enabled",
-      "class": "bug",
-      "issue": "#1555",
-      "note": "allowCORS adds headers to non-preflight requests"
     },
     {
       "id": "api/http/httpImposterTest.js::https imposter DELETE /imposters/:id supports returning a replayable body with proxies removed",
