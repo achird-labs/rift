@@ -7863,6 +7863,128 @@
           "port": 4545
         }
       ]
+    },
+    {
+      "name": "targeted: an unrecognised fault is ignored (#1556)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "fault": "NON_EXISTENT_FAULT"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    },
+    {
+      "name": "targeted: a lower-case Mountebank fault name is unrecognised (#1556)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "fault": "connection_reset_by_peer"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    },
+    {
+      "name": "targeted: an unrecognised fault is completed by defaultResponse and honours repeat (#1556)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 418,
+              "headers": {
+                "X-D": "1"
+              },
+              "body": "dflt"
+            },
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "fault": "NOPE",
+                    "repeat": 2
+                  },
+                  {
+                    "is": {
+                      "body": "second"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "times": 3
+        }
+      ]
+    },
+    {
+      "name": "targeted: a known fault still resets the connection (#1556)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "fault": "CONNECTION_RESET_BY_PEER"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
     }
   ]
 }

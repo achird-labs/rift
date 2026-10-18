@@ -295,7 +295,10 @@ matching Mountebank's transport-fault semantics:
 A client hitting this stub sees a transport error (connection reset), not a response. The recognized
 fault strings are the same set as `_rift.fault.tcp` above (`CONNECTION_RESET_BY_PEER`,
 `EMPTY_RESPONSE`, `RANDOM_DATA_THEN_CLOSE`, `MALFORMED_RESPONSE_CHUNK`, plus their aliases). An
-unrecognized fault string is a configuration error and yields `500 Unknown fault: <value>`.
+unrecognized fault string is ignored, as in Mountebank: no fault fires, and the stub answers an
+empty response completed by the imposter's `defaultResponse` (else `200` with an empty body), with
+no `x-rift-fault` header. Rift warns when the imposter loads, and `rift-lint` reports it as
+[W022](linting.md#warnings).
 
 Like `_rift.fault.tcp`, a bare top-level `fault` also forces the whole imposter onto **HTTP/1
 only**: it is a connection-level event, and aborting a socket mid-stream is incompatible with

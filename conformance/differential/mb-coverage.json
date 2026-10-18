@@ -43,7 +43,7 @@
     "src/util/combinators.js": {"lines": [68, 68], "branches": [8, 8], "functions": [4, 5]},
     "src/util/date.js": {"lines": [41, 51], "branches": [5, 11], "functions": [3, 3]},
     "src/util/errors.js": {"lines": [55, 55], "branches": [11, 11], "functions": [4, 4]},
-    "src/util/helpers.js": {"lines": [105, 131], "branches": [12, 15], "functions": [6, 8]},
+    "src/util/helpers.js": {"lines": [109, 131], "branches": [15, 17], "functions": [6, 8]},
     "src/util/inherit.js": {"lines": [28, 28], "branches": [5, 6], "functions": [2, 2]},
     "src/util/ip.js": {"lines": [45, 54], "branches": [10, 14], "functions": [3, 3]},
     "src/util/middleware.js": {"lines": [213, 256], "branches": [44, 51], "functions": [14, 15]}

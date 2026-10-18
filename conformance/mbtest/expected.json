@@ -269,22 +269,10 @@
       "note": "shellTransform output is served as the body, not read as a response object (behaviors.md)"
     },
     {
-      "id": "api/http/httpFaultTest.js::http imposter POST /imposters with stubs should do nothing when undefined fault is specified",
-      "class": "bug",
-      "issue": "#1556",
-      "note": "an unknown fault answers 500"
-    },
-    {
       "id": "api/http/httpFaultTest.js::https imposter POST /imposters with stubs should write garbage then drop the connection when fault RANDOM_DATA_THEN_CLOSE is specified",
       "class": "bug",
       "issue": "#1600",
       "note": "on an https imposter the garbage is written before or instead of the TLS layer, so the client fails the handshake (ERR_SSL_BAD_RECORD_TYPE) instead of parsing garbage HTTP (HPE_INVALID_CONSTANT)"
-    },
-    {
-      "id": "api/http/httpFaultTest.js::https imposter POST /imposters with stubs should do nothing when undefined fault is specified",
-      "class": "bug",
-      "issue": "#1556",
-      "note": "an unknown fault answers 500"
     },
     {
       "id": "api/http/httpImposterTest.js::http imposter DELETE /imposters/:id supports returning a replayable body with proxies removed",

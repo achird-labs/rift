@@ -162,16 +162,16 @@ Feature: Error-response envelope — the standard {"errors":[{code,message}]} co
       | ref  |
       | file |
 
-  # The deliberate NON-envelope doors, pinned as negatives so a future over-sweep of rift#611 is
-  # caught rather than silently accepted. An unrecognised fault name is answered with a plain-text
-  # 500 carrying no content-type at all.
-  Scenario: an unrecognised fault name keeps its plain-text 500 reply
+  # rift#1556: an unrecognised fault name is no error door. Mountebank ignores the fault and serves
+  # an empty response (completed by `defaultResponse`, absent here), so neither an envelope nor the
+  # old plain-text `500 Unknown fault`, and no `x-rift-fault`, since no fault fired.
+  Scenario: an unrecognised fault name is ignored as an empty 200, as in Mountebank
     Given a fresh imposter from fixture "errors/unknown-fault"
     When the client sends "GET" "/unknown-fault"
-    Then the response status is 500
-    And the response body contains "Unknown fault"
+    Then the response status is 200
+    And the response body is ""
     And the response is not a JSON error envelope
-    And the response has no header "content-type"
+    And the response has no header "x-rift-fault"
 
   # rift#1371: deleting a port with no imposter is Mountebank's idempotent teardown — 200 with `{}`,
   # not a refusal, so it left the sweep below.

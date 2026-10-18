@@ -1536,6 +1536,28 @@ pub fn validate_response(
         );
     }
 
+    // W022 (issue #1556): a top-level `fault` name the engine does not know. Mountebank admits it
+    // and ignores it at serve time, answering an empty response completed by `defaultResponse`, and
+    // so does the engine, so this is a warning. An empty name is no response type (#1551), and a
+    // non-string is refused at decode, so neither is judged here.
+    if let Some(name) = response.get("fault").and_then(Value::as_str)
+        && !name.is_empty()
+        && !TCP_FAULT_KINDS.contains(&name)
+    {
+        result.add_issue(
+            LintIssue::warning(
+                "W022",
+                format!(
+                    "Unknown fault '{name}' — it is ignored, and the response is served as an \
+                     empty response completed by defaultResponse, as in Mountebank"
+                ),
+                file.to_path_buf(),
+            )
+            .with_location(format!("{location}.fault"))
+            .with_suggestion(format!("Use one of: {}", TCP_FAULT_KINDS.join(", "))),
+        );
+    }
+
     // `_rift.fault.tcp` accepts both the bare kind string and the probabilistic object form
     // (issue #531). Validate the object form's `probability` and warn on an unknown fault type.
     if let Some(tcp) = response

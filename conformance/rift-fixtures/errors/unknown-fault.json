@@ -1,6 +1,6 @@
 {
   "protocol": "http",
-  "name": "errors · unrecognised fault name — the deliberate plain-text 500 door",
+  "name": "errors · unrecognised fault name — ignored as an empty response, as in Mountebank (#1556)",
   "stubs": [
     {
       "predicates": [{ "equals": { "path": "/unknown-fault" } }],
