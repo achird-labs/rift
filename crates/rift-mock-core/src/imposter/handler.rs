@@ -15,7 +15,7 @@ use super::response::{
 use super::status::{invalid_status_response, resolve as resolve_status};
 use super::types::{
     DebugMatchResult, DebugRequest, DebugResponse, IsResponse, ProxyResponse, RecordedRequest,
-    ResponseMode, StatusValue, StubResponse, UpstreamTarget,
+    ResponseMode, StubResponse, UpstreamTarget,
 };
 use crate::behaviors::{
     CsvCache, Spliced, SplicedHeaders, authored_headers, header_to_title_case, plain_headers,
@@ -1381,7 +1381,9 @@ async fn handle_request_inner(
                     // the function did not return is completed from `defaultResponse` (issue #1369),
                     // or is `200`, no headers and an empty body when there is none.
                     let authored = IsResponse::decoded(
-                        inject_response.status_code.map(StatusValue::Code),
+                        inject_response
+                            .status_code
+                            .map(super::types::StatusValue::Code),
                         inject_response.headers.map(|headers| {
                             headers.into_iter().map(|(k, v)| (k, vec![v])).collect()
                         }),
