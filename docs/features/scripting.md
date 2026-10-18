@@ -373,7 +373,7 @@ rather than `ctx`-shaped, and each has its own documented mechanism:
 | Wait before responding | `_behaviors.wait` — a number, a `{min, max}` range, or a Mountebank-style JS function (`"wait": "function() { ... }"`, or the object spelling `{"inject": "function() { ... }"}`) | [Behaviors](../mountebank/behaviors.md) |
 
 Each takes its own Mountebank-shaped inputs, **not** `ctx`: an `inject` predicate receives
-`request`/`state`/`logger`/`config`, a `decorate` function receives the request and the response,
+`request`/`state`/`logger`/`config`, a `decorate` function receives `config` and the response,
 and a `wait` function takes no arguments and returns a millisecond count.
 Earlier versions of this page also listed `matches(ctx)`, `transform(ctx)` and `delay(ctx)` rows
 here. Those entrypoints were never dispatched by either engine — a script defining one would pass

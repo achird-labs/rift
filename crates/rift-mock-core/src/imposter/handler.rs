@@ -1272,6 +1272,7 @@ async fn handle_request_inner(
                     csv_cache: csv_cache(),
                     script_timeout,
                     strict: strict_behaviors_for(&imposter.config),
+                    default_response: imposter.config.default_response.as_ref(),
                 });
             // Per-request entry announcement — `trace!` so it compiles out of release (issue #706);
             // the outcome (status/latency) is captured by metrics and the response's x-rift-* headers.
@@ -1390,39 +1391,10 @@ async fn handle_request_inner(
                         inject_response.body.map(serde_json::Value::String),
                         None,
                     );
-                    let fallback = IsResponse::default();
-                    let completed = authored.completed_by(
-                        imposter
-                            .config
-                            .default_response
-                            .as_ref()
-                            .unwrap_or(&fallback),
+                    let mut parts = ServedParts::completed(
+                        &authored,
+                        imposter.config.default_response.as_ref(),
                     );
-                    let mut parts = ServedParts {
-                        status: completed.status_code,
-                        // The function returns a number, so a string status is the default's,
-                        // which Mountebank merges after the behaviors (issue #1558).
-                        status_text: completed
-                            .status_text
-                            .as_deref()
-                            .map(|text| Spliced::supplied(text.to_string())),
-                        headers: completed
-                            .headers
-                            .iter()
-                            .map(|(k, values)| {
-                                (
-                                    k.clone(),
-                                    values
-                                        .iter()
-                                        .map(|v| crate::behaviors::Spliced::authored(v.clone()))
-                                        .collect(),
-                                )
-                            })
-                            .collect(),
-                        body: crate::behaviors::Spliced::authored(body_text(
-                            completed.body.as_ref(),
-                        )),
-                    };
                     // Mountebank runs a response's behaviors on the injected response too
                     // (issue #1188). A failed inject never gets here, so it runs none of them —
                     // as in Mountebank, which throws before executing behaviors.
@@ -1439,6 +1411,7 @@ async fn handle_request_inner(
                             csv_cache: csv_cache(),
                             script_timeout,
                             strict: strict_behaviors_for(&imposter.config),
+                            default_response: imposter.config.default_response.as_ref(),
                         };
                         match run.apply(parts).await {
                             BehaviorOutcome::Applied { parts: applied, .. } => parts = applied,
@@ -2074,6 +2047,7 @@ async fn handle_request_inner(
                         csv_cache: csv_cache(),
                         script_timeout,
                         strict: strict_behaviors,
+                        default_response: imposter.config.default_response.as_ref(),
                     };
                     match run
                         .apply(ServedParts {

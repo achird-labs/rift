@@ -3,20 +3,22 @@
 //! This module handles creating responses from stubs, applying behaviors,
 //! and managing the response cycle.
 
+use super::conditional::{self, ConditionalSpec};
 use super::types::{
     DebugResponsePreview, IsResponse, ResponseMode, RiftResponseExtension, RiftScriptConfig,
     StubResponse,
 };
 use crate::behaviors::{
-    DecorateError, HasRepeatBehavior, RequestContext, ResponseStatus, apply_decorate,
-    is_js_config_decorate,
+    DecorateError, Decorated, HasRepeatBehavior, RequestContext, ResponseStatus, apply_decorate,
+    is_javascript_decorate,
 };
-// Fallback-only (issue #357 Item 6): the real JS `config =>` decorate path is Boa
-// (`execute_mountebank_config_decorate`); this textual transpiler is used only when the
-// `javascript` feature is disabled and no JS engine is available.
-use super::conditional::{self, ConditionalSpec};
+// Fallback-only (issue #357 Item 6): a JavaScript decorate runs in Boa
+// (`execute_mountebank_decorate`); these textual rewrites are used only when the `javascript`
+// feature is disabled and no JS engine is available.
+#[cfg(feature = "javascript")]
+use crate::behaviors::is_js_function_decorate;
 #[cfg(not(feature = "javascript"))]
-use crate::behaviors::rewrite_js_config_to_rhai;
+use crate::behaviors::{is_js_config_decorate, rewrite_js_config_to_rhai};
 use crate::imposter::Predicate;
 use std::collections::HashMap;
 
@@ -512,6 +514,11 @@ pub fn create_stub_from_proxy_response(
 
 /// Apply decorate behavior - handles both JavaScript and Rhai scripts.
 ///
+/// A JavaScript decorate ([`is_javascript_decorate`]) runs on Mountebank's contract (issue
+/// #1567): called as `fn(config, response, logger)` whatever its form or parameter names, a
+/// returned object replaces the response, and the headers are exactly the script's. Anything else
+/// runs as Rhai.
+///
 /// `imposter_port` identifies the per-imposter state shared with predicate injects and response
 /// injects for the same imposter (issue #355 Item 0) — decorate reads and writes the same
 /// persisted state rather than a throwaway object. `stub_id` tags the script logger's tracing
@@ -521,149 +528,106 @@ pub fn apply_js_or_rhai_decorate(
     request: &RequestContext,
     body: &str,
     status: &ResponseStatus,
-    headers: &mut HashMap<String, String>,
+    headers: &HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
-) -> Result<(String, ResponseStatus), DecorateError> {
+) -> Result<Decorated, DecorateError> {
     // Only the JS engine call sites below consume `imposter_port`/`stub_id`; without the feature
     // the parameters would otherwise be unused.
     #[cfg(not(feature = "javascript"))]
     let _ = (imposter_port, stub_id);
 
-    // Mountebank's JS `config =>` convention (issue #191). Issue #357 Item 6: every such script
-    // now runs through REAL Boa execution (`execute_mountebank_config_decorate`, which already
-    // backed the `require()` case for issue #305) instead of the lossy textual JS→Rhai
-    // transpiler — one JS contract everywhere, so e.g. `JSON.parse` + real object mutation work.
-    // Checked before the `function` route since arrow scripts don't start with "function" and
-    // `function(config)` uses the config model, not (request, response).
-    if is_js_config_decorate(script) {
-        #[cfg(feature = "javascript")]
-        {
-            let mb_request = crate::scripting::MountebankRequest {
-                method: request.method.clone(),
-                path: request.path.clone(),
-                query: request.query_joined(),
-                headers: request.headers.clone(),
-                body: request.body.clone(),
-                // `RequestContext` doesn't track binary/text, so the classification is genuinely
-                // unknown here — say so rather than asserting `Text` over a possibly-base64 body
-                // (issue #636). `isBinary` is then absent for decorate scripts, not falsely false.
-                mode: None,
-                request_from: request.request_from.clone(),
-                ip: request.ip.clone(),
-                form: request.form.clone(),
-            };
-            // `execute_mountebank_config_decorate` calls `decorate_fn` as a function value
-            // (`{decorate_fn}(__config)`), so a bare body with no `function`/arrow wrapper (the
-            // "config.response.body = ...;" convention `is_js_config_decorate` also accepts)
-            // must be wrapped into one first.
-            //
-            // B4 (issue #357): detect "already a function value" via START-ANCHORED prefixes (the
-            // same wrapper forms `is_js_config_decorate` recognizes), NOT a substring `=>` test —
-            // a bare body can legitimately contain an inner arrow lambda, e.g.
-            // `config.response.body = JSON.stringify(items.map(x => x.id));`, and a `contains("=>")`
-            // check would then leave it unwrapped, producing `var __fn = <statement>` (a throw).
-            let trimmed = script.trim_start();
-            let already_function_value = trimmed.starts_with("function")
-                || trimmed.starts_with("config =>")
-                || trimmed.starts_with("config=>")
-                || trimmed.starts_with("(config) =>")
-                || trimmed.starts_with("(config)=>");
-            let wrapped_script = if already_function_value {
-                std::borrow::Cow::Borrowed(script)
-            } else {
-                std::borrow::Cow::Owned(format!("function(config) {{ {script} }}"))
-            };
-            return match crate::scripting::execute_mountebank_config_decorate(
-                &wrapped_script,
-                &mb_request,
+    if !is_javascript_decorate(script) {
+        return decorate_rhai(script, request, body, status, headers);
+    }
+
+    #[cfg(feature = "javascript")]
+    {
+        let mb_request = crate::scripting::MountebankRequest {
+            method: request.method.clone(),
+            path: request.path.clone(),
+            query: request.query_joined(),
+            headers: request.headers.clone(),
+            body: request.body.clone(),
+            // `RequestContext` doesn't track binary/text, so the classification is genuinely
+            // unknown here — say so rather than asserting `Text` over a possibly-base64 body
+            // (issue #636). `isBinary` is then absent for decorate scripts, not falsely false.
+            mode: None,
+            request_from: request.request_from.clone(),
+            ip: request.ip.clone(),
+            form: request.form.clone(),
+        };
+        // The executor calls the script as a function value, so a bare body in the `config`
+        // convention ("config.response.body = ...;") is wrapped into one first. The test is the
+        // start-anchored function recogniser, NOT a substring `=>` test (B4, issue #357): a bare
+        // body can contain an inner arrow, e.g. `items.map(x => x.id)`, and leaving it unwrapped
+        // would produce `var __fn = <statement>` (a throw).
+        let wrapped_script = if is_js_function_decorate(script) {
+            std::borrow::Cow::Borrowed(script)
+        } else {
+            std::borrow::Cow::Owned(format!("function(config) {{ {script} }}"))
+        };
+        crate::scripting::execute_mountebank_decorate(
+            &wrapped_script,
+            &mb_request,
+            body,
+            status,
+            headers,
+            imposter_port,
+            stub_id,
+        )
+        .map_err(|e| DecorateError::JavaScript(e.to_string()))
+    }
+
+    // No JS engine compiled in (`--no-default-features`): fall back to textual rewrites so
+    // simple field-access decorates still work, at the cost of real JS semantics (require(),
+    // JSON.parse/stringify on nested values, closures, a returned object).
+    #[cfg(not(feature = "javascript"))]
+    {
+        if is_js_config_decorate(script) {
+            return decorate_rhai(
+                &rewrite_js_config_to_rhai(script),
+                request,
                 body,
                 status,
                 headers,
-                imposter_port,
-                stub_id,
-            ) {
-                Ok(result) => {
-                    for (k, v) in result.headers {
-                        headers.insert(k, v);
-                    }
-                    Ok((result.body, result.status_code))
-                }
-                Err(e) => Err(DecorateError::JavaScript(e.to_string())),
-            };
+            );
         }
-
-        // No JS engine compiled in (`--no-default-features`): fall back to the textual rewrite
-        // so simple field-access decorates still work, at the cost of real JS semantics
-        // (require(), JSON.parse/stringify on nested values, closures).
-        #[cfg(not(feature = "javascript"))]
+        if script.trim().starts_with("function")
+            && let Some(start) = script.find('{')
+            && let Some(end) = script.rfind('}')
+            && start < end
         {
-            let rhai_script = rewrite_js_config_to_rhai(script);
-            return apply_decorate(&rhai_script, request, body, status, headers);
+            let rhai_script = script[start + 1..end].trim().replace('\'', "\"");
+            return decorate_rhai(&rhai_script, request, body, status, headers);
         }
+        // Any other JavaScript (an arrow not named `config`, an `async` function) has no textual
+        // fallback; it must not reach Rhai as if it were Rhai (issue #1567).
+        Err(DecorateError::JsParseFailure)
     }
+}
 
-    // Check if it's a JavaScript function declaration
-    if script.trim().starts_with("function") {
-        #[cfg(feature = "javascript")]
-        {
-            // Use the JavaScript engine for proper execution
-            let mb_request = crate::scripting::MountebankRequest {
-                method: request.method.clone(),
-                path: request.path.clone(),
-                query: request.query_joined(),
-                headers: request.headers.clone(),
-                body: request.body.clone(),
-                // `RequestContext` doesn't track binary/text, so the classification is genuinely
-                // unknown here — say so rather than asserting `Text` over a possibly-base64 body
-                // (issue #636). `isBinary` is then absent for decorate scripts, not falsely false.
-                mode: None,
-                request_from: request.request_from.clone(),
-                ip: request.ip.clone(),
-                form: request.form.clone(),
-            };
-
-            match crate::scripting::execute_mountebank_decorate(
-                script,
-                &mb_request,
-                body,
-                status,
-                headers,
-                imposter_port,
-                stub_id,
-            ) {
-                Ok(result) => {
-                    // Update headers from the result
-                    for (k, v) in result.headers {
-                        headers.insert(k, v);
-                    }
-                    Ok((result.body, result.status_code))
-                }
-                Err(e) => Err(DecorateError::JavaScript(e.to_string())),
-            }
-        }
-
-        #[cfg(not(feature = "javascript"))]
-        {
-            // Fallback to Rhai conversion when JavaScript feature is disabled
-            if let Some(start) = script.find('{')
-                && let Some(end) = script.rfind('}')
-            {
-                let js_body = script[start + 1..end].trim();
-                let rhai_script = js_body.replace('\'', "\"");
-                return apply_decorate(&rhai_script, request, body, status, headers);
-            }
-            Err(DecorateError::JsParseFailure)
-        }
-    } else {
-        // Assume it's Rhai script
-        apply_decorate(script, request, body, status, headers)
-    }
+/// Run a Rhai decorate over a copy of `headers`; the script changes the response it is handed.
+fn decorate_rhai(
+    script: &str,
+    request: &RequestContext,
+    body: &str,
+    status: &ResponseStatus,
+    headers: &HashMap<String, String>,
+) -> Result<Decorated, DecorateError> {
+    let mut headers = headers.clone();
+    let (body, status_code) = apply_decorate(script, request, body, status, &mut headers)?;
+    Ok(Decorated {
+        status_code,
+        headers,
+        body,
+        returned: None,
+    })
 }
 
 /// Run [`apply_js_or_rhai_decorate`] off the async worker with a wall-clock deadline
 /// (issue #476) — the same `spawn_blocking` + `tokio::time::timeout` shape as
-/// `scripting::bounded`. Takes and returns the header map by value because the execution moves
+/// `scripting::bounded`. Takes the header map by value because the execution moves
 /// to a blocking thread. No abort flag: Boa has no per-instruction interrupt, so after a timeout
 /// the loop-iteration cap (issue #327) is what eventually frees the blocking thread; the client
 /// is released at the deadline either way. The deadline is the imposter's
@@ -674,11 +638,11 @@ pub async fn apply_decorate_bounded(
     request: RequestContext,
     body: String,
     status: ResponseStatus,
-    mut headers: HashMap<String, String>,
+    headers: HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<String>,
     timeout: std::time::Duration,
-) -> Result<(String, ResponseStatus, HashMap<String, String>), DecorateError> {
+) -> Result<Decorated, DecorateError> {
     let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
     // Deliberately a plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987): the
     // decorate script has no `ctx.state`, so nothing on this thread can annotate. What makes that
@@ -694,11 +658,10 @@ pub async fn apply_decorate_bounded(
             &request,
             &body,
             &status,
-            &mut headers,
+            &headers,
             imposter_port,
             stub_id.as_deref(),
         )
-        .map(|(body, status)| (body, status, headers))
     });
     match tokio::time::timeout(timeout, handle).await {
         Ok(Ok(result)) => result,
@@ -738,13 +701,17 @@ mod tests {
 
     #[test]
     fn decorate_js_config_sets_body() {
-        let mut headers = std::collections::HashMap::new();
-        let (body, status) = apply_js_or_rhai_decorate(
+        let headers = std::collections::HashMap::new();
+        let Decorated {
+            body,
+            status_code: status,
+            ..
+        } = apply_js_or_rhai_decorate(
             "config => { config.response.body = 'hello'; }",
             &decorate_req(),
             "original",
             &ResponseStatus::Code(200),
-            &mut headers,
+            &headers,
             test_port(),
             None,
         )
@@ -755,13 +722,13 @@ mod tests {
 
     #[test]
     fn decorate_js_config_reads_request_body() {
-        let mut headers = std::collections::HashMap::new();
-        let (body, _) = apply_js_or_rhai_decorate(
+        let headers = std::collections::HashMap::new();
+        let Decorated { body, .. } = apply_js_or_rhai_decorate(
             "config => { config.response.body = config.request.body; }",
             &decorate_req(),
             "original",
             &ResponseStatus::Code(200),
-            &mut headers,
+            &headers,
             test_port(),
             None,
         )
@@ -788,18 +755,18 @@ mod tests {
             "config => {{ const s = require('{}'); s(config); }}",
             module.display()
         );
-        let mut headers = std::collections::HashMap::new();
+        let headers = std::collections::HashMap::new();
         let result = apply_js_or_rhai_decorate(
             &script,
             &decorate_req(),
             "original",
             &ResponseStatus::Code(200),
-            &mut headers,
+            &headers,
             test_port(),
             None,
         );
         let _ = std::fs::remove_file(&module);
-        let (body, _) = result.expect("require-based config decorate should run");
+        let Decorated { body, .. } = result.expect("require-based config decorate should run");
         assert_eq!(body, "REQUIRE-RAN");
     }
 
@@ -812,7 +779,7 @@ mod tests {
     #[cfg(feature = "javascript")]
     #[test]
     fn decorate_js_config_real_json_parse_and_mutation_runs_through_boa() {
-        let mut headers = std::collections::HashMap::new();
+        let headers = std::collections::HashMap::new();
         let request = RequestContext {
             method: "POST".to_string(),
             path: "/orders".to_string(),
@@ -827,12 +794,12 @@ mod tests {
             delete parsed.order.items;
             config.response.body = JSON.stringify(parsed);
         }"#;
-        let (body, _) = apply_js_or_rhai_decorate(
+        let Decorated { body, .. } = apply_js_or_rhai_decorate(
             script,
             &request,
             "original",
             &ResponseStatus::Code(200),
-            &mut headers,
+            &headers,
             test_port(),
             None,
         )
@@ -850,7 +817,7 @@ mod tests {
     #[cfg(feature = "javascript")]
     #[test]
     fn decorate_bare_body_with_inner_arrow_runs_through_boa() {
-        let mut headers = std::collections::HashMap::new();
+        let headers = std::collections::HashMap::new();
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/orders".to_string(),
@@ -863,12 +830,12 @@ mod tests {
         // inner `.map(x => x.id)` arrow.
         let script =
             r#"config.response.body = JSON.stringify([{id:1},{id:2},{id:3}].map(x => x.id));"#;
-        let (body, _) = apply_js_or_rhai_decorate(
+        let Decorated { body, .. } = apply_js_or_rhai_decorate(
             script,
             &request,
             "original",
             &ResponseStatus::Code(200),
-            &mut headers,
+            &headers,
             test_port(),
             None,
         )
@@ -879,13 +846,16 @@ mod tests {
 
     #[test]
     fn decorate_js_config_sets_status() {
-        let mut headers = std::collections::HashMap::new();
-        let (_, status) = apply_js_or_rhai_decorate(
+        let headers = std::collections::HashMap::new();
+        let Decorated {
+            status_code: status,
+            ..
+        } = apply_js_or_rhai_decorate(
             "config => { config.response.statusCode = 404; }",
             &decorate_req(),
             "original",
             &ResponseStatus::Code(200),
-            &mut headers,
+            &headers,
             test_port(),
             None,
         )
@@ -897,13 +867,13 @@ mod tests {
     fn decorate_js_config_function_wrapper_executes() {
         // `function(config) { ... }` must take the config-rewrite route, NOT the `function`→JS-engine
         // route (it uses the config model, not (request, response)). Locks the detection ordering.
-        let mut headers = std::collections::HashMap::new();
-        let (body, _) = apply_js_or_rhai_decorate(
+        let headers = std::collections::HashMap::new();
+        let Decorated { body, .. } = apply_js_or_rhai_decorate(
             "function(config) { config.response.body = 'fn'; }",
             &decorate_req(),
             "original",
             &ResponseStatus::Code(200),
-            &mut headers,
+            &headers,
             test_port(),
             None,
         )
@@ -915,13 +885,13 @@ mod tests {
     fn decorate_js_config_no_wrapper_executes() {
         // A bare body (no arrow/function wrapper) is detected via `config.response.` and rewritten
         // in place (no brace stripping).
-        let mut headers = std::collections::HashMap::new();
-        let (body, _) = apply_js_or_rhai_decorate(
+        let headers = std::collections::HashMap::new();
+        let Decorated { body, .. } = apply_js_or_rhai_decorate(
             "config.response.body = 'bare';",
             &decorate_req(),
             "original",
             &ResponseStatus::Code(200),
-            &mut headers,
+            &headers,
             test_port(),
             None,
         )
@@ -931,18 +901,121 @@ mod tests {
 
     #[test]
     fn decorate_plain_rhai_still_works() {
-        let mut headers = std::collections::HashMap::new();
-        let (body, _) = apply_js_or_rhai_decorate(
+        let headers = std::collections::HashMap::new();
+        let Decorated { body, .. } = apply_js_or_rhai_decorate(
             "response.body = request.path;",
             &decorate_req(),
             "original",
             &ResponseStatus::Code(200),
-            &mut headers,
+            &headers,
             test_port(),
             None,
         )
         .unwrap();
         assert_eq!(body, "/orders", "existing Rhai decorate must be unchanged");
+    }
+
+    // Issue #1567: Mountebank's decorate contract — any function form, the return value, and
+    // header deletion. The response handed over is `statusCode` with `X-Orig: 1` and `orig`.
+    #[cfg(feature = "javascript")]
+    fn decorate_1567(
+        script: &str,
+        status: u16,
+    ) -> (String, ResponseStatus, HashMap<String, String>) {
+        let headers = HashMap::from([("X-Orig".to_string(), "1".to_string())]);
+        let Decorated {
+            body,
+            status_code: status,
+            headers,
+            ..
+        } = apply_js_or_rhai_decorate(
+            script,
+            &decorate_req(),
+            "orig",
+            &ResponseStatus::Code(status),
+            &headers,
+            test_port(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{script}: {e}"));
+        (body, status, headers)
+    }
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn every_arrow_form_runs_as_javascript() {
+        for (script, want) in [
+            (
+                "(request, response) => { response.body = 'mutated ' + request.path; }",
+                "mutated /orders",
+            ),
+            ("(req, res) => { res.body = 'a'; }", "a"),
+            ("request => { request.response.body = 'si'; }", "si"),
+            (
+                "async (request, response) => { response.body = 'as'; }",
+                "as",
+            ),
+            ("async config => { config.response.body = 'ac'; }", "ac"),
+        ] {
+            let (body, status, headers) = decorate_1567(script, 200);
+            assert_eq!(body, want, "{script}");
+            assert_eq!(status, ResponseStatus::Code(200), "{script}");
+            assert_eq!(headers.get("X-Orig").map(String::as_str), Some("1"));
+        }
+    }
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn a_returned_object_replaces_the_response() {
+        let (body, status, headers) = decorate_1567(
+            "function (request, response) { return { body: 'returned' }; }",
+            404,
+        );
+        assert_eq!(body, "returned");
+        assert_eq!(
+            status,
+            ResponseStatus::Code(200),
+            "an omitted status is 200"
+        );
+        assert!(headers.is_empty(), "the returned object has no headers");
+
+        let (body, status, _) =
+            decorate_1567("config => ({ statusCode: 201, body: 'cfgret' })", 200);
+        assert_eq!(
+            (body.as_str(), status),
+            ("cfgret", ResponseStatus::Code(201))
+        );
+
+        let (body, status, headers) =
+            decorate_1567("config => ({ headers: { 'X-New': 'n' }, body: 'b' })", 404);
+        assert_eq!((body.as_str(), status), ("b", ResponseStatus::Code(200)));
+        assert_eq!(
+            headers,
+            HashMap::from([("X-New".to_string(), "n".to_string())])
+        );
+    }
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn a_falsy_return_keeps_the_mutated_response() {
+        let (body, status, headers) =
+            decorate_1567("config => { config.response.body = 'mut'; return 0; }", 404);
+        assert_eq!((body.as_str(), status), ("mut", ResponseStatus::Code(404)));
+        assert_eq!(headers.get("X-Orig").map(String::as_str), Some("1"));
+    }
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn a_deleted_header_is_gone_in_both_forms() {
+        for script in [
+            "config => { delete config.response.headers['X-Orig']; config.response.body = 'd'; }",
+            "function (request, response) { delete response.headers['X-Orig']; response.body = 'd'; }",
+            "(request, response) => { delete response.headers['X-Orig']; response.body = 'd'; }",
+        ] {
+            let (body, _, headers) = decorate_1567(script, 200);
+            assert_eq!(body, "d", "{script}");
+            assert!(!headers.contains_key("X-Orig"), "{script}: {headers:?}");
+        }
     }
 
     // =========================================================================
@@ -1265,7 +1338,11 @@ mod tests {
     #[cfg(feature = "javascript")]
     #[tokio::test]
     async fn mb_decorate_bounded_applies() {
-        let (body, status, _headers) = apply_decorate_bounded(
+        let Decorated {
+            body,
+            status_code: status,
+            ..
+        } = apply_decorate_bounded(
             "function (request, response) { response.body = response.body + '-decorated'; }"
                 .to_string(),
             decorate_req(),

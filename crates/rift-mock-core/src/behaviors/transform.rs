@@ -43,6 +43,28 @@ pub enum DecorateError {
     Timeout(u64),
 }
 
+/// What a `decorate` script left (issue #1567).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decorated {
+    pub status_code: ResponseStatus,
+    /// Exactly the script's headers, so a header it deleted is gone.
+    pub headers: HashMap<String, String>,
+    pub body: String,
+    /// `Some` when the function returned an object, which replaces the response as in Mountebank
+    /// (`behaviors.js:246-249`). It names the fields that object leaves out; they hold the built-in
+    /// `200`, no headers and `""` here, and the pipeline completes them from the imposter's
+    /// `defaultResponse`. `None` when the script changed the response it was handed.
+    pub returned: Option<ReturnedOmits>,
+}
+
+/// The fields a decorate's returned object leaves out (issue #1567).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReturnedOmits {
+    pub status_code: bool,
+    pub headers: bool,
+    pub body: bool,
+}
+
 /// Execute shell transform command
 /// The command receives MB_REQUEST and MB_RESPONSE environment variables
 /// and should output the transformed response body to stdout
@@ -99,6 +121,56 @@ pub fn apply_shell_transform(
             "Shell transform failed: {stderr}"
         )))
     }
+}
+
+/// Whether a `decorate` script is a JavaScript function value (issue #1567): `function`, an arrow
+/// (`(<params>) =>` or `<identifier> =>`), either optionally `async`. Start-anchored on the trimmed
+/// script. Mountebank calls any of them as `fn(config, response, logger)`, whatever the parameters
+/// are named. Rhai cannot start a script this way: its closures are `|x|`, and `=>` appears only
+/// inside a `switch`.
+#[must_use]
+pub fn is_js_function_decorate(script: &str) -> bool {
+    let t = script.trim_start();
+    if is_function_head(t) {
+        return true;
+    }
+    // `async` is a keyword only when a function head follows it; `async => 1` is an arrow whose
+    // parameter is named `async`, which the check above already took.
+    t.strip_prefix("async")
+        .filter(|rest| rest.starts_with(|c: char| c.is_whitespace() || c == '('))
+        .is_some_and(|rest| is_function_head(rest.trim_start()))
+}
+
+fn is_function_head(t: &str) -> bool {
+    t.starts_with("function") || is_arrow_head(t)
+}
+
+/// `(<anything without ')'>) =>` or `<identifier> =>`.
+fn is_arrow_head(t: &str) -> bool {
+    let rest = if let Some(inner) = t.strip_prefix('(') {
+        match inner.find(')') {
+            Some(close) => &inner[close + 1..],
+            None => return false,
+        }
+    } else {
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+        let end = t.find(|c: char| !is_ident(c)).unwrap_or(t.len());
+        if end == 0 || t.starts_with(|c: char| c.is_ascii_digit()) {
+            return false;
+        }
+        &t[end..]
+    };
+    rest.trim_start().starts_with("=>")
+}
+
+/// Whether the engine runs a `decorate` script as JavaScript rather than Rhai: a function value
+/// ([`is_js_function_decorate`]) or a bare body in the `config` convention
+/// ([`is_js_config_decorate`]), which the engine wraps in `function(config) { ... }`.
+/// `rift-lint` carries a copy of this rule, pinned by
+/// `crates/rift-http-proxy/tests/issue_1156_decorate_routing.rs`.
+#[must_use]
+pub fn is_javascript_decorate(script: &str) -> bool {
+    is_js_function_decorate(script) || is_js_config_decorate(script)
 }
 
 /// Detect Mountebank's JavaScript `config =>` decorate calling convention (issue #191): an arrow or
@@ -575,6 +647,48 @@ mod tests {
         for script in ["response.body = 1;", "function(request, response) {}"] {
             assert!(!is_js_config_decorate(script), "{script}");
         }
+    }
+
+    // Issue #1567: every function form is recognised, whatever its parameters are named; Rhai is
+    // not.
+    #[test]
+    fn every_function_form_is_a_javascript_function_decorate() {
+        for script in [
+            "function (request, response) {}",
+            "function(config) {}",
+            "async function (r) {}",
+            "(request, response) => {}",
+            "(req, res)=>{}",
+            "() => 1",
+            "({ response }) => {}",
+            "request => {}",
+            "$r => {}",
+            "_ => {}",
+            "async (request, response) => {}",
+            "async(r) => {}",
+            "async config => {}",
+            "async => 1",
+            "  \n config => {}",
+        ] {
+            assert!(is_js_function_decorate(script), "{script:?}");
+            assert!(is_javascript_decorate(script), "{script:?}");
+        }
+        for script in [
+            "",
+            "response.body = 1;",
+            "(1 + 2) * 3",
+            "(a = f()) => 1",
+            "1 => 2",
+            "let f = |x| x + 1;",
+            "switch x { 1 => () }",
+            "asyncfn(1)",
+            "async x",
+            "config.response.body = 'x';",
+        ] {
+            assert!(!is_js_function_decorate(script), "{script:?}");
+        }
+        assert!(is_javascript_decorate("config.response.body = 'x';"));
+        assert!(!is_javascript_decorate("response.body = 1;"));
     }
 
     // Issue #1384: a `}` before the first `{` leaves no wrapper body to strip, so the whole

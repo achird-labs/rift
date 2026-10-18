@@ -9,8 +9,7 @@
 
 /// The engine's routing, as `apply_js_or_rhai_decorate` applies it.
 fn engine_runs_as_javascript(script: &str) -> bool {
-    rift_mock_core::behaviors::is_js_config_decorate(script)
-        || script.trim().starts_with("function")
+    rift_mock_core::behaviors::is_javascript_decorate(script)
 }
 
 #[test]
@@ -39,6 +38,18 @@ fn the_linter_routes_decorate_scripts_exactly_as_the_engine_does() {
         "",
         "   ",
         "async function (r, s) {}",
+        // Issue #1567: every arrow form, whatever its parameters are named.
+        "(request, response) => { response.body = 'x'; }",
+        "(req, res)=>{}",
+        "() => {}",
+        "request => { request.response.body = 'si'; }",
+        "$r => {}",
+        "async (request, response) => {}",
+        "async config => {}",
+        "  ({ response }) => {}",
+        // Not a function head: Rhai.
+        "(1 + 2) * 3",
+        "let f = |x| x + 1; response.body = f(1);",
     ];
     for script in cases {
         assert_eq!(
@@ -46,5 +57,24 @@ fn the_linter_routes_decorate_scripts_exactly_as_the_engine_does() {
             engine_runs_as_javascript(script),
             "the linter and the engine disagree on whether this decorate is JavaScript: {script:?}"
         );
+    }
+}
+
+// Issue #1567: an arrow decorate runs as JavaScript whatever its parameters are named. It used to
+// reach Rhai unless its parameter was `config`, and fail there.
+#[test]
+fn every_arrow_decorate_runs_as_javascript() {
+    for script in [
+        "(request, response) => { response.body = 'x'; }",
+        "(req, res)=>{}",
+        "request => {}",
+        "async (request, response) => {}",
+        "async function (request, response) {}",
+    ] {
+        assert!(engine_runs_as_javascript(script), "{script:?}");
+        assert!(rift_lint::is_javascript_decorate(script), "{script:?}");
+    }
+    for script in ["response.body = 1;", "(1 + 2) * 3", "switch x { 1 => () }"] {
+        assert!(!engine_runs_as_javascript(script), "{script:?}");
     }
 }

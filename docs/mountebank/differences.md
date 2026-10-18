@@ -71,7 +71,8 @@ not rewrite an address into the `::ffff:` form, because a script would then see 
 adds the header. More generally, in Mountebank 2.9.1 any decorate that throws answers `500` with a
 JavaScript stack trace in the body (its error handler fails while logging the request). Rift serves
 the undecorated response with `x-rift-decorate-error: true` instead, and `500` only under
-`strictBehaviors` — see [Behaviors](behaviors.md).
+`strictBehaviors` — see [Behaviors](behaviors.md). A decorate that is not a function at all (`42`,
+a bare expression) answers `500` in Mountebank; Rift runs it as a Rhai script, so it may succeed.
 
 ## `copy` from an absent source
 

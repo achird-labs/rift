@@ -27,6 +27,12 @@ record.
 
 ### Changed
 
+- **A `decorate` that returns an object now replaces the response** (#1567), as in Mountebank. The
+  return value used to be ignored, so `return { body: 'x' }` changed nothing. A field the returned
+  object leaves out is taken from the imposter's `defaultResponse`, or is `200`, no headers and an
+  empty body. Only a script that returned a truthy value other than the response it was given is
+  affected; `return response;` is still a mutation.
+
 - **A `lookup` CSV file's cells and headers are no longer trimmed** (#1566), as in Mountebank. A
   file with padded headers (`name, location`) that used to match now names the column ` location`,
   so `${row}[location]` is left in place; a padded cell (` Bob `) matches only a padded key. A
@@ -93,6 +99,14 @@ record.
   reports it as `E057`.
 
 ### Fixed
+
+- **A `decorate` runs on Mountebank's contract, whatever function form it is written in** (#1567).
+  An arrow whose parameter is not named `config`, such as `(request, response) => { ... }`,
+  `(req, res) => ...` or `request => { ... }`, ran as Rhai, failed, and served the undecorated
+  response with `x-rift-decorate-error`; so did an `async` function. Every function form now runs
+  as JavaScript, called as `fn(config, response, logger)` as in Mountebank, and `rift-lint` parses
+  it as JavaScript. A header the function deletes (`delete response.headers['X-Old']`) is no
+  longer sent: the headers were merged back over the originals.
 
 - **An imposter can no longer be created on the server's own admin, metrics, front-door or
   intercept port on macOS** (#1557). Under `--local-only`, with `--host 127.0.0.1`, or with a

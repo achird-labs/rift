@@ -2437,15 +2437,6 @@ fn parse_mountebank_response(
     })
 }
 
-/// Response from a Mountebank decorate function
-#[derive(Debug, Clone)]
-pub struct MountebankDecorateResponse {
-    /// The `statusCode` the script left: a number, or a string (issue #1558).
-    pub status_code: crate::behaviors::ResponseStatus,
-    pub headers: std::collections::HashMap<String, String>,
-    pub body: String,
-}
-
 /// A decorate script's `response.statusCode` (issue #1558): the string as written while it is one,
 /// as Mountebank hands it over.
 fn status_to_js(status: &crate::behaviors::ResponseStatus) -> JsValue {
@@ -2598,236 +2589,21 @@ fn register_require(context: &mut Context) -> Result<()> {
     Ok(())
 }
 
-/// Execute a Mountebank `config => {...}` / `function(config)` decorate in Boa, exposing a
-/// `config` object ({ request, response, path, state, logger }) — with every request field also
-/// flattened onto `config` itself (issue #355 Item 0) — and a CommonJS `require()` so a decorate
-/// can load an external `.cjs`/`.js` module (issue #305). `config.state` is the per-port state
-/// persisted via `get_imposter_state`/`save_imposter_state`, shared with predicate injects and
-/// response injects for the same imposter. Returns the mutated response.
-pub fn execute_mountebank_config_decorate(
-    decorate_fn: &str,
-    request: &MountebankRequest,
-    response_body: &str,
-    response_status: &crate::behaviors::ResponseStatus,
-    response_headers: &std::collections::HashMap<String, String>,
-    imposter_port: u16,
-    stub_id: Option<&str>,
-) -> Result<MountebankDecorateResponse> {
-    let decorate_fn = decorate_fn.to_string();
-    let request = request.clone();
-    let response_body = response_body.to_string();
-    let response_status = response_status.clone();
-    let response_headers = response_headers.clone();
-    let stub_id = stub_id.map(str::to_string);
-    with_mb_js_thread(move |thread| {
-        execute_mountebank_config_decorate_in(
-            thread,
-            &decorate_fn,
-            &request,
-            &response_body,
-            &response_status,
-            &response_headers,
-            imposter_port,
-            stub_id.as_deref(),
-        )
-    })?
-}
-
-#[allow(clippy::too_many_arguments)]
-fn execute_mountebank_config_decorate_in(
-    thread: &mut MbJsThread,
-    decorate_fn: &str,
-    request: &MountebankRequest,
-    response_body: &str,
-    response_status: &crate::behaviors::ResponseStatus,
-    response_headers: &std::collections::HashMap<String, String>,
-    imposter_port: u16,
-    stub_id: Option<&str>,
-) -> Result<MountebankDecorateResponse> {
-    let MbJsThread { context, scripts } = thread;
-
-    // Create request object
-    let request_obj = create_mountebank_request_object(&mut *context, request)?;
-
-    // Create response object
-    let response_obj = create_js_object(&*context);
-
-    response_obj
-        .set(
-            js_string!("statusCode"),
-            status_to_js(response_status),
-            false,
-            &mut *context,
-        )
-        .map_err(|e| anyhow!("Failed to set statusCode: {e}"))?;
-
-    response_obj
-        .set(
-            js_string!("body"),
-            JsValue::from(js_string!(response_body.to_string())),
-            false,
-            &mut *context,
-        )
-        .map_err(|e| anyhow!("Failed to set body: {e}"))?;
-
-    // Create headers object for response
-    let headers_obj = create_js_object(&*context);
-    for (k, v) in response_headers {
-        headers_obj
-            .set(
-                js_string!(k.clone()),
-                JsValue::from(js_string!(v.clone())),
-                false,
-                &mut *context,
-            )
-            .map_err(|e| anyhow!("Failed to set header: {e}"))?;
-    }
-    response_obj
-        .set(js_string!("headers"), headers_obj, false, &mut *context)
-        .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
-
-    // Get current (persisted, per-port) state for this imposter — shared with predicate/response
-    // injects for the same imposter (issue #355 Item 0).
-    // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
-    // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
-    // guard is written back at the end of this call.
-    let cell = imposter_state_cell(imposter_port);
-    let mut imposter_state = cell.lock();
-    let state_map = imposter_state.clone();
-    let state_obj = json_to_js(&mut *context, &Value::Object(state_map))?;
-    let logger_obj =
-        create_script_logger_object(&mut *context, imposter_port, stub_id.map(str::to_owned))?;
-
-    // Build the config object: { request, response, path, state, logger } + flattened request.
-    let config_obj = create_js_object(&*context);
-    config_obj
-        .set(
-            js_string!("request"),
-            request_obj.clone(),
-            false,
-            &mut *context,
-        )
-        .map_err(|e| anyhow!("Failed to set config.request: {e}"))?;
-    config_obj
-        .set(
-            js_string!("response"),
-            JsValue::from(response_obj),
-            false,
-            &mut *context,
-        )
-        .map_err(|e| anyhow!("Failed to set config.response: {e}"))?;
-    config_obj
-        .set(
-            js_string!("path"),
-            JsValue::from(js_string!(request.path.clone())),
-            false,
-            &mut *context,
-        )
-        .map_err(|e| anyhow!("Failed to set config.path: {e}"))?;
-    config_obj
-        .set(js_string!("state"), state_obj.clone(), false, &mut *context)
-        .map_err(|e| anyhow!("Failed to set config.state: {e}"))?;
-    config_obj
-        .set(js_string!("logger"), logger_obj, false, &mut *context)
-        .map_err(|e| anyhow!("Failed to set config.logger: {e}"))?;
-    flatten_request_onto(&config_obj, &request_obj, &mut *context)?;
-
-    // Register the CommonJS `require()` global before evaluating the decorate so it (and any
-    // module it loads) can use it.
-    register_require(&mut *context)?;
-
-    // Set global variable
-    let global = context.global_object();
-    global
-        .set(
-            js_string!("__config"),
-            config_obj.clone(),
-            false,
-            &mut *context,
-        )
-        .map_err(|e| anyhow!("Failed to set config: {e}"))?;
-
-    // Wrap the decorate function to call it with our config object (already set as the
-    // `__config` global above).
-    let wrapper_script = format!(
-        r#"
-        var __configFn = {decorate_fn};
-        __configFn(__config);
-        __config.response;
-        "#
-    );
-
-    // Execute the script
-    let result = eval_mb_script(context, scripts, &wrapper_script)
-        .map_err(|e| anyhow!("Failed to execute config decorate function: {e}"))?;
-
-    // Parse the modified response
-    let obj = result.as_object().ok_or_else(|| {
-        anyhow!("Config decorate function must leave config.response as an object")
-    })?;
-
-    let status_code = status_from_js(obj.get(js_string!("statusCode"), &mut *context).ok())
-        .unwrap_or_else(|| response_status.clone());
-
-    // Get headers
-    let mut headers = response_headers.clone();
-    if let Ok(headers_val) = obj.get(js_string!("headers"), &mut *context)
-        && let Some(headers_obj) = headers_val.as_object()
-        && let Ok(keys) = headers_obj.own_property_keys(&mut *context)
-    {
-        for key in keys {
-            let key_str = match &key {
-                PropertyKey::String(s) => s.to_std_string_escaped(),
-                PropertyKey::Index(i) => i.get().to_string(),
-                PropertyKey::Symbol(_) => continue,
-            };
-            if let Ok(val) = headers_obj.get(key.clone(), &mut *context)
-                && let Some(s) = val.as_string()
-            {
-                headers.insert(key_str, s.to_std_string_escaped());
-            }
-        }
-    }
-
-    // Get body
-    let body = obj
-        .get(js_string!("body"), &mut *context)
-        .ok()
-        .map(|v| {
-            if let Some(s) = v.as_string() {
-                s.to_std_string_escaped()
-            } else if v.is_object() {
-                let json = js_to_json(&mut *context, &v).unwrap_or(Value::Null);
-                serde_json::to_string(&json).unwrap_or_default()
-            } else if v.is_null() || v.is_undefined() {
-                String::new()
-            } else {
-                v.display().to_string()
-            }
-        })
-        .unwrap_or_else(|| response_body.to_string());
-
-    // Persist any mutation the decorate made to the shared, per-port state.
-    if let Ok(Value::Object(map)) = js_to_json(&mut *context, &state_obj) {
-        *imposter_state = map;
-    }
-
-    Ok(MountebankDecorateResponse {
-        status_code,
-        headers,
-        body,
-    })
-}
-
-/// Execute a Mountebank-style decorate behavior function.
+/// Execute a Mountebank `decorate` in Boa, on Mountebank's contract (issue #1567).
 ///
-/// Full call signature (issue #355 Item 0): `fn(config, response, logger, state)`, where `config`
-/// stands in for the legacy `request` positional argument (request fields flattened onto
-/// `config`), and `state` is the per-port state persisted via `get_imposter_state`/
-/// `save_imposter_state` — shared with predicate injects and response injects for the same
-/// imposter (previously this was a throwaway `{}` per call).
-/// Legacy forms: `function(request, response) { ... }`, `function(request, response, logger)`,
-/// `function(request, response, logger, state)`.
+/// Mountebank calls every decorate as `(fn)(config, response, logger)` (`behaviors.js:239`), so
+/// the function may be written in any form (`function`, an arrow, `async`) with any parameter
+/// names. `config` carries `request`, `response`, `path`, `state` and `logger`, with every request
+/// field also flattened onto it (issue #355 Item 0), and `response` is the same object as
+/// `config.response`. A fourth `state` argument is a Rift superset. `state` is the per-port state
+/// persisted via `get_imposter_state`/`save_imposter_state`, shared with predicate injects and
+/// response injects for the same imposter. A CommonJS `require()` lets a decorate load an external
+/// `.cjs`/`.js` module (issue #305).
+///
+/// A truthy return value replaces the response, as in Mountebank (`behaviors.js:246-249`); an
+/// `async` function's promise is settled first. Otherwise the result is `config.response` as the
+/// function left it. Either way the headers are exactly that object's own, so a deleted header is
+/// gone.
 pub fn execute_mountebank_decorate(
     decorate_fn: &str,
     request: &MountebankRequest,
@@ -2836,7 +2612,7 @@ pub fn execute_mountebank_decorate(
     response_headers: &std::collections::HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
-) -> Result<MountebankDecorateResponse> {
+) -> Result<crate::behaviors::Decorated> {
     let decorate_fn = decorate_fn.to_string();
     let request = request.clone();
     let response_body = response_body.to_string();
@@ -2867,15 +2643,12 @@ fn execute_mountebank_decorate_in(
     response_headers: &std::collections::HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
-) -> Result<MountebankDecorateResponse> {
+) -> Result<crate::behaviors::Decorated> {
     let MbJsThread { context, scripts } = thread;
 
-    // Create request object
     let request_obj = create_mountebank_request_object(&mut *context, request)?;
 
-    // Create response object
     let response_obj = create_js_object(&*context);
-
     response_obj
         .set(
             js_string!("statusCode"),
@@ -2884,7 +2657,6 @@ fn execute_mountebank_decorate_in(
             &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set statusCode: {e}"))?;
-
     response_obj
         .set(
             js_string!("body"),
@@ -2893,8 +2665,6 @@ fn execute_mountebank_decorate_in(
             &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set body: {e}"))?;
-
-    // Create headers object for response
     let headers_obj = create_js_object(&*context);
     for (k, v) in response_headers {
         headers_obj
@@ -2910,23 +2680,6 @@ fn execute_mountebank_decorate_in(
         .set(js_string!("headers"), headers_obj, false, &mut *context)
         .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
 
-    // Config-first convention (issue #355 Item 0): config stands in for the legacy `request` arg,
-    // with request fields flattened onto it, and carries the shared per-port state + native
-    // logger. Built even though this entrypoint's legacy convention doesn't take a `config`
-    // param, so `function(config, response, ...)`-style scripts also work through this path.
-    let config_obj = create_js_object(&*context);
-    config_obj
-        .set(
-            js_string!("request"),
-            request_obj.clone(),
-            false,
-            &mut *context,
-        )
-        .map_err(|e| anyhow!("Failed to set config.request: {e}"))?;
-    flatten_request_onto(&config_obj, &request_obj, &mut *context)?;
-
-    // Get current (persisted, per-port) state for this imposter — shared with predicate/response
-    // injects for the same imposter (previously a throwaway `{}` per call; issue #355 Item 0).
     // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
     // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
     // guard is written back at the end of this call.
@@ -2937,104 +2690,224 @@ fn execute_mountebank_decorate_in(
     let logger_obj =
         create_script_logger_object(&mut *context, imposter_port, stub_id.map(str::to_owned))?;
 
-    // Set global variables
-    let global = context.global_object();
-    global
-        .set(js_string!("__request"), request_obj, false, &mut *context)
-        .map_err(|e| anyhow!("Failed to set request: {e}"))?;
-    global
-        .set(js_string!("__config"), config_obj, false, &mut *context)
-        .map_err(|e| anyhow!("Failed to set config: {e}"))?;
-    global
+    // config: { request, response, path, state, logger } + the flattened request.
+    let config_obj = create_js_object(&*context);
+    config_obj
         .set(
-            js_string!("__response"),
-            JsValue::from(response_obj),
+            js_string!("request"),
+            request_obj.clone(),
             false,
             &mut *context,
         )
-        .map_err(|e| anyhow!("Failed to set response: {e}"))?;
-    global
-        .set(js_string!("__logger"), logger_obj, false, &mut *context)
-        .map_err(|e| anyhow!("Failed to set logger: {e}"))?;
-    global
+        .map_err(|e| anyhow!("Failed to set config.request: {e}"))?;
+    config_obj
         .set(
-            js_string!("__state"),
-            state_obj.clone(),
+            js_string!("response"),
+            JsValue::from(response_obj.clone()),
             false,
             &mut *context,
         )
-        .map_err(|e| anyhow!("Failed to set state: {e}"))?;
+        .map_err(|e| anyhow!("Failed to set config.response: {e}"))?;
+    config_obj
+        .set(
+            js_string!("path"),
+            JsValue::from(js_string!(request.path.clone())),
+            false,
+            &mut *context,
+        )
+        .map_err(|e| anyhow!("Failed to set config.path: {e}"))?;
+    config_obj
+        .set(js_string!("state"), state_obj.clone(), false, &mut *context)
+        .map_err(|e| anyhow!("Failed to set config.state: {e}"))?;
+    config_obj
+        .set(
+            js_string!("logger"),
+            logger_obj.clone(),
+            false,
+            &mut *context,
+        )
+        .map_err(|e| anyhow!("Failed to set config.logger: {e}"))?;
+    flatten_request_onto(&config_obj, &request_obj, &mut *context)?;
 
-    // Wrap the decorate function to call it with (config, response, logger, state). `config`
-    // stands in for the legacy `request` positional arg (request fields flattened onto it), so
-    // both `function(request, response, ...)` and `function(config, response, ...)` scripts work.
+    // Register the CommonJS `require()` global before evaluating the decorate so it (and any
+    // module it loads) can use it.
+    register_require(&mut *context)?;
+
+    let global = context.global_object();
+    for (name, value) in [
+        ("__config", JsValue::from(config_obj.clone())),
+        ("__response", JsValue::from(response_obj.clone())),
+        ("__logger", logger_obj),
+        ("__state", state_obj.clone()),
+    ] {
+        global
+            .set(js_string!(name), value, false, &mut *context)
+            .map_err(|e| anyhow!("Failed to set {name}: {e}"))?;
+    }
+
+    // The script's completion value is what the function returned.
     let wrapper_script = format!(
         r#"
         var __decorateFn = {decorate_fn};
         __decorateFn(__config, __response, __logger, __state);
-        __response;
         "#
     );
-
-    // Execute the script
-    let result = eval_mb_script(context, scripts, &wrapper_script)
+    let returned = eval_mb_script(context, scripts, &wrapper_script)
         .map_err(|e| anyhow!("Failed to execute decorate function: {e}"))?;
+    let returned = settle_promise(returned, &mut *context)?;
 
     // Persist any mutation the decorate made to the shared, per-port state.
     if let Ok(Value::Object(map)) = js_to_json(&mut *context, &state_obj) {
         *imposter_state = map;
     }
 
-    // Parse the modified response
-    let obj = result
-        .as_object()
-        .ok_or_else(|| anyhow!("Decorate function must return response object"))?;
-
-    let status_code = status_from_js(obj.get(js_string!("statusCode"), &mut *context).ok())
-        .unwrap_or_else(|| response_status.clone());
-
-    // Get headers
-    let mut headers = response_headers.clone();
-    if let Ok(headers_val) = obj.get(js_string!("headers"), &mut *context)
-        && let Some(headers_obj) = headers_val.as_object()
-        && let Ok(keys) = headers_obj.own_property_keys(&mut *context)
-    {
-        for key in keys {
-            let key_str = match &key {
-                PropertyKey::String(s) => s.to_std_string_escaped(),
-                PropertyKey::Index(i) => i.get().to_string(),
-                PropertyKey::Symbol(_) => continue,
-            };
-            if let Ok(val) = headers_obj.get(key.clone(), &mut *context)
-                && let Some(s) = val.as_string()
-            {
-                headers.insert(key_str, s.to_std_string_escaped());
-            }
-        }
+    let left = config_obj
+        .get(js_string!("response"), &mut *context)
+        .map_err(|e| anyhow!("Failed to read config.response: {e}"))?;
+    // `return response;` hands back the response it was given: that is a mutation, and keeps
+    // what the script never saw (the held-aside Set-Cookie lines).
+    let is_given = |value: &JsValue| {
+        value.as_object().is_some_and(|obj| {
+            JsObject::equals(&obj, &response_obj)
+                || left
+                    .as_object()
+                    .is_some_and(|left| JsObject::equals(&obj, &left))
+        })
+    };
+    if returned.to_boolean() && !is_given(&returned) {
+        let obj = returned.as_object().ok_or_else(|| {
+            anyhow!(
+                "a decorate function must return a response object or nothing, not {}",
+                returned.display()
+            )
+        })?;
+        return returned_response(&obj, &mut *context);
     }
 
-    // Get body
+    let obj = left
+        .as_object()
+        .ok_or_else(|| anyhow!("a decorate function must leave config.response as an object"))?;
+    let status_code = status_from_js(Some(
+        obj.get(js_string!("statusCode"), &mut *context)
+            .map_err(|e| anyhow!("Failed to read statusCode: {e}"))?,
+    ))
+    .unwrap_or_else(|| response_status.clone());
+    let headers = headers_from_js(&obj, &mut *context)?.unwrap_or_else(|| response_headers.clone());
     let body = obj
         .get(js_string!("body"), &mut *context)
-        .ok()
-        .map(|v| {
-            if let Some(s) = v.as_string() {
-                s.to_std_string_escaped()
-            } else if v.is_object() {
-                let json = js_to_json(&mut *context, &v).unwrap_or(Value::Null);
-                serde_json::to_string(&json).unwrap_or_default()
-            } else if v.is_null() || v.is_undefined() {
-                String::new()
-            } else {
-                v.display().to_string()
-            }
-        })
-        .unwrap_or_else(|| response_body.to_string());
-
-    Ok(MountebankDecorateResponse {
+        .map_err(|e| anyhow!("Failed to read body: {e}"))?;
+    Ok(crate::behaviors::Decorated {
         status_code,
         headers,
-        body,
+        body: body_from_js(&body, &mut *context).unwrap_or_default(),
+        returned: None,
+    })
+}
+
+/// The value an `async` decorate's promise settles to, after running the queued jobs; any other
+/// value as it is.
+fn settle_promise(value: JsValue, context: &mut Context) -> Result<JsValue> {
+    // Domain-optional: most decorates return nothing or a plain object, which is not a promise.
+    let Some(promise) = value
+        .as_object()
+        .and_then(|obj| boa_engine::object::builtins::JsPromise::from_object(obj.clone()).ok())
+    else {
+        return Ok(value);
+    };
+    context
+        .run_jobs()
+        .map_err(|e| anyhow!("Failed to run the decorate's promise jobs: {e}"))?;
+    match promise.state() {
+        boa_engine::builtins::promise::PromiseState::Fulfilled(value) => Ok(value),
+        boa_engine::builtins::promise::PromiseState::Rejected(reason) => Err(anyhow!(
+            "the decorate function's promise was rejected: {}",
+            reason.display()
+        )),
+        boa_engine::builtins::promise::PromiseState::Pending => {
+            Err(anyhow!("the decorate function's promise never settled"))
+        }
+    }
+}
+
+/// A response object a decorate returned, which replaces the response (issue #1567). A field it
+/// does not carry (absent, `undefined` or `null`) is marked omitted, for the pipeline to complete
+/// from `defaultResponse`.
+fn returned_response(obj: &JsObject, context: &mut Context) -> Result<crate::behaviors::Decorated> {
+    let status = status_from_js(Some(
+        obj.get(js_string!("statusCode"), context)
+            .map_err(|e| anyhow!("Failed to read statusCode: {e}"))?,
+    ));
+    let headers = headers_from_js(obj, context)?;
+    let body = obj
+        .get(js_string!("body"), context)
+        .map_err(|e| anyhow!("Failed to read body: {e}"))?;
+    let body = body_from_js(&body, context);
+    let omits = crate::behaviors::ReturnedOmits {
+        status_code: status.is_none(),
+        headers: headers.is_none(),
+        body: body.is_none(),
+    };
+    Ok(crate::behaviors::Decorated {
+        status_code: status.unwrap_or(crate::behaviors::ResponseStatus::Code(200)),
+        headers: headers.unwrap_or_default(),
+        body: body.unwrap_or_default(),
+        returned: Some(omits),
+    })
+}
+
+/// A response object's headers: its own string-keyed properties. `None` when `headers` is not an
+/// object. A value is a header line when it is a string, number or boolean; any other value is
+/// not one line in the single-value model (issue #238) and is dropped with a warning.
+fn headers_from_js(
+    obj: &JsObject,
+    context: &mut Context,
+) -> Result<Option<std::collections::HashMap<String, String>>> {
+    let value = obj
+        .get(js_string!("headers"), context)
+        .map_err(|e| anyhow!("Failed to read headers: {e}"))?;
+    let Some(headers_obj) = value.as_object() else {
+        return Ok(None);
+    };
+    let keys = headers_obj
+        .own_property_keys(context)
+        .map_err(|e| anyhow!("Failed to list headers: {e}"))?;
+    let mut headers = std::collections::HashMap::new();
+    for key in keys {
+        let name = match &key {
+            PropertyKey::String(s) => s.to_std_string_escaped(),
+            PropertyKey::Index(i) => i.get().to_string(),
+            PropertyKey::Symbol(_) => continue,
+        };
+        let value = headers_obj
+            .get(key.clone(), context)
+            .map_err(|e| anyhow!("Failed to read header {name}: {e}"))?;
+        if let Some(text) = value.as_string() {
+            headers.insert(name, text.to_std_string_escaped());
+        } else if value.is_number() || value.is_boolean() {
+            headers.insert(name, value.display().to_string());
+        } else {
+            tracing::warn!(
+                "decorate header {name:?} is {}, not a single header value; it is not sent",
+                value.type_of()
+            );
+        }
+    }
+    Ok(Some(headers))
+}
+
+/// A response body as served: a string as it is, an object as JSON, anything else as JavaScript
+/// prints it. `None` for `undefined` or `null`.
+fn body_from_js(value: &JsValue, context: &mut Context) -> Option<String> {
+    if value.is_null() || value.is_undefined() {
+        return None;
+    }
+    Some(if let Some(s) = value.as_string() {
+        s.to_std_string_escaped()
+    } else if value.is_object() {
+        let json = js_to_json(context, value).unwrap_or(Value::Null);
+        serde_json::to_string(&json).unwrap_or_default()
+    } else {
+        value.display().to_string()
     })
 }
 
@@ -3766,7 +3639,7 @@ function respond(ctx) {
             "config => {{ const s = require('{}'); s(config); }}",
             module.display()
         );
-        let result = execute_mountebank_config_decorate(
+        let result = execute_mountebank_decorate(
             &script,
             &config_req(),
             "orig",
@@ -3788,7 +3661,7 @@ function respond(ctx) {
     #[test]
     fn test_config_decorate_direct_field_access() {
         let script = "config => { config.response.body = 'DIRECT'; }";
-        let resp = execute_mountebank_config_decorate(
+        let resp = execute_mountebank_decorate(
             script,
             &config_req(),
             "orig",
@@ -3805,7 +3678,7 @@ function respond(ctx) {
     #[test]
     fn test_config_decorate_reads_request_body() {
         let script = "config => { config.response.body = config.request.body; }";
-        let resp = execute_mountebank_config_decorate(
+        let resp = execute_mountebank_decorate(
             script,
             &config_req(),
             "orig",
@@ -3854,7 +3727,7 @@ function respond(ctx) {
             "config => {{ require('{}'); config.response.body = 'REACHED'; }}",
             path_a.display()
         );
-        let result = execute_mountebank_config_decorate(
+        let result = execute_mountebank_decorate(
             &script,
             &config_req(),
             "orig",
@@ -3877,7 +3750,7 @@ function respond(ctx) {
     #[test]
     fn test_config_decorate_require_missing_errors() {
         let script = "config => { const s = require('/no/such/rift305/module.cjs'); s(config); }";
-        let result = execute_mountebank_config_decorate(
+        let result = execute_mountebank_decorate(
             script,
             &config_req(),
             "orig",
