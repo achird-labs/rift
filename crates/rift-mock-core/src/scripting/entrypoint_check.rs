@@ -118,7 +118,7 @@ fn declared_functions(
 /// Pure AST introspection — `compile` only parses, it never runs top-level statements, so this
 /// has zero execution side effects (unlike the JS path, which has no public AST walk).
 fn rhai_declared_functions(script: &str) -> Result<Vec<String>, EntrypointCheckError> {
-    let engine = rhai::Engine::new();
+    let engine = crate::scripting::rift_rhai_engine();
     let ast = engine
         .compile(script)
         .map_err(|e| EntrypointCheckError::Syntax(e.to_string()))?;

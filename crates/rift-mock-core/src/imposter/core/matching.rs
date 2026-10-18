@@ -147,6 +147,7 @@ impl Imposter {
         let form = Self::parse_form_data(headers_map, body);
 
         let imposter_port = self.script_state_key();
+        let script_files = self.script_file_access();
         let flow_id = self.resolve_flow_id(headers_map);
         // The request body as JSON, parsed at most once per request and shared across every stub's
         // predicates (issue #290) — and only if a predicate or body dimension reads it (#1442).
@@ -199,6 +200,7 @@ impl Imposter {
                 client_ip,
                 form.as_ref(),
                 imposter_port,
+                &script_files,
                 &body_json,
                 xml_dom.as_ref(),
                 Some(&query_map),
@@ -385,6 +387,7 @@ impl Imposter {
         let stubs = snapshot.stubs();
         let form = Self::parse_form_data(headers_map, body);
         let imposter_port = self.script_state_key();
+        let script_files = self.script_file_access();
         let flow_id = self.resolve_flow_id(headers_map);
         let body_json = crate::behaviors::LazyJson::new(body);
         let query_map = crate::imposter::predicates::parse_query(query);
@@ -413,6 +416,7 @@ impl Imposter {
                 client_ip,
                 form.as_ref(),
                 imposter_port,
+                &script_files,
                 &body_json,
                 xml_dom.as_ref(),
                 Some(&query_map),

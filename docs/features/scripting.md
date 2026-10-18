@@ -51,6 +51,36 @@ function `wait`, and `_rift.script` — requires `--allowInjection`, exactly as 
 removed; `"engine": "lua"` (or a `.lua` script file) is rejected with an error naming the
 replacement.
 
+!!! warning "`--allowInjection` means host code execution"
+    The code it admits runs with Rift's own privileges, and `shellTransform` runs host commands.
+    Enable it only for authors you would give a shell on the machine. Nothing below makes it a
+    sandbox.
+
+### Files a script may read
+
+A Mountebank-style hook (`inject`, a predicate `inject`, `predicateGenerators.inject`, `decorate`,
+a proxy's `addDecorateBehavior`) can load a CommonJS module with `require('<path>')`: the module
+sees `module`, `exports`, `require`, `__filename` and `__dirname`, a relative `require` inside it
+resolves from its own directory, and a `.json` file is parsed. Only files load: there is no `fs`,
+`path` or other built-in, and no package lookup. Which files depends on where the imposter came
+from:
+
+| Imposter written by | `require()` reads |
+|:--------------------|:------------------|
+| A local `--configfile` or `--imposters file:`, or the C-ABI host calls | Any path; a relative one from the working directory. Its author already has the filesystem. |
+| The admin API, a `--datadir` file, or an `https:` source, with `--scripts-dir` | Only files under `--scripts-dir`; a relative path from there. |
+| The same, without `--scripts-dir` | Nothing: every `require` is refused. |
+
+A path outside `--scripts-dir` (absolute, `..`, or a link that points out) is refused with one
+message, `require('<path>'): outside --scripts-dir`, whether or not anything exists there. A stub
+added over the admin API to a running `--configfile` imposter confines that imposter from then on.
+Every hook run gets its own `require` and module cache, so no run sees another imposter's
+modules.
+
+`--scripts-dir` confines file access through `file:` references and `require()`; it is defence in
+depth for authors you already trust, not a sandbox. Rhai `import` is not supported: an `import`
+statement resolves no module on any door.
+
 ---
 
 ## JavaScript (Mountebank Inject)

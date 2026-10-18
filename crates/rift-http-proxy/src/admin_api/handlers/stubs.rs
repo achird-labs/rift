@@ -2,8 +2,8 @@
 
 use crate::admin_api::handlers::imposters::handle_get as handle_get_imposter;
 use crate::admin_api::handlers::imposters::{
-    admin_script_base, imposter_default_script_engine, imposter_script_registry,
-    reject_stubs_if_injection_disallowed,
+    admin_script_base, claim_scripts_for_admin, imposter_default_script_engine,
+    imposter_script_registry, reject_stubs_if_injection_disallowed,
 };
 use crate::admin_api::types::{
     AddStubRequest, ReplaceStubsRequest, StubWithLinks, collect_body, error_response,
@@ -130,6 +130,9 @@ pub async fn handle_add(
         }
     }
 
+    if let Some(rejection) = claim_scripts_for_admin(&manager, port, &scripts_dir) {
+        return rejection;
+    }
     match manager.add_stub(port, add_req.stub, add_req.index).await {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
         Err(e) => e.into(),
@@ -185,6 +188,9 @@ pub async fn handle_replace_all(
 
     // Stub-overlap analysis is computed once in core on the replace (issue #423) and surfaced by
     // the GET render below via the imposter's cached warnings — no redundant recompute here.
+    if let Some(rejection) = claim_scripts_for_admin(&manager, port, &scripts_dir) {
+        return rejection;
+    }
     if let Err(e) = manager.replace_stubs(port, replace_req.stubs).await {
         return e.into();
     }
@@ -360,6 +366,9 @@ pub async fn handle_replace(
         );
     }
 
+    if let Some(rejection) = claim_scripts_for_admin(&manager, port, &scripts_dir) {
+        return rejection;
+    }
     match manager.replace_stub(port, index, stub).await {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
         Err(e) => stub_index_error(e),
@@ -441,6 +450,9 @@ pub async fn handle_replace_by_id(
                 validation_result.into_error_message().unwrap_or_default()
             ),
         );
+    }
+    if let Some(rejection) = claim_scripts_for_admin(&manager, port, &scripts_dir) {
+        return rejection;
     }
     match manager.replace_stub_by_id(port, id, stub).await {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,

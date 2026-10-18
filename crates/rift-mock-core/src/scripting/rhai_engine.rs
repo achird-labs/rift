@@ -127,7 +127,7 @@ impl RhaiEngine {
     }
 
     pub fn create_engine() -> Engine {
-        let mut engine = Engine::new();
+        let mut engine = crate::scripting::rift_rhai_engine();
 
         // Register ScriptFlowStore type
         engine
@@ -803,6 +803,42 @@ mod tests {
     use crate::backends::InMemoryFlowStore;
     use serde_json::json;
     use std::collections::HashMap;
+
+    // Issue #1611: Rhai's default resolver loads any `.rhai` file on the host. Every engine Rift
+    // builds — the `_rift.script` runtime one and the Rhai decorate's — resolves no module.
+    #[test]
+    fn rhai_import_resolves_no_module() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("leak.rhai"),
+            "export const X = \"CANARY_RHAI_1611\";",
+        )
+        .unwrap();
+        let module = dir.path().join("leak");
+        let import = format!("import {:?} as m; m::X", module.to_str().unwrap());
+
+        let err = RhaiEngine::create_engine()
+            .eval::<String>(&import)
+            .expect_err("the runtime engine must not load a module");
+        assert!(!err.to_string().contains("CANARY_RHAI_1611"), "{err}");
+
+        let mut headers = HashMap::new();
+        let decorate = format!(
+            "import {:?} as m; response.body = m::X;",
+            module.to_str().unwrap()
+        );
+        let decorated = crate::behaviors::apply_decorate(
+            &decorate,
+            &crate::behaviors::RequestContext::default(),
+            "orig",
+            &crate::behaviors::ResponseStatus::Code(200),
+            &mut headers,
+        );
+        assert!(
+            decorated.is_err(),
+            "a Rhai decorate must not load a module: {decorated:?}"
+        );
+    }
 
     #[tokio::test]
     async fn test_simple_fault_injection() {

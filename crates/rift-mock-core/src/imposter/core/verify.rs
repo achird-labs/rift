@@ -137,6 +137,7 @@ impl Imposter {
             client_ip.as_deref(),
             form.as_ref(),
             self.script_state_key(),
+            &self.script_file_access(),
             &body_json,
             xml_dom.as_ref(),
             Some(&query_map),

@@ -1268,6 +1268,7 @@ async fn handle_request_inner(
                     request_body: body_string.as_deref(),
                     client_addr: Some(client_addr),
                     script_state_key: imposter.script_state_key(),
+                    script_files: imposter.script_file_access(),
                     stub: stub_ref(&imposter, stub_index, &stub_state.stub),
                     csv_cache: csv_cache(),
                     script_timeout,
@@ -1374,6 +1375,7 @@ async fn handle_request_inner(
                 mb_request,
                 imposter.script_state_key(),
                 stub_state.stub.id.clone(),
+                imposter.script_file_access(),
                 script_timeout,
             )
             .await
@@ -1408,6 +1410,7 @@ async fn handle_request_inner(
                             request_body: body_string.as_deref(),
                             client_addr: Some(client_addr),
                             script_state_key: imposter.script_state_key(),
+                            script_files: imposter.script_file_access(),
                             stub: stub_ref(&imposter, stub_index, &stub_state.stub),
                             csv_cache: csv_cache(),
                             script_timeout,
@@ -2046,6 +2049,7 @@ async fn handle_request_inner(
                         request_body: body_string.as_deref(),
                         client_addr: Some(client_addr),
                         script_state_key: imposter.script_state_key(),
+                        script_files: imposter.script_file_access(),
                         stub: stub_ref(&imposter, stub_index, &stub_state.stub),
                         csv_cache: csv_cache(),
                         script_timeout,

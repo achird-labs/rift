@@ -26,6 +26,9 @@ pub enum Persistence {
 pub struct DesiredImposter {
     pub config: super::types::ImposterConfig,
     pub persistence: Persistence,
+    /// What this imposter's scripts may `require()`, as the door it came through decides (issue
+    /// #1611): a local config file is trusted, a datadir file or a network source is confined.
+    pub script_files: super::script_resolve::ScriptFileAccess,
 }
 
 /// Outcome of [`ImposterManager::apply_config`](super::ImposterManager::apply_config):

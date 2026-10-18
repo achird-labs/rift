@@ -64,7 +64,7 @@ pub struct RhaiValidator {
 impl RhaiValidator {
     /// Creates a new Rhai validator.
     pub fn new() -> Self {
-        let engine = Engine::new();
+        let engine = crate::scripting::rift_rhai_engine();
         Self { engine }
     }
 

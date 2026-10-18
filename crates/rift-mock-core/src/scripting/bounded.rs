@@ -537,6 +537,7 @@ mod tests {
                 mb_req("/a"),
                 test_port(),
                 None,
+                std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
                 Duration::from_millis(60_000),
             )
             .await
@@ -555,6 +556,7 @@ mod tests {
                 mb_req("/hang"),
                 test_port(),
                 None,
+                std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
                 Duration::from_millis(25),
             )
             .await;
@@ -585,6 +587,7 @@ mod tests {
                 mb_req("/count"),
                 port,
                 None,
+                std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
                 Duration::from_millis(60_000),
             )
             .await
@@ -594,6 +597,7 @@ mod tests {
                 mb_req("/count"),
                 port,
                 None,
+                std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
                 Duration::from_millis(60_000),
             )
             .await

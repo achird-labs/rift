@@ -1,5 +1,5 @@
 use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result};
-use crate::imposter::ResponseMode;
+use crate::imposter::{ResponseMode, ScriptFileAccess};
 use crate::scripting::{
     FaultDecision, PredicateGeneratorError, ScriptCtxExtras, ScriptCtxInput, ScriptRequest,
     ScriptResult, ScriptResultBody, ScriptStubContext, entrypoints,
@@ -296,13 +296,11 @@ const MB_SCRIPT_CACHE_CAPACITY: usize = 64;
 /// Reusing a realm means one script's writes to JS globals are visible to later scripts on the
 /// same worker — Mountebank parity: MB evals every injection in one shared Node process, so
 /// injected globals leak there too. Every global the hooks *contract* on is re-set per run
-/// (`__config`/`__logger`/state globals; config-decorate re-registers `require()` with a fresh
-/// module cache each run), and the per-imposter state object is rebuilt per run from the
-/// port-keyed `IMPOSTER_STATE` map, so cross-imposter isolation of *state* is unaffected. One
-/// worker-history quirk: only config-decorate registers `require`, so after a worker has run
-/// one, a later inject on the same worker sees a live (stale-cache) `require` global where a
-/// fresh worker would throw `ReferenceError` — inject scripts were never promised `require`,
-/// and MB itself exposes it everywhere, so this is tolerated rather than scrubbed per run.
+/// (`__config`/`__logger`/state globals, and a fresh `require()` bound to the running imposter,
+/// issue #1611), and the per-imposter state object is rebuilt per run from the port-keyed
+/// `IMPOSTER_STATE` map, so cross-imposter isolation of *state* is unaffected. A `require` that a
+/// script keeps in a global answers only during the run that installed it, so it never carries
+/// one imposter's module cache or root into another's run.
 struct MbJsThread {
     context: Context,
     scripts: MbScriptCache,
@@ -1732,15 +1730,19 @@ pub fn clear_imposter_state(port: u16) {
 /// means checking whether it was called during the synchronous call).
 ///
 /// Where response is: `{ statusCode: number, headers: object?, body: string }`
+///
+/// `files` is what the running imposter's scripts may `require()` (issue #1611).
 pub fn execute_mountebank_inject(
     inject_fn: &str,
     request: &MountebankRequest,
     imposter_port: u16,
     stub_id: Option<&str>,
+    files: &Arc<ScriptFileAccess>,
 ) -> Result<MountebankInjectResponse> {
     let inject_fn = inject_fn.to_string();
     let request = request.clone();
     let stub_id = stub_id.map(str::to_string);
+    let files = Arc::clone(files);
     with_mb_js_thread(move |thread| {
         execute_mountebank_inject_in(
             thread,
@@ -1748,6 +1750,7 @@ pub fn execute_mountebank_inject(
             &request,
             imposter_port,
             stub_id.as_deref(),
+            &files,
         )
     })?
 }
@@ -1764,6 +1767,7 @@ pub async fn execute_mountebank_inject_bounded(
     request: MountebankRequest,
     imposter_port: u16,
     stub_id: Option<String>,
+    files: Arc<ScriptFileAccess>,
     timeout: std::time::Duration,
 ) -> Result<MountebankInjectResponse> {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1774,6 +1778,7 @@ pub async fn execute_mountebank_inject_bounded(
             &request,
             imposter_port,
             stub_id.as_deref(),
+            &files,
         ));
     }))?;
     match tokio::time::timeout(timeout, rx).await {
@@ -1799,8 +1804,12 @@ fn execute_mountebank_inject_in(
     request: &MountebankRequest,
     imposter_port: u16,
     stub_id: Option<&str>,
+    files: &Arc<ScriptFileAccess>,
 ) -> Result<MountebankInjectResponse> {
     let MbJsThread { context, scripts } = thread;
+    // Mountebank gives every injection `require` (issue #1611); this run's is bound to its own
+    // imposter and dies with the guard.
+    let _require = install_require(&mut *context, files)?;
 
     // Create request object
     let request_obj = create_mountebank_request_object(&mut *context, request)?;
@@ -1926,11 +1935,13 @@ pub fn execute_predicate_inject(
     inject_fn: &str,
     request: &MountebankRequest,
     imposter_port: u16,
+    files: &Arc<ScriptFileAccess>,
 ) -> anyhow::Result<bool> {
     let inject_fn = inject_fn.to_string();
     let request = request.clone();
+    let files = Arc::clone(files);
     with_mb_js_thread(move |thread| {
-        execute_predicate_inject_in(thread, &inject_fn, &request, imposter_port)
+        execute_predicate_inject_in(thread, &inject_fn, &request, imposter_port, &files)
     })?
 }
 
@@ -1939,8 +1950,14 @@ fn execute_predicate_inject_in(
     inject_fn: &str,
     request: &MountebankRequest,
     imposter_port: u16,
+    files: &Arc<ScriptFileAccess>,
 ) -> anyhow::Result<bool> {
     let MbJsThread { context, scripts } = thread;
+    let _require = install_require(&mut *context, files).map_err(|e| {
+        anyhow::Error::from(PredicateInjectionError(format!(
+            "failed to install require: {e}"
+        )))
+    })?;
 
     let request_obj = match create_mountebank_request_object(&mut *context, request) {
         Ok(obj) => obj,
@@ -2052,12 +2069,20 @@ pub fn execute_predicate_generator_inject(
     inject_fn: &str,
     request: &MountebankRequest,
     existing_predicates: &[serde_json::Value],
+    files: &Arc<ScriptFileAccess>,
 ) -> Result<Vec<serde_json::Value>, PredicateGeneratorError> {
     let inject_fn = inject_fn.to_string();
     let request = request.clone();
     let existing_predicates = existing_predicates.to_vec();
+    let files = Arc::clone(files);
     match with_mb_js_thread(move |thread| {
-        execute_predicate_generator_inject_in(thread, &inject_fn, &request, &existing_predicates)
+        execute_predicate_generator_inject_in(
+            thread,
+            &inject_fn,
+            &request,
+            &existing_predicates,
+            &files,
+        )
     }) {
         Ok(result) => result,
         Err(e) => Err(PredicateGeneratorError::Pool(e.to_string())),
@@ -2069,8 +2094,11 @@ fn execute_predicate_generator_inject_in(
     inject_fn: &str,
     request: &MountebankRequest,
     existing_predicates: &[serde_json::Value],
+    files: &Arc<ScriptFileAccess>,
 ) -> Result<Vec<serde_json::Value>, PredicateGeneratorError> {
     let MbJsThread { context, scripts } = thread;
+    let _require = install_require(&mut *context, files)
+        .map_err(|e| PredicateGeneratorError::Script(format!("failed to install require: {e}")))?;
 
     let request_obj = create_mountebank_request_object(&mut *context, request).map_err(|e| {
         PredicateGeneratorError::Script(format!("failed to build request object: {e}"))
@@ -2460,58 +2488,186 @@ fn status_from_js(value: Option<JsValue>) -> Option<crate::behaviors::ResponseSt
         .map(|n| crate::behaviors::ResponseStatus::Code(n as u16))
 }
 
-/// Minimal CommonJS module loader backing the `require()` global (issue #305).
-///
-/// Resolves `path` (absolute as-is, relative against the process CWD), reads the source,
-/// wraps it as `(function(module, exports, __filename, __dirname) { ... })` and evaluates it.
-/// Nested `require(...)` calls inside the loaded module resolve through the same global
-/// `require`, since the wrapper does not shadow it as a parameter.
-///
-/// `cache` memoizes `module.exports` by canonicalized path (falling back to the resolved path
-/// string when canonicalization fails) so requiring the same module twice within one decorate
-/// run only reads and evaluates it once.
+/// `module.exports` of every module one hook run has loaded, by resolved path (issue #305): a
+/// module required twice in one run is read and evaluated once. GC-traced because it holds
+/// `JsValue`s, so it is a `Gc<GcRefCell<..>>` capture of the native `require` function.
 type RequireCache =
     boa_engine::gc::Gc<boa_engine::gc::GcRefCell<std::collections::HashMap<String, JsValue>>>;
 
+thread_local! {
+    /// The hook run in progress on this thread and what its imposter may `require()` (issue
+    /// #1611). Each `require` function carries the id of the run that installed it and answers
+    /// only while that run is the current one, so a `require` a script stashed in a global of the
+    /// shared realm is dead in every later run, whichever imposter that run belongs to.
+    static REQUIRE_RUN: RefCell<Option<(u64, Arc<ScriptFileAccess>)>> = const { RefCell::new(None) };
+}
+
+/// Ids for [`REQUIRE_RUN`]; process-wide, so no two runs ever share one.
+static NEXT_REQUIRE_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Ends a hook run's `require` (issue #1611): restores whatever run was current before, which is
+/// none except for a reentrant run nested inside another on the same thread.
+struct RequireRunGuard {
+    previous: Option<(u64, Arc<ScriptFileAccess>)>,
+}
+
+impl Drop for RequireRunGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        REQUIRE_RUN.with_borrow_mut(|run| *run = previous);
+    }
+}
+
+/// Give this hook run a fresh `require` global bound to its own imposter's `files` (issues #305,
+/// #1611): a new module cache, a new run id, and top-level relative paths resolved from the
+/// root (or, for a trusted door, its base). Every Mountebank-style hook calls this before its
+/// script runs, so no run sees another run's modules, cache or root. Keep the guard for the whole
+/// run; dropping it ends the `require`.
+fn install_require(
+    context: &mut Context,
+    files: &Arc<ScriptFileAccess>,
+) -> Result<RequireRunGuard> {
+    let id = NEXT_REQUIRE_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let previous = REQUIRE_RUN.with_borrow_mut(|run| run.replace((id, Arc::clone(files))));
+    let guard = RequireRunGuard { previous };
+    let base = match files.as_ref() {
+        ScriptFileAccess::Confined(root) => root.clone(),
+        ScriptFileAccess::Trusted { base } => base.clone(),
+        ScriptFileAccess::Refused => std::path::PathBuf::new(),
+    };
+    let cache: RequireCache = boa_engine::gc::Gc::new(boa_engine::gc::GcRefCell::new(
+        std::collections::HashMap::new(),
+    ));
+    let require = require_function(context, cache, id, base);
+    context
+        .global_object()
+        .set(js_string!("require"), require, false, context)
+        .map_err(|e| anyhow!("Failed to set require: {e}"))?;
+    Ok(guard)
+}
+
+/// A `require` function for run `run`, resolving a relative path from `base`. The captures are all
+/// GC-traceable, so `from_copy_closure_with_captures` registers them without `unsafe`: the cache
+/// holds `JsValue`s and must stay reachable to the collector.
+fn require_function(
+    context: &mut Context,
+    cache: RequireCache,
+    run: u64,
+    base: std::path::PathBuf,
+) -> JsValue {
+    NativeFunction::from_copy_closure_with_captures(
+        |_this, args, (cache, run, base): &(RequireCache, u64, std::path::PathBuf), context| {
+            require_impl(cache, *run, base, args, context)
+        },
+        (cache, run, base),
+    )
+    .to_js_function(context.realm())
+    .into()
+}
+
+/// A JavaScript `Error` with `message`.
+fn require_error(message: String) -> boa_engine::JsError {
+    JsNativeError::error().with_message(message).into()
+}
+
+/// Where `request` resolves for this run, or the error `require` throws. Under
+/// [`ScriptFileAccess::Confined`] a path outside the root gets one fixed message, without a look at
+/// the filesystem outside it, so a refusal never says whether anything is there (issue #1611).
+fn resolve_module(
+    files: &ScriptFileAccess,
+    base: &std::path::Path,
+    request: &str,
+) -> JsResult<std::path::PathBuf> {
+    match files {
+        ScriptFileAccess::Refused => Err(require_error(format!(
+            "require('{request}'): no --scripts-dir is configured"
+        ))),
+        ScriptFileAccess::Confined(root) => crate::imposter::resolve_confined(root, base, request)
+            .map_err(|e| {
+                require_error(match e {
+                    crate::imposter::ConfinedPathError::Outside => {
+                        format!("require('{request}'): outside --scripts-dir")
+                    }
+                    crate::imposter::ConfinedPathError::NotFound => {
+                        format!("require('{request}'): no such module under --scripts-dir")
+                    }
+                    crate::imposter::ConfinedPathError::Root(e) => {
+                        format!("require('{request}'): --scripts-dir cannot be resolved: {e}")
+                    }
+                })
+            }),
+        ScriptFileAccess::Trusted { .. } => Ok(base.join(request)),
+    }
+}
+
+/// Minimal CommonJS module loader backing `require()` (issues #305, #1611).
+///
+/// Resolves `request` under the run's [`ScriptFileAccess`] (relative to `base`: the root, or the
+/// requiring module's own directory), reads it, and evaluates it as
+/// `(function(module, exports, require, __filename, __dirname) { ... })`. The `require` a module
+/// gets resolves relative paths from that module's directory, as Node's does. A `.json` file is
+/// parsed rather than evaluated, as in Node. No built-in (`fs`, `path`) and no bare package name
+/// resolves: only files.
 fn require_impl(
     cache: &RequireCache,
+    run: u64,
+    base: &std::path::Path,
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let path_str = args
+    let request = args
         .first()
         .and_then(|v| v.as_string())
         .map(|s| s.to_std_string_escaped())
         .ok_or_else(|| JsNativeError::typ().with_message("require() path must be a string"))?;
-
-    let raw_path = std::path::PathBuf::from(&path_str);
-    let resolved_path = if raw_path.is_absolute() {
-        raw_path
-    } else {
-        let cwd = std::env::current_dir().map_err(|e| {
-            JsNativeError::error()
-                .with_message(format!("require('{path_str}'): cannot resolve cwd: {e}"))
+    let files = REQUIRE_RUN
+        .with_borrow(|current| match current {
+            Some((id, files)) if *id == run => Some(Arc::clone(files)),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            require_error(format!(
+                "require('{request}'): this require belongs to a script run that has ended"
+            ))
         })?;
-        cwd.join(raw_path)
+
+    let resolved_path = resolve_module(&files, base, &request)?;
+    let confined = !matches!(files.as_ref(), ScriptFileAccess::Trusted { .. });
+
+    // A confined path is canonical already. A trusted one is keyed by its canonical form when it
+    // has one: a domain-optional lookup, since a missing file is reported by the read below.
+    let cache_key = if confined {
+        resolved_path.to_string_lossy().into_owned()
+    } else {
+        std::fs::canonicalize(&resolved_path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| resolved_path.to_string_lossy().into_owned())
     };
-
-    let cache_key = std::fs::canonicalize(&resolved_path)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| resolved_path.to_string_lossy().into_owned());
-
     if let Some(cached) = cache.borrow().get(&cache_key) {
         return Ok(cached.clone());
     }
 
     let source = std::fs::read_to_string(&resolved_path)
-        .map_err(|e| JsNativeError::error().with_message(format!("require('{path_str}'): {e}")))?;
+        .map_err(|e| require_error(format!("require('{request}'): {e}")))?;
+
+    if resolved_path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+    {
+        let parsed: Value = serde_json::from_str(&source)
+            .map_err(|e| require_error(format!("require('{request}'): invalid JSON: {e}")))?;
+        let exports = json_to_js(context, &parsed)
+            .map_err(|e| require_error(format!("require('{request}'): {e}")))?;
+        cache.borrow_mut().insert(cache_key, exports.clone());
+        return Ok(exports);
+    }
 
     let wrapped_source =
-        format!("(function(module, exports, __filename, __dirname) {{\n{source}\n}})");
+        format!("(function(module, exports, require, __filename, __dirname) {{\n{source}\n}})");
     let wrapper = context.eval(Source::from_bytes(wrapped_source.as_bytes()))?;
     let wrapper_obj = wrapper.as_object().ok_or_else(|| {
         JsNativeError::typ().with_message(format!(
-            "require('{path_str}'): module wrapper is not callable"
+            "require('{request}'): module wrapper is not callable"
         ))
     })?;
 
@@ -2531,17 +2687,20 @@ fn require_impl(
         .borrow_mut()
         .insert(cache_key.clone(), JsValue::from(exports_obj.clone()));
 
-    let filename = resolved_path.to_string_lossy().into_owned();
-    let dirname = resolved_path
+    let dir = resolved_path
         .parent()
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(std::path::Path::to_path_buf)
         .unwrap_or_default();
+    let filename = resolved_path.to_string_lossy().into_owned();
+    let dirname = dir.to_string_lossy().into_owned();
+    let module_require = require_function(context, cache.clone(), run, dir);
 
     wrapper_obj.call(
         &JsValue::undefined(),
         &[
             JsValue::from(module_obj.clone()),
             JsValue::from(exports_obj),
+            module_require,
             JsValue::from(js_string!(filename)),
             JsValue::from(js_string!(dirname)),
         ],
@@ -2556,39 +2715,6 @@ fn require_impl(
     Ok(module_exports)
 }
 
-/// Register a global `require()` implementing the minimal CommonJS loader above.
-///
-/// The module cache is a GC-traced `Gc<GcRefCell<HashMap<..>>>` passed as the native function's
-/// capture, so it is shared across every `require()` call made during one script evaluation
-/// (including nested requires triggered by a loaded module) and its cached `JsValue`s stay
-/// reachable to the collector for the lifetime of the enclosing `Context`.
-fn register_require(context: &mut Context) -> Result<()> {
-    // The cache holds `JsValue`s (module.exports), which are GC-managed, so it must be a
-    // GC-traced capture — a plain `Rc<RefCell<..>>` closure capture would be untraced and could
-    // let the GC free a cached export still referenced only from the cache (UB). `Gc<GcRefCell>`
-    // is traced, so `from_copy_closure_with_captures` registers it safely (no `unsafe`).
-    let cache: RequireCache = boa_engine::gc::Gc::new(boa_engine::gc::GcRefCell::new(
-        std::collections::HashMap::new(),
-    ));
-
-    let require_fn = NativeFunction::from_copy_closure_with_captures(
-        |_this, args, cache: &RequireCache, context| require_impl(cache, args, context),
-        cache,
-    );
-
-    let global = context.global_object();
-    global
-        .set(
-            js_string!("require"),
-            require_fn.to_js_function(context.realm()),
-            false,
-            context,
-        )
-        .map_err(|e| anyhow!("Failed to set require: {e}"))?;
-
-    Ok(())
-}
-
 /// Execute a Mountebank `decorate` in Boa, on Mountebank's contract (issue #1567).
 ///
 /// Mountebank calls every decorate as `(fn)(config, response, logger)` (`behaviors.js:239`), so
@@ -2598,12 +2724,13 @@ fn register_require(context: &mut Context) -> Result<()> {
 /// `config.response`. A fourth `state` argument is a Rift superset. `state` is the per-port state
 /// persisted via `get_imposter_state`/`save_imposter_state`, shared with predicate injects and
 /// response injects for the same imposter. A CommonJS `require()` lets a decorate load an external
-/// `.cjs`/`.js` module (issue #305).
+/// `.cjs`/`.js` module (issue #305), within what `files` allows (issue #1611).
 ///
 /// A truthy return value replaces the response, as in Mountebank (`behaviors.js:246-249`); an
 /// `async` function's promise is settled first. Otherwise the result is `config.response` as the
 /// function left it. Either way the headers are exactly that object's own, so a deleted header is
 /// gone.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_mountebank_decorate(
     decorate_fn: &str,
     request: &MountebankRequest,
@@ -2612,6 +2739,7 @@ pub fn execute_mountebank_decorate(
     response_headers: &std::collections::HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
+    files: &Arc<ScriptFileAccess>,
 ) -> Result<crate::behaviors::Decorated> {
     let decorate_fn = decorate_fn.to_string();
     let request = request.clone();
@@ -2619,6 +2747,7 @@ pub fn execute_mountebank_decorate(
     let response_status = response_status.clone();
     let response_headers = response_headers.clone();
     let stub_id = stub_id.map(str::to_string);
+    let files = Arc::clone(files);
     with_mb_js_thread(move |thread| {
         execute_mountebank_decorate_in(
             thread,
@@ -2629,6 +2758,7 @@ pub fn execute_mountebank_decorate(
             &response_headers,
             imposter_port,
             stub_id.as_deref(),
+            &files,
         )
     })?
 }
@@ -2643,6 +2773,7 @@ fn execute_mountebank_decorate_in(
     response_headers: &std::collections::HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
+    files: &Arc<ScriptFileAccess>,
 ) -> Result<crate::behaviors::Decorated> {
     let MbJsThread { context, scripts } = thread;
 
@@ -2729,9 +2860,9 @@ fn execute_mountebank_decorate_in(
         .map_err(|e| anyhow!("Failed to set config.logger: {e}"))?;
     flatten_request_onto(&config_obj, &request_obj, &mut *context)?;
 
-    // Register the CommonJS `require()` global before evaluating the decorate so it (and any
-    // module it loads) can use it.
-    register_require(&mut *context)?;
+    // A fresh CommonJS `require()` bound to this imposter (issues #305, #1611), live until the
+    // run returns.
+    let _require = install_require(&mut *context, files)?;
 
     let global = context.global_object();
     for (name, value) in [
@@ -2914,6 +3045,12 @@ fn body_from_js(value: &JsValue, context: &mut Context) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The unconfined `require` of a local door (issue #1611): these tests write their modules to
+    /// the temp dir.
+    fn trusted_files() -> Arc<ScriptFileAccess> {
+        Arc::new(ScriptFileAccess::trusted_cwd())
+    }
     use crate::backends::InMemoryFlowStore;
     use serde_json::json;
     use std::collections::HashMap;
@@ -3461,6 +3598,7 @@ function respond(ctx) {
             &headers,
             test_port(),
             None,
+            &trusted_files(),
         );
         assert!(
             result.is_ok(),
@@ -3486,6 +3624,7 @@ function respond(ctx) {
                 &HashMap::new(),
                 test_port(),
                 None,
+                &trusted_files(),
             )
             .expect("decorate runs")
             .body
@@ -3522,7 +3661,7 @@ function respond(ctx) {
         };
 
         let throwing = r#"function(config, logger, predicates) { throw new Error("boom"); }"#;
-        let err = execute_predicate_generator_inject(throwing, &request, &[])
+        let err = execute_predicate_generator_inject(throwing, &request, &[], &trusted_files())
             .expect_err("a throwing generator must return Err, not empty predicates");
         assert!(
             matches!(err, PredicateGeneratorError::Script(_)),
@@ -3532,7 +3671,7 @@ function respond(ctx) {
         let ok_fn = r#"function(config, logger, predicates) {
             return [{ equals: { path: config.request.path } }];
         }"#;
-        let preds = execute_predicate_generator_inject(ok_fn, &request, &[])
+        let preds = execute_predicate_generator_inject(ok_fn, &request, &[], &trusted_files())
             .expect("a valid generator returns Ok");
         assert_eq!(preds.len(), 1);
     }
@@ -3554,7 +3693,7 @@ function respond(ctx) {
 
         // Returns a number → JSON.stringify gives "5", which does not parse as a predicate array.
         let non_array = r#"function(config, logger, predicates) { return 5; }"#;
-        let err = execute_predicate_generator_inject(non_array, &request, &[])
+        let err = execute_predicate_generator_inject(non_array, &request, &[], &trusted_files())
             .expect_err("a non-array return must fail, not silently produce empty predicates");
         assert!(
             matches!(err, PredicateGeneratorError::Output(_)),
@@ -3563,9 +3702,10 @@ function respond(ctx) {
 
         // Returns undefined → not stringifiable at all.
         let no_return = r#"function(config, logger, predicates) { return undefined; }"#;
-        let err = execute_predicate_generator_inject(no_return, &request, &[]).expect_err(
-            "a non-stringifiable return must fail, not silently produce empty predicates",
-        );
+        let err = execute_predicate_generator_inject(no_return, &request, &[], &trusted_files())
+            .expect_err(
+                "a non-stringifiable return must fail, not silently produce empty predicates",
+            );
         assert!(
             matches!(err, PredicateGeneratorError::Output(_)),
             "expected Output error, got {err:?}"
@@ -3595,6 +3735,7 @@ function respond(ctx) {
             &headers,
             test_port(),
             None,
+            &trusted_files(),
         );
         assert!(
             result.is_ok(),
@@ -3647,6 +3788,7 @@ function respond(ctx) {
             &HashMap::new(),
             test_port(),
             None,
+            &trusted_files(),
         );
         let _ = std::fs::remove_file(&module);
         let resp = result.expect("require decorate should run");
@@ -3669,6 +3811,7 @@ function respond(ctx) {
             &HashMap::new(),
             test_port(),
             None,
+            &trusted_files(),
         )
         .expect("direct config decorate should run");
         assert_eq!(resp.body, "DIRECT");
@@ -3686,6 +3829,7 @@ function respond(ctx) {
             &HashMap::new(),
             test_port(),
             None,
+            &trusted_files(),
         )
         .expect("config.request decorate should run");
         assert_eq!(resp.body, "REQ-BODY");
@@ -3735,6 +3879,7 @@ function respond(ctx) {
             &HashMap::new(),
             test_port(),
             None,
+            &trusted_files(),
         );
         let _ = std::fs::remove_file(&path_a);
         let _ = std::fs::remove_file(&path_b);
@@ -3758,6 +3903,7 @@ function respond(ctx) {
             &HashMap::new(),
             test_port(),
             None,
+            &trusted_files(),
         );
         assert!(
             result.is_err(),
@@ -3766,9 +3912,223 @@ function respond(ctx) {
     }
 
     // =========================================================================================
-    // Issue #355 Item 0: Mountebank v2 `config` calling convention (dual-convention, zero
-    // breakage) for response inject, predicate inject, and decorate.
+    // Issue #1611: what `require()` may read, per imposter and per run.
     // =========================================================================================
+
+    /// A scripts root holding `top.js` → `lib/a.js` → `./b.js`, `data.json`, and an `outside/`
+    /// sibling with a canary module.
+    struct ScriptsTree {
+        _dir: tempfile::TempDir,
+        root: std::path::PathBuf,
+        outside: std::path::PathBuf,
+    }
+
+    fn scripts_tree() -> ScriptsTree {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().canonicalize().expect("canonical tempdir");
+        let root = base.join("sd");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            root.join("top.js"),
+            "module.exports = require('./lib/a.js');",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("lib/a.js"),
+            "module.exports = 'A>' + require('./b.js') + ':' + __dirname.endsWith('lib');",
+        )
+        .unwrap();
+        std::fs::write(root.join("lib/b.js"), "module.exports = 'B';").unwrap();
+        std::fs::write(root.join("data.json"), r#"{"n": 7, "s": "json"}"#).unwrap();
+        std::fs::write(outside.join("mod.js"), "module.exports = 'CANARY_1611';").unwrap();
+        ScriptsTree {
+            _dir: dir,
+            root,
+            outside,
+        }
+    }
+
+    /// The body an inject reporting `require(<module>)` returns under `files`.
+    fn inject_require(files: &Arc<ScriptFileAccess>, module: &str) -> String {
+        let script = format!(
+            "config => {{ try {{ return {{ body: 'OK:' + JSON.stringify(require({module:?})) }}; }} \
+             catch (e) {{ return {{ body: 'ERR:' + String(e) }}; }} }}"
+        );
+        execute_mountebank_inject(&script, &mb_req("GET", "/r"), test_port(), None, files)
+            .expect("inject runs")
+            .body
+            .expect("a body")
+    }
+
+    #[test]
+    fn confined_require_loads_from_the_root_and_nested_requires_from_the_module() {
+        let tree = scripts_tree();
+        let files = Arc::new(ScriptFileAccess::Confined(tree.root.clone()));
+        assert_eq!(inject_require(&files, "top.js"), "OK:\"A>B:true\"");
+        assert_eq!(
+            inject_require(&files, tree.root.join("lib/b.js").to_str().unwrap()),
+            "OK:\"B\""
+        );
+        // A `.json` module is parsed, as in Node.
+        assert_eq!(
+            inject_require(&files, "data.json"),
+            r#"OK:{"n":7,"s":"json"}"#
+        );
+    }
+
+    #[test]
+    fn confined_require_refuses_every_path_outside_the_root_with_one_message() {
+        let tree = scripts_tree();
+        let files = Arc::new(ScriptFileAccess::Confined(tree.root.clone()));
+        let present = tree.outside.join("mod.js");
+        let missing = tree.outside.join("missing.js");
+        for module in [
+            present.to_str().unwrap(),
+            missing.to_str().unwrap(),
+            "../outside/mod.js",
+            "/etc/hosts",
+        ] {
+            let body = inject_require(&files, module);
+            assert_eq!(
+                body,
+                format!("ERR:Error: require('{module}'): outside --scripts-dir"),
+            );
+        }
+        assert_eq!(
+            inject_require(&files, "lib/nope.js"),
+            "ERR:Error: require('lib/nope.js'): no such module under --scripts-dir"
+        );
+    }
+
+    #[test]
+    fn refused_require_refuses_every_path() {
+        let tree = scripts_tree();
+        let files = Arc::new(ScriptFileAccess::Refused);
+        for module in [tree.root.join("top.js"), tree.outside.join("mod.js")] {
+            let module = module.to_str().unwrap().to_string();
+            assert_eq!(
+                inject_require(&files, &module),
+                format!("ERR:Error: require('{module}'): no --scripts-dir is configured")
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_require_reads_any_path_and_nests_from_the_module() {
+        let tree = scripts_tree();
+        let files = Arc::new(ScriptFileAccess::Trusted {
+            base: tree.root.clone(),
+        });
+        assert_eq!(inject_require(&files, "top.js"), "OK:\"A>B:true\"");
+        assert_eq!(
+            inject_require(&files, tree.outside.join("mod.js").to_str().unwrap()),
+            "OK:\"CANARY_1611\""
+        );
+    }
+
+    // A `require` kept in a global of the shared realm answers only in the run that installed it,
+    // so a later run, of this imposter or another, can never reach the earlier one's root or
+    // module cache.
+    #[test]
+    fn a_stashed_require_is_dead_after_its_run() {
+        let tree = scripts_tree();
+        let mut thread = MbJsThread::new();
+        let trusted = Arc::new(ScriptFileAccess::Trusted {
+            base: tree.root.clone(),
+        });
+        let stash = "config => { globalThis.__stashed = require; \
+                     return { body: String(require('top.js')) }; }";
+        let first = execute_mountebank_inject_in(
+            &mut thread,
+            stash,
+            &mb_req("GET", "/a"),
+            test_port(),
+            None,
+            &trusted,
+        )
+        .expect("first run");
+        assert_eq!(first.body.as_deref(), Some("A>B:true"));
+
+        let refused = Arc::new(ScriptFileAccess::Refused);
+        let replay = format!(
+            "config => {{ try {{ return {{ body: String(__stashed({:?})) }}; }} \
+             catch (e) {{ return {{ body: 'ERR:' + String(e) }}; }} }}",
+            tree.outside.join("mod.js").to_str().unwrap()
+        );
+        let second = execute_mountebank_inject_in(
+            &mut thread,
+            &replay,
+            &mb_req("GET", "/b"),
+            test_port(),
+            None,
+            &refused,
+        )
+        .expect("second run");
+        let body = second.body.expect("a body");
+        assert!(
+            body.starts_with("ERR:") && body.contains("a script run that has ended"),
+            "{body}"
+        );
+        assert!(!body.contains("CANARY_1611"), "{body}");
+    }
+
+    // Every Mountebank hook gets its own `require` (MB exposes it to all injection), each bound
+    // to the access it is given, not one a previous run left on the worker.
+    #[test]
+    fn every_hook_gets_a_require_bound_to_its_own_access() {
+        let tree = scripts_tree();
+        let mut thread = MbJsThread::new();
+        let confined = Arc::new(ScriptFileAccess::Confined(tree.root.clone()));
+        let refused = Arc::new(ScriptFileAccess::Refused);
+
+        let decorated = execute_mountebank_decorate_in(
+            &mut thread,
+            "config => { config.response.body = require('top.js'); }",
+            &config_req(),
+            "orig",
+            &crate::behaviors::ResponseStatus::Code(200),
+            &HashMap::new(),
+            test_port(),
+            None,
+            &confined,
+        )
+        .expect("decorate");
+        assert_eq!(decorated.body, "A>B:true");
+
+        assert!(
+            execute_predicate_inject_in(
+                &mut thread,
+                "config => require('top.js') === 'A>B:true'",
+                &mb_req("GET", "/p"),
+                test_port(),
+                &confined,
+            )
+            .expect("predicate inject")
+        );
+        let refused_predicate = execute_predicate_inject_in(
+            &mut thread,
+            "config => require('top.js') === 'A>B:true'",
+            &mb_req("GET", "/p"),
+            test_port(),
+            &refused,
+        );
+        assert!(
+            refused_predicate.is_err_and(|e| e.to_string().contains("no --scripts-dir")),
+            "the predicate's require is the refused imposter's, not the decorate's"
+        );
+
+        let generated = execute_predicate_generator_inject_in(
+            &mut thread,
+            "config => [{ equals: { body: require('lib/b.js') } }]",
+            &mb_req("GET", "/g"),
+            &[],
+            &confined,
+        )
+        .expect("generator");
+        assert_eq!(generated, vec![json!({"equals": {"body": "B"}})]);
+    }
 
     fn mb_req(method: &str, path: &str) -> MountebankRequest {
         MountebankRequest {
@@ -3787,12 +4147,24 @@ function respond(ctx) {
     #[test]
     fn inject_status_code_accepts_a_numeric_string() {
         let script = r#"function(config) { return { statusCode: "201", body: "b" }; }"#;
-        let resp = execute_mountebank_inject(script, &mb_req("GET", "/s"), test_port(), None)
-            .expect("inject should run");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/s"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("inject should run");
         assert_eq!(resp.status_code, Some(201));
         let script = r#"function(config) { return { body: "b" }; }"#;
-        let resp = execute_mountebank_inject(script, &mb_req("GET", "/s"), test_port(), None)
-            .expect("inject should run");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/s"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("inject should run");
         assert_eq!(resp.status_code, None);
     }
 
@@ -3801,8 +4173,14 @@ function respond(ctx) {
     fn inject_v2_config_request_path() {
         let script =
             r#"function(config) { return { statusCode: 200, body: config.request.path }; }"#;
-        let resp = execute_mountebank_inject(script, &mb_req("GET", "/a-path"), test_port(), None)
-            .expect("v2 config convention should run");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/a-path"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("v2 config convention should run");
         assert_eq!(resp.body_text(), "/a-path");
     }
 
@@ -3817,8 +4195,14 @@ function respond(ctx) {
         let script =
             format!("function(config) {{ return {{ statusCode: 200, body: '{marker}' }}; }}");
         for _ in 0..64 {
-            let resp = execute_mountebank_inject(&script, &mb_req("GET", "/c"), port, None)
-                .expect("inject run");
+            let resp = execute_mountebank_inject(
+                &script,
+                &mb_req("GET", "/c"),
+                port,
+                None,
+                &trusted_files(),
+            )
+            .expect("inject run");
             assert_eq!(resp.body_text(), marker);
         }
         let parses = mb_script_parse_count_containing(&marker);
@@ -3833,8 +4217,14 @@ function respond(ctx) {
     #[test]
     fn inject_sees_empty_string_body_for_bodyless_request() {
         let script = r#"function(config) { return { statusCode: 200, body: typeof config.request.body + ':' + JSON.stringify(config.request.body) }; }"#;
-        let resp = execute_mountebank_inject(script, &mb_req("GET", "/nobody"), test_port(), None)
-            .expect("inject runs");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/nobody"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("inject runs");
         assert_eq!(resp.body_text(), r#"string:"""#);
     }
 
@@ -3850,6 +4240,7 @@ function respond(ctx) {
             &HashMap::new(),
             test_port(),
             None,
+            &trusted_files(),
         )
         .expect("decorate runs");
         assert_eq!(result.body, r#"string:"""#);
@@ -3861,6 +4252,7 @@ function respond(ctx) {
             r#"function(config) { return config.request.body === ""; }"#,
             &mb_req("GET", "/nobody"),
             test_port(),
+            &trusted_files(),
         )
         .expect("predicate inject runs");
         assert!(matched);
@@ -3879,8 +4271,14 @@ function respond(ctx) {
     #[test]
     fn inject_headers_lookup_is_case_insensitive() {
         let script = r#"function(config) { var h = config.request.headers; return { body: [h['content-type'], h['CONTENT-TYPE'], h['Content-Type'], String(h['x-missing'])].join('|') }; }"#;
-        let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
-            .expect("inject runs");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req_with_headers(),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("inject runs");
         assert_eq!(
             resp.body_text(),
             "application/json|application/json|application/json|undefined"
@@ -3890,8 +4288,14 @@ function respond(ctx) {
     #[test]
     fn inject_headers_in_and_has_own_property_ignore_case() {
         let script = r#"function(config) { var h = config.request.headers; return { body: ('x-id' in h) + ',' + h.hasOwnProperty('x-id') + ',' + Object.prototype.hasOwnProperty.call(h, 'X-ID') + ',' + ('nope' in h) }; }"#;
-        let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
-            .expect("inject runs");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req_with_headers(),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("inject runs");
         assert_eq!(resp.body_text(), "true,true,true,false");
     }
 
@@ -3899,8 +4303,14 @@ function respond(ctx) {
     fn inject_headers_enumerate_title_case() {
         // Enumeration is unchanged: the names the listener stored.
         let script = r#"function(config) { var h = config.request.headers; return { body: JSON.stringify(Object.keys(h).sort()) + ' ' + JSON.stringify(h) .length }; }"#;
-        let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
-            .expect("inject runs");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req_with_headers(),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("inject runs");
         assert!(
             resp.body_text().starts_with(r#"["Content-Type","X-Id"] "#),
             "{}",
@@ -3919,8 +4329,14 @@ function respond(ctx) {
             h['x-new'] = 'n';
             return { body: [h['Content-Type'], String(h['X-Id']), ('x-id' in h), JSON.stringify(Object.keys(h).sort())].join('|') };
         }"#;
-        let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
-            .expect("inject runs");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req_with_headers(),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("inject runs");
         assert_eq!(
             resp.body_text(),
             r#"text/csv|undefined|false|["Content-Type","x-new"]"#
@@ -3935,8 +4351,14 @@ function respond(ctx) {
             var h = Object.freeze(config.request.headers);
             return { body: [h['x-id'], h.hasOwnProperty('X-Id'), h.hasOwnProperty('x-id')].join('|') };
         }"#;
-        let resp = execute_mountebank_inject(script, &mb_req_with_headers(), test_port(), None)
-            .expect("inject runs");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req_with_headers(),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("inject runs");
         assert_eq!(resp.body_text(), "7|true|false");
     }
 
@@ -3946,6 +4368,7 @@ function respond(ctx) {
             r#"function(config) { return config.request.headers['x-id'] === '7'; }"#,
             &mb_req_with_headers(),
             test_port(),
+            &trusted_files(),
         )
         .expect("predicate inject runs");
         assert!(matched);
@@ -3957,6 +4380,7 @@ function respond(ctx) {
             &HashMap::new(),
             test_port(),
             None,
+            &trusted_files(),
         )
         .expect("decorate runs");
         assert_eq!(decorated.body, "application/json");
@@ -3966,8 +4390,14 @@ function respond(ctx) {
     #[test]
     fn inject_legacy_positional_request_path() {
         let script = r#"function(request, state, logger) { return { statusCode: 200, body: request.path }; }"#;
-        let resp = execute_mountebank_inject(script, &mb_req("GET", "/legacy"), test_port(), None)
-            .expect("legacy positional convention should run");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/legacy"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("legacy positional convention should run");
         assert_eq!(resp.body_text(), "/legacy");
     }
 
@@ -3975,8 +4405,14 @@ function respond(ctx) {
     #[test]
     fn inject_flattened_config_path() {
         let script = r#"function(config) { return { statusCode: 200, body: config.path + " " + config.method }; }"#;
-        let resp = execute_mountebank_inject(script, &mb_req("POST", "/flat"), test_port(), None)
-            .expect("flattened config fields should be readable");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req("POST", "/flat"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("flattened config fields should be readable");
         assert_eq!(resp.body_text(), "/flat POST");
     }
 
@@ -3988,8 +4424,14 @@ function respond(ctx) {
             var req = config.request || config;
             return { statusCode: 200, body: req.path };
         }"#;
-        let resp = execute_mountebank_inject(script, &mb_req("GET", "/shim"), test_port(), None)
-            .expect("request-or-config shim should run");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/shim"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("request-or-config shim should run");
         assert_eq!(resp.body_text(), "/shim");
     }
 
@@ -4001,8 +4443,14 @@ function respond(ctx) {
             state.hits = (state.hits || 0) + 1;
             return { statusCode: 200, body: "hits:" + state.hits };
         }"#;
-        let resp = execute_mountebank_inject(script, &mb_req("GET", "/hybrid"), test_port(), None)
-            .expect("hybrid config+state signature should run");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/hybrid"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("hybrid config+state signature should run");
         assert_eq!(resp.body_text(), "hits:1");
     }
 
@@ -4013,8 +4461,14 @@ function respond(ctx) {
         let script = r#"function(config, injectState, logger, done) {
             done({ statusCode: 200, body: "via-done" });
         }"#;
-        let resp = execute_mountebank_inject(script, &mb_req("GET", "/cb"), test_port(), None)
-            .expect("callback-style inject should run");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/cb"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("callback-style inject should run");
         assert_eq!(resp.body_text(), "via-done");
     }
 
@@ -4023,8 +4477,14 @@ function respond(ctx) {
         let script = r#"function(config) {
             config.callback({ statusCode: 200, body: "via-config-callback" });
         }"#;
-        let resp = execute_mountebank_inject(script, &mb_req("GET", "/cb2"), test_port(), None)
-            .expect("config.callback alias should run");
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/cb2"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("config.callback alias should run");
         assert_eq!(resp.body_text(), "via-config-callback");
     }
 
@@ -4032,19 +4492,43 @@ function respond(ctx) {
     #[test]
     fn predicate_v2_config_request_path() {
         let script = r#"function(config) { return config.request.path === "/match"; }"#;
-        assert!(execute_predicate_inject(script, &mb_req("GET", "/match"), test_port()).unwrap());
+        assert!(
+            execute_predicate_inject(
+                script,
+                &mb_req("GET", "/match"),
+                test_port(),
+                &trusted_files()
+            )
+            .unwrap()
+        );
     }
 
     #[test]
     fn predicate_legacy_positional() {
         let script = r#"function(request, logger, state) { return request.path === "/match"; }"#;
-        assert!(execute_predicate_inject(script, &mb_req("GET", "/match"), test_port()).unwrap());
+        assert!(
+            execute_predicate_inject(
+                script,
+                &mb_req("GET", "/match"),
+                test_port(),
+                &trusted_files()
+            )
+            .unwrap()
+        );
     }
 
     #[test]
     fn predicate_flattened_config_path() {
         let script = r#"function(config) { return config.path === "/match"; }"#;
-        assert!(execute_predicate_inject(script, &mb_req("GET", "/match"), test_port()).unwrap());
+        assert!(
+            execute_predicate_inject(
+                script,
+                &mb_req("GET", "/match"),
+                test_port(),
+                &trusted_files()
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -4053,7 +4537,15 @@ function respond(ctx) {
             var req = config.request || config;
             return req.path === "/match";
         }"#;
-        assert!(execute_predicate_inject(script, &mb_req("GET", "/match"), test_port()).unwrap());
+        assert!(
+            execute_predicate_inject(
+                script,
+                &mb_req("GET", "/match"),
+                test_port(),
+                &trusted_files()
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -4062,7 +4554,15 @@ function respond(ctx) {
             state.checked = true;
             return config.method === "GET";
         }"#;
-        assert!(execute_predicate_inject(script, &mb_req("GET", "/match"), test_port()).unwrap());
+        assert!(
+            execute_predicate_inject(
+                script,
+                &mb_req("GET", "/match"),
+                test_port(),
+                &trusted_files()
+            )
+            .unwrap()
+        );
     }
 
     // Decorate: same five conventions.
@@ -4077,6 +4577,7 @@ function respond(ctx) {
             &HashMap::new(),
             test_port(),
             None,
+            &trusted_files(),
         )
         .expect("v2 config decorate should run");
         assert_eq!(resp.body, "/dec-a");
@@ -4093,6 +4594,7 @@ function respond(ctx) {
             &HashMap::new(),
             test_port(),
             None,
+            &trusted_files(),
         )
         .expect("legacy positional decorate should run");
         assert_eq!(resp.body, "/dec-legacy");
@@ -4109,6 +4611,7 @@ function respond(ctx) {
             &HashMap::new(),
             test_port(),
             None,
+            &trusted_files(),
         )
         .expect("flattened config decorate should run");
         assert_eq!(resp.body, "/dec-flat");
@@ -4128,6 +4631,7 @@ function respond(ctx) {
             &HashMap::new(),
             test_port(),
             None,
+            &trusted_files(),
         )
         .expect("request-or-config shim decorate should run");
         assert_eq!(resp.body, "/dec-shim");
@@ -4147,6 +4651,7 @@ function respond(ctx) {
             &HashMap::new(),
             test_port(),
             None,
+            &trusted_files(),
         )
         .expect("hybrid config+state decorate should run");
         assert_eq!(resp.body, "decorated:GET");
@@ -4160,12 +4665,24 @@ function respond(ctx) {
         let predicate_script =
             r#"function(config) { config.state.seen = "from-predicate"; return true; }"#;
         assert!(
-            execute_predicate_inject(predicate_script, &mb_req("GET", "/shared"), port).unwrap()
+            execute_predicate_inject(
+                predicate_script,
+                &mb_req("GET", "/shared"),
+                port,
+                &trusted_files()
+            )
+            .unwrap()
         );
 
         let inject_script = r#"function(config) { return { statusCode: 200, body: config.state.seen || "missing" }; }"#;
-        let resp = execute_mountebank_inject(inject_script, &mb_req("GET", "/shared"), port, None)
-            .expect("response inject should run");
+        let resp = execute_mountebank_inject(
+            inject_script,
+            &mb_req("GET", "/shared"),
+            port,
+            None,
+            &trusted_files(),
+        )
+        .expect("response inject should run");
         assert_eq!(
             resp.body_text(),
             "from-predicate",
@@ -4189,12 +4706,21 @@ function respond(ctx) {
 
         // Imposter A writes state via a predicate inject.
         let writer = r#"function(config) { config.state.marker = "from-A"; return true; }"#;
-        assert!(execute_predicate_inject(writer, &mb_req("GET", "/iso"), port_a).unwrap());
+        assert!(
+            execute_predicate_inject(writer, &mb_req("GET", "/iso"), port_a, &trusted_files())
+                .unwrap()
+        );
 
         // Imposter B reads state via a response inject: it must see its own (empty) state, not A's.
         let reader = r#"function(config) { return { statusCode: 200, body: config.state.marker || "isolated" }; }"#;
-        let resp_b = execute_mountebank_inject(reader, &mb_req("GET", "/iso"), port_b, None)
-            .expect("response inject should run");
+        let resp_b = execute_mountebank_inject(
+            reader,
+            &mb_req("GET", "/iso"),
+            port_b,
+            None,
+            &trusted_files(),
+        )
+        .expect("response inject should run");
         assert_eq!(
             resp_b.body_text(),
             "isolated",
@@ -4202,8 +4728,14 @@ function respond(ctx) {
         );
 
         // Sanity: A still sees its own state — isolation didn't wipe it.
-        let resp_a = execute_mountebank_inject(reader, &mb_req("GET", "/iso"), port_a, None)
-            .expect("response inject should run");
+        let resp_a = execute_mountebank_inject(
+            reader,
+            &mb_req("GET", "/iso"),
+            port_a,
+            None,
+            &trusted_files(),
+        )
+        .expect("response inject should run");
         assert_eq!(resp_a.body_text(), "from-A");
         // (Decorate keys the SAME `IMPOSTER_STATE` map via the identical `imposter_port`, so its
         // isolation follows from the same mechanism proven here.)
@@ -4231,11 +4763,22 @@ function respond(ctx) {
             for i in 0..n {
                 s.spawn(move || {
                     if i % 2 == 0 {
-                        execute_mountebank_inject(incr, &mb_req("POST", "/count"), port, None)
-                            .expect("inject should run");
+                        execute_mountebank_inject(
+                            incr,
+                            &mb_req("POST", "/count"),
+                            port,
+                            None,
+                            &trusted_files(),
+                        )
+                        .expect("inject should run");
                     } else {
-                        execute_predicate_inject(pred_incr, &mb_req("POST", "/count"), port)
-                            .expect("predicate inject should run");
+                        execute_predicate_inject(
+                            pred_incr,
+                            &mb_req("POST", "/count"),
+                            port,
+                            &trusted_files(),
+                        )
+                        .expect("predicate inject should run");
                     }
                 });
             }
@@ -4244,8 +4787,9 @@ function respond(ctx) {
         let read = r#"function(config) {
             return { statusCode: 200, body: String(config.state.count || 0) };
         }"#;
-        let final_resp = execute_mountebank_inject(read, &mb_req("GET", "/count"), port, None)
-            .expect("read inject should run");
+        let final_resp =
+            execute_mountebank_inject(read, &mb_req("GET", "/count"), port, None, &trusted_files())
+                .expect("read inject should run");
         assert_eq!(
             final_resp.body_text(),
             n.to_string(),
@@ -4272,7 +4816,7 @@ function respond(ctx) {
         std::thread::scope(|s| {
             for _ in 0..n {
                 s.spawn(move || {
-                    execute_predicate_inject(incr, &mb_req("POST", "/gen"), port)
+                    execute_predicate_inject(incr, &mb_req("POST", "/gen"), port, &trusted_files())
                         .expect("predicate inject should run");
                 });
             }
@@ -4280,8 +4824,9 @@ function respond(ctx) {
         let read = r#"function(config) {
             return { statusCode: 200, body: String(config.state.count || 0) };
         }"#;
-        let before = execute_mountebank_inject(read, &mb_req("GET", "/gen"), port, None)
-            .expect("read inject should run");
+        let before =
+            execute_mountebank_inject(read, &mb_req("GET", "/gen"), port, None, &trusted_files())
+                .expect("read inject should run");
         assert_eq!(
             before.body_text(),
             n.to_string(),
@@ -4298,8 +4843,14 @@ function respond(ctx) {
         std::thread::scope(|s| {
             for _ in 0..8 {
                 s.spawn(move || {
-                    let resp = execute_mountebank_inject(read, &mb_req("GET", "/gen"), port, None)
-                        .expect("read inject should run");
+                    let resp = execute_mountebank_inject(
+                        read,
+                        &mb_req("GET", "/gen"),
+                        port,
+                        None,
+                        &trusted_files(),
+                    )
+                    .expect("read inject should run");
                     assert_eq!(
                         resp.body_text(),
                         "0",
@@ -4371,7 +4922,13 @@ function respond(ctx) {
         }"#;
 
         let result = tracing::subscriber::with_default(subscriber, || {
-            execute_mountebank_inject(script, &mb_req("GET", "/log"), port, Some("stub-log-42"))
+            execute_mountebank_inject(
+                script,
+                &mb_req("GET", "/log"),
+                port,
+                Some("stub-log-42"),
+                &trusted_files(),
+            )
         });
 
         assert!(
@@ -4405,7 +4962,13 @@ function respond(ctx) {
     #[test]
     fn mb_inject_infinite_loop_terminates() {
         let script = r#"function(config) { while (true) {} }"#;
-        let result = execute_mountebank_inject(script, &mb_req("GET", "/loop"), test_port(), None);
+        let result = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/loop"),
+            test_port(),
+            None,
+            &trusted_files(),
+        );
         assert!(
             result.is_err(),
             "an infinite loop in an inject fn must terminate with an error, not hang"
@@ -4419,7 +4982,13 @@ function respond(ctx) {
     #[test]
     fn mb_inject_throwing_returns_err() {
         let script = r#"function(config) { throw new Error('boom-inject'); }"#;
-        let result = execute_mountebank_inject(script, &mb_req("GET", "/throw"), test_port(), None);
+        let result = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/throw"),
+            test_port(),
+            None,
+            &trusted_files(),
+        );
         let err = result.expect_err("a throwing inject must surface as Err, not silently succeed");
         assert!(
             err.to_string().contains("boom-inject"),

@@ -299,6 +299,140 @@ fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, ScriptResolveError> {
     Ok(joined)
 }
 
+/// What a script running in an imposter may read from disk at request time (issue #1611): the
+/// modules a Mountebank-style hook loads with `require()`.
+///
+/// This is the runtime counterpart of [`ScriptBaseDir`], which vets a `file:` path once, at
+/// admission. A `require` path is computed by code on every request, so it is vetted here, each
+/// time it is used. The mode belongs to the running imposter and is chosen by the door that wrote
+/// it; it is never part of [`ImposterConfig`], so it is never serialized, never a `stub_key` input
+/// and never in the bytes an embedder replicates.
+///
+/// None of this is a sandbox: `--allowInjection` also admits `shellTransform`, which runs host
+/// commands. Confinement keeps a network-authored script from reading the host's files by the
+/// route that looks harmless.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ScriptFileAccess {
+    /// A network-authored door with `--scripts-dir`: only modules under this root load.
+    Confined(PathBuf),
+    /// A network-authored door without `--scripts-dir`, and any embedder that has not chosen:
+    /// every `require` is refused.
+    #[default]
+    Refused,
+    /// A local, human-authored door (`--configfile`, the in-process FFI APIs): any path, a relative
+    /// one joined to `base`. Its author already has the filesystem.
+    Trusted { base: PathBuf },
+}
+
+impl ScriptFileAccess {
+    /// The access a network-authored door grants: confined to `scripts_dir`, or refused without
+    /// one.
+    #[must_use]
+    pub fn network(scripts_dir: Option<&Path>) -> Self {
+        scripts_dir.map_or(Self::Refused, |dir| Self::Confined(dir.to_path_buf()))
+    }
+
+    /// The access a local, human-authored door grants: unconfined, with a relative path joined to
+    /// the process's working directory, as `require` has always resolved one.
+    #[must_use]
+    pub fn trusted_cwd() -> Self {
+        // Domain-equivalent fallback, not a swallow: `.` is the working directory, so a relative
+        // path still resolves against it when the absolute form cannot be read.
+        let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::Trusted { base }
+    }
+}
+
+/// Why [`resolve_confined`] refused a path.
+#[derive(Debug, thiserror::Error)]
+#[cfg_attr(not(feature = "javascript"), allow(dead_code))] // only `require` reads files yet
+pub(crate) enum ConfinedPathError {
+    /// The path is outside the root, or reaches outside through a link. One answer for every such
+    /// path, whether or not anything exists there.
+    #[error("outside the root")]
+    Outside,
+    /// The path is inside the root and nothing is there.
+    #[error("no such file under the root")]
+    NotFound,
+    /// The root itself cannot be resolved.
+    #[error("the root cannot be resolved: {0}")]
+    Root(std::io::Error),
+}
+
+/// Resolve `request` to a file strictly under `root`, without reading it (issue #1611).
+///
+/// A relative `request` joins `base` (the root itself, or the directory of the module asking); an
+/// absolute one is taken as written. Either way the path is first normalised lexically, and one
+/// outside the root is refused before the filesystem is touched. A path inside it is then
+/// canonicalised and must still be under the canonical root, so a link inside the root that
+/// points out is refused as well. Every refusal of a path outside the root is the same
+/// [`ConfinedPathError::Outside`], so the answer never depends on what exists outside it.
+///
+/// The returned path is canonical; read that one.
+#[cfg_attr(not(feature = "javascript"), allow(dead_code))] // only `require` reads files yet
+pub(crate) fn resolve_confined(
+    root: &Path,
+    base: &Path,
+    request: &str,
+) -> Result<PathBuf, ConfinedPathError> {
+    let lexical_root =
+        normalize_lexically(&std::path::absolute(root).map_err(ConfinedPathError::Root)?);
+    let canonical_root = lexical_root
+        .canonicalize()
+        .map_err(ConfinedPathError::Root)?;
+    let requested = Path::new(request);
+    let joined = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        std::path::absolute(base)
+            .map_err(ConfinedPathError::Root)?
+            .join(requested)
+    };
+    let candidate = normalize_lexically(&joined);
+    // Either spelling of the root: a module's own directory is canonical, a path written into a
+    // script usually is not.
+    if !candidate.starts_with(&lexical_root) && !candidate.starts_with(&canonical_root) {
+        return Err(ConfinedPathError::Outside);
+    }
+    match candidate.canonicalize() {
+        Ok(canonical) if canonical.starts_with(&canonical_root) => Ok(canonical),
+        Ok(_) => Err(ConfinedPathError::Outside),
+        Err(e) => {
+            // A link whose target is missing is refused like any link out, never reported as a
+            // missing file: that would say whether its target exists.
+            let is_link = candidate
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.file_type().is_symlink());
+            let parent_inside = candidate
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .is_some_and(|parent| parent.starts_with(&canonical_root));
+            if !is_link && parent_inside && e.kind() == std::io::ErrorKind::NotFound {
+                Err(ConfinedPathError::NotFound)
+            } else {
+                Err(ConfinedPathError::Outside)
+            }
+        }
+    }
+}
+
+/// `path` with every `.` dropped and every `..` applied to what precedes it, computed from its
+/// components alone. A `..` at the top stays at the top, as the filesystem treats it.
+#[cfg_attr(not(feature = "javascript"), allow(dead_code))] // only `require` reads files yet
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,5 +980,167 @@ mod tests {
             extract_script(&config).engine.as_deref(),
             Some("javascript")
         );
+    }
+
+    // ---- Issue #1611: the runtime resolver behind `require()` ----
+
+    /// A canary tree: `root/` is the confinement root, `outside/` sits beside it.
+    struct Confinement {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        outside: PathBuf,
+    }
+
+    fn confinement() -> Confinement {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().canonicalize().expect("canonical tempdir");
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("mod.js"), "module.exports = 1;").unwrap();
+        std::fs::write(root.join("lib/helper.js"), "module.exports = 2;").unwrap();
+        std::fs::write(outside.join("secret.js"), "CANARY_1611").unwrap();
+        Confinement {
+            _dir: dir,
+            root,
+            outside,
+        }
+    }
+
+    fn outside_err(result: Result<PathBuf, ConfinedPathError>) -> bool {
+        matches!(result, Err(ConfinedPathError::Outside))
+    }
+
+    #[test]
+    fn confined_resolves_a_module_in_the_root_by_relative_and_absolute_path() {
+        let c = confinement();
+        let canonical = c.root.join("mod.js");
+        assert_eq!(
+            resolve_confined(&c.root, &c.root, "mod.js").unwrap(),
+            canonical
+        );
+        assert_eq!(
+            resolve_confined(&c.root, &c.root, "./lib/../mod.js").unwrap(),
+            canonical
+        );
+        assert_eq!(
+            resolve_confined(&c.root, &c.root, canonical.to_str().unwrap()).unwrap(),
+            canonical
+        );
+    }
+
+    #[test]
+    fn confined_resolves_a_relative_path_from_the_requiring_module_directory() {
+        let c = confinement();
+        assert_eq!(
+            resolve_confined(&c.root, &c.root.join("lib"), "../mod.js").unwrap(),
+            c.root.join("mod.js")
+        );
+        assert_eq!(
+            resolve_confined(&c.root, &c.root.join("lib"), "helper.js").unwrap(),
+            c.root.join("lib/helper.js")
+        );
+    }
+
+    #[test]
+    fn confined_refuses_absolute_dotdot_and_symlink_escapes() {
+        let c = confinement();
+        assert!(outside_err(resolve_confined(
+            &c.root,
+            &c.root,
+            "/etc/hosts"
+        )));
+        assert!(outside_err(resolve_confined(
+            &c.root,
+            &c.root,
+            "../outside/secret.js"
+        )));
+        assert!(outside_err(resolve_confined(
+            &c.root,
+            &c.root.join("lib"),
+            "../../outside/secret.js"
+        )));
+        assert!(outside_err(resolve_confined(
+            &c.root,
+            &c.root,
+            c.outside.join("secret.js").to_str().unwrap()
+        )));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(c.outside.join("secret.js"), c.root.join("link.js"))
+                .unwrap();
+            std::os::unix::fs::symlink(&c.outside, c.root.join("linkdir")).unwrap();
+            std::os::unix::fs::symlink(c.outside.join("gone.js"), c.root.join("dangling.js"))
+                .unwrap();
+            assert!(outside_err(resolve_confined(&c.root, &c.root, "link.js")));
+            assert!(outside_err(resolve_confined(
+                &c.root,
+                &c.root,
+                "linkdir/secret.js"
+            )));
+            assert!(outside_err(resolve_confined(
+                &c.root,
+                &c.root,
+                "linkdir/gone.js"
+            )));
+            // A dangling link is a link out, not a missing file: that would say its target is gone.
+            assert!(outside_err(resolve_confined(
+                &c.root,
+                &c.root,
+                "dangling.js"
+            )));
+        }
+    }
+
+    #[test]
+    fn confined_refuses_a_missing_and_an_existing_outside_path_alike() {
+        let c = confinement();
+        let present = c.outside.join("secret.js");
+        let missing = c.outside.join("no-such-file.js");
+        for path in [&present, &missing] {
+            let err = resolve_confined(&c.root, &c.root, path.to_str().unwrap()).unwrap_err();
+            assert_eq!(err.to_string(), "outside the root", "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn confined_reports_a_missing_file_inside_the_root() {
+        let c = confinement();
+        assert!(matches!(
+            resolve_confined(&c.root, &c.root, "lib/missing.js"),
+            Err(ConfinedPathError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn confined_accepts_either_spelling_of_a_linked_root() {
+        let c = confinement();
+        let parent = c.root.parent().unwrap().to_path_buf();
+        #[cfg(unix)]
+        {
+            let alias = parent.join("alias");
+            std::os::unix::fs::symlink(&c.root, &alias).unwrap();
+            // Written through the alias, read from the canonical root, and the other way round.
+            let through_alias = alias.join("mod.js");
+            assert_eq!(
+                resolve_confined(&alias, &alias, through_alias.to_str().unwrap()).unwrap(),
+                c.root.join("mod.js")
+            );
+            assert_eq!(
+                resolve_confined(&alias, &c.root.join("lib"), "helper.js").unwrap(),
+                c.root.join("lib/helper.js")
+            );
+        }
+    }
+
+    #[test]
+    fn script_file_access_for_a_network_door_is_confined_or_refused() {
+        assert_eq!(
+            ScriptFileAccess::network(Some(Path::new("/srv/scripts"))),
+            ScriptFileAccess::Confined(PathBuf::from("/srv/scripts"))
+        );
+        assert_eq!(ScriptFileAccess::network(None), ScriptFileAccess::Refused);
+        assert_eq!(ScriptFileAccess::default(), ScriptFileAccess::Refused);
     }
 }

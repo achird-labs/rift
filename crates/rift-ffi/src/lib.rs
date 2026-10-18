@@ -308,7 +308,12 @@ pub extern "C" fn rift_start() -> *mut RiftHandle {
         rift_http_proxy::install_default_crypto_provider();
         match Runtime::new() {
             Ok(runtime) => {
-                let manager = Arc::new(ImposterManager::new());
+                // The host's own calls are a local door (issue #1611): a script it hands over may
+                // `require()` any path, as it always could. The admin plane `rift_serve_admin`
+                // opens on this manager names its own, network access.
+                let manager = Arc::new(ImposterManager::new().with_script_file_access(
+                    rift_http_proxy::imposter::ScriptFileAccess::trusted_cwd(),
+                ));
                 // The intercept listener reserves its port on this manager (issue #1557).
                 let intercept =
                     InterceptControl::default().with_port_reservations(Arc::clone(&manager));

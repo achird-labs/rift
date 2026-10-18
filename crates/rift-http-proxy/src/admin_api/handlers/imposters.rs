@@ -10,8 +10,8 @@ use crate::admin_api::types::{
 use crate::extensions::decorate::backend_error_response;
 use crate::imposter::RecordedRequest;
 use crate::imposter::{
-    ApplyReport, Imposter, ImposterConfig, ImposterError, ImposterManager, ScriptBaseDir, Stub,
-    StubResponse, VerifyOptions, resolve_scripts,
+    ApplyReport, Imposter, ImposterConfig, ImposterError, ImposterManager, ScriptBaseDir,
+    ScriptFileAccess, Stub, StubResponse, VerifyOptions, resolve_scripts,
 };
 use crate::response::ErrorKind;
 use crate::scripting::validate_stubs;
@@ -33,6 +33,27 @@ pub(crate) fn admin_script_base(scripts_dir: &Option<Arc<PathBuf>>) -> ScriptBas
         Some(dir) => ScriptBaseDir::ScriptsDir(dir.as_ref().clone()),
         None => ScriptBaseDir::Unconfigured,
     }
+}
+
+/// What a script in an imposter written through the admin API may `require()` (issue #1611): only
+/// modules under `--scripts-dir`, or nothing without one. The admin API is a network door, like
+/// `--datadir` and an `https:` source.
+pub(crate) fn admin_script_access(scripts_dir: &Option<Arc<PathBuf>>) -> ScriptFileAccess {
+    ScriptFileAccess::network(scripts_dir.as_deref().map(PathBuf::as_path))
+}
+
+/// Make the scripts of the imposter on `port` this admin door's before a stub is written into it
+/// (issue #1611), so a stub posted over the network never runs with the unconfined `require` of a
+/// `--configfile` imposter. `Some` is the error response when the imposter does not exist.
+pub(crate) fn claim_scripts_for_admin(
+    manager: &ImposterManager,
+    port: u16,
+    scripts_dir: &Option<Arc<PathBuf>>,
+) -> Option<Response<Full<Bytes>>> {
+    manager
+        .set_script_file_access(port, admin_script_access(scripts_dir))
+        .err()
+        .map(Into::into)
 }
 
 /// The `_rift.scripts` registry of the imposter on `port` (already resolved when the imposter was
@@ -150,7 +171,14 @@ pub async fn handle_create(
         );
     }
 
-    match manager.create_imposter(config).await {
+    match manager
+        .create_imposter_from(
+            config,
+            crate::imposter::Persistence::Datadir,
+            admin_script_access(&scripts_dir),
+        )
+        .await
+    {
         Ok(assigned_port) => {
             info!("Created imposter on port {}", assigned_port);
             // Return the full imposter details with 201 Created
@@ -402,7 +430,10 @@ async fn replace_all_from_bytes(
     // anything, only replaces what actually changed, and reports per-port failures instead of
     // log-and-continue. The imposters it kept running then get fresh runtime state in place, as
     // Mountebank's recreate gives them (issue #1518), unless `?reconcile=true` asks to keep it.
-    let mut report = match manager.apply_config(batch.imposters).await {
+    let mut report = match manager
+        .apply_config_from(batch.imposters, admin_script_access(&scripts_dir))
+        .await
+    {
         Ok(report) => report,
         // Set-level validation failure (bad protocol, duplicate port, duplicate stub id): a bad
         // request body, rejected before any imposter was touched.

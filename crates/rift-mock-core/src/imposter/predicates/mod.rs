@@ -10,6 +10,15 @@ use crate::imposter::types::{Predicate, PredicateOperation, PredicateSelector};
 use crate::util::MultiValueMap;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
+use std::sync::Arc;
+
+/// The access a standalone caller of [`stub_matches`]/[`predicate_matches`] runs a predicate
+/// `inject` under: no imposter door chose one, so every `require()` is refused (issue #1611).
+fn refused_script_files() -> &'static Arc<crate::imposter::ScriptFileAccess> {
+    static REFUSED: std::sync::LazyLock<Arc<crate::imposter::ScriptFileAccess>> =
+        std::sync::LazyLock::new(|| Arc::new(crate::imposter::ScriptFileAccess::Refused));
+    &REFUSED
+}
 
 /// A borrowed, multi-value view over request headers, so the one predicate engine can serve both
 /// the imposter hot path (one value per header name) and the intercept proxy (every value of a
@@ -105,6 +114,7 @@ where
         client_ip,
         form_fast.as_ref(),
         imposter_port,
+        refused_script_files(),
         &body_json,
         None,
         Some(&query_map),
@@ -130,6 +140,8 @@ pub(crate) fn stub_matches_inner<H>(
     // common non-form-predicate case, gives type inference nothing to pin the hasher to).
     form: Option<&MultiValueMap>,
     imposter_port: u16,
+    // What a predicate `inject` may `require()` (issue #1611).
+    script_files: &Arc<crate::imposter::ScriptFileAccess>,
     body_json: &LazyJson<'_>,
     // The once-per-request lazily-parsed XML DOM (issue #711): `Some` on the request hot path
     // (`find_matching_stub_with_client`/`_linear`), which constructs one `LazyXmlDom` before the
@@ -154,6 +166,7 @@ where
         client_ip,
         form,
         imposter_port,
+        script_files,
         body_json,
         xml_dom,
         query_map,
@@ -187,6 +200,8 @@ pub(crate) fn stub_matches_explained<H>(
     client_ip: Option<&str>,
     form: Option<&MultiValueMap>,
     imposter_port: u16,
+    // What a predicate `inject` may `require()` (issue #1611).
+    script_files: &Arc<crate::imposter::ScriptFileAccess>,
     body_json: &LazyJson<'_>,
     xml_dom: Option<&LazyXmlDom<'_>>,
     query_map: Option<&MultiValueMap>,
@@ -206,6 +221,7 @@ where
             client_ip,
             form,
             imposter_port,
+            script_files,
             body_json,
             xml_dom,
             query_map,
@@ -297,6 +313,7 @@ where
         client_ip,
         form_fast.as_ref(),
         imposter_port,
+        refused_script_files(),
         &body_json,
         None,
         Some(&query_map),
@@ -309,9 +326,9 @@ where
 ///
 /// See [`stub_matches`] for the `Err` contract (issue #440).
 #[allow(clippy::too_many_arguments)]
-// `imposter_port` is consumed by the `inject` predicate evaluator, which is `javascript`-gated
-// (issue #599); without that feature the arm doesn't use it, so it's only threaded through the
-// recursive And/Or descent — a false positive for this build only.
+// `imposter_port` and `script_files` are consumed by the `inject` predicate evaluator, which is
+// `javascript`-gated (issue #599); without that feature the arm doesn't use them, so they are only
+// threaded through the recursive And/Or descent — a false positive for this build only.
 #[cfg_attr(not(feature = "javascript"), allow(clippy::only_used_in_recursion))]
 pub(crate) fn predicate_matches_inner<H>(
     predicate: &Predicate,
@@ -325,6 +342,8 @@ pub(crate) fn predicate_matches_inner<H>(
     // Concretely `FastMap` — see `stub_matches_inner`.
     form: Option<&MultiValueMap>,
     imposter_port: u16,
+    // What a predicate `inject` may `require()` (issue #1611).
+    script_files: &Arc<crate::imposter::ScriptFileAccess>,
     body_json: &LazyJson<'_>,
     // The once-per-request lazily-parsed XML DOM (issue #711) — see `stub_matches_inner`.
     xml_dom: Option<&LazyXmlDom<'_>>,
@@ -612,6 +631,7 @@ where
             client_ip,
             form,
             imposter_port,
+            script_files,
             body_json,
             xml_dom,
             Some(query_map),
@@ -632,6 +652,7 @@ where
                     client_ip,
                     form,
                     imposter_port,
+                    script_files,
                     body_json,
                     xml_dom,
                     Some(query_map),
@@ -656,6 +677,7 @@ where
                     client_ip,
                     form,
                     imposter_port,
+                    script_files,
                     body_json,
                     xml_dom,
                     Some(query_map),
@@ -696,14 +718,14 @@ where
                         .filter(|_| body.is_some_and(|b| !b.is_empty()))
                         .map(crate::util::comma_joined),
                 };
-                execute_predicate_inject(inject_fn, &mb_request, imposter_port)
+                execute_predicate_inject(inject_fn, &mb_request, imposter_port, script_files)
             }
             #[cfg(not(feature = "javascript"))]
             {
                 tracing::warn!(
                     "inject predicate requires the 'javascript' feature; predicate will not match"
                 );
-                let _ = inject_fn;
+                let _ = (inject_fn, script_files);
                 Ok(false)
             }
         }
@@ -3365,6 +3387,7 @@ mod tests {
                 None,
                 None,
                 0,
+                refused_script_files(),
                 &LazyJson::absent(),
                 None,
                 None,
@@ -3386,6 +3409,7 @@ mod tests {
                 None,
                 None,
                 0,
+                refused_script_files(),
                 &LazyJson::absent(),
                 None,
                 None,
@@ -3407,6 +3431,7 @@ mod tests {
                 None,
                 None,
                 0,
+                refused_script_files(),
                 &LazyJson::absent(),
                 None,
                 None,
@@ -3467,6 +3492,7 @@ mod tests {
             None,
             None,
             0,
+            refused_script_files(),
             &LazyJson::absent(),
             None,
             Some(&parsed),
@@ -3483,6 +3509,7 @@ mod tests {
             None,
             None,
             0,
+            refused_script_files(),
             &LazyJson::absent(),
             None,
             None,
@@ -3601,6 +3628,7 @@ mod tests {
             None,
             None,
             0,
+            refused_script_files(),
             &LazyJson::absent(),
             None,
             None,
@@ -3662,6 +3690,7 @@ mod tests {
                 None,
                 None,
                 0,
+                refused_script_files(),
                 &LazyJson::absent(),
                 None,
                 None,

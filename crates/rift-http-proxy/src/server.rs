@@ -9,8 +9,8 @@ use crate::config_loader::ConfigSource;
 use crate::extensions::metrics;
 use crate::front_door::{CompiledRoutes, RouteTable, RunningFrontDoor, bind_front_door_at};
 use crate::imposter::{
-    ImposterConfig, ImposterManager, PeerPolicy, Persistence, ScriptBaseDir, ServerListener,
-    TlsDefaults, resolve_scripts,
+    ImposterConfig, ImposterManager, PeerPolicy, Persistence, ScriptBaseDir, ScriptFileAccess,
+    ServerListener, TlsDefaults, resolve_scripts,
 };
 use crate::injection_gate::GATED_SCRIPT_SURFACES;
 use crate::intercept_control::{
@@ -19,7 +19,8 @@ use crate::intercept_control::{
 pub use crate::listen::ListenAddr;
 use crate::listen::{ListenerSet, PortReservation, refuse_imposter_port};
 use crate::sources::{
-    self, FileSource, HttpSource, ImposterSource, SourceRef, SourceRegistry, SourceSet,
+    self, Authorship, FileSource, HttpSource, ImposterSource, SourceRef, SourceRegistry, SourceSet,
+    SourcedImposter,
 };
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
@@ -1009,7 +1010,10 @@ impl ServerBuilder {
                 } else {
                     PeerPolicy::Any
                 };
+                // A door that names no access of its own is a network one (issue #1611): every
+                // door this server opens names one, so this is only the fail-closed default.
                 let mut built = ImposterManager::with_datadir(cli.datadir.clone())
+                    .with_script_file_access(ScriptFileAccess::network(cli.scripts_dir.as_deref()))
                     .with_default_host(cli.host.clone())
                     .with_peer_policy(peer_policy)
                     .with_tls_defaults(tls_defaults)
@@ -1033,6 +1037,7 @@ impl ServerBuilder {
                 &manager,
                 source_set.as_deref(),
                 cli.datadir.as_deref(),
+                cli.scripts_dir.as_deref(),
                 cli.allow_injection,
                 &cli_intercept_flags(&cli),
             )
@@ -2059,6 +2064,7 @@ async fn load_startup_imposters(
     manager: &Arc<ImposterManager>,
     sources: Option<&SourceSet>,
     datadir: Option<&Path>,
+    scripts_dir: Option<&Path>,
     allow_injection: bool,
     intercept_flags: &[&str],
 ) -> anyhow::Result<ConfigFileStartOptions> {
@@ -2073,14 +2079,14 @@ async fn load_startup_imposters(
 
     let entries = source_configs
         .into_iter()
-        .map(|config| (StartupOrigin::Source, config))
+        .map(|sourced| (StartupOrigin::Source(sourced.authorship), sourced.config))
         .chain(
             datadir_configs
                 .into_iter()
                 .map(|(path, config)| (StartupOrigin::Datadir(path), config)),
         )
         .collect();
-    skipped.extend(create_startup_imposters(manager, entries).await);
+    skipped.extend(create_startup_imposters(manager, entries, scripts_dir).await);
 
     if let Some(summary) = format_skipped_summary(&skipped) {
         error!("{summary}");
@@ -2094,7 +2100,7 @@ async fn fetch_and_gate_sources(
     set: &SourceSet,
     allow_injection: bool,
     intercept_flags: &[&str],
-) -> anyhow::Result<(Vec<ImposterConfig>, ConfigFileStartOptions)> {
+) -> anyhow::Result<(Vec<SourcedImposter>, ConfigFileStartOptions)> {
     for source_ref in &set.refs {
         info!("Loading imposters from source: {}", source_ref.uri);
     }
@@ -2108,7 +2114,12 @@ async fn fetch_and_gate_sources(
             .collect::<Vec<_>>()
             .join(", "),
     );
-    if let Some(message) = configfile_injection_error(&label, &merged.imposters, allow_injection) {
+    let (configs, authorships): (Vec<ImposterConfig>, Vec<Authorship>) = merged
+        .imposters
+        .into_iter()
+        .map(|sourced| (sourced.config, sourced.authorship))
+        .unzip();
+    if let Some(message) = configfile_injection_error(&label, &configs, allow_injection) {
         anyhow::bail!(message);
     }
     if let Some(block) = &merged.intercept {
@@ -2123,7 +2134,11 @@ async fn fetch_and_gate_sources(
     }
 
     Ok((
-        merged.imposters,
+        configs
+            .into_iter()
+            .zip(authorships)
+            .map(|(config, authorship)| SourcedImposter { config, authorship })
+            .collect(),
         ConfigFileStartOptions {
             intercept: merged.intercept,
             routes: merged.routes,
@@ -2132,10 +2147,11 @@ async fn fetch_and_gate_sources(
 }
 
 /// Which store a startup imposter came from: it decides whether the imposter is written to the
-/// datadir and where a failure to create it is reported.
+/// datadir, where a failure to create it is reported, and what its scripts may `require()` (issue
+/// #1611).
 #[derive(Debug)]
 enum StartupOrigin {
-    Source,
+    Source(Authorship),
     Datadir(PathBuf),
 }
 
@@ -2144,6 +2160,7 @@ enum StartupOrigin {
 async fn create_startup_imposters(
     manager: &Arc<ImposterManager>,
     mut entries: Vec<(StartupOrigin, ImposterConfig)>,
+    scripts_dir: Option<&Path>,
 ) -> Vec<SkippedImposterFile> {
     // Stable, so sources still precede the datadir within each class: a port both declare is
     // served from the source, and the datadir file is skipped and named.
@@ -2152,13 +2169,17 @@ async fn create_startup_imposters(
     let mut skipped = Vec::new();
     for (origin, config) in entries {
         match origin {
-            StartupOrigin::Source => {
+            StartupOrigin::Source(authorship) => {
                 let port = config.port;
                 info!("Creating imposter on port {:?} from source", port);
                 // Ephemeral (issue #1122): the source is where this imposter is re-read from, at
                 // restart and at reload. A datadir copy would load as a second imposter beside it.
                 match manager
-                    .create_imposter_as(config, Persistence::Ephemeral)
+                    .create_imposter_from(
+                        config,
+                        Persistence::Ephemeral,
+                        authorship.script_file_access(scripts_dir),
+                    )
                     .await
                 {
                     Ok(assigned) => info!("Created imposter on port {}", assigned),
@@ -2167,8 +2188,13 @@ async fn create_startup_imposters(
             }
             StartupOrigin::Datadir(path) => {
                 info!("Loading imposter on port {:?} from {:?}", config.port, path);
+                // The datadir holds what the admin API persisted, so it is a network door.
                 match manager
-                    .create_imposter_as(config, Persistence::Datadir)
+                    .create_imposter_from(
+                        config,
+                        Persistence::Datadir,
+                        ScriptFileAccess::network(scripts_dir),
+                    )
                     .await
                 {
                     Ok(port) => info!("Created imposter on port {} from {:?}", port, path),
@@ -3297,7 +3323,7 @@ mod tests {
 
         let manager = Arc::new(ImposterManager::new());
         let set = single_file_source(&path);
-        let err = load_startup_imposters(&manager, Some(&set), None, false, &[])
+        let err = load_startup_imposters(&manager, Some(&set), None, None, false, &[])
             .await
             .expect_err("a gated configfile must abort startup");
         assert!(err.to_string().contains("--allowInjection"), "got: {err}");
@@ -3321,7 +3347,7 @@ mod tests {
 
         let manager = Arc::new(ImposterManager::new());
         let set = single_file_source(&example);
-        let err = load_startup_imposters(&manager, Some(&set), None, false, &[])
+        let err = load_startup_imposters(&manager, Some(&set), None, None, false, &[])
             .await
             .expect_err("examples/latency-testing.json uses a JS-function wait; it must be gated");
         assert!(err.to_string().contains("--allowInjection"), "got: {err}");
@@ -3349,9 +3375,16 @@ mod tests {
         );
 
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        load_startup_imposters(&manager, Some(&single_file_source(&path)), None, false, &[])
-            .await
-            .expect("clean configfile loads");
+        load_startup_imposters(
+            &manager,
+            Some(&single_file_source(&path)),
+            None,
+            None,
+            false,
+            &[],
+        )
+        .await
+        .expect("clean configfile loads");
         assert_eq!(manager.count(), 2);
 
         let stub: crate::imposter::Stub =
@@ -3382,7 +3415,7 @@ mod tests {
         set: Option<&SourceSet>,
         datadir: Option<&Path>,
     ) -> anyhow::Result<()> {
-        load_startup_imposters(manager, set, datadir, false, &[])
+        load_startup_imposters(manager, set, datadir, None, false, &[])
             .await
             .map(|_| ())
     }
@@ -3754,9 +3787,13 @@ mod tests {
         let skipped = create_startup_imposters(
             &manager,
             vec![
-                (StartupOrigin::Source, config("from-configfile")),
+                (
+                    StartupOrigin::Source(Authorship::Local),
+                    config("from-configfile"),
+                ),
                 (StartupOrigin::Datadir(file.clone()), config("from-datadir")),
             ],
+            None,
         )
         .await;
 
@@ -3819,7 +3856,7 @@ mod tests {
             &manager,
             vec![
                 (
-                    StartupOrigin::Source,
+                    StartupOrigin::Source(Authorship::Local),
                     config(
                         serde_json::json!({"protocol": "http", "name": "port-less", "stubs": []}),
                     ),
@@ -3831,6 +3868,7 @@ mod tests {
                     )),
                 ),
             ],
+            None,
         )
         .await;
 
@@ -3920,7 +3958,7 @@ mod tests {
 
         let manager = Arc::new(ImposterManager::new());
         let datadir = dir.path().to_path_buf();
-        load_startup_imposters(&manager, None, Some(&datadir), false, &[])
+        load_startup_imposters(&manager, None, Some(&datadir), None, false, &[])
             .await
             .expect("a gated datadir file is skipped, never fatal");
 
@@ -3948,7 +3986,7 @@ mod tests {
 
         let manager = Arc::new(ImposterManager::new());
         let datadir = dir.path().to_path_buf();
-        load_startup_imposters(&manager, None, Some(&datadir), true, &[])
+        load_startup_imposters(&manager, None, Some(&datadir), None, true, &[])
             .await
             .expect("datadir load succeeds");
         assert!(

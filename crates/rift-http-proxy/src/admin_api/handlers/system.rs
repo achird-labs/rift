@@ -163,12 +163,18 @@ pub fn handle_logs(query: Option<&str>) -> Response<Full<Bytes>> {
 
 /// True when a reload's configs carry a scripting surface that `--allowInjection` has not
 /// enabled (issue #612) — the same classifier every other imposter door uses.
-fn reload_is_gated(configs: &[crate::imposter::ImposterConfig], allow_injection: bool) -> bool {
+fn reload_is_gated(configs: &[ReloadEntry], allow_injection: bool) -> bool {
     !allow_injection
         && configs
             .iter()
-            .any(crate::injection_gate::config_uses_script_surface)
+            .any(|(config, _)| crate::injection_gate::config_uses_script_surface(config))
 }
+
+/// A reloaded imposter and what its scripts may `require()` (issue #1611).
+type ReloadEntry = (
+    crate::imposter::ImposterConfig,
+    crate::imposter::ScriptFileAccess,
+);
 
 /// Read a synchronous config source for a reload, or the message of the 500 that refuses it.
 ///
@@ -191,29 +197,38 @@ async fn read_blocking(
 }
 
 fn tagged(
-    configs: Vec<crate::imposter::ImposterConfig>,
+    configs: Vec<ReloadEntry>,
     persistence: crate::imposter::Persistence,
 ) -> impl Iterator<Item = crate::imposter::DesiredImposter> {
-    configs
-        .into_iter()
-        .map(move |config| crate::imposter::DesiredImposter {
+    configs.into_iter().map(
+        move |(config, script_files)| crate::imposter::DesiredImposter {
             config,
             persistence,
-        })
+            script_files,
+        },
+    )
+}
+
+/// Every config with the one `access` its store's door grants.
+fn with_access(
+    configs: Vec<crate::imposter::ImposterConfig>,
+    access: &crate::imposter::ScriptFileAccess,
+) -> Vec<ReloadEntry> {
+    configs
+        .into_iter()
+        .map(|config| (config, access.clone()))
+        .collect()
 }
 
 /// The lowest explicit port declared by both a source and the datadir, if any (issue #1122).
-fn port_declared_by_both(
-    ephemeral: &[crate::imposter::ImposterConfig],
-    persisted: &[crate::imposter::ImposterConfig],
-) -> Option<u16> {
+fn port_declared_by_both(ephemeral: &[ReloadEntry], persisted: &[ReloadEntry]) -> Option<u16> {
     let from_sources: std::collections::HashSet<u16> = ephemeral
         .iter()
-        .filter_map(crate::imposter::ImposterConfig::explicit_port)
+        .filter_map(|(config, _)| config.explicit_port())
         .collect();
     persisted
         .iter()
-        .filter_map(crate::imposter::ImposterConfig::explicit_port)
+        .filter_map(|(config, _)| config.explicit_port())
         .filter(|port| from_sources.contains(port))
         .min()
 }
@@ -235,13 +250,18 @@ fn port_declared_by_both(
 /// replace the config-seeded rules of a listener that file started, after the imposters and
 /// routes, keeping runtime rules; the listener itself is boot-only, so any other case is reported
 /// in `warnings` instead (issue #1271).
+///
+/// `scripts_dir` decides what reloaded scripts may `require()` (issue #1611): a local config file's
+/// are unconfined, a datadir file's or a network source's are confined to it.
 pub async fn handle_reload(
     manager: Arc<ImposterManager>,
     config_source: Option<crate::sources::ReloadSource>,
     front_door_routes: Option<&crate::front_door::FrontDoorRoutes>,
     intercept: Option<&crate::intercept_control::InterceptControl>,
     allow_injection: bool,
+    scripts_dir: Option<&std::path::Path>,
 ) -> Response<Full<Bytes>> {
+    let network = crate::imposter::ScriptFileAccess::network(scripts_dir);
     let Some(source) = config_source else {
         return json_response(
             StatusCode::OK,
@@ -255,18 +275,27 @@ pub async fn handle_reload(
     // source (issue #1122); the two are applied as one set, so neither store's sweep removes
     // what only the other declares.
     let (persisted, ephemeral, intercept_block, routes, all_unchanged) = match source {
-        crate::sources::ReloadSource::Legacy(source) => match read_blocking(source).await {
-            Ok(loaded) => (
-                loaded.imposters,
-                Vec::new(),
-                loaded.intercept,
-                loaded.routes,
-                false,
-            ),
-            Err(message) => {
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &message);
+        crate::sources::ReloadSource::Legacy(source) => {
+            // A config file is its operator's; a directory may hold what the admin API persisted.
+            let access = match source.as_ref() {
+                crate::config_loader::ConfigSource::File { .. } => {
+                    crate::imposter::ScriptFileAccess::trusted_cwd()
+                }
+                crate::config_loader::ConfigSource::Dir(_) => network.clone(),
+            };
+            match read_blocking(source).await {
+                Ok(loaded) => (
+                    with_access(loaded.imposters, &access),
+                    Vec::new(),
+                    loaded.intercept,
+                    loaded.routes,
+                    false,
+                ),
+                Err(message) => {
+                    return error_response(StatusCode::INTERNAL_SERVER_ERROR, &message);
+                }
             }
-        },
+        }
         // U-12: each source's own fetch is already async and does its own I/O budgeting
         // (`FileSource` hops to the blocking pool; `HttpSource` is non-blocking), so this arm
         // must not be wrapped in `spawn_blocking`.
@@ -291,7 +320,7 @@ pub async fn handle_reload(
                     match read_blocking(Arc::new(crate::config_loader::ConfigSource::Dir(dir)))
                         .await
                     {
-                        Ok(loaded) => loaded.imposters,
+                        Ok(loaded) => with_access(loaded.imposters, &network),
                         Err(message) => {
                             return error_response(StatusCode::INTERNAL_SERVER_ERROR, &message);
                         }
@@ -299,10 +328,18 @@ pub async fn handle_reload(
                 }
                 None => Vec::new(),
             };
+            let ephemeral = merged
+                .imposters
+                .into_iter()
+                .map(|sourced| {
+                    let access = sourced.authorship.script_file_access(scripts_dir);
+                    (sourced.config, access)
+                })
+                .collect();
             // `routes` is re-applied (issue #1160), and so are `intercept.rules` (issue #1271).
             (
                 persisted,
-                merged.imposters,
+                ephemeral,
                 merged.intercept,
                 merged.routes,
                 unchanged,
@@ -584,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_reload_no_source_is_noop() {
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager, None, None, None, false).await;
+        let resp = handle_reload(manager, None, None, None, false, None).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -626,6 +663,7 @@ mod tests {
             Some(&table),
             None,
             false,
+            None,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -669,7 +707,7 @@ mod tests {
         ));
 
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
@@ -725,7 +763,15 @@ mod tests {
         ));
 
         // Initial reload replaces the placeholder with the first script version resolved.
-        let resp = handle_reload(manager.clone(), Some(source.clone()), None, None, true).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source.clone()),
+            None,
+            None,
+            true,
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let script_code = |manager: &ImposterManager| {
             let imposter = manager
@@ -747,7 +793,7 @@ mod tests {
         // Edit the referenced file (the configfile itself is untouched) and reload again.
         std::fs::write(&script_path, r#"fn respond(ctx) { http(503, "second") }"#)
             .expect("write script (second version)");
-        let resp = handle_reload(manager.clone(), Some(source), None, None, true).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, true, None).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             script_code(&manager).as_deref(),
@@ -798,7 +844,15 @@ mod tests {
             },
         ));
 
-        let resp = handle_reload(manager.clone(), Some(source.clone()), None, None, false).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source.clone()),
+            None,
+            None,
+            false,
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK, "clean config reloads");
         assert!(manager.get_imposter(imposter_port).is_ok());
 
@@ -814,7 +868,7 @@ mod tests {
         )
         .expect("write scripted config");
 
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
         assert_eq!(
             resp.status(),
             StatusCode::BAD_REQUEST,
@@ -870,7 +924,7 @@ mod tests {
             },
         ));
 
-        let resp = handle_reload(manager.clone(), Some(source), None, None, true).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, true, None).await;
         assert_eq!(
             resp.status(),
             StatusCode::OK,
@@ -952,7 +1006,7 @@ mod tests {
             format!("file:{}", file.display()),
             &datadir,
         );
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
         let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -1029,7 +1083,7 @@ mod tests {
         let source = sources_and_datadir(registry, "unchanged:x".to_string(), &datadir);
 
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(
@@ -1067,11 +1121,19 @@ mod tests {
             },
         ));
         write(true);
-        let resp = handle_reload(manager.clone(), Some(source.clone()), None, None, false).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source.clone()),
+            None,
+            None,
+            false,
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         write(false);
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(
@@ -1104,7 +1166,7 @@ mod tests {
         };
 
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(
@@ -1139,7 +1201,7 @@ mod tests {
             format!("file:{}", file.display()),
             &datadir,
         );
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
         let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -1176,7 +1238,7 @@ mod tests {
             &datadir,
         );
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(manager.get_imposter(imposter_port).is_err());
 
@@ -1199,7 +1261,7 @@ mod tests {
             &datadir,
         );
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(manager.count(), 1);
         let written: Vec<_> = std::fs::read_dir(&datadir)
@@ -1237,7 +1299,7 @@ mod tests {
         );
 
         for source in [legacy, both] {
-            let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
+            let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
             assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
             let body = body_json(resp).await;
             let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -1273,7 +1335,7 @@ mod tests {
         );
 
         for source in [legacy, both] {
-            let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
+            let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
             assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
             let body = body_json(resp).await;
             let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -1309,6 +1371,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);

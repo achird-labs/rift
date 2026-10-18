@@ -571,13 +571,24 @@ impl Imposter {
         body: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
-        Self::generate_predicates_impl(generators, method, path, headers, body, query, TEST_PEER)
-            .map(|generated| generated.raw)
+        Self::generate_predicates_impl(
+            generators,
+            method,
+            path,
+            headers,
+            body,
+            query,
+            TEST_PEER,
+            &self.script_file_access(),
+        )
+        .map(|generated| generated.raw)
     }
 
     /// [`Self::generate_predicates_from_request`] without `&self`, so the proxy-recording path
     /// can run it on `spawn_blocking` (issue #476) — a `predicateGenerators.inject` script must
-    /// not execute (and block on the MB script pool) on a tokio async worker.
+    /// not execute (and block on the MB script pool) on a tokio async worker. `script_files` is what
+    /// a `predicateGenerators.inject` may `require()` (issue #1611).
+    #[allow(clippy::too_many_arguments)]
     fn generate_predicates_impl<SH: BuildHasher>(
         generators: &[serde_json::Value],
         method: &str,
@@ -586,6 +597,7 @@ impl Imposter {
         body: Option<&str>,
         query: Option<&str>,
         client_addr: std::net::SocketAddr,
+        script_files: &std::sync::Arc<crate::imposter::ScriptFileAccess>,
     ) -> Result<GeneratedPredicates, crate::scripting::PredicateGeneratorError> {
         let mut predicates = Vec::new();
         let invalid = crate::scripting::PredicateGeneratorError::Invalid;
@@ -636,8 +648,12 @@ impl Imposter {
                         form: crate::imposter::Imposter::request_form(headers, body)
                             .map(|form| crate::util::comma_joined(&form)),
                     };
-                    let inject_preds =
-                        execute_predicate_generator_inject(inject_fn, &mb_request, &predicates)?;
+                    let inject_preds = execute_predicate_generator_inject(
+                        inject_fn,
+                        &mb_request,
+                        &predicates,
+                        script_files,
+                    )?;
                     predicates.extend(inject_preds);
                     continue;
                 }
@@ -645,7 +661,7 @@ impl Imposter {
                 // (issues #498, #1353). Without a script engine the generation fails instead.
                 #[cfg(not(feature = "javascript"))]
                 {
-                    let _ = inject_fn;
+                    let _ = (inject_fn, script_files);
                     return Err(crate::scripting::PredicateGeneratorError::Script(
                         "predicateGenerator inject requires the 'javascript' feature".to_string(),
                     ));
@@ -811,6 +827,7 @@ impl Imposter {
                 body.map(|b| b.text),
                 uri.query(),
                 client_addr,
+                &self.script_file_access(),
             )
             .map_err(|e| (e.kind(), e.to_string()));
         }
@@ -820,6 +837,7 @@ impl Imposter {
         let headers = headers.clone();
         let body = body.map(|b| b.text.to_string());
         let query = uri.query().map(str::to_string);
+        let script_files = self.script_file_access();
         let timeout = std::time::Duration::from_millis(
             crate::scripting::resolve_script_timeout_ms(&self.config),
         );
@@ -835,6 +853,7 @@ impl Imposter {
                 body.as_deref(),
                 query.as_deref(),
                 client_addr,
+                &script_files,
             )
         });
         match tokio::time::timeout(timeout, handle).await {
@@ -1416,6 +1435,7 @@ mod predicate_generator_selector_tests {
             body,
             query,
             TEST_PEER,
+            &std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
         )
         .expect("predicate generation succeeds")
         .raw
@@ -1618,6 +1638,7 @@ mod predicate_generator_shape_tests {
             body,
             query,
             TEST_PEER,
+            &std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
         )
         .expect("predicate generation succeeds")
         .raw
@@ -1635,6 +1656,7 @@ mod predicate_generator_shape_tests {
             None,
             None,
             TEST_PEER,
+            &std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
         ) {
             Err(crate::scripting::PredicateGeneratorError::Invalid(message)) => message,
             other => panic!("expected an invalid-predicate failure, got {other:?}"),
@@ -1998,6 +2020,7 @@ mod predicate_generator_shape_tests {
                 None,
                 None,
                 TEST_PEER,
+                &std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
             )
             .expect("generates")
             .raw;
