@@ -616,7 +616,8 @@
       "id": "cli/configFileTest.js::--configfile should support legacy ejs 2.x include syntax in configuration files",
       "class": "bug",
       "issue": "#1604",
-      "note": "Rift's EJS renderer does not accept Mountebank's include forms (now runs since #1559 fixed the stop cascade)"
+      "note": "Rift's EJS renderer does not accept Mountebank's include forms (now runs since #1559 fixed the stop cascade)",
+      "flaky": "fails on macOS, passes on GitHub's Linux runner; the platform-dependent cause is to be found under #1604"
     },
     {
       "id": "cli/configFileTest.js::--configfile should evaluate stringify function in templates when loading configuration files",
