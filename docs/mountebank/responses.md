@@ -118,11 +118,24 @@ Status codes can also be specified as strings for compatibility with some tools:
 their string form, matching Mountebank, so a config like this is valid rather than a `400`:
 
 ```json
-{ "is": { "headers": { "Content-Length": 124, "X-Cache-Hit": true } } }
+{ "is": { "headers": { "X-Count": 124, "X-Cache-Hit": true } } }
 ```
 
-sends `Content-Length: 124` and `X-Cache-Hit: true`. Arrays may mix types the same way; `null`,
+sends `X-Count: 124` and `X-Cache-Hit: true`. Arrays may mix types the same way; `null`,
 objects and nested arrays are still rejected.
+
+**A `Content-Length` you set is corrected to the body's real length.** As in Mountebank, the value
+is replaced with the byte length of the body actually sent, after behaviors (`decorate`, `copy`,
+`lookup`, `shellTransform`) have run, and for a `defaultResponse` or an `inject` response too. A
+binary body counts its decoded bytes. A response with no `Content-Length` is left as it is. When
+the response also sets `Transfer-Encoding`, Rift drops `Content-Length`, because HTTP forbids
+sending both (see [Differences](differences.md#content-length-beside-transfer-encoding)); a `204`
+response never carries one.
+
+**A binary body may contain line breaks.** Before decoding a `_mode: "binary"` body, Rift removes
+every character outside the base64 alphabet (`A–Z`, `a–z`, `0–9`, `+`, `/`, `=`), as Mountebank
+does, so base64 wrapped at 76 columns decodes. A body that is still invalid after that is served as
+its raw text with `x-rift-binary-error: true`, or as a `500` under `strictBehaviors`.
 
 **Automatic `Content-Type`.** When a response has a **JSON** body (an object or array, not a
 string) and the stub sets **no** `Content-Type` header, Rift adds `Content-Type: application/json`.

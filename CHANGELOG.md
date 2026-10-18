@@ -69,6 +69,13 @@ record.
   `GET /imposters/:port/stubs/:index` (#1552). A non-integer used to answer the HTML "Cannot PUT"
   page, `01` and `+1` were read as `1`, an out-of-range index answered `no such resource`, and a
   `PUT` checked its body before its index.
+- **A `Content-Length` set on a response is corrected to the body's real length** (#1554). A stale
+  value used to be sent as written, which hung the client when it was too large and truncated the
+  body when it was too small, including after `decorate`, `copy`, `shellTransform` or a
+  `defaultResponse`; a debug build panicked instead and sent nothing. Rift now recomputes it after
+  behaviors as Mountebank does, on every listener and over HTTP/2 too, drops it beside
+  `Transfer-Encoding` and on a `204`, and decodes a binary body that contains line breaks. `rift-lint`
+  no longer warns W015 on such a body.
 
 ### Testing
 

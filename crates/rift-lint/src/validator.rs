@@ -579,8 +579,10 @@ fn body_rewritten_before_decode(response: &Value) -> bool {
 /// A warning because the engine serves it: it falls back to the raw body with
 /// `x-rift-binary-error: true`, or answers 500 under `strictBehaviors`. The decode is the engine's
 /// exact one — `base64::engine::general_purpose::STANDARD` — because a regex approximation would
-/// disagree with it at the edges (padding, the URL-safe alphabet, embedded newlines) and then the
-/// linter would pass a body the engine rejects, or the reverse.
+/// disagree with it at the edges (padding, the URL-safe alphabet) and then the linter would pass a
+/// body the engine rejects, or the reverse. Like the engine (`decode_binary_body`, #1554, after
+/// Mountebank's `postProcess`), it first drops every character outside `A-Za-z0-9+/=`, so a body
+/// with line breaks is not flagged.
 fn check_binary_body(file: &Path, response: &Value, location: &str, result: &mut LintResult) {
     use base64::Engine as _;
 
@@ -589,9 +591,15 @@ fn check_binary_body(file: &Path, response: &Value, location: &str, result: &mut
     }
     let decodes = match response.get("body") {
         None | Some(Value::Null) => return,
-        Some(Value::String(body)) => base64::engine::general_purpose::STANDARD
-            .decode(body)
-            .is_ok(),
+        Some(Value::String(body)) => {
+            let alphabet_only: String = body
+                .chars()
+                .filter(|&c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+                .collect();
+            base64::engine::general_purpose::STANDARD
+                .decode(alphabet_only)
+                .is_ok()
+        }
         // Serialized to JSON text before the decode, so it can never be valid base64.
         Some(_) => false,
     };

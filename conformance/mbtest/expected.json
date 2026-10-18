@@ -444,18 +444,6 @@
       "note": "deepEquals on an array is order-sensitive and equals on an array is not a subset match"
     },
     {
-      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should correctly set content-length for binary data",
-      "class": "bug",
-      "issue": "#1554",
-      "note": "a stale Content-Length on a binary body hangs the client"
-    },
-    {
-      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should correctly set content-length for binary data when using multiline base64",
-      "class": "bug",
-      "issue": "#1554",
-      "note": "a stale Content-Length on a binary body hangs the client"
-    },
-    {
       "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should handle JSON null values",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#a-json-body-gets-content-type-applicationjson",
@@ -496,18 +484,6 @@
       "class": "bug",
       "issue": "#1579",
       "note": "deepEquals on an array is order-sensitive and equals on an array is not a subset match"
-    },
-    {
-      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should correctly set content-length for binary data",
-      "class": "bug",
-      "issue": "#1554",
-      "note": "a stale Content-Length on a binary body hangs the client"
-    },
-    {
-      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should correctly set content-length for binary data when using multiline base64",
-      "class": "bug",
-      "issue": "#1554",
-      "note": "a stale Content-Length on a binary body hangs the client"
     },
     {
       "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should handle JSON null values",

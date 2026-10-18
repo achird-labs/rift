@@ -293,6 +293,14 @@ the same message. Mountebank's own docs examples print raw responses, so the
 [mbTest harness](https://github.com/achird-labs/rift/tree/master/conformance/mbtest) compares them
 without the framing headers and with the header fields sorted.
 
+## `Content-Length` beside `Transfer-Encoding`
+
+When a response sets both `Content-Length` and `Transfer-Encoding`, Mountebank sends both headers.
+Rift sends only `Transfer-Encoding`, because HTTP forbids a message carrying both (RFC 9112 §6.2)
+and hyper refuses to send them together. The client reads the same body. Any other
+`Content-Length` a response sets is corrected to the body's real length, as Mountebank corrects it
+(see [Responses](responses.md#headers)).
+
 ## A JSON body gets `Content-Type: application/json`
 
 When an `is` response's `body` is a JSON object or array and the response sets no `Content-Type`,
