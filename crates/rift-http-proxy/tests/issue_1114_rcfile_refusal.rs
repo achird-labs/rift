@@ -102,8 +102,9 @@ fn an_unsupported_rcfile_key_is_reported_on_stderr() {
         stderr.contains("unsupported key 'bogusKey'"),
         "the ignored key must be visible: {stderr}"
     );
+    // A `stop` with no PID file succeeds (issue #1559), so a zero exit is the proof.
     assert!(
-        stderr.contains("PID file not found"),
+        output.status.success(),
         "a valid rcfile must let the command run past the rcfile step: {stderr}"
     );
 }

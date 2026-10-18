@@ -44,8 +44,7 @@ const ACTIVE_ALLOCATOR: &str = "system";
 use anyhow::Context as _;
 use clap::Parser;
 use rift_http_proxy::bootstrap::{
-    DEFAULT_PIDFILE, apply_rcfile_defaults_reporting, log_filter, save_imposters, stop_for_restart,
-    stop_server,
+    DEFAULT_PIDFILE, apply_rcfile_defaults_reporting, log_filter, save_imposters, stop_server,
 };
 use rift_http_proxy::healthcheck;
 use rift_http_proxy::intercept_ca_cli;
@@ -159,8 +158,9 @@ fn main() -> Result<(), anyhow::Error> {
             return stop_server(&pidfile_or_default(&cli));
         }
         Some(Commands::Restart) => {
-            // A missing PID file is a satisfied precondition for restart, not an error (#827).
-            stop_for_restart(&pidfile_or_default(&cli))?;
+            // A missing PID file is a satisfied precondition for restart, not an error (#827);
+            // `stop_server` reports it `Ok` for both subcommands (#1559).
+            stop_server(&pidfile_or_default(&cli))?;
             // Fall through to start
         }
         Some(Commands::Save {

@@ -172,18 +172,18 @@ Server options:
       --datadir <DIR>              Directory for persistent imposter storage
       --scripts-dir <DIR>          Root directory for admin-API `file:`/`ref:` script resolution; references that escape it are rejected (unset ⇒ file-backed scripts via the admin API are refused)
       --allow-injection            Enable JavaScript injection in responses (alias: --allowInjection)
-      --local-only                 Only accept connections from localhost: binds the admin API and /metrics to `127.0.0.1` and `::1`, and refuses non-loopback clients on every imposter port and the front door
+      --local-only                 Only accept connections from localhost: binds the admin API and /metrics to `127.0.0.1` and `::1`, and refuses non-loopback clients on every imposter port and the front door (alias: --localOnly)
       --require-admin-auth         Refuse to start when the admin API would bind a non-loopback address with no --api-key (default: warn)
       --loglevel <LEVEL>           Log level: trace, debug, info, warn, error (an unrecognised value is refused) [default: info]
       --runtime <MODE>             Runtime topology: work-stealing (default) or per-core[=N] (RFC-712; experimental, Linux-first — macOS falls back with a warning, Windows rejects it)
       --runtime-affinity           Pin per-core worker threads to CPU cores (with --runtime per-core; effective on Linux)
       --metrics-port <PORT>        Prometheus metrics port [default: 9090]
       --front-door <ADDR>          Serve every imposter from one address, routed by host/path/header (see Features -> Front Door)
-      --ip-whitelist <IPS>         Comma-separated allowed IPs (accepted for Mountebank compatibility; NOT enforced)
+      --ip-whitelist <IPS>         Comma-separated allowed IPs (accepted for Mountebank compatibility; NOT enforced) (alias: --ipWhitelist)
       --mock                       Accepted for Mountebank compatibility; no effect — set `recordRequests: true` per imposter
       --debug                      Enable debug mode (same as RIFT_DEBUG=1; also sets the log level to debug unless RUST_LOG is set)
       --nologfile                  Do not write the --log file (stdout only)
-      --log <FILE>                 Also write logs to this file (off unless set)
+      --log <FILE>                 Also write logs to this file (off unless set) (alias: --logfile)
       --pidfile <FILE>             Write the server's PID here (off unless set; stop/restart read ./rift.pid when omitted)
       --origin <ORIGIN>            Accepted for Mountebank compatibility; NOT implemented — the admin API sends no CORS headers
       --api-key <TOKEN>            Require this token in the Authorization header for all admin API requests
@@ -214,6 +214,11 @@ expansion), which is otherwise applied on load. A tag the preprocessor does not 
 load, so use `--no-parse` when a document contains a literal `<%`. A `<%= process.env.VAR %>` whose
 variable is unset (and has no `|| 'default'`) renders empty and logs a `WARN` naming the variable
 and where the tag is; if the rendered document then fails to parse, the error names it too.
+
+Mountebank's spellings `--localOnly`, `--logfile` and `--ipWhitelist` are aliases of `--local-only`,
+`--log` and `--ip-whitelist`, alongside `--allowInjection` and `--noParse` (and `save`'s
+`--removeProxies`, of `--remove-proxies`). Unlike `mb`, `--logfile` has no default: Rift writes no
+log file unless one is named.
 
 `--formatter`, `--protofile`, `--ip-whitelist`, `--origin` and `--mock` are accepted for Mountebank
 command-line compatibility but have no effect in Rift. Each logs a warning when given. `--origin`
@@ -767,9 +772,9 @@ rift stop
 returns — up to 5 seconds, above the server's own shutdown bound — then removes the PID file (the
 server usually removes it first, which is fine). A process still running after that is reported as
 an error and its PID file is kept, rather than being assumed gone. A PID file whose process is
-already gone is treated as stale: it is removed and `stop` succeeds. A missing PID file, a
-non-positive PID, or a process `rift` is not permitted to signal is an error, and the file is left
-in place.
+already gone is treated as stale: it is removed and `stop` succeeds. A missing PID file means
+nothing is running: `stop` logs `nothing to stop` and succeeds, as `mb stop` does. A non-positive
+PID, or a process `rift` is not permitted to signal, is an error, and the file is left in place.
 
 ### restart
 
@@ -807,7 +812,7 @@ rift save --savefile mocks.json --remove-proxies
 | Flag | Description | Default |
 |:-----|:------------|:--------|
 | `--savefile <FILE>` | Output file | `mb.json` |
-| `--remove-proxies` | Request the `removeProxies=true` view | off |
+| `--remove-proxies` | Request the `removeProxies=true` view (alias: `--removeProxies`) | off |
 
 A keyed server needs no extra flag: `save` presents the admin API key the process already holds
 (`MB_APIKEY`, `--api-key`, or an rcfile `apiKey`), as `healthcheck` does (issue #1154). A non-2xx

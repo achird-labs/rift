@@ -130,6 +130,7 @@ pub struct Cli {
     /// `::1`, and every imposter port and the front door refuse non-loopback clients
     #[arg(
         long,
+        visible_alias = "localOnly",
         env = "MB_LOCAL_ONLY",
         global = true,
         help_heading = "Server options"
@@ -183,9 +184,11 @@ pub struct Cli {
     #[arg(long, global = true, help_heading = "Server options")]
     pub nologfile: bool,
 
-    /// Also write logs to this file (off unless set; logs always go to stdout)
+    /// Also write logs to this file (off unless set; logs always go to stdout). `--logfile` is
+    /// Mountebank's spelling (issue #1559); unlike `mb`, there is no default file
     #[arg(
         long,
+        visible_alias = "logfile",
         value_name = "FILE",
         global = true,
         help_heading = "Server options"
@@ -274,6 +277,7 @@ pub struct Cli {
     /// or `--require-admin-auth` (issue #863) to make an exposed keyless plane a startup failure.
     #[arg(
         long,
+        visible_alias = "ipWhitelist",
         value_delimiter = ',',
         global = true,
         help_heading = "Server options"
@@ -616,7 +620,7 @@ pub enum Commands {
         savefile: PathBuf,
 
         /// Drop `proxy` responses from the saved stubs, keeping the recorded ones (Mountebank removeProxies)
-        #[arg(long)]
+        #[arg(long, visible_alias = "removeProxies")]
         remove_proxies: bool,
     },
 

@@ -11,7 +11,19 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **Mountebank's CLI spellings `--logfile`, `--localOnly`, `--ipWhitelist` and `save --removeProxies`
+  are accepted** as aliases of `--log`, `--local-only`, `--ip-whitelist` and `--remove-proxies`
+  (#1559). `--logfile` has no default file, and `--ipWhitelist` stays the #879 no-op.
+
 ### Changed
+
+- **`rift stop` with no PID file now exits 0**, as `mb stop` does (#1559). Every other stop failure
+  — a non-positive PID, a process `rift` may not signal, one still running after the wait — is still
+  an error. For embedders, `bootstrap::stop_server` returns `Ok` for a missing PID file, and
+  `bootstrap::stop_for_restart`, which existed only to make that exception, is removed: call
+  `stop_server`.
 
 - **A stub response with more than one of `is`, `proxy`, `inject` and `fault`, or with none, is now
   refused**, with Mountebank's messages (`each response object must have only one response type`,

@@ -615,38 +615,39 @@
     {
       "id": "cli/configFileTest.js::--configfile should support legacy ejs 2.x include syntax in configuration files",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "#1604",
+      "note": "Rift's EJS renderer does not accept Mountebank's include forms (now runs since #1559 fixed the stop cascade)"
     },
     {
       "id": "cli/configFileTest.js::--configfile should evaluate stringify function in templates when loading configuration files",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "#1604",
+      "note": "the file uses EJS 3's `<%- include('file') -%>`, which Rift refuses, so the server does not start"
     },
     {
       "id": "cli/configFileTest.js::--configfile should evaluate nested stringify functions when loading configuration files",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "#1604",
+      "note": "the file uses EJS 3's `<%- include('file') -%>`, which Rift refuses, so the server does not start"
     },
     {
       "id": "cli/configFileTest.js::--configfile should evaluate stringify functions with injected data when loading configuration files",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "#1604",
+      "note": "the file uses EJS 3's `<%- include('file') -%>`, which Rift refuses, so the server does not start"
     },
     {
       "id": "cli/configFileTest.js::--configfile should not render through ejs when --noParse option provided",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "TBD-pidfile-before-ready",
+      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters (~90 ms), and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
+      "note": "ECONNREFUSED on 4545: the request arrived between the pidfile write and the imposter bind. Mountebank writes the pidfile last (bin/mb), as its readiness signal"
     },
     {
       "id": "cli/configFileTest.js::--configfile should evaluate gzipped requests (issue #477)",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "#1584",
+      "note": "a valid gzip request body is not decoded, so the body predicate does not match (FAILED TO MATCH)"
     },
     {
       "id": "cli/datadirTest.js::--datadir should load previously saved imposters until they are deleted",
@@ -663,8 +664,8 @@
     {
       "id": "cli/datadirTest.js::--datadir should not delete files outside of imposter directories when deleting imposter",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "TBD-datadir-layout",
+      "note": "Rift's datadir is one <port>.json per imposter, not Mountebank's <port>/ directory, so DELETE /imposters leaves <datadir>/5555/ in place (the outside file is kept, as the test wants)"
     },
     {
       "id": "cli/debugTest.js::--debug http server should record matches against stubs",
@@ -705,33 +706,27 @@
     {
       "id": "cli/hostTest.js::--host should work with --configfile",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "#1575",
+      "note": "a DNS-name --host is refused for the admin plane, so the server does not start"
     },
     {
       "id": "cli/hostTest.js::--host should work with mb save",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "#1575",
+      "note": "a DNS-name --host is refused for the admin plane, so the server does not start"
     },
     {
       "id": "cli/hostTest.js::--host should work with mb replay",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
-    },
-    {
-      "id": "cli/hostTest.js::--host should disallow localhost calls when bound to specific host",
-      "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "#1575",
+      "note": "a DNS-name --host is refused for the admin plane, so the server does not start"
     },
     {
       "id": "cli/hostTest.js::--host should bind http imposter to provided host",
       "class": "harness",
       "reason": "binds to the address os.hostname() resolves to; fails on Mountebank too on a host whose name resolves to a non-loopback or IPv6 address, and is skipped where it resolves to localhost",
       "flaky": "depends on what the host's name resolves to",
-      "note": "never runs on Rift until #1559 and #1575 land"
+      "note": "never runs on Rift until #1575 lands"
     },
     {
       "id": "cli/rcfileTest.js::--rcfile should still start if rcfile does not exist",
@@ -742,26 +737,26 @@
     {
       "id": "cli/rcfileTest.js::--rcfile should still start if rcfile is not JSON",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "#1574",
+      "note": "the test writes mbrc.json only after start, so at start it is a missing --rcfile, which aborts startup"
     },
     {
       "id": "cli/rcfileTest.js::--rcfile should load rcfile options and override defaults",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "#1569",
+      "note": "GET /config options has no mock, and the rcfile subset refuses `mock` as an unsupported key"
     },
     {
       "id": "cli/rcfileTest.js::--rcfile options passed on CLI should override rcfile options",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "#1569",
+      "note": "GET /config options has no mock or debug"
     },
     {
       "id": "cli/rcfileTest.js::--rcfile options passed on CLI using an alias should override rcfile options",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
+      "issue": "#1586",
+      "note": "the short flag -d is refused (exit 2)"
     },
     {
       "id": "cli/replayTest.js::mb replay should remove proxies",
@@ -782,12 +777,6 @@
       "note": "imposters.ejs uses `<%- include('file') -%>`, which Rift refuses"
     },
     {
-      "id": "cli/saveTest.js::mb save should allow removing proxies during save",
-      "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file"
-    },
-    {
       "id": "cli/securityTest.js::security mb without --allowInjection should return a 400 if endOfResponseResolver is used",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#error-envelopes",
@@ -802,30 +791,29 @@
     },
     {
       "id": "cli/securityTest.js::security IP blocking should only allow local requests to http imposter if --localOnly used",
-      "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#--local-only",
+      "note": "Rift's http imposter refuses macOS's fe80::1%lo0, which Mountebank admits as a loopback-interface address",
       "mountebankMayFail": "these tests need a routable non-loopback local address; GitHub's Linux runners do not provide one, so they fail on Mountebank there too (they pass on Mountebank on macOS)"
     },
     {
       "id": "cli/securityTest.js::security IP blocking should allow non-local requests if --localOnly not used",
-      "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file",
-      "mountebankMayFail": "these tests need a routable non-loopback local address; GitHub's Linux runners do not provide one, so they fail on Mountebank there too (they pass on Mountebank on macOS)"
+      "class": "harness",
+      "reason": "needs a routable non-loopback local address; GitHub's Linux runners do not provide one, so it fails on both engines there",
+      "flaky": "passes on both engines where the host has such an address (macOS), fails on both where it does not"
     },
     {
       "id": "cli/securityTest.js::security IP blocking should block IPs not on --ipWhitelist",
-      "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#command-line",
+      "note": "--ipWhitelist is accepted and not enforced (#879)",
       "mountebankMayFail": "these tests need a routable non-loopback local address; GitHub's Linux runners do not provide one, so they fail on Mountebank there too (they pass on Mountebank on macOS)"
     },
     {
       "id": "cli/securityTest.js::security IP blocking should ignore --ipWhitelist if --localOnly passed",
       "class": "bug",
-      "issue": "#1559",
-      "note": "never ran: an earlier test's afterEach `rift stop` exits 1 on a missing pidfile, which aborts the rest of the file",
+      "issue": "#1568",
+      "note": "the --local-only admin accepts a non-loopback source address (here an en0 link-local) dialling loopback",
       "mountebankMayFail": "these tests need a routable non-loopback local address; GitHub's Linux runners do not provide one, so they fail on Mountebank there too (they pass on Mountebank on macOS)"
     },
     {

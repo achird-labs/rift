@@ -14,7 +14,8 @@ mod support;
 use std::process::{Command, Output};
 
 /// Run to a point PAST the filter without ever starting a server: `stop` is dispatched after the
-/// subscriber is installed, so it reaches `log_filter` and then fails on its missing pidfile.
+/// subscriber is installed, so it reaches `log_filter` and then succeeds on its missing pidfile —
+/// nothing to stop, as `mb stop` (issue #1559). Exit status 0 is therefore the proof it got past.
 ///
 /// **Every case here uses this, including the ones expecting a refusal.** Spawning a bare server and
 /// relying on it *not* reaching the accept loop would mean that if a refusal ever regressed, the
@@ -36,8 +37,8 @@ fn run_past_the_filter(args: &[&str], env: &[(&str, &str)]) -> Output {
     cmd.output().expect("run rift")
 }
 
-/// The marker proving a run got past the filter and reached the `stop` dispatch.
-const PAST_THE_FILTER: &str = "PID file not found";
+/// The line `stop` logs on stdout at `info` once it is dispatched, so a refusal must not print it.
+const PAST_THE_FILTER: &str = "nothing to stop";
 
 // The headline: a level that does not exist must stop the server rather than quietly becoming
 // `info`. The same judgement #1114 applies to a wrong-*typed* rcfile value, for a wrong-*valued* one.
@@ -58,9 +59,10 @@ fn an_unrecognised_loglevel_aborts_startup_naming_the_value() {
         stderr.contains("trace"),
         "the refusal must list the accepted levels, got: {stderr}"
     );
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        !stderr.contains(PAST_THE_FILTER),
-        "the refusal must happen at the filter, before the `stop` dispatch: {stderr}"
+        !stdout.contains(PAST_THE_FILTER),
+        "the refusal must happen at the filter, before the `stop` dispatch: {stdout}"
     );
 }
 
@@ -84,9 +86,10 @@ fn an_invalid_rust_log_aborts_startup() {
         stderr.contains("foo=bar"),
         "the refusal must name the offending value, got: {stderr}"
     );
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        !stderr.contains(PAST_THE_FILTER),
-        "the refusal must happen at the filter, before the `stop` dispatch: {stderr}"
+        !stdout.contains(PAST_THE_FILTER),
+        "the refusal must happen at the filter, before the `stop` dispatch: {stdout}"
     );
 }
 
@@ -103,7 +106,7 @@ fn an_empty_loglevel_env_still_starts() {
         "an empty MB_LOGLEVEL must mean 'not supplied', not a refusal: {stderr}"
     );
     assert!(
-        stderr.contains(PAST_THE_FILTER),
+        out.status.success(),
         "the run must have reached the `stop` dispatch past the filter, got: {stderr}"
     );
 }
@@ -120,7 +123,7 @@ fn a_valid_rust_log_is_not_refused() {
         "a valid RUST_LOG must not be refused, got: {stderr}"
     );
     assert!(
-        stderr.contains("PID file not found"),
+        out.status.success(),
         "the run must have reached the `stop` dispatch past the filter, got: {stderr}"
     );
 }
@@ -137,7 +140,7 @@ fn trace_is_accepted_by_the_binary() {
         "--loglevel trace must be accepted, got: {stderr}"
     );
     assert!(
-        stderr.contains("PID file not found"),
+        out.status.success(),
         "the run must have reached the `stop` dispatch past the filter, got: {stderr}"
     );
 }
