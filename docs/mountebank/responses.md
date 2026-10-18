@@ -560,7 +560,7 @@ response declares in `headers`. The response is `304` when:
 
 The `304` carries `ETag`, `Last-Modified`, `Cache-Control`, `Vary`, `Expires` and
 `Content-Location` from the configured response when present, and `x-rift-imposter: true`, with no
-body, `Content-Type` or `Content-Length`. CORS headers are added as on any response.
+body, `Content-Type` or `Content-Length`. `allowCORS` adds its headers on a preflight, as on any other response.
 
 The [Optimizely template](https://github.com/achird-labs/rift/tree/master/templates/optimizely) is a worked example: its datafile CDN is one `is` stub with `_rift.conditional: true`.
 

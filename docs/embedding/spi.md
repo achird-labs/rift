@@ -466,7 +466,7 @@ Inject with `.with_exchange_inspector_provider(Arc<dyn ExchangeInspectorProvider
 - **The response hook runs on every path**: the serve loop, the `/__rift/` gateway and in-process
   dispatch. It runs before the decorator and CORS. It is not called for a response the request hook
   produced.
-- **Early exits see neither hook**: a disabled imposter, a CORS preflight, a `413`, a body-read error.
+- **Early exits see neither hook**: a disabled imposter, a `413`, a body-read error.
 - **Inert by default.** With no provider, or a provider returning `None`, the cost is one `is_none`
   check per phase. The hooks are synchronous on purpose: keep I/O off them.
 

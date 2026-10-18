@@ -426,8 +426,9 @@ async fn journal_records_304_as_served_status() {
     manager.delete_all().await;
 }
 
+/// `allowCORS` answers only a preflight (#1555); a conditional GET's 304 is not one.
 #[tokio::test]
-async fn cors_headers_present_on_304() {
+async fn cors_headers_absent_on_a_non_preflight_304() {
     let manager = ImposterManager::new();
     let port = create(
         &manager,
@@ -438,10 +439,7 @@ async fn cors_headers_present_on_304() {
 
     let response = get(port, &[("If-None-Match", HELLO_ETAG)]).await;
     assert_eq!(response.status(), 304);
-    assert_eq!(
-        header(&response, "access-control-allow-origin").as_deref(),
-        Some("*")
-    );
+    assert_eq!(header(&response, "access-control-allow-origin"), None);
     manager.delete_all().await;
 }
 

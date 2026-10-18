@@ -130,18 +130,25 @@ Feature: Mountebank compatibility — predicates, imposter options and response 
     And the response body is ""
     And the response header "x-rift-no-match" is "true"
 
-  Scenario: allowCORS adds the allow headers and answers a preflight
+  # Mountebank's baseHttpServer.js:39-51 (#1555): only an OPTIONS carrying Origin,
+  # Access-Control-Request-Method and Access-Control-Request-Headers is a preflight. It is matched
+  # like any request, and its three values are echoed onto the stub's answer.
+  Scenario: allowCORS echoes a full preflight onto the stub's answer and adds nothing otherwise
     Given a fresh imposter from fixture "mbcompat/options"
-    When the client sends "GET" "/hit"
-    Then the response body is "hit"
-    And the response header "access-control-allow-origin" is "*"
     When the request header "Origin" is "http://a.test"
-    And the request header "Access-Control-Request-Method" is "POST"
+    And the client sends "GET" "/hit"
+    Then the response body is "hit"
+    And the response has no header "access-control-allow-origin"
+    When the request header "Access-Control-Request-Method" is "POST"
+    And the client sends "OPTIONS" "/hit"
+    Then the response has no header "access-control-allow-origin"
+    When the request header "Access-Control-Request-Headers" is "X-Custom"
     And the client sends "OPTIONS" "/hit"
     Then the response status is 200
-    And the response header "access-control-allow-origin" is "*"
-    And the response header "access-control-allow-headers" is "*"
-    And the response header "access-control-allow-methods" is "*"
+    And the response body is "hit"
+    And the response header "access-control-allow-origin" is "http://a.test"
+    And the response header "access-control-allow-methods" is "POST"
+    And the response header "access-control-allow-headers" is "X-Custom"
 
   Scenario: recordRequests false keeps the journal empty after traffic
     Given a fresh imposter from fixture "mbcompat/options"

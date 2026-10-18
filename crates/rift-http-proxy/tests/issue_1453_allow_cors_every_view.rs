@@ -108,18 +108,20 @@ async fn a_numeric_allow_cors_answers_a_preflight_like_true() {
             )
             .header("Origin", "http://example.com")
             .header("Access-Control-Request-Method", "POST")
+            .header("Access-Control-Request-Headers", "X-Custom")
             .send()
             .await
             .expect("OPTIONS");
         assert_eq!(response.status().as_u16(), 200, "allowCORS {value}");
-        for name in [
-            "access-control-allow-origin",
-            "access-control-allow-headers",
-            "access-control-allow-methods",
+        // A full preflight gets its own values echoed back (#1555).
+        for (name, echoed) in [
+            ("access-control-allow-origin", "http://example.com"),
+            ("access-control-allow-headers", "X-Custom"),
+            ("access-control-allow-methods", "POST"),
         ] {
             assert_eq!(
                 response.headers().get(name).and_then(|v| v.to_str().ok()),
-                Some("*"),
+                Some(echoed),
                 "allowCORS {value}: {name}"
             );
         }

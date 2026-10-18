@@ -7343,6 +7343,254 @@
           "path": "/"
         }
       ]
+    },
+    {
+      "name": "targeted: allowCORS: preflight echo and non-preflight silence (#1555)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "allowCORS": true,
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "method": "OPTIONS",
+                      "path": "/opt"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 204,
+                      "headers": {
+                        "X-Stub": "yes"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/own"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "Access-Control-Allow-Origin": "http://own.test"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "OPTIONS",
+          "path": "/",
+          "headers": [
+            [
+              "Origin",
+              "http://x.test"
+            ],
+            [
+              "Access-Control-Request-Method",
+              "PUT"
+            ],
+            [
+              "Access-Control-Request-Headers",
+              "X-Custom-Header"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "OPTIONS",
+          "path": "/",
+          "headers": [
+            [
+              "Origin",
+              "http://x.test"
+            ],
+            [
+              "Access-Control-Request-Method",
+              "PUT"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/",
+          "headers": [
+            [
+              "Origin",
+              "http://x.test"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "OPTIONS",
+          "path": "/",
+          "headers": [
+            [
+              "Origin",
+              "http://x.test"
+            ],
+            [
+              "Access-Control-Request-Headers",
+              "X-Custom-Header"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "OPTIONS",
+          "path": "/opt",
+          "headers": [
+            [
+              "Origin",
+              "http://x.test"
+            ],
+            [
+              "Access-Control-Request-Method",
+              "PUT"
+            ],
+            [
+              "Access-Control-Request-Headers",
+              "X-Custom-Header"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "OPTIONS",
+          "path": "/opt"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "OPTIONS",
+          "path": "/own",
+          "headers": [
+            [
+              "Origin",
+              "http://x.test"
+            ],
+            [
+              "Access-Control-Request-Method",
+              "PUT"
+            ],
+            [
+              "Access-Control-Request-Headers",
+              "X-Custom-Header"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "GET",
+          "path": "/own",
+          "headers": [
+            [
+              "Origin",
+              "http://x.test"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "OPTIONS",
+          "path": "/",
+          "headers": [
+            [
+              "Origin",
+              ""
+            ],
+            [
+              "Access-Control-Request-Method",
+              "PUT"
+            ],
+            [
+              "Access-Control-Request-Headers",
+              "X-Custom-Header"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "targeted: allowCORS: a preflight echo rides on the defaultResponse (#1555)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "allowCORS": true,
+            "defaultResponse": {
+              "statusCode": 404
+            }
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "OPTIONS",
+          "path": "/",
+          "headers": [
+            [
+              "Origin",
+              "http://x.test"
+            ],
+            [
+              "Access-Control-Request-Method",
+              "PUT"
+            ],
+            [
+              "Access-Control-Request-Headers",
+              "X-Custom-Header"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "OPTIONS",
+          "path": "/"
+        }
+      ]
     }
   ]
 }
