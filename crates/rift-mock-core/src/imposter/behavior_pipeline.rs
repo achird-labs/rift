@@ -151,6 +151,8 @@ pub(crate) struct BehaviorRun<'a, SH> {
     /// `None` only for a caller with no socket.
     pub client_addr: Option<std::net::SocketAddr>,
     pub script_state_key: u16,
+    /// What the imposter's scripts may `require()` (issue #1611).
+    pub script_files: std::sync::Arc<crate::imposter::ScriptFileAccess>,
     pub stub: StubRef<'a>,
     pub csv_cache: &'a CsvCache,
     pub script_timeout: Duration,
@@ -328,6 +330,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                         single,
                         self.script_state_key,
                         self.stub.id.map(str::to_owned),
+                        std::sync::Arc::clone(&self.script_files),
                         self.script_timeout,
                     )
                     .await
@@ -581,6 +584,7 @@ mod tests {
             request_body: None,
             client_addr: None,
             script_state_key: 4545,
+            script_files: std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
             stub: STUB,
             csv_cache: &csv_cache,
             script_timeout: Duration::from_secs(5),
@@ -609,6 +613,7 @@ mod tests {
             request_body: None,
             client_addr: None,
             script_state_key: 4545,
+            script_files: std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
             stub: STUB,
             csv_cache: &csv_cache,
             script_timeout: Duration::from_secs(5),

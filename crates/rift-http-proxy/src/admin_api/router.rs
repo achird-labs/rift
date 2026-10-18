@@ -482,6 +482,7 @@ async fn route_by_path(
                 front_door_routes.as_ref(),
                 intercept,
                 allow_injection,
+                scripts_dir.as_deref().map(std::path::PathBuf::as_path),
             )
             .await;
         }

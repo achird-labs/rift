@@ -27,6 +27,16 @@ record.
 
 ### Changed
 
+- **BREAKING: an admin-API, `--datadir` or `https:` imposter's `require()` of a path outside
+  `--scripts-dir` now fails** (#1611), and every `require` in one fails when no `--scripts-dir` is
+  set. **Migration:** set `--scripts-dir` and keep the modules under it; or load the imposter from
+  a local `--configfile`. A stub added over the admin API to a running `--configfile` imposter
+  confines that imposter's `require` too. A `require` is now available in `inject` and predicate
+  `inject`, as in Mountebank, and `require('x.json')` returns the parsed object. **Embedders:**
+  `ImposterManager` imposters get `ScriptFileAccess::Refused` unless the door chooses
+  (`with_script_file_access`, `create_imposter_from`, `apply_config_from`,
+  `DesiredImposter::script_files`); `ImposterSource` gains `authorship()`, `Network` by default,
+  and `MergedSources::imposters` is now `Vec<SourcedImposter>`.
 - **BREAKING: `shellTransform` follows Mountebank's contract** (#1589). A command now receives the
   request and the response JSON as two arguments appended to its command line, as well as in
   `MB_REQUEST` / `MB_RESPONSE` (the arguments are left off when the line reaches 2048 characters);
@@ -197,6 +207,29 @@ record.
 - **`PUT /imposters` answers with the imposters in request order**, as Mountebank does, each
   port-less imposter at its own position; it listed them by port (#1563). The answer now lists only
   the body's imposters, so one created concurrently by `POST /imposters` no longer appears in it.
+
+### Security
+
+- **`require()` in a network-written imposter reads only under `--scripts-dir`** (#1611). A
+  `decorate` (or any Mountebank-style hook) in an imposter created over the admin API, loaded from
+  `--datadir` or fetched from an `https:` source could `require()` any file on the host, and the
+  error for a non-JavaScript file echoed its content (a `.env` value as a `ReferenceError`, a token
+  as a `SyntaxError`) into the inject `400` body and the decorate WARN log. Such a `require` now
+  loads only files under `--scripts-dir`, is refused without one, and refuses a path outside the
+  root (absolute, `..`, or a link out) with one fixed message, `outside --scripts-dir`, without
+  looking at the filesystem outside it, so whether a file exists never shows. A local
+  `--configfile` imposter and the C-ABI host calls keep the unconfined `require`.
+- **Each hook run gets its own `require`** (#1611). One `decorate` left a live `require` on its
+  script worker, carrying its module cache, so a later `inject` or predicate `inject` of *another*
+  imposter could load a module the first had cached, even after the file was gone. Every
+  Mountebank-style hook (`inject`, predicate `inject`, `predicateGenerators.inject`, `decorate`)
+  now gets a fresh `require` bound to its own imposter, nested requires resolve from the module's
+  own directory, and a `require` kept in a global stops working when its run ends.
+- **Rhai `import` is disabled** (#1611). Rhai's default resolver loaded any `.rhai` file on the
+  host from a `_rift.script`. `import` was never documented and now resolves no module, on every
+  door.
+- `--allowInjection` admits code that runs with Rift's privileges, `shellTransform` included; the
+  docs now say so, and that `--scripts-dir` is defence in depth, not a sandbox.
 
 ### Testing
 

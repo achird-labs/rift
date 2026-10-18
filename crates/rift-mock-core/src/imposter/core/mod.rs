@@ -564,6 +564,10 @@ pub struct Imposter {
     /// [`imposter_level_view`] of `config`, computed on the first reconcile that asks (issue
     /// #1254). `config` never changes after construction, so neither does this.
     imposter_level: OnceLock<Result<serde_json::Value, String>>,
+    /// What this imposter's scripts may `require()` (issue #1611): chosen by the door that last
+    /// wrote its stubs, never part of `config`. [`ScriptFileAccess::Refused`] until a door says
+    /// otherwise.
+    script_files: ArcSwap<crate::imposter::ScriptFileAccess>,
 }
 
 /// `config` as `apply_config` compares it at the imposter level: every field except `stubs`, with
@@ -680,7 +684,21 @@ impl Imposter {
             sequencer,
             stub_warnings: ArcSwapOption::empty(),
             imposter_level: OnceLock::new(),
+            script_files: ArcSwap::from_pointee(crate::imposter::ScriptFileAccess::Refused),
         })
+    }
+
+    /// What this imposter's scripts may `require()` (issue #1611), as the door that last wrote its
+    /// stubs chose it.
+    #[must_use]
+    pub fn script_file_access(&self) -> Arc<crate::imposter::ScriptFileAccess> {
+        self.script_files.load_full()
+    }
+
+    /// Set what this imposter's scripts may `require()`: the access of the door now writing its
+    /// stubs (issue #1611). A request already running keeps the access it started with.
+    pub(crate) fn set_script_file_access(&self, access: crate::imposter::ScriptFileAccess) {
+        self.script_files.store(Arc::new(access));
     }
 
     /// Which store this imposter belongs to (issue #1122).

@@ -287,9 +287,9 @@ pub fn apply_decorate(
     response_status: &ResponseStatus,
     response_headers: &mut HashMap<String, String>,
 ) -> Result<(String, ResponseStatus), DecorateError> {
-    use rhai::{Dynamic, Engine, Map, Scope};
+    use rhai::{Dynamic, Map, Scope};
 
-    let engine = Engine::new();
+    let engine = crate::scripting::rift_rhai_engine();
     let mut scope = Scope::new();
 
     // Create request map for Rhai

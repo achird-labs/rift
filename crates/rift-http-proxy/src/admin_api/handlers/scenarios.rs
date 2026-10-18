@@ -377,6 +377,11 @@ pub async fn handle_add_space_stub(
     }
     // The path `:flowId` is the source of truth for the scope; ignore any `space` in the body.
     stub.space = Some(flow_id.to_string());
+    if let Some(rejection) =
+        crate::admin_api::handlers::imposters::claim_scripts_for_admin(&manager, port, &scripts_dir)
+    {
+        return rejection;
+    }
     match manager.add_stub(port, stub, None).await {
         Ok(()) => match manager.get_imposter(port) {
             Ok(imposter) => json_response(

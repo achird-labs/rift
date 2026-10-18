@@ -75,6 +75,15 @@ the undecorated response with `x-rift-decorate-error: true` instead, and `500` o
 `strictBehaviors` — see [Behaviors](behaviors.md). A decorate that is not a function at all (`42`,
 a bare expression) answers `500` in Mountebank; Rift runs it as a Rhai script, so it may succeed.
 
+## `require()` loads files only, from `--scripts-dir`
+
+Mountebank's `require` is Node's: it loads built-ins such as `fs` and any file on the host. Rift's
+loads only file modules (CommonJS `.js`, and `.json`), with no built-ins and no package lookup. A
+script in an imposter written over the admin API, from `--datadir` or from an `https:` source may
+load files only from under `--scripts-dir`, and none without it; a local `--configfile` imposter may
+load any path. A path outside the root is refused with `require('<path>'): outside --scripts-dir`.
+Rhai `import` is not supported. See [Scripting](../features/scripting.md#files-a-script-may-read).
+
 ## `shellTransform` arguments
 
 `shellTransform` appends the request and response JSON to the command as two single-quoted

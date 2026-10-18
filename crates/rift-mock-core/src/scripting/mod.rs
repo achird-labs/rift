@@ -17,6 +17,16 @@ pub use bounded::{
 
 pub use rhai_engine::RhaiEngine;
 
+/// A Rhai engine with file modules turned off (issue #1611): an `import` statement resolves
+/// nothing, on every door. Rhai's default resolver loads any `.rhai` file on the host; `import`
+/// was never documented, and confining it would need a per-imposter resolver through the shared
+/// script pool. Every Rhai engine Rift builds comes from here.
+pub(crate) fn rift_rhai_engine() -> rhai::Engine {
+    let mut engine = rhai::Engine::new();
+    engine.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new());
+    engine
+}
+
 // Script pool for optimized execution
 mod script_pool;
 pub use script_pool::{CompiledScript, ScriptPool, ScriptPoolConfig};

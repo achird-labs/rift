@@ -726,7 +726,11 @@ async fn distinct_ports_across_sources_merge() {
     .fetch_all()
     .await
     .expect("distinct ports merge");
-    let mut ports: Vec<u16> = merged.imposters.iter().filter_map(|c| c.port).collect();
+    let mut ports: Vec<u16> = merged
+        .imposters
+        .iter()
+        .filter_map(|c| c.config.port)
+        .collect();
     ports.sort_unstable();
     let mut expected = vec![port_a, port_b];
     expected.sort_unstable();
@@ -1429,7 +1433,7 @@ async fn a_file_source_with_no_parse_keeps_a_literal_ejs_tag() {
         .fetch_all()
         .await
         .expect("--no-parse loads the document verbatim");
-    let body = serde_json::to_value(&merged.imposters[0].stubs[0].responses[0]).unwrap();
+    let body = serde_json::to_value(&merged.imposters[0].config.stubs[0].responses[0]).unwrap();
     assert_eq!(body["is"]["body"], "<% literal %>");
 }
 

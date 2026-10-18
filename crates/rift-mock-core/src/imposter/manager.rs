@@ -11,6 +11,7 @@ use super::reconcile::{
     ApplyReport, DeleteAllReport, DesiredImposter, EventContext, ImposterEvent,
     ImposterEventListener, Persistence, StubReconcile,
 };
+use super::script_resolve::ScriptFileAccess;
 use super::types::{ImposterConfig, ImposterError, Stub, StubResponse, UnresolvableHost};
 use crate::behaviors::ResponseSequencer;
 use crate::extensions::decorate::ResponseDecorator;
@@ -489,6 +490,9 @@ pub struct ImposterManager {
     /// Created unconditionally (a `broadcast::Sender` with no receivers is ~free); publishing is a
     /// no-op until a client subscribes.
     event_bus: Arc<super::events::AdminEventBus>,
+    /// What scripts may `require()` in an imposter created through a call that names no access
+    /// (issue #1611). See [`Self::with_script_file_access`].
+    script_file_access: ScriptFileAccess,
 }
 
 /// Default bound for the post-delete connection drain (issue #596). Generous: normal graceful
@@ -531,7 +535,25 @@ impl ImposterManager {
             conn_drain: DEFAULT_CONN_DRAIN,
             reserved: parking_lot::RwLock::new(std::collections::BTreeMap::new()),
             event_bus: Arc::new(super::events::AdminEventBus::new()),
+            script_file_access: ScriptFileAccess::Refused,
         }
+    }
+
+    /// What scripts may `require()` in an imposter created or applied through a call that names
+    /// no access of its own (issue #1611): [`create_imposter`](Self::create_imposter),
+    /// [`create_imposter_as`](Self::create_imposter_as), [`apply_config`](Self::apply_config) and
+    /// [`apply_one`](Self::apply_one). The default, [`ScriptFileAccess::Refused`], fails closed: an
+    /// embedder that has not chosen gets no `require`.
+    ///
+    /// Choose by who writes the configs: [`ScriptFileAccess::network`] with the embedder's scripts
+    /// root for configs that arrive over a network, [`ScriptFileAccess::trusted_cwd`] only for
+    /// configs a local operator wrote. A door that differs from this default names its own access:
+    /// [`create_imposter_from`](Self::create_imposter_from),
+    /// [`apply_config_from`](Self::apply_config_from), or [`DesiredImposter::script_files`].
+    #[must_use]
+    pub fn with_script_file_access(mut self, access: ScriptFileAccess) -> Self {
+        self.script_file_access = access;
+        self
     }
 
     /// Mark `port` as held by one of the server's own listeners (issue #1557), so no imposter can
@@ -1062,10 +1084,23 @@ impl ImposterManager {
         config: ImposterConfig,
         persistence: Persistence,
     ) -> Result<u16, ImposterError> {
+        self.create_imposter_from(config, persistence, self.script_file_access.clone())
+            .await
+    }
+
+    /// [`create_imposter_as`](Self::create_imposter_as) for a door that chooses what the
+    /// imposter's scripts may `require()` (issue #1611), whatever
+    /// [`with_script_file_access`](Self::with_script_file_access) says.
+    pub async fn create_imposter_from(
+        &self,
+        config: ImposterConfig,
+        persistence: Persistence,
+        script_files: ScriptFileAccess,
+    ) -> Result<u16, ImposterError> {
         // `false`: the direct-create contract is all-or-nothing whatever `serve_unbound` says
         // (issue #143) — `Err` here means "the imposter does not exist" to every caller.
         let (port, _) = self
-            .create_imposter_staged(config, false, persistence)
+            .create_imposter_staged(config, false, persistence, script_files)
             .await?;
         self.emit(ImposterEvent::Created(port));
         Ok(port)
@@ -1083,6 +1118,7 @@ impl ImposterManager {
         mut config: ImposterConfig,
         allow_unbound: bool,
         persistence: Persistence,
+        script_files: ScriptFileAccess,
     ) -> Result<(u16, Option<ImposterError>), ImposterError> {
         // Validate protocol first
         match config.protocol.as_str() {
@@ -1178,6 +1214,7 @@ impl ImposterManager {
         )
         .map_err(|e| ImposterError::FlowStoreConfig(format!("{e:#}")))?;
         imposter.set_persistence(persistence);
+        imposter.set_script_file_access(script_files);
         let floor = self.load_floors.lock().get(&port).copied();
         if let Some(floor) = floor {
             imposter.continue_load_clock(floor);
@@ -2000,8 +2037,25 @@ impl ImposterManager {
         &self,
         desired: Vec<ImposterConfig>,
     ) -> Result<ApplyReport, ImposterError> {
-        self.apply_entries(desired.into_iter().map(|config| (config, None)).collect())
+        self.apply_config_from(desired, self.script_file_access.clone())
             .await
+    }
+
+    /// [`apply_config`](Self::apply_config) for a door that chooses what the scripts of every
+    /// imposter it writes may `require()` (issue #1611). A running imposter the apply keeps takes
+    /// this access too: its stubs are now the ones this door wrote.
+    pub async fn apply_config_from(
+        &self,
+        desired: Vec<ImposterConfig>,
+        script_files: ScriptFileAccess,
+    ) -> Result<ApplyReport, ImposterError> {
+        self.apply_entries(
+            desired
+                .into_iter()
+                .map(|config| (config, None, script_files.clone()))
+                .collect(),
+        )
+        .await
     }
 
     /// [`apply_config`](Self::apply_config) over a desired set whose entries say which store each
@@ -2018,7 +2072,7 @@ impl ImposterManager {
         self.apply_entries(
             desired
                 .into_iter()
-                .map(|d| (d.config, Some(d.persistence)))
+                .map(|d| (d.config, Some(d.persistence), d.script_files))
                 .collect(),
         )
         .await
@@ -2030,17 +2084,17 @@ impl ImposterManager {
     /// move it into the datadir, where it would collide with its own source on the next reload.
     async fn apply_entries(
         &self,
-        mut desired: Vec<(ImposterConfig, Option<Persistence>)>,
+        mut desired: Vec<(ImposterConfig, Option<Persistence>, ScriptFileAccess)>,
     ) -> Result<ApplyReport, ImposterError> {
-        Self::validate_config_set(desired.iter().map(|(config, _)| config))?;
-        self.refuse_reserved_in_set(desired.iter().map(|(config, _)| config))?;
+        Self::validate_config_set(desired.iter().map(|(config, _, _)| config))?;
+        self.refuse_reserved_in_set(desired.iter().map(|(config, _, _)| config))?;
 
         let mut report = ApplyReport::default();
 
         // Deletes first, so ports freed here can be re-bound by creates below.
         let desired_ports: std::collections::HashSet<u16> = desired
             .iter()
-            .filter_map(|(config, _)| config.explicit_port())
+            .filter_map(|(config, _, _)| config.explicit_port())
             .collect();
         // `ports()` already scans ascending, so no separate sort is needed here (was needed for
         // the old HashMap's arbitrary key order).
@@ -2060,18 +2114,19 @@ impl ImposterManager {
             }
         }
 
-        desired.sort_by_key(|(config, _)| config.explicit_port().is_none());
-        for (config, requested) in desired {
+        desired.sort_by_key(|(config, _, _)| config.explicit_port().is_none());
+        for (config, requested, script_files) in desired {
             let Some(port) = config.explicit_port() else {
                 // No explicit port (absent or `0`) → nothing to reconcile against; always an
                 // auto-assigned create.
                 let persistence = requested.unwrap_or(Persistence::Datadir);
-                self.create_for_apply(config, 0, persistence, &mut report)
+                self.create_for_apply(config, 0, persistence, script_files, &mut report)
                     .await;
                 continue;
             };
 
-            self.apply_entry(port, config, requested, &mut report).await;
+            self.apply_entry(port, config, requested, script_files, &mut report)
+                .await;
         }
 
         Ok(report)
@@ -2093,7 +2148,8 @@ impl ImposterManager {
     /// a failure while applying lands in [`ApplyReport::failed`], as with `apply_config`. Nothing
     /// serializes this against a concurrent `apply_config`, whose delete sweep may remove the port.
     pub async fn apply_one(&self, config: ImposterConfig) -> Result<ApplyReport, ImposterError> {
-        self.apply_one_entry(config, None).await
+        self.apply_one_entry(config, None, self.script_file_access.clone())
+            .await
     }
 
     /// [`apply_one`](Self::apply_one) with the store the imposter belongs to, the per-entry
@@ -2103,14 +2159,19 @@ impl ImposterManager {
         &self,
         desired: DesiredImposter,
     ) -> Result<ApplyReport, ImposterError> {
-        self.apply_one_entry(desired.config, Some(desired.persistence))
-            .await
+        self.apply_one_entry(
+            desired.config,
+            Some(desired.persistence),
+            desired.script_files,
+        )
+        .await
     }
 
     async fn apply_one_entry(
         &self,
         config: ImposterConfig,
         requested: Option<Persistence>,
+        script_files: ScriptFileAccess,
     ) -> Result<ApplyReport, ImposterError> {
         let port = config
             .explicit_port()
@@ -2118,7 +2179,8 @@ impl ImposterManager {
         Self::validate_config_set(std::iter::once(&config))?;
         self.refuse_reserved_in_set(std::iter::once(&config))?;
         let mut report = ApplyReport::default();
-        self.apply_entry(port, config, requested, &mut report).await;
+        self.apply_entry(port, config, requested, script_files, &mut report)
+            .await;
         Ok(report)
     }
 
@@ -2130,14 +2192,19 @@ impl ImposterManager {
         port: u16,
         mut config: ImposterConfig,
         requested: Option<Persistence>,
+        script_files: ScriptFileAccess,
         report: &mut ApplyReport,
     ) {
         let Ok(existing) = self.get_imposter(port) else {
             let persistence = requested.unwrap_or(Persistence::Datadir);
-            self.create_for_apply(config, port, persistence, report)
+            self.create_for_apply(config, port, persistence, script_files, report)
                 .await;
             return;
         };
+
+        // Before any stub this door wrote can serve (issue #1611): the imposter's scripts are now
+        // this door's.
+        existing.set_script_file_access(script_files.clone());
 
         // Retag before anything below can write the file, so every write in this iteration
         // (the enabled toggle, a stub patch, a replace's re-create) goes to the new store.
@@ -2148,7 +2215,7 @@ impl ImposterManager {
         }
 
         if imposter_level_differs_ignoring_enabled(&existing, &mut config) {
-            self.replace_imposter(port, config, persistence, requested, report)
+            self.replace_imposter(port, config, persistence, requested, script_files, report)
                 .await;
             return;
         }
@@ -2204,7 +2271,7 @@ impl ImposterManager {
                 }
             }
             StubReconcile::Degenerate => {
-                self.replace_imposter(port, config, persistence, requested, report)
+                self.replace_imposter(port, config, persistence, requested, script_files, report)
                     .await;
             }
         }
@@ -2232,10 +2299,11 @@ impl ImposterManager {
         config: ImposterConfig,
         fail_port: u16,
         persistence: Persistence,
+        script_files: ScriptFileAccess,
         report: &mut ApplyReport,
     ) {
         match self
-            .create_imposter_staged(config, self.serve_unbound, persistence)
+            .create_imposter_staged(config, self.serve_unbound, persistence, script_files)
             .await
         {
             Ok((assigned, bind_failure)) => {
@@ -2267,6 +2335,7 @@ impl ImposterManager {
         config: ImposterConfig,
         persistence: Persistence,
         requested: Option<Persistence>,
+        script_files: ScriptFileAccess,
         report: &mut ApplyReport,
     ) {
         // `false`: the re-create overwrites `{port}.json`, so unlinking it first only opens a window
@@ -2276,7 +2345,7 @@ impl ImposterManager {
             return;
         }
         match self
-            .create_imposter_staged(config, self.serve_unbound, persistence)
+            .create_imposter_staged(config, self.serve_unbound, persistence, script_files)
             .await
         {
             Ok((_, bind_failure)) => {
@@ -2305,6 +2374,21 @@ impl ImposterManager {
                 report.failed.push((port, e));
             }
         }
+    }
+
+    /// Set what the scripts of the imposter on `port` may `require()` (issue #1611). A door that
+    /// writes stubs into a running imposter calls this before it writes them: the imposter's
+    /// scripts are then that door's, whoever created it. The admin API's stub routes do, so a stub
+    /// posted over the network never runs with the unconfined `require` of a `--configfile`
+    /// imposter.
+    pub fn set_script_file_access(
+        &self,
+        port: u16,
+        script_files: ScriptFileAccess,
+    ) -> Result<(), ImposterError> {
+        self.get_imposter(port)?
+            .set_script_file_access(script_files);
+        Ok(())
     }
 
     /// Get imposter count (for future metrics)
@@ -3221,6 +3305,7 @@ mod tests {
         let entry = |persistence| DesiredImposter {
             config: datadir_config(),
             persistence,
+            script_files: ScriptFileAccess::Refused,
         };
         let report = manager
             .apply_desired(vec![
@@ -3270,6 +3355,7 @@ mod tests {
             .apply_desired(vec![DesiredImposter {
                 config: config(),
                 persistence: Persistence::Datadir,
+                script_files: ScriptFileAccess::Refused,
             }])
             .await
             .expect("retag to datadir");
@@ -3288,6 +3374,7 @@ mod tests {
             .apply_desired(vec![DesiredImposter {
                 config: config(),
                 persistence: Persistence::Ephemeral,
+                script_files: ScriptFileAccess::Refused,
             }])
             .await
             .expect("retag to ephemeral");
@@ -3325,6 +3412,7 @@ mod tests {
                     {"port": port_0, "protocol": "http", "enabled": false, "stubs": []}
                 )),
                 persistence: Persistence::Ephemeral,
+                script_files: ScriptFileAccess::Refused,
             }])
             .await
             .expect("apply");
@@ -3409,6 +3497,7 @@ mod tests {
                     "cert": "not a pem", "key": "not a pem", "stubs": []
                 })),
                 persistence: Persistence::Datadir,
+                script_files: ScriptFileAccess::Refused,
             }])
             .await
             .expect("validation passes; the re-create fails");
@@ -3474,6 +3563,7 @@ mod tests {
                     "stubs": [stub("a"), stub("b"), stub("c"), stub("d")]
                 })),
                 persistence: Persistence::Ephemeral,
+                script_files: ScriptFileAccess::Refused,
             }])
             .await
             .expect("apply");
@@ -4080,6 +4170,64 @@ mod tests {
     fn at(port: u16, mut config: ImposterConfig) -> ImposterConfig {
         config.port = Some(port);
         config
+    }
+
+    // Issue #1611: the door that writes an imposter chooses what its scripts may `require()`, and
+    // an embedder that never chose gets nothing.
+    #[tokio::test]
+    async fn script_file_access_is_the_writing_doors_and_defaults_to_refused() {
+        let config = || imposter_cfg(json!({"protocol": "http", "stubs": []}));
+        let trusted = ScriptFileAccess::Trusted {
+            base: PathBuf::from("/srv"),
+        };
+        let confined = ScriptFileAccess::Confined(PathBuf::from("/srv/scripts"));
+
+        let manager = ImposterManager::new();
+        let port = manager.create_imposter(config()).await.expect("create");
+        assert_eq!(
+            *manager.get_imposter(port).unwrap().script_file_access(),
+            ScriptFileAccess::Refused,
+            "an embedder that has not chosen fails closed"
+        );
+
+        let manager = ImposterManager::new().with_script_file_access(trusted.clone());
+        let port = manager.create_imposter(config()).await.expect("create");
+        let imposter = manager.get_imposter(port).unwrap();
+        assert_eq!(*imposter.script_file_access(), trusted);
+
+        // A re-apply from another door keeps the imposter running and makes it that door's.
+        let report = manager
+            .apply_config_from(vec![at(port, config())], confined.clone())
+            .await
+            .expect("apply");
+        assert!(
+            report.replaced.is_empty() && report.failed.is_empty(),
+            "{report:?}"
+        );
+        assert!(Arc::ptr_eq(&imposter, &manager.get_imposter(port).unwrap()));
+        assert_eq!(*imposter.script_file_access(), confined);
+
+        let port = manager
+            .create_imposter_from(config(), Persistence::Ephemeral, confined.clone())
+            .await
+            .expect("create");
+        assert_eq!(
+            *manager.get_imposter(port).unwrap().script_file_access(),
+            confined
+        );
+        manager
+            .set_script_file_access(port, ScriptFileAccess::Refused)
+            .expect("set");
+        assert_eq!(
+            *manager.get_imposter(port).unwrap().script_file_access(),
+            ScriptFileAccess::Refused
+        );
+        assert!(
+            manager
+                .set_script_file_access(1, ScriptFileAccess::Refused)
+                .is_err(),
+            "no imposter on the port"
+        );
     }
 
     // Issue #423: imposters created through the manager (the path embedded/FFI consumers use, which
@@ -4813,6 +4961,7 @@ mod tests {
                 .apply_one_desired(DesiredImposter {
                     config: config(),
                     persistence: Persistence::Datadir,
+                    script_files: ScriptFileAccess::Refused,
                 })
                 .await
                 .expect("retag");

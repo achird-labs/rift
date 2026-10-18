@@ -531,7 +531,9 @@ pub fn create_stub_from_proxy_response(
 /// `imposter_port` identifies the per-imposter state shared with predicate injects and response
 /// injects for the same imposter (issue #355 Item 0) — decorate reads and writes the same
 /// persisted state rather than a throwaway object. `stub_id` tags the script logger's tracing
-/// events with the owning stub, when known (issue #355 AC1).
+/// events with the owning stub, when known (issue #355 AC1). `files` is what the imposter's
+/// scripts may `require()` (issue #1611).
+#[allow(clippy::too_many_arguments)]
 pub fn apply_js_or_rhai_decorate(
     script: &str,
     request: &RequestContext,
@@ -540,11 +542,12 @@ pub fn apply_js_or_rhai_decorate(
     headers: &HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
+    files: &std::sync::Arc<crate::imposter::ScriptFileAccess>,
 ) -> Result<Decorated, DecorateError> {
-    // Only the JS engine call sites below consume `imposter_port`/`stub_id`; without the feature
-    // the parameters would otherwise be unused.
+    // Only the JS engine call sites below consume `imposter_port`/`stub_id`/`files`; without the
+    // feature the parameters would otherwise be unused.
     #[cfg(not(feature = "javascript"))]
-    let _ = (imposter_port, stub_id);
+    let _ = (imposter_port, stub_id, files);
 
     if !is_javascript_decorate(script) {
         return decorate_rhai(script, request, body, status, headers);
@@ -584,6 +587,7 @@ pub fn apply_js_or_rhai_decorate(
             headers,
             imposter_port,
             stub_id,
+            files,
         )
         .map_err(|e| DecorateError::JavaScript(e.to_string()))
     }
@@ -650,6 +654,7 @@ pub async fn apply_decorate_bounded(
     headers: HashMap<String, String>,
     imposter_port: u16,
     stub_id: Option<String>,
+    files: std::sync::Arc<crate::imposter::ScriptFileAccess>,
     timeout: std::time::Duration,
 ) -> Result<Decorated, DecorateError> {
     let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
@@ -657,7 +662,7 @@ pub async fn apply_decorate_bounded(
     // decorate script has no `ctx.state`, so nothing on this thread can annotate. What makes that
     // airtight is *which* code reads the store, not the thread's history: the `ctx.state.*` natives
     // are registered only by `create_ctx_object`, which the decorate path never calls. Rhai
-    // decorate uses a bare `rhai::Engine::new()`, and MB-JS decorate binds only `config`/`logger`.
+    // decorate uses a plain `rift_rhai_engine()`, and MB-JS decorate binds only `config`/`logger`.
     // (Do NOT reason from "the thread-local is always cleared" — it is not: `execute_js_script`
     // has no RAII guard, so a panic skips its `clear_current_flow_store`, and `declared_functions_js`
     // never clears at all. A stale `Arc<dyn FlowStore>` can outlive its job on a pool thread.)
@@ -670,6 +675,7 @@ pub async fn apply_decorate_bounded(
             &headers,
             imposter_port,
             stub_id.as_deref(),
+            &files,
         )
     });
     match tokio::time::timeout(timeout, handle).await {
@@ -690,6 +696,12 @@ mod tests {
 
     // Allocates a fresh port per test so parallel tests never share `IMPOSTER_STATE` (disjoint
     // from the range used by `rift-mock-core/src/scripting/js_engine.rs`'s own tests in this binary).
+    /// The unconfined `require` of a local door (issue #1611): these tests write their modules to
+    /// the temp dir.
+    fn trusted_files() -> std::sync::Arc<crate::imposter::ScriptFileAccess> {
+        std::sync::Arc::new(crate::imposter::ScriptFileAccess::trusted_cwd())
+    }
+
     fn test_port() -> u16 {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(41_100);
@@ -723,6 +735,7 @@ mod tests {
             &headers,
             test_port(),
             None,
+            &trusted_files(),
         )
         .unwrap();
         assert_eq!(body, "hello");
@@ -740,6 +753,7 @@ mod tests {
             &headers,
             test_port(),
             None,
+            &trusted_files(),
         )
         .unwrap();
         assert_eq!(body, "REQ-BODY");
@@ -773,6 +787,7 @@ mod tests {
             &headers,
             test_port(),
             None,
+            &trusted_files(),
         );
         let _ = std::fs::remove_file(&module);
         let Decorated { body, .. } = result.expect("require-based config decorate should run");
@@ -811,6 +826,7 @@ mod tests {
             &headers,
             test_port(),
             None,
+            &trusted_files(),
         )
         .expect("real JS JSON.parse/stringify decorate must execute via Boa");
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -847,6 +863,7 @@ mod tests {
             &headers,
             test_port(),
             None,
+            &trusted_files(),
         )
         .expect("bare-body decorate with an inner arrow must execute via Boa");
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -867,6 +884,7 @@ mod tests {
             &headers,
             test_port(),
             None,
+            &trusted_files(),
         )
         .unwrap();
         assert_eq!(status, ResponseStatus::Code(404));
@@ -885,6 +903,7 @@ mod tests {
             &headers,
             test_port(),
             None,
+            &trusted_files(),
         )
         .unwrap();
         assert_eq!(body, "fn");
@@ -903,6 +922,7 @@ mod tests {
             &headers,
             test_port(),
             None,
+            &trusted_files(),
         )
         .unwrap();
         assert_eq!(body, "bare");
@@ -919,6 +939,7 @@ mod tests {
             &headers,
             test_port(),
             None,
+            &trusted_files(),
         )
         .unwrap();
         assert_eq!(body, "/orders", "existing Rhai decorate must be unchanged");
@@ -945,6 +966,7 @@ mod tests {
             &headers,
             test_port(),
             None,
+            &trusted_files(),
         )
         .unwrap_or_else(|e| panic!("{script}: {e}"));
         (body, status, headers)
@@ -1360,6 +1382,7 @@ mod tests {
             std::collections::HashMap::new(),
             test_port(),
             None,
+            trusted_files(),
             std::time::Duration::from_millis(60_000),
         )
         .await
@@ -1383,6 +1406,7 @@ mod tests {
             std::collections::HashMap::new(),
             test_port(),
             None,
+            trusted_files(),
             std::time::Duration::from_millis(25),
         )
         .await;

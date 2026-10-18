@@ -138,6 +138,43 @@ pub trait ImposterSource: Send + Sync {
         &'a self,
         r: &'a SourceRef,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<FetchedImposters>> + Send + 'a>>;
+
+    /// Who writes the documents this source serves (issue #1611): it decides what their scripts
+    /// may `require()`. [`Authorship::Network`] unless the source says otherwise, so a source that
+    /// does not know fails closed. Only `file:` is local.
+    fn authorship(&self) -> Authorship {
+        Authorship::Network
+    }
+}
+
+/// Who wrote an imposter a source served (issue #1611).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Authorship {
+    /// A local operator's file: its scripts' `require()` is unconfined, as it always was.
+    Local,
+    /// Anything fetched from elsewhere: confined to `--scripts-dir`, refused without one.
+    Network,
+}
+
+impl Authorship {
+    /// What scripts in an imposter of this authorship may `require()`.
+    #[must_use]
+    pub fn script_file_access(
+        self,
+        scripts_dir: Option<&std::path::Path>,
+    ) -> rift_mock_core::imposter::ScriptFileAccess {
+        match self {
+            Self::Local => rift_mock_core::imposter::ScriptFileAccess::trusted_cwd(),
+            Self::Network => rift_mock_core::imposter::ScriptFileAccess::network(scripts_dir),
+        }
+    }
+}
+
+/// An imposter a source served, and who wrote it.
+#[derive(Debug, Clone)]
+pub struct SourcedImposter {
+    pub config: ImposterConfig,
+    pub authorship: Authorship,
 }
 
 /// `file:` — the local filesystem, and the path `--configfile` takes.
@@ -156,6 +193,10 @@ impl FileSource {
 impl ImposterSource for FileSource {
     fn schemes(&self) -> &'static [&'static str] {
         &["file"]
+    }
+
+    fn authorship(&self) -> Authorship {
+        Authorship::Local
     }
 
     fn fetch<'a>(
@@ -421,7 +462,7 @@ pub struct SourceSet {
 
 /// What one round of fetching every source produced.
 pub struct MergedSources {
-    pub imposters: Vec<ImposterConfig>,
+    pub imposters: Vec<SourcedImposter>,
     /// The `intercept` block, from whichever source declared one. Two sources declaring one is
     /// an error, not a silent last-one-wins — there is a single listener to bring up.
     pub intercept: Option<InterceptStartOptions>,
@@ -443,7 +484,7 @@ impl SourceSet {
     /// silent override: the operator wrote two URIs expecting both to be served, and quietly
     /// dropping one of them is the failure mode that is hardest to notice in a running fleet.
     pub async fn fetch_all(&self) -> anyhow::Result<MergedSources> {
-        let mut imposters: Vec<ImposterConfig> = Vec::new();
+        let mut imposters: Vec<SourcedImposter> = Vec::new();
         // port -> the URI that claimed it.
         let mut claimed: HashMap<u16, String> = HashMap::new();
         let mut all_unchanged = true;
@@ -462,6 +503,7 @@ impl SourceSet {
             })?;
 
             let fetched = source.fetch(source_ref).await?;
+            let authorship = source.authorship();
             if !fetched.unchanged {
                 all_unchanged = false;
             }
@@ -500,7 +542,7 @@ impl SourceSet {
                     }
                     claimed.insert(port, source_ref.uri.clone());
                 }
-                imposters.push(config);
+                imposters.push(SourcedImposter { config, authorship });
             }
         }
 

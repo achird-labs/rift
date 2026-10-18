@@ -131,6 +131,31 @@ use`; auto-assign skips it. Under `with_serve_unbound(true)` the imposter is ins
 without a listener, as a failed bind is. The check runs when an imposter binds, never when a config
 is decoded, so stored configs stay decodable.
 
+### What scripts may `require()` (`ScriptFileAccess`)
+
+A running imposter carries a `ScriptFileAccess` that decides which files its Mountebank-style
+scripts may load with `require()` (issue #1611). It is never part of `ImposterConfig`, so it is not
+serialized, not a `stub_key` input and not in replicated bytes: the door that writes the imposter
+chooses it.
+
+| Variant | `require()` reads |
+|:--------|:------------------|
+| `ScriptFileAccess::Confined(root)` | Only files under `root`; anything else is refused with one message that never says whether the file exists. `ScriptFileAccess::network(Some(root))`. |
+| `ScriptFileAccess::Refused` (the default) | Nothing. `ScriptFileAccess::network(None)`. |
+| `ScriptFileAccess::Trusted { base }` | Any path; a relative one from `base`. `ScriptFileAccess::trusted_cwd()` uses the working directory. For configs a local operator wrote. |
+
+| Item | Signature | Purpose |
+|:-----|:----------|:--------|
+| `with_script_file_access` | `fn with_script_file_access(self, access: ScriptFileAccess) -> Self` | The access of every create or apply that names none: `create_imposter`, `create_imposter_as`, `apply_config`, `apply_one`. Defaults to `Refused`, so an embedder that has not chosen fails closed. |
+| `create_imposter_from` | `async fn create_imposter_from(&self, config: ImposterConfig, persistence: Persistence, script_files: ScriptFileAccess) -> Result<u16, ImposterError>` | `create_imposter_as` with the access this door grants. |
+| `apply_config_from` | `async fn apply_config_from(&self, desired: Vec<ImposterConfig>, script_files: ScriptFileAccess) -> Result<ApplyReport, ImposterError>` | `apply_config` with the access this door grants. A running imposter the apply keeps takes it too. |
+| `DesiredImposter::script_files` | `pub script_files: ScriptFileAccess` | The access of one `apply_desired` / `apply_one_desired` entry. |
+| `set_script_file_access` | `fn set_script_file_access(&self, port: u16, script_files: ScriptFileAccess) -> Result<(), ImposterError>` | Make a running imposter's scripts this door's before writing stubs into it. The admin API's stub routes call it. |
+
+Rift's own server gives the admin API, `--datadir` files and `https:` sources `network(--scripts-dir)`,
+and local `file:` sources `trusted_cwd()`; the C-ABI's host calls are `trusted_cwd()` and its admin
+plane is `network(None)`. A multi-tenant embedder should pass `network(Some(root))` per tenant.
+
 ### Reconciling one imposter (`apply_one`)
 
 `ImposterManager::apply_config` reconciles the whole imposter set: it deletes every running port the
@@ -238,7 +263,7 @@ println!("admin bound to {}", running.local_addr());
 | `with_local_only` | `fn with_local_only(self, local_only: bool) -> Self` | Record `--local-only` for `GET /config` to report (issue #879). Stated explicitly, not inferred from the bind address. |
 | `with_admin_authorizer` | `fn with_admin_authorizer(self, authorizer: Arc<dyn AdminAuthorizer>) -> Self` | Install the per-request authorization hook (issue #854); `ServerBuilder::admin_authorizer` is the builder spelling. |
 | `with_intercept` | `fn with_intercept(self, control: InterceptControl) -> Self` | Serve the `/intercept*` routes against this shared control slot. Without it every `/intercept*` route answers `404`. See [Intercept proxy](../features/intercept-proxy.md). |
-| `with_scripts_dir` | `fn with_scripts_dir(self, dir: PathBuf) -> Self` | Root that `_rift.script` `file:` references resolve under for imposters created through this API (issue #356). Without it such references are rejected. |
+| `with_scripts_dir` | `fn with_scripts_dir(self, dir: PathBuf) -> Self` | Root that `_rift.script` `file:` references resolve under for imposters created through this API (issue #356), and the only place their scripts may `require()` from (issue #1611). Without it both are refused. |
 | `with_reported_admin_port` | `fn with_reported_admin_port(self, port: u16) -> Self` | Report `port` from `GET /config` instead of the port this server bound (issue #1135). For a host that fronts the admin API with its own public listener and binds the core to an ephemeral loopback port — without it, `options.port` advertises the *private* port to Mountebank-compat clients that read it to build URLs. Unset reports the bound port; `0` is a configured `0`, not "unset". `ServerBuilder::reported_admin_port` is the builder spelling. |
 | `listen` | `fn listen(self, addr: ListenAddr) -> Self` | Listen on `addr` instead of the exact address given to `new` (issue #1528): `ListenAddr::Any(port)` for `[::]` dual-stack with a `0.0.0.0` fallback, `ListenAddr::Loopback(port)` for `127.0.0.1` and `[::1]`, `ListenAddr::Exact(addr)` for one address. `new(addr, …)` alone is `Exact(addr)`; an IPv6 address is dual-stack. |
 | `with_reported_host` | `fn with_reported_host(self, host: Option<String>) -> Self` | The `--host` flag `GET /config` reports as `options.host` (issue #1528): the flag, `null` when unset, never the bound address. |

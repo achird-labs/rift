@@ -62,7 +62,7 @@ impl CompiledCache {
         if let Some(ast) = self.get_verified(key, code) {
             return Ok(ast);
         }
-        let engine = rhai::Engine::new();
+        let engine = crate::scripting::rift_rhai_engine();
         let ast = Arc::new(
             engine
                 .compile(code)
