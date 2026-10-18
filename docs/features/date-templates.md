@@ -72,7 +72,7 @@ taken literally; there are no escape sequences. Filters chain left to right.
 |:---------|:-------|
 | `request.method` | The request method. |
 | `request.path` | The request path. |
-| `request.query.<name>` | A query parameter. A key repeated in the URL renders comma-joined, in order (`?color=red&color=green` gives `red,green`), the value a `query` predicate matches. |
+| `request.query.<name>` | A query parameter. A key repeated in the URL renders comma-joined, in order (`?color=red&color=green` gives `red,green`); a `query` predicate matches each value instead ([Repeated keys](../mountebank/predicates.md#repeated-keys)). |
 | `request.header '<Name>'` | A request header, matched case-insensitively. For a repeated header, the first value. |
 | `request.json '<path>'` | A value from the JSON request body. The path starts with `$` and uses `.key` and `[index]` segments only (`$.items[0].id`). Objects and arrays render as JSON. |
 | `now [offset='±N<unit>'] [format='<strftime>']` | The current UTC time. `offset` units are `s`, `m`, `h`, `d`; the default format is RFC 3339. |

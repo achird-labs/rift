@@ -44,7 +44,13 @@ impl CopySource {
             },
             CopySource::Nested(map) => {
                 if let Some(param_name) = map.get("query") {
-                    request.query.get(param_name).cloned()
+                    // A repeated key gives its first value, as Mountebank's `getFrom` does for a
+                    // multi-valued request field (issue #1553).
+                    request
+                        .query
+                        .get(param_name)
+                        .and_then(|v| v.first())
+                        .cloned()
                 } else if let Some(header_name) = map.get("headers") {
                     // Case-insensitive header lookup since HTTP headers are case-insensitive
                     let lower_name = header_name.to_lowercase();
@@ -233,7 +239,7 @@ mod tests {
     #[test]
     fn test_copy_source_nested() {
         let mut query = HashMap::new();
-        query.insert("name".to_string(), "Alice".to_string());
+        query.insert("name".to_string(), vec!["Alice".to_string()]);
 
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
@@ -264,7 +270,7 @@ mod tests {
     #[test]
     fn test_apply_copy_behaviors() {
         let mut query = HashMap::new();
-        query.insert("name".to_string(), "Alice".to_string());
+        query.insert("name".to_string(), vec!["Alice".to_string()]);
 
         let request = RequestContext {
             method: "GET".to_string(),
@@ -310,7 +316,7 @@ mod tests {
     #[test]
     fn copy_repairs_a_header_value_it_rewrote_from_request_data() {
         let mut query = HashMap::new();
-        query.insert("q".to_string(), "one\rtwo".to_string());
+        query.insert("q".to_string(), vec!["one\rtwo".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
@@ -400,7 +406,7 @@ mod tests {
     #[test]
     fn every_repaired_value_of_a_multi_value_header_names_the_same_stub() {
         let mut query = HashMap::new();
-        query.insert("q".to_string(), "one\rtwo".to_string());
+        query.insert("q".to_string(), vec!["one\rtwo".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
@@ -463,7 +469,7 @@ mod tests {
     #[test]
     fn copy_repair_warning_names_the_stub() {
         let mut query = HashMap::new();
-        query.insert("q".to_string(), "one\rtwo".to_string());
+        query.insert("q".to_string(), vec!["one\rtwo".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
@@ -519,7 +525,7 @@ mod tests {
     #[test]
     fn copy_repairs_the_substituted_text_but_not_a_literal_control_char_beside_it() {
         let mut query = HashMap::new();
-        query.insert("q".to_string(), "one\rtwo".to_string());
+        query.insert("q".to_string(), vec!["one\rtwo".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
@@ -560,7 +566,7 @@ mod tests {
     #[test]
     fn copy_leaves_a_header_value_without_the_token_untouched() {
         let mut query = HashMap::new();
-        query.insert("q".to_string(), "hi".to_string());
+        query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
@@ -636,7 +642,7 @@ mod tests {
     #[test]
     fn copy_preserves_multi_value_headers_and_substitutes_each() {
         let mut query = HashMap::new();
-        query.insert("q".to_string(), "hi".to_string());
+        query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
@@ -982,7 +988,7 @@ mod tests {
         ]))
         .expect("the copies parse");
         let mut request = request_with_body("ab-cd");
-        request.query.insert("i".to_string(), "2".to_string());
+        request.query.insert("i".to_string(), vec!["2".to_string()]);
         let served = apply_copy_behaviors(
             "$C[${I}]",
             &mut HashMap::new(),

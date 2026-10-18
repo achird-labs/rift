@@ -1,0 +1,1806 @@
+{
+  "source": "issue #1553 (Mountebank predicates.js array semantics; mbTest docs /docs/api/predicates#array)",
+  "cases": [
+    {
+      "name": "repeated query: equals with an array, both orders, subset and extras",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "key": [
+                          "first",
+                          "second"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: deepEquals with an array needs the same values in any order and no other keys",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "query": {
+                        "key": [
+                          "first",
+                          "second"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: equals with a scalar matches any value of a repeated key",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "key": "first"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: deepEquals with a scalar needs a single value",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "query": {
+                        "key": "first"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: a one-element array does not match a single value",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "key": [
+                          "first"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: deepEquals counts duplicate values",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "query": {
+                        "key": [
+                          "first",
+                          "first"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: a comma-joined scalar matches only a literal comma value",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "key": "first,second"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: contains with an array",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "contains": {
+                      "query": {
+                        "key": [
+                          "fir",
+                          "sec"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: startsWith with a scalar matches any value",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "query": {
+                        "key": "sec"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: matches with an array of patterns",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "query": {
+                        "key": [
+                          "^f",
+                          "^s"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: matches anchors each value, not the joined string",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "query": {
+                        "key": "^first$"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: exists holds for a repeated key",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "query": {
+                        "key": true
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: not equals sees every value",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "not": {
+                      "equals": {
+                        "query": {
+                          "key": "first"
+                        }
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: equals with an array is case-insensitive by default",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "key": [
+                          "FIRST",
+                          "SECOND"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: equals with an array honours caseSensitive",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "key": [
+                          "FIRST",
+                          "SECOND"
+                        ]
+                      }
+                    },
+                    "caseSensitive": true
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: except applies to every value and every expected element",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "key": [
+                          "first",
+                          "second"
+                        ]
+                      }
+                    },
+                    "except": "\\d+"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first&key=second&other=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first,second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p?key=first1&key=second2"
+        }
+      ]
+    },
+    {
+      "name": "repeated form key: equals with an array",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "form": {
+                        "key": [
+                          "first",
+                          "second"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/f",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/f",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "key=first"
+        }
+      ]
+    },
+    {
+      "name": "repeated form key: deepEquals with an array in another order",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "form": {
+                        "key": [
+                          "second",
+                          "first"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/f",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/f",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "key=first"
+        }
+      ]
+    },
+    {
+      "name": "repeated form key: equals with a scalar",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "form": {
+                        "key": "first"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/f",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/f",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "key=first"
+        }
+      ]
+    },
+    {
+      "name": "repeated form key: a comma-joined scalar",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "form": {
+                        "key": "first,second"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/f",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/f",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "key=first"
+        }
+      ]
+    },
+    {
+      "name": "repeated header: equals with an array",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "headers": {
+                        "X-K": [
+                          "first",
+                          "second"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "hit"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/h",
+          "headers": [
+            [
+              "X-K",
+              "first"
+            ],
+            [
+              "X-K",
+              "second"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/h",
+          "headers": [
+            [
+              "X-K",
+              "second"
+            ],
+            [
+              "X-K",
+              "first"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/h",
+          "headers": [
+            [
+              "X-K",
+              "first"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "repeated query: the Mountebank docs array example",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "query": {
+                        "key": [
+                          "first",
+                          "second"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "Entire array matched"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "key": [
+                          "first",
+                          "second"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "Subset of array matched"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "key": "first"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "A field in the array matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/path?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/path?key=second&key=first&key=third"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/path?key=first&key=third"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: recorded request keeps every value",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/r?key=first&key=second&one=1"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: predicateGenerators record an array and replay it",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "backend"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "query": true
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/g?key=first&key=second"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4546"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/g?key=second&key=first"
+        }
+      ]
+    },
+    {
+      "name": "repeated query: copy takes the first value of a repeated key",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "key=${K}"
+                    },
+                    "_behaviors": {
+                      "copy": [
+                        {
+                          "from": {
+                            "query": "key"
+                          },
+                          "into": "${K}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/c?key=first&key=second"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/c?key=second&key=first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/c?key=only"
+        }
+      ]
+    },
+    {
+      "name": "repeated header: the recorded request keeps every value",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/r",
+          "headers": [
+            [
+              "X-A",
+              "1"
+            ],
+            [
+              "X-A",
+              "2"
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

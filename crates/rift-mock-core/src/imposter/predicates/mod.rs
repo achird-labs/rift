@@ -4,11 +4,10 @@
 //! Also supports requestFrom, ip, and form fields.
 
 use crate::behaviors::{
-    LazyJson, LazyXmlDom, Selection, fold_xpath_selector, json_node_text, jsonpath_selection,
-    xpath_selection,
+    LazyJson, LazyXmlDom, Selection, fold_xpath_selector, jsonpath_selection, xpath_selection,
 };
 use crate::imposter::types::{Predicate, PredicateOperation, PredicateSelector};
-use crate::util::FastMap;
+use crate::util::MultiValueMap;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
@@ -91,8 +90,7 @@ where
     // per request (before the stub scan) and calls `stub_matches_inner` directly (issues #290, #480).
     let body_json = LazyJson::new(body);
     let query_map = parse_query(query);
-    let form_fast: Option<FastMap<String, String>> =
-        form.map(|f| f.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    let form_fast = form.map(one_value_per_key);
     // Standalone callers of this wrapper aren't a per-request hot loop, so there's no shared DOM
     // to thread in — `None` here just means an XPath predicate falls back to its own per-call parse
     // (correct, just not cached; see `stub_matches_inner`).
@@ -130,7 +128,7 @@ pub(crate) fn stub_matches_inner<H>(
     // Concretely `FastMap` — always sourced from `Imposter::parse_form_data` (issue #704) on the
     // request hot path; unlike `headers`, this can't be generic (a bare `None` form argument, the
     // common non-form-predicate case, gives type inference nothing to pin the hasher to).
-    form: Option<&FastMap<String, String>>,
+    form: Option<&MultiValueMap>,
     imposter_port: u16,
     body_json: &LazyJson<'_>,
     // The once-per-request lazily-parsed XML DOM (issue #711): `Some` on the request hot path
@@ -140,7 +138,7 @@ pub(crate) fn stub_matches_inner<H>(
     // callers (the `stub_matches` wrapper, tests) — they fall back to a per-call parse.
     xml_dom: Option<&LazyXmlDom<'_>>,
     // Always sourced from `parse_query`/`parse_query_string` (issue #704); same reasoning as `form`.
-    query_map: Option<&FastMap<String, String>>,
+    query_map: Option<&MultiValueMap>,
 ) -> anyhow::Result<bool>
 where
     H: RequestHeaders,
@@ -187,11 +185,11 @@ pub(crate) fn stub_matches_explained<H>(
     body: Option<&str>,
     request_from: Option<&str>,
     client_ip: Option<&str>,
-    form: Option<&FastMap<String, String>>,
+    form: Option<&MultiValueMap>,
     imposter_port: u16,
     body_json: &LazyJson<'_>,
     xml_dom: Option<&LazyXmlDom<'_>>,
-    query_map: Option<&FastMap<String, String>>,
+    query_map: Option<&MultiValueMap>,
 ) -> anyhow::Result<Option<usize>>
 where
     H: RequestHeaders,
@@ -218,9 +216,18 @@ where
     Ok(None)
 }
 
-/// Parse query string for predicate matching, URL-decoding both keys and values
-pub fn parse_query(query: Option<&str>) -> FastMap<String, String> {
-    query.map_or_else(FastMap::default, parse_query_string)
+/// Parse query string for predicate matching, URL-decoding both keys and values. A repeated key
+/// keeps every value (issue #1553).
+pub fn parse_query(query: Option<&str>) -> MultiValueMap {
+    query.map_or_else(MultiValueMap::default, parse_query_string)
+}
+
+/// A caller's one-value-per-key form, as the engine's multi-valued shape: the public
+/// [`stub_matches`]/[`predicate_matches`] take a form whose keys each carry one value.
+fn one_value_per_key(form: &HashMap<String, String>) -> MultiValueMap {
+    form.iter()
+        .map(|(k, v)| (k.clone(), vec![v.clone()]))
+        .collect()
 }
 
 // Allocation-free ASCII case-insensitive string tests (issue #480). The previous
@@ -276,8 +283,7 @@ where
     // request and calls `predicate_matches_inner` directly with the shared parses (issues #290, #480).
     let body_json = LazyJson::new(body);
     let query_map = parse_query(query);
-    let form_fast: Option<FastMap<String, String>> =
-        form.map(|f| f.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    let form_fast = form.map(one_value_per_key);
     // Not the request hot loop — no shared DOM to thread in (see `stub_matches` for the same
     // reasoning); an XPath predicate degrades to its own per-call parse.
     predicate_matches_inner(
@@ -317,13 +323,13 @@ pub(crate) fn predicate_matches_inner<H>(
     request_from: Option<&str>,
     client_ip: Option<&str>,
     // Concretely `FastMap` — see `stub_matches_inner`.
-    form: Option<&FastMap<String, String>>,
+    form: Option<&MultiValueMap>,
     imposter_port: u16,
     body_json: &LazyJson<'_>,
     // The once-per-request lazily-parsed XML DOM (issue #711) — see `stub_matches_inner`.
     xml_dom: Option<&LazyXmlDom<'_>>,
     // Concretely `FastMap` — see `stub_matches_inner`.
-    query_map: Option<&FastMap<String, String>>,
+    query_map: Option<&MultiValueMap>,
 ) -> anyhow::Result<bool>
 where
     H: RequestHeaders,
@@ -400,7 +406,7 @@ where
     // Build request context for field access. Use the once-per-request parse when the caller
     // threaded it (hot path / standalone wrappers); only parse locally as a fallback (issue #480).
     let parsed_query;
-    let query_map: &FastMap<String, String> = match query_map {
+    let query_map: &MultiValueMap = match query_map {
         Some(q) => q,
         None => {
             parsed_query = parse_query(query);
@@ -571,21 +577,11 @@ where
             ),
         }
     };
-    let sort_key = |text: &str| {
-        let text = apply_except(text);
-        if case_sensitive {
-            text.into_owned()
-        } else {
-            text.to_ascii_lowercase()
-        }
-    };
     let evaluate = |kind: LeafKind, fields: &HashMap<String, serde_json::Value>| -> bool {
         match &selection {
             None => leaf(kind, fields, body_str),
             Some(Selection::One(value)) => leaf(kind, fields, value),
-            Some(Selection::Many(values)) => {
-                holds_for_any_selected(kind, fields, values, &sort_key, &leaf)
-            }
+            Some(Selection::Many(values)) => holds_for_any_selected(kind, fields, values, &leaf),
         }
     };
 
@@ -668,14 +664,9 @@ where
                 let mb_request = MountebankRequest {
                     method: method.to_string(),
                     path: path.to_string(),
-                    // Reuse the once-per-request query map instead of re-parsing (issue #480).
-                    // `MountebankRequest`'s fields are the fixed std-hasher scripting boundary
-                    // (out of scope for #704), so a hasher-changing map is copied across rather
-                    // than moved.
-                    query: query_map
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
+                    // Reuse the once-per-request query map instead of re-parsing (issue #480). A
+                    // script sees a repeated key comma-joined (`docs/mountebank/responses.md`).
+                    query: crate::util::comma_joined(query_map),
                     // `MountebankRequest.headers` is the fixed single-value scripting boundary
                     // (out of scope for #704/#994), so a repeated header exposes only its first
                     // value to an inject script.
@@ -695,7 +686,7 @@ where
                     // for a non-empty body, as Mountebank builds `request.form`.
                     form: form
                         .filter(|_| body.is_some_and(|b| !b.is_empty()))
-                        .map(|f| f.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+                        .map(crate::util::comma_joined),
                 };
                 execute_predicate_inject(inject_fn, &mb_request, imposter_port)
             }
@@ -711,6 +702,7 @@ where
     }
 }
 
+pub(crate) mod arrays;
 mod fields;
 pub(crate) mod json;
 pub(crate) mod regex_cache;
@@ -747,15 +739,14 @@ enum LeafKind {
 
 /// A leaf predicate whose selector picked several values (issue #1257), as Mountebank's
 /// predicates.js evaluates it: a scalar expected `body` holds when any value satisfies it; an array
-/// expected `body` needs every expected element to be satisfied by some value; `deepEquals` compares
-/// the sorted list element by element and so needs an array of the same length. The other fields
-/// do not depend on the selection and are checked with each candidate as usual. `sort_key` orders
-/// both sides of a `deepEquals` the way the comparison sees them (`except` removed, case folded).
+/// expected `body` needs every expected element to be satisfied by some value; `deepEquals` needs
+/// an array holding the same values as a multiset. The rule lives in [`arrays`], shared with repeated
+/// query, form and header keys (issue #1553). The other fields do not depend on the selection and
+/// are checked with each candidate as usual.
 fn holds_for_any_selected(
     kind: LeafKind,
     fields: &HashMap<String, serde_json::Value>,
     values: &[String],
-    sort_key: &impl Fn(&str) -> String,
     leaf: &impl Fn(LeafKind, &HashMap<String, serde_json::Value>, &str) -> bool,
 ) -> bool {
     let Some(expected) = fields.get("body") else {
@@ -767,26 +758,17 @@ fn holds_for_any_selected(
         narrowed.insert("body".to_string(), element.clone());
         narrowed
     };
-    match (kind, expected) {
-        (LeafKind::DeepEquals, serde_json::Value::Array(elements)) => {
-            if elements.len() != values.len() {
-                return false;
-            }
-            let mut elements: Vec<&serde_json::Value> = elements.iter().collect();
-            elements.sort_by_cached_key(|element| sort_key(&json_node_text(element)));
-            let mut values: Vec<&String> = values.iter().collect();
-            values.sort_by_cached_key(|value| sort_key(value));
-            elements
-                .iter()
-                .zip(values)
-                .all(|(element, value)| leaf(kind, &expecting(element), value))
+    let test = |element: &serde_json::Value, value: &String| {
+        // A scalar expectation is tested as written; only an array's elements need narrowing.
+        if std::ptr::eq(element, expected) {
+            leaf(kind, fields, value)
+        } else {
+            leaf(kind, &expecting(element), value)
         }
-        (LeafKind::DeepEquals, _) => false,
-        (_, serde_json::Value::Array(elements)) => elements.iter().all(|element| {
-            let narrowed = expecting(element);
-            values.iter().any(|value| leaf(kind, &narrowed, value))
-        }),
-        _ => values.iter().any(|value| leaf(kind, fields, value)),
+    };
+    match kind {
+        LeafKind::DeepEquals => arrays::deep_equals_array(expected, values, test),
+        _ => arrays::satisfied_by_array(expected, values, test),
     }
 }
 
@@ -824,37 +806,33 @@ mod tests {
     }
 
     // =========================================================================
-    // Multi-valued query parameters (Issue #83 - fixed)
-    // Multiple values for the same key are comma-joined: ?key=first&key=second → "first,second"
+    // Multi-valued query parameters (issues #83, #1553)
+    // A repeated key keeps every value, as Mountebank's `querystring.parse` builds an array:
+    // ?key=first&key=second → ["first", "second"]. #83 asked for Mountebank's any-of matching; the
+    // comma-join it got (`"first,second"` matched) did not deliver it.
     // =========================================================================
 
     #[test]
-    fn test_parse_query_string_multi_valued_comma_joined() {
+    fn test_parse_query_string_multi_valued_keeps_every_value() {
         let result = parse_query_string("key=first&key=second");
 
         assert_eq!(result.len(), 1);
         assert_eq!(
             result.get("key"),
-            Some(&"first,second".to_string()),
-            "Multi-valued query params should be comma-joined"
+            Some(&vec!["first".to_string(), "second".to_string()]),
+            "a repeated key keeps every value in order"
         );
     }
 
-    #[test]
-    fn test_equals_query_multi_valued_param() {
-        // equals { query: { key: "first,second" } } should match ?key=first&key=second
+    fn query_equals(expected: serde_json::Value, query: &str) -> bool {
         let fields: HashMap<String, serde_json::Value> =
-            [("query".to_string(), json!({"key": "first,second"}))]
-                .into_iter()
-                .collect();
-
+            [("query".to_string(), expected)].into_iter().collect();
         let pred = make_predicate(PredicateOperation::Equals(fields));
-
-        let result = predicate_matches(
+        predicate_matches(
             &pred,
             "GET",
             "/test",
-            Some("key=first&key=second"),
+            Some(query),
             &empty_headers(),
             None,
             None,
@@ -862,12 +840,171 @@ mod tests {
             None,
             0,
         )
-        .unwrap();
+        .unwrap()
+    }
 
+    #[test]
+    fn test_equals_query_multi_valued_param() {
+        // Inverted by #1553: the comma-joined spelling no longer matches two values, which
+        // Mountebank never matched; each value is matched on its own instead.
         assert!(
-            result,
-            "equals should match comma-joined multi-valued query params"
+            !query_equals(json!({"key": "first,second"}), "key=first&key=second"),
+            "the comma-joined spelling must not match two separate values"
         );
+        assert!(query_equals(
+            json!({"key": "first,second"}),
+            "key=first,second"
+        ));
+        assert!(query_equals(
+            json!({"key": "first"}),
+            "key=first&key=second"
+        ));
+        assert!(query_equals(
+            json!({"key": "second"}),
+            "key=first&key=second"
+        ));
+        assert!(query_equals(
+            json!({"key": ["second", "first"]}),
+            "key=first&key=second"
+        ));
+    }
+
+    /// Whether the predicate JSON `predicate` matches a GET with `query` and `headers`.
+    fn json_predicate_matches(
+        predicate: serde_json::Value,
+        query: &str,
+        headers: &[(&str, &str)],
+    ) -> bool {
+        let pred: Predicate = serde_json::from_value(predicate).expect("predicate");
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for (k, v) in headers {
+            map.entry((*k).to_string())
+                .or_default()
+                .push((*v).to_string());
+        }
+        predicate_matches(
+            &pred,
+            "GET",
+            "/t",
+            Some(query),
+            &map,
+            None,
+            None,
+            None,
+            None,
+            0,
+        )
+        .unwrap()
+    }
+
+    // Issue #1553: `except` and case folding apply to every value of a repeated key, on both sides.
+    #[test]
+    fn except_and_case_folding_apply_to_each_value_of_a_repeated_key() {
+        let q = "key=first1&key=second2";
+        assert!(json_predicate_matches(
+            json!({"equals": {"query": {"key": ["FIRST", "Second"]}}, "except": "\\d+"}),
+            q,
+            &[]
+        ));
+        assert!(json_predicate_matches(
+            json!({"deepEquals": {"query": {"key": ["second", "first"]}}, "except": "\\d+"}),
+            q,
+            &[]
+        ));
+        assert!(!json_predicate_matches(
+            json!({"equals": {"query": {"key": ["FIRST", "second"]}}, "except": "\\d+", "caseSensitive": true}),
+            q,
+            &[]
+        ));
+        assert!(json_predicate_matches(
+            json!({"matches": {"query": {"key": ["^f", "^s"]}}}),
+            q,
+            &[]
+        ));
+        assert!(!json_predicate_matches(
+            json!({"matches": {"query": {"key": ["^f", "^t"]}}}),
+            q,
+            &[]
+        ));
+    }
+
+    // Issue #1553: `exists` over a repeated key holds outright for a truthy expectation
+    // (`predicates.js` `onlyActualIsArray`), and a falsy one holds when some value is empty.
+    #[test]
+    fn exists_over_a_repeated_key() {
+        assert!(json_predicate_matches(
+            json!({"exists": {"query": {"key": true}}}),
+            "key=&key=",
+            &[]
+        ));
+        assert!(json_predicate_matches(
+            json!({"exists": {"query": {"key": false}}}),
+            "key=a&key=",
+            &[]
+        ));
+        assert!(!json_predicate_matches(
+            json!({"exists": {"query": {"key": false}}}),
+            "key=a&key=b",
+            &[]
+        ));
+    }
+
+    // Issue #1553: the `deepEquals` multiset counts duplicates, and the key set must still agree.
+    #[test]
+    fn deep_equals_over_a_repeated_key_counts_duplicates_and_keys() {
+        let deep = |v: serde_json::Value| json!({"deepEquals": {"query": {"key": v}}});
+        assert!(json_predicate_matches(
+            deep(json!(["first", "first"])),
+            "key=first&key=first",
+            &[]
+        ));
+        assert!(!json_predicate_matches(
+            deep(json!(["first", "second"])),
+            "key=first&key=first",
+            &[]
+        ));
+        assert!(!json_predicate_matches(
+            deep(json!(["first", "second"])),
+            "key=first&key=second&other=1",
+            &[]
+        ));
+        // A one-element array is not a key sent once, nor the reverse.
+        assert!(!json_predicate_matches(
+            deep(json!(["first"])),
+            "key=first",
+            &[]
+        ));
+        assert!(!json_predicate_matches(
+            deep(json!("first")),
+            "key=first&key=first",
+            &[]
+        ));
+    }
+
+    // Issue #1553: a repeated header now takes an array expectation, with the same rule.
+    #[test]
+    fn an_array_expectation_over_a_repeated_header() {
+        let headers = [("X-K", "first"), ("X-K", "second")];
+        assert!(json_predicate_matches(
+            json!({"equals": {"headers": {"x-k": ["second", "first"]}}}),
+            "",
+            &headers
+        ));
+        assert!(json_predicate_matches(
+            json!({"deepEquals": {"headers": {"X-K": ["second", "first"]}}}),
+            "",
+            &headers
+        ));
+        assert!(!json_predicate_matches(
+            json!({"deepEquals": {"headers": {"X-K": "first"}}}),
+            "",
+            &headers
+        ));
+        assert!(!json_predicate_matches(
+            json!({"equals": {"headers": {"X-K": ["first"]}}}),
+            "",
+            &[("X-K", "first")]
+        ));
     }
 
     // =========================================================================
@@ -881,7 +1018,7 @@ mod tests {
 
         assert_eq!(
             result.get("flag"),
-            Some(&String::new()),
+            Some(&vec![String::new()]),
             "Bare query param 'flag' should be present with empty value"
         );
     }
@@ -890,8 +1027,8 @@ mod tests {
     fn test_parse_query_string_mixed_bare_and_valued() {
         let result = parse_query_string("a=1&flag&b=2");
 
-        assert_eq!(result.get("a"), Some(&"1".to_string()));
-        assert_eq!(result.get("b"), Some(&"2".to_string()));
+        assert_eq!(result.get("a"), Some(&vec!["1".to_string()]));
+        assert_eq!(result.get("b"), Some(&vec!["2".to_string()]));
         assert!(
             result.contains_key("flag"),
             "Bare param 'flag' should be present in mixed query string"
@@ -2689,8 +2826,8 @@ mod tests {
     fn test_parse_query_string_url_encoded() {
         // Already fixed in #70 - verify URL decoding works
         let result = parse_query_string("key=hello%20world&name=caf%C3%A9");
-        assert_eq!(result.get("key"), Some(&"hello world".to_string()));
-        assert_eq!(result.get("name"), Some(&"café".to_string()));
+        assert_eq!(result.get("key"), Some(&vec!["hello world".to_string()]));
+        assert_eq!(result.get("name"), Some(&vec!["café".to_string()]));
     }
 
     #[test]
@@ -2707,22 +2844,22 @@ mod tests {
         let value = parse_query_string("k=%FF");
         assert_eq!(
             value.get("k"),
-            Some(&"%FF".to_string()),
+            Some(&vec!["%FF".to_string()]),
             "an undecodable value must pass through raw, not become empty"
         );
 
         let key = parse_query_string("%FF=v");
         assert_eq!(
             key.get("%FF"),
-            Some(&"v".to_string()),
+            Some(&vec!["v".to_string()]),
             "an undecodable key must pass through raw, not collapse to an empty key"
         );
 
         // The collision the fix exists to prevent: two *different* undecodable keys both blanked
         // to "" used to comma-join their unrelated values into a single bogus entry.
         let collision = parse_query_string("%FF=a&%FE=b");
-        assert_eq!(collision.get("%FF"), Some(&"a".to_string()));
-        assert_eq!(collision.get("%FE"), Some(&"b".to_string()));
+        assert_eq!(collision.get("%FF"), Some(&vec!["a".to_string()]));
+        assert_eq!(collision.get("%FE"), Some(&vec!["b".to_string()]));
         assert_eq!(
             collision.len(),
             2,

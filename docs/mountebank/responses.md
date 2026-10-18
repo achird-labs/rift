@@ -221,7 +221,7 @@ substitutes them into the response **body** and **header values** before any beh
 | `${request.path}` | Request path |
 | `${request.method}` | HTTP method |
 | `${request.body}` | Raw request body |
-| `${request.query.<name>}` | Query parameter `<name>`. A key repeated in the URL renders **comma-joined, in order** — `?color=red&color=green` gives `red,green` — the same value a `query` predicate matches against |
+| `${request.query.<name>}` | Query parameter `<name>`. A key repeated in the URL renders **comma-joined, in order** — `?color=red&color=green` gives `red,green`; a `query` predicate matches each value instead ([Repeated keys](predicates.md#repeated-keys)) |
 | `${request.headers.<name>}` | Request header `<name>` (case-insensitive) |
 | `${request.pathParams.<name>}` | Path parameter `<name>` captured from the stub's `routePattern` |
 
@@ -709,8 +709,8 @@ request.form      // { a: "1" } - the parsed body, only for a non-empty applicat
 `requestFrom` and `ip` are the values the `requestFrom` and `ip` predicates match. On the default
 bind address an IPv4 client is `127.0.0.1` in Rift and `::ffff:127.0.0.1` in Mountebank — see
 [Client address](differences.md#client-address). A query or form key the client repeated reaches
-the script as one comma-joined string (`"1,2"`), where Mountebank gives an array, as it does for
-predicates ([differences](differences.md#exists-with-an-object-over-an-array)). The same request object reaches a predicate
+the script as one comma-joined string (`"1,2"`), where Mountebank gives an array
+([differences](differences.md#scripts-and-templates-see-a-repeated-key-comma-joined)). The same request object reaches a predicate
 `inject`, a proxy's `predicateGenerators` `inject`, `decorate` and `shellTransform`'s `MB_REQUEST`.
 
 Rift also accepts Mountebank's current `function (config) { ... }` form: `config.request`,

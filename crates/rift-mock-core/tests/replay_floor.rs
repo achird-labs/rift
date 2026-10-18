@@ -109,7 +109,14 @@ const LEDGER: &[(&str, &str, usize)] = &[
         "deny_unknown_fields",
         0,
     ),
-    ("crates/rift-mock-core/src/imposter/types.rs", "untagged", 7),
+    (
+        "crates/rift-mock-core/src/imposter/types.rs",
+        "untagged",
+        // #1553 `multi_value_query` (a recorded request's `query`, not stub config): `Shown` is
+        // serialize-only, and `OneOrMany` widens the decode from a string to a string or an array,
+        // so every journal an older engine wrote still reads. No refusal.
+        9,
+    ),
     ("crates/rift-mock-core/src/imposter/types.rs", "tag attr", 1),
     ("crates/rift-mock-core/src/imposter/types.rs", "flatten", 2),
     (
@@ -132,7 +139,9 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // response holds one type, fixture in issue_1267_replay_decode.rs).
         // #1550 `refuse_proxy_to_path`: an admission check (Admission::Checked only, re-run in
         // admission_check_stub, fixtures in issue_1267_replay_decode.rs); its call and its parse.
-        24,
+        // #1553 `multi_value_query::deserialize`: the map decode a string-valued query already
+        // went through, now over string-or-array values (see `untagged`). No new refusal.
+        25,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",

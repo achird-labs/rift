@@ -27,6 +27,20 @@ record.
 
 ### Changed
 
+- **A repeated query or form key is matched value by value, as in Mountebank** (#1553):
+  `equals {"key": "first"}` now matches `?key=first&key=second`, an array expectation needs each of
+  its elements among the values (any order, other values allowed), `deepEquals` needs the same
+  values as a multiset, and an array expectation on a repeated header works. A predicate written
+  against the old comma-joined form (`"first,second"`) no longer matches repeated keys; write the
+  array instead. Recorded requests (`GET /imposters/:port`, verify) show a repeated query key as an
+  array, `predicateGenerators` record one, so a recorded stub replays to the same values in any
+  order, and `copy` from a repeated query key takes its first value. A stub an older engine
+  recorded from a repeated key holds the joined string, so it no longer replays to that request:
+  re-record it, or replace the value with the array. Templates and scripts still see
+  the values comma-joined. For embedders, `parse_query_string` now returns every value of each key
+  (`MultiValueMap`), and `RecordedRequest.query` is `HashMap<String, Vec<String>>`; a journal
+  written by an older engine still decodes.
+
 - **An unrecognised `fault` is ignored, as in Mountebank** (#1556). It used to answer `500 Unknown
   fault`; it now serves an empty response completed by the imposter's `defaultResponse`, and
   `repeat` still applies. Rift warns at load, and rift-lint reports it as the warning `W022`.

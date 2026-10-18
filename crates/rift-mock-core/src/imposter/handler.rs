@@ -979,7 +979,8 @@ async fn handle_request_inner(
             method: method.clone(),
             path: path.clone(),
             // `RecordedRequest.query` is the fixed std-hasher journal/serde boundary (out of scope
-            // for #704); `parse_query_string` returns `FastMap`, so convert at this edge.
+            // for #704); `parse_query_string` returns `FastMap`, so convert at this edge. Every
+            // value of a repeated key is kept, as Mountebank records it (issue #1553).
             query: parse_query_string(&query_str).into_iter().collect(),
             // `RecordedRequest.headers` is the fixed std-hasher journal/serde boundary (out of
             // scope for #704) — the request-scoped `FastMap` is converted here, at the one place
@@ -1345,8 +1346,9 @@ async fn handle_request_inner(
                 method: method.clone(),
                 path: path.clone(),
                 // `MountebankRequest`'s fields are the fixed std-hasher scripting boundary (out of
-                // scope for #704), so the `FastMap`-backed maps are copied across here.
-                query: parse_query_string(&query_str).into_iter().collect(),
+                // scope for #704), so the `FastMap`-backed maps are copied across here. A script
+                // sees a repeated key comma-joined (`docs/mountebank/responses.md`).
+                query: crate::util::comma_joined(&parse_query_string(&query_str)),
                 // `MountebankRequest.headers` is the fixed single-value scripting boundary (out
                 // of scope for #704/#1025), so a repeated header exposes only its first value to
                 // an inject function.
@@ -1361,7 +1363,7 @@ async fn handle_request_inner(
                 request_from: Some(client_addr.to_string()),
                 ip: Some(client_addr.ip().to_string()),
                 form: Imposter::request_form(&request_headers, body_string.as_deref())
-                    .map(|form| form.into_iter().collect()),
+                    .map(|form| crate::util::comma_joined(&form)),
             };
 
             match execute_mountebank_inject_bounded(
@@ -1544,8 +1546,9 @@ async fn handle_request_inner(
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or(serde_json::Value::Null),
                 // `ScriptRequest`'s fields are the fixed std-hasher scripting boundary (out of
-                // scope for #704), so the `FastMap`-backed maps are copied across here.
-                query: parse_query_string(&query_str).into_iter().collect(),
+                // scope for #704), so the `FastMap`-backed maps are copied across here, a repeated
+                // key comma-joined.
+                query: crate::util::comma_joined(&parse_query_string(&query_str)),
                 // Issue #433: populate path params from the matched stub's route pattern, if any.
                 path_params: stub_state
                     .stub

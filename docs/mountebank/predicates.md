@@ -19,18 +19,30 @@ Predicates can match on these request fields:
 | `requestFrom` | Client address and port | `127.0.0.1:53412` |
 | `ip` | Client IP address | `127.0.0.1` |
 
-### Repeated request headers
+### Repeated keys
 
-A client may send the same header name more than once. Such a header matches if **any** of its
-values satisfies the predicate — so a request carrying
+A client may send the same query key, form key or header name more than once. The field then holds
+every value, in the order sent, and is matched value by value, as in Mountebank:
 
-```
-X-Test: first
-X-Test: second
-```
-
-matches `{"equals": {"headers": {"X-Test": "first"}}}` *and*
-`{"equals": {"headers": {"X-Test": "second"}}}`.
+- **A scalar expectation holds when any value satisfies it.** A request carrying
+  `?key=first&key=second` (or two `X-Test` headers, `first` and `second`) matches
+  `{"equals": {"query": {"key": "first"}}}` *and* `{"equals": {"query": {"key": "second"}}}`, and
+  `{"startsWith": {"query": {"key": "sec"}}}`.
+- **An array expectation needs each of its elements among the values**, in any order, with other
+  values allowed. `{"equals": {"query": {"key": ["second", "first"]}}}` matches
+  `?key=first&key=second` and `?key=first&key=second&key=third`, but not `?key=first`.
+- **`deepEquals` compares the values as a multiset.** `{"deepEquals": {"query": {"key": ["second",
+  "first"]}}}` matches `?key=first&key=second` in either order, but not with a third value, and
+  `["first", "first"]` matches only a key sent twice as `first`. A scalar never `deepEquals` a
+  repeated key.
+- **A one-element array is not a key sent once.** `{"equals": {"query": {"key": ["first"]}}}` does
+  not match `?key=first`, as in Mountebank, which is what lets its documentation's example tell
+  "the entire array", "a subset" and "one field" apart.
+- **`except` and case folding apply to each value** and to each expected element.
+- **A comma does not split a value.** `?key=first,second` is one value, `first,second`; it does
+  not match `["first", "second"]`, and `"first,second"` does not match `?key=first&key=second`.
+  Releases before #1553 joined a repeated key into one comma-separated string, so a predicate
+  written against that form (`"first,second"`) needs the array instead.
 
 Two consequences worth knowing:
 
@@ -40,7 +52,9 @@ Two consequences worth knowing:
 - **Single-valued contexts take the first value.** `inject` functions, `_rift.script`,
   `predicateGenerators`, the debug endpoint, the `copy` / `lookup` / `decorate` / `shellTransform`
   behaviors and `${request.headers.*}` template substitution all receive one value per header
-  name — the first one sent.
+  name — the first one sent. `copy` and `lookup` from a repeated query key also take its first
+  value, as Mountebank's do; scripts and templates see a repeated query or form key comma-joined
+  (see [Differences](differences.md#scripts-and-templates-see-a-repeated-key-comma-joined)).
 
 Only a value that is **not valid UTF-8** is affected — the check is UTF-8 validity, not ASCII
 (#1048). A header carrying non-ASCII UTF-8, such as `X-User-Name: José` or
@@ -216,9 +230,9 @@ an empty body, a request without a form (`form` exists only for a non-empty urle
 parent that is `""`, `null`, `0` or `false` fails it, whether it expects `true` or `false`. A body
 that is not JSON has no fields, so everything in it is absent.
 
-A repeated header or a JSON array exists for `true`; for `false` it holds when one of the values is
-empty (a header value after an empty first one replaces it, as in Mountebank). A repeated query or
-form key is one comma-joined value in Rift, so it is present unless every value is missing. A JSON array tested against an object expectation holds when
+A repeated header, query or form key, or a JSON array exists for `true`; for `false` it holds when
+one of the values is empty (a header value after an empty first one replaces it, as in Mountebank).
+A JSON array tested against an object expectation holds when
 some element satisfies it, which differs from Mountebank — see
 [Differences from Mountebank](differences.md#exists-with-an-object-over-an-array). Body keys are
 compared ignoring case unless `keyCaseSensitive` is set.

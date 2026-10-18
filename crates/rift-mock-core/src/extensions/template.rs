@@ -22,7 +22,7 @@
 //! ```
 
 use crate::util::FastMap;
-use crate::util::parse_query_string;
+use crate::util::{comma_joined, parse_query_string};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -43,9 +43,9 @@ pub struct RequestData {
     pub method: String,
     /// Request path (without query string)
     pub path: String,
-    /// Query parameters parsed from the URL, by the same parser predicates use (issue #1153), so a
-    /// repeated key renders comma-joined exactly as a predicate matched it. Request-scoped —
-    /// `FastMap` (issue #704), which the parser returns directly, so there is no re-hash.
+    /// Query parameters parsed from the URL, by the same parser predicates use (issue #1153), a
+    /// repeated key's values comma-joined in order (`docs/mountebank/responses.md`; predicates
+    /// match each value, issue #1553). Request-scoped — `FastMap` (issue #704).
     pub query: FastMap<String, String>,
     /// Request headers (keys lowercased). Request-scoped — `FastMap` (issue #704).
     pub headers: FastMap<String, String>,
@@ -74,7 +74,7 @@ impl RequestData {
         headers: &std::collections::HashMap<String, Vec<String>, SH>,
         body: Option<&str>,
     ) -> Self {
-        let query = parse_query_string(query_string.unwrap_or(""));
+        let query = comma_joined(&parse_query_string(query_string.unwrap_or("")));
         // Lowercased because that is this map's lookup contract (`${request.headers.x-id}` is
         // matched case-insensitively by lowercasing the token). The collector hands over
         // Title-Case names, which lowercase to exactly the names hyper produced before.
@@ -318,18 +318,16 @@ mod tests {
     #[test]
     fn test_parse_query_string() {
         let params = parse_query_string("name=John&age=30&city=New%20York");
-        assert_eq!(params.get("name"), Some(&"John".to_string()));
-        assert_eq!(params.get("age"), Some(&"30".to_string()));
-        assert_eq!(params.get("city"), Some(&"New York".to_string()));
+        assert_eq!(params.get("name"), Some(&vec!["John".to_string()]));
+        assert_eq!(params.get("age"), Some(&vec!["30".to_string()]));
+        assert_eq!(params.get("city"), Some(&vec!["New York".to_string()]));
     }
 
     // Issue #1153: templates parsed a repeated query key with the orphaned `crate::predicate`
-    // parser, which keeps the *last* value — while predicates, the recorded request and scripts all
-    // use the live parser, which comma-joins every value in order (Mountebank's `stringify`). So a
-    // stub could match on `color = "red,green"` and then render `${request.query.color}` as
-    // `green`. One parser now, so the template sees what the predicate matched.
+    // parser, which keeps the *last* value. One parser now; a template renders a repeated key's
+    // values comma-joined in order, while predicates match each value (issue #1553).
     #[test]
-    fn a_repeated_query_key_renders_comma_joined_as_predicates_see_it() {
+    fn a_repeated_query_key_renders_comma_joined() {
         let headers: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         let data = RequestData::new("GET", "/p", Some("color=red&color=green"), &headers, None);

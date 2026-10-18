@@ -98,32 +98,59 @@ pub fn decode_or_raw(value: &str) -> String {
         .unwrap_or_else(|_| value.to_string())
 }
 
+/// A parsed query string or urlencoded form: every key with all of its values, in request order
+/// (issue #1553). Never holds an empty vector — a key is present only because it was sent.
+pub type MultiValueMap = FastMap<String, Vec<String>>;
+
 /// Parse a raw query string into a map. The one query parser: predicates, the recorded request,
 /// scripts and templates all read a request's query through this, so they cannot disagree about it
 /// (issue #1153 — templates used to parse with a different function and saw `?c=a&c=b` as `b`
-/// while every other surface saw `a,b`).
+/// while every other surface saw `a,b`). The urlencoded form is parsed by the same function.
 ///
 /// URL-decodes keys and values with [`decode_or_raw`]. A bare parameter with no `=` (`?flag`) is a
-/// key with an empty value. A **repeated key is comma-joined in order** — Mountebank's `stringify`
-/// behaviour — so `?color=red&color=green` gives `color => "red,green"`.
+/// key with an empty value. A **repeated key keeps every value, in order** (issue #1553), as
+/// Mountebank's `querystring.parse` builds an array: `?color=red&color=green` gives
+/// `color => ["red", "green"]`. The predicate engine matches each value; the surfaces that still
+/// show one string per key (templates, scripts) read [`comma_joined`].
 #[must_use]
-pub fn parse_query_string(query: &str) -> FastMap<String, String> {
-    let mut map = FastMap::default();
+pub fn parse_query_string(query: &str) -> MultiValueMap {
+    let mut map = MultiValueMap::default();
     for pair in query.split('&').filter(|s| !s.is_empty()) {
         let (key, value) = match pair.split_once('=') {
             Some((k, v)) => (k, v),
             None => (pair, ""),
         };
-        let decoded_key = decode_or_raw(key);
-        let decoded_value = decode_or_raw(value);
-        map.entry(decoded_key)
-            .and_modify(|existing: &mut String| {
-                existing.push(',');
-                existing.push_str(&decoded_value);
-            })
-            .or_insert(decoded_value);
+        map.entry(decode_or_raw(key))
+            .or_default()
+            .push(decode_or_raw(value));
     }
     map
+}
+
+/// The one-string-per-key view of a [`MultiValueMap`]: a repeated key's values comma-joined in
+/// order (`["red", "green"]` → `"red,green"`). What templates, `inject`, `decorate` and
+/// `shellTransform` see, as documented in `docs/mountebank/responses.md`; Mountebank gives those an
+/// array, which is a separate change of script-visible types.
+#[must_use]
+pub fn comma_joined<S: std::hash::BuildHasher + Default>(
+    map: &FastMap<String, Vec<String>>,
+) -> std::collections::HashMap<String, String, S> {
+    map.iter().map(|(k, v)| (k.clone(), v.join(","))).collect()
+}
+
+/// A field's values as Mountebank shows them (`querystring.parse`, `headersMap`): one value is a
+/// string, several are an array. The shape a recorded request, `predicateGenerators` and the
+/// verify API's report all use for a query or form key (issue #1553).
+#[must_use]
+pub fn values_as_json(values: &[String]) -> serde_json::Value {
+    match values {
+        [one] => serde_json::Value::String(one.clone()),
+        many => serde_json::Value::Array(
+            many.iter()
+                .map(|v| serde_json::Value::String(v.clone()))
+                .collect(),
+        ),
+    }
 }
 
 /// The terminal fallback for the builders below: a 500 assembled without the builder, so it cannot
@@ -331,7 +358,7 @@ mod parse_query_string_tests {
     #[test]
     fn an_undecodable_value_passes_through_raw() {
         let params = parse_query_string("k=%FF");
-        assert_eq!(params.get("k").map(String::as_str), Some("%FF"));
+        assert_eq!(one(&params, "k"), Some("%FF"));
     }
 
     // Issue #614: the key is decoded on the same terms as the value — Mountebank decodes both — and an
@@ -340,27 +367,51 @@ mod parse_query_string_tests {
     #[test]
     fn an_encoded_key_is_decoded_and_an_undecodable_one_stays_raw() {
         let params = parse_query_string("first%20name=bob");
-        assert_eq!(params.get("first name").map(String::as_str), Some("bob"));
+        assert_eq!(one(&params, "first name"), Some("bob"));
 
         let undecodable = parse_query_string("%FF=v");
-        assert_eq!(undecodable.get("%FF").map(String::as_str), Some("v"));
+        assert_eq!(one(&undecodable, "%FF"), Some("v"));
     }
 
     // Issue #614: a bare parameter's key is decoded like a valued one.
     #[test]
     fn a_bare_parameter_key_is_decoded() {
         let params = parse_query_string("first%20name");
-        assert_eq!(params.get("first name").map(String::as_str), Some(""));
+        assert_eq!(one(&params, "first name"), Some(""));
     }
 
-    // The behaviour issue #1153 unifies on: a repeated key is comma-joined in order, which is what
-    // templates now render instead of the last value.
+    fn one<'a>(params: &'a super::MultiValueMap, key: &str) -> Option<&'a str> {
+        match params.get(key).map(Vec::as_slice) {
+            Some([value]) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
+    // Issue #1553: a repeated key keeps every value in request order, as Mountebank's
+    // `querystring.parse` builds an array; the comma-joined view is what templates render (#1153).
     #[test]
-    fn a_repeated_key_is_comma_joined_in_order() {
-        let params = parse_query_string("color=red&color=green&color=blue");
+    fn a_repeated_key_keeps_every_value_in_order() {
+        let params = parse_query_string("color=red&color=green&color=blue&one=1");
         assert_eq!(
-            params.get("color").map(String::as_str),
+            params.get("color").map(Vec::as_slice),
+            Some(["red", "green", "blue"].map(String::from).as_slice())
+        );
+        assert_eq!(one(&params, "one"), Some("1"));
+        let joined: std::collections::HashMap<String, String> = super::comma_joined(&params);
+        assert_eq!(
+            joined.get("color").map(String::as_str),
             Some("red,green,blue")
+        );
+        assert_eq!(joined.get("one").map(String::as_str), Some("1"));
+    }
+
+    // One value is a string and several an array, as Mountebank prints a query.
+    #[test]
+    fn values_render_as_a_string_or_an_array() {
+        assert_eq!(super::values_as_json(&["a".into()]), serde_json::json!("a"));
+        assert_eq!(
+            super::values_as_json(&["a".into(), "b".into()]),
+            serde_json::json!(["a", "b"])
         );
     }
 }

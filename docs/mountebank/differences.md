@@ -93,16 +93,28 @@ comma), and inserted text is never re-scanned for tokens — see [Behaviors](beh
 `{"exists": {"body": {"items": {"id": true}}}}` against `{"items": [...]}` holds in Mountebank for
 any array, whatever its elements and whatever the expectation asks: its array shortcut fires before
 the elements are looked at. Rift holds it when some element satisfies the object, so
-`{"items": [{"sku": 1}]}` does not satisfy `{"id": true}`. A repeated query or form key is one
-comma-joined value in Rift, so `?q=&q=` is `","`, which exists, where Mountebank sees an array of
-two empty values. See [Predicates](predicates.md#exists).
+`{"items": [{"sku": 1}]}` does not satisfy `{"id": true}`. See [Predicates](predicates.md#exists).
 
 ## `except` on a JSON body
 
 Rift applies `except` to each value of a JSON body after parsing it. Mountebank also applies it to
 the raw body text before parsing, so a pattern that matches JSON punctuation (a quote, a brace) can
-make the body unparseable there, so every field in it reads as missing. A repeated query
-key is one comma-joined value in Rift, so `except` strips the joined text rather than each value.
+make the body unparseable there, so every field in it reads as missing.
+
+## Scripts and templates see a repeated key comma-joined
+
+Predicates match each value of a repeated query or form key, as Mountebank does (see
+[Repeated keys](predicates.md#repeated-keys)). An `inject` function, `decorate`, `shellTransform`'s
+`MB_REQUEST`, `_rift.script` and `${request.query.*}` template substitution still receive one string
+per key, the values comma-joined in order (`?q=1&q=2` is `"1,2"`), where Mountebank gives a script
+the array `["1", "2"]`.
+
+## An array expectation against a single value
+
+An array expectation is not matched against a single string by its characters:
+`{"equals": {"query": {"key": ["f"]}}}` does not match `?key=first`. Mountebank reads the array's
+indexes as fields of the string, so `["f"]` matches there because the first character of `first`
+is `f`. A value that is a JSON array (a body, or `?key=["f"]`) is still compared as one.
 
 ## `except` with an `xpath` or `jsonpath` selector
 

@@ -258,8 +258,8 @@ records
 
 | Matcher | Recorded predicate |
 |:--------|:-------------------|
-| `field: true` | `{"deepEquals": {field: value}}` — the whole field, exactly. A query with an extra parameter is a different request |
-| `query` / `headers: {"name": true, …}` | `{"equals": {field: {name: value, …}}}` over the listed names; a listed name the request lacks is left out |
+| `field: true` | `{"deepEquals": {field: value}}` — the whole field, exactly. A query with an extra parameter is a different request. A query or form key the request repeated is recorded as the array of its values (`{"key": ["first", "second"]}`), as Mountebank records it, so the stub replays to the same values in any order |
+| `query` / `headers: {"name": true, …}` | `{"equals": {field: {name: value, …}}}` over the listed names; a listed name the request lacks is left out, and a listed query key it repeated is the array of its values |
 | `"predicateOperator": "exists"` | `{"exists": {field: true}}`, or `{"exists": {field: {name: true, …}}}` for `query` and `headers` |
 | any other `predicateOperator` | `{operator: {field: value}}` for each field |
 

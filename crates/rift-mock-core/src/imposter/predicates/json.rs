@@ -2,7 +2,7 @@
 //! and recursive JSON comparison used by the `equals`/`deepEquals`/`matches` operators.
 
 use super::RequestHeaders;
-use crate::util::FastMap;
+use crate::util::MultiValueMap;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -157,13 +157,13 @@ pub(crate) fn check_exists_predicate<H>(
     method: &str,
     path: &str,
     // Concretely `FastMap` — always sourced from `parse_query`/`parse_query_string` (issue #704).
-    query: &FastMap<String, String>,
+    query: &MultiValueMap,
     headers: &H,
     body: &str,
     request_from: Option<&str>,
     client_ip: Option<&str>,
     // Concretely `FastMap` — see `check_predicate_fields`.
-    form: Option<&FastMap<String, String>>,
+    form: Option<&MultiValueMap>,
     key_case_sensitive: bool,
     // `body` parsed once per request, when it is the compared body (no selector) and is JSON.
     body_json: &crate::behaviors::LazyJson<'_>,
@@ -213,14 +213,14 @@ where
         }
     }
 
-    // Rift comma-joins a repeated query or form key (`?q=&q=` is `","`), so it reads as one
-    // present value where Mountebank sees an array, and `except` strips the joined text.
+    // A repeated query or form key is an array, as in Mountebank (issue #1553): a truthy
+    // expectation holds outright, and `except` applies to each value.
     if let Some(expected_query) = obj.get("query").and_then(|v| v.as_object()) {
         for (key, expected) in expected_query {
             let values: Vec<&str> = query
                 .iter()
                 .filter(|(k, _)| key_matches(key, k))
-                .map(|(_, v)| v.as_str())
+                .flat_map(|(_, v)| v.iter().map(String::as_str))
                 .collect();
             if !check.holds_for_values(expected, &values) {
                 return false;
@@ -260,7 +260,7 @@ where
             let values: Vec<&str> = actual_form
                 .iter()
                 .filter(|(k, _)| key_matches(key, k))
-                .map(|(_, v)| v.as_str())
+                .flat_map(|(_, v)| v.iter().map(String::as_str))
                 .collect();
             if !check.holds_for_values(expected, &values) {
                 return false;

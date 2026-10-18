@@ -37,7 +37,7 @@ pub fn apply_shell_transform(
     }
     request_json.insert("method".into(), request.method.as_str().into());
     request_json.insert("path".into(), request.path.as_str().into());
-    request_json.insert("query".into(), serde_json::json!(request.query));
+    request_json.insert("query".into(), serde_json::json!(request.query_joined()));
     request_json.insert("headers".into(), serde_json::json!(request.headers));
     // `""` for a request without a body, as Mountebank's `JSON.stringify(request)` (#1365).
     request_json.insert("body".into(), request.body.as_deref().unwrap_or("").into());
@@ -146,8 +146,8 @@ pub fn apply_decorate(
     );
 
     let mut query_map = Map::new();
-    for (k, v) in &request.query {
-        query_map.insert(k.clone().into(), Dynamic::from(v.clone()));
+    for (k, v) in request.query_joined() {
+        query_map.insert(k.into(), Dynamic::from(v));
     }
     req_map.insert("query".into(), Dynamic::from(query_map));
 

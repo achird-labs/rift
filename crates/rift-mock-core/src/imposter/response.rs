@@ -539,7 +539,7 @@ pub fn apply_js_or_rhai_decorate(
             let mb_request = crate::scripting::MountebankRequest {
                 method: request.method.clone(),
                 path: request.path.clone(),
-                query: request.query.clone(),
+                query: request.query_joined(),
                 headers: request.headers.clone(),
                 body: request.body.clone(),
                 // `RequestContext` doesn't track binary/text, so the classification is genuinely
@@ -608,7 +608,7 @@ pub fn apply_js_or_rhai_decorate(
             let mb_request = crate::scripting::MountebankRequest {
                 method: request.method.clone(),
                 path: request.path.clone(),
-                query: request.query.clone(),
+                query: request.query_joined(),
                 headers: request.headers.clone(),
                 body: request.body.clone(),
                 // `RequestContext` doesn't track binary/text, so the classification is genuinely

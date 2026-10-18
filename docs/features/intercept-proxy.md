@@ -420,7 +420,9 @@ as-is, unchanged. Forwarding always relays the raw bytes regardless of classific
 
 A header predicate matches by **name**, and a repeated request header (the client sent the same
 name more than once) is one name with several values: the predicate matches if **any** of those
-values satisfies it, not only the first or the last. Forwarding to an imposter (`action.forward`)
+values satisfies it, not only the first or the last, and an array expectation needs each of its
+elements among them, as for an imposter's [repeated keys](../mountebank/predicates.md#repeated-keys).
+Forwarding to an imposter (`action.forward`)
 carries every value of a repeated header along, in the order the client sent them — none are
 dropped or comma-joined. A header value that is not valid UTF-8 is dropped rather than matched or
 forwarded, the same as an invalid body byte sequence would be if it broke UTF-8 classification.

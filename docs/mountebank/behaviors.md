@@ -208,8 +208,9 @@ to JSON. `response.headers` holds one string per header name.
 `application/x-www-form-urlencoded` body). On the default bind address an IPv4 client is
 `127.0.0.1` in Rift and `::ffff:127.0.0.1` in Mountebank — see
 [Client address](differences.md#client-address). A query or form key the client repeated is one
-comma-joined string (`"1,2"`), where Mountebank gives an array, as for predicates
-([differences](differences.md#exists-with-an-object-over-an-array)); the same holds in `MB_REQUEST`.
+comma-joined string (`"1,2"`), where Mountebank gives an array
+([differences](differences.md#scripts-and-templates-see-a-repeated-key-comma-joined)); the same holds
+in `MB_REQUEST`. Predicates match each value of such a key.
 
 ### Basic Transformation
 
@@ -357,7 +358,8 @@ An XPath selector that evaluates to a string, number or boolean (`string(//a)`, 
 `boolean(//a)`) substitutes that value. Mountebank leaves the token in place for a number or
 boolean, and fails the request for `string()`.
 
-Every occurrence of the `into` token in the body and header values is replaced. If the source is
+Every occurrence of the `into` token in the body and header values is replaced. A query key or
+header the client repeated is copied from its first value, as in Mountebank. If the source is
 absent, or nothing is extracted, the token is left in place, as in Mountebank. Releases up to
 0.21.0 replaced it with an empty string. A selector that does
 not compile is not treated as "nothing extracted": the imposter is refused when it is loaded.
