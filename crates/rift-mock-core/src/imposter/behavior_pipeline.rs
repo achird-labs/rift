@@ -10,8 +10,8 @@ use super::response::{apply_decorate_bounded, body_text};
 use super::types::{IsResponse, StatusValue};
 use crate::behaviors::{
     BehaviorProgram, BehaviorStep, CsvCache, Decorated, RequestContext, ResponseStatus,
-    ShellTransformError, Spliced, SplicedHeaders, apply_copy_spliced, apply_lookup_spliced,
-    apply_shell_transform,
+    ShellTransformError, Spliced, SplicedHeaders, WaitScriptError, apply_copy_spliced,
+    apply_lookup_spliced, apply_shell_transform,
 };
 use crate::util::build_response_with_headers;
 use bytes::Bytes;
@@ -85,8 +85,36 @@ pub(crate) enum BehaviorOutcome {
     /// contract (#269/#323): the response is served, but carries a signal header and is not the
     /// response the configuration asked for.
     Applied { parts: ServedParts, degraded: bool },
-    /// A behavior failed under `strictBehaviors` (#375): serve this error response instead.
+    /// A behavior failed under `strictBehaviors` (#375), or failed in a way Mountebank always
+    /// answers with an error, as a `wait` function that throws (#1616): serve this error response
+    /// instead.
     StrictFailure(Response<Full<Bytes>>),
+}
+
+/// Mountebank's answer to a `wait` function that throws (issue #1616): `500` with
+/// `{"errors":[{"code":"invalid injection","message":"invalid wait injection","data":...}]}`, as
+/// its HTTP server writes an `InjectionError`. `data` is the thrown message, left out when the
+/// thrown value has none. `type` reuses the frozen `invalid injection` slug (#797); `source`,
+/// `name` and `stack` are left out, as on every Rift error envelope.
+fn wait_error_response(e: &WaitScriptError) -> Response<Full<Bytes>> {
+    let kind = crate::response::ErrorKind::InvalidInjection.slug();
+    let mut error = serde_json::json!({
+        "code": kind,
+        "type": kind,
+        "message": "invalid wait injection",
+    });
+    if let Some(data) = &e.data {
+        error["data"] = data.as_str().into();
+    }
+    build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [
+            ("x-rift-imposter", "true"),
+            ("x-rift-wait-error", "true"),
+            ("content-type", "application/json"),
+        ],
+        serde_json::json!({ "errors": [error] }).to_string(),
+    )
 }
 
 /// Everything the pipeline reads besides the response itself.
@@ -187,7 +215,12 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
         for step in &self.behaviors.steps {
             match step {
                 BehaviorStep::Wait(wait) => {
-                    let wait_ms = wait.get_duration_ms();
+                    // A wait function that throws is the response (issue #1616), with or without
+                    // `strictBehaviors`: Mountebank has no lenient mode for it.
+                    let wait_ms = match wait.get_duration_ms() {
+                        Ok(ms) => ms,
+                        Err(e) => return BehaviorOutcome::StrictFailure(wait_error_response(&e)),
+                    };
                     if wait_ms > 0 {
                         tokio::time::sleep(Duration::from_millis(wait_ms)).await;
                     }

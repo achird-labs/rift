@@ -42,8 +42,8 @@ record.
 - A `wait` computed by a JavaScript function is no longer capped at 60 s, matching Mountebank and
   the numeric form (#1612).
 - A `wait` function whose result is not a number, is negative, or is `NaN` or infinite now waits
-  0 ms, as Node's `setTimeout` reads it in Mountebank. It used to take the 100 ms fallback, which
-  is now kept for a function that throws (#1588).
+  0 ms, as Node's `setTimeout` reads it in Mountebank. It used to take the 100 ms fallback (#1588);
+  a function that throws now answers `500` (#1616).
 - **A `decorate` that returns an object now replaces the response** (#1567), as in Mountebank. The
   return value used to be ignored, so `return { body: 'x' }` changed nothing. A field the returned
   object leaves out is taken from the imposter's `defaultResponse`, or is `200`, no headers and an
@@ -116,6 +116,14 @@ record.
   reports it as `E057`.
 
 ### Fixed
+
+- **A `wait` function that throws now answers `500` with Mountebank's `invalid wait injection`**
+  (#1616), instead of serving the stub after 100 ms. The error's `code` and `type` are
+  `invalid injection`, `data` is the thrown message, and the response carries
+  `x-rift-wait-error: true`. A syntax error is found the same way, when the request is served. This
+  happens with or without `strictBehaviors`, as in Mountebank. A config whose broken wait function
+  was silently ignored now fails at serve time; a build without the `javascript` feature still
+  takes the logged 100 ms fallback, since it cannot run the function.
 
 - **A `wait` string is read as Mountebank reads it** (#1588): with `parseInt` first, so `"1000"`
   waits 1000 ms and `"800ms"` 800 ms, and otherwise called as any function expression, so an arrow

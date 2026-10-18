@@ -48,11 +48,33 @@ pub enum WaitBehavior {
     Inject { inject: String },
 }
 
+/// A `wait` function that threw (issue #1616): Mountebank answers the request with `500` and
+/// `invalid wait injection` instead of serving the response, whatever `strictBehaviors` says.
+///
+/// Only a script error is one: a throw, a `ReferenceError`, a syntax error found when the source
+/// is evaluated, or a throw while converting the result to a number. A result that is not a number
+/// is no delay, not an error (issue #1588).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{detail}")]
+pub struct WaitScriptError {
+    /// What went wrong, for the log.
+    pub detail: String,
+    /// Mountebank's `data`: the thrown value's `message`. `None` when the thrown value has none,
+    /// as for `throw 'text'`, where Mountebank leaves `data` out.
+    pub data: Option<String>,
+}
+
 impl WaitBehavior {
-    /// Get the wait duration in milliseconds
-    pub fn get_duration_ms(&self) -> u64 {
+    /// The wait in milliseconds, or the error a `wait` function threw (issue #1616).
+    ///
+    /// # Errors
+    ///
+    /// [`WaitScriptError`] when a function `wait` throws or does not parse. Only a build with the
+    /// `javascript` feature can tell; without it the regex fallback cannot tell a throw from a
+    /// body it does not read, so both take a logged 100 ms fallback there.
+    pub fn get_duration_ms(&self) -> Result<u64, WaitScriptError> {
         match self {
-            WaitBehavior::Fixed(ms) => *ms,
+            WaitBehavior::Fixed(ms) => Ok(*ms),
             WaitBehavior::Range { min_ms, max_ms } => {
                 use rand::RngExt;
                 // `random_range` asserts a non-empty range, and this runs on the request task with no
@@ -68,28 +90,28 @@ impl WaitBehavior {
                              built in-process rather than loaded"
                         );
                     }
-                    *min_ms
+                    Ok(*min_ms)
                 } else {
-                    rand::rng().random_range(*min_ms..=*max_ms)
+                    Ok(rand::rng().random_range(*min_ms..=*max_ms))
                 }
             }
             // Both spellings of a JS-function wait run the identical path (issue #608): same Boa
-            // execution, same loud fallback.
+            // execution, same failure.
             WaitBehavior::Function(js_func) | WaitBehavior::Inject { inject: js_func } => {
-                // Parse JavaScript function and execute
-                // Format: "function() { return Math.floor(Math.random() * 100) + 50; }"
-                // A failed/unusable wait function falls back to 100ms — but loudly, so it is
-                // distinguishable from a genuine 100ms wait (B4, issue #355).
                 // No cap (issue #1612): like a numeric `wait` and like Mountebank, the computed
                 // delay is honoured as written. The sleep is an async `tokio::time::sleep`, which
                 // saturates an overflowing deadline, so a huge value holds no worker thread.
-                Self::execute_js_wait_function(js_func).unwrap_or_else(|| {
+                //
+                // `None` is reachable only without the `javascript` feature: the regex fallback
+                // did not recognise the body. It falls back to 100ms, loudly, so it is
+                // distinguishable from a genuine 100ms wait (B4, issue #355).
+                Ok(Self::execute_js_wait_function(js_func)?.unwrap_or_else(|| {
                     tracing::warn!(
                         target: "rift::script",
                         "wait function produced no usable delay; falling back to 100ms"
                     );
                     100
-                })
+                }))
             }
         }
     }
@@ -101,60 +123,64 @@ impl WaitBehavior {
     /// check: Mountebank has none, and a copied routing rule is what kept arrows at 100 ms.
     ///
     /// When the `javascript` feature is enabled the call runs on a bounded Boa `Context` (issue
-    /// #355 Item 6). Without it, a regex fallback reads the common shapes, so
-    /// `--no-default-features` still builds and works for them. `None` means the source threw or
-    /// could not be evaluated, and the caller takes its logged 100 ms fallback.
-    fn execute_js_wait_function(js_func: &str) -> Option<u64> {
+    /// #355 Item 6), and its answer is final: `Err` for a script that throws (issue #1616), a
+    /// delay otherwise. Without it, a regex fallback reads the common shapes, so
+    /// `--no-default-features` still builds and works for them; `Ok(None)` means it could not read
+    /// the source, and the caller takes its logged 100 ms fallback.
+    fn execute_js_wait_function(js_func: &str) -> Result<Option<u64>, WaitScriptError> {
         let parsed = rift_types::status::js_parse_int(js_func);
         if !parsed.is_nan() {
-            return Some(node_timeout_ms(parsed));
+            return Ok(Some(node_timeout_ms(parsed)));
         }
         let trimmed = js_func.trim();
 
         #[cfg(feature = "javascript")]
         {
-            if let Some(ms) = Self::execute_js_wait_function_boa(trimmed) {
-                return Some(ms);
-            }
+            Self::execute_js_wait_function_boa(trimmed).map(Some)
         }
 
-        Self::execute_js_wait_function_regex(trimmed)
+        #[cfg(not(feature = "javascript"))]
+        {
+            Ok(Self::execute_js_wait_function_regex(trimmed))
+        }
     }
 
     /// Run the wait function for real on a bounded Boa `Context`: evaluate `(<js_func>)()` and
-    /// read the result as Node's `setTimeout` reads a delay ([`node_timeout_ms`]). `None` only for
-    /// a script that throws or does not parse, including a throw while converting the result.
+    /// read the result as Node's `setTimeout` reads a delay ([`node_timeout_ms`]). `Err` for a
+    /// script that throws or does not parse, including a throw while converting the result
+    /// (issue #1616).
     #[cfg(feature = "javascript")]
-    fn execute_js_wait_function_boa(js_func: &str) -> Option<u64> {
+    fn execute_js_wait_function_boa(js_func: &str) -> Result<u64, WaitScriptError> {
         let mut context = crate::scripting::bounded_js_context();
         let wrapped = format!("({js_func})()");
-        // A script/runtime error must not be swallowed silently (B4, issue #355): log it, then
-        // return None so the caller's regex safety net / 100ms fallback still applies.
-        let result = match context.eval(boa_engine::Source::from_bytes(wrapped.as_bytes())) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(target: "rift::script", "wait function script error: {e}");
-                return None;
+        let failed = |stage: &str, e: &boa_engine::JsError, context: &mut boa_engine::Context| {
+            let detail = format!("wait function {stage}: {e}");
+            tracing::warn!(target: "rift::script", "{detail}");
+            WaitScriptError {
+                detail,
+                data: thrown_message(e, context),
             }
         };
+        let result = context
+            .eval(boa_engine::Source::from_bytes(wrapped.as_bytes()))
+            .map_err(|e| failed("script error", &e, &mut context))?;
         // `to_number` fails only when the conversion itself throws (a `valueOf` that throws, a
         // Symbol) — a throw, like the one above. A string, a Promise or `undefined` converts to
         // `NaN`, which is a value, not an error.
-        let n = match result.to_number(&mut context) {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(
-                    target: "rift::script",
-                    "wait function result could not be converted to a number: {e}"
-                );
-                return None;
-            }
-        };
-        Some(node_timeout_ms(n))
+        let n = result.to_number(&mut context).map_err(|e| {
+            failed(
+                "result could not be converted to a number",
+                &e,
+                &mut context,
+            )
+        })?;
+        Ok(node_timeout_ms(n))
     }
 
-    /// Regex-based fallback: used as the sole path when the `javascript` feature is disabled,
-    /// and as a safety net if the Boa path above fails to produce a value while it's enabled.
+    /// Regex-based fallback: the sole path when the `javascript` feature is disabled. With the
+    /// feature on, Boa's answer is final and this is never reached (issue #1616): a throwing
+    /// function must not turn into a guess at its `Math.random` shape.
+    #[cfg_attr(feature = "javascript", allow(dead_code))]
     fn execute_js_wait_function_regex(trimmed: &str) -> Option<u64> {
         if let Some(body) = extract_function_body(trimmed) {
             // Handle Solo pattern:
@@ -232,6 +258,31 @@ impl WaitBehavior {
     }
 }
 
+/// What Mountebank puts in `data` for a thrown value: its `message` (issue #1616). A native error
+/// (a `ReferenceError`, a syntax error) carries it directly; a thrown object is read for a
+/// `message` property. `None` for a value without one, such as `throw 'text'`: Mountebank's
+/// `error.message` is then `undefined` and `data` is left out, so the display string is not
+/// substituted.
+#[cfg(feature = "javascript")]
+fn thrown_message(e: &boa_engine::JsError, context: &mut boa_engine::Context) -> Option<String> {
+    if let Some(native) = e.as_native() {
+        return Some(native.message().to_string());
+    }
+    let object = e.as_opaque()?.as_object()?;
+    // Domain-optional: a `message` getter that throws, or a message that cannot be made a string,
+    // leaves `data` out. Nothing is hidden: the request already fails with the 500 and the log line.
+    let message = object
+        .get(boa_engine::js_string!("message"), context)
+        .ok()?;
+    if message.is_undefined() {
+        return None;
+    }
+    message
+        .to_string(context)
+        .ok()
+        .map(|text| text.to_std_string_escaped())
+}
+
 /// A computed delay as Node's `setTimeout` reads it (issue #1588): `NaN`, an infinity or a
 /// negative number is no delay; anything else is floored, and a value beyond `u64` saturates to
 /// `u64::MAX`, which `tokio::time::sleep` saturates to its far-future deadline (issue #1612).
@@ -306,12 +357,15 @@ mod tests {
         let object = WaitBehavior::Inject {
             inject: js.to_string(),
         };
-        assert_eq!(bare.get_duration_ms(), object.get_duration_ms());
-        assert_eq!(object.get_duration_ms(), 250);
+        assert_eq!(
+            bare.get_duration_ms().expect("a usable wait"),
+            object.get_duration_ms().expect("a usable wait")
+        );
+        assert_eq!(object.get_duration_ms().expect("a usable wait"), 250);
     }
 
     // AC 608-2: the object form gives the same delay as the bare string for a large value (no cap,
-    // issue #1612) and shares the loud fallback (issue #355).
+    // issue #1612) and fails the same way (issues #355, #1616).
     #[test]
     fn wait_inject_shares_value_and_fallback() {
         let js = "function() { return 999999999; }";
@@ -319,26 +373,38 @@ mod tests {
             inject: js.to_string(),
         };
         assert_eq!(
-            huge.get_duration_ms(),
-            WaitBehavior::Function(js.to_string()).get_duration_ms(),
+            huge.get_duration_ms().expect("a usable wait"),
+            WaitBehavior::Function(js.to_string())
+                .get_duration_ms()
+                .expect("a usable wait"),
             "the object form must give the same delay as the bare string form"
         );
-        assert_eq!(huge.get_duration_ms(), 999_999_999);
+        assert_eq!(huge.get_duration_ms().expect("a usable wait"), 999_999_999);
 
-        let unusable = WaitBehavior::Inject {
-            inject: "not a function at all".to_string(),
-        };
+        // Issue #1616: a source that does not parse is a script error in both spellings.
+        let unusable = "not a function at all";
+        let object = WaitBehavior::Inject {
+            inject: unusable.to_string(),
+        }
+        .get_duration_ms();
+        let bare = WaitBehavior::Function(unusable.to_string()).get_duration_ms();
+        #[cfg(feature = "javascript")]
+        assert!(
+            object.is_err() && bare.is_err(),
+            "both spellings fail the same way: {object:?} / {bare:?}"
+        );
+        #[cfg(not(feature = "javascript"))]
         assert_eq!(
-            unusable.get_duration_ms(),
-            100,
-            "an unusable object-form wait falls back to the same loud 100ms as the bare form"
+            (object, bare),
+            (Ok(100), Ok(100)),
+            "without a JavaScript engine both take the same loud 100ms fallback"
         );
     }
 
     #[test]
     fn test_wait_behavior_fixed() {
         let wait = WaitBehavior::Fixed(100);
-        assert_eq!(wait.get_duration_ms(), 100);
+        assert_eq!(wait.get_duration_ms().expect("a usable wait"), 100);
     }
 
     #[test]
@@ -348,7 +414,7 @@ mod tests {
             max_ms: 200,
         };
         for _ in 0..10 {
-            let duration = wait.get_duration_ms();
+            let duration = wait.get_duration_ms().expect("a usable wait");
             assert!((100..=200).contains(&duration));
         }
     }
@@ -369,7 +435,7 @@ mod tests {
         // would draw from 10..=100 and land on 100 about 1 run in 91. The clamp is deterministic,
         // so every iteration must be 100.
         for _ in 0..200 {
-            assert_eq!(wait.get_duration_ms(), 100);
+            assert_eq!(wait.get_duration_ms().expect("a usable wait"), 100);
         }
     }
 
@@ -379,7 +445,7 @@ mod tests {
             min_ms: 250,
             max_ms: 250,
         };
-        assert_eq!(wait.get_duration_ms(), 250);
+        assert_eq!(wait.get_duration_ms().expect("a usable wait"), 250);
     }
 
     // Adjacent unchecked `u64` add on two `\d+` captures. Driven at the regex fallback directly:
@@ -419,13 +485,13 @@ mod tests {
         // Solo pattern with min=0, max=0 -> returns 0
         let js = " function() { var min = Math.ceil(0); var max = Math.floor(0); var num = Math.floor(Math.random() * (max - min + 1)); var wait = (num + min); return wait; } ";
         let wait = WaitBehavior::Function(js.to_string());
-        assert_eq!(wait.get_duration_ms(), 0);
+        assert_eq!(wait.get_duration_ms().expect("a usable wait"), 0);
 
         // Solo pattern with min=50, max=100 -> returns value in range
         let js = "function() { var min = Math.ceil(50); var max = Math.floor(100); var num = Math.floor(Math.random() * (max - min + 1)); var wait = (num + min); return wait; }";
         let wait = WaitBehavior::Function(js.to_string());
         for _ in 0..10 {
-            let duration = wait.get_duration_ms();
+            let duration = wait.get_duration_ms().expect("a usable wait");
             assert!(
                 (50..=100).contains(&duration),
                 "Duration {duration} not in range 50-100"
@@ -439,7 +505,7 @@ mod tests {
         let js = "function() { return Math.floor(Math.random() * 100) + 50; }";
         let wait = WaitBehavior::Function(js.to_string());
         for _ in 0..10 {
-            let duration = wait.get_duration_ms();
+            let duration = wait.get_duration_ms().expect("a usable wait");
             assert!(
                 (50..=150).contains(&duration),
                 "Duration {duration} not in range 50-150"
@@ -452,7 +518,7 @@ mod tests {
     #[test]
     fn wait_function_executes_js() {
         let wait = WaitBehavior::Function("function() { return 42; }".to_string());
-        assert_eq!(wait.get_duration_ms(), 42);
+        assert_eq!(wait.get_duration_ms().expect("a usable wait"), 42);
     }
 
     // A negative return value must not become an enormous u64 delay (underflow) or a negative
@@ -460,7 +526,7 @@ mod tests {
     #[test]
     fn wait_function_negative_clamps_to_zero() {
         let wait = WaitBehavior::Function("function() { return -5; }".to_string());
-        assert_eq!(wait.get_duration_ms(), 0);
+        assert_eq!(wait.get_duration_ms().expect("a usable wait"), 0);
     }
 
     // Issue #1612: a function wait is honoured as written, like a numeric `wait` and like
@@ -468,7 +534,7 @@ mod tests {
     #[test]
     fn wait_function_huge_value_is_honoured() {
         let wait = WaitBehavior::Function("function() { return 999999999; }".to_string());
-        assert_eq!(wait.get_duration_ms(), 999_999_999);
+        assert_eq!(wait.get_duration_ms().expect("a usable wait"), 999_999_999);
     }
 
     // Issue #1612: a result beyond u64 saturates to u64::MAX rather than panicking or wrapping;
@@ -478,7 +544,7 @@ mod tests {
     #[test]
     fn wait_function_beyond_u64_saturates() {
         let wait = WaitBehavior::Function("function() { return 1e300; }".to_string());
-        assert_eq!(wait.get_duration_ms(), u64::MAX);
+        assert_eq!(wait.get_duration_ms().expect("a usable wait"), u64::MAX);
     }
 
     // Issue #481: the no-`javascript`-feature regex fallback now uses shared LazyLock statics.
@@ -519,7 +585,7 @@ mod tests {
     #[test]
     fn a_wait_function_only_boa_can_evaluate_runs_on_boa() {
         let wait = WaitBehavior::Function("function() { return 2 * 21; }".to_string());
-        assert_eq!(wait.get_duration_ms(), 42);
+        assert_eq!(wait.get_duration_ms().expect("a usable wait"), 42);
     }
 
     // Issue #1384, revised by #1588: a non-finite result does not saturate to `u64::MAX`
@@ -530,7 +596,11 @@ mod tests {
     fn a_non_finite_wait_is_no_delay() {
         for body in ["Infinity", "NaN"] {
             let wait = WaitBehavior::Function(format!("function() {{ return {body}; }}"));
-            assert_eq!(wait.get_duration_ms(), 0, "return {body}");
+            assert_eq!(
+                wait.get_duration_ms().expect("a usable wait"),
+                0,
+                "return {body}"
+            );
         }
     }
 
@@ -549,7 +619,11 @@ mod tests {
             ("function () { return '500'; }", 500),
         ] {
             let wait = WaitBehavior::Function(source.to_string());
-            assert_eq!(wait.get_duration_ms(), ms, "wait {source:?}");
+            assert_eq!(
+                wait.get_duration_ms().expect("a usable wait"),
+                ms,
+                "wait {source:?}"
+            );
         }
     }
 
@@ -568,16 +642,73 @@ mod tests {
             "() => undefined",
         ] {
             let wait = WaitBehavior::Function(source.to_string());
-            assert_eq!(wait.get_duration_ms(), 0, "wait {source:?}");
+            assert_eq!(
+                wait.get_duration_ms().expect("a usable wait"),
+                0,
+                "wait {source:?}"
+            );
         }
     }
 
-    // Issue #1588: a throwing wait function still takes the 100 ms fallback, and is not mistaken
-    // for a non-numeric result (no delay). Mountebank answers 500 here; that is #1616.
+    // Issue #1616: a wait function that throws is an error carrying the thrown message, which the
+    // pipeline answers with Mountebank's `500 invalid wait injection`. It used to take the 100 ms
+    // fallback, indistinguishable from a working wait.
+    #[cfg(feature = "javascript")]
     #[test]
-    fn a_throwing_wait_function_falls_back_to_100ms() {
-        let wait = WaitBehavior::Function("() => { throw new Error('x'); }".to_string());
-        assert_eq!(wait.get_duration_ms(), 100);
+    fn a_throwing_wait_function_is_a_script_error() {
+        for (source, data) in [
+            ("() => { throw new Error('x'); }", Some("x")),
+            (
+                "function(){ throw new TypeError('bad type'); }",
+                Some("bad type"),
+            ),
+            (
+                "function(){ return nosuch.x; }",
+                Some("nosuch is not defined"),
+            ),
+            ("function(){ throw { message: 'custom' }; }", Some("custom")),
+            ("function(){ throw 'plain'; }", None),
+            ("function(){ throw 42; }", None),
+            ("function(){ throw {}; }", None),
+            (
+                "() => ({ valueOf() { throw new Error('conv'); } })",
+                Some("conv"),
+            ),
+        ] {
+            let err = WaitBehavior::Function(source.to_string())
+                .get_duration_ms()
+                .expect_err(source);
+            assert_eq!(err.data.as_deref(), data, "wait {source:?}: {err}");
+        }
+    }
+
+    // Issue #1616: a syntax error is found at serve time, as in Mountebank (the create succeeds),
+    // and carries the parser's message. Boa words it differently from V8, so only presence is
+    // pinned.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn a_wait_function_that_does_not_parse_is_a_script_error() {
+        let err = WaitBehavior::Function("function(){ return ; }}".to_string())
+            .get_duration_ms()
+            .expect_err("a syntax error");
+        assert!(
+            err.data.as_deref().is_some_and(|d| !d.is_empty()),
+            "a syntax error carries its message: {err:?}"
+        );
+    }
+
+    // Issue #1616: with Boa on, its error is final. The regex fallback reads this body as a
+    // `Math.random` draw, so a fall-through would turn the throw into a delay.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn a_throw_does_not_fall_through_to_the_regex_fallback() {
+        let source = "function() { nosuch(); return Math.floor(Math.random() * 10) + 5; }";
+        assert!(WaitBehavior::execute_js_wait_function_regex(source).is_some());
+        assert!(
+            WaitBehavior::Function(source.to_string())
+                .get_duration_ms()
+                .is_err()
+        );
     }
 
     // Issue #1588: `parseInt` runs first, so a numeric string is its number, a trailing unit is
@@ -594,11 +725,19 @@ mod tests {
             ("1e3", 1),
         ] {
             let wait = WaitBehavior::Function(source.to_string());
-            assert_eq!(wait.get_duration_ms(), ms, "wait {source:?}");
+            assert_eq!(
+                wait.get_duration_ms().expect("a usable wait"),
+                ms,
+                "wait {source:?}"
+            );
             let inject = WaitBehavior::Inject {
                 inject: source.to_string(),
             };
-            assert_eq!(inject.get_duration_ms(), ms, "inject {source:?}");
+            assert_eq!(
+                inject.get_duration_ms().expect("a usable wait"),
+                ms,
+                "inject {source:?}"
+            );
         }
     }
 
@@ -650,7 +789,7 @@ mod tests {
             min_ms: 5,
             max_ms: 3,
         };
-        assert_eq!(wait.get_duration_ms(), 5);
+        assert_eq!(wait.get_duration_ms().expect("a usable wait"), 5);
         assert!(logs_contain("clamping to min"));
     }
 
@@ -662,7 +801,7 @@ mod tests {
             min_ms: 5,
             max_ms: 5,
         };
-        assert_eq!(wait.get_duration_ms(), 5);
+        assert_eq!(wait.get_duration_ms().expect("a usable wait"), 5);
         assert!(!logs_contain("clamping to min"));
     }
 

@@ -9232,6 +9232,130 @@
           "path": "/paren"
         }
       ]
+    },
+    {
+      "name": "targeted: a wait function that throws answers 500 invalid wait injection (#1616)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/throw"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "wait": "function () { throw new Error('x'); }"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/reference"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "wait": "function () { return nosuch.x; }"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/string"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "wait": "function () { throw 'plain'; }"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/nan"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "wait": "function () { return 'abc'; }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/throw"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/reference"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/string"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/nan"
+        }
+      ]
     }
   ]
 }

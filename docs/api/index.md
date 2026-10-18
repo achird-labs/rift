@@ -1046,7 +1046,7 @@ Six are Mountebank's own error types, so a client that already maps Mountebank e
 | `insufficient access` | 403 |
 | `no such resource` | 404 |
 | `resource conflict` | 409 |
-| `invalid injection` | 400 |
+| `invalid injection` | 400; 500 for a `wait` function that throws |
 
 The rest name doors Mountebank does not have:
 

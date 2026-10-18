@@ -22,7 +22,7 @@
     "src/controllers/configController.js": {"lines": [64, 64], "branches": [6, 6], "functions": [3, 4]},
     "src/controllers/imposterController.js": {"lines": [316, 328], "branches": [42, 42], "functions": [17, 22]},
     "src/controllers/impostersController.js": {"lines": [213, 215], "branches": [41, 44], "functions": [15, 16]},
-    "src/models/behaviors.js": {"lines": [523, 553], "branches": [83, 93], "functions": [29, 29]},
+    "src/models/behaviors.js": {"lines": [528, 553], "branches": [85, 94], "functions": [29, 29]},
     "src/models/behaviorsValidator.js": {"lines": [169, 186], "branches": [39, 48], "functions": [14, 14]},
     "src/models/compatibility.js": {"lines": [122, 133], "branches": [26, 30], "functions": [8, 8]},
     "src/models/dryRunValidator.js": {"lines": [215, 261], "branches": [44, 55], "functions": [18, 22]},
