@@ -211,7 +211,7 @@ in a stub whose top-level `equals`/`deepEquals` `method` predicate is a single s
 
 A key the engine parses and does not act on (issue #1152). The value reads back unchanged, so
 nothing else would distinguish "honoured" from "dropped". Reported for `_rift.metrics`,
-`_rift.proxy`, `recordMatches: true` and `defaultResponse.proxy` (imposter-level, no `stubIndex`), for a `_rift` block on
+`_rift.proxy`, `recordMatches: true`, `ciphers` on an `https` imposter and `defaultResponse.proxy` (imposter-level, no `stubIndex`), for a `_rift` block on
 a `proxy`, `inject` or `fault` response, and for a `_behaviors`/`behaviors` block setting anything
 besides `repeat` on a `fault` or `_rift`-only response (issues #1181, #1188, #1189) — one entry per key and shape,
 naming the stubs, with the first as `stubIndex`. A proxy `predicateGenerators` entry with a key the

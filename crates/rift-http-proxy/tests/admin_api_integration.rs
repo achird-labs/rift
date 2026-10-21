@@ -3096,9 +3096,11 @@ mod mutual_tls {
             .expect("201 json");
         assert_eq!(zero["mutualAuth"], false, "zero-config https: {zero}");
         assert_eq!(zero["rejectUnauthorized"], false);
-        for k in ["cert", "key", "ca"] {
+        for k in ["cert", "key"] {
             assert!(zero.get(k).is_none(), "no configured {k} to print: {zero}");
         }
+        // Issue #1576: `ca` is always printed on https, `null` when unset, as Mountebank does.
+        assert_eq!(zero.get("ca"), Some(&serde_json::Value::Null), "{zero}");
         let zero_port = zero["port"].as_u64().expect("assigned port");
 
         let http: serde_json::Value = c

@@ -1,7 +1,7 @@
 //! Response types and HATEOAS structures for the Admin API.
 
 use crate::extensions::stub_analysis::StubWarning;
-use crate::imposter::{IsResponse, RecordedRequest, Stub};
+use crate::imposter::{IsResponse, PemList, RecordedRequest, Stub};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -95,11 +95,14 @@ pub struct ImposterDetail {
     pub rift: Option<RiftImposterExtensions>,
 }
 
-/// The TLS keys Mountebank prints on an https imposter's detail (its `httpsServer` metadata).
+/// The TLS keys Mountebank prints on every https view (its `httpsServer` metadata): the create
+/// answer, the detail and — merged into the stored config by `replayable_value` — the replayable
+/// export (issue #1576). Not the `?list` form, which Mountebank prints without metadata.
 ///
-/// The two flags are always printed, as Mountebank does; `cert`, `key` and `ca` only when the
-/// imposter configured them (a self-signed or server-default certificate is not imposter config).
-/// The values are exactly what `?replayable=true` already exports.
+/// The two flags and `ca` are always printed, `ca` as `null` when unset and otherwise in the
+/// spelling it was posted in; `ciphers` (upper-cased, as Mountebank prints it) when configured;
+/// `cert` and `key` only when the imposter configured them (a self-signed or server-default
+/// certificate is not imposter config, and printing it would leak an operator's key).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TlsHeader {
@@ -109,20 +112,9 @@ pub struct TlsHeader {
     pub key: Option<String>,
     pub mutual_auth: bool,
     pub reject_unauthorized: bool,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_ca"
-    )]
-    pub ca: Option<Vec<String>>,
-}
-
-/// A single trust anchor prints as the string it was configured as, several as an array — the
-/// shape `ImposterConfig` serializes in the replayable form.
-fn serialize_ca<S: serde::Serializer>(ca: &Option<Vec<String>>, s: S) -> Result<S::Ok, S::Error> {
-    match ca.as_deref() {
-        Some([single]) => s.serialize_str(single),
-        other => other.serialize(s),
-    }
+    pub ca: Option<PemList>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ciphers: Option<String>,
 }
 
 /// Rift-specific extensions in API responses
@@ -704,20 +696,25 @@ mod tests {
     }
 
     #[test]
-    fn tls_header_prints_one_ca_as_a_string_and_several_as_an_array() {
-        let header = |ca: Vec<&str>| TlsHeader {
+    fn tls_header_prints_ca_in_its_posted_spelling() {
+        let header = |ca: PemList| TlsHeader {
             cert: None,
             key: None,
             mutual_auth: true,
             reject_unauthorized: true,
-            ca: Some(ca.into_iter().map(String::from).collect()),
+            ca: Some(ca),
+            ciphers: None,
         };
         assert_eq!(
-            serde_json::to_value(header(vec!["A"])).unwrap(),
+            serde_json::to_value(header(PemList::One("A".into()))).unwrap(),
             serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true, "ca": "A"})
         );
         assert_eq!(
-            serde_json::to_value(header(vec!["A", "B"])).unwrap()["ca"],
+            serde_json::to_value(header(PemList::Many(vec!["A".into()]))).unwrap()["ca"],
+            serde_json::json!(["A"])
+        );
+        assert_eq!(
+            serde_json::to_value(header(PemList::Many(vec!["A".into(), "B".into()]))).unwrap()["ca"],
             serde_json::json!(["A", "B"])
         );
     }

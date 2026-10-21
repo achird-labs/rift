@@ -578,9 +578,14 @@ pub(crate) fn imposter_level_view(
 ) -> serde_json::Result<serde_json::Value> {
     let stubs = std::mem::take(&mut config.stubs);
     let enabled = std::mem::replace(&mut config.enabled, true);
+    // Compared as the imposter will hold it: without a non-https `ciphers` (issue #1576).
+    let ciphers = config.take_non_https_ciphers();
     let view = serde_json::to_value(&*config);
     config.stubs = stubs;
     config.enabled = enabled;
+    if ciphers.is_some() {
+        config.ciphers = ciphers;
+    }
     view
 }
 
@@ -622,6 +627,12 @@ impl Imposter {
         sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
         journal: Option<Arc<dyn crate::imposter::journal::RequestJournal>>,
     ) -> anyhow::Result<Self> {
+        let mut config = config;
+        // Dropped silently on a non-https imposter, as Mountebank's http server drops it (#1576):
+        // it is not printed back, so the readback shows it was not kept.
+        if let Some(dropped) = config.take_non_https_ciphers() {
+            tracing::debug!(port = ?config.port, ciphers = %dropped, "`ciphers` dropped: not https");
+        }
         let load_clock = LoadClock::new();
         let loaded_at = load_clock.next();
         let stubs: Vec<Arc<StubState>> = config

@@ -287,9 +287,11 @@ Get imposter details.
 ```
 
 The detail prints the keys Mountebank's detail prints (#1334): `defaultResponse` when set, and for
-an `https` imposter its TLS metadata — `mutualAuth` and `rejectUnauthorized` always, `cert`, `key`
-and `ca` when the imposter configured them (a self-signed or server-default certificate is not
-printed). `allowCORS` is a Mountebank key, printed in every view when truthy: it accepts any JSON
+an `https` imposter its TLS metadata — `mutualAuth`, `rejectUnauthorized` and `ca` always (`ca` is
+`null` when unset, and otherwise printed as posted: a one-element array stays an array), `ciphers`
+upper-cased when set, and `cert` and `key` when the imposter configured them (a self-signed or
+server-default certificate is not printed). The create response and `?replayable=true` carry the
+same TLS keys (#1576); the `--datadir` file stores only what was posted. `allowCORS` is a Mountebank key, printed in every view when truthy: it accepts any JSON
 value, read by JavaScript truthiness, and the create response, the detail, `?replayable=true` and the
 list all print it exactly as configured, as Mountebank 2.9.2+ does. Rift-only config keys —
 `defaultForward`, `strictBehaviors`, `recordMatches`, `serviceName`, `serviceInfo` and the config

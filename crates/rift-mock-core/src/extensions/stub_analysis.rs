@@ -193,6 +193,13 @@ pub fn ignored_config_keys(config: &ImposterConfig, stubs: &[Stub]) -> Vec<StubW
              `recordRequests` and GET /imposters/:port to see the requests",
         ));
     }
+    // https only: on any other protocol the imposter drops it, as Mountebank does (#1576).
+    if config.ciphers.is_some() && config.protocol.eq_ignore_ascii_case("https") {
+        warnings.push(imposter_level(
+            "`ciphers` is stored and printed but not applied: the TLS listener uses rustls' \
+             default suites (Mountebank passes it to OpenSSL as a cipher list)",
+        ));
+    }
     if config
         .default_response
         .as_ref()
@@ -1590,5 +1597,31 @@ mod tests {
         );
         assert!(ignored_config_keys(&config, &stubs[..1]).is_empty());
         assert!(ignored_config_keys(&config, &stubs[2..5]).is_empty());
+    }
+
+    /// Issue #1576: `ciphers` is stored and printed but not applied, so it is reported once.
+    #[test]
+    fn ciphers_is_reported_as_ignored() {
+        let config: ImposterConfig =
+            serde_json::from_value(json!({ "port": 0, "protocol": "https", "ciphers": "x" }))
+                .expect("config");
+        let warnings = ignored_config_keys(&config, &[]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].warning_type, WarningType::ConfigKeyIgnored);
+        assert!(
+            warnings[0]
+                .message
+                .starts_with("`ciphers` is stored and printed but not applied"),
+            "{}",
+            warnings[0].message
+        );
+        let plain: ImposterConfig =
+            serde_json::from_value(json!({ "port": 0, "protocol": "https" })).expect("config");
+        assert!(ignored_config_keys(&plain, &[]).is_empty());
+        // On http it is dropped, as Mountebank drops it, so there is nothing to report.
+        let http: ImposterConfig =
+            serde_json::from_value(json!({ "port": 0, "protocol": "http", "ciphers": "x" }))
+                .expect("config");
+        assert!(ignored_config_keys(&http, &[]).is_empty());
     }
 }

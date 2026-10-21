@@ -333,6 +333,17 @@ the same imposter.
 - The imposter list carries `recordRequests` for each imposter, next to Rift's `stubCount` and `enabled`. Mountebank prints `recordRequests` only in an imposter's detail.
 - The `?replayable=true` export keeps the imposter's `host`, so a re-posted export binds where the original did. Mountebank 2.9.1's export leaves `host` out.
 
+## An https imposter's TLS keys
+
+Every https view prints the keys Mountebank prints: `mutualAuth`, `rejectUnauthorized` and `ca`
+(`null` when unset, otherwise as posted, so a one-element array stays an array), and `ciphers`
+upper-cased when set. That includes the create answer, the detail and `?replayable=true`. Three
+things differ:
+
+- The default certificate is not printed. When an https imposter has no `key` and `cert`, Mountebank prints its bundled public certificate and key. Rift's fallback is the operator's `--default-tls-cert`/`--default-tls-key`, a secret that would leak through the admin API and every `rift save`, or a certificate generated for that imposter, which an export would turn into stored config. An export without `key` and `cert` re-imports to the same fallback.
+- `ciphers` is stored and printed but not applied. Mountebank hands it to OpenSSL as a cipher list; Rift's TLS listener uses rustls' default suites, and the imposter reports the key in `_rift.warnings`.
+- Client-auth settings that cannot take effect are refused where Mountebank accepts them: `ca` or `rejectUnauthorized` without `mutualAuth: true`, `ca` without `rejectUnauthorized`, and the other combinations listed under [TLS](../features/tls.md#mutual-tls-mtls). So a Mountebank export carrying `ca` with `mutualAuth: false` does not import into Rift.
+
 ## An inherited `--host` is not stored with the imposter
 
 An imposter created without a `host` binds the server's `--host` in both engines, and neither

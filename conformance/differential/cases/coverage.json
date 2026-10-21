@@ -6,52 +6,48 @@
       "steps": [
         {
           "do": "admin",
-          "method": "PUT",
+          "method": "POST",
           "path": "/imposters",
           "body": {
-            "imposters": [
+            "port": 4545,
+            "protocol": "https",
+            "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXEX/fnYkYAcizx3v\nahNgfzAVPeWgrbxN9qx9CQ4iGnqhRANCAASDXiLzeB6up5bgpTReHcf4JU6e7C4f\nrpDMFw4CoCTpMVXyno+FspxrMFGOrrY55pJtwuNG0P+eiS+EmGk81KWj\n-----END PRIVATE KEY-----\n",
+            "cert": "-----BEGIN CERTIFICATE-----\nMIIClzCCAX+gAwIBAgIUb76s3Bu32t04g8Yk97Awl6nREj0wDQYJKoZIhvcNAQEL\nBQAwLTErMCkGA1UEAwwicmlmdC1jb25mb3JtYW5jZS10ZXN0LWludGVyY2VwdC1j\nYTAeFw0yNjA5MjkwMjU5MDBaFw00NjA5MjQwMjU5MDBaMBQxEjAQBgNVBAMMCWxv\nY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABINeIvN4Hq6nluClNF4d\nx/glTp7sLh+ukMwXDgKgJOkxVfKej4WynGswUY6utjnmkm3C40bQ/56JL4SYaTzU\npaOjgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww\nCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQW\nBBQFFykmXW4Tc+8DGcDc9dA00gVkszAfBgNVHSMEGDAWgBSSlbpvl+VQ7TncCG8D\nootZHZDvlTANBgkqhkiG9w0BAQsFAAOCAQEAYLl6o+p7bEqeoYpwNh7XGytSBF9P\nP7gejJxmPYcz7UdGSaNFpWoE3Ic2VzBKIXfvlQbHmf4D94xoTC4LDm021xeZxrsR\n+Va2YNpBwC5z71ktJPlng4R/FFZgrN4cRq14rVxekm+BIejEavDxY0B72AzCafZB\njKWHXCvtWM59e/IsOLK2MkBrDXl2TVPoWCieKqnvSwJOsVzacB20zZL8vHMRhwYG\nveyjA8Hwcjio9gNIK71BvCdBkWz4SouMpSJlntfikfaBGAf2ZsIgii6vC1jPEEkW\nnNYxYS6bPSrDXul440CKJGqWX1wAkeI+EHAGioUacTf8hBryNlsFBV0hIg==\n-----END CERTIFICATE-----\n",
+            "stubs": [
               {
-                "port": 4545,
-                "protocol": "https",
-                "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXEX/fnYkYAcizx3v\nahNgfzAVPeWgrbxN9qx9CQ4iGnqhRANCAASDXiLzeB6up5bgpTReHcf4JU6e7C4f\nrpDMFw4CoCTpMVXyno+FspxrMFGOrrY55pJtwuNG0P+eiS+EmGk81KWj\n-----END PRIVATE KEY-----\n",
-                "cert": "-----BEGIN CERTIFICATE-----\nMIIClzCCAX+gAwIBAgIUb76s3Bu32t04g8Yk97Awl6nREj0wDQYJKoZIhvcNAQEL\nBQAwLTErMCkGA1UEAwwicmlmdC1jb25mb3JtYW5jZS10ZXN0LWludGVyY2VwdC1j\nYTAeFw0yNjA5MjkwMjU5MDBaFw00NjA5MjQwMjU5MDBaMBQxEjAQBgNVBAMMCWxv\nY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABINeIvN4Hq6nluClNF4d\nx/glTp7sLh+ukMwXDgKgJOkxVfKej4WynGswUY6utjnmkm3C40bQ/56JL4SYaTzU\npaOjgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww\nCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQW\nBBQFFykmXW4Tc+8DGcDc9dA00gVkszAfBgNVHSMEGDAWgBSSlbpvl+VQ7TncCG8D\nootZHZDvlTANBgkqhkiG9w0BAQsFAAOCAQEAYLl6o+p7bEqeoYpwNh7XGytSBF9P\nP7gejJxmPYcz7UdGSaNFpWoE3Ic2VzBKIXfvlQbHmf4D94xoTC4LDm021xeZxrsR\n+Va2YNpBwC5z71ktJPlng4R/FFZgrN4cRq14rVxekm+BIejEavDxY0B72AzCafZB\njKWHXCvtWM59e/IsOLK2MkBrDXl2TVPoWCieKqnvSwJOsVzacB20zZL8vHMRhwYG\nveyjA8Hwcjio9gNIK71BvCdBkWz4SouMpSJlntfikfaBGAf2ZsIgii6vC1jPEEkW\nnNYxYS6bPSrDXul440CKJGqWX1wAkeI+EHAGioUacTf8hBryNlsFBV0hIg==\n-----END CERTIFICATE-----\n",
-                "stubs": [
+                "predicates": [
                   {
-                    "predicates": [
-                      {
-                        "equals": {
-                          "path": "/a"
-                        }
-                      }
-                    ],
-                    "responses": [
-                      {
-                        "is": {
-                          "statusCode": 201,
-                          "headers": {
-                            "X-Tls": "yes"
-                          },
-                          "body": "secure"
-                        }
-                      }
-                    ]
-                  },
+                    "equals": {
+                      "path": "/a"
+                    }
+                  }
+                ],
+                "responses": [
                   {
-                    "predicates": [
-                      {
-                        "equals": {
-                          "method": "POST",
-                          "body": "payload"
-                        }
-                      }
-                    ],
-                    "responses": [
-                      {
-                        "is": {
-                          "body": "posted"
-                        }
-                      }
-                    ]
+                    "is": {
+                      "statusCode": 201,
+                      "headers": {
+                        "X-Tls": "yes"
+                      },
+                      "body": "secure"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "method": "POST",
+                      "body": "payload"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "posted"
+                    }
                   }
                 ]
               }
@@ -82,14 +78,6 @@
           "do": "admin",
           "method": "GET",
           "path": "/imposters"
-        },
-        {
-          "do": "admin",
-          "method": "PUT",
-          "path": "/imposters",
-          "body": {
-            "imposters": []
-          }
         }
       ]
     },
@@ -98,22 +86,18 @@
       "steps": [
         {
           "do": "admin",
-          "method": "PUT",
+          "method": "POST",
           "path": "/imposters",
           "body": {
-            "imposters": [
+            "port": 4545,
+            "protocol": "https",
+            "stubs": [
               {
-                "port": 4545,
-                "protocol": "https",
-                "stubs": [
+                "responses": [
                   {
-                    "responses": [
-                      {
-                        "is": {
-                          "body": "ok"
-                        }
-                      }
-                    ]
+                    "is": {
+                      "body": "ok"
+                    }
                   }
                 ]
               }
@@ -125,14 +109,6 @@
           "port": 4545,
           "scheme": "https",
           "path": "/"
-        },
-        {
-          "do": "admin",
-          "method": "PUT",
-          "path": "/imposters",
-          "body": {
-            "imposters": []
-          }
         }
       ]
     },
@@ -141,25 +117,21 @@
       "steps": [
         {
           "do": "admin",
-          "method": "PUT",
+          "method": "POST",
           "path": "/imposters",
           "body": {
-            "imposters": [
+            "port": 4545,
+            "protocol": "https",
+            "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXEX/fnYkYAcizx3v\nahNgfzAVPeWgrbxN9qx9CQ4iGnqhRANCAASDXiLzeB6up5bgpTReHcf4JU6e7C4f\nrpDMFw4CoCTpMVXyno+FspxrMFGOrrY55pJtwuNG0P+eiS+EmGk81KWj\n-----END PRIVATE KEY-----\n",
+            "cert": "-----BEGIN CERTIFICATE-----\nMIIClzCCAX+gAwIBAgIUb76s3Bu32t04g8Yk97Awl6nREj0wDQYJKoZIhvcNAQEL\nBQAwLTErMCkGA1UEAwwicmlmdC1jb25mb3JtYW5jZS10ZXN0LWludGVyY2VwdC1j\nYTAeFw0yNjA5MjkwMjU5MDBaFw00NjA5MjQwMjU5MDBaMBQxEjAQBgNVBAMMCWxv\nY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABINeIvN4Hq6nluClNF4d\nx/glTp7sLh+ukMwXDgKgJOkxVfKej4WynGswUY6utjnmkm3C40bQ/56JL4SYaTzU\npaOjgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww\nCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQW\nBBQFFykmXW4Tc+8DGcDc9dA00gVkszAfBgNVHSMEGDAWgBSSlbpvl+VQ7TncCG8D\nootZHZDvlTANBgkqhkiG9w0BAQsFAAOCAQEAYLl6o+p7bEqeoYpwNh7XGytSBF9P\nP7gejJxmPYcz7UdGSaNFpWoE3Ic2VzBKIXfvlQbHmf4D94xoTC4LDm021xeZxrsR\n+Va2YNpBwC5z71ktJPlng4R/FFZgrN4cRq14rVxekm+BIejEavDxY0B72AzCafZB\njKWHXCvtWM59e/IsOLK2MkBrDXl2TVPoWCieKqnvSwJOsVzacB20zZL8vHMRhwYG\nveyjA8Hwcjio9gNIK71BvCdBkWz4SouMpSJlntfikfaBGAf2ZsIgii6vC1jPEEkW\nnNYxYS6bPSrDXul440CKJGqWX1wAkeI+EHAGioUacTf8hBryNlsFBV0hIg==\n-----END CERTIFICATE-----\n",
+            "recordRequests": true,
+            "stubs": [
               {
-                "port": 4545,
-                "protocol": "https",
-                "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXEX/fnYkYAcizx3v\nahNgfzAVPeWgrbxN9qx9CQ4iGnqhRANCAASDXiLzeB6up5bgpTReHcf4JU6e7C4f\nrpDMFw4CoCTpMVXyno+FspxrMFGOrrY55pJtwuNG0P+eiS+EmGk81KWj\n-----END PRIVATE KEY-----\n",
-                "cert": "-----BEGIN CERTIFICATE-----\nMIIClzCCAX+gAwIBAgIUb76s3Bu32t04g8Yk97Awl6nREj0wDQYJKoZIhvcNAQEL\nBQAwLTErMCkGA1UEAwwicmlmdC1jb25mb3JtYW5jZS10ZXN0LWludGVyY2VwdC1j\nYTAeFw0yNjA5MjkwMjU5MDBaFw00NjA5MjQwMjU5MDBaMBQxEjAQBgNVBAMMCWxv\nY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABINeIvN4Hq6nluClNF4d\nx/glTp7sLh+ukMwXDgKgJOkxVfKej4WynGswUY6utjnmkm3C40bQ/56JL4SYaTzU\npaOjgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww\nCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQW\nBBQFFykmXW4Tc+8DGcDc9dA00gVkszAfBgNVHSMEGDAWgBSSlbpvl+VQ7TncCG8D\nootZHZDvlTANBgkqhkiG9w0BAQsFAAOCAQEAYLl6o+p7bEqeoYpwNh7XGytSBF9P\nP7gejJxmPYcz7UdGSaNFpWoE3Ic2VzBKIXfvlQbHmf4D94xoTC4LDm021xeZxrsR\n+Va2YNpBwC5z71ktJPlng4R/FFZgrN4cRq14rVxekm+BIejEavDxY0B72AzCafZB\njKWHXCvtWM59e/IsOLK2MkBrDXl2TVPoWCieKqnvSwJOsVzacB20zZL8vHMRhwYG\nveyjA8Hwcjio9gNIK71BvCdBkWz4SouMpSJlntfikfaBGAf2ZsIgii6vC1jPEEkW\nnNYxYS6bPSrDXul440CKJGqWX1wAkeI+EHAGioUacTf8hBryNlsFBV0hIg==\n-----END CERTIFICATE-----\n",
-                "recordRequests": true,
-                "stubs": [
+                "responses": [
                   {
-                    "responses": [
-                      {
-                        "is": {
-                          "body": "ok"
-                        }
-                      }
-                    ]
+                    "is": {
+                      "body": "ok"
+                    }
                   }
                 ]
               }
@@ -191,14 +163,6 @@
           "do": "admin",
           "method": "GET",
           "path": "/imposters"
-        },
-        {
-          "do": "admin",
-          "method": "PUT",
-          "path": "/imposters",
-          "body": {
-            "imposters": []
-          }
         }
       ]
     },
@@ -207,52 +171,48 @@
       "steps": [
         {
           "do": "admin",
-          "method": "PUT",
+          "method": "POST",
           "path": "/imposters",
           "body": {
-            "imposters": [
+            "port": 4545,
+            "protocol": "https",
+            "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXEX/fnYkYAcizx3v\nahNgfzAVPeWgrbxN9qx9CQ4iGnqhRANCAASDXiLzeB6up5bgpTReHcf4JU6e7C4f\nrpDMFw4CoCTpMVXyno+FspxrMFGOrrY55pJtwuNG0P+eiS+EmGk81KWj\n-----END PRIVATE KEY-----\n",
+            "cert": "-----BEGIN CERTIFICATE-----\nMIIClzCCAX+gAwIBAgIUb76s3Bu32t04g8Yk97Awl6nREj0wDQYJKoZIhvcNAQEL\nBQAwLTErMCkGA1UEAwwicmlmdC1jb25mb3JtYW5jZS10ZXN0LWludGVyY2VwdC1j\nYTAeFw0yNjA5MjkwMjU5MDBaFw00NjA5MjQwMjU5MDBaMBQxEjAQBgNVBAMMCWxv\nY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABINeIvN4Hq6nluClNF4d\nx/glTp7sLh+ukMwXDgKgJOkxVfKej4WynGswUY6utjnmkm3C40bQ/56JL4SYaTzU\npaOjgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww\nCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQW\nBBQFFykmXW4Tc+8DGcDc9dA00gVkszAfBgNVHSMEGDAWgBSSlbpvl+VQ7TncCG8D\nootZHZDvlTANBgkqhkiG9w0BAQsFAAOCAQEAYLl6o+p7bEqeoYpwNh7XGytSBF9P\nP7gejJxmPYcz7UdGSaNFpWoE3Ic2VzBKIXfvlQbHmf4D94xoTC4LDm021xeZxrsR\n+Va2YNpBwC5z71ktJPlng4R/FFZgrN4cRq14rVxekm+BIejEavDxY0B72AzCafZB\njKWHXCvtWM59e/IsOLK2MkBrDXl2TVPoWCieKqnvSwJOsVzacB20zZL8vHMRhwYG\nveyjA8Hwcjio9gNIK71BvCdBkWz4SouMpSJlntfikfaBGAf2ZsIgii6vC1jPEEkW\nnNYxYS6bPSrDXul440CKJGqWX1wAkeI+EHAGioUacTf8hBryNlsFBV0hIg==\n-----END CERTIFICATE-----\n",
+            "defaultResponse": {
+              "statusCode": 418,
+              "body": "default"
+            },
+            "stubs": [
               {
-                "port": 4545,
-                "protocol": "https",
-                "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXEX/fnYkYAcizx3v\nahNgfzAVPeWgrbxN9qx9CQ4iGnqhRANCAASDXiLzeB6up5bgpTReHcf4JU6e7C4f\nrpDMFw4CoCTpMVXyno+FspxrMFGOrrY55pJtwuNG0P+eiS+EmGk81KWj\n-----END PRIVATE KEY-----\n",
-                "cert": "-----BEGIN CERTIFICATE-----\nMIIClzCCAX+gAwIBAgIUb76s3Bu32t04g8Yk97Awl6nREj0wDQYJKoZIhvcNAQEL\nBQAwLTErMCkGA1UEAwwicmlmdC1jb25mb3JtYW5jZS10ZXN0LWludGVyY2VwdC1j\nYTAeFw0yNjA5MjkwMjU5MDBaFw00NjA5MjQwMjU5MDBaMBQxEjAQBgNVBAMMCWxv\nY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABINeIvN4Hq6nluClNF4d\nx/glTp7sLh+ukMwXDgKgJOkxVfKej4WynGswUY6utjnmkm3C40bQ/56JL4SYaTzU\npaOjgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww\nCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQW\nBBQFFykmXW4Tc+8DGcDc9dA00gVkszAfBgNVHSMEGDAWgBSSlbpvl+VQ7TncCG8D\nootZHZDvlTANBgkqhkiG9w0BAQsFAAOCAQEAYLl6o+p7bEqeoYpwNh7XGytSBF9P\nP7gejJxmPYcz7UdGSaNFpWoE3Ic2VzBKIXfvlQbHmf4D94xoTC4LDm021xeZxrsR\n+Va2YNpBwC5z71ktJPlng4R/FFZgrN4cRq14rVxekm+BIejEavDxY0B72AzCafZB\njKWHXCvtWM59e/IsOLK2MkBrDXl2TVPoWCieKqnvSwJOsVzacB20zZL8vHMRhwYG\nveyjA8Hwcjio9gNIK71BvCdBkWz4SouMpSJlntfikfaBGAf2ZsIgii6vC1jPEEkW\nnNYxYS6bPSrDXul440CKJGqWX1wAkeI+EHAGioUacTf8hBryNlsFBV0hIg==\n-----END CERTIFICATE-----\n",
-                "defaultResponse": {
-                  "statusCode": 418,
-                  "body": "default"
-                },
-                "stubs": [
+                "predicates": [
                   {
-                    "predicates": [
-                      {
-                        "startsWith": {
-                          "path": "/inj"
-                        }
-                      }
-                    ],
-                    "responses": [
-                      {
-                        "inject": "function (config) { return { statusCode: 202, body: config.request.method + ' ' + config.request.path }; }"
-                      }
-                    ]
-                  },
+                    "startsWith": {
+                      "path": "/inj"
+                    }
+                  }
+                ],
+                "responses": [
                   {
-                    "predicates": [
+                    "inject": "function (config) { return { statusCode: 202, body: config.request.method + ' ' + config.request.path }; }"
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/wait"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "waited"
+                    },
+                    "behaviors": [
                       {
-                        "equals": {
-                          "path": "/wait"
-                        }
-                      }
-                    ],
-                    "responses": [
-                      {
-                        "is": {
-                          "body": "waited"
-                        },
-                        "behaviors": [
-                          {
-                            "wait": 10
-                          }
-                        ]
+                        "wait": 10
                       }
                     ]
                   }
@@ -278,13 +238,70 @@
           "port": 4545,
           "scheme": "https",
           "path": "/other"
+        }
+      ]
+    },
+    {
+      "name": "coverage: httpsServer.js:35 an https imposter's ciphers are stored and printed upper-cased",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "https",
+            "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXEX/fnYkYAcizx3v\nahNgfzAVPeWgrbxN9qx9CQ4iGnqhRANCAASDXiLzeB6up5bgpTReHcf4JU6e7C4f\nrpDMFw4CoCTpMVXyno+FspxrMFGOrrY55pJtwuNG0P+eiS+EmGk81KWj\n-----END PRIVATE KEY-----\n",
+            "cert": "-----BEGIN CERTIFICATE-----\nMIIClzCCAX+gAwIBAgIUb76s3Bu32t04g8Yk97Awl6nREj0wDQYJKoZIhvcNAQEL\nBQAwLTErMCkGA1UEAwwicmlmdC1jb25mb3JtYW5jZS10ZXN0LWludGVyY2VwdC1j\nYTAeFw0yNjA5MjkwMjU5MDBaFw00NjA5MjQwMjU5MDBaMBQxEjAQBgNVBAMMCWxv\nY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABINeIvN4Hq6nluClNF4d\nx/glTp7sLh+ukMwXDgKgJOkxVfKej4WynGswUY6utjnmkm3C40bQ/56JL4SYaTzU\npaOjgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww\nCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQW\nBBQFFykmXW4Tc+8DGcDc9dA00gVkszAfBgNVHSMEGDAWgBSSlbpvl+VQ7TncCG8D\nootZHZDvlTANBgkqhkiG9w0BAQsFAAOCAQEAYLl6o+p7bEqeoYpwNh7XGytSBF9P\nP7gejJxmPYcz7UdGSaNFpWoE3Ic2VzBKIXfvlQbHmf4D94xoTC4LDm021xeZxrsR\n+Va2YNpBwC5z71ktJPlng4R/FFZgrN4cRq14rVxekm+BIejEavDxY0B72AzCafZB\njKWHXCvtWM59e/IsOLK2MkBrDXl2TVPoWCieKqnvSwJOsVzacB20zZL8vHMRhwYG\nveyjA8Hwcjio9gNIK71BvCdBkWz4SouMpSJlntfikfaBGAf2ZsIgii6vC1jPEEkW\nnNYxYS6bPSrDXul440CKJGqWX1wAkeI+EHAGioUacTf8hBryNlsFBV0hIg==\n-----END CERTIFICATE-----\n",
+            "ciphers": "ecdhe-ecdsa-aes128-gcm-sha256",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ok"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
         },
         {
           "do": "admin",
-          "method": "PUT",
+          "method": "GET",
+          "path": "/imposters/4545"
+        }
+      ]
+    },
+    {
+      "name": "coverage: httpsServer.js:19 an https imposter's ca array is printed as posted",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
           "path": "/imposters",
           "body": {
-            "imposters": []
+            "port": 4545,
+            "protocol": "https",
+            "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXEX/fnYkYAcizx3v\nahNgfzAVPeWgrbxN9qx9CQ4iGnqhRANCAASDXiLzeB6up5bgpTReHcf4JU6e7C4f\nrpDMFw4CoCTpMVXyno+FspxrMFGOrrY55pJtwuNG0P+eiS+EmGk81KWj\n-----END PRIVATE KEY-----\n",
+            "cert": "-----BEGIN CERTIFICATE-----\nMIIClzCCAX+gAwIBAgIUb76s3Bu32t04g8Yk97Awl6nREj0wDQYJKoZIhvcNAQEL\nBQAwLTErMCkGA1UEAwwicmlmdC1jb25mb3JtYW5jZS10ZXN0LWludGVyY2VwdC1j\nYTAeFw0yNjA5MjkwMjU5MDBaFw00NjA5MjQwMjU5MDBaMBQxEjAQBgNVBAMMCWxv\nY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABINeIvN4Hq6nluClNF4d\nx/glTp7sLh+ukMwXDgKgJOkxVfKej4WynGswUY6utjnmkm3C40bQ/56JL4SYaTzU\npaOjgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww\nCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQW\nBBQFFykmXW4Tc+8DGcDc9dA00gVkszAfBgNVHSMEGDAWgBSSlbpvl+VQ7TncCG8D\nootZHZDvlTANBgkqhkiG9w0BAQsFAAOCAQEAYLl6o+p7bEqeoYpwNh7XGytSBF9P\nP7gejJxmPYcz7UdGSaNFpWoE3Ic2VzBKIXfvlQbHmf4D94xoTC4LDm021xeZxrsR\n+Va2YNpBwC5z71ktJPlng4R/FFZgrN4cRq14rVxekm+BIejEavDxY0B72AzCafZB\njKWHXCvtWM59e/IsOLK2MkBrDXl2TVPoWCieKqnvSwJOsVzacB20zZL8vHMRhwYG\nveyjA8Hwcjio9gNIK71BvCdBkWz4SouMpSJlntfikfaBGAf2ZsIgii6vC1jPEEkW\nnNYxYS6bPSrDXul440CKJGqWX1wAkeI+EHAGioUacTf8hBryNlsFBV0hIg==\n-----END CERTIFICATE-----\n",
+            "mutualAuth": true,
+            "rejectUnauthorized": true,
+            "ca": [
+              "-----BEGIN CERTIFICATE-----\nMIIClzCCAX+gAwIBAgIUb76s3Bu32t04g8Yk97Awl6nREj0wDQYJKoZIhvcNAQEL\nBQAwLTErMCkGA1UEAwwicmlmdC1jb25mb3JtYW5jZS10ZXN0LWludGVyY2VwdC1j\nYTAeFw0yNjA5MjkwMjU5MDBaFw00NjA5MjQwMjU5MDBaMBQxEjAQBgNVBAMMCWxv\nY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABINeIvN4Hq6nluClNF4d\nx/glTp7sLh+ukMwXDgKgJOkxVfKej4WynGswUY6utjnmkm3C40bQ/56JL4SYaTzU\npaOjgZIwgY8wDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww\nCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQW\nBBQFFykmXW4Tc+8DGcDc9dA00gVkszAfBgNVHSMEGDAWgBSSlbpvl+VQ7TncCG8D\nootZHZDvlTANBgkqhkiG9w0BAQsFAAOCAQEAYLl6o+p7bEqeoYpwNh7XGytSBF9P\nP7gejJxmPYcz7UdGSaNFpWoE3Ic2VzBKIXfvlQbHmf4D94xoTC4LDm021xeZxrsR\n+Va2YNpBwC5z71ktJPlng4R/FFZgrN4cRq14rVxekm+BIejEavDxY0B72AzCafZB\njKWHXCvtWM59e/IsOLK2MkBrDXl2TVPoWCieKqnvSwJOsVzacB20zZL8vHMRhwYG\nveyjA8Hwcjio9gNIK71BvCdBkWz4SouMpSJlntfikfaBGAf2ZsIgii6vC1jPEEkW\nnNYxYS6bPSrDXul440CKJGqWX1wAkeI+EHAGioUacTf8hBryNlsFBV0hIg==\n-----END CERTIFICATE-----\n"
+            ],
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ok"
+                    }
+                  }
+                ]
+              }
+            ]
           }
         }
       ]

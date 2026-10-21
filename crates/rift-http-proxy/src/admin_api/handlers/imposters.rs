@@ -244,11 +244,11 @@ fn imposters_value(
     };
 
     if params.replayable {
-        let configs: Vec<ImposterConfig> = imposters
+        let configs = imposters
             .iter()
-            .map(|i| replayable_config(i, params.remove_proxies))
-            .collect();
-        render(serde_json::to_value(&configs).map(|v| serde_json::json!({ "imposters": v })))
+            .map(|i| replayable_value(i, params.remove_proxies))
+            .collect::<Result<Vec<_>, _>>();
+        render(configs.map(|v| serde_json::json!({ "imposters": v })))
     } else if params.list {
         // Mountebank-compatible abbreviated listing: port, protocol, name, numberOfRequests, _links
         let entries: Vec<ImposterListEntry> = imposters
@@ -659,10 +659,15 @@ pub async fn handle_get(
 
     match manager.get_imposter(port) {
         // The same document `GET /imposters?replayable=true` lists for this imposter (issue #1219).
-        Ok(imposter) if params.replayable => json_response(
-            StatusCode::OK,
-            &replayable_config(&imposter, params.remove_proxies),
-        ),
+        Ok(imposter) if params.replayable => {
+            match replayable_value(&imposter, params.remove_proxies) {
+                Ok(value) => json_response(StatusCode::OK, &value),
+                Err(e) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("failed to serialize response body: {e}"),
+                ),
+            }
+        }
         Ok(imposter) => json_response(
             StatusCode::OK,
             &imposter_detail(&imposter, port, base_url, params.remove_proxies),
@@ -967,7 +972,41 @@ pub fn tls_header(config: &ImposterConfig) -> Option<TlsHeader> {
         mutual_auth: config.mutual_auth,
         reject_unauthorized: config.reject_unauthorized,
         ca: config.ca.clone(),
+        // Stored verbatim, printed upper-cased — Mountebank's `options.ciphers.toUpperCase()`.
+        ciphers: config.ciphers.as_deref().map(str::to_uppercase),
     })
+}
+
+/// The replayable document one imposter prints (`?replayable=true`, `rift save`, the C-ABI
+/// export): [`replayable_config`] serialized, with an https imposter's [`TlsHeader`] keys merged
+/// on top — both client-auth flags, `ca` (`null` when unset) and `ciphers` upper-cased — as
+/// Mountebank's replayable form carries its `httpsServer` metadata (issue #1576).
+///
+/// The keys are added here, in the printed view, and NOT by `ImposterConfig`'s `Serialize`: that
+/// form is the `--datadir` file and rift-cluster's committed `PutImposter` bytes, which must stay
+/// byte-identical for every existing input. The added keys re-import unchanged (`ca: null` decodes
+/// as unset; a false flag is the default).
+///
+/// # Errors
+/// A serialization failure of the config, which the callers answer as an encode error.
+pub fn replayable_value(
+    imposter: &Imposter,
+    remove_proxies: bool,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let config = replayable_config(imposter, remove_proxies);
+    let mut value = serde_json::to_value(&config)?;
+    if let Some(tls) = tls_header(&config) {
+        // Both are structs, so both serialize to objects; `cert`/`key` carry the same values.
+        match (value.as_object_mut(), serde_json::to_value(tls)?) {
+            (Some(doc), serde_json::Value::Object(keys)) => doc.extend(keys),
+            _ => {
+                return Err(serde::ser::Error::custom(
+                    "an https imposter's config or TLS metadata did not encode as an object",
+                ));
+            }
+        }
+    }
+    Ok(value)
 }
 
 /// The replayable (`?replayable=true`) projection of one imposter: its config, carrying the stubs it
@@ -3057,5 +3096,125 @@ mod delete_persistence_tests {
             replace_failure_status(&[fault()]),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+}
+
+// Issue #1576: every https view — create answer, detail and `?replayable=true` — prints the keys
+// Mountebank's `httpsServer` metadata carries: both client-auth flags, `ca` (`null` when unset, in
+// the spelling it was posted in) and `ciphers` (upper-cased) when set.
+#[cfg(test)]
+mod https_view_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    const BASE: &str = "http://localhost:2525";
+
+    fn config(body: serde_json::Value) -> ImposterConfig {
+        serde_json::from_value(body).expect("config")
+    }
+
+    fn header_json(body: serde_json::Value) -> serde_json::Value {
+        serde_json::to_value(tls_header(&config(body)).expect("https")).expect("serialize")
+    }
+
+    async fn body_json(resp: Response<Full<Bytes>>) -> serde_json::Value {
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    #[test]
+    fn tls_header_prints_ca_null_when_unset() {
+        let json = header_json(serde_json::json!({"protocol": "https"}));
+        assert_eq!(json.get("ca"), Some(&serde_json::Value::Null), "{json}");
+        assert_eq!(json["mutualAuth"], false);
+        assert_eq!(json["rejectUnauthorized"], false);
+        assert!(json.get("ciphers").is_none(), "{json}");
+    }
+
+    #[test]
+    fn tls_header_prints_ca_in_the_spelling_it_was_posted_in() {
+        for ca in [
+            serde_json::json!(["A"]),
+            serde_json::json!("A"),
+            serde_json::json!(["A", "B"]),
+        ] {
+            let json = header_json(serde_json::json!({
+                "protocol": "https", "mutualAuth": true, "rejectUnauthorized": true, "ca": ca
+            }));
+            assert_eq!(json["ca"], ca);
+        }
+    }
+
+    #[test]
+    fn tls_header_prints_ciphers_upper_cased() {
+        let json = header_json(
+            serde_json::json!({"protocol": "https", "ciphers": "ecdhe-rsa-aes128-gcm-sha256"}),
+        );
+        assert_eq!(json["ciphers"], "ECDHE-RSA-AES128-GCM-SHA256");
+    }
+
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn replayable_https_views_carry_the_client_auth_flags_and_ca_null() {
+        let manager = Arc::new(ImposterManager::new());
+        let https = manager
+            .create_imposter(config(
+                serde_json::json!({"protocol": "https", "ciphers": "aes128-sha", "stubs": []}),
+            ))
+            .await
+            .expect("create https");
+        let http = manager
+            .create_imposter(config(
+                serde_json::json!({"protocol": "http", "ciphers": "aes128-sha", "stubs": []}),
+            ))
+            .await
+            .expect("create http");
+
+        let one =
+            body_json(handle_get(https, Some("replayable=true"), BASE, Arc::clone(&manager)).await)
+                .await;
+        let list =
+            body_json(handle_list(Arc::clone(&manager), Some("replayable=true"), BASE).await).await;
+        let listed = |port: u16| {
+            list["imposters"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .find(|i| i["port"] == port)
+                .cloned()
+                .unwrap_or_else(|| panic!("{port} missing: {list}"))
+        };
+        for view in [one, listed(https)] {
+            assert_eq!(view["mutualAuth"], false, "{view}");
+            assert_eq!(view["rejectUnauthorized"], false, "{view}");
+            assert_eq!(view.get("ca"), Some(&serde_json::Value::Null), "{view}");
+            assert_eq!(view["ciphers"], "AES128-SHA", "{view}");
+        }
+        let plain = listed(http);
+        for k in ["mutualAuth", "rejectUnauthorized", "ca", "ciphers"] {
+            assert!(
+                plain.get(k).is_none(),
+                "http replayable has no `{k}`: {plain}"
+            );
+        }
+
+        // The stored form is untouched: the config the imposter keeps has no flags and no `ca`,
+        // and `ciphers` stays as posted.
+        let stored =
+            serde_json::to_value(&manager.get_imposter(https).expect("imposter").config).unwrap();
+        for k in ["mutualAuth", "rejectUnauthorized", "ca"] {
+            assert!(
+                stored.get(k).is_none(),
+                "stored form has no `{k}`: {stored}"
+            );
+        }
+        assert_eq!(stored["ciphers"], "aes128-sha");
+
+        // The replayable document re-imports.
+        let again: ImposterConfig =
+            serde_json::from_value(listed(https)).expect("replayable decodes");
+        manager.delete_all().await;
+        manager.create_imposter(again).await.expect("re-import");
+        manager.delete_all().await;
     }
 }

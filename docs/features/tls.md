@@ -174,6 +174,10 @@ Three fields, matching Mountebank's grammar:
 | `rejectUnauthorized` | Validate the client certificate against `ca`. Requires `ca`. |
 | `ca` | PEM trust anchor(s) client certificates must chain to. A string or an array. |
 
+`ciphers`, Mountebank's OpenSSL cipher list, is accepted, stored and printed back upper-cased, but
+not applied: the listener uses rustls' default suites, and the imposter reports the key in
+`_rift.warnings`. On an `http` imposter it is dropped, as Mountebank drops it (see [Differences from Mountebank](../mountebank/differences.md#an-https-imposters-tls-keys)).
+
 **Require a certificate, without validating it.** Useful for virtualizing a server that demands
 mutual auth when you do not have that server's PKI. Any certificate the client holds the key for
 is accepted (the handshake signature is still checked, so a certificate copied off the wire is

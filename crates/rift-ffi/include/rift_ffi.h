@@ -118,10 +118,12 @@ char *rift_list_imposters(RiftHandle *h, const char *options_json);
 
 /**
  * Get one imposter. `options_json` — same shape as [`rift_list_imposters`]. Replayable returns
- * the single `ImposterConfig` (same `removeProxies` projection); otherwise a detail object
+ * the single `ImposterConfig` (same `removeProxies` projection, an https imposter's TLS metadata
+ * included as in the detail); otherwise a detail object
  * `{"protocol","port","name"?,"defaultResponse"?,"numberOfRequests","enabled","recordRequests",
  * "allowCORS"?,"stubs","requests"}` (`allowCORS` as configured, when truthy), plus the TLS metadata `GET /imposters/{port}` prints for an https imposter
- * (`mutualAuth`, `rejectUnauthorized`, and `cert`/`key`/`ca` when configured).
+ * (`mutualAuth`, `rejectUnauthorized`, `ca` — `null` when unset — `ciphers` upper-cased when set,
+ * and `cert`/`key` when configured).
  * Returns (caller frees) null on any error (null handle, unknown port, or malformed options).
  *
  * # Safety
