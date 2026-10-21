@@ -134,11 +134,11 @@ is decoded, so stored configs stay decodable.
 ### What scripts may `require()` (`ScriptFileAccess`)
 
 A running imposter carries a `ScriptFileAccess` that decides which files its Mountebank-style
-scripts may load with `require()` (issue #1611). It is never part of `ImposterConfig`, so it is not
-serialized, not a `stub_key` input and not in replicated bytes: the door that writes the imposter
-chooses it.
+scripts may load with `require()` (issue #1611), and which CSV files its `lookup` behaviors may read
+(issue #1617). It is never part of `ImposterConfig`, so it is not serialized, not a `stub_key` input
+and not in replicated bytes: the door that writes the imposter chooses it.
 
-| Variant | `require()` reads |
+| Variant | `require()` and `lookup` read |
 |:--------|:------------------|
 | `ScriptFileAccess::Confined(root)` | Only files under `root`; anything else is refused with one message that never says whether the file exists. `ScriptFileAccess::network(Some(root))`. |
 | `ScriptFileAccess::Refused` (the default) | Nothing. `ScriptFileAccess::network(None)`. |
@@ -157,6 +157,12 @@ chooses it.
 Rift's own server gives the admin API, `--datadir` files and `https:` sources `network(--scripts-dir)`,
 and local `file:` sources `trusted_cwd()`; the C-ABI's host calls are `trusted_cwd()` and its admin
 plane is `network(None)`. A multi-tenant embedder should pass `network(Some(root))` per tenant.
+
+A `lookup` path is resolved under the access every time it runs, so an imposter the default
+`Refused` access applies serves its lookups with their tokens unreplaced. `check_lookup_paths(stubs,
+&access)` is the refusal Rift's admin API runs before a write; it is not part of `admission_check`,
+because whether a path is readable depends on the door and not on the config, so a stored config
+never fails to replay for it.
 
 ### Reconciling one imposter (`apply_one`)
 

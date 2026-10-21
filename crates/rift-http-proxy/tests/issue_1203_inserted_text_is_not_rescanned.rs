@@ -22,7 +22,10 @@ impl Admin {
         let manager = Arc::new(ImposterManager::new());
         let server =
             AdminApiServer::new("127.0.0.1:0".parse().expect("addr"), manager.clone(), None)
-                .with_allow_injection(true);
+                .with_allow_injection(true)
+                // The lookups' CSVs are temp files; an admin-API lookup reads only under
+                // `--scripts-dir` (issue #1617).
+                .with_scripts_dir(std::env::temp_dir());
         let running = server.bind().await.expect("admin API binds");
         let url = format!("http://{}", running.local_addr());
         let client = reqwest::Client::new();

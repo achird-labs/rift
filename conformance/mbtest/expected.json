@@ -630,6 +630,48 @@
       "issue": "#1596",
       "note": "request.query in a script lists keys in an arbitrary order, not the client's",
       "flaky": "the key order is arbitrary per request, so the test passes when it happens to match"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support lookup from CSV file keyed by regex",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#lookup-reads-csv-files-only-under---scripts-dir",
+      "note": "the lookup reads a CSV file by absolute path in mbTest's working directory; Rift's admin API reads lookup files only under --scripts-dir, which mbTest's engine is not started with, so the create answers 400 (#1617)"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support lookup from CSV file keyed by xpath",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#lookup-reads-csv-files-only-under---scripts-dir",
+      "note": "the lookup reads a CSV file by absolute path in mbTest's working directory; Rift's admin API reads lookup files only under --scripts-dir, which mbTest's engine is not started with, so the create answers 400 (#1617)"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support lookup from CSV file keyed by jsonpath",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#lookup-reads-csv-files-only-under---scripts-dir",
+      "note": "the lookup reads a CSV file by absolute path in mbTest's working directory; Rift's admin API reads lookup files only under --scripts-dir, which mbTest's engine is not started with, so the create answers 400 (#1617)"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support lookup from CSV file keyed by regex",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#lookup-reads-csv-files-only-under---scripts-dir",
+      "note": "the lookup reads a CSV file by absolute path in mbTest's working directory; Rift's admin API reads lookup files only under --scripts-dir, which mbTest's engine is not started with, so the create answers 400 (#1617)"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support lookup from CSV file keyed by xpath",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#lookup-reads-csv-files-only-under---scripts-dir",
+      "note": "the lookup reads a CSV file by absolute path in mbTest's working directory; Rift's admin API reads lookup files only under --scripts-dir, which mbTest's engine is not started with, so the create answers 400 (#1617)"
+    },
+    {
+      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support lookup from CSV file keyed by jsonpath",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#lookup-reads-csv-files-only-under---scripts-dir",
+      "note": "the lookup reads a CSV file by absolute path in mbTest's working directory; Rift's admin API reads lookup files only under --scripts-dir, which mbTest's engine is not started with, so the create answers 400 (#1617)"
+    },
+    {
+      "id": "docs:/docs/api/behaviors#lookup",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#lookup-reads-csv-files-only-under---scripts-dir",
+      "note": "the page's lookup example reads a CSV file in Mountebank's working directory; Rift's admin API reads lookup files only under --scripts-dir (#1617)"
     }
   ]
 }

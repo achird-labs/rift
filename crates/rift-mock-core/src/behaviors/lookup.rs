@@ -4,11 +4,12 @@ use super::copy::CopySource;
 use super::extraction::ExtractionMethod;
 use super::request::RequestContext;
 use super::spliced::{Spliced, SplicedHeaders, authored_headers, plain_headers};
+use crate::imposter::{ScriptFileAccess, read_lookup_file, resolve_lookup_path};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Lookup behavior - query external data source
@@ -124,9 +125,15 @@ pub struct DatasetBinding {
     pub digest: Option<String>,
 }
 
-/// CSV data cache for performance
+/// Parsed CSV files, keyed by the canonical path read and the delimiter it was parsed with: two
+/// lookups that read one file with different delimiters each get their own parse, as each gets
+/// its own in Mountebank, which re-reads the file per request (issues #1566, #1617).
+///
+/// A file is read once, on first use, and kept. Its path is resolved under the imposter's
+/// [`ScriptFileAccess`] on every use, before the cache is consulted, so a path or link that has
+/// moved out of `--scripts-dir` since is refused even when its earlier content is cached.
 pub struct CsvCache {
-    data: RwLock<HashMap<String, Arc<CsvData>>>,
+    data: RwLock<HashMap<(PathBuf, String), Arc<CsvData>>>,
 }
 
 impl Default for CsvCache {
@@ -142,34 +149,46 @@ impl CsvCache {
         }
     }
 
-    /// Get or load CSV data
-    pub fn get_or_load(&self, path: &str, delimiter: &str) -> Option<Arc<CsvData>> {
-        // Check cache first
-        {
-            let cache = self.data.read();
-            if let Some(data) = cache.get(path) {
-                return Some(Arc::clone(data));
+    /// The parsed CSV file `path` names under `access`, read and cached on first use.
+    ///
+    /// `None` when the path may not be read under `access` (issue #1617) or the file cannot be
+    /// loaded; either is logged, so a lookup's tokens are never left in place silently.
+    pub fn get_or_load(
+        &self,
+        path: &str,
+        delimiter: &str,
+        access: &ScriptFileAccess,
+    ) -> Option<Arc<CsvData>> {
+        let resolved = match resolve_lookup_path(path, access) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                tracing::warn!("lookup behavior: {e}");
+                return None;
             }
+        };
+        let key = (resolved, delimiter.to_string());
+        if let Some(data) = self.data.read().get(&key) {
+            return Some(Arc::clone(data));
         }
 
-        // Load from file. A failure here means a misconfigured data source
-        // (missing/unreadable/malformed CSV); surface it instead of silently
-        // serving the response with the lookup tokens left unreplaced.
-        let data = match CsvData::load(path, delimiter) {
-            Ok(data) => data,
+        // A failure here means a misconfigured data source (missing/unreadable/malformed CSV);
+        // surface it instead of silently serving the response with the lookup tokens left
+        // unreplaced.
+        let text = match read_lookup_file(path, &key.0, access) {
+            Ok(text) => text,
+            Err(e) => {
+                tracing::warn!("lookup behavior: {e}");
+                return None;
+            }
+        };
+        let data = match CsvData::from_text(&text, path, delimiter) {
+            Ok(data) => Arc::new(data),
             Err(e) => {
                 tracing::warn!("lookup behavior: failed to load CSV data source '{path}': {e}");
                 return None;
             }
         };
-        let data = Arc::new(data);
-
-        // Cache it
-        {
-            let mut cache = self.data.write();
-            cache.insert(path.to_string(), Arc::clone(&data));
-        }
-
+        self.data.write().insert(key, Arc::clone(&data));
         Some(data)
     }
 
@@ -200,18 +219,23 @@ impl CsvData {
     pub fn load<P: AsRef<Path>>(path: P, delimiter: &str) -> Result<Self, std::io::Error> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)?;
+        Self::from_text(&text, &path.display().to_string(), delimiter)
+    }
+
+    /// [`CsvData::load`] for text already read from the file `name` names.
+    fn from_text(text: &str, name: &str, delimiter: &str) -> Result<Self, std::io::Error> {
         if text.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Empty CSV",
             ));
         }
-        let (data, error) = Self::parse(&text, delimiter);
+        let (data, error) = Self::parse(text, delimiter);
         if let Some(error) = error {
             tracing::warn!(
                 "lookup behavior: CSV data source '{}' stops at line {}: {}; rows from there on \
                  are not read, as in Mountebank",
-                path.display(),
+                name,
                 error.line,
                 error.kind
             );
@@ -500,6 +524,7 @@ pub fn apply_lookup_behaviors(
     behaviors: &[LookupBehavior],
     request: &RequestContext,
     csv_cache: &CsvCache,
+    access: &ScriptFileAccess,
     stub: crate::imposter::headers::StubRef<'_>,
 ) -> String {
     let mut spliced_body = Spliced::authored(body.to_string());
@@ -511,6 +536,7 @@ pub fn apply_lookup_behaviors(
         behaviors,
         request,
         csv_cache,
+        access,
         stub,
     );
     *headers = plain_headers(spliced_headers);
@@ -526,6 +552,9 @@ pub fn apply_lookup_behaviors(
 ///
 /// `status` is a `statusCode` string (issue #1558), scanned like a header value, as Mountebank's
 /// `globalObjectReplace` replaces tokens in every string field of the response.
+///
+/// `access` is the imposter's: it decides which CSV files may be read (issue #1617).
+#[allow(clippy::too_many_arguments)] // each is a distinct input of one pass; a struct adds nothing
 pub(crate) fn apply_lookup_spliced(
     body: &mut Spliced,
     headers: &mut SplicedHeaders,
@@ -533,6 +562,7 @@ pub(crate) fn apply_lookup_spliced(
     behaviors: &[LookupBehavior],
     request: &RequestContext,
     csv_cache: &CsvCache,
+    access: &ScriptFileAccess,
     stub: crate::imposter::headers::StubRef<'_>,
 ) {
     for behavior in behaviors {
@@ -544,6 +574,7 @@ pub(crate) fn apply_lookup_spliced(
             if let Some(csv_data) = csv_cache.get_or_load(
                 &behavior.from_data_source.csv.path,
                 &behavior.from_data_source.csv.delimiter,
+                access,
             ) {
                 // Lookup row
                 let replacements = csv_data.lookup(&key, &behavior.from_data_source.csv.key_column);
@@ -670,6 +701,7 @@ mod tests {
             &behaviors,
             &request,
             &CsvCache::default(),
+            &ScriptFileAccess::trusted_cwd(),
             FIXTURE_STUB,
         );
 
@@ -734,6 +766,7 @@ mod tests {
                 &behaviors,
                 &request,
                 &CsvCache::default(),
+                &ScriptFileAccess::trusted_cwd(),
                 crate::imposter::headers::StubRef {
                     port: 4646,
                     index: 5,
@@ -808,6 +841,7 @@ mod tests {
             &behaviors,
             &request,
             &CsvCache::default(),
+            &ScriptFileAccess::trusted_cwd(),
             FIXTURE_STUB,
         );
 
@@ -870,6 +904,7 @@ mod tests {
             &behaviors,
             &request,
             &CsvCache::default(),
+            &ScriptFileAccess::trusted_cwd(),
             FIXTURE_STUB,
         );
 
@@ -932,6 +967,7 @@ mod tests {
             &behaviors,
             &request,
             &CsvCache::default(),
+            &ScriptFileAccess::trusted_cwd(),
             FIXTURE_STUB,
         );
 
@@ -1044,6 +1080,7 @@ mod tests {
             &[behavior],
             &request,
             &CsvCache::default(),
+            &ScriptFileAccess::trusted_cwd(),
             FIXTURE_STUB,
         );
         let _ = std::fs::remove_file(&csv);
@@ -1190,6 +1227,53 @@ mod tests {
         assert!(data.lookup("oslo", "city").is_empty());
     }
 
+    /// Issue #1617 (folded in from #1566): the cache is keyed by path and delimiter, so a second
+    /// delimiter over the same file gets its own parse instead of the first one's.
+    #[test]
+    fn the_cache_keeps_one_parse_per_delimiter() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mixed.csv");
+        std::fs::write(&path, "k;v\n1;semi\n").expect("write csv");
+        let path = path.to_string_lossy().into_owned();
+        let cache = CsvCache::default();
+        let access = ScriptFileAccess::trusted_cwd();
+        let comma = cache.get_or_load(&path, ",", &access).expect("comma");
+        assert_eq!(comma.lookup("1;semi", "k;v")["[k;v]"], "1;semi");
+        let semi = cache.get_or_load(&path, ";", &access).expect("semi");
+        assert_eq!(semi.lookup("1", "k")["[v]"], "semi");
+    }
+
+    /// A path the access refuses is never read, cached or not (issue #1617).
+    #[test]
+    fn the_cache_reads_nothing_the_access_refuses() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("data.csv");
+        std::fs::write(&path, "id,name\n1,x\n").expect("write csv");
+        let path = path.to_string_lossy().into_owned();
+        let cache = CsvCache::default();
+        assert!(
+            cache
+                .get_or_load(&path, ",", &ScriptFileAccess::trusted_cwd())
+                .is_some()
+        );
+        assert!(
+            cache
+                .get_or_load(&path, ",", &ScriptFileAccess::Refused)
+                .is_none()
+        );
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        assert!(
+            cache
+                .get_or_load(
+                    &path,
+                    ",",
+                    &ScriptFileAccess::Confined(elsewhere.path().to_path_buf())
+                )
+                .is_none(),
+            "the cached parse is not served to an access that may not read the file"
+        );
+    }
+
     /// `clear` drops cached files, so the next `get_or_load` reads the file again.
     #[test]
     fn clear_drops_the_cached_file() {
@@ -1200,7 +1284,7 @@ mod tests {
         let cache = CsvCache::default();
         let name = |cache: &CsvCache| {
             cache
-                .get_or_load(&path_str, ",")
+                .get_or_load(&path_str, ",", &ScriptFileAccess::trusted_cwd())
                 .expect("loads")
                 .lookup("1", "id")["[name]"]
                 .clone()
@@ -1479,6 +1563,7 @@ mod tests {
             &[behavior],
             &request,
             &CsvCache::default(),
+            &ScriptFileAccess::trusted_cwd(),
             FIXTURE_STUB,
         );
         let _ = std::fs::remove_file(&csv);

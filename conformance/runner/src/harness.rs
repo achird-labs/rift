@@ -753,8 +753,10 @@ static ENGINE_SEQ: AtomicUsize = AtomicUsize::new(0);
 /// Names each [`Harness::scratch_file`].
 static SCRATCH_SEQ: AtomicUsize = AtomicUsize::new(0);
 
-/// Spawn `rift --port 0 --nologfile --metrics-port 0 --allow-injection <args>` (plus `--front-door
-/// 0` when asked) in the corpus root, output to a fresh log file, and return the child and that log.
+/// Spawn `rift --port 0 --nologfile --metrics-port 0 --allow-injection --scripts-dir <corpus root>
+/// <args>` (plus `--front-door 0` when asked) in the corpus root, output to a fresh log file, and
+/// return the child and that log. `--scripts-dir` is what lets an admin-API `lookup` read the
+/// corpus's `data/` CSVs (rift#1617); a relative path resolves from it as it did from the cwd.
 /// Port 0 throughout: a probed port could be taken before the engine bound it, or answered by a
 /// neighbour's loopback socket while the engine holds the wildcard (#1485).
 fn spawn_engine(config: &Config, opts: &SpawnOptions) -> Result<(Child, PathBuf), HarnessError> {
@@ -781,6 +783,7 @@ fn spawn_engine(config: &Config, opts: &SpawnOptions) -> Result<(Child, PathBuf)
     let binary = config.build_dir.join("rift");
     let mut command = Command::new(&binary);
     command.args(["--port", "0", "--nologfile", "--metrics-port", "0"]);
+    command.arg("--scripts-dir").arg(&config.corpus_root);
     if !opts.no_injection {
         command.arg("--allow-injection");
     }
@@ -1302,6 +1305,10 @@ impl ContainerEngine {
             args.push("--max-body-size".to_string());
             args.push(max.to_string());
         }
+        // The image's working directory, where the corpus's `data/` is mounted: as for a spawned
+        // engine, the root an admin-API `lookup` reads under (rift#1617).
+        args.push("--scripts-dir".to_string());
+        args.push(IMAGE_WORKDIR.to_string());
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let engine = Self {
             admin_url: format!("http://{LOOPBACK}:{admin_port}"),

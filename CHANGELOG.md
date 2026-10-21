@@ -47,6 +47,16 @@ record.
   (`with_script_file_access`, `create_imposter_from`, `apply_config_from`,
   `DesiredImposter::script_files`); `ImposterSource` gains `authorship()`, `Network` by default,
   and `MergedSources::imposters` is now `Vec<SourcedImposter>`.
+- **BREAKING: an admin-API, `--datadir` or `https:` imposter's `lookup` reads CSV files only under
+  `--scripts-dir`** (#1617), a relative `path` from there instead of from the working directory,
+  and none without `--scripts-dir`; a deliberate departure from Mountebank. The admin API refuses a
+  `path` outside the root, or any `path` without one, with `400`; a stored `--datadir` file still
+  loads and its lookup leaves the tokens in place with a warning. **Migration:** start the server
+  with `--scripts-dir` pointing at the directory holding the CSV files, and write `path` relative
+  to it (or absolute inside it); or load the imposter from a local `--configfile`, which reads any
+  path as before. **Embedders:** a lookup reads under the imposter's `ScriptFileAccess`, so
+  `ImposterManager`'s default `Refused` reads none; `CsvCache::get_or_load` and
+  `apply_lookup_behaviors` take the access, and `check_lookup_paths` is the admin API's refusal.
 - **BREAKING: `shellTransform` follows Mountebank's contract** (#1589). A command now receives the
   request and the response JSON as two arguments appended to its command line, as well as in
   `MB_REQUEST` / `MB_RESPONSE` (the arguments are left off when the line reaches 2048 characters);
@@ -207,6 +217,10 @@ record.
   line break and serve the quotes. `csv.delimiter` may now be several characters (`"||"`), which
   Mountebank accepts and Rift refused with `400`; an empty `delimiter` means `,`. `rift-lint` and the
   imposter JSON Schema accept any string delimiter.
+- **Two lookups reading one CSV file with different `delimiter`s each get their own parse**
+  (#1617, from #1566). The parsed-file cache was keyed by path alone, so the second lookup was
+  served the first one's parse; Mountebank re-reads the file per lookup. The cache is now keyed by
+  the canonical path and the delimiter.
 - **A proxy forwards the request's own path and query to the upstream** whatever follows the host
   in `to`, as Mountebank does (#1550). A `to` ending in `/` used to send `//path`, one with `?query`
   folded the request into the query, and one with `#fragment` dropped the path. Userinfo in `to` no
@@ -287,6 +301,18 @@ record.
   keeps the imposter's own access; a door that takes predicates from someone else calls the new
   `Imposter::verify_from(&opts, &door)`. `rift_verify` is a host call and keeps the imposter's
   access.
+- **A `lookup` reads CSV files only under `--scripts-dir` in a network-written imposter** (#1617).
+  Its `fromDataSource.csv.path` read any host file, even with `--allowInjection` off, so any admin
+  client could serve itself a host file whose lines look like CSV rows (`/etc/shells`, a `.env`).
+  Mountebank does the same; Rift departs from it on purpose. An imposter written over the admin
+  API, loaded from `--datadir` or fetched from an `https:` source reads only under `--scripts-dir`,
+  a relative path from there, and nothing without one. The admin API refuses a path outside the
+  root (absolute, `..`, or a link out) with one fixed message, `lookup CSV path '<path>' is outside
+  --scripts-dir`, without looking at the filesystem outside it. The path is resolved again each
+  time the lookup runs, and the file is checked once it is open to be the one that was resolved,
+  so a link changed after admission or during the read is refused rather than followed. A local
+  `--configfile` imposter and the C-ABI host calls still read any path. A confined `require()`
+  (#1611) now makes the same check when it opens a module.
 - `--allowInjection` admits code that runs with Rift's privileges, `shellTransform` included; the
   docs now say so, and that `--scripts-dir` is defence in depth, not a sandbox.
 

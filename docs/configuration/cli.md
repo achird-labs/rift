@@ -126,6 +126,9 @@ sources:
   without `--scripts-dir`.
 - **`require()` outside `--scripts-dir`** — a script in a fetched imposter loads modules only from
   under `--scripts-dir`, and none without it, as an admin-API imposter's does (issue #1611).
+- **`lookup` CSV files outside `--scripts-dir`** — a fetched imposter's `lookup` reads CSV files
+  only from under `--scripts-dir`, and none without it, as an admin-API imposter's does (issue
+  #1617).
 
 Any other tag the preprocessor does not evaluate is also refused, as it is for a local file, and
 a fetched document has no `--no-parse`.
@@ -172,7 +175,7 @@ Server options:
       --configfile <FILE>          Load imposters from a JSON/YAML file on startup (sugar for --imposters file:<FILE>)
       --imposters <URI[,URI...]>   Load imposters from one or more source URIs: file:<path>, a bare path, or https://… (see Imposter Sources below)
       --datadir <DIR>              Directory for persistent imposter storage
-      --scripts-dir <DIR>          Root directory for admin-API `file:`/`ref:` script resolution and for `require()` in admin-API, `--datadir` and `https:` imposters; paths that escape it are rejected (unset ⇒ both are refused)
+      --scripts-dir <DIR>          Root directory for admin-API `file:`/`ref:` script resolution and for `require()` and `lookup` CSV files in admin-API, `--datadir` and `https:` imposters; paths that escape it are rejected (unset ⇒ all are refused)
       --allow-injection            Enable JavaScript injection in responses (alias: --allowInjection)
       --local-only                 Only accept requests from localhost: the admin API, /metrics and --intercept-port listen on `127.0.0.1` and `::1`, and they, every imposter port and the front door refuse non-loopback clients (alias: --localOnly)
       --require-admin-auth         Refuse to start when the admin API would bind a non-loopback address with no --api-key (default: warn)
@@ -531,7 +534,7 @@ wins over the built-in default (and over an `--rcfile` value — see [RC file](#
 | `RIFT_REQUIRE_ADMIN_AUTH` | Refuse to start on a keyless non-loopback admin bind (env alias of `--require-admin-auth`) | `false` |
 | `MB_LOGLEVEL` | Log level (env alias of `--loglevel`). Set-but-empty means `info` | `info` |
 | `MB_APIKEY` | Admin API authorization token (see `--api-key`) | |
-| `RIFT_SCRIPTS_DIR` | Root directory for admin-API `file:`/`ref:` script resolution and for `require()` in admin-API, `--datadir` and `https:` imposters (env alias of `--scripts-dir`); paths escaping it are rejected | |
+| `RIFT_SCRIPTS_DIR` | Root directory for admin-API `file:`/`ref:` script resolution and for `require()` and `lookup` CSV files in admin-API, `--datadir` and `https:` imposters (env alias of `--scripts-dir`); paths escaping it are rejected | |
 | `RIFT_DEBUG` | Enable debug mode (truthy: `1`/`true`/`yes`/`on`); same as `--debug`. Adds an `x-rift-script-trace` response header and makes response-template errors return a request-time error instead of an empty substitution. Does not add Mountebank's per-stub `matches` | off |
 | `RIFT_RUNTIME` | Runtime topology (env alias of `--runtime`): `work-stealing` or `per-core[=N]` (RFC-712; experimental) | `work-stealing` |
 | `RIFT_RUNTIME_AFFINITY` | Pin per-core worker threads to CPU cores (env alias of `--runtime-affinity`) | off |

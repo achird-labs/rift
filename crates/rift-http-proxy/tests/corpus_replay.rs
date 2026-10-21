@@ -257,6 +257,11 @@ async fn serve_and_verify(corpus: &Path) {
         .arg("--configfile")
         .arg(tmp.path())
         .args(["--port", &admin_port.to_string(), "--allowInjection"])
+        // `rift-verify --verify-dynamic` re-creates imposters over the admin API, whose lookups
+        // read their `data/` CSVs only under `--scripts-dir` (issue #1617): the corpus root, so a
+        // relative path resolves there as it does from the working directory.
+        .arg("--scripts-dir")
+        .arg(corpus)
         .current_dir(corpus)
         .stdout(std::process::Stdio::from(log_out))
         .stderr(std::process::Stdio::from(log_err))

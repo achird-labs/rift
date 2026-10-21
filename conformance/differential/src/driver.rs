@@ -14,6 +14,9 @@ const AUTO_PORT_BASE: u16 = 64000;
 pub struct Engines {
     pub mountebank: Engine,
     pub rift: Engine,
+    /// Both engines' working directory. A `lookup`'s relative CSV path is written against it: it
+    /// is made absolute under it before either engine sees it (see [`absolute_csv_paths`]).
+    pub cwd: std::path::PathBuf,
 }
 
 #[derive(Debug, Default)]
@@ -304,10 +307,69 @@ async fn admin_both(
     path: &str,
     body: Option<&Value>,
 ) -> (Observation, Observation) {
+    let body = body.map(|body| absolute_csv_paths(body, &engines.cwd));
+    let body = body.as_ref();
     tokio::join!(
         admin(client, &engines.mountebank, &maps[0], method, path, body),
         admin(client, &engines.rift, &maps[1], method, path, body),
     )
+}
+
+/// `body` with every relative `fromDataSource.csv.path` made absolute under `cwd`, lexically.
+///
+/// Mountebank reads a relative CSV path from its working directory; Rift, for an imposter written
+/// over the admin API, reads only under `--scripts-dir`, a relative path from there (rift#1617).
+/// The harness starts Rift with the repository as `--scripts-dir`, and hands both engines the same
+/// absolute path, so both read the same file and the cases keep comparing what the lookup does
+/// with it. An absolute path is left alone.
+#[must_use]
+pub fn absolute_csv_paths(body: &Value, cwd: &std::path::Path) -> Value {
+    match body {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let value = match (key.as_str(), value) {
+                        ("fromDataSource", Value::Object(source)) => {
+                            let mut source = source.clone();
+                            if let Some(Value::Object(csv)) = source.get_mut("csv")
+                                && let Some(Value::String(path)) = csv.get_mut("path")
+                                && std::path::Path::new(path.as_str()).is_relative()
+                            {
+                                *path = normalize(&cwd.join(path.as_str()))
+                                    .to_string_lossy()
+                                    .into_owned();
+                            }
+                            absolute_csv_paths(&Value::Object(source), cwd)
+                        }
+                        _ => absolute_csv_paths(value, cwd),
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| absolute_csv_paths(item, cwd))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// `path` with `.` dropped and `..` applied, from its components alone.
+fn normalize(path: &std::path::Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 async fn admin(
@@ -424,6 +486,25 @@ fn remap(observation: &Observation, map: &PortMap) -> Observation {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn relative_csv_paths_are_made_absolute_under_the_cwd() {
+        let lookup = |path: &str| {
+            json!({"stubs": [{"responses": [{"_behaviors": [{"lookup": {
+                "fromDataSource": {"csv": {"path": path, "keyColumn": "id"}}
+            }}]}]}]})
+        };
+        let cwd = std::path::Path::new("/repo/corpus");
+        for (written, sent) in [
+            ("data/x.csv", "/repo/corpus/data/x.csv"),
+            ("../../other/./x.csv", "/other/x.csv"),
+            ("/abs/x.csv", "/abs/x.csv"),
+        ] {
+            assert_eq!(absolute_csv_paths(&lookup(written), cwd), lookup(sent));
+        }
+        let unrelated = json!({"path": "data/x.csv", "csv": {"path": "data/x.csv"}});
+        assert_eq!(absolute_csv_paths(&unrelated, cwd), unrelated);
+    }
 
     #[test]
     fn an_engine_assigned_port_is_registered_and_mapped_back() {

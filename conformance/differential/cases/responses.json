@@ -962,7 +962,7 @@
                         },
                         "fromDataSource": {
                           "csv": {
-                            "path": "/data/users.csv",
+                            "path": "data/users.csv",
                             "keyColumn": "id"
                           }
                         },

@@ -2708,6 +2708,9 @@ fn resolve_module(
                     crate::imposter::ConfinedPathError::Root(e) => {
                         format!("require('{request}'): --scripts-dir cannot be resolved: {e}")
                     }
+                    crate::imposter::ConfinedPathError::Read(e) => {
+                        format!("require('{request}'): {e}")
+                    }
                 })
             }),
         ScriptFileAccess::Trusted { .. } => Ok(base.join(request)),
@@ -2761,8 +2764,22 @@ fn require_impl(
         return Ok(cached.clone());
     }
 
-    let source = std::fs::read_to_string(&resolved_path)
-        .map_err(|e| require_error(format!("require('{request}'): {e}")))?;
+    // A confined read re-checks the path once the file is open, so a link swapped in after the
+    // resolution above cannot reach outside the root (issue #1617).
+    let source = match files.as_ref() {
+        ScriptFileAccess::Confined(root) => {
+            crate::imposter::read_confined(root, base, &request, &resolved_path).map_err(|e| {
+                require_error(match e {
+                    crate::imposter::ConfinedPathError::Read(e) => {
+                        format!("require('{request}'): {e}")
+                    }
+                    _ => format!("require('{request}'): outside --scripts-dir"),
+                })
+            })?
+        }
+        _ => std::fs::read_to_string(&resolved_path)
+            .map_err(|e| require_error(format!("require('{request}'): {e}")))?,
+    };
 
     if resolved_path
         .extension()

@@ -375,6 +375,12 @@ pub async fn handle_add_space_stub(
             );
         }
     }
+    if let Some(rejection) = crate::admin_api::handlers::imposters::reject_unreadable_lookups(
+        std::slice::from_ref(&stub),
+        &scripts_dir,
+    ) {
+        return rejection;
+    }
     // The path `:flowId` is the source of truth for the scope; ignore any `space` in the body.
     stub.space = Some(flow_id.to_string());
     // The stub's scripts get the admin door's access in the same write (issues #1611, #1645).

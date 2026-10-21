@@ -627,9 +627,26 @@ When several rows match, the first one in the file is used, as in Mountebank. Re
 repeated value in any other column.
 
 `csv.delimiter` sets the field separator (default `,`). It may be several characters, such as
-`||`, and an empty string means `,`. The file is read once and cached; its path is resolved
-relative to the server's working directory. If the file cannot be read, a warning is logged and
-the tokens are left in place.
+`||`, and an empty string means `,`. The file is read once and cached, once per delimiter. If the
+file cannot be read, a warning is logged and the tokens are left in place.
+
+Which files a lookup may read depends on how its imposter was written (#1617), unlike Mountebank,
+which reads any path:
+
+| The imposter came from | `path` may name |
+|:--|:--|
+| The admin API, a `--datadir` file, or an `https:` source, with `--scripts-dir` | Only files under `--scripts-dir`; a relative path from there. |
+| The same, without `--scripts-dir` | Nothing. |
+| A local `--configfile` (or the embedding C API) | Any file; a relative path from the server's working directory. |
+
+So `users.csv` above, posted over the admin API, is `<scripts-dir>/users.csv`; start the server
+with `--scripts-dir` pointing at the directory that holds your data files. The admin API refuses
+a path outside the root (absolute, `..`, or a link that points out) with `400`: `lookup CSV path
+'<path>' is outside --scripts-dir`, or, without `--scripts-dir`, `lookup CSV path '<path>' cannot
+be read: no --scripts-dir is configured`. The answer is the same whether or not anything exists
+there. A file inside the root that does not exist yet is accepted, and read once it does. The path
+is resolved again each time the lookup runs, so a link changed to point outside the root later is
+refused then. See [Differences](differences.md#lookup-reads-csv-files-only-under---scripts-dir).
 
 The file is parsed as Mountebank's parser (csv-parse) parses it:
 
