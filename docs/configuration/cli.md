@@ -183,7 +183,7 @@ Server options:
       --front-door <ADDR>          Serve every imposter from one address, routed by host/path/header (see Features -> Front Door)
       --ip-whitelist <IPS>         Comma-separated allowed IPs (accepted for Mountebank compatibility; NOT enforced) (alias: --ipWhitelist)
       --mock                       Accepted for Mountebank compatibility; no effect — set `recordRequests: true` per imposter
-      --debug                      Enable debug mode (same as RIFT_DEBUG=1; also sets the log level to debug unless RUST_LOG is set)
+      --debug                      Enable debug mode (same as RIFT_DEBUG=1; also sets the log level to debug unless RUST_LOG is set; does not add Mountebank's per-stub `matches`)
       --nologfile                  Do not write the --log file (stdout only)
       --log <FILE>                 Also write logs to this file (off unless set) (alias: --logfile)
       --pidfile <FILE>             Write the server's PID here (off unless set; stop/restart read ./rift.pid when omitted)
@@ -530,7 +530,7 @@ wins over the built-in default (and over an `--rcfile` value — see [RC file](#
 | `MB_LOGLEVEL` | Log level (env alias of `--loglevel`). Set-but-empty means `info` | `info` |
 | `MB_APIKEY` | Admin API authorization token (see `--api-key`) | |
 | `RIFT_SCRIPTS_DIR` | Root directory for admin-API `file:`/`ref:` script resolution and for `require()` in admin-API, `--datadir` and `https:` imposters (env alias of `--scripts-dir`); paths escaping it are rejected | |
-| `RIFT_DEBUG` | Enable debug mode (truthy: `1`/`true`/`yes`/`on`); same as `--debug`. Adds an `x-rift-script-trace` response header and makes response-template errors return a request-time error instead of an empty substitution | off |
+| `RIFT_DEBUG` | Enable debug mode (truthy: `1`/`true`/`yes`/`on`); same as `--debug`. Adds an `x-rift-script-trace` response header and makes response-template errors return a request-time error instead of an empty substitution. Does not add Mountebank's per-stub `matches` | off |
 | `RIFT_RUNTIME` | Runtime topology (env alias of `--runtime`): `work-stealing` or `per-core[=N]` (RFC-712; experimental) | `work-stealing` |
 | `RIFT_RUNTIME_AFFINITY` | Pin per-core worker threads to CPU cores (env alias of `--runtime-affinity`) | off |
 | `RIFT_METRICS_PORT` | Prometheus metrics port | `9090` |

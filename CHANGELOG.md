@@ -279,6 +279,12 @@ record.
 - `--allowInjection` admits code that runs with Rift's privileges, `shellTransform` included; the
   docs now say so, and that `--scripts-dir` is defence in depth, not a sandbox.
 
+### Documentation
+
+- **`--debug` and Mountebank's per-stub `matches`** (#1573): documented as a difference. Rift's
+  `--debug` does not record matches per stub; the request journal's `matchOutcome.stubIndex` is the
+  equivalent. Also corrects `differences.md`: a recorded request has no `ip` field.
+
 ### Testing
 
 - **The differential suite measures how much of Mountebank it exercises** (#1548):

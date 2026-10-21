@@ -59,12 +59,14 @@ client as `::ffff:127.0.0.1`. `requestFrom` is spelled differently: Mountebank w
 `"host": "0.0.0.0"` listens on IPv4 only, in both engines, and Rift then reports the client as
 `127.0.0.1`.
 
-Each engine uses its own value everywhere: the `ip` and `requestFrom` predicates, recorded
-requests, generated predicates ([Proxy](proxy.md#predicate-generators)) and the `request.ip` /
+Each engine uses its own value everywhere: the `ip` and `requestFrom` predicates, generated predicates ([Proxy](proxy.md#predicate-generators)) and the `request.ip` /
 `request.requestFrom` that `inject`, `decorate` and `shellTransform`'s `MB_REQUEST` see. Rift does
 not rewrite an address into the `::ffff:` form, because a script would then see a value its own
 `ip` predicate never matches. An IPv6 client's `requestFrom` is written `[::1]:50000` in Rift and
 `::1:50000` in Mountebank.
+
+A recorded request (`requests[]`, the journal) carries `requestFrom` but no separate `ip` field;
+Mountebank's carries both.
 
 ## `decorate` and a response without headers
 
@@ -189,6 +191,15 @@ ceiling admits, even a binary one, which is journalled base64-encoded (a third l
 larger than the whole budget (possible only with a budget set lower) is recorded without its body
 and flagged `"_bodyOmitted": true`, never dropped.
 A cursor read past evicted entries reports it with `x-rift-truncated`.
+
+## `--debug`
+
+Mountebank's `--debug` lists every match on each stub of `GET /imposters/:id` (`matches`). Rift's
+`--debug` raises the log level and enables script tracing; it does not record matches per stub, and
+`GET /imposters/:id` never has a `matches` key. To see which stub answered each request, set
+`recordRequests: true`: each recorded request carries `matchOutcome.stubIndex` (the matched stub),
+`status` and `latencyMs`. To ask which stub *would* answer, send the request with
+`X-Rift-Debug: true` (see [Debug mode](../features/debug-mode.md)).
 
 ## Malformed XML for XPath
 
