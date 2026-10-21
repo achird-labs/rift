@@ -10,7 +10,7 @@
             "to": "http://localhost:4818",
             "mode": "proxyOnce",
             "predicateGenerators": [
-              { "inject": "function (config) { throw new Error(\"boom\"); }" }
+              { "inject": "function (config) { if (config.request.isDryRun) { return []; } throw new Error(\"boom\"); }" }
             ]
           }
         }

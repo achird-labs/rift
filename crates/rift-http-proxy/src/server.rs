@@ -1964,6 +1964,35 @@ fn configfile_injection_error(
     ))
 }
 
+/// The startup error for a source imposter whose `predicateGenerators` inject fails Mountebank's
+/// create-time dry run (issue #1580): it throws or returns a non-array over an empty `GET /`.
+/// `None` when it passes. Runs after the `--allowInjection` gate, and never on `--datadir`, whose
+/// files a door already admitted.
+async fn configfile_generator_error(
+    path: &Path,
+    config: &ImposterConfig,
+    access: ScriptFileAccess,
+) -> Option<String> {
+    let outcome = crate::imposter::dry_run_predicate_generators(
+        &config.stubs,
+        std::time::Duration::from_millis(crate::scripting::resolve_script_timeout_ms(config)),
+        Arc::new(access),
+    )
+    .await;
+    let error = outcome.err()?;
+    let port = config
+        .explicit_port()
+        .map_or_else(|| "<auto-assigned>".to_string(), |port| port.to_string());
+    let source = match &error {
+        crate::imposter::GeneratorDryRun::Refused { source, .. } => format!(" in {source}"),
+        crate::imposter::GeneratorDryRun::Unavailable(_) => String::new(),
+    };
+    Some(format!(
+        "{}: imposter on port {port}: {error}{source}",
+        path.display()
+    ))
+}
+
 /// Split parsed datadir configs into those that may be served and those gated by `--allowInjection`
 /// (issue #612). A datadir file is skipped rather than fatal: `{port}.json` is persisted from
 /// admin-API writes, so a leftover script-bearing file from an earlier `--allowInjection` run must
@@ -2165,7 +2194,9 @@ async fn load_startup_imposters(
     intercept_flags: &[&str],
 ) -> anyhow::Result<ConfigFileStartOptions> {
     let (source_configs, options) = match sources {
-        Some(set) => fetch_and_gate_sources(set, allow_injection, intercept_flags).await?,
+        Some(set) => {
+            fetch_and_gate_sources(set, allow_injection, intercept_flags, scripts_dir).await?
+        }
         None => (Vec::new(), ConfigFileStartOptions::default()),
     };
     let (datadir_configs, mut skipped) = match datadir {
@@ -2196,6 +2227,7 @@ async fn fetch_and_gate_sources(
     set: &SourceSet,
     allow_injection: bool,
     intercept_flags: &[&str],
+    scripts_dir: Option<&Path>,
 ) -> anyhow::Result<(Vec<SourcedImposter>, ConfigFileStartOptions)> {
     for source_ref in &set.refs {
         info!("Loading imposters from source: {}", source_ref.uri);
@@ -2217,6 +2249,14 @@ async fn fetch_and_gate_sources(
         .unzip();
     if let Some(message) = configfile_injection_error(&label, &configs, allow_injection) {
         anyhow::bail!(message);
+    }
+    for (config, authorship) in configs.iter().zip(&authorships) {
+        if let Some(message) =
+            configfile_generator_error(&label, config, authorship.script_file_access(scripts_dir))
+                .await
+        {
+            anyhow::bail!(message);
+        }
     }
     if let Some(block) = &merged.intercept {
         if let Some(message) = intercept_source_conflict_error(&label, intercept_flags) {

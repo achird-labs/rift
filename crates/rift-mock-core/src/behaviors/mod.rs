@@ -21,6 +21,8 @@ mod spliced;
 mod transform;
 mod types;
 mod wait;
+#[cfg(feature = "javascript")]
+pub(crate) use wait::thrown_message;
 
 // Re-export main types for library consumers
 #[allow(unused_imports)]

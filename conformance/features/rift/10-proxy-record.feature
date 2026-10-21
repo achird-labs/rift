@@ -74,7 +74,9 @@ Feature: Proxy record/replay — proxyOnce, proxyTransparent, proxyAlways chains
   # tags the proxied response with `x-rift-generator-error: script-error` and SKIPS recording the
   # shadowing match-all stub (previously it recorded a match-all that would shadow the real upstream
   # on replay). The proxy still forwards the upstream response — only the unsafe recording is
-  # suppressed — so the stub count stays at the single proxy stub.
+  # suppressed — so the stub count stays at the single proxy stub. The fixture's inject returns `[]`
+  # on `config.request.isDryRun`: since rift#1580 one that throws there is refused at creation, as in
+  # Mountebank's dry run.
   Scenario: a failing predicateGenerators.inject tags the response and records no shadowing stub
     Given a fresh verbatim imposter from fixture "proxy/generror-upstream"
     And a fresh verbatim imposter from fixture "proxy/generror-proxy"

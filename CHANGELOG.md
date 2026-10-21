@@ -44,6 +44,16 @@ record.
 
 ### Changed
 
+- **A `predicateGenerators` `inject` that throws or returns a non-array is refused when the imposter
+  is created, as in Mountebank** (#1580). It is run once against an empty `GET /` with
+  `config.request.isDryRun` set; guard on that to skip it. It used to be admitted and then fail at
+  every recording. Every admin write door answers `400 invalid injection` (`message` `invalid
+  predicateGenerator injection`, with `source` and `data`), and `--configfile`, `--imposters` and
+  `POST /admin/reload` refuse it too; `--datadir` files are not dry-run again. Every proxy mode is
+  checked, `proxyTransparent` included. `rift-mock-core` exports the check as
+  `imposter::dry_run_predicate_generators` for embedders' own write doors, and
+  `PredicateGeneratorError` gains a `Threw` variant carrying the thrown message.
+
 - **https imposters print `ca`, `mutualAuth`, `rejectUnauthorized` and `ciphers` in every view,
   `?replayable=true` included** (#1576), as Mountebank does: `ca` is `null` when unset, a
   one-element `ca` array prints (and is stored) as an array instead of a bare string, and `ciphers`

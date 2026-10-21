@@ -536,9 +536,9 @@
     },
     {
       "id": "docs:/docs/api/proxies#predicate-generators",
-      "class": "bug",
-      "issue": "#1580",
-      "note": "a nested generator matcher with a value ({query: {q: ...}}) records `equals query {}`"
+      "class": "documented",
+      "doc": "docs/mountebank/proxy.md#what-gets-recorded",
+      "note": "step 16: a jsonpath generator records the selected numbers as strings (`[\"1\",\"2\",\"3\"]`), the documented selected-value deviation; the listed-key step 8 passes since #1580"
     },
     {
       "id": "docs:/docs/api/proxies#proxyAlways",
