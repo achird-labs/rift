@@ -191,6 +191,16 @@ still makes, or the reverse. See [Predicates](predicates.md#except).
 The [JSON body](#except-on-a-json-body) entry covers the same difference for a predicate with no
 selector.
 
+## Binary mode refuses `matches` wherever it sits
+
+A `"mode": "binary"` imposter refuses a `matches` predicate or a `jsonpath`/`xpath` selector with
+`400`, as Mountebank does, but Rift refuses one anywhere under `and`/`or`. Mountebank raises the
+refusal from a dry run of each stub against a synthetic request, and `and`/`or` stop early there: an
+`or` whose earlier branch matches the dry-run request (`{"equals": {"path": "/"}}`), or an `and` whose
+earlier branch does not, never reaches the later `matches`, so Mountebank creates that imposter. The
+stub could never use the `matches` on a binary body either way, so Rift refuses it as written rather
+than depend on Mountebank's synthetic request.
+
 ## Body size
 
 Mountebank has no body limit and crashes past about 512 MiB, where a body no longer fits a V8

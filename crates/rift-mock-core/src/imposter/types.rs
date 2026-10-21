@@ -631,8 +631,9 @@ impl Drop for ReplayGuard {
 /// engine already admitted, from its own log or tables or from a peer (issue #1267). The skipped
 /// checks are exactly those [`admission_check`] runs on the decoded value: a stub with no responses,
 /// predicate `jsonpath`/`xpath` selectors and `matches` patterns, behaviors blocks that do not parse,
-/// and `copy`/`lookup` selectors. Normalisation (aliases such as `rules`, `delayRange` → `wait`,
-/// defaults) is unchanged.
+/// and `copy`/`lookup` selectors. (`admission_check` also runs the imposter-level binary-mode
+/// check, #1578, which no decode runs.) Normalisation (aliases such as `rules`, `delayRange` →
+/// `wait`, defaults) is unchanged.
 ///
 /// Every other decode-time refusal still applies and is part of the stored format (issue #1268):
 /// type and shape errors, an inverted `wait`/`delayRange` range, a `_behaviors` array or scalar
@@ -670,8 +671,63 @@ where
 /// door, and when the top-level `repeat` is itself malformed, both refuse but this names it first.
 /// A response with more than one type, or none (#1551), is door-only for the same reason: the
 /// decoded response holds exactly one type, so what the door refused cannot reach this function.
+///
+/// Then the imposter-level binary-mode check (#1578), after every stub's, because the door decodes
+/// every stub before it runs: see [`check_binary_mode`]. A replayed config never carries `mode`
+/// (it is never serialized), so this part cannot newly refuse a stored config.
 pub fn admission_check(config: &ImposterConfig) -> Result<(), String> {
-    config.stubs.iter().try_for_each(admission_check_stub)
+    config.stubs.iter().try_for_each(admission_check_stub)?;
+    check_binary_mode(config)
+}
+
+/// Mountebank's binary-mode refusal (issue #1578): an imposter created with `"mode": "binary"`
+/// refuses every `matches` predicate and every `jsonpath`/`xpath` selector, with Mountebank's
+/// messages. The gate is exactly `"binary"`, as Mountebank's `request.mode === 'binary'` is.
+///
+/// Mountebank raises these from a dry run of each stub against a synthetic request, so an `and`
+/// whose earlier branch is false there, or an `or` whose earlier branch is true, never reaches a
+/// later `matches`. Rift refuses statically, wherever the predicate sits: such a stub is dead weight
+/// either way (docs/mountebank/differences.md).
+///
+/// An imposter-level admission check, never a decode refusal: it needs the imposter's `mode`, which
+/// the create and apply doors read and then clear, so it is never stored or replayed.
+pub(crate) fn check_binary_mode(config: &ImposterConfig) -> Result<(), String> {
+    if config.mode.as_deref() != Some("binary") {
+        return Ok(());
+    }
+    config
+        .stubs
+        .iter()
+        .try_for_each(|stub| refuse_binary_mode_selectors(&stub.predicates))
+}
+
+/// The per-predicate half of [`check_binary_mode`], walking `not`/`and`/`or`. The selector is
+/// checked before the operation, the order Mountebank's `normalize` and `matches` throw in.
+fn refuse_binary_mode_selectors(predicates: &[Predicate]) -> Result<(), String> {
+    predicates.iter().try_for_each(|predicate| {
+        let selector = match &predicate.parameters.selector {
+            Some(PredicateSelector::JsonPath { .. }) => Some("jsonpath"),
+            Some(PredicateSelector::XPath { .. }) => Some("xpath"),
+            None => None,
+        };
+        if let Some(selector) = selector {
+            return Err(format!(
+                "the {selector} predicate parameter is not allowed in binary mode"
+            ));
+        }
+        match &predicate.operation {
+            PredicateOperation::Matches(_) => {
+                Err("the matches predicate is not allowed in binary mode".to_string())
+            }
+            PredicateOperation::Not(inner) => {
+                refuse_binary_mode_selectors(std::slice::from_ref(&**inner))
+            }
+            PredicateOperation::And(inner) | PredicateOperation::Or(inner) => {
+                refuse_binary_mode_selectors(inner)
+            }
+            _ => Ok(()),
+        }
+    })
 }
 
 /// [`admission_check`] for one stub. Responses first: they decode before `TryFrom<StubRaw>` checks
@@ -2643,6 +2699,13 @@ pub struct ImposterConfig {
     #[serde(default = "default_protocol")]
     #[cfg_attr(feature = "schema", schemars(schema_with = "crate::schema::protocol"))]
     pub protocol: String,
+    /// Mountebank's creation-time `mode` (issue #1578): `"binary"` refuses `matches` predicates
+    /// and `jsonpath`/`xpath` selectors, as Mountebank's dry run does; any other value, or none, is
+    /// text. Creation-time only, as in Mountebank: read by the binary-mode check at the create and
+    /// apply doors, then cleared, so it is never printed, persisted or replayed, and a later stub
+    /// edit is not held to it (Mountebank's stub routes accept the same stub).
+    #[serde(default, skip_serializing)]
+    pub mode: Option<String>,
     /// Inline PEM certificate for `protocol: "https"` (Mountebank-compatible). Paired with `key`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cert: Option<String>,
@@ -2821,6 +2884,7 @@ impl Default for ImposterConfig {
             port: None,
             host: None,
             protocol: default_protocol(),
+            mode: None,
             cert: None,
             key: None,
             // Client auth is off unless asked for (issue #977): an imposter that silently began
@@ -3350,6 +3414,10 @@ impl RiftScriptConfig {
 /// Error types for imposter management
 #[derive(Debug, thiserror::Error)]
 pub enum ImposterError {
+    /// A config the engine refuses at creation for a reason that is neither its protocol nor its
+    /// TLS settings, worded as Mountebank words it (issue #1578: binary-mode selectors).
+    #[error("{0}")]
+    InvalidConfig(String),
     #[error("Port {0} is already in use")]
     PortInUse(u16),
     #[error("Imposter not found on port {0}")]
@@ -4066,6 +4134,101 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    // ===== Issue #1578: binary-mode selectors =====
+
+    fn predicates_of(predicates: serde_json::Value) -> Vec<Predicate> {
+        serde_json::from_value(predicates).expect("predicates decode")
+    }
+
+    #[test]
+    fn binary_mode_refuses_matches_and_selectors_wherever_they_sit() {
+        let matches = "the matches predicate is not allowed in binary mode";
+        let jsonpath = "the jsonpath predicate parameter is not allowed in binary mode";
+        let xpath = "the xpath predicate parameter is not allowed in binary mode";
+        for (predicates, expected) in [
+            (serde_json::json!([{ "matches": { "body": "x" } }]), matches),
+            (
+                serde_json::json!([{ "equals": { "body": "x" }, "jsonpath": { "selector": "$.a" } }]),
+                jsonpath,
+            ),
+            (
+                serde_json::json!([{ "equals": { "body": "x" }, "xpath": { "selector": "//a" } }]),
+                xpath,
+            ),
+            (
+                serde_json::json!([{ "exists": { "body": true }, "jsonpath": { "selector": "$.a" } }]),
+                jsonpath,
+            ),
+            (
+                serde_json::json!([{ "not": { "matches": { "body": "x" } } }]),
+                matches,
+            ),
+            (
+                serde_json::json!([{ "and": [{ "equals": { "path": "/" } },
+                                             { "not": { "matches": { "body": "x" } } }] }]),
+                matches,
+            ),
+            (
+                serde_json::json!([{ "or": [{ "equals": { "path": "/" } },
+                                            { "exists": { "body": true },
+                                              "xpath": { "selector": "//a" } }] }]),
+                xpath,
+            ),
+        ] {
+            assert_eq!(
+                refuse_binary_mode_selectors(&predicates_of(predicates.clone())),
+                Err(expected.to_string()),
+                "{predicates}"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_mode_admits_plain_predicates() {
+        let predicates = predicates_of(serde_json::json!([
+            { "equals": { "body": "AQID" } },
+            { "deepEquals": { "path": "/" } },
+            { "exists": { "body": true } },
+            { "not": { "contains": { "body": "x" } } }
+        ]));
+        assert_eq!(refuse_binary_mode_selectors(&predicates), Ok(()));
+    }
+
+    /// Mountebank selects before `matches` throws, so a `matches` with a selector names the selector.
+    #[test]
+    fn binary_mode_names_the_selector_before_matches() {
+        let predicates = predicates_of(serde_json::json!([
+            { "matches": { "body": "x" }, "jsonpath": { "selector": "$.a" } }
+        ]));
+        assert_eq!(
+            refuse_binary_mode_selectors(&predicates),
+            Err("the jsonpath predicate parameter is not allowed in binary mode".to_string())
+        );
+    }
+
+    /// Only an exact `"binary"` is binary, as in Mountebank's `request.mode === 'binary'`.
+    #[test]
+    fn check_binary_mode_is_keyed_on_exactly_binary() {
+        let config = |mode: Option<&str>| {
+            let mut value = serde_json::json!({ "protocol": "http", "stubs": [{
+                "predicates": [{ "matches": { "body": "x" } }],
+                "responses": [{ "is": { "statusCode": 200 } }]
+            }] });
+            if let Some(mode) = mode {
+                value["mode"] = mode.into();
+            }
+            serde_json::from_value::<ImposterConfig>(value).expect("config decodes")
+        };
+        assert!(check_binary_mode(&config(Some("binary"))).is_err());
+        for mode in [None, Some("text"), Some("Binary"), Some(" binary")] {
+            assert_eq!(check_binary_mode(&config(mode)), Ok(()), "{mode:?}");
+        }
+        let decoded = config(Some("binary"));
+        assert_eq!(decoded.mode.as_deref(), Some("binary"));
+        let printed = serde_json::to_value(&decoded).expect("serialize");
+        assert!(printed.get("mode").is_none(), "never printed: {printed}");
     }
 
     // ===== Issue #1314: one parse for a proxy's `mode` =====

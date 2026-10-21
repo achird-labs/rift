@@ -1131,6 +1131,12 @@ impl ImposterManager {
             proto => return Err(ImposterError::InvalidProtocol(proto.to_string())),
         }
 
+        // Mountebank's binary-mode refusal (issue #1578), then forget `mode`: it is creation-time
+        // only, so the stored config — what is printed, persisted, replicated and rebuilt from by a
+        // later stub edit or replace — never carries it, as Mountebank's stored imposter does not.
+        super::types::check_binary_mode(&config).map_err(ImposterError::InvalidConfig)?;
+        config.mode = None;
+
         // Client-auth settings are validated for EVERY protocol, not just https (issue #977).
         // `resolve_tls_acceptors` derives this again on the https branch; that is fine and
         // deliberate — `client_auth_for` is pure, and having it self-contained is what lets the
@@ -1985,9 +1991,9 @@ impl ImposterManager {
         Ok(())
     }
 
-    /// Full-set validation shared by `reload` and `apply_config`: protocol validity, no
-    /// duplicate explicit ports (`0` is auto-assigned, not explicit — issue #1104), and no
-    /// duplicate explicit stub ids within an imposter
+    /// Full-set validation shared by `reload` and `apply_config`: protocol validity, Mountebank's
+    /// binary-mode refusal (issue #1578), no duplicate explicit ports (`0` is auto-assigned, not
+    /// explicit — issue #1104), and no duplicate explicit stub ids within an imposter
     /// (the invariant `add_stub_unique` enforces incrementally, issue #202 — duplicate ids
     /// would silently corrupt the stub-key diff). Runs before anything mutates.
     fn validate_config_set<'a>(
@@ -1999,6 +2005,8 @@ impl ImposterManager {
                 "http" | "https" => {}
                 other => return Err(ImposterError::InvalidProtocol(other.to_string())),
             }
+            // Issue #1578; `create_imposter_staged` checks it again and clears `mode`.
+            super::types::check_binary_mode(config).map_err(ImposterError::InvalidConfig)?;
             if let Some(port) = config.explicit_port()
                 && !seen.insert(port)
             {
@@ -4846,6 +4854,44 @@ mod tests {
             ImposterConfig::default().enabled,
             "Default must agree with the serde default"
         );
+    }
+
+    // Issue #1578: binary mode refuses `matches` at both doors, and is forgotten once admitted.
+    #[tokio::test]
+    async fn binary_mode_is_refused_at_both_doors_and_never_stored() {
+        let manager = ImposterManager::new();
+        let refused = || {
+            imposter_cfg(json!({
+                "protocol": "http", "mode": "binary",
+                "stubs": [{ "predicates": [{ "matches": { "body": "x" } }],
+                            "responses": [{ "is": { "statusCode": 200 } }] }]
+            }))
+        };
+        let message = "the matches predicate is not allowed in binary mode";
+        match manager.create_imposter(refused()).await {
+            Err(ImposterError::InvalidConfig(m)) => assert_eq!(m, message),
+            other => panic!("create: {other:?}"),
+        }
+        match manager.apply_config(vec![refused()]).await {
+            Err(ImposterError::InvalidConfig(m)) => assert_eq!(m, message),
+            other => panic!("apply_config: {other:?}"),
+        }
+        assert!(manager.imposters.ports().is_empty(), "nothing was created");
+
+        let admitted = |stubs: serde_json::Value| {
+            imposter_cfg(json!({ "protocol": "http", "mode": "binary", "stubs": stubs }))
+        };
+        let port = manager
+            .create_imposter(admitted(json!([stub_json("a")])))
+            .await
+            .expect("a selector-free binary imposter is created");
+        assert_eq!(manager.get_imposter(port).unwrap().config.mode, None);
+        let mut replace = admitted(json!([stub_json("b")]));
+        replace.port = Some(port);
+        replace.name = Some("replaced".to_string());
+        let report = manager.apply_config(vec![replace]).await.expect("apply");
+        assert_eq!(report.replaced, vec![port]);
+        assert_eq!(manager.get_imposter(port).unwrap().config.mode, None);
     }
 
     // AC2d: imposter-level field changes always replace wholesale.

@@ -158,7 +158,12 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // admission check (Admission::Checked only, re-run in admission_check_stub).
         // #1551 `refuse_response_type_count`, two and none: door-only (see above).
         // #1550 `refuse_proxy_to_path`, a path in an http(s) `to`: an admission check (see above).
-        23,
+        // #1578 `refuse_binary_mode_selectors`, `matches` and a `jsonpath`/`xpath` selector in a
+        // `"mode": "binary"` imposter: an imposter-level admission check, never run by a decode
+        // (the create/apply doors and `admission_check` call it through `check_binary_mode`).
+        // Unreachable on replay by construction: `mode` is never serialized, so stored bytes do not
+        // carry it. Fixtures in issue_1267_replay_decode.rs.
+        25,
     ),
     ("crates/rift-types/src/wire.rs", "::custom", 4),
     ("crates/rift-types/src/wire.rs", "serde error helper", 0),

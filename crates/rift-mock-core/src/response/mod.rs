@@ -215,6 +215,7 @@ impl From<ImposterError> for Response<Full<Bytes>> {
             ImposterError::InvalidProtocol(p) => {
                 error_response(StatusCode::BAD_REQUEST, &format!("Invalid protocol: {p}"))
             }
+            ImposterError::InvalidConfig(msg) => error_response(StatusCode::BAD_REQUEST, &msg),
             ImposterError::StubIndexOutOfBounds(i) => {
                 error_response(StatusCode::NOT_FOUND, &format!("Stub index {i} not found"))
             }

@@ -1237,6 +1237,616 @@
           }
         }
       ]
+    },
+    {
+      "name": "coverage: predicates.js:338 a binary-mode imposter refuses a matches predicate",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "mode": "binary",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "body": "^AQ"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: predicates.js:58 a binary-mode imposter refuses a jsonpath selector",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "mode": "binary",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "x"
+                    },
+                    "jsonpath": {
+                      "selector": "$.a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: predicates.js:58 a binary-mode imposter refuses an xpath selector",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "mode": "binary",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "x"
+                    },
+                    "xpath": {
+                      "selector": "//a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: predicates.js:58 a binary-mode imposter refuses exists with a jsonpath selector",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "mode": "binary",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "body": true
+                    },
+                    "jsonpath": {
+                      "selector": "$.a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: predicates.js:338 a binary-mode imposter refuses matches under not",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "mode": "binary",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "not": {
+                      "matches": {
+                        "body": "^AQ"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: predicates.js:338 a binary-mode imposter refuses matches after a false or branch",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "mode": "binary",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "or": [
+                      {
+                        "equals": {
+                          "path": "/zzz"
+                        }
+                      },
+                      {
+                        "matches": {
+                          "body": "^AQ"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: predicates.js:338 a binary-mode https imposter refuses a matches predicate",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "https",
+            "mode": "binary",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "body": "^AQ"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: predicates.js:338 a binary-mode imposter refuses matches in its second stub",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "mode": "binary",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "x"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "body": "^AQ"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: dryRunValidator.js:244 matches is admitted without binary mode",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "body": "^AQ"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: dryRunValidator.js:244 PUT /imposters refuses a binary-mode imposter with matches, and admits one without",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "mode": "binary",
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "matches": {
+                          "body": "^AQ"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "MATCHED"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "mode": "binary",
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "equals": {
+                          "body": "AQID"
+                        }
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 200,
+                          "body": "MATCHED"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: imposterController.js:161 a binary-mode imposter's stub routes accept matches, and mode is never printed",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "mode": "binary",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "AQID"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545?replayable=true"
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "stub": {
+              "predicates": [
+                {
+                  "matches": {
+                    "body": "^AQ"
+                  }
+                }
+              ],
+              "responses": [
+                {
+                  "is": {
+                    "statusCode": 200,
+                    "body": "MATCHED"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "body": "^AQ"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs/0",
+          "body": {
+            "predicates": [
+              {
+                "matches": {
+                  "body": "^AQ"
+                }
+              }
+            ],
+            "responses": [
+              {
+                "is": {
+                  "statusCode": 200,
+                  "body": "MATCHED"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: predicates.js:357 binary mode: an or whose first branch matches the dry run never reaches matches",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "mode": "binary",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "or": [
+                      {
+                        "equals": {
+                          "path": "/"
+                        }
+                      },
+                      {
+                        "matches": {
+                          "body": "^AQ"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: predicates.js:357 binary mode: an and whose first branch fails the dry run never reaches matches",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "mode": "binary",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "and": [
+                      {
+                        "equals": {
+                          "path": "/nomatch"
+                        }
+                      },
+                      {
+                        "matches": {
+                          "body": "^AQ"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "MATCHED"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

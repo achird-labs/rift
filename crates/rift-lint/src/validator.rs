@@ -537,6 +537,80 @@ fn apply_default_engine(imposter: &Value) -> Option<Value> {
     Some(resolved)
 }
 
+/// E058 (issue #1578): an imposter created with `"mode": "binary"` (exactly that string, as the
+/// engine and Mountebank read it) refuses every `matches` predicate and `jsonpath`/`xpath`
+/// selector, wherever it sits under `not`/`and`/`or`. A predicate with both names its selector, as
+/// the engine does. `rules` is read when `predicates` is empty or absent, as the engine reads it.
+fn check_binary_mode_selectors(file: &Path, imposter: &Value, result: &mut LintResult) {
+    fn walk(file: &Path, predicate: &Value, location: &str, result: &mut LintResult) {
+        let refused = ["jsonpath", "xpath"]
+            .into_iter()
+            .find(|key| predicate.get(*key).is_some_and(|v| !v.is_null()))
+            .map(|key| format!("the {key} predicate parameter is not allowed in binary mode"))
+            .or_else(|| {
+                predicate
+                    .get("matches")
+                    .is_some_and(|v| !v.is_null())
+                    .then(|| "the matches predicate is not allowed in binary mode".to_owned())
+            });
+        if let Some(message) = refused {
+            result.add_issue(
+                LintIssue::error(
+                    "E058",
+                    format!("{message}; the engine refuses this imposter, as Mountebank does"),
+                    file.to_path_buf(),
+                )
+                .with_location(location)
+                .with_suggestion(
+                    "Match the base64 body with equals/contains/startsWith instead, or remove \
+                     \"mode\": \"binary\"",
+                ),
+            );
+            return;
+        }
+        if let Some(inner) = predicate.get("not") {
+            walk(file, inner, &format!("{location}.not"), result);
+        }
+        for key in ["and", "or"] {
+            for (i, inner) in predicate
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                walk(file, inner, &format!("{location}.{key}[{i}]"), result);
+            }
+        }
+    }
+
+    if imposter.get("mode").and_then(Value::as_str) != Some("binary") {
+        return;
+    }
+    let Some(stubs) = imposter.get("stubs").and_then(Value::as_array) else {
+        return;
+    };
+    for (stub_idx, stub) in stubs.iter().enumerate() {
+        let non_empty = |key: &'static str| {
+            stub.get(key)
+                .and_then(Value::as_array)
+                .filter(|a| !a.is_empty())
+                .map(|a| (key, a))
+        };
+        let Some((key, predicates)) = non_empty("predicates").or_else(|| non_empty("rules")) else {
+            continue;
+        };
+        for (pred_idx, predicate) in predicates.iter().enumerate() {
+            walk(
+                file,
+                predicate,
+                &format!("stubs[{stub_idx}].{key}[{pred_idx}]"),
+                result,
+            );
+        }
+    }
+}
+
 /// Validate a complete imposter configuration.
 pub fn validate_imposter(
     file: &Path,
@@ -556,6 +630,7 @@ pub fn validate_imposter(
     check_state_without_flow_state(file, imposter, result);
     check_ignored_keys(file, imposter, result);
     check_conditional_never_fires(file, imposter, result);
+    check_binary_mode_selectors(file, imposter, result);
     disclose_carrier_fields(file, imposter, result);
 
     // Named script registry (`_rift.scripts`, issue #356): validated once up front (each entry
