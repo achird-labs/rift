@@ -2307,8 +2307,15 @@ fn execute_predicate_generator_inject_in(
         "#
     );
 
-    let result = call_mb_wrapper(context, scripts, &wrapper_script, require)
-        .map_err(|e| PredicateGeneratorError::Script(format!("script execution error: {e}")))?;
+    let result = match call_mb_wrapper(context, scripts, &wrapper_script, require) {
+        Ok(result) => result,
+        Err(e) => {
+            return Err(PredicateGeneratorError::Threw {
+                message: crate::behaviors::thrown_message(&e, context),
+                detail: e.to_string(),
+            });
+        }
+    };
 
     let json_str = result
         .as_string()
@@ -2347,6 +2354,10 @@ pub struct MountebankRequest {
     pub request_from: Option<String>,
     pub ip: Option<String>,
     pub form: Option<std::collections::HashMap<String, String>>,
+    /// Set only for the create-time dry run of a `predicateGenerators` inject (issue #1580), which
+    /// runs it once over an empty `GET /`. Exposed as `request.isDryRun: true` then and absent
+    /// otherwise, as in Mountebank, so a script can skip the dry run.
+    pub is_dry_run: bool,
 }
 
 /// Create a Mountebank-style request object
@@ -2555,6 +2566,12 @@ fn create_mountebank_request_object(
             )
             .map_err(|e| anyhow!("Failed to set {key}: {e}"))?;
         }
+    }
+
+    // Absent rather than `false` outside a dry run, as in Mountebank (issue #1580).
+    if request.is_dry_run {
+        obj.set(js_string!("isDryRun"), JsValue::from(true), false, context)
+            .map_err(|e| anyhow!("Failed to set isDryRun: {e}"))?;
     }
 
     // A plain object: only headers get the case-insensitive lookup, form keys are the client's own.
@@ -3854,8 +3871,11 @@ function respond(ctx) {
         let err = execute_predicate_generator_inject(throwing, &request, &[], &trusted_files())
             .expect_err("a throwing generator must return Err, not empty predicates");
         assert!(
-            matches!(err, PredicateGeneratorError::Script(_)),
-            "expected Script error, got {err:?}"
+            matches!(
+                &err,
+                PredicateGeneratorError::Threw { message: Some(m), .. } if m == "boom"
+            ),
+            "expected the thrown message, got {err:?}"
         );
 
         let ok_fn = r#"function(config, logger, predicates) {

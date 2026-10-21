@@ -282,6 +282,14 @@ pub async fn handle_reload(
     // `persisted` holds the imposters that belong to the datadir, `ephemeral` those re-read from a
     // source (issue #1122); the two are applied as one set, so neither store's sweep removes
     // what only the other declares.
+    //
+    // Only a config file's imposters get the generator dry run (issue #1580), not the datadir's:
+    // a door already admitted those, and refusing them now would break a running setup.
+    let dry_run_persisted = matches!(
+        &source,
+        crate::sources::ReloadSource::Legacy(legacy)
+            if matches!(legacy.as_ref(), crate::config_loader::ConfigSource::File { .. })
+    );
     let (persisted, ephemeral, intercept_block, routes, all_unchanged) = match source {
         crate::sources::ReloadSource::Legacy(source) => {
             // A config file is its operator's; a directory may hold what the admin API persisted.
@@ -409,6 +417,25 @@ pub async fn handle_reload(
         || reload_is_gated(&ephemeral, allow_injection)
     {
         return crate::admin_api::handlers::imposters::injection_disallowed_response();
+    }
+
+    // Mountebank's create-time dry run of generator injects (issue #1580), still before anything
+    // mutates. Skipped for the datadir's imposters: see `dry_run_persisted`.
+    let file_entries = if dry_run_persisted {
+        persisted.as_slice()
+    } else {
+        &[]
+    };
+    for (config, access) in file_entries.iter().chain(&ephemeral) {
+        if let Some(rejection) = crate::admin_api::handlers::imposters::reject_failing_generators(
+            &config.stubs,
+            crate::scripting::resolve_script_timeout_ms(config),
+            access.clone(),
+        )
+        .await
+        {
+            return rejection;
+        }
     }
 
     let count = persisted.len() + ephemeral.len();
@@ -939,6 +966,53 @@ mod tests {
             Some(serde_json::json!("original")),
             "the refused reload must leave the running imposter unchanged"
         );
+
+        manager.delete_all().await;
+    }
+
+    // Issue #1580: a config file's generator inject is dry-run on reload too, before anything
+    // mutates; a throwing one refuses the reload with Mountebank's envelope.
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn test_handle_reload_refuses_a_throwing_generator_inject() {
+        use http_body_util::BodyExt;
+
+        let manager = Arc::new(ImposterManager::new());
+        let imposter_port = held_port(&manager).await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"imposters":[{{"port":{imposter_port},"protocol":"http","stubs":[
+                {{"responses":[{{"proxy":{{"to":"http://127.0.0.1:1","predicateGenerators":[
+                  {{"inject":"function (config) {{ throw new Error('boom'); }}"}}]}}}}]}}
+            ]}}]}}"#
+            ),
+        )
+        .expect("write config");
+        let source = crate::sources::ReloadSource::Legacy(Arc::new(
+            crate::config_loader::ConfigSource::File {
+                path,
+                no_parse: false,
+            },
+        ));
+
+        let resp = handle_reload(manager.clone(), Some(source), None, None, true, None).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(
+            body["errors"][0]["message"],
+            "invalid predicateGenerator injection"
+        );
+        assert_eq!(body["errors"][0]["data"], "boom");
+        // The placeholder holding the port is left as it was.
+        let stubs = manager
+            .get_imposter(imposter_port)
+            .expect("placeholder still running")
+            .get_stubs();
+        assert!(stubs.is_empty(), "the refused reload changed nothing");
 
         manager.delete_all().await;
     }

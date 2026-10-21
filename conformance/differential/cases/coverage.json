@@ -2073,6 +2073,542 @@
           }
         }
       ]
+    },
+    {
+      "name": "coverage: responseResolver.js:159 a predicateGenerator inject that throws is refused when the imposter is created",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "inject": "function (config) { throw new Error('boom'); }"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: responseResolver.js:159 a predicateGenerator inject that throws on the dry run's empty body is refused at creation",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "inject": "function (config) { return [{ equals: JSON.parse(config.request.body) }]; }"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: responseResolver.js:155 a predicateGenerator inject returning undefined is refused at creation",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "inject": "function (config) { }"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: responseResolver.js:159 a throwing predicateGenerator inject under proxyTransparent is refused at creation",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyTransparent",
+                      "predicateGenerators": [
+                        {
+                          "inject": "function (config) { throw new Error('boom'); }"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: imposterController.js:200 a throwing predicateGenerator inject is refused by the stub doors",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": []
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "stub": {
+              "responses": [
+                {
+                  "proxy": {
+                    "to": "http://localhost:4546",
+                    "predicateGenerators": [
+                      {
+                        "inject": "function (config) { throw new Error('boom'); }"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "predicateGenerators": [
+                        {
+                          "inject": "function (config) { throw new Error('boom'); }"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "responses": [
+                      {
+                        "proxy": {
+                          "to": "http://localhost:4546",
+                          "predicateGenerators": [
+                            {
+                              "inject": "function (config) { throw new Error('boom'); }"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: responseResolver.js:151 a predicateGenerator inject guarded on isDryRun is created and records",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "up"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "inject": "function (config) { if (config.request.isDryRun) { return []; } return [{ contains: { body: JSON.parse(config.request.body).id } }]; }"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/a",
+          "body": "{\"id\":\"7\"}"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/a",
+          "body": "{\"id\":\"7\"}"
+        }
+      ]
+    },
+    {
+      "name": "coverage: responseResolver.js:131 a predicateGenerator with predicateOperator exists",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "up"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "query": true
+                          },
+                          "predicateOperator": "exists"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: responseResolver.js:109 a predicateGenerator whose ignore filters a whole query",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "up"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "query": true
+                          },
+                          "ignore": {
+                            "query": "t"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/a?t=1&u=2"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/a?t=9&u=2"
+        }
+      ]
+    },
+    {
+      "name": "coverage: responseResolver.js:119 a predicateGenerator listing a query key the request repeats",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "up"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "query": {
+                              "a": true
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/a?a=1&a=2"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/a?a=9"
+        }
+      ]
+    },
+    {
+      "name": "coverage: responseResolver.js:121 a predicateGenerator listing a query key with a non-boolean value records its value",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "up"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "query": {
+                              "q": "mountebank"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/search?q=rift&page=2"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/search?q=rift&page=3"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/search?q=other"
+        }
+      ]
     }
   ]
 }

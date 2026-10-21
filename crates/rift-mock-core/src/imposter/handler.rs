@@ -1383,6 +1383,7 @@ async fn handle_request_inner(
                 ip: Some(client_addr.ip().to_string()),
                 form: Imposter::request_form(&request_headers, body_string.as_deref())
                     .map(|form| crate::util::comma_joined(&form)),
+                is_dry_run: false,
             };
 
             match execute_mountebank_inject_bounded(

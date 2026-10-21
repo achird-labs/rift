@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 
 const INJECT: &str = "function (config) { return { statusCode: 200, body: 'x' }; }";
 const INJECT_PRED: &str = "function (config) { return true; }";
+// A generator returns the predicates to add: an array, which the create-time dry run checks (#1580).
+const INJECT_GEN: &str = "function (config) { return []; }";
 
 /// Every scripted payload kind, as a full stub body.
 fn scripted_stubs() -> Vec<(&'static str, Value)> {
@@ -57,7 +59,7 @@ fn scripted_stubs() -> Vec<(&'static str, Value)> {
         (
             "predicateGenerators.inject",
             json!({ "responses": [{ "proxy": { "to": "http://127.0.0.1:1", "mode": "proxyOnce",
-                    "predicateGenerators": [{ "inject": INJECT_PRED }] } }] }),
+                    "predicateGenerators": [{ "inject": INJECT_GEN }] } }] }),
         ),
     ]
 }

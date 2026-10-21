@@ -143,7 +143,6 @@ a divergence (to be fixed in Rift and then covered here), or nobody has written 
 | `predicates.js:21-24`, `:238-241`, `:269-271` | Array semantics of `deepEquals`/`equals`: order-independent arrays of objects, an expected array as a subset of the actual one, an object over an array of objects |
 | `predicates.js:58-59`, `:338-339` | An imposter with `"mode": "binary"` refuses `matches`, `jsonpath` and `xpath` at creation in Mountebank; Rift creates it |
 | `predicates.js:384-389`, `responseResolver.js:69-77` | A predicate or response `inject` that throws: Mountebank answers `500`, Rift `400` |
-| `responseResolver.js:109-110`, `:119-120`, `:131-144`, `:159-163`, `:197-198`; `helpers.js:81-87`, `:117-129` | `predicateGenerators` with `ignore`, a nested matcher, `predicateOperator: "exists"`, and an `inject` that throws (Mountebank refuses the last two at creation) |
 | `dryRunValidator.js:188-192`; `behaviorsValidator.js:98-99`, `:167-173` | `repeat: 0`, a `copy.from` with two keys, an unknown behavior and a behavior object with two types: Mountebank refuses each at creation, Rift accepts it |
 | `behaviors.js:275-276`, `:364-369` | `copy` from a missing field, and into a header name or body key |
 | `baseHttpServer.js:47-50` | A CORS preflight (`Access-Control-Request-Headers` set): Mountebank echoes the request's values and serves the stub's body |
@@ -163,6 +162,7 @@ the detail and the replayable export are compared too (#1576). The default certi
 | `imposterController.js:124-128`, `:140-146`; `imposter.js:79-98`, `:132-138`; `responseResolver.js:281-295`, `:357-359`, `:376-393`; `dryRunValidator.js:91-93`; `httpProxy.js:62-68`; `middleware.js:125-127` | The callback API of out-of-process (`--protofile`) protocols, which Rift does not implement |
 | `dryRunValidator.js:130-171`, `:229-232` | The injection checks, which run only without `--allowInjection`; the harness runs both engines with it |
 | `dryRunValidator.js:250-251` | A protocol's own validator; http and https have none |
+| `responseResolver.js:136-137` | `buildExists` recursing into an object: every `exists` generator crashes on the dry run's second key first (#1580), so no imposter that would reach it can be created |
 | `compatibility.js:91-100`; `imposterPrinter.js:31-32` | tcp-only upcasts and printing |
 | `imposter.js:105-107`, `baseHttpServer.js:135-137`, `ip.js:31-47` | `--ipWhitelist` blocking (#879: not enforced in Rift) |
 | `imposter.js:126-127`, `inMemoryImpostersRepository.js:82-89` | `--debug` match recording; the harness starts both engines without it |
@@ -178,7 +178,8 @@ the detail and the replayable export are compared too (#1576). The default certi
 **Not yet written** (reachable, no case yet): `behaviors.js:346-348`, `:453-454`, `:472-474`,
 `:507-508`; `behaviorsValidator.js:23-24`, `:40-41`, `:107-108`, `:160-162`; `httpProxy.js:133-134`,
 `:203-204`, `:215-217`; `jsonpath.js:27-28`; `predicates.js:51-53`, `:137-138`, `:396-398`;
-`responseResolver.js:86-87`; `xpath.js:15-16`, `:26-28`; `helpers.js:58-59`.
+`responseResolver.js:86-87`; `xpath.js:15-16`, `:26-28`; `helpers.js:58-59`, `:122-127` (an array or
+object `ignore`).
 
 ## Cases
 

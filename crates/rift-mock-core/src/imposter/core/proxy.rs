@@ -431,10 +431,11 @@ fn capture<SH: BuildHasher>(
                     "form" => form,
                     _ => None,
                 };
+                // Every listed key, whatever its matcher value, as Mountebank's `buildEquals`
+                // records it (issue #1580): `{"q": "mountebank"}` lists `q` as `{"q": true}` does.
                 listed
-                    .iter()
-                    .filter(|(_, wanted)| wanted.as_bool() == Some(true))
-                    .filter_map(|(key, _)| {
+                    .keys()
+                    .filter_map(|key| {
                         let value = match &keyed {
                             Some(map) => map.get(key).cloned(),
                             None => request
@@ -558,6 +559,162 @@ pub(crate) struct GeneratedPredicates {
     typed: Vec<rift_types::Predicate>,
 }
 
+/// A failed generator pass, with the `inject` function that was running when it failed (`None`
+/// for a failure outside an inject), so the create-time dry run can name it (issue #1580).
+#[derive(Debug)]
+struct GeneratorFailure {
+    inject: Option<String>,
+    error: crate::scripting::PredicateGeneratorError,
+}
+
+impl From<crate::scripting::PredicateGeneratorError> for GeneratorFailure {
+    fn from(error: crate::scripting::PredicateGeneratorError) -> Self {
+        Self {
+            inject: None,
+            error,
+        }
+    }
+}
+
+/// Why the create-time dry run of a stub's `predicateGenerators` refused it (issue #1580).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratorDryRun {
+    /// The config's fault: an `inject` threw, returned something other than an array, or ran past
+    /// the script timeout. Mountebank answers this with `400 invalid injection`; `source` is the
+    /// call it ran (`(<fn>)(config);`) and `data` the error's message, `None` for a thrown value
+    /// without one (`throw 'text'`), for which Mountebank leaves `data` out.
+    Refused {
+        source: String,
+        data: Option<String>,
+    },
+    /// Not the config's fault: the script pool could not run the generator, or its task panicked.
+    /// Admitting the config unchecked would skip the check silently, so the door fails instead.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for GeneratorDryRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused {
+                data: Some(data), ..
+            } => write!(f, "invalid predicateGenerator injection: {data}"),
+            Self::Refused { data: None, .. } => {
+                write!(f, "invalid predicateGenerator injection")
+            }
+            Self::Unavailable(detail) => {
+                write!(
+                    f,
+                    "could not dry-run a predicateGenerator injection: {detail}"
+                )
+            }
+        }
+    }
+}
+
+// Hand-written rather than `thiserror`, which would read the `source` field as the cause.
+impl std::error::Error for GeneratorDryRun {}
+
+/// The peer a dry run's `matches` generators see. The synthetic request has no client: its
+/// `requestFrom` is `""` and it has no `ip`, as in Mountebank's dry run.
+const DRY_RUN_PEER: std::net::SocketAddr =
+    std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0);
+
+fn has_inject_generator(generators: &[serde_json::Value]) -> bool {
+    generators
+        .iter()
+        .any(|g| g.as_object().is_some_and(|o| o.contains_key("inject")))
+}
+
+/// Run every proxy response's `predicateGenerators` once over Mountebank's synthetic dry-run
+/// request (an empty `GET /`, with `request.isDryRun` set) and refuse the stubs when an `inject`
+/// throws or returns a non-array, as Mountebank's `dryRunValidator` does when an imposter or stub
+/// is created (issue #1580). Every proxy mode is checked, `proxyTransparent` included.
+///
+/// Only the request doors call this, after the `--allowInjection` gate: it runs user code, so it
+/// must never run on decode or in `admission_check` (rift-cluster replays stored configs through
+/// both on every node), nor on `--datadir` load of configs already admitted. Generator lists
+/// without an `inject` cannot fail here and never touch the script pool. A generated predicate
+/// the engine would not admit is not refused: Mountebank does not check that at creation, and a
+/// recording reports it.
+///
+/// # Errors
+///
+/// [`GeneratorDryRun::Refused`] for the config's fault, [`GeneratorDryRun::Unavailable`] when the
+/// script pool could not run the check.
+pub async fn dry_run_predicate_generators(
+    stubs: &[Stub],
+    timeout: Duration,
+    script_files: Arc<crate::imposter::ScriptFileAccess>,
+) -> Result<(), GeneratorDryRun> {
+    let lists: Vec<Vec<serde_json::Value>> = stubs
+        .iter()
+        .flat_map(|stub| &stub.responses)
+        .filter_map(|response| match response {
+            StubResponse::Proxy { proxy, .. }
+                if has_inject_generator(&proxy.predicate_generators) =>
+            {
+                Some(proxy.predicate_generators.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    for generators in lists {
+        // The first inject names a timeout: the pass cannot say which one was running.
+        let first_inject = generators
+            .iter()
+            .find_map(|g| g.get("inject").and_then(serde_json::Value::as_str))
+            .map(str::to_owned);
+        let files = Arc::clone(&script_files);
+        // Off the async worker, under the script deadline, as a recording runs it (issue #476).
+        let handle = tokio::task::spawn_blocking(move || {
+            Imposter::run_generators(
+                &generators,
+                "GET",
+                "/",
+                &HashMap::<String, Vec<String>>::new(),
+                Some(""),
+                None,
+                DRY_RUN_PEER,
+                &files,
+                true,
+            )
+        });
+        let failure = match tokio::time::timeout(timeout, handle).await {
+            Ok(Ok(Ok(_))) => continue,
+            Ok(Ok(Err(failure))) => failure,
+            Ok(Err(join_err)) => {
+                return Err(GeneratorDryRun::Unavailable(format!(
+                    "generator task panicked: {join_err}"
+                )));
+            }
+            Err(_elapsed) => {
+                return Err(GeneratorDryRun::Refused {
+                    source: injection_source(first_inject.as_deref()),
+                    data: Some(format!("timed out after {}ms", timeout.as_millis())),
+                });
+            }
+        };
+        use crate::scripting::PredicateGeneratorError as E;
+        let data = match failure.error {
+            E::Threw { message, .. } => message,
+            E::Script(message) | E::Output(message) => Some(message),
+            E::Pool(message) => return Err(GeneratorDryRun::Unavailable(message)),
+            // Recorded as a failure when a real request generates it; not a create-time refusal.
+            E::Invalid(_) => continue,
+        };
+        return Err(GeneratorDryRun::Refused {
+            source: injection_source(failure.inject.as_deref()),
+            data,
+        });
+    }
+    Ok(())
+}
+
+/// Mountebank's `source` for a generator injection: the call it evaluates.
+fn injection_source(inject: Option<&str>) -> String {
+    inject.map_or_else(String::new, |f| format!("({f})(config);"))
+}
+
 impl Imposter {
     /// The predicates a generator pass writes, for tests that pin their shape. Recording goes
     /// through `generate_stub_predicates`, which keeps the typed form too.
@@ -599,6 +756,35 @@ impl Imposter {
         client_addr: std::net::SocketAddr,
         script_files: &std::sync::Arc<crate::imposter::ScriptFileAccess>,
     ) -> Result<GeneratedPredicates, crate::scripting::PredicateGeneratorError> {
+        Self::run_generators(
+            generators,
+            method,
+            path,
+            headers,
+            body,
+            query,
+            client_addr,
+            script_files,
+            false,
+        )
+        .map_err(|failure| failure.error)
+    }
+
+    /// The generator pass itself. `dry_run` is the create-time check (issue #1580): an inject then
+    /// sees Mountebank's synthetic request — `requestFrom: ""`, no `ip`, an empty `form` and
+    /// `isDryRun: true`.
+    #[allow(clippy::too_many_arguments)]
+    fn run_generators<SH: BuildHasher>(
+        generators: &[serde_json::Value],
+        method: &str,
+        path: &str,
+        headers: &HashMap<String, Vec<String>, SH>,
+        body: Option<&str>,
+        query: Option<&str>,
+        client_addr: std::net::SocketAddr,
+        script_files: &std::sync::Arc<crate::imposter::ScriptFileAccess>,
+        dry_run: bool,
+    ) -> Result<GeneratedPredicates, GeneratorFailure> {
         let mut predicates = Vec::new();
         let invalid = crate::scripting::PredicateGeneratorError::Invalid;
 
@@ -609,12 +795,10 @@ impl Imposter {
             if let Some(refusal) = rift_types::generator_shape_error(i, r#gen)
                 .or_else(|| crate::imposter::types::generator_operator_error(i, r#gen))
             {
-                return Err(invalid(refusal));
+                return Err(invalid(refusal).into());
             }
             let Some(gen_obj) = r#gen.as_object() else {
-                return Err(invalid(format!(
-                    "predicateGenerators[{i}] must be an object"
-                )));
+                return Err(invalid(format!("predicateGenerators[{i}] must be an object")).into());
             };
 
             // Handle inject predicateGenerator — calls a JS function with the request and
@@ -643,17 +827,32 @@ impl Imposter {
                         // flag through separately, so default to `Text`.
                         body: body.map(|b| b.to_string()),
                         mode: None,
-                        request_from: Some(client_addr.to_string()),
-                        ip: Some(client_addr.ip().to_string()),
-                        form: crate::imposter::Imposter::request_form(headers, body)
-                            .map(|form| crate::util::comma_joined(&form)),
+                        // Mountebank's dry-run request has an empty `requestFrom`, no `ip` and an
+                        // empty `form` (`baseHttpServer.js`).
+                        request_from: Some(if dry_run {
+                            String::new()
+                        } else {
+                            client_addr.to_string()
+                        }),
+                        ip: (!dry_run).then(|| client_addr.ip().to_string()),
+                        form: if dry_run {
+                            Some(HashMap::new())
+                        } else {
+                            crate::imposter::Imposter::request_form(headers, body)
+                                .map(|form| crate::util::comma_joined(&form))
+                        },
+                        is_dry_run: dry_run,
                     };
                     let inject_preds = execute_predicate_generator_inject(
                         inject_fn,
                         &mb_request,
                         &predicates,
                         script_files,
-                    )?;
+                    )
+                    .map_err(|error| GeneratorFailure {
+                        inject: Some(inject_fn.to_owned()),
+                        error,
+                    })?;
                     predicates.extend(inject_preds);
                     continue;
                 }
@@ -661,17 +860,22 @@ impl Imposter {
                 // (issues #498, #1353). Without a script engine the generation fails instead.
                 #[cfg(not(feature = "javascript"))]
                 {
-                    let _ = (inject_fn, script_files);
-                    return Err(crate::scripting::PredicateGeneratorError::Script(
-                        "predicateGenerator inject requires the 'javascript' feature".to_string(),
-                    ));
+                    let _ = (script_files, dry_run);
+                    return Err(GeneratorFailure {
+                        inject: Some(inject_fn.to_owned()),
+                        error: crate::scripting::PredicateGeneratorError::Script(
+                            "predicateGenerator inject requires the 'javascript' feature"
+                                .to_string(),
+                        ),
+                    });
                 }
             }
 
             let Some(matches) = gen_obj.get("matches").and_then(|m| m.as_object()) else {
                 return Err(invalid(format!(
                     "predicateGenerators[{i}] needs `matches` or `inject`"
-                )));
+                ))
+                .into());
             };
             let request = GeneratorRequest {
                 method,
@@ -814,11 +1018,7 @@ impl Imposter {
         // An `inject` generator executes a JS script; run the generator pass off the async worker
         // under the script deadline (issue #476). Script-free generator lists (the common case)
         // keep the inline path — pure predicate building, no script pool.
-        let has_inject_generator = proxy_config
-            .predicate_generators
-            .iter()
-            .any(|g| g.as_object().is_some_and(|o| o.contains_key("inject")));
-        if !has_inject_generator {
+        if !has_inject_generator(&proxy_config.predicate_generators) {
             return Self::generate_predicates_impl(
                 &proxy_config.predicate_generators,
                 method,
@@ -1875,6 +2075,23 @@ mod predicate_generator_shape_tests {
         );
     }
 
+    // Mountebank's `buildEquals` records every listed key whatever its matcher value, so the
+    // docs' `{"query": {"q": "mountebank"}}` records the request's `q` (issue #1580's mbTest docs
+    // case); Rift used to record only the keys set to `true`, here `equals query {}`.
+    #[test]
+    fn a_listed_key_is_recorded_whatever_its_matcher_value() {
+        let predicates = generate(
+            json!({ "matches": { "query": { "q": "mountebank", "b": false } } }),
+            None,
+            Some("q=rift&b=2&c=3"),
+            &[],
+        );
+        assert_eq!(
+            predicates,
+            vec![json!({ "equals": { "query": { "q": "rift", "b": "2" } } })]
+        );
+    }
+
     #[test]
     fn a_whole_field_matcher_records_an_absent_field_as_empty() {
         let predicates = generate(
@@ -2422,5 +2639,126 @@ mod claim_tests {
         imp.delete_stub(1).expect("delete the proxy stub");
 
         assert!(recorded(&imp, &sig));
+    }
+}
+
+/// The create-time dry run of `predicateGenerators` injects (issue #1580).
+#[cfg(all(test, feature = "javascript"))]
+mod dry_run_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn stubs_with(mode: &str, generators: serde_json::Value) -> Vec<Stub> {
+        vec![
+            serde_json::from_value(json!({
+                "responses": [{ "proxy": {
+                    "to": "http://up", "mode": mode, "predicateGenerators": generators,
+                } }],
+            }))
+            .expect("valid stub"),
+        ]
+    }
+
+    fn inject(script: &str) -> Vec<Stub> {
+        stubs_with("proxyOnce", json!([{ "inject": script }]))
+    }
+
+    async fn dry_run(stubs: &[Stub], timeout: Duration) -> Result<(), GeneratorDryRun> {
+        let files = Arc::new(crate::imposter::ScriptFileAccess::network(None));
+        dry_run_predicate_generators(stubs, timeout, files).await
+    }
+
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    #[tokio::test]
+    async fn a_throwing_inject_is_refused_with_its_source_and_message() {
+        let script = "function (config) { throw new Error('boom'); }";
+        let refusal = dry_run(&inject(script), TIMEOUT).await.unwrap_err();
+        let GeneratorDryRun::Refused { source, data } = refusal else {
+            panic!("expected a refusal, got {refusal:?}");
+        };
+        assert_eq!(source, format!("({script})(config);"));
+        // The thrown error's message alone, as Mountebank reports it.
+        assert_eq!(data.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn an_inject_returning_undefined_is_refused() {
+        let refusal = dry_run(&inject("function (config) {}"), TIMEOUT).await;
+        assert!(
+            matches!(refusal, Err(GeneratorDryRun::Refused { .. })),
+            "{refusal:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_inject_returning_an_empty_array_is_admitted() {
+        let admitted = dry_run(&inject("function (config) { return []; }"), TIMEOUT).await;
+        assert_eq!(admitted, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn an_inject_guarded_on_is_dry_run_is_admitted() {
+        let script = "function (config) { if (config.request.isDryRun) { return []; } \
+                      return [{ equals: JSON.parse(config.request.body) }]; }";
+        assert_eq!(dry_run(&inject(script), TIMEOUT).await, Ok(()));
+        // Unguarded, the same parse throws on the synthetic empty body, as in Mountebank.
+        let unguarded =
+            "function (config) { return [{ equals: JSON.parse(config.request.body) }]; }";
+        assert!(dry_run(&inject(unguarded), TIMEOUT).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_inject_sees_mountebanks_synthetic_request() {
+        let script = "function (config) { var r = config.request; \
+            if (r.method !== 'GET' || r.path !== '/' || r.body !== '' || r.requestFrom !== '' \
+                || 'ip' in r || Object.keys(r.query).length || Object.keys(r.headers).length \
+                || Object.keys(r.form).length || r.isDryRun !== true) { throw new Error(JSON.stringify(r)); } \
+            return []; }";
+        assert_eq!(dry_run(&inject(script), TIMEOUT).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_matches_only_list_never_reaches_the_script_pool() {
+        // A zero deadline would refuse any run that went through the pool.
+        let stubs = stubs_with("proxyOnce", json!([{ "matches": { "path": true } }]));
+        assert_eq!(dry_run(&stubs, Duration::ZERO).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_generated_predicate_the_engine_would_refuse_is_not_a_create_time_refusal() {
+        let script = "function (config) { return [{ notAnOperator: {} }]; }";
+        assert_eq!(dry_run(&inject(script), TIMEOUT).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn an_inject_past_the_script_timeout_is_refused() {
+        let script = "function (config) { var end = Date.now() + 2000; while (Date.now() < end) {} return []; }";
+        let refusal = dry_run(&inject(script), Duration::from_millis(50)).await;
+        let Err(GeneratorDryRun::Refused { data, .. }) = refusal else {
+            panic!("expected a refusal, got {refusal:?}");
+        };
+        assert_eq!(data.as_deref(), Some("timed out after 50ms"));
+    }
+
+    #[tokio::test]
+    async fn every_proxy_mode_is_checked_proxy_transparent_included() {
+        let throwing = json!([{ "inject": "function () { throw new Error('boom'); }" }]);
+        for mode in ["proxyOnce", "proxyAlways", "proxyTransparent"] {
+            let refusal = dry_run(&stubs_with(mode, throwing.clone()), TIMEOUT).await;
+            assert!(refusal.is_err(), "{mode}: {refusal:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn response_and_predicate_injects_are_not_dry_run() {
+        let stubs: Vec<Stub> = vec![
+            serde_json::from_value(json!({
+                "predicates": [{ "inject": "function () { throw new Error('p'); }" }],
+                "responses": [{ "inject": "function () { throw new Error('r'); }" }],
+            }))
+            .expect("valid stub"),
+        ];
+        assert_eq!(dry_run(&stubs, Duration::ZERO).await, Ok(()));
     }
 }

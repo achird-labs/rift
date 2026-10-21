@@ -112,6 +112,70 @@ pub(crate) fn injection_disallowed_response() -> Response<Full<Bytes>> {
     )
 }
 
+/// Refuse stubs whose `predicateGenerators` `inject` throws or returns a non-array when dry-run
+/// over an empty `GET /`, as Mountebank's create-time dry run does (issue #1580). Every admin write
+/// door runs it right after the `--allowInjection` gate, which has already refused any inject
+/// generator when the flag is off. `timeout_ms` is the imposter's script timeout and `access` what
+/// its scripts may `require()`. `None` when the stubs are allowed through; a `500` when the script
+/// pool could not run the check, which is not the config's fault and must not admit it unchecked.
+pub(crate) async fn reject_failing_generators(
+    stubs: &[Stub],
+    timeout_ms: u64,
+    access: ScriptFileAccess,
+) -> Option<Response<Full<Bytes>>> {
+    use crate::imposter::GeneratorDryRun;
+    match crate::imposter::dry_run_predicate_generators(
+        stubs,
+        std::time::Duration::from_millis(timeout_ms),
+        Arc::new(access),
+    )
+    .await
+    {
+        Ok(()) => None,
+        Err(GeneratorDryRun::Refused { source, data }) => {
+            Some(generator_injection_refused(&source, data.as_deref()))
+        }
+        Err(e @ GeneratorDryRun::Unavailable(_)) => {
+            error!("{e}");
+            Some(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+            ))
+        }
+    }
+}
+
+/// Mountebank's `400 invalid injection` for a generator inject its dry run caught (issue #1580).
+/// `data` is left out when the thrown value had no message, as Mountebank leaves it out.
+fn generator_injection_refused(source: &str, data: Option<&str>) -> Response<Full<Bytes>> {
+    let mut error = serde_json::json!({
+        "code": ErrorKind::InvalidInjection.slug(),
+        "type": ErrorKind::InvalidInjection.slug(),
+        "message": "invalid predicateGenerator injection",
+        "source": source,
+    });
+    if let Some(data) = data {
+        error["data"] = data.into();
+    }
+    let body = serde_json::json!({ "errors": [error] }).to_string();
+    build_response_with_headers(
+        StatusCode::BAD_REQUEST,
+        [("Content-Type", ADMIN_JSON_CONTENT_TYPE)],
+        body,
+    )
+}
+
+/// The script timeout of the live imposter on `port`, for a stub door: the stub arrives without
+/// its imposter's `_rift` block. The default when there is no such imposter (the door then
+/// answers `404` anyway).
+pub(crate) fn imposter_script_timeout_ms(manager: &ImposterManager, port: u16) -> u64 {
+    manager
+        .get_imposter(port)
+        .map_or(crate::scripting::DEFAULT_SCRIPT_TIMEOUT_MS, |imposter| {
+            crate::scripting::resolve_script_timeout_ms(&imposter.config)
+        })
+}
+
 /// Reject a whole imposter config when its stubs carry a scripting surface and `--allowInjection`
 /// is off. Delegates to [`reject_stubs_if_injection_disallowed`].
 fn reject_if_injection_disallowed(
@@ -145,6 +209,15 @@ pub async fn handle_create(
     };
 
     if let Some(rejection) = reject_if_injection_disallowed(&config, allow_injection) {
+        return rejection;
+    }
+    if let Some(rejection) = reject_failing_generators(
+        &config.stubs,
+        crate::scripting::resolve_script_timeout_ms(&config),
+        admin_script_access(&scripts_dir),
+    )
+    .await
+    {
         return rejection;
     }
 
@@ -381,6 +454,17 @@ async fn replace_all_from_bytes(
     // surface and --allowInjection is off (issue #355 Item 4).
     for config in &batch.imposters {
         if let Some(rejection) = reject_if_injection_disallowed(config, allow_injection) {
+            return rejection;
+        }
+    }
+    for config in &batch.imposters {
+        if let Some(rejection) = reject_failing_generators(
+            &config.stubs,
+            crate::scripting::resolve_script_timeout_ms(config),
+            admin_script_access(&scripts_dir),
+        )
+        .await
+        {
             return rejection;
         }
     }

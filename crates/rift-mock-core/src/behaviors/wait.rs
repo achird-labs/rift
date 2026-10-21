@@ -264,7 +264,10 @@ impl WaitBehavior {
 /// `error.message` is then `undefined` and `data` is left out, so the display string is not
 /// substituted.
 #[cfg(feature = "javascript")]
-fn thrown_message(e: &boa_engine::JsError, context: &mut boa_engine::Context) -> Option<String> {
+pub(crate) fn thrown_message(
+    e: &boa_engine::JsError,
+    context: &mut boa_engine::Context,
+) -> Option<String> {
     if let Some(native) = e.as_native() {
         return Some(native.message().to_string());
     }

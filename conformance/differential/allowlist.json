@@ -3317,5 +3317,156 @@
     "reason": "Mountebank's dry run never reaches the matches, so it creates the imposter; Rift refuses it as written",
     "mountebank": "[{\"predicates\":[{\"and\":[{\"equals\":{\"path\":\"/nomatch\"}},{\"matches\":{\"body\":\"^AQ\"}}]}],\"responses\":[{\"is\":{\"body\":\"MATCHED\",\"statusCode\":200}}]}]",
     "rift": "(absent)"
+  },
+  {
+    "id": "generator-dry-run-data/json-parse",
+    "case": "coverage: responseResolver.js:159 a predicateGenerator inject that throws on the dry run's empty body is refused at creation",
+    "location": "step[0].admin.body/errors/0/data",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "two JavaScript engines word an error differently (`JSON.parse` of an empty body), and a non-array",
+    "reason": "Boa and V8 word a JSON.parse error differently",
+    "mountebank": "\"Unexpected end of JSON input\"",
+    "riftMatches": "\"EOF while parsing a value.*\""
+  },
+  {
+    "id": "generator-dry-run-data/non-array",
+    "case": "coverage: responseResolver.js:155 a predicateGenerator inject returning undefined is refused at creation",
+    "location": "step[0].admin.body/errors/0/data",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "two JavaScript engines word an error differently (`JSON.parse` of an empty body), and a non-array",
+    "reason": "a non-array generator return reports Rift's own message",
+    "mountebankMatches": "\".* is not iterable.*\"",
+    "rift": "\"function did not return a stringifiable value\""
+  },
+  {
+    "id": "generator-exists/status",
+    "case": "coverage: responseResolver.js:131 a predicateGenerator with predicateOperator exists",
+    "location": "step[1].admin.status",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank 2.9.5 refuses every generator with `\"predicateOperator\": \"exists\"` when the imposter is created (an internal error with no message), although its docs describe it; Rift records `{\"exists\": …}` as documented",
+    "reason": "Mountebank's buildExists crashes on the dry run; Rift creates the imposter",
+    "mountebank": "400",
+    "rift": "201"
+  },
+  {
+    "id": "generator-exists/answer",
+    "case": "coverage: responseResolver.js:131 a predicateGenerator with predicateOperator exists",
+    "location": "step[1].admin",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank 2.9.5 refuses every generator with `\"predicateOperator\": \"exists\"` when the imposter is created (an internal error with no message), although its docs describe it; Rift records `{\"exists\": …}` as documented",
+    "reason": "the rest of the create answer: Mountebank's crash envelope against Rift's imposter"
+  },
+  {
+    "id": "generator-exists/stored",
+    "case": "coverage: responseResolver.js:131 a predicateGenerator with predicateOperator exists",
+    "location": "stored[4545]",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank 2.9.5 refuses every generator with `\"predicateOperator\": \"exists\"` when the imposter is created (an internal error with no message), although its docs describe it; Rift records `{\"exists\": …}` as documented",
+    "reason": "Mountebank created no imposter"
+  },
+  {
+    "id": "generator-exists/replayable",
+    "case": "coverage: responseResolver.js:131 a predicateGenerator with predicateOperator exists",
+    "location": "replayable[4545]",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank 2.9.5 refuses every generator with `\"predicateOperator\": \"exists\"` when the imposter is created (an internal error with no message), although its docs describe it; Rift records `{\"exists\": …}` as documented",
+    "reason": "Mountebank created no imposter"
+  },
+  {
+    "id": "generator-ignore/deepEquals",
+    "case": "coverage: responseResolver.js:109 a predicateGenerator whose ignore filters a whole query",
+    "location": "*[4545]/stubs/0/predicates/0/deepEquals",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "A whole `query` or `headers` field the generator's `ignore` filters is recorded with `equals` over",
+    "reason": "Rift records the ignore-filtered whole query with equals",
+    "mountebank": "{\"query\":{\"u\":\"2\"}}",
+    "rift": "(absent)"
+  },
+  {
+    "id": "generator-ignore/equals",
+    "case": "coverage: responseResolver.js:109 a predicateGenerator whose ignore filters a whole query",
+    "location": "*[4545]/stubs/0/predicates/0/equals",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "A whole `query` or `headers` field the generator's `ignore` filters is recorded with `equals` over",
+    "reason": "Rift records the ignore-filtered whole query with equals",
+    "mountebank": "(absent)",
+    "rift": "{\"query\":{\"u\":\"2\"}}"
+  },
+  {
+    "id": "generator-ignore/second-recording",
+    "case": "coverage: responseResolver.js:109 a predicateGenerator whose ignore filters a whole query",
+    "location": "*[4545]/stubs/1",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "A whole `query` or `headers` field the generator's `ignore` filters is recorded with `equals` over",
+    "reason": "Mountebank's deepEquals recording misses ?t=9&u=2 and records again; Rift replays its recording"
+  },
+  {
+    "id": "generator-ignore/second-recording-tail",
+    "case": "coverage: responseResolver.js:109 a predicateGenerator whose ignore filters a whole query",
+    "location": "*[4545]/stubs/2",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "A whole `query` or `headers` field the generator's `ignore` filters is recorded with `equals` over",
+    "reason": "the proxy stub sits one place later in Mountebank's list"
+  },
+  {
+    "id": "generator-ignore/upstream",
+    "case": "coverage: responseResolver.js:109 a predicateGenerator whose ignore filters a whole query",
+    "location": "stored[4546]/numberOfRequests",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "A whole `query` or `headers` field the generator's `ignore` filters is recorded with `equals` over",
+    "reason": "Mountebank proxies the second request again",
+    "mountebank": "2",
+    "rift": "1"
+  },
+  {
+    "id": "generator-nested/value",
+    "case": "coverage: responseResolver.js:119 a predicateGenerator listing a query key the request repeats",
+    "location": "*[4545]/stubs/0/predicates/0/equals/query/a",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank records `{}`, which matches any value of that key.",
+    "reason": "a repeated listed key is recorded as its values; Mountebank records {}",
+    "mountebank": "{}",
+    "rift": "[\"1\",\"2\"]"
+  },
+  {
+    "id": "generator-nested/second-recording",
+    "case": "coverage: responseResolver.js:119 a predicateGenerator listing a query key the request repeats",
+    "location": "*[4545]/stubs/1",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank records `{}`, which matches any value of that key.",
+    "reason": "Mountebank's {} recording replays ?a=9; Rift proxies it and records it"
+  },
+  {
+    "id": "generator-nested/second-recording-tail",
+    "case": "coverage: responseResolver.js:119 a predicateGenerator listing a query key the request repeats",
+    "location": "*[4545]/stubs/2",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank records `{}`, which matches any value of that key.",
+    "reason": "the proxy stub sits one place later in Rift's list"
+  },
+  {
+    "id": "generator-nested/upstream",
+    "case": "coverage: responseResolver.js:119 a predicateGenerator listing a query key the request repeats",
+    "location": "stored[4546]/numberOfRequests",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "Mountebank records `{}`, which matches any value of that key.",
+    "reason": "Rift proxies ?a=9, Mountebank replays it",
+    "mountebank": "1",
+    "rift": "2"
   }
 ]

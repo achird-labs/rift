@@ -3,7 +3,8 @@
 use crate::admin_api::handlers::imposters::handle_get as handle_get_imposter;
 use crate::admin_api::handlers::imposters::{
     admin_script_access, admin_script_base, imposter_default_script_engine,
-    imposter_script_registry, reject_stubs_if_injection_disallowed, reject_unreadable_lookups,
+    imposter_script_registry, imposter_script_timeout_ms, reject_failing_generators,
+    reject_stubs_if_injection_disallowed, reject_unreadable_lookups,
 };
 use crate::admin_api::types::{
     AddStubRequest, ReplaceStubsRequest, StubWithLinks, collect_body, error_response,
@@ -68,6 +69,16 @@ pub async fn handle_add(
     // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
     if let Some(rejection) =
         reject_stubs_if_injection_disallowed(std::slice::from_ref(&add_req.stub), allow_injection)
+    {
+        return rejection;
+    }
+    // After the gate, before anything is stored (issue #1580).
+    if let Some(rejection) = reject_failing_generators(
+        std::slice::from_ref(&add_req.stub),
+        imposter_script_timeout_ms(&manager, port),
+        admin_script_access(&scripts_dir),
+    )
+    .await
     {
         return rejection;
     }
@@ -169,6 +180,16 @@ pub async fn handle_replace_all(
     // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
     if let Some(rejection) =
         reject_stubs_if_injection_disallowed(&replace_req.stubs, allow_injection)
+    {
+        return rejection;
+    }
+    // After the gate, before anything is stored (issue #1580).
+    if let Some(rejection) = reject_failing_generators(
+        &replace_req.stubs,
+        imposter_script_timeout_ms(&manager, port),
+        admin_script_access(&scripts_dir),
+    )
+    .await
     {
         return rejection;
     }
@@ -349,6 +370,16 @@ pub async fn handle_replace(
     {
         return rejection;
     }
+    // After the gate, before anything is stored (issue #1580).
+    if let Some(rejection) = reject_failing_generators(
+        std::slice::from_ref(&stub),
+        imposter_script_timeout_ms(&manager, port),
+        admin_script_access(&scripts_dir),
+    )
+    .await
+    {
+        return rejection;
+    }
 
     // Resolve `_rift.script` `file:`/`ref:` sources before persisting (issue #356 B1).
     if let Some(rejection) = resolve_admin_stubs(
@@ -435,6 +466,16 @@ pub async fn handle_replace_by_id(
     // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
     if let Some(rejection) =
         reject_stubs_if_injection_disallowed(std::slice::from_ref(&stub), allow_injection)
+    {
+        return rejection;
+    }
+    // After the gate, before anything is stored (issue #1580).
+    if let Some(rejection) = reject_failing_generators(
+        std::slice::from_ref(&stub),
+        imposter_script_timeout_ms(&manager, port),
+        admin_script_access(&scripts_dir),
+    )
+    .await
     {
         return rejection;
     }

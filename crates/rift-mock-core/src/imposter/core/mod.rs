@@ -1162,6 +1162,7 @@ pub(crate) use matching::ScenarioStampingStore;
 mod stub_index;
 use stub_index::StubSnapshot;
 mod proxy;
+pub use proxy::{GeneratorDryRun, dry_run_predicate_generators};
 pub(crate) use proxy::{ProxiedResponse, ProxyBody, ProxyOutcome, unread_generator_keys};
 mod recording;
 mod responses;
