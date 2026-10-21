@@ -295,10 +295,12 @@ check about *which address is being judged* (issues #1131, #1528):
 
 ```rust
 use rift_http_proxy::imposter::PeerPolicy;
-use rift_http_proxy::server::{admin_bind_addr, admin_listen_addr};
+use rift_http_proxy::server::admin_listen_addr;
 
-let listen = admin_listen_addr(&cli)?;      // Loopback, Any (no --host) or Exact(--host), on --port
-let running = AdminApiServer::new(admin_bind_addr(&cli)?, manager, cli.api_key.clone())
+// Loopback, Any (no --host) or Exact(--host), on --port. A DNS-name --host is resolved here, so
+// call it once and judge the same address you bind (issue #1575).
+let listen = admin_listen_addr(&cli)?;
+let running = AdminApiServer::new(listen.judged(), manager, cli.api_key.clone())
     .listen(listen)
     .with_require_admin_auth(cli.require_admin_auth)
     .with_local_only(cli.local_only)
@@ -316,9 +318,9 @@ metrics listener it must not have to unwind; an embedder binding the admin plane
 | Item | Signature | Purpose |
 |:-----|:----------|:--------|
 | `Cli::connect_host` | `fn connect_host(&self) -> &str` | The host a local client (`rift healthcheck`, `rift save`) connects to: `--host`, or `127.0.0.1` when it is unset (issue #1528). `Cli::host` is an `Option<String>` since #1528, `None` when no `--host`/`MB_HOST` was given. |
-| `admin_listen_addr` | `fn admin_listen_addr(cli: &Cli) -> anyhow::Result<ListenAddr>` | Where the admin plane listens under this CLI (issue #1528): `Loopback(port)` under `--local-only`, `Any(port)` with no `--host`, otherwise `Exact(--host:port)`. Same errors as `admin_bind_addr`. |
+| `admin_listen_addr` | `fn admin_listen_addr(cli: &Cli) -> anyhow::Result<ListenAddr>` | Where the admin plane listens under this CLI (issue #1528): `Loopback(port)` under `--local-only`, `Any(port)` with no `--host`, otherwise `Exact(--host:port)`, a DNS name resolved to its first address (issue #1575). Same errors as `admin_bind_addr`. |
 | `ListenAddr` | `enum ListenAddr { Any(u16), Loopback(u16), Exact(SocketAddr) }` | Where a server-level listener binds (issue #1528). `judged()` is the address the exposure check is handed (`[::]:port`, `127.0.0.1:port`, or the exact address); `bind()` returns every std listener it needs (one, or two under `Loopback`). |
-| `admin_bind_addr` | `fn admin_bind_addr(cli: &Cli) -> anyhow::Result<SocketAddr>` | The address the admin plane is judged by under this CLI: `--local-only` pins loopback, otherwise `--host`, on `--port`; with no `--host`, `[::]:port` (issue #1528). It is `admin_listen_addr(cli)?.judged()`, the same value the exposure check is handed. `ServerBuilder::start` calls it too, so the rule has one definition. Accepts an IPv4 literal or an IPv6 literal, bare (`::1`) or bracketed (`[::1]`); errors when `--host` is not an IP literal (a DNS name is not resolved). |
+| `admin_bind_addr` | `fn admin_bind_addr(cli: &Cli) -> anyhow::Result<SocketAddr>` | The address the admin plane is judged by under this CLI: `--local-only` pins loopback, otherwise `--host`, on `--port`; with no `--host`, `[::]:port` (issue #1528). It is `admin_listen_addr(cli)?.judged()`, the same value the exposure check is handed. `ServerBuilder::start` calls it too, so the rule has one definition. Accepts an IPv4 literal, an IPv6 literal, bare (`::1`) or bracketed (`[::1]`), or a DNS name, resolved to its first address (issue #1575); each call resolves afresh, so call it once and use that address for both the exposure check and the bind. Errors when `--host` does not resolve. |
 
 `ConfigSource` (from `rift-http-proxy`) is either `File { path, no_parse }` (a single `--configfile`,
 with optional EJS preprocessing) or `Dir(PathBuf)` (a `--datadir` of one-imposter-per-file configs).

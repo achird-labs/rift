@@ -36,6 +36,14 @@ record.
 
 ### Changed
 
+- **`--host` accepts a DNS name for the admin API**, as Mountebank does (#1575): the name is
+  resolved once at startup and the admin API binds its first address. It used to refuse anything
+  but an IP literal, although imposters already resolved names (#1137). The `--require-admin-auth`
+  exposure check judges the resolved address, so a name that resolves off-host is still warned
+  about or refused. A name that does not resolve is a startup error naming it. Embedders:
+  `server::admin_bind_addr` and `admin_listen_addr` now resolve a name instead of returning an
+  error for it.
+
 - **Embedding API: `server::bind_metrics_listeners` takes a `PeerPolicy`** (#1568):
   `bind_metrics_listeners(addr, PeerPolicy::Any)` keeps the old behaviour. `AdminApiServer` gains
   `with_peer_policy(PeerPolicy)`, default `Any`. `bind_metrics_server` and `run_metrics_server` are

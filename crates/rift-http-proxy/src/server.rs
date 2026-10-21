@@ -61,7 +61,7 @@ pub struct Cli {
     #[arg(long, default_value_t = DEFAULT_ADMIN_PORT, env = "MB_PORT", global = true, help_heading = "Server options")]
     pub port: u16,
 
-    /// IP address to bind the admin API and host-less imposters to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`) [default: every interface, IPv6 and IPv4]
+    /// Address to bind the admin API and host-less imposters to (IPv4, IPv6 bare `::1` or bracketed `[::1]`, or a DNS name, resolved at startup) [default: every interface, IPv6 and IPv4]
     //
     // Unset, the admin API listens on `[::]` dual-stack, or `0.0.0.0` on a host without IPv6, as
     // Mountebank does (issue #1528). `None` is that absence, so an rcfile `host` can tell it apart
@@ -907,7 +907,7 @@ impl ServerBuilder {
         //   * the exposure check — under `--require-admin-auth` its error must not have to unwind
         //     the metrics listener, which binds further down;
         //   * the `SocketAddr` parse itself — a malformed `--host` used to fail *after* the metrics
-        //     server was already up.
+        //     server was already up. A DNS-name `--host` is resolved here too, once (issue #1575).
         // The `--intercept-port` listener inherits the bound admin IP further down, so the host is
         // parsed exactly once (issue #1137).
         let admin_listen = admin_listen_addr(&cli)?;
@@ -1516,23 +1516,56 @@ pub fn intercept_flag_options(
 /// (`127.0.0.1` and `[::1]`), an explicit `--host` is bound exactly, and no `--host` listens on
 /// every interface, `[::]` dual-stack with a `0.0.0.0` fallback, as Mountebank does.
 ///
+/// A `--host` that is not an IP literal is resolved as a name, and the admin plane binds the first
+/// address it resolves to, as Mountebank's Node `listen(port, host)` does (issue #1575). The lookup
+/// runs here, once, at startup: the exposure check and the bind both read the one [`ListenAddr`]
+/// it produces, so a name can never be judged at one address and bound at another.
+///
 /// # Errors
-/// If `--host` is not an IP literal; see [`admin_bind_addr`].
+/// If `--host` does not resolve, or is bracketed around something that is not IPv6 (`[1.2.3.4]`).
 pub fn admin_listen_addr(cli: &Cli) -> anyhow::Result<ListenAddr> {
+    admin_listen_addr_with(cli, |host, port| {
+        std::net::ToSocketAddrs::to_socket_addrs(&(host, port))
+    })
+}
+
+/// [`admin_listen_addr`] with the name lookup injected, so a test can resolve a name to an
+/// off-host address without depending on this machine's resolver.
+fn admin_listen_addr_with<I>(
+    cli: &Cli,
+    resolve: impl FnOnce(&str, u16) -> std::io::Result<I>,
+) -> anyhow::Result<ListenAddr>
+where
+    I: Iterator<Item = SocketAddr>,
+{
     if cli.local_only {
         return Ok(ListenAddr::Loopback(cli.port));
     }
     let Some(host) = cli.host.as_deref() else {
         return Ok(ListenAddr::Any(cli.port));
     };
-    rift_mock_core::proxy::bind_addr(host, cli.port)
+    let port = cli.port;
+    if let Some(addr) = rift_mock_core::proxy::bind_addr(host, port) {
+        return Ok(ListenAddr::Exact(addr));
+    }
+    // Brackets mean an IPv6 literal; anything else inside them is a typo, not a name to look up.
+    if host.starts_with('[') {
+        anyhow::bail!(
+            "--host {host} is not an IP literal, so the admin plane has no address to bind on port \
+             {port}. Use an IPv4 literal (`127.0.0.1`, `0.0.0.0`), an IPv6 literal (`::1`, `[::]`), \
+             or a DNS name."
+        );
+    }
+    resolve(host, port)
+        .with_context(|| {
+            format!("--host {host} did not resolve, so the admin plane has no address to bind on port {port}")
+        })?
+        .next()
         .map(ListenAddr::Exact)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "--host {host} is not an IP literal, so the admin plane has no address to bind on \
-                 port {}. Use an IPv4 literal (`127.0.0.1`, `0.0.0.0`) or an IPv6 literal (`::1`, \
-                 `[::]`); a DNS name is not resolved here.",
-                cli.port
+                "--host {host} resolved to no address, so the admin plane has nothing to bind on \
+                 port {port}"
             )
         })
 }
@@ -1546,12 +1579,13 @@ pub fn admin_listen_addr(cli: &Cli) -> anyhow::Result<ListenAddr> {
 /// must judge and bind the *same* address (issue #1131). `start` calls it too, so the rule still
 /// has one definition — a copy of it in another binary is what this exists to make unnecessary.
 ///
-/// `--host` may be an IPv4 literal or an IPv6 literal, bare (`::1`) or bracketed (`[::1]`).
+/// `--host` may be an IPv4 literal, an IPv6 literal, bare (`::1`) or bracketed (`[::1]`), or a DNS
+/// name, which is resolved to its first address (issue #1575). Each call resolves a name afresh, so
+/// an embedder that binds what this returns should call it once and use that one address for both
+/// the exposure check and the bind.
 ///
 /// # Errors
-/// If `--host` is not an IP literal (a DNS name, or `[1.2.3.4]`). Name resolution is deliberately not
-/// attempted: the exposure check classifies a literal address, and a name that resolves differently
-/// there than at bind time is the disagreement this seam removes.
+/// If `--host` does not resolve, or is bracketed around something that is not IPv6 (`[1.2.3.4]`).
 pub fn admin_bind_addr(cli: &Cli) -> anyhow::Result<SocketAddr> {
     Ok(admin_listen_addr(cli)?.judged())
 }
@@ -2457,14 +2491,86 @@ mod tests {
         );
     }
 
+    // ---- issue #1575: a DNS-name `--host` --------------------------------------------------
+
+    /// `admin_listen_addr` with a resolver that answers `addrs` for `name` and fails otherwise.
+    fn listen_resolving(
+        argv: &[&str],
+        name: &'static str,
+        addrs: &'static [&'static str],
+    ) -> anyhow::Result<ListenAddr> {
+        admin_listen_addr_with(&Cli::parse_from(argv), |host, port| {
+            if host != name {
+                return Err(std::io::Error::other(format!("unknown host {host}")));
+            }
+            Ok(addrs
+                .iter()
+                .map(move |ip| SocketAddr::new(ip.parse().expect("test address"), port)))
+        })
+    }
+
     #[test]
-    fn a_dns_host_is_still_refused() {
-        let err = listen_of(&["rift", "--host", "example.com"]).expect_err("not a literal");
-        assert!(
-            err.to_string()
-                .contains("--host example.com is not an IP literal"),
-            "{err}"
+    fn a_dns_host_binds_its_first_resolved_address() {
+        assert_eq!(
+            listen_resolving(
+                &["rift", "--host", "myhost", "--port", "3000"],
+                "myhost",
+                &["10.0.0.5", "127.0.0.1"],
+            )
+            .expect("resolve"),
+            ListenAddr::Exact("10.0.0.5:3000".parse().expect("addr"))
         );
+    }
+
+    #[test]
+    fn a_name_resolving_off_host_is_judged_exposed() {
+        let judged = listen_resolving(&["rift", "--host", "myhost"], "myhost", &["10.0.0.5"])
+            .expect("resolve")
+            .judged();
+        assert_eq!(judged, "10.0.0.5:2525".parse::<SocketAddr>().expect("addr"));
+        crate::admin_api::check_admin_exposure(
+            judged,
+            None,
+            crate::admin_api::AdminExposurePolicy::Warn,
+        )
+        .expect("the default posture warns");
+        crate::admin_api::check_admin_exposure(
+            judged,
+            None,
+            crate::admin_api::AdminExposurePolicy::Refuse,
+        )
+        .expect_err("a name resolving to a LAN address with no key is refused");
+    }
+
+    #[test]
+    fn a_host_that_resolves_to_nothing_is_an_error_naming_it() {
+        let err = listen_resolving(&["rift", "--host", "myhost"], "myhost", &[])
+            .expect_err("no address to bind");
+        assert!(err.to_string().contains("--host myhost"), "{err}");
+    }
+
+    #[test]
+    fn a_bracketed_ipv4_host_is_refused_without_a_lookup() {
+        let err = admin_listen_addr_with(
+            &Cli::parse_from(["rift", "--host", "[1.2.3.4]"]),
+            |_, _| -> std::io::Result<std::iter::Empty<SocketAddr>> {
+                panic!("a bracketed host is never looked up")
+            },
+        )
+        .expect_err("brackets mean IPv6");
+        assert!(err.to_string().contains("--host [1.2.3.4]"), "{err}");
+    }
+
+    #[test]
+    fn local_only_never_resolves_the_host() {
+        let listen = admin_listen_addr_with(
+            &Cli::parse_from(["rift", "--local-only", "--host", "myhost"]),
+            |_, _| -> std::io::Result<std::iter::Empty<SocketAddr>> {
+                panic!("--local-only does not read --host")
+            },
+        )
+        .expect("resolve");
+        assert_eq!(listen, ListenAddr::Loopback(2525));
     }
 
     #[test]

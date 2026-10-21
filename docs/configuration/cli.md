@@ -168,7 +168,7 @@ rift [OPTIONS] [COMMAND]
 
 Server options:
       --port <PORT>                Admin API port [default: 2525]
-      --host <HOST>                IP address to bind the admin API and host-less imposters to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`) [default: every interface, IPv6 and IPv4]
+      --host <HOST>                Address to bind the admin API and host-less imposters to (IPv4, IPv6 bare `::1` or bracketed `[::1]`, or a DNS name, resolved at startup) [default: every interface, IPv6 and IPv4]
       --configfile <FILE>          Load imposters from a JSON/YAML file on startup (sugar for --imposters file:<FILE>)
       --imposters <URI[,URI...]>   Load imposters from one or more source URIs: file:<path>, a bare path, or https://… (see Imposter Sources below)
       --datadir <DIR>              Directory for persistent imposter storage
@@ -392,6 +392,13 @@ rift --require-admin-auth --local-only       # ok — not reachable off-host
 it on any bind. Loopback (`127.0.0.0/8`, `::1`) satisfies it with no key. `0.0.0.0` and `::` are
 unspecified addresses, not loopback, so they are flagged — as is any specific off-host interface
 such as `10.0.0.5`.
+
+`--host` may be a DNS name, as in Mountebank: it is resolved once at startup and the admin API binds
+the first address it resolves to, so `--host localhost` binds `127.0.0.1` or `::1`, whichever the
+resolver returns first. The exposure check above judges that resolved address, so a name that
+resolves to a LAN address is warned about, or refused under `--require-admin-auth`, like the
+address itself. A name that does not resolve is a startup error naming it. `--local-only` still
+pins loopback and never looks the name up.
 
 `--host` also confines imposters, as in Mountebank: an imposter created without a `host` binds the
 server's `--host`, so `--host 127.0.0.1` keeps host-less imposters on loopback as well as the admin
