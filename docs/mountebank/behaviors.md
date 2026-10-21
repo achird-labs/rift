@@ -417,8 +417,11 @@ a JSON response, `{"body": "…"}`.
 ## copy
 
 Copy values from the request to the response. Useful for echoing request data. Tokens are replaced
-in the body, in header values and in a `statusCode` string (see
-[Responses: Status Codes](responses.md#status-codes)).
+in the body, in header names and values, and in a `statusCode` string (see
+[Responses: Status Codes](responses.md#status-codes)), as in Mountebank. A header whose name changes
+replaces any header already of that name (case-insensitively). A token left in a header name (its
+source had no value) is not a valid name, so the response is a `500` naming the header, as
+Mountebank answers `500` for it.
 
 `from` names the request field: `"path"`, `"method"` or `"body"` as a string, or
 `{"query": "<name>"}` / `{"headers": "<name>"}` for one query parameter or header. `using` extracts
@@ -443,11 +446,14 @@ An XPath selector that evaluates to a string, number or boolean (`string(//a)`, 
 `boolean(//a)`) substitutes that value. Mountebank leaves the token in place for a number or
 boolean, and fails the request for `string()`.
 
-Every occurrence of the `into` token in the body and header values is replaced. A query key or
-header the client repeated is copied from its first value, as in Mountebank. If the source is
-absent, or nothing is extracted, the token is left in place, as in Mountebank. Releases up to
-0.21.0 replaced it with an empty string. A selector that does
-not compile is not treated as "nothing extracted": the imposter is refused when it is loaded.
+Every occurrence of the `into` token in the body and header names and values is replaced. A query
+key or header the client repeated is copied from its first value, as in Mountebank. If the source
+field is missing, a `regex` selector runs against the text `undefined`, as in Mountebank (so `.*`
+copies `undefined`, and `\d+` matches nothing). A `jsonpath` or `xpath` selector extracts nothing
+and the token is left in place. When nothing is extracted, the token is left in place, as in
+Mountebank. Releases up to 0.21.0 replaced it with an empty string, and up to 0.23.0 a missing
+field left the token for every selector. A selector that does not compile is not treated as
+"nothing extracted": the imposter is refused when it is loaded.
 
 Rift returns the first capture group where Mountebank returns the whole regex match, so a pattern
 like `/users/(\d+)` yields just the id.
@@ -571,7 +577,9 @@ Look up a row in a CSV file, keyed by a value extracted from the request. `key` 
 `from` and `using` as [`copy`](#copy). Each column of the matched row replaces the token
 `<into>[<column>]`, so with `"into": "${row}"` the `email` column fills `${row}[email]`. As in
 Mountebank, the column may also be quoted: `${row}["email"]` and `${row}['email']` are replaced too.
-Tokens are replaced in the body, in header values and in a `statusCode` string, as with `copy`.
+Tokens are replaced in the body, in header names and values and in a `statusCode` string, as with
+`copy`. A key field the request does not carry is read as `undefined` by a `regex`, as in
+Mountebank, so `.*` looks up the row keyed `undefined`.
 
 `key.index` picks which match keys the row, as in Mountebank. For a `regex`, `0` is the whole
 match and `n` is the `n`th capture group; for `jsonpath` and `xpath`, `n` is the `n`th selected

@@ -187,6 +187,14 @@ record.
 
 ### Fixed
 
+- **`copy`/`lookup` from a missing field, and tokens in header names** (#1583). A regex `copy` or
+  `lookup` whose request field is absent now reads the text `undefined`, as Mountebank does (`.*`
+  copies `undefined`; a JSONPath or XPath selector still extracts nothing and leaves the token). A
+  token in a response header *name* is substituted, and the renamed header replaces one already of
+  that name, where Rift used to answer `500 Response build error`. A token left in a name still
+  answers `500`, now naming the header. Text a copy inserts into a name is never expanded by a later
+  `lookup` (#1203).
+
 - **`--local-only` with `--intercept-port` listens on `[::1]` too, and the intercept proxy refuses
   non-loopback clients** (#1572). The admin API and `/metrics` bind `127.0.0.1` and `[::1]` under
   `--local-only` (#1528), but the intercept listener bound `127.0.0.1` only, so a `localhost` client

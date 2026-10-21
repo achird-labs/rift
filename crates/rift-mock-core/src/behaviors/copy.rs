@@ -2,8 +2,11 @@
 
 use super::extraction::ExtractionMethod;
 use super::request::RequestContext;
-use super::spliced::{Spliced, SplicedHeaders, authored_headers, plain_headers};
+use super::spliced::{
+    Spliced, SplicedHeaders, authored_headers, plain_headers, replace_response_token,
+};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 
 /// Copy behavior - copy request fields into response
@@ -106,8 +109,11 @@ pub(crate) fn apply_copy_spliced(
 ) {
     for behavior in behaviors {
         // Mountebank (behaviors.js replaceArrayValuesIn) only replaces a token it has a value
-        // for: an absent source or a selector that extracts nothing leaves the token as authored.
-        let Some(source) = behavior.from.extract(request) else {
+        // for: a selector that extracts nothing leaves the token as authored. An absent source is
+        // `undefined`, which only a regex reads (issue #1583).
+        let Some(source) =
+            source_or_undefined(&behavior.extraction, behavior.from.extract(request))
+        else {
             continue;
         };
 
@@ -118,7 +124,7 @@ pub(crate) fn apply_copy_spliced(
             let Some(bare) = behavior.extraction.extract(&source) else {
                 continue;
             };
-            replace_copy_token(body, headers, status, &behavior.into, &bare, stub);
+            replace_response_token(body, headers, status, &behavior.into, &bare, stub);
             continue;
         }
 
@@ -135,7 +141,7 @@ pub(crate) fn apply_copy_spliced(
                 continue;
             };
             let token = format!("{}[{i}]", behavior.into);
-            replace_copy_token(
+            replace_response_token(
                 body,
                 headers,
                 status,
@@ -144,13 +150,13 @@ pub(crate) fn apply_copy_spliced(
                 stub,
             );
         }
-        replace_copy_token(body, headers, status, &behavior.into, bare, stub);
+        replace_response_token(body, headers, status, &behavior.into, bare, stub);
     }
 }
 
-/// The indices of every `${into}[n]` the body and header values spell, `n` written as Mountebank
-/// writes an array index (no sign, no leading zero): Mountebank replaces `${into}[${i}]` for each
-/// value literally, so `$C[01]` is never an indexed token.
+/// The indices of every `${into}[n]` the body, the status and the header names and values spell,
+/// `n` written as Mountebank writes an array index (no sign, no leading zero): Mountebank replaces
+/// `${into}[${i}]` for each value literally, so `$C[01]` is never an indexed token.
 fn written_indices(
     into: &str,
     body: &Spliced,
@@ -159,12 +165,14 @@ fn written_indices(
 ) -> BTreeSet<usize> {
     let prefix = format!("{into}[");
     let mut indices = BTreeSet::new();
-    for text in std::iter::once(body)
-        .chain(headers.values().flatten())
-        .chain(status)
+    let names = headers.keys().map(|name| name.as_str());
+    for text in std::iter::once(body.as_str())
+        .chain(headers.values().flatten().map(Spliced::as_str))
+        .chain(names)
+        .chain(status.map(Spliced::as_str))
     {
-        for (at, _) in text.as_str().match_indices(&prefix) {
-            let rest = &text.as_str()[at + prefix.len()..];
+        for (at, _) in text.match_indices(&prefix) {
+            let rest = &text[at + prefix.len()..];
             let len = rest.bytes().take_while(u8::is_ascii_digit).count();
             let digits = &rest[..len];
             let canonical = len > 0 && (digits == "0" || !digits.starts_with('0'));
@@ -189,42 +197,20 @@ fn bare_value<'a>(method: &ExtractionMethod, values: &'a [Option<String>]) -> Op
     }
 }
 
-/// Replace one copy token in the body, the `statusCode` string and every header value.
-fn replace_copy_token(
-    body: &mut Spliced,
-    headers: &mut SplicedHeaders,
-    status: &mut Option<Spliced>,
-    token: &str,
-    replacement: &str,
-    stub: crate::imposter::headers::StubRef<'_>,
-) {
-    body.replace_token(token, replacement);
-    // The status is read as a number when the response is written, and a value that is not one is
-    // quoted back in the 500's JSON body, so it needs no header-value repair.
-    if let Some(status) = status {
-        status.replace_token(token, replacement);
-    }
-
-    // Also replace in headers — per value, so multi-value headers (e.g. multiple Set-Cookie)
-    // keep their multiplicity (RFC 7230 §3.2.2 forbids folding Set-Cookie).
-    //
-    // `replacement` is request-derived, so it can carry a byte a header value cannot hold; repair
-    // it like the templating passes do (issue #1067). Only the substituted text is repaired — a
-    // control character the author typed into the header itself is an authoring bug that must
-    // still reach the builder and fail the response.
-    //
-    // Skipped outright when no header uses this token: the repair warns when it removes
-    // something, so running it for a body-only stub would log a header warning, once per
-    // request, about a header that does not exist.
-    if headers
-        .values()
-        .flatten()
-        .any(|v| v.contains_authored(token))
-    {
-        let repaired = crate::imposter::headers::sanitize_header_value(replacement, stub);
-        for value in headers.values_mut().flatten() {
-            value.replace_token(token, &repaired);
-        }
+/// The text a `copy` or `lookup` selector runs over (issue #1583). A request field that is absent
+/// is `undefined` in Mountebank's `getFrom`: `RegExp.exec(undefined)` reads it as the text
+/// `undefined`, so a regex still matches it, while JSONPath and XPath select nothing from it.
+///
+/// What is inserted from `undefined` is request-derived like any other source, so it is recorded
+/// as inserted text (issue #1203).
+pub(crate) fn source_or_undefined(
+    extraction: &ExtractionMethod,
+    extracted: Option<String>,
+) -> Option<Cow<'static, str>> {
+    match (extracted, extraction) {
+        (Some(source), _) => Some(Cow::Owned(source)),
+        (None, ExtractionMethod::Regex { .. }) => Some(Cow::Borrowed("undefined")),
+        (None, ExtractionMethod::JsonPath { .. } | ExtractionMethod::XPath { .. }) => None,
     }
 }
 
@@ -627,8 +613,9 @@ mod tests {
         );
     }
 
-    /// Same boundary on the source-missing path, which leaves the token as authored (issue
-    /// #1402). Nothing is substituted, so nothing is repaired.
+    /// Same boundary on the source-missing path when the regex does not match `undefined` either,
+    /// which leaves the token as authored (issues #1402, #1583). Nothing is substituted, so
+    /// nothing is repaired.
     #[test]
     fn copy_with_a_missing_source_does_not_repair_a_literal_config_value() {
         let request = RequestContext {
@@ -648,7 +635,7 @@ mod tests {
             },
             into: "${q}".to_string(),
             extraction: ExtractionMethod::Regex {
-                selector: ".*".to_string(),
+                selector: r"\d+".to_string(),
                 options: None,
             },
         }];
@@ -708,8 +695,9 @@ mod tests {
 
     #[test]
     fn copy_missing_source_keeps_token_per_value_without_folding() {
-        // No `q` query param → the source is absent, so the token is left as authored in each
-        // value (Mountebank parity, issue #1402); the multiplicity survives.
+        // No `q` query param → the source is `undefined`, which `\d+` does not match, so the token
+        // is left as authored in each value (Mountebank parity, issues #1402, #1583); the
+        // multiplicity survives.
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
@@ -727,7 +715,7 @@ mod tests {
             },
             into: "${q}".to_string(),
             extraction: ExtractionMethod::Regex {
-                selector: ".*".to_string(),
+                selector: r"\d+".to_string(),
                 options: None,
             },
         }];
@@ -1038,6 +1026,127 @@ mod tests {
         assert_eq!(
             written_indices("$C", &body, &headers, None),
             BTreeSet::from([0, 7, 12])
+        );
+    }
+
+    /// Issue #1583: Mountebank's `getFrom` gives `undefined` for a missing request field, and
+    /// `RegExp.exec(undefined)` reads it as the text `undefined`, so a regex still matches it.
+    #[test]
+    fn a_missing_source_runs_a_regex_over_the_text_undefined() {
+        let request = request_with_body("");
+        for (from, selector, expected) in [
+            (r#"{"query": "nosuch"}"#, ".*", "undefined"),
+            (r#"{"headers": "X-None"}"#, ".*", "undefined"),
+            (r#"{"query": "nosuch"}"#, r"\w+", "undefined"),
+            (r#"{"query": "nosuch"}"#, "und", "und"),
+            (r#""nosuch""#, ".*", "undefined"),
+            (r#"{"query": "nosuch"}"#, r"\d+", "$C"),
+        ] {
+            let (body, header) = copy_once(from, regex(selector), &request, "[$C]");
+            assert_eq!(body, format!("[{expected}]"), "{from} {selector}");
+            assert_eq!(header, vec![format!("<{expected}>")], "{from} {selector}");
+        }
+    }
+
+    /// Issue #1583: JSONPath and XPath select nothing from `undefined`, so the token stays.
+    #[test]
+    fn a_missing_source_leaves_the_token_for_jsonpath_and_xpath() {
+        let request = request_with_body("");
+        for using in [
+            serde_json::json!({"method": "jsonpath", "selector": "$.a"}),
+            serde_json::json!({"method": "xpath", "selector": "//a"}),
+        ] {
+            let (body, header) = copy_once(r#"{"query": "nosuch"}"#, using, &request, "[$C]");
+            assert_eq!(body, "[$C]");
+            assert_eq!(header, vec!["<$C>".to_string()]);
+        }
+    }
+
+    /// Copies the path's first segment into `${v}` over `headers`, returning them.
+    fn copy_path_into_headers(
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> HashMap<String, Vec<String>> {
+        let behavior: CopyBehavior = serde_json::from_value(serde_json::json!({
+            "from": "path", "into": "${v}", "using": regex(r"[^/]+")
+        }))
+        .expect("the copy parses");
+        let mut request = request_with_body("");
+        request.path = path.to_string();
+        let mut map: HashMap<String, Vec<String>> = headers
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), vec![(*v).to_string()]))
+            .collect();
+        apply_copy_behaviors("", &mut map, &[behavior], &request, FIXTURE_STUB);
+        map
+    }
+
+    /// Issue #1583: Mountebank's `globalObjectReplace` replaces tokens in every key of the
+    /// response, header names included. Rift left the name alone and the builder answered 500.
+    #[test]
+    fn a_token_in_a_header_name_is_replaced() {
+        let headers = copy_path_into_headers("/p", &[("X-${v}", "1")]);
+        assert_eq!(
+            headers,
+            HashMap::from([("X-p".to_string(), vec!["1".to_string()])])
+        );
+    }
+
+    #[test]
+    fn a_header_name_and_its_value_are_both_replaced() {
+        let headers = copy_path_into_headers("/p", &[("X-${v}", "v=${v}")]);
+        assert_eq!(
+            headers,
+            HashMap::from([("X-p".to_string(), vec!["v=p".to_string()])])
+        );
+    }
+
+    /// The renamed header replaces one already of that name, case-insensitively, as Mountebank's
+    /// `obj[newKey] = obj[key]` does before Node writes the headers.
+    #[test]
+    fn a_renamed_header_replaces_one_already_of_that_name() {
+        let headers = copy_path_into_headers("/p", &[("X-${v}", "renamed"), ("x-P", "authored")]);
+        assert_eq!(
+            headers,
+            HashMap::from([("X-p".to_string(), vec!["renamed".to_string()])])
+        );
+    }
+
+    /// A header name whose token has no value keeps it, and still reaches the builder as written.
+    #[test]
+    fn a_header_name_whose_token_has_no_value_keeps_it() {
+        let behavior: CopyBehavior = serde_json::from_value(serde_json::json!({
+            "from": "path", "into": "${v}", "using": regex(r"\d+")
+        }))
+        .expect("the copy parses");
+        let mut headers = HashMap::from([("X-${v}".to_string(), vec!["1".to_string()])]);
+        apply_copy_behaviors(
+            "",
+            &mut headers,
+            &[behavior],
+            &request_with_body(""),
+            FIXTURE_STUB,
+        );
+        assert_eq!(
+            headers,
+            HashMap::from([("X-${v}".to_string(), vec!["1".to_string()])])
+        );
+    }
+
+    /// An indexed token in a header name takes its value too.
+    #[test]
+    fn an_indexed_token_in_a_header_name_is_replaced() {
+        let behavior: CopyBehavior = serde_json::from_value(serde_json::json!({
+            "from": "path", "into": "$C", "using": regex(r"(\w+)-(\w+)")
+        }))
+        .expect("the copy parses");
+        let mut request = request_with_body("");
+        request.path = "/ab-cd".to_string();
+        let mut headers = HashMap::from([("X-$C[2]".to_string(), vec!["1".to_string()])]);
+        apply_copy_behaviors("", &mut headers, &[behavior], &request, FIXTURE_STUB);
+        assert_eq!(
+            headers,
+            HashMap::from([("X-cd".to_string(), vec!["1".to_string()])])
         );
     }
 }

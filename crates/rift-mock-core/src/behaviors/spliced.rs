@@ -26,8 +26,144 @@ pub(crate) struct Spliced {
     inserted: Vec<Range<usize>>,
 }
 
-/// Header values with provenance, one entry per header name and one element per header line.
-pub(crate) type SplicedHeaders = HashMap<String, Vec<Spliced>>;
+/// Headers with provenance, one entry per header name and one element per header line. Names
+/// carry provenance too (issue #1583): `copy` and `lookup` replace tokens in them, as Mountebank's
+/// `globalObjectReplace` does in every key of the response.
+pub(crate) type SplicedHeaders = HashMap<SplicedName, Vec<Spliced>>;
+
+/// A response header name and the bytes the engine substituted into it (issue #1583).
+///
+/// Equal and hashed by its text alone, and borrowable as `&str`, so the header map is looked up by
+/// name exactly as a `HashMap<String, _>` is. The provenance only decides which tokens a later
+/// pass may expand in it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SplicedName(Spliced);
+
+impl SplicedName {
+    /// The name as text the engine owns, for the response builder.
+    pub(crate) fn into_text(self) -> String {
+        self.0.into_text()
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// A name the author wrote (or that is treated as theirs: a script's output, an upstream's).
+impl From<String> for SplicedName {
+    fn from(name: String) -> Self {
+        Self(Spliced::authored(name))
+    }
+}
+
+impl From<&str> for SplicedName {
+    fn from(name: &str) -> Self {
+        Self(Spliced::authored(name.to_string()))
+    }
+}
+
+impl PartialEq for SplicedName {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for SplicedName {}
+
+impl std::hash::Hash for SplicedName {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Must hash as the `str` it borrows as, so `get(&str)` finds it.
+        self.as_str().hash(state);
+    }
+}
+
+impl std::borrow::Borrow<str> for SplicedName {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::ops::Deref for SplicedName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for SplicedName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Replace one `copy` or `lookup` token in every field of the response it can appear in: the body,
+/// the `statusCode` string (issue #1558), each header value and each header name (issue #1583) —
+/// the fields Mountebank's `globalObjectReplace` walks.
+///
+/// `replacement` is request-derived (or a CSV cell a client picked), so it can carry a byte a header
+/// cannot hold; in a header value or name it is repaired like the templating passes repair theirs
+/// (issue #1067). Only the substituted text is repaired: a control character the author typed into
+/// the header itself, or a token left in a name, still reaches the builder and fails the response.
+pub(crate) fn replace_response_token(
+    body: &mut Spliced,
+    headers: &mut SplicedHeaders,
+    status: &mut Option<Spliced>,
+    token: &str,
+    replacement: &str,
+    stub: crate::imposter::headers::StubRef<'_>,
+) {
+    body.replace_token(token, replacement);
+    // The status is read as a number when the response is written, and a value that is not one is
+    // quoted back in the 500's JSON body, so it needs no header repair.
+    if let Some(status) = status {
+        status.replace_token(token, replacement);
+    }
+
+    // Skipped outright when no header uses this token: the repair warns when it removes
+    // something, so running it for a body-only stub would log a header warning, once per request,
+    // about a header that does not exist.
+    let in_values = headers
+        .values()
+        .flatten()
+        .any(|v| v.contains_authored(token));
+    // Sorted, so which of two names renamed alike wins does not depend on hash order.
+    let mut renamed: Vec<SplicedName> = headers
+        .keys()
+        .filter(|name| name.0.contains_authored(token))
+        .cloned()
+        .collect();
+    if !in_values && renamed.is_empty() {
+        return;
+    }
+    let repaired = crate::imposter::headers::sanitize_header_value(replacement, stub);
+
+    // Per value, so multi-value headers (e.g. multiple Set-Cookie) keep their multiplicity
+    // (RFC 7230 §3.2.2 forbids folding Set-Cookie).
+    if in_values {
+        for value in headers.values_mut().flatten() {
+            value.replace_token(token, &repaired);
+        }
+    }
+
+    // Names after values, as `globalObjectReplace` replaces a key's value before renaming it. The
+    // renamed header replaces any header already of its name, case-insensitively — Mountebank's
+    // `obj[newKey] = obj[key]` followed by Node's case-insensitive `setHeader` — and a name this
+    // pass produced is not visited again.
+    renamed.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    for old in renamed {
+        // Gone when an earlier rename in this pass replaced it.
+        let Some(values) = headers.remove(old.as_str()) else {
+            continue;
+        };
+        let mut name = old.0;
+        name.replace_token(token, &repaired);
+        let name = SplicedName(name);
+        headers.retain(|existing, _| !existing.eq_ignore_ascii_case(&name));
+        headers.insert(name, values);
+    }
+}
 
 impl Spliced {
     /// Text the author wrote (or that is treated as theirs: a script's output, a proxied body).
@@ -194,11 +330,16 @@ fn push_merged(ranges: &mut Vec<Range<usize>>, next: Range<usize>) {
     ranges.push(next);
 }
 
-/// Every header value as authored text.
+/// Every header name and value as authored text.
 pub(crate) fn authored_headers(headers: HashMap<String, Vec<String>>) -> SplicedHeaders {
     headers
         .into_iter()
-        .map(|(k, values)| (k, values.into_iter().map(Spliced::authored).collect()))
+        .map(|(k, values)| {
+            (
+                k.into(),
+                values.into_iter().map(Spliced::authored).collect(),
+            )
+        })
         .collect()
 }
 
@@ -206,7 +347,12 @@ pub(crate) fn authored_headers(headers: HashMap<String, Vec<String>>) -> Spliced
 pub(crate) fn plain_headers(headers: SplicedHeaders) -> HashMap<String, Vec<String>> {
     headers
         .into_iter()
-        .map(|(k, values)| (k, values.into_iter().map(Spliced::into_text).collect()))
+        .map(|(k, values)| {
+            (
+                k.into_text(),
+                values.into_iter().map(Spliced::into_text).collect(),
+            )
+        })
         .collect()
 }
 

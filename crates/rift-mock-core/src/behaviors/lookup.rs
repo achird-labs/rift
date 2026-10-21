@@ -3,7 +3,9 @@
 use super::copy::CopySource;
 use super::extraction::ExtractionMethod;
 use super::request::RequestContext;
-use super::spliced::{Spliced, SplicedHeaders, authored_headers, plain_headers};
+use super::spliced::{
+    Spliced, SplicedHeaders, authored_headers, plain_headers, replace_response_token,
+};
 use crate::imposter::{ScriptFileAccess, read_lookup_file, resolve_lookup_path};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -43,9 +45,11 @@ pub struct LookupKey {
 }
 
 impl LookupKey {
-    /// The key this lookup reads the row by, or `None` when the request yields none.
+    /// The key this lookup reads the row by, or `None` when the request yields none. An absent
+    /// request field is `undefined`, which a regex reads as text (issue #1583).
     pub fn extract(&self, request: &RequestContext) -> Option<String> {
-        let source = self.from.extract(request)?;
+        let source =
+            super::copy::source_or_undefined(&self.extraction, self.from.extract(request))?;
         match self.index {
             None => self.extraction.extract(&source),
             Some(index) => self
@@ -592,47 +596,10 @@ pub(crate) fn apply_lookup_spliced(
                         format!("{into}['{column}']"),
                         format!("{into}[{column}]"),
                     ] {
-                        replace_lookup_token(body, headers, status, &full_token, &value, stub);
+                        replace_response_token(body, headers, status, &full_token, &value, stub);
                     }
                 }
             }
-        }
-    }
-}
-
-/// Replace one lookup token with a CSV cell in the body, the `statusCode` string and every header
-/// value.
-fn replace_lookup_token(
-    body: &mut Spliced,
-    headers: &mut SplicedHeaders,
-    status: &mut Option<Spliced>,
-    full_token: &str,
-    value: &str,
-    stub: crate::imposter::headers::StubRef<'_>,
-) {
-    body.replace_token(full_token, value);
-    // Read as a number when the response is written; no header-value repair applies.
-    if let Some(status) = status {
-        status.replace_token(full_token, value);
-    }
-    // Per value, so multi-value headers keep their multiplicity (RFC 7230 §3.2.2 forbids folding
-    // Set-Cookie).
-    //
-    // Which CSV cell lands here is chosen by a client-controlled key, so a cell holding a byte a
-    // header value cannot carry is a client-selectable 500; repair it like the templating passes
-    // do (issue #1067). Only the substituted cell is repaired, so a control character the author
-    // typed into the header itself still reaches the builder and fails the response.
-    //
-    // Skipped outright when no header uses this token — otherwise every CSV column of the matched
-    // row would run the repair, and warn, on every request even for a body-only stub.
-    if headers
-        .values()
-        .flatten()
-        .any(|v| v.contains_authored(full_token))
-    {
-        let repaired = crate::imposter::headers::sanitize_header_value(value, stub);
-        for header_value in headers.values_mut().flatten() {
-            header_value.replace_token(full_token, &repaired);
         }
     }
 }
@@ -1057,7 +1024,7 @@ mod tests {
             std::env::temp_dir().join(format!("rift_lookup_1240_{tag}_{}.csv", std::process::id()));
         std::fs::write(
             &csv,
-            "id,name\nab,first\ncd,second\n/ab-cd,whole\nb2,second-book\n",
+            "id,name\nab,first\ncd,second\n/ab-cd,whole\nb2,second-book\nundefined,from-undefined\n",
         )
         .expect("write csv");
         let behavior: LookupBehavior = serde_json::from_value(serde_json::json!({
@@ -1598,5 +1565,82 @@ mod tests {
         let (body, header) = lookup_quoted("all", r#"${row}["id"]|${row}['name']|${row}[name]"#);
         assert_eq!(body, "ab|first|first");
         assert_eq!(header, vec!["ab|first|first".to_string()]);
+    }
+
+    /// Issue #1583: a missing key field is `undefined` in Mountebank's `lookupRow`, and a regex
+    /// reads it as that text, so the row keyed `undefined` is served.
+    #[test]
+    fn a_missing_key_field_looks_up_the_row_keyed_undefined() {
+        let key = serde_json::json!({
+            "from": {"query": "nosuch"},
+            "using": {"method": "regex", "selector": ".*"}
+        });
+        assert_eq!(lookup_with_key("undef", key, "/x", None), "from-undefined");
+        let key = serde_json::json!({
+            "from": {"query": "nosuch"},
+            "using": {"method": "jsonpath", "selector": "$.a"}
+        });
+        assert_eq!(
+            lookup_with_key("undef-jp", key, "/x", None),
+            "${row}[name]",
+            "a JSONPath selects nothing from undefined"
+        );
+    }
+
+    /// Issue #1203 for header names (#1583): a client that sends a whole lookup token in its path
+    /// gets it copied into a header name as text, never expanded by the lookup that follows.
+    #[test]
+    fn a_lookup_does_not_expand_a_token_a_copy_put_into_a_header_name() {
+        let csv = std::env::temp_dir().join(format!("rift_lookup_1583_{}.csv", std::process::id()));
+        std::fs::write(&csv, "id,name\nk,secret\n").expect("write csv");
+        let copy: crate::behaviors::CopyBehavior = serde_json::from_value(serde_json::json!({
+            "from": "path", "into": "${v}", "using": {"method": "regex", "selector": "[^/]+"}
+        }))
+        .expect("the copy parses");
+        let lookup: LookupBehavior = serde_json::from_value(serde_json::json!({
+            "key": {"from": {"query": "id"}, "using": {"method": "regex", "selector": ".*"}},
+            "fromDataSource": {"csv": {"path": csv.to_string_lossy(), "keyColumn": "id"}},
+            "into": "${row}"
+        }))
+        .expect("the lookup parses");
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/${row}[name]".to_string(),
+            query: HashMap::from([("id".to_string(), vec!["k".to_string()])]),
+            ..Default::default()
+        };
+        let mut body = Spliced::authored("${v}|${row}[name]".to_string());
+        let mut headers = authored_headers(HashMap::from([(
+            "X-${v}".to_string(),
+            vec!["1".to_string()],
+        )]));
+        crate::behaviors::apply_copy_spliced(
+            &mut body,
+            &mut headers,
+            &mut None,
+            &[copy],
+            &request,
+            FIXTURE_STUB,
+        );
+        apply_lookup_spliced(
+            &mut body,
+            &mut headers,
+            &mut None,
+            &[lookup],
+            &request,
+            &CsvCache::default(),
+            &ScriptFileAccess::trusted_cwd(),
+            FIXTURE_STUB,
+        );
+        let _ = std::fs::remove_file(&csv);
+        assert_eq!(
+            body.as_str(),
+            "${row}[name]|secret",
+            "the authored token is expanded, the copied one is not"
+        );
+        assert_eq!(
+            plain_headers(headers),
+            HashMap::from([("X-${row}[name]".to_string(), vec!["1".to_string()])])
+        );
     }
 }

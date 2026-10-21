@@ -1847,6 +1847,489 @@
           }
         }
       ]
+    },
+    {
+      "name": "coverage: behaviors.js:362 copy: missing source and header-name tokens (#1583)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/q-any"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "nosuch"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/h-any"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "headers": "X-None"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/q-word"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "nosuch"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\w+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/q-und"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "nosuch"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "und"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/q-digit"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "nosuch"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\d+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/q-jsonpath"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "nosuch"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "jsonpath",
+                            "selector": "$.a"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/q-xpath"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "nosuch"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "xpath",
+                            "selector": "//a"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/unknown-field"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "nosuch",
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/no-body"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/name/"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-${v}": "1"
+                      },
+                      "body": "name"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\w+$"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/both/"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-${v}": "${v}"
+                      },
+                      "body": "both"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\w+$"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/keys/"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "Content-Type": "application/json"
+                      },
+                      "body": {
+                        "k-${v}": "${v}",
+                        "n": {
+                          "${v}": 1
+                        }
+                      }
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\w+$"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/lookup"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "row=${row}[name]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": {
+                              "query": "nosuch"
+                            },
+                            "using": {
+                              "method": "regex",
+                              "selector": ".*"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "../../conformance/differential/data/undefined-key.csv",
+                              "keyColumn": "id"
+                            }
+                          },
+                          "into": "${row}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q-any"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/h-any"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q-word"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q-und"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q-digit"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q-jsonpath"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q-xpath"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/unknown-field"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/no-body"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/name/p"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/both/p"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/keys/p"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/lookup"
+        }
+      ]
     }
   ]
 }
