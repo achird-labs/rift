@@ -1158,8 +1158,8 @@ impl ServerBuilder {
 
         if cli.local_only {
             info!(
-                "--local-only: admin and /metrics bind loopback; imposters and the front door \
-                 refuse non-loopback clients"
+                "--local-only: admin and /metrics bind loopback; admin, /metrics, imposters and \
+                 the front door refuse non-loopback clients"
             );
         }
 
