@@ -308,8 +308,20 @@ string and body). To record exportable stubs, give the proxy `predicateGenerator
 ## Generated predicates
 
 A proxy's `predicateGenerators` record predicates whose order, selector scope, selected-value type
-and header-name lookup differ from Mountebank 2.9.1's; each difference, and why Rift's recording is
-the one that replays, is listed under [Proxy: What Gets Recorded](proxy.md#what-gets-recorded).
+and header-name lookup differ from Mountebank 2.9.1's. So do a whole field filtered by `ignore`
+(recorded with `equals`), a field under an explicit `predicateOperator` (its value, not the whole
+request), and a listed query or form key the request repeats (the array of its values, where
+Mountebank records `{}`). Each difference, and why Rift's recording is the one that replays, is
+listed under [Proxy: What Gets Recorded](proxy.md#what-gets-recorded).
+
+Mountebank 2.9.5 refuses every generator with `"predicateOperator": "exists"` when the imposter is
+created (an internal error with no message), although its docs describe it; Rift records
+`{"exists": …}` as documented.
+
+A generator `inject` is dry-run when its stub is created, and one that throws or returns a
+non-array is refused, as in Mountebank ([Proxy: The create-time dry run](proxy.md#the-create-time-dry-run)).
+The refusal's `data` can word the error differently, and an `inject` that returns a string is
+refused where Mountebank records its characters as predicates.
 
 ## Two response shapes Mountebank does not have
 
