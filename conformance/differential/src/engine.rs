@@ -317,7 +317,9 @@ pub async fn start_mountebank(mb: &Path, cwd: &Path) -> Result<Engine, String> {
 const ADMIN_LISTENING_TARGET: &str = "rift_http_proxy::admin_api::server";
 const ADMIN_LISTENING: &str = "listening on http://";
 
-/// Starts Rift with the flags that mirror Mountebank's: injection on, localhost only.
+/// Starts Rift with the flags that mirror Mountebank's: injection on, localhost only. Plus
+/// `--scripts-dir <scripts_dir>`, which Mountebank has no counterpart for: without it an admin-API
+/// `lookup` reads no CSV file at all (rift#1617).
 ///
 /// The admin API binds port 0 and the port is read from its startup line, so no probe is ever
 /// released for something else to take (#1485). Everything else logs at `error`, as before.
@@ -325,11 +327,13 @@ const ADMIN_LISTENING: &str = "listening on http://";
 /// # Errors
 /// Spawn failure, the admin port not reported, or the admin API not answering within the startup
 /// window.
-pub async fn start_rift(bin: &Path, cwd: &Path) -> Result<Engine, String> {
+pub async fn start_rift(bin: &Path, cwd: &Path, scripts_dir: &Path) -> Result<Engine, String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let mut child = Command::new(bin)
         .args(["--port", "0", "--allow-injection", "--local-only"])
+        .arg("--scripts-dir")
+        .arg(scripts_dir)
         .args(["--loglevel", "error"])
         .env("RUST_LOG", format!("error,{ADMIN_LISTENING_TARGET}=info"))
         .env("NO_COLOR", "1")

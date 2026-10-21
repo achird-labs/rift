@@ -286,6 +286,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                         std::slice::from_ref(lookup),
                         request_context.get_or_init(build_request_context),
                         self.csv_cache,
+                        &self.script_files,
                         self.stub,
                     );
                 }

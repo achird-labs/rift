@@ -42,6 +42,19 @@ pub(crate) fn admin_script_access(scripts_dir: &Option<Arc<PathBuf>>) -> ScriptF
     ScriptFileAccess::network(scripts_dir.as_deref().map(PathBuf::as_path))
 }
 
+/// Refuse stubs whose `lookup` behaviors name a CSV file an admin-API imposter may never read
+/// (issue #1617): a path outside `--scripts-dir`, or any path without one. Every admin write door
+/// runs it with the access it gives the imposter, so the client hears at write time what the
+/// imposter would otherwise refuse on every request. `None` when the stubs are allowed through.
+pub(crate) fn reject_unreadable_lookups(
+    stubs: &[Stub],
+    scripts_dir: &Option<Arc<PathBuf>>,
+) -> Option<Response<Full<Bytes>>> {
+    crate::imposter::check_lookup_paths(stubs, &admin_script_access(scripts_dir))
+        .err()
+        .map(|e| error_response(StatusCode::BAD_REQUEST, &e))
+}
+
 /// The `_rift.scripts` registry of the imposter on `port` (already resolved when the imposter was
 /// created), for resolving a newly-added stub's `{ "ref": "name" }` against. Empty when the
 /// imposter doesn't exist or declares no registry.
@@ -143,6 +156,10 @@ pub async fn handle_create(
             StatusCode::BAD_REQUEST,
             &format!("Script resolution failed: {e}"),
         );
+    }
+
+    if let Some(rejection) = reject_unreadable_lookups(&config.stubs, &scripts_dir) {
+        return rejection;
     }
 
     // Validate all scripts in stubs before creating the imposter
@@ -380,6 +397,12 @@ async fn replace_all_from_bytes(
                     config.port
                 ),
             );
+        }
+    }
+
+    for config in &batch.imposters {
+        if let Some(rejection) = reject_unreadable_lookups(&config.stubs, &scripts_dir) {
+            return rejection;
         }
     }
 

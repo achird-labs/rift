@@ -3246,7 +3246,10 @@ async fn test_lookup_behavior_applied_on_is_response() {
     }))
     .expect("config");
 
-    let manager = ImposterManager::new();
+    // A manager reads lookup CSVs only under the access it gives its imposters, and none by
+    // default (issue #1617).
+    let manager = ImposterManager::new()
+        .with_script_file_access(ScriptFileAccess::Confined(dir.path().to_path_buf()));
     let port_0 = manager
         .create_imposter(config)
         .await

@@ -4,7 +4,7 @@
 //! outside 100–999 answers `500` `ERR_HTTP_INVALID_STATUS_CODE` (`baseHttpServer.js:143-155`). A
 //! falsy value (`""`, `0`) falls back to `defaultResponse.statusCode`, then `200` (`:25`).
 
-use rift_mock_core::imposter::ImposterManager;
+use rift_mock_core::imposter::{ImposterManager, ScriptFileAccess};
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -111,7 +111,9 @@ async fn lookup_substitutes_a_csv_cell_in_is_status_code() {
     let csv = dir.join("codes.csv");
     std::fs::write(&csv, "name,code\nmountebank,400\nbroken,4x0\n").expect("write csv");
 
-    let manager = ImposterManager::new();
+    // Lookups read only under the access the manager gives its imposters (issue #1617).
+    let manager =
+        ImposterManager::new().with_script_file_access(ScriptFileAccess::Confined(dir.clone()));
     let port = create(
         &manager,
         json!({ "protocol": "http", "stubs": [ { "responses": [ {

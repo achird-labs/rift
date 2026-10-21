@@ -21,7 +21,7 @@ fn copy_block(method: &str, selector: &str) -> serde_json::Value {
 fn lookup_block(method: &str, selector: &str) -> serde_json::Value {
     json!({ "lookup": {
         "key": { "from": "body", "using": { "method": method, "selector": selector } },
-        "fromDataSource": { "csv": { "path": "/nonexistent.csv", "keyColumn": "id" } },
+        "fromDataSource": { "csv": { "path": "rift-1258-nonexistent.csv", "keyColumn": "id" } },
         "into": "${row}"
     } })
 }
@@ -87,6 +87,9 @@ async fn admin() -> (rift_http_proxy::admin_api::RunningAdminApi, String) {
         Arc::new(ImposterManager::new()),
         None,
     )
+    // A missing lookup file under `--scripts-dir` is admitted; without one every lookup path is
+    // refused (issue #1617).
+    .with_scripts_dir(std::env::temp_dir())
     .bind()
     .await
     .expect("admin API binds");

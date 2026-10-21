@@ -65,4 +65,5 @@ pub const SERVE_OPTION_KEYS: &[&str] = &[
     "maxBodySize",
     "bodyMemoryBudget",
     "journalMaxBytes",
+    "scriptsDir",
 ];

@@ -181,14 +181,17 @@ async fn mountebank_is_the_oracle() {
         return;
     };
     let rift_bin = engine::locate_rift().unwrap_or_else(|e| panic!("{e}"));
-    let cwd = corpus_dir();
+    let cwd = corpus_dir().canonicalize().expect("corpus dir");
+    // Every case's CSV files are in the repository; `absolute_csv_paths` names them there.
+    let scripts_dir = repo_root().canonicalize().expect("repo root");
     let mut engines = Engines {
         mountebank: engine::start_mountebank(&mb, &cwd)
             .await
             .unwrap_or_else(|e| panic!("{e}")),
-        rift: engine::start_rift(&rift_bin, &cwd)
+        rift: engine::start_rift(&rift_bin, &cwd, &scripts_dir)
             .await
             .unwrap_or_else(|e| panic!("{e}")),
+        cwd: cwd.clone(),
     };
     let client = client().expect("http client");
 

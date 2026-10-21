@@ -101,7 +101,7 @@ rift_free(result);
 ```
 
 - **Options JSON** (pass `NULL` or `{}` for all defaults; every field optional):
-  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"noParse":false,"config":null,"allowInjection":false,"requireAdminAuth":false,"upstreamCaFile":null,"upstreamCaPem":null,"upstreamTlsSkipVerify":false,"maxBodySize":null,"bodyMemoryBudget":null,"journalMaxBytes":null}`.
+  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"noParse":false,"config":null,"allowInjection":false,"requireAdminAuth":false,"upstreamCaFile":null,"upstreamCaPem":null,"upstreamTlsSkipVerify":false,"maxBodySize":null,"bodyMemoryBudget":null,"journalMaxBytes":null,"scriptsDir":null}`.
   `port: 0` binds an ephemeral port; `host` must be an IP literal — IPv4, or IPv6 bare (`::1`) or
   bracketed (`[::1]`), a numeric scope id (`fe80::1%2`) kept — and a DNS name such as `localhost` is
   refused (#1137; before that fix a bare IPv6 host could never bind). The metrics server, if asked
@@ -165,6 +165,10 @@ rift_free(result);
   limits current when it was created.
 - **`journalMaxBytes`** (default `805306368`, 768 MiB): bytes of recorded requests each imposter
   keeps, oldest evicted first. Like the body limits, set it before creating imposters.
+- **`scriptsDir`** (default none): the admin plane's `--scripts-dir`. An imposter posted through
+  the admin plane reads `file:` scripts, `require()` modules and `lookup` CSV files only under it,
+  and none without it (#1611, #1617). The host calls (`rift_create_imposter`, `config`, …) read any
+  path, as before.
 - **`allowInjection`** (default `false`): whether Rift admits script/`inject` imposters
   (`inject`/`decorate`/`shellTransform`/JS-function `wait`/`_rift.script`), mirroring the
   `--allowInjection` CLI flag. Leave it `false` unless you intend to permit them.
@@ -213,7 +217,8 @@ check before sending one:
 {"version":"…","commit":"…","builtAt":"…","features":["javascript"],
  "serveOptions":["host","port","apiKey","metricsPort","configFile","noParse","config",
                  "allowInjection","requireAdminAuth","upstreamCaFile","upstreamCaPem",
-                 "upstreamTlsSkipVerify","maxBodySize","bodyMemoryBudget","journalMaxBytes"]}
+                 "upstreamTlsSkipVerify","maxBodySize","bodyMemoryBudget","journalMaxBytes",
+                 "scriptsDir"]}
 ```
 
 0.17.0 published the first eight keys without `noParse`; `noParse` and the three `upstream*` keys

@@ -365,7 +365,6 @@ impl ScriptFileAccess {
 
 /// Why [`resolve_confined`] refused a path.
 #[derive(Debug, thiserror::Error)]
-#[cfg_attr(not(feature = "javascript"), allow(dead_code))] // only `require` reads files yet
 pub(crate) enum ConfinedPathError {
     /// The path is outside the root, or reaches outside through a link. One answer for every such
     /// path, whether or not anything exists there.
@@ -377,6 +376,9 @@ pub(crate) enum ConfinedPathError {
     /// The root itself cannot be resolved.
     #[error("the root cannot be resolved: {0}")]
     Root(std::io::Error),
+    /// The vetted file could not be opened or read (see [`read_confined`]).
+    #[error("{0}")]
+    Read(std::io::Error),
 }
 
 /// Resolve `request` to a file strictly under `root`, without reading it (issue #1611).
@@ -389,7 +391,6 @@ pub(crate) enum ConfinedPathError {
 /// [`ConfinedPathError::Outside`], so the answer never depends on what exists outside it.
 ///
 /// The returned path is canonical; read that one.
-#[cfg_attr(not(feature = "javascript"), allow(dead_code))] // only `require` reads files yet
 pub(crate) fn resolve_confined(
     root: &Path,
     base: &Path,
@@ -436,9 +437,234 @@ pub(crate) fn resolve_confined(
     }
 }
 
+/// Read the file [`resolve_confined`] returned as `canonical` for `request`, failing closed if what
+/// is opened is not that file (issues #1611, #1617).
+///
+/// A link swapped into the path between resolving it and opening it would let the open reach a
+/// file outside the root. So the file is opened first, `request` is resolved again, and the read
+/// goes ahead only when the second resolution is the same path and names the very file that is
+/// open (same device and inode on Unix). Off Unix that identity check is path-only: the second
+/// resolution must land on the same canonical path. Anything else is
+/// [`ConfinedPathError::Outside`], the same answer as any other path out of the root.
+///
+/// Only a regular file is read. The open does not block (`O_NONBLOCK` on Unix), so a FIFO or a
+/// device, under the root or swapped in during the race, cannot hold a worker at `open`, and
+/// anything that is not a regular file once open, a directory included, is refused as
+/// [`ConfinedPathError::Outside`] before it is resolved again or read. Links inside the root are
+/// still followed.
+pub(crate) fn read_confined(
+    root: &Path,
+    base: &Path,
+    request: &str,
+    canonical: &Path,
+) -> Result<String, ConfinedPathError> {
+    use std::io::Read;
+    let mut file = open_without_blocking(canonical).map_err(ConfinedPathError::Read)?;
+    let opened = file.metadata().map_err(ConfinedPathError::Read)?;
+    if !opened.is_file() {
+        return Err(ConfinedPathError::Outside);
+    }
+    let again = resolve_confined(root, base, request)?;
+    // Fails closed: a path that no longer resolves to a readable file was changed under the read.
+    let current = std::fs::metadata(&again).map_err(|_| ConfinedPathError::Outside)?;
+    if again != canonical || !same_file(&opened, &current) {
+        return Err(ConfinedPathError::Outside);
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(ConfinedPathError::Read)?;
+    Ok(text)
+}
+
+/// Open `path` for reading without waiting on it: a FIFO with no writer, or a device, would
+/// otherwise block `open` itself. `O_NONBLOCK` changes nothing for a regular file's reads.
+#[cfg(unix)]
+fn open_without_blocking(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_without_blocking(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+/// Whether two metadata reads describe the same file.
+#[cfg(unix)]
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+/// Off Unix there is no stable file identity in `std`; the second resolution above still has to
+/// land on the same canonical path.
+#[cfg(not(unix))]
+fn same_file(_: &std::fs::Metadata, _: &std::fs::Metadata) -> bool {
+    true
+}
+
+/// Why a `lookup` behavior may not read the CSV file its `fromDataSource.csv.path` names (issue
+/// #1617). The path is the one the config wrote; nothing in a message depends on what exists
+/// outside `--scripts-dir`.
+#[derive(Debug, thiserror::Error)]
+pub enum LookupFileError {
+    /// The path is absolute outside the root, climbs out of it with `..`, or reaches out through a
+    /// link. One answer for all of them, whether or not anything exists there.
+    #[error("lookup CSV path '{0}' is outside --scripts-dir")]
+    Outside(String),
+    /// The imposter was written by a network door and the server has no `--scripts-dir`.
+    #[error("lookup CSV path '{0}' cannot be read: no --scripts-dir is configured")]
+    NoRoot(String),
+    /// `--scripts-dir` itself cannot be resolved.
+    #[error("lookup CSV path '{path}' cannot be read: --scripts-dir cannot be resolved: {source}")]
+    Root {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The path is allowed and nothing readable is there (yet).
+    #[error("lookup CSV path '{path}' cannot be read: {source}")]
+    Unreadable {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl LookupFileError {
+    /// Whether a config door refuses a lookup that fails this way. A missing file is admitted, as
+    /// in Mountebank: the file may be written after the imposter. Every other failure is a path
+    /// the imposter could never read.
+    #[must_use]
+    pub fn refuses_admission(&self) -> bool {
+        !matches!(self, Self::Unreadable { .. })
+    }
+}
+
+/// The file a `lookup` behavior's CSV `path` names, under the imposter's [`ScriptFileAccess`]
+/// (issue #1617). Mountebank reads any path; Rift reads, for an imposter written by a network door
+/// (the admin API, `--datadir`, an `https:` source), only files under `--scripts-dir`, a relative
+/// path from there, and none without it. A local door's imposter ([`ScriptFileAccess::Trusted`])
+/// reads any path, a relative one from its base, as before.
+///
+/// The result is canonical, so it is also the cache key. Read it with [`read_lookup_file`].
+///
+/// # Errors
+/// See [`LookupFileError`].
+pub fn resolve_lookup_path(
+    path: &str,
+    access: &ScriptFileAccess,
+) -> Result<PathBuf, LookupFileError> {
+    match access {
+        ScriptFileAccess::Refused => Err(LookupFileError::NoRoot(path.to_string())),
+        ScriptFileAccess::Confined(root) => {
+            resolve_confined(root, root, path).map_err(|e| lookup_error(path, e))
+        }
+        ScriptFileAccess::Trusted { base } => {
+            base.join(path)
+                .canonicalize()
+                .map_err(|source| LookupFileError::Unreadable {
+                    path: path.to_string(),
+                    source,
+                })
+        }
+    }
+}
+
+/// Read the file [`resolve_lookup_path`] resolved `path` to, re-checking it under a confined
+/// access at the moment of the read ([`read_confined`]), since files and links can change after
+/// the imposter was admitted.
+///
+/// # Errors
+/// See [`LookupFileError`].
+pub fn read_lookup_file(
+    path: &str,
+    resolved: &Path,
+    access: &ScriptFileAccess,
+) -> Result<String, LookupFileError> {
+    match access {
+        ScriptFileAccess::Refused => Err(LookupFileError::NoRoot(path.to_string())),
+        ScriptFileAccess::Confined(root) => {
+            read_confined(root, root, path, resolved).map_err(|e| lookup_error(path, e))
+        }
+        ScriptFileAccess::Trusted { .. } => {
+            std::fs::read_to_string(resolved).map_err(|source| LookupFileError::Unreadable {
+                path: path.to_string(),
+                source,
+            })
+        }
+    }
+}
+
+fn lookup_error(path: &str, e: ConfinedPathError) -> LookupFileError {
+    let path = path.to_string();
+    match e {
+        ConfinedPathError::Outside => LookupFileError::Outside(path),
+        ConfinedPathError::NotFound => LookupFileError::Unreadable {
+            path,
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such file under --scripts-dir",
+            ),
+        },
+        ConfinedPathError::Root(source) => LookupFileError::Root { path, source },
+        ConfinedPathError::Read(source) => LookupFileError::Unreadable { path, source },
+    }
+}
+
+/// Refuse a stub whose `lookup` behaviors name a CSV file its imposter could never read under
+/// `access` (issue #1617): a path outside `--scripts-dir`, or any path when a network door has no
+/// `--scripts-dir`. Run by the admin API's write doors with the access they give the imposter.
+///
+/// Deliberately not part of [`crate::imposter::admission_check`] or any `Deserialize`: what is
+/// readable depends on the door and the server's flags, not on the config, so a stored or replayed
+/// config is never refused for it. Such an imposter loads and its lookup is refused when it runs,
+/// by [`resolve_lookup_path`].
+///
+/// # Errors
+/// The first refused lookup's message.
+pub fn check_lookup_paths(stubs: &[Stub], access: &ScriptFileAccess) -> Result<(), String> {
+    for path in stubs.iter().flat_map(executed_lookup_paths) {
+        if let Err(e) = resolve_lookup_path(&path, access)
+            && e.refuses_admission()
+        {
+            return Err(e.to_string());
+        }
+    }
+    Ok(())
+}
+
+/// The CSV paths of the `lookup` behaviors a stub runs. Only the response types that run their
+/// behaviors count; a `fault` or `_rift.script` response's behaviors are ignored, so never read.
+fn executed_lookup_paths(stub: &Stub) -> Vec<String> {
+    stub.responses
+        .iter()
+        .filter(|response| {
+            matches!(
+                response,
+                StubResponse::Is { .. } | StubResponse::Inject { .. } | StubResponse::Proxy { .. }
+            )
+        })
+        .filter_map(StubResponse::behaviors_block)
+        .filter_map(serde_json::Value::as_array)
+        // Domain-optional: a program that does not parse is refused by the doors' behaviors check
+        // and never runs, so it reads no file.
+        .filter_map(|elements| crate::behaviors::BehaviorProgram::from_elements(elements).ok())
+        .flat_map(|program| program.steps)
+        .filter_map(|step| match step {
+            crate::behaviors::BehaviorStep::Lookup(lookup) => {
+                Some(lookup.from_data_source.csv.path)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// `path` with every `.` dropped and every `..` applied to what precedes it, computed from its
 /// components alone. A `..` at the top stays at the top, as the filesystem treats it.
-#[cfg_attr(not(feature = "javascript"), allow(dead_code))] // only `require` reads files yet
 fn normalize_lexically(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -1162,5 +1388,206 @@ mod tests {
         );
         assert_eq!(ScriptFileAccess::network(None), ScriptFileAccess::Refused);
         assert_eq!(ScriptFileAccess::default(), ScriptFileAccess::Refused);
+    }
+
+    /// A `root/` holding `data.csv`, beside an `outside/` holding `secret.csv` (issue #1617).
+    fn lookup_tree() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().canonicalize().expect("canonical tempdir");
+        std::fs::create_dir_all(base.join("root/sub")).expect("mkdir root");
+        std::fs::create_dir_all(base.join("outside")).expect("mkdir outside");
+        std::fs::write(base.join("root/data.csv"), "id\n1\n").expect("write data");
+        std::fs::write(base.join("outside/secret.csv"), "id\n1\n").expect("write secret");
+        (dir, base)
+    }
+
+    #[test]
+    fn a_confined_lookup_resolves_only_under_the_root() {
+        let (_dir, base) = lookup_tree();
+        let access = ScriptFileAccess::Confined(base.join("root"));
+        let inside = base.join("root/data.csv");
+        for path in [
+            "data.csv",
+            "./sub/../data.csv",
+            inside.to_str().expect("utf-8"),
+        ] {
+            assert_eq!(
+                resolve_lookup_path(path, &access).expect("inside"),
+                inside,
+                "{path}"
+            );
+        }
+        let secret = base.join("outside/secret.csv");
+        for path in [
+            "../outside/secret.csv",
+            "sub/../../outside/secret.csv",
+            secret.to_str().expect("utf-8"),
+            "/etc/shells",
+        ] {
+            let err = resolve_lookup_path(path, &access).expect_err(path);
+            assert!(matches!(err, LookupFileError::Outside(_)), "{path}: {err}");
+            assert!(err.refuses_admission());
+            assert_eq!(
+                err.to_string(),
+                format!("lookup CSV path '{path}' is outside --scripts-dir")
+            );
+        }
+        // Missing inside the root: admitted, then unreadable.
+        let missing = resolve_lookup_path("later.csv", &access).expect_err("missing");
+        assert!(!missing.refuses_admission(), "{missing}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_confined_lookup_refuses_a_link_out_of_the_root() {
+        let (_dir, base) = lookup_tree();
+        let access = ScriptFileAccess::Confined(base.join("root"));
+        std::os::unix::fs::symlink(base.join("outside/secret.csv"), base.join("root/link.csv"))
+            .expect("file link");
+        std::os::unix::fs::symlink(base.join("outside"), base.join("root/dir")).expect("dir link");
+        std::os::unix::fs::symlink(base.join("outside/nothing"), base.join("root/dangling.csv"))
+            .expect("dangling link");
+        for path in ["link.csv", "dir/secret.csv", "dangling.csv"] {
+            let err = resolve_lookup_path(path, &access).expect_err(path);
+            assert!(matches!(err, LookupFileError::Outside(_)), "{path}: {err}");
+        }
+    }
+
+    /// The read re-resolves once the file is open, so a path that moved out of the root between
+    /// resolving it and reading it is refused rather than read.
+    #[cfg(unix)]
+    #[test]
+    fn a_confined_read_refuses_a_path_that_moved_after_it_was_resolved() {
+        let (_dir, base) = lookup_tree();
+        let root = base.join("root");
+        let access = ScriptFileAccess::Confined(root.clone());
+        std::os::unix::fs::symlink(root.join("data.csv"), root.join("swap.csv")).expect("link");
+        let resolved = resolve_lookup_path("swap.csv", &access).expect("inside");
+        assert_eq!(
+            read_lookup_file("swap.csv", &resolved, &access).expect("reads"),
+            "id\n1\n"
+        );
+
+        std::fs::remove_file(root.join("swap.csv")).expect("unlink");
+        std::os::unix::fs::symlink(base.join("outside/secret.csv"), root.join("swap.csv"))
+            .expect("relink");
+        let err = read_lookup_file("swap.csv", &resolved, &access).expect_err("moved");
+        assert!(matches!(err, LookupFileError::Outside(_)), "{err}");
+
+        // The resolved file itself replaced by another file: not the file that was vetted.
+        std::fs::remove_file(root.join("swap.csv")).expect("unlink");
+        std::fs::rename(root.join("data.csv"), root.join("old.csv")).expect("rename");
+        std::fs::write(root.join("data.csv"), "id\n2\n").expect("rewrite");
+        std::os::unix::fs::symlink(root.join("old.csv"), root.join("swap.csv")).expect("relink");
+        let err = read_lookup_file("swap.csv", &resolved, &access).expect_err("replaced");
+        assert!(matches!(err, LookupFileError::Outside(_)), "{err}");
+    }
+
+    /// A FIFO under the root would block `open` until a writer came, holding a worker; a directory
+    /// would reach the read. Both are refused as fast as any path out of the root.
+    #[cfg(unix)]
+    #[test]
+    fn a_confined_read_refuses_a_fifo_and_a_directory_without_blocking() {
+        let (_dir, base) = lookup_tree();
+        let root = base.join("root");
+        let status = std::process::Command::new("mkfifo")
+            .arg(root.join("pipe.csv"))
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo");
+        let access = ScriptFileAccess::Confined(root.clone());
+        for path in ["pipe.csv", "sub"] {
+            let resolved = resolve_lookup_path(path, &access).expect("inside the root");
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker_access = access.clone();
+            std::thread::spawn(move || {
+                // The receiver is gone only once the test has already failed on the timeout.
+                let _ = tx.send(read_lookup_file(path, &resolved, &worker_access));
+            });
+            let read = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("{path}: the read blocked"));
+            let err = read.expect_err(path);
+            assert!(matches!(err, LookupFileError::Outside(_)), "{path}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_refused_access_reads_no_lookup_and_a_trusted_one_any() {
+        let (_dir, base) = lookup_tree();
+        let secret = base.join("outside/secret.csv");
+        let err = resolve_lookup_path("data.csv", &ScriptFileAccess::Refused).expect_err("refused");
+        assert_eq!(
+            err.to_string(),
+            "lookup CSV path 'data.csv' cannot be read: no --scripts-dir is configured"
+        );
+        assert!(err.refuses_admission());
+
+        let trusted = ScriptFileAccess::Trusted {
+            base: base.join("root"),
+        };
+        assert_eq!(
+            resolve_lookup_path(secret.to_str().expect("utf-8"), &trusted).expect("any path"),
+            secret
+        );
+        assert_eq!(
+            resolve_lookup_path("../outside/secret.csv", &trusted).expect("relative to base"),
+            secret
+        );
+        let missing = resolve_lookup_path("nope.csv", &trusted).expect_err("missing");
+        assert!(!missing.refuses_admission(), "{missing}");
+    }
+
+    fn lookup_stub(path: &str, response: &str) -> Stub {
+        serde_json::from_value(serde_json::json!({
+            "responses": [{
+                response: if response == "fault" {
+                    serde_json::json!("CONNECTION_RESET_BY_PEER")
+                } else {
+                    serde_json::json!({})
+                },
+                "_behaviors": { "lookup": {
+                    "key": { "from": "path", "using": { "method": "regex", "selector": ".*" } },
+                    "fromDataSource": { "csv": { "path": path, "keyColumn": "id" } },
+                    "into": "${row}"
+                } }
+            }]
+        }))
+        .expect("stub")
+    }
+
+    #[test]
+    fn check_lookup_paths_refuses_what_the_access_could_never_read() {
+        let (_dir, base) = lookup_tree();
+        let access = ScriptFileAccess::Confined(base.join("root"));
+        assert_eq!(
+            check_lookup_paths(&[lookup_stub("data.csv", "is")], &access),
+            Ok(())
+        );
+        assert_eq!(
+            check_lookup_paths(&[lookup_stub("later.csv", "is")], &access),
+            Ok(()),
+            "a file that may be written later is admitted"
+        );
+        assert_eq!(
+            check_lookup_paths(&[lookup_stub("../outside/secret.csv", "is")], &access),
+            Err("lookup CSV path '../outside/secret.csv' is outside --scripts-dir".to_string())
+        );
+        assert!(
+            check_lookup_paths(&[lookup_stub("data.csv", "is")], &ScriptFileAccess::Refused)
+                .is_err()
+        );
+        // A fault response's behaviors never run, so they read nothing.
+        assert_eq!(
+            check_lookup_paths(&[lookup_stub("/etc/shells", "fault")], &access),
+            Ok(())
+        );
+        assert_eq!(
+            check_lookup_paths(
+                &[lookup_stub("/etc/shells", "is")],
+                &ScriptFileAccess::trusted_cwd()
+            ),
+            Ok(())
+        );
     }
 }

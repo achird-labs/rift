@@ -3,7 +3,7 @@
 use crate::admin_api::handlers::imposters::handle_get as handle_get_imposter;
 use crate::admin_api::handlers::imposters::{
     admin_script_access, admin_script_base, imposter_default_script_engine,
-    imposter_script_registry, reject_stubs_if_injection_disallowed,
+    imposter_script_registry, reject_stubs_if_injection_disallowed, reject_unreadable_lookups,
 };
 use crate::admin_api::types::{
     AddStubRequest, ReplaceStubsRequest, StubWithLinks, collect_body, error_response,
@@ -24,7 +24,8 @@ use tracing::warn;
 /// Resolve `_rift.script` `file:`/`ref:` sources in admin-API-supplied stubs at WRITE time (issue
 /// #356 B1), under the same `--scripts-dir` root as whole-imposter create, before the stubs are
 /// persisted. Returns a `400` on any escape / unknown-ref / unconfigured-`file:` error so nothing
-/// unresolved (`file`/`ref` still set) is ever written to the datadir. `None` on success.
+/// unresolved (`file`/`ref` still set) is ever written to the datadir, and on a `lookup` CSV path
+/// the imposter may not read (issue #1617). `None` on success.
 fn resolve_admin_stubs(
     stubs: &mut [Stub],
     manager: &ImposterManager,
@@ -35,7 +36,7 @@ fn resolve_admin_stubs(
     let default_engine = imposter_default_script_engine(manager, port);
     let base = admin_script_base(scripts_dir);
     match resolve_stub_scripts(stubs, &registry, &default_engine, &base) {
-        Ok(()) => None,
+        Ok(()) => reject_unreadable_lookups(stubs, scripts_dir),
         Err(e) => Some(error_response(
             StatusCode::BAD_REQUEST,
             &format!("Script resolution failed: {e}"),

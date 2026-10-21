@@ -56,9 +56,10 @@ pub(crate) use types::RESPONSE_VARIANT_KEYS;
 
 // Re-export script `file:`/`ref:` resolution (issue #356)
 #[cfg_attr(not(feature = "javascript"), allow(unused_imports))]
-pub(crate) use script_resolve::{ConfinedPathError, resolve_confined};
+pub(crate) use script_resolve::{ConfinedPathError, read_confined, resolve_confined};
 pub use script_resolve::{
-    ScriptBaseDir, ScriptFileAccess, ScriptResolveError, resolve_scripts, resolve_stub_scripts,
+    LookupFileError, ScriptBaseDir, ScriptFileAccess, ScriptResolveError, check_lookup_paths,
+    read_lookup_file, resolve_lookup_path, resolve_scripts, resolve_stub_scripts,
 };
 
 // Re-export core imposter

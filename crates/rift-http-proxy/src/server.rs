@@ -107,7 +107,9 @@ pub struct Cli {
     /// Root directory `_rift.script` `file:` references resolve under for admin-API-created
     /// imposters (issue #356). A resolved path that escapes this root is rejected. Without it,
     /// admin-API `file:` script references are rejected outright (`--configfile`/`--datadir`
-    /// loads are unaffected — those resolve relative to the config's own directory).
+    /// loads are unaffected — those resolve relative to the config's own directory). It is also
+    /// the only directory `require()` (issue #1611) and a `lookup`'s CSV `path` (issue #1617) may
+    /// read from in an admin-API, `--datadir` or `https:` imposter; without it they read nothing.
     #[arg(
         long,
         value_name = "DIR",

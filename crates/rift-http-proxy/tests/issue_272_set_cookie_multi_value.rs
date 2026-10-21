@@ -54,7 +54,10 @@ async fn lookup_behavior_preserves_multi_value_set_cookie() {
     let csv = std::env::temp_dir().join(format!("rift_272_lookup_{}.csv", std::process::id()));
     std::fs::write(&csv, "id,name\nhi,World\n").expect("write csv");
 
-    let manager = ImposterManager::new();
+    // A lookup reads only under the access its imposter was given (issue #1617).
+    let manager = ImposterManager::new().with_script_file_access(
+        rift_http_proxy::imposter::ScriptFileAccess::Confined(std::env::temp_dir()),
+    );
     let port = mk(
         &manager,
         serde_json::json!({

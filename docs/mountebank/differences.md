@@ -86,6 +86,23 @@ load files only from under `--scripts-dir`, and none without it; a local `--conf
 load any path. A path outside the root is refused with `require('<path>'): outside --scripts-dir`.
 Rhai `import` is not supported, and neither is JavaScript dynamic `import()`, which Node resolves and Rift rejects. See [Scripting](../features/scripting.md#files-a-script-may-read).
 
+## `lookup` reads CSV files only under `--scripts-dir`
+
+Mountebank's `lookup` reads `fromDataSource.csv.path` wherever it points, with or without
+`--allowInjection`, so any admin client can read a host file whose lines look like CSV rows. Rift
+confines it like `require()`: an imposter written over the admin API, from `--datadir` or from an
+`https:` source reads CSV files only under `--scripts-dir`, a relative path from there (not from
+the working directory), and none without it. A local `--configfile` imposter reads any path, a
+relative one from the working directory, as Mountebank does.
+
+The admin API refuses a path outside the root (absolute, `..`, or a link that points out) with
+`400` and `lookup CSV path '<path>' is outside --scripts-dir`, and any path without `--scripts-dir`
+with `lookup CSV path '<path>' cannot be read: no --scripts-dir is configured`, whether or not
+anything exists there. A file that does not exist yet inside the root is accepted. A stored
+`--datadir` file is not refused for it; the path is resolved again every time the lookup runs, and
+one outside the root leaves the tokens in place with a warning (#1617). See
+[Behaviors](behaviors.md#csv-lookup).
+
 ## Promise jobs a hook leaves behind are dropped
 
 Mountebank runs every injection in one Node process, so a `.then` callback an `inject` queues runs

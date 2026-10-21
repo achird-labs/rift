@@ -291,7 +291,9 @@ and `xpath` selectors apply to the value `from` picked.
 
 `copy` and `lookup` each accept a single object or an array of them. See
 [Behaviors](../mountebank/behaviors.md) for `shellTransform`, `repeat` and the
-error semantics.
+error semantics. Unlike Mountebank, a `lookup` in an imposter posted over the admin API reads
+its CSV file only under `--scripts-dir`, with `data.csv` above meaning `<scripts-dir>/data.csv`
+(see [CSV Lookup](../mountebank/behaviors.md#csv-lookup)).
 
 Behaviors run on `is`, `inject` and `proxy` responses, and `repeat` on every response. A block
 setting anything else on a `fault` or `_rift`-only response is kept and returned, and reported as
