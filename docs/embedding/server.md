@@ -39,6 +39,7 @@ let builder = ServerBuilder::from_cli(Cli::parse());
 | `accept_runtimes` | `fn accept_runtimes(self, runtimes: Vec<tokio::runtime::Handle>) -> Self` | Fan imposter accept loops out across per-core runtimes (issue #745). Applies only to the builder-constructed manager; an injected one uses `ImposterManager::with_accept_runtimes`. Empty keeps the single-listener topology. |
 | `admin_authorizer` | `fn admin_authorizer(self, authorizer: Arc<dyn AdminAuthorizer>) -> Self` | Per-request admin authorization hook (issue #854) — see [`AdminAuthorizer`](spi.md#adminauthorizer--per-request-admin-authorization). |
 | `reported_admin_port` | `fn reported_admin_port(self, port: u16) -> Self` | The port `GET /config` reports, when the admin plane binds somewhere other than where clients reach it (issue #1135). See `AdminApiServer::with_reported_admin_port` below. |
+| `reported_host` | `fn reported_host(self, host: Option<String>) -> Self` | The `options.host` `GET /config` reports, when the embedder re-points `--host` for its own listener (issue #1560). Report-only: the bind is untouched. Default is the CLI's `--host`; `None` reports no host. |
 | `run` | `async fn run(self) -> anyhow::Result<()>` | Load configs, bind, and serve **forever** (returns only on error/shutdown). |
 | `start` | `async fn start(self) -> anyhow::Result<RunningServer>` | Same, but returns a `RunningServer` handle **once bound** — supports ephemeral (`:0`) ports and programmatic shutdown. |
 
