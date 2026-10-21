@@ -4332,3 +4332,102 @@ fn w022_unknown_top_level_fault() {
         assert!(!has_code(&lint(name), "W022"), "{name}");
     }
 }
+
+// ─── E058: binary-mode selectors (issue #1578) ──────────────────────────────
+
+fn binary_imposter(predicate: Value) -> Value {
+    json!({
+        "port": 3000,
+        "protocol": "http",
+        "mode": "binary",
+        "stubs": [{ "predicates": [predicate], "responses": [{ "is": { "statusCode": 200 } }] }]
+    })
+}
+
+fn lint_imposter(imposter: &Value) -> LintResult {
+    let mut r = LintResult::new();
+    validate_imposter(path(), imposter, &mut r, &opts());
+    r
+}
+
+/// The engine refuses `matches` and `jsonpath`/`xpath` selectors in a binary-mode imposter, with
+/// Mountebank's message, wherever they sit under `not`/`and`/`or`.
+#[test]
+fn e058_binary_mode_selectors() {
+    for (predicate, location, word) in [
+        (
+            json!({ "matches": { "body": "x" } }),
+            "stubs[0].predicates[0]",
+            "matches",
+        ),
+        (
+            json!({ "equals": { "body": "x" }, "jsonpath": { "selector": "$.a" } }),
+            "stubs[0].predicates[0]",
+            "jsonpath",
+        ),
+        (
+            json!({ "exists": { "body": true }, "xpath": { "selector": "//a" } }),
+            "stubs[0].predicates[0]",
+            "xpath",
+        ),
+        (
+            json!({ "not": { "matches": { "body": "x" } } }),
+            "stubs[0].predicates[0].not",
+            "matches",
+        ),
+        (
+            json!({ "or": [{ "equals": { "path": "/" } }, { "matches": { "body": "x" } }] }),
+            "stubs[0].predicates[0].or[1]",
+            "matches",
+        ),
+    ] {
+        let r = lint_imposter(&binary_imposter(predicate.clone()));
+        let issue = r
+            .issues
+            .iter()
+            .find(|issue| issue.code == "E058")
+            .unwrap_or_else(|| panic!("{predicate}: {:?}", codes(&r)));
+        assert_eq!(issue.severity, Severity::Error);
+        assert_eq!(issue.location.as_deref(), Some(location), "{predicate}");
+        assert!(
+            issue.message.contains(&format!("the {word} predicate")),
+            "{predicate}: {}",
+            issue.message
+        );
+    }
+}
+
+/// Only an exact `"mode": "binary"` is binary, as in the engine and Mountebank; a selector-free
+/// binary imposter is fine.
+#[test]
+fn e058_not_fired_outside_binary_mode() {
+    let matches = json!({ "matches": { "body": "x" } });
+    for mode in [None, Some("text"), Some("Binary")] {
+        let mut imposter = binary_imposter(matches.clone());
+        match mode {
+            Some(mode) => imposter["mode"] = mode.into(),
+            None => {
+                imposter.as_object_mut().expect("object").remove("mode");
+            }
+        }
+        let r = lint_imposter(&imposter);
+        assert!(!has_code(&r, "E058"), "{mode:?}: {:?}", codes(&r));
+    }
+    let r = lint_imposter(&binary_imposter(json!({ "equals": { "body": "AQID" } })));
+    assert!(!has_code(&r, "E058"), "{:?}", codes(&r));
+}
+
+/// The CLI path (`lint_file` → `lint_document_at`) and `lint_json` report it for a config file's
+/// `imposters` wrapper too.
+#[test]
+fn e058_reported_through_a_config_document() {
+    let text = json!({ "imposters": [binary_imposter(json!({ "matches": { "body": "x" } }))] })
+        .to_string();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("imposters.json");
+    std::fs::write(&file, &text).expect("write config");
+    let r = lint_file(&file, &opts());
+    assert!(has_code(&r, "E058"), "{:?}", codes(&r));
+    let r = lint_json(&text, "imposters.json", &opts());
+    assert!(has_code(&r, "E058"), "{:?}", codes(&r));
+}

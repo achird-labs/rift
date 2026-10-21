@@ -1767,6 +1767,14 @@
         "null"
       ]
     },
+    "mode": {
+      "description": "Mountebank's creation-time `mode` (issue #1578): `\"binary\"` refuses `matches` predicates\nand `jsonpath`/`xpath` selectors, as Mountebank's dry run does; any other value, or none, is\ntext. Creation-time only, as in Mountebank: read by the binary-mode check at the create and\napply doors, then cleared, so it is never printed, persisted or replayed, and a later stub\nedit is not held to it (Mountebank's stub routes accept the same stub).",
+      "type": [
+        "string",
+        "null"
+      ],
+      "writeOnly": true
+    },
     "mutualAuth": {
       "description": "Request and **require** a client certificate (Mountebank `mutualAuth`, issue #977).\n\nStricter than Mountebank, deliberately: there `mutualAuth` only *requests* a certificate and\nnever rejects one — and its implementation gates `requestCert` on `rejectUnauthorized` too,\nso a bare `mutualAuth: true` is a no-op. For a mock whose job is to virtualize a server that\ndemands mutual auth, a client that presents nothing must fail the handshake.\n\nWithout `reject_unauthorized` the chain is not validated — any certificate the peer holds\nthe key for is accepted. `https` only; `true` on an `http` imposter is a creation error.",
       "type": "boolean"

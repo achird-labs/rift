@@ -177,6 +177,11 @@ config without `--allowInjection` (`400 invalid injection`).
 A port that another imposter already holds is a `400` (not a `409`); a port held by some other
 process fails to bind and is a `500`.
 
+A top-level `"mode": "binary"` is read at creation and not stored, as in Mountebank: it refuses a
+`matches` predicate or a `jsonpath`/`xpath` selector with `400` (`the matches predicate is not
+allowed in binary mode`), here, on `PUT /imposters` and in a config file. It is never printed, and
+the stub routes do not apply it to an imposter created with it.
+
 **Example:**
 ```bash
 curl -X POST http://localhost:2525/imposters \

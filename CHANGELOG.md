@@ -52,6 +52,13 @@ record.
   dropped, not stored or printed, as Mountebank's http server drops it. The `--datadir` file and the
   stored config are unchanged for every existing input; the default certificate is still not
   printed.
+- **A binary-mode imposter refuses `matches` predicates and `jsonpath`/`xpath` selectors** with
+  `400`, as Mountebank does (#1578): `"mode": "binary"` in `POST`/`PUT /imposters` or a config
+  file, at any depth under `not`/`and`/`or` (Mountebank's dry run skips a branch an earlier `and`/`or`
+  branch decides; see the differences page). `mode` is read at creation and never stored or printed,
+  so the stub routes still accept such a stub, as Mountebank's do. `rift-lint` reports it as `E058`.
+  Embedders: `ImposterError` gains `InvalidConfig`, and `admission_check` runs the check when a
+  decoded config carries `mode`; a replayed config never does, since `mode` is not serialized.
 
 - **`--host` accepts a DNS name for the admin API**, as Mountebank does (#1575): the name is
   resolved once at startup and the admin API binds its first address. It used to refuse anything

@@ -136,6 +136,7 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | E051 | A `copy`, `lookup`, `decorate` or `shellTransform` value the engine cannot read |
 | E052 | An unknown proxy `mode` the engine refuses |
 | E056 | A response with more than one of `is`, `proxy`, `inject` and `fault`, which the engine refuses |
+| E058 | A `matches` predicate or `jsonpath`/`xpath` selector in a `"mode": "binary"` imposter, which the engine refuses |
 
 ### Warnings
 

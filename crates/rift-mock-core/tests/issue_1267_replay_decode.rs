@@ -414,3 +414,53 @@ fn a_response_with_two_types_or_none_replays_to_its_pre_1551_value() {
         assert_eq!(admission_check(&config), Ok(()), "{stub}");
     }
 }
+
+/// Issue #1578: `"mode": "binary"` refuses `matches` and `jsonpath`/`xpath` selectors. The refusal is
+/// an imposter-level admission check, never a decode refusal: both decodes admit the bytes, and
+/// `admission_check` reports it.
+const BINARY_MATCHES: &str = r#"{
+    "port": 4700, "protocol": "http", "mode": "binary",
+    "stubs": [{ "predicates": [{ "matches": { "body": "^AQ" } }],
+                "responses": [{ "is": { "statusCode": 200 } }] }]
+}"#;
+
+#[test]
+fn a_binary_mode_imposter_is_refused_by_admission_check_not_by_the_decode() {
+    let message = "the matches predicate is not allowed in binary mode";
+    let door: ImposterConfig =
+        serde_json::from_str(BINARY_MATCHES).expect("the validating decode admits the bytes");
+    assert_eq!(admission_check(&door), Err(message.to_string()));
+    let replay: ImposterConfig =
+        replayed(BINARY_MATCHES).expect("the replayed decode admits the bytes");
+    assert_eq!(admission_check(&replay), Err(message.to_string()));
+}
+
+/// `mode` is never serialized, so what an engine stores for a binary imposter carries no `mode` and
+/// can never newly fail `admission_check` on replay: the refusal is unreachable there by construction.
+#[test]
+fn a_stored_binary_mode_imposter_replays_without_mode_and_passes_admission_check() {
+    let door: ImposterConfig = serde_json::from_str(BINARY_MATCHES).expect("decode");
+    let stored = serde_json::to_string(&door).expect("serialize");
+    assert!(!stored.contains("\"mode\""), "stored: {stored}");
+    let replay: ImposterConfig = replayed(&stored).expect("the stored bytes replay");
+    assert_eq!(admission_check(&replay), Ok(()));
+}
+
+/// The door refuses a stub-level failure while decoding, before the imposter-level binary check
+/// runs, so `admission_check` names it first even when it sits in a later stub.
+#[test]
+fn a_stub_level_refusal_is_reported_before_the_binary_mode_one() {
+    let config = format!(
+        r#"{{ "port": 4700, "protocol": "http", "mode": "binary", "stubs": [
+            {{ "predicates": [{{ "matches": {{ "body": "x" }} }}],
+               "responses": [{{ "is": {{ "statusCode": 200 }} }}] }},
+            {BAD_MATCHES}
+        ] }}"#
+    );
+    let replay: ImposterConfig = replayed(&config).expect("the replayed decode admits the bytes");
+    let checked = admission_check(&replay).expect_err("admission_check refuses");
+    assert!(
+        checked.starts_with("predicate `matches` field `path` has an invalid regex"),
+        "admission_check: {checked}"
+    );
+}
