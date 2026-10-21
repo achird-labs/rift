@@ -61,15 +61,15 @@ fn port_zero_resolves_to_an_ephemeral_bind() {
     assert_eq!(addr, "[::]:0".parse::<SocketAddr>().expect("literal"));
 }
 
-// AC5: a non-literal host (a DNS name) is refused, and the refusal names the flag an operator
-// would fix rather than leaving them with a bare `invalid socket address syntax`.
+// AC5: a host that does not resolve is refused, and the refusal names the flag an operator would
+// fix. A DNS name that does resolve is accepted since #1575 (`issue_1575_dns_admin_host.rs`).
 #[test]
-fn a_non_literal_host_is_refused_naming_the_flag() {
-    let err = admin_bind_addr(&cli(&["rift", "--host", "localhost"]))
-        .expect_err("a DNS name is not a literal socket address and must be refused");
-    let msg = err.to_string();
+fn an_unresolvable_host_is_refused_naming_the_flag() {
+    let err = admin_bind_addr(&cli(&["rift", "--host", "no-such-host.invalid"]))
+        .expect_err("a name that does not resolve has no address to bind");
+    let msg = format!("{err:#}");
     assert!(
-        msg.contains("--host") && msg.contains("localhost"),
+        msg.contains("--host") && msg.contains("no-such-host.invalid"),
         "the refusal must name the flag and the offending value, got: {msg}"
     );
 }

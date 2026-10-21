@@ -86,8 +86,9 @@ fn a_bracketed_ipv4_host_is_refused_naming_the_flag() {
 // wording must not blame an input the fix now accepts, and must name both IPv6 spellings.
 #[test]
 fn the_refusal_names_both_ipv6_spellings() {
-    let msg = admin_bind_addr(&cli(&["rift", "--host", "localhost"]))
-        .expect_err("a DNS name is refused")
+    // A DNS name resolves since #1575, so the refusal is reached through a bracketed IPv4 host.
+    let msg = admin_bind_addr(&cli(&["rift", "--host", "[1.2.3.4]"]))
+        .expect_err("a bracketed IPv4 host is refused")
         .to_string();
     assert!(
         msg.contains("`::1`") && msg.contains("`[::]`"),

@@ -452,35 +452,30 @@
       "note": "--formatter is accepted and ignored"
     },
     {
-      "id": "cli/hostTest.js::--host should allow binding to specific host",
-      "class": "bug",
-      "issue": "#1575",
-      "note": "a DNS-name --host is refused for the admin plane"
-    },
-    {
       "id": "cli/hostTest.js::--host should work with --configfile",
       "class": "bug",
-      "issue": "#1575",
-      "note": "a DNS-name --host is refused for the admin plane, so the server does not start"
+      "issue": "TBD-pidfile-before-ready",
+      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
+      "note": "times out on 4545: the request arrived between the pidfile write and the imposter bind (the server itself starts since #1575, and answers on the host's name once bound)"
     },
     {
       "id": "cli/hostTest.js::--host should work with mb save",
-      "class": "bug",
-      "issue": "#1575",
-      "note": "a DNS-name --host is refused for the admin plane, so the server does not start"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
+      "note": "Rift-only config keys (recordMatches) print in the saved file (api/index.md); the server starts on a DNS-name --host since #1575"
     },
     {
       "id": "cli/hostTest.js::--host should work with mb replay",
-      "class": "bug",
-      "issue": "#1575",
-      "note": "a DNS-name --host is refused for the admin plane, so the server does not start"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#command-line",
+      "note": "`rift replay` starts a server from --configfile; it does not switch a running server's proxies to replay (the server starts on a DNS-name --host since #1575)"
     },
     {
       "id": "cli/hostTest.js::--host should bind http imposter to provided host",
       "class": "harness",
       "reason": "binds to the address os.hostname() resolves to; fails on Mountebank too on a host whose name resolves to a non-loopback or IPv6 address, and is skipped where it resolves to localhost",
       "flaky": "depends on what the host's name resolves to",
-      "note": "never runs on Rift until #1575 lands"
+      "note": "runs since #1575; fails here because the host's name resolves to ::1, so localhost reaches the imposter, as it would on Mountebank"
     },
     {
       "id": "cli/rcfileTest.js::--rcfile should still start if rcfile does not exist",
