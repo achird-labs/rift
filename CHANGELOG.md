@@ -13,6 +13,11 @@ record.
 
 ### Added
 
+- **Embedders can bind a front door the way `--front-door` does**: `front_door::bind_front_door_at`
+  and `server::parse_front_door_addr` are now public (#1561). A bare port is `ListenAddr::Any`,
+  `[::]` dual-stack with an IPv4 fallback, which the `SocketAddr` entry points cannot express.
+  Both are additive; `bind_front_door` and `bind_front_door_with_observer` are unchanged.
+
 - **Mountebank's CLI spellings `--logfile`, `--localOnly`, `--ipWhitelist` and `save --removeProxies`
   are accepted** as aliases of `--log`, `--local-only`, `--ip-whitelist` and `--remove-proxies`
   (#1559). `--logfile` has no default file, and `--ipWhitelist` stays the #879 no-op.
