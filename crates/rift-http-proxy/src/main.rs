@@ -44,7 +44,8 @@ const ACTIVE_ALLOCATOR: &str = "system";
 use anyhow::Context as _;
 use clap::Parser;
 use rift_http_proxy::bootstrap::{
-    DEFAULT_PIDFILE, apply_rcfile_defaults_reporting, log_filter, save_imposters, stop_server,
+    DEFAULT_PIDFILE, apply_rcfile_defaults_reporting, log_filter, missing_rcfile_warning,
+    rcfile_not_found, save_imposters, stop_server,
 };
 use rift_http_proxy::healthcheck;
 use rift_http_proxy::intercept_ca_cli;
@@ -83,11 +84,21 @@ fn main() -> Result<(), anyhow::Error> {
     // therefore refuses the probe: a server started with that file would not start either, so
     // "unhealthy" is the true answer. `script` stays above, since it reads no host or port.
     if let Some(rcfile) = cli.rcfile.clone() {
-        for key in apply_rcfile_defaults_reporting(&mut cli, &rcfile)? {
-            eprintln!(
-                "Warning: --rcfile {}: unsupported key '{key}' (ignored)",
-                rcfile.display()
-            );
+        match apply_rcfile_defaults_reporting(&mut cli, &rcfile) {
+            Ok(keys) => {
+                for key in keys {
+                    eprintln!(
+                        "Warning: --rcfile {}: unsupported key '{key}' (ignored)",
+                        rcfile.display()
+                    );
+                }
+            }
+            // Mountebank warns about a `--rcfile` that does not exist and starts (issue #1574).
+            // Only that case: a present file that is unreadable or invalid still aborts (#1114).
+            Err(err) if rcfile_not_found(&err) => {
+                eprintln!("Warning: {}", missing_rcfile_warning(&rcfile));
+            }
+            Err(err) => return Err(err),
         }
     }
 

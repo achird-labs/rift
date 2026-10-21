@@ -427,6 +427,10 @@ Rift's answer as JSON and Mountebank's as text.
   filtering (#879, see the [CLI reference](../configuration/cli.md#--ip-whitelist-does-not-filter-anything)).
 - `--formatter` is accepted and ignored: Rift does not load Mountebank's JavaScript formatter
   modules, so `rift save` always writes JSON (see the [CLI reference](../configuration/cli.md)).
+- An `--rcfile` that exists but cannot be used aborts startup. `mb` prints `Cannot parse rcfile`
+  and starts for a file that is not JSON; Rift refuses it (and a wrong-typed key, or a path that is
+  a directory), because starting without the file would silently drop settings the operator thinks
+  are in force (#1114). A path that does not exist warns and starts in both.
 - `rift replay --configfile <file>` starts a server with that file loaded. `mb replay` switches a
   running server's proxies to replay mode; Rift has no command for that (see
   [Migration](../getting-started/migration.md)).

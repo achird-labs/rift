@@ -268,9 +268,11 @@ fn rcfile_non_object_is_an_error() {
 
 #[test]
 fn rcfile_missing_file_is_an_error() {
+    // The reporting seam still errors (issue #1574 downgrades it to a warning in the callers, via
+    // `rcfile_not_found`), and the error still names the file.
     let mut parsed = cli(&[]);
     let missing = std::path::Path::new("/nope/rift.rc");
-    let err = bootstrap::apply_rcfile_defaults(&mut parsed, missing)
+    let err = bootstrap::apply_rcfile_defaults_reporting(&mut parsed, missing)
         .expect_err("a missing rcfile must be reported");
     // Issue #946: `std::fs` does not put the path in its io errors, so without context of our own
     // this reads as a bare "No such file or directory" with nothing to act on.
@@ -1002,4 +1004,35 @@ async fn running_admin_api_failure_is_delivered_exactly_once() {
         .wait()
         .await
         .expect("later waiters see Ok, not a duplicate error");
+}
+
+// Issue #1574: a path that does not exist is the one read failure a caller may downgrade to a
+// warning, as Mountebank does; everything else about a present file stays an error (#1114).
+#[test]
+fn only_a_missing_rcfile_is_classified_as_not_found() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let missing = dir.path().join("absent.rc");
+    let err = bootstrap::apply_rcfile_defaults_reporting(&mut cli(&[]), &missing)
+        .expect_err("a missing rcfile is an error from the reporting seam");
+    assert!(bootstrap::rcfile_not_found(&err), "{err:#}");
+
+    let not_json = write_rcfile(&dir, "debug: true");
+    let err = bootstrap::apply_rcfile_defaults_reporting(&mut cli(&[]), &not_json)
+        .expect_err("a non-JSON rcfile is refused");
+    assert!(!bootstrap::rcfile_not_found(&err), "{err:#}");
+
+    let wrong_type = write_rcfile(&dir, r#"{"localOnly": "yes"}"#);
+    let err = bootstrap::apply_rcfile_defaults_reporting(&mut cli(&[]), &wrong_type)
+        .expect_err("a wrong-typed key is refused");
+    assert!(!bootstrap::rcfile_not_found(&err), "{err:#}");
+}
+
+#[test]
+fn apply_rcfile_defaults_starts_without_a_missing_rcfile() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut parsed = cli(&[]);
+    bootstrap::apply_rcfile_defaults(&mut parsed, &dir.path().join("absent.rc"))
+        .expect("a missing rcfile is a warning");
+    assert_eq!(parsed.port, cli(&[]).port, "nothing was applied");
 }
