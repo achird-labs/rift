@@ -2205,8 +2205,14 @@ mod reload {
         };
 
         let (manager, admin) = start(Some(source.clone())).await;
+        // Seeded as the server seeds a config file: trusted, the access its reload grants. A reload
+        // never widens an imposter's access in place (issue #1645), so a seed with less would make
+        // the reload replace both imposters.
         manager
-            .apply_config(load_configs(&source).unwrap())
+            .apply_config_from(
+                load_configs(&source).unwrap(),
+                rift_http_proxy::imposter::ScriptFileAccess::trusted_cwd(),
+            )
             .await
             .unwrap();
         // The manager assigned both ports; tell them apart by what they serve. The rewrite below

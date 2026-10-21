@@ -67,7 +67,34 @@ impl Imposter {
     /// `flow_id` when set. Reuses the live predicate evaluator and recorded-request store — no new
     /// state. An `inject` predicate that fails propagates as `Err` (the issue #440 contract the
     /// request hot path also honors) rather than being silently counted as a non-match.
+    ///
+    /// An `inject` predicate runs with the imposter's own script access, so this is only for a
+    /// caller that wrote the imposter or is trusted at least as far; a door that takes predicates
+    /// from someone else uses [`Self::verify_from`] (review of #1645).
     pub fn verify(&self, opts: &VerifyOptions) -> anyhow::Result<VerifyOutcome> {
+        let files = self.script_file_access();
+        self.verify_with(opts, &files)
+    }
+
+    /// [`Self::verify`] for predicates a door supplies (review of #1645): an `inject` predicate's
+    /// `require()` gets what both the imposter's access and `door` allow
+    /// ([`ScriptFileAccess::meet`](crate::imposter::ScriptFileAccess::meet)), so an admin client's
+    /// predicate never reads with a `--configfile` imposter's unconfined access, nor runs in its
+    /// realm.
+    pub fn verify_from(
+        &self,
+        opts: &VerifyOptions,
+        door: &crate::imposter::ScriptFileAccess,
+    ) -> anyhow::Result<VerifyOutcome> {
+        let files = std::sync::Arc::new(self.script_file_access().meet(door));
+        self.verify_with(opts, &files)
+    }
+
+    fn verify_with(
+        &self,
+        opts: &VerifyOptions,
+        files: &std::sync::Arc<crate::imposter::ScriptFileAccess>,
+    ) -> anyhow::Result<VerifyOutcome> {
         let scoped = self.get_recorded_requests_filtered(|r| match &opts.flow_id {
             Some(flow_id) => self.resolve_flow_id_recorded(&r.headers) == *flow_id,
             None => true,
@@ -77,7 +104,7 @@ impl Imposter {
         let mut matched = Vec::new();
         let mut non_matches = Vec::new();
         for req in scoped {
-            if self.request_matches_predicates(&req, &opts.predicates)? {
+            if self.request_matches_predicates(&req, &opts.predicates, files)? {
                 matched.push(req);
             } else if opts.include_closest {
                 non_matches.push(req);
@@ -85,7 +112,7 @@ impl Imposter {
         }
 
         let closest = if opts.include_closest {
-            self.closest_non_match(non_matches, &opts.predicates)?
+            self.closest_non_match(non_matches, &opts.predicates, files)?
         } else {
             None
         };
@@ -109,6 +136,7 @@ impl Imposter {
         &self,
         req: &RecordedRequest,
         predicates: &[Predicate],
+        files: &std::sync::Arc<crate::imposter::ScriptFileAccess>,
     ) -> anyhow::Result<bool> {
         let form = Self::parse_form_data(&req.headers, req.body.as_deref());
         let body_json = crate::behaviors::LazyJson::new(req.body.as_deref());
@@ -137,7 +165,7 @@ impl Imposter {
             client_ip.as_deref(),
             form.as_ref(),
             self.script_state_key(),
-            &self.script_file_access(),
+            files,
             &body_json,
             xml_dom.as_ref(),
             Some(&query_map),
@@ -151,6 +179,7 @@ impl Imposter {
         &self,
         non_matches: Vec<RecordedRequest>,
         predicates: &[Predicate],
+        files: &std::sync::Arc<crate::imposter::ScriptFileAccess>,
     ) -> anyhow::Result<Option<ClosestMatch>> {
         if non_matches.is_empty() || predicates.is_empty() {
             return Ok(None);
@@ -160,7 +189,7 @@ impl Imposter {
         for req in non_matches {
             let mut satisfied = 0;
             for predicate in predicates {
-                if self.request_matches_predicates(&req, std::slice::from_ref(predicate))? {
+                if self.request_matches_predicates(&req, std::slice::from_ref(predicate), files)? {
                     satisfied += 1;
                 }
             }
@@ -177,7 +206,7 @@ impl Imposter {
         let (_, request) = best.expect("non_matches is non-empty");
         let mut failed_predicates = Vec::new();
         for predicate in predicates {
-            if !self.request_matches_predicates(&request, std::slice::from_ref(predicate))? {
+            if !self.request_matches_predicates(&request, std::slice::from_ref(predicate), files)? {
                 failed_predicates.push(FailedPredicate {
                     predicate: predicate.clone(),
                     actual: actual_projection(&request, predicate),

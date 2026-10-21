@@ -220,13 +220,13 @@ fn validate_inject_script(
 ) -> Option<StubValidationError> {
     #[cfg(feature = "javascript")]
     {
-        use boa_engine::{Context, Script, Source};
+        use boa_engine::{Script, Source};
 
         // Parse only, never evaluate (issue #1183): this runs inline on the admin request task, and
         // evaluating ran user code there with no loop or time budget. The wrapper is the one
         // `execute_mountebank_inject` runs, so what parses here is what the engine will compile.
         let wrapper = format!("var __injectFn = {code};");
-        let mut context = Context::default();
+        let mut context = crate::scripting::js_engine::sealed_js_context();
         match Script::parse(Source::from_bytes(wrapper.as_bytes()), None, &mut context) {
             Ok(_) => None,
             Err(e) => Some(StubValidationError {

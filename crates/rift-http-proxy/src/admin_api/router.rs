@@ -675,7 +675,7 @@ async fn route_imposter(
 
         // /imposters/:port/verify (issue #494)
         (&Method::POST, ImposterRoute::Verify) => {
-            imposters::handle_verify(port, req, manager, allow_injection).await
+            imposters::handle_verify(port, req, manager, allow_injection, scripts_dir).await
         }
 
         // /imposters/:port/savedProxyResponses

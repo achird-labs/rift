@@ -1,5 +1,5 @@
 use super::validator::{ScriptValidationError, ScriptValidator};
-use boa_engine::{Context, Source};
+use boa_engine::Source;
 use std::error::Error;
 use std::fmt;
 
@@ -81,7 +81,7 @@ impl ScriptValidator for JsValidator {
     /// unbound-identifier error. `Script::parse` catches genuine syntax errors without
     /// executing anything.
     fn validate(&self, script: &str) -> Result<(), Self::Error> {
-        let mut context = Context::default();
+        let mut context = crate::scripting::js_engine::sealed_js_context();
         boa_engine::Script::parse(Source::from_bytes(script.as_bytes()), None, &mut context)
             .map_err(|e| JsValidationError::EvaluationError(e.to_string()))?;
         Ok(())

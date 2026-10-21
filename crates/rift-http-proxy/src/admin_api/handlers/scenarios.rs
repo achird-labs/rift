@@ -377,12 +377,9 @@ pub async fn handle_add_space_stub(
     }
     // The path `:flowId` is the source of truth for the scope; ignore any `space` in the body.
     stub.space = Some(flow_id.to_string());
-    if let Some(rejection) =
-        crate::admin_api::handlers::imposters::claim_scripts_for_admin(&manager, port, &scripts_dir)
-    {
-        return rejection;
-    }
-    match manager.add_stub(port, stub, None).await {
+    // The stub's scripts get the admin door's access in the same write (issues #1611, #1645).
+    let access = crate::admin_api::handlers::imposters::admin_script_access(&scripts_dir);
+    match manager.add_stub_from(port, stub, None, access).await {
         Ok(()) => match manager.get_imposter(port) {
             Ok(imposter) => json_response(
                 StatusCode::CREATED,

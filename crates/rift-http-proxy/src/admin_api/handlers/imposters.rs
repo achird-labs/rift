@@ -42,20 +42,6 @@ pub(crate) fn admin_script_access(scripts_dir: &Option<Arc<PathBuf>>) -> ScriptF
     ScriptFileAccess::network(scripts_dir.as_deref().map(PathBuf::as_path))
 }
 
-/// Make the scripts of the imposter on `port` this admin door's before a stub is written into it
-/// (issue #1611), so a stub posted over the network never runs with the unconfined `require` of a
-/// `--configfile` imposter. `Some` is the error response when the imposter does not exist.
-pub(crate) fn claim_scripts_for_admin(
-    manager: &ImposterManager,
-    port: u16,
-    scripts_dir: &Option<Arc<PathBuf>>,
-) -> Option<Response<Full<Bytes>>> {
-    manager
-        .set_script_file_access(port, admin_script_access(scripts_dir))
-        .err()
-        .map(Into::into)
-}
-
 /// The `_rift.scripts` registry of the imposter on `port` (already resolved when the imposter was
 /// created), for resolving a newly-added stub's `{ "ref": "name" }` against. Empty when the
 /// imposter doesn't exist or declares no registry.
@@ -865,6 +851,7 @@ pub async fn handle_verify(
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
     allow_injection: bool,
+    scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req, &manager.body_guard()).await {
         Ok(b) => b,
@@ -875,23 +862,30 @@ pub async fn handle_verify(
     // worker. Like the live matcher (#476) there's no abort flag — Boa's loop-iteration cap (#327)
     // eventually frees the blocking thread. A non-inject verify pays only a cheap task hop, fine
     // since verify is not a per-request hot path.
-    tokio::task::spawn_blocking(move || verify_response(port, &body, &manager, allow_injection))
-        .await
-        .unwrap_or_else(|e| {
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("verify task failed: {e}"),
-            )
-        })
+    let door = admin_script_access(&scripts_dir);
+    tokio::task::spawn_blocking(move || {
+        verify_response(port, &body, &manager, allow_injection, &door)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("verify task failed: {e}"),
+        )
+    })
 }
 
 /// The body of [`handle_verify`] over already-collected bytes, so the parse/gate/evaluate path is
 /// unit-testable without a `Request<Incoming>`.
+///
+/// `door` is the admin door's script access: an `inject` predicate is the admin client's code,
+/// so it never runs with more than that, whatever imposter it verifies (review of #1645).
 fn verify_response(
     port: u16,
     body: &[u8],
     manager: &ImposterManager,
     allow_injection: bool,
+    door: &ScriptFileAccess,
 ) -> Response<Full<Bytes>> {
     let opts: VerifyOptions = match serde_json::from_slice(body) {
         Ok(o) => o,
@@ -914,7 +908,7 @@ fn verify_response(
         return injection_disallowed_response();
     }
     match manager.get_imposter(port) {
-        Ok(imposter) => match imposter.verify(&opts) {
+        Ok(imposter) => match imposter.verify_from(&opts, door) {
             Ok(outcome) => json_response(StatusCode::OK, &outcome),
             // A failing `inject` predicate is the only error path (issue #440); it is caused by the
             // caller-supplied predicate, so it maps to 400 rather than a server fault.
@@ -2234,13 +2228,64 @@ mod verify_tests {
         serde_json::from_slice(&bytes).expect("json")
     }
 
+    // Review of #1645: a verify's `inject` predicate is written by the admin client, so it runs
+    // with the admin door's access, never with the trusted access of a `--configfile` imposter it
+    // verifies against.
+    #[cfg(feature = "javascript")]
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn a_verify_inject_runs_with_the_admin_doors_access() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside.json");
+        std::fs::write(&outside, r#"{"canary": 1645}"#).expect("canary");
+        let manager = Arc::new(ImposterManager::new());
+        let config = serde_json::from_value(serde_json::json!({
+            "protocol": "http", "recordRequests": true, "stubs": []
+        }))
+        .expect("config");
+        let port = manager
+            .create_imposter_from(
+                config,
+                crate::imposter::Persistence::Ephemeral,
+                ScriptFileAccess::trusted_cwd(),
+            )
+            .await
+            .expect("create");
+        manager
+            .get_imposter(port)
+            .expect("imposter")
+            .record_request(rec("GET", "/a"));
+        let inject = format!(
+            "config => {{ try {{ return require({:?}).canary === 1645; }} catch (e) {{ return false; }} }}",
+            outside.to_str().expect("utf-8")
+        );
+        let body = serde_json::to_vec(&serde_json::json!({
+            "predicates": [{ "inject": inject }]
+        }))
+        .expect("body");
+        let resp = verify_response(
+            port,
+            &body,
+            &manager,
+            true,
+            &admin_script_access(&Some(Arc::new(dir.path().join("sd")))),
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["matched"], 0,
+            "the admin client's inject could read a file outside --scripts-dir: {json}"
+        );
+        let _ = manager.delete_imposter(port).await;
+    }
+
     #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn verify_counts_matched_and_total() {
         let (m, port) =
             manager_with(&[rec("GET", "/a"), rec("POST", "/a"), rec("GET", "/b")]).await;
         let body = br#"{"predicates":[{"equals":{"method":"GET"}}]}"#;
-        let resp = verify_response(port, body, &m, false);
+        let resp = verify_response(port, body, &m, false, &ScriptFileAccess::Refused);
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["matched"], 2);
@@ -2254,7 +2299,7 @@ mod verify_tests {
     async fn verify_include_requests_and_closest() {
         let (m, port) = manager_with(&[rec("GET", "/a"), rec("DELETE", "/z")]).await;
         let body = br#"{"predicates":[{"equals":{"method":"GET"}}],"includeRequests":true,"includeClosest":true}"#;
-        let resp = verify_response(port, body, &m, false);
+        let resp = verify_response(port, body, &m, false, &ScriptFileAccess::Refused);
         let json = body_json(resp).await;
         assert_eq!(json["matched"], 1);
         assert_eq!(json["requests"].as_array().expect("requests").len(), 1);
@@ -2267,7 +2312,7 @@ mod verify_tests {
     async fn verify_rejects_inject_predicate_without_allow_injection() {
         let (m, port) = manager_with(&[rec("GET", "/a")]).await;
         let body = br#"{"predicates":[{"inject":"function(){return true;}"}]}"#;
-        let resp = verify_response(port, body, &m, false);
+        let resp = verify_response(port, body, &m, false, &ScriptFileAccess::Refused);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let json = body_json(resp).await;
         assert_eq!(json["errors"][0]["code"], "invalid injection");
@@ -2278,7 +2323,7 @@ mod verify_tests {
     #[tokio::test]
     async fn verify_bad_json_is_400() {
         let (m, port) = manager_with(&[]).await;
-        let resp = verify_response(port, b"not json", &m, false);
+        let resp = verify_response(port, b"not json", &m, false, &ScriptFileAccess::Refused);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let _ = m.delete_imposter(port).await;
     }
@@ -2287,7 +2332,13 @@ mod verify_tests {
     async fn verify_unknown_imposter_is_404() {
         let port = UNUSED_PORT;
         let m = Arc::new(ImposterManager::new());
-        let resp = verify_response(port, br#"{"predicates":[]}"#, &m, false);
+        let resp = verify_response(
+            port,
+            br#"{"predicates":[]}"#,
+            &m,
+            false,
+            &ScriptFileAccess::Refused,
+        );
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

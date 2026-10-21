@@ -2,7 +2,7 @@
 
 use crate::admin_api::handlers::imposters::handle_get as handle_get_imposter;
 use crate::admin_api::handlers::imposters::{
-    admin_script_base, claim_scripts_for_admin, imposter_default_script_engine,
+    admin_script_access, admin_script_base, imposter_default_script_engine,
     imposter_script_registry, reject_stubs_if_injection_disallowed,
 };
 use crate::admin_api::types::{
@@ -130,10 +130,15 @@ pub async fn handle_add(
         }
     }
 
-    if let Some(rejection) = claim_scripts_for_admin(&manager, port, &scripts_dir) {
-        return rejection;
-    }
-    match manager.add_stub(port, add_req.stub, add_req.index).await {
+    match manager
+        .add_stub_from(
+            port,
+            add_req.stub,
+            add_req.index,
+            admin_script_access(&scripts_dir),
+        )
+        .await
+    {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
         Err(e) => e.into(),
     }
@@ -188,10 +193,10 @@ pub async fn handle_replace_all(
 
     // Stub-overlap analysis is computed once in core on the replace (issue #423) and surfaced by
     // the GET render below via the imposter's cached warnings — no redundant recompute here.
-    if let Some(rejection) = claim_scripts_for_admin(&manager, port, &scripts_dir) {
-        return rejection;
-    }
-    if let Err(e) = manager.replace_stubs(port, replace_req.stubs).await {
+    if let Err(e) = manager
+        .replace_stubs_from(port, replace_req.stubs, admin_script_access(&scripts_dir))
+        .await
+    {
         return e.into();
     }
 
@@ -366,10 +371,10 @@ pub async fn handle_replace(
         );
     }
 
-    if let Some(rejection) = claim_scripts_for_admin(&manager, port, &scripts_dir) {
-        return rejection;
-    }
-    match manager.replace_stub(port, index, stub).await {
+    match manager
+        .replace_stub_from(port, index, stub, admin_script_access(&scripts_dir))
+        .await
+    {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
         Err(e) => stub_index_error(e),
     }
@@ -451,10 +456,10 @@ pub async fn handle_replace_by_id(
             ),
         );
     }
-    if let Some(rejection) = claim_scripts_for_admin(&manager, port, &scripts_dir) {
-        return rejection;
-    }
-    match manager.replace_stub_by_id(port, id, stub).await {
+    match manager
+        .replace_stub_by_id_from(port, id, stub, admin_script_access(&scripts_dir))
+        .await
+    {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
         Err(e) => e.into(),
     }

@@ -82,7 +82,15 @@ loads only file modules (CommonJS `.js`, and `.json`), with no built-ins and no 
 script in an imposter written over the admin API, from `--datadir` or from an `https:` source may
 load files only from under `--scripts-dir`, and none without it; a local `--configfile` imposter may
 load any path. A path outside the root is refused with `require('<path>'): outside --scripts-dir`.
-Rhai `import` is not supported. See [Scripting](../features/scripting.md#files-a-script-may-read).
+Rhai `import` is not supported, and neither is JavaScript dynamic `import()`, which Node resolves and Rift rejects. See [Scripting](../features/scripting.md#files-a-script-may-read).
+
+## Promise jobs a hook leaves behind are dropped
+
+Mountebank runs every injection in one Node process, so a `.then` callback an `inject` queues runs
+after it returns, and globals are shared by every imposter. Rift drops the promise jobs a hook leaves
+queued when it returns (an `async` `decorate` still waits for its own), and shares globals only
+between scripts with the same `require()` access, so a script written over the admin API never runs
+code inside a `--configfile` imposter's hook (#1645).
 
 ## `shellTransform` arguments
 

@@ -247,6 +247,10 @@ pub(crate) enum StubReconcile {
     /// More than half the stubs would change — the caller should replace the imposter
     /// wholesale instead of thrashing the stub set in place.
     Degenerate,
+    /// The writing door's script access allows more than the imposter's (issue #1645), so it can
+    /// only take effect on an imposter whose every stub is new: the caller replaces the imposter.
+    /// Nothing was touched.
+    Widens,
 }
 
 /// What reconciling a live stub vector toward a desired one would do, computed without touching
