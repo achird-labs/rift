@@ -797,6 +797,8 @@ pub struct ServerBuilder {
     imposter_sources: Vec<Arc<dyn ImposterSource>>,
     admin_authorizer: Option<Arc<dyn AdminAuthorizer>>,
     reported_admin_port: Option<u16>,
+    /// `Some(v)` overrides the CLI's `--host` in `GET /config`; the inner `None` reports no host.
+    reported_host: Option<Option<String>>,
 }
 
 impl ServerBuilder {
@@ -810,6 +812,7 @@ impl ServerBuilder {
             imposter_sources: Vec::new(),
             admin_authorizer: None,
             reported_admin_port: None,
+            reported_host: None,
         }
     }
 
@@ -862,6 +865,15 @@ impl ServerBuilder {
         self
     }
 
+    /// What `GET /config` reports as `options.host`, when the embedder re-points `--host` for its
+    /// own listener (rift-cluster pins it to loopback). Default: the CLI's `--host`. Report-only —
+    /// the bind is untouched. Mirrors [`Self::reported_admin_port`] (issue #1560).
+    #[must_use]
+    pub fn reported_host(mut self, host: Option<String>) -> Self {
+        self.reported_host = Some(host);
+        self
+    }
+
     /// Inject a pre-built manager (skipping internal construction, including `--datadir`
     /// write-through and TLS defaults) — the embedding seam.
     #[must_use]
@@ -884,6 +896,7 @@ impl ServerBuilder {
         let extra_sources = self.imposter_sources;
         let admin_authorizer = self.admin_authorizer;
         let reported_admin_port = self.reported_admin_port;
+        let reported_host = self.reported_host.unwrap_or_else(|| cli.host.clone());
         // Refuse a blank `--api-key` before anything binds (issue #844). Same reasoning as the
         // front-door check below, with a security edge: a blank key enables the auth gate and then
         // authenticates every request, so the admin plane must never reach the accept loop in that
@@ -1210,7 +1223,7 @@ impl ServerBuilder {
         let mut server = AdminApiServer::new(admin_addr, manager, cli.api_key)
             .listen(admin_listen)
             .with_bound_listeners(admin_listeners)
-            .with_reported_host(cli.host)
+            .with_reported_host(reported_host)
             .with_allow_injection(cli.allow_injection)
             .with_local_only(cli.local_only)
             .with_peer_policy(server_peer_policy)

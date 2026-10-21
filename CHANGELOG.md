@@ -18,6 +18,10 @@ record.
   `[::]` dual-stack with an IPv4 fallback, which the `SocketAddr` entry points cannot express.
   Both are additive; `bind_front_door` and `bind_front_door_with_observer` are unchanged.
 
+- **`ServerBuilder::reported_host`** sets the `options.host` that `GET /config` reports, for an
+  embedder that re-points `--host` for its own listener (#1560). Report-only, like
+  `reported_admin_port`; the default is still the CLI's `--host`.
+
 - **Mountebank's CLI spellings `--logfile`, `--localOnly`, `--ipWhitelist` and `save --removeProxies`
   are accepted** as aliases of `--log`, `--local-only`, `--ip-whitelist` and `--remove-proxies`
   (#1559). `--logfile` has no default file, and `--ipWhitelist` stays the #879 no-op.
