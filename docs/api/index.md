@@ -940,7 +940,8 @@ Get current configuration.
   "serveOptions": [
     "host", "port", "apiKey", "metricsPort", "configFile", "noParse", "config",
     "allowInjection", "requireAdminAuth", "upstreamCaFile", "upstreamCaPem",
-    "upstreamTlsSkipVerify", "maxBodySize", "bodyMemoryBudget", "journalMaxBytes"
+    "upstreamTlsSkipVerify", "maxBodySize", "bodyMemoryBudget", "journalMaxBytes",
+    "scriptsDir"
   ],
   "process": {
     "nodeVersion": "N/A (Rust)", "architecture": "aarch64", "platform": "macos",

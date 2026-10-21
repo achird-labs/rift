@@ -289,6 +289,10 @@ struct ServeOptions {
     /// Bytes of recorded requests each imposter keeps, oldest evicted first (issue #1441).
     /// Default 805306368 (768 MiB).
     journal_max_bytes: Option<usize>,
+    /// The admin plane's `--scripts-dir` (issue #1617): the only directory an imposter written
+    /// through it may read `file:` scripts, `require()` modules and `lookup` CSV files from. Without
+    /// it the admin plane reads none.
+    scripts_dir: Option<String>,
 }
 
 /// Parse `{"imposters":[...]}` or a bare `[...]` into imposter configs (the reload input shape).
@@ -2252,6 +2256,9 @@ async fn build_admin_plane_inner(
     if let Some(source) = config_source {
         server = server.with_config_source(source);
     }
+    if let Some(dir) = &opts.scripts_dir {
+        server = server.with_scripts_dir(std::path::PathBuf::from(dir));
+    }
     let admin = match server.bind().await {
         Ok(admin) => admin,
         Err(e) => {
@@ -2476,6 +2483,7 @@ mod build_admin_plane_chain_tests {
             max_body_size: None,
             body_memory_budget: None,
             journal_max_bytes: None,
+            scripts_dir: None,
         };
         let Err(err) = handle.runtime.block_on(build_admin_plane(&handle, &opts)) else {
             panic!("a missing configFile must fail the admin build");
@@ -2772,6 +2780,7 @@ mod serve_option_capability_tests {
             "maxBodySize": 1048576,
             "bodyMemoryBudget": 2097152,
             "journalMaxBytes": 4194304,
+            "scriptsDir": "/srv/rift-scripts",
         });
         assert_eq!(
             full.as_object().expect("object").len(),

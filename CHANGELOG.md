@@ -13,6 +13,10 @@ record.
 
 ### Added
 
+- **`rift_serve_admin` takes `scriptsDir`** (#1617), the embedded admin plane's `--scripts-dir`:
+  the only directory an imposter posted through it may read `file:` scripts, `require()` modules
+  and `lookup` CSV files from. `serveOptions` advertises it.
+
 - **Embedders can bind a front door the way `--front-door` does**: `front_door::bind_front_door_at`
   and `server::parse_front_door_addr` are now public (#1561). A bare port is `ListenAddr::Any`,
   `[::]` dual-stack with an IPv4 fallback, which the `SocketAddr` entry points cannot express.
@@ -310,7 +314,9 @@ record.
   root (absolute, `..`, or a link out) with one fixed message, `lookup CSV path '<path>' is outside
   --scripts-dir`, without looking at the filesystem outside it. The path is resolved again each
   time the lookup runs, and the file is checked once it is open to be the one that was resolved,
-  so a link changed after admission or during the read is refused rather than followed. A local
+  so a link changed after admission or during the read is refused rather than followed. Only a
+  regular file is read, and the open does not block, so a FIFO or device under the root cannot
+  hold a worker. A local
   `--configfile` imposter and the C-ABI host calls still read any path. A confined `require()`
   (#1611) now makes the same check when it opens a module.
 - `--allowInjection` admits code that runs with Rift's privileges, `shellTransform` included; the

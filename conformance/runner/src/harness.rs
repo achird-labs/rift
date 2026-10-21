@@ -1714,6 +1714,9 @@ impl EmbeddedEngine {
         if let Some(path) = &opts.upstream_ca_file {
             options["upstreamCaFile"] = path.display().to_string().into();
         }
+        // As for a spawned engine's `--scripts-dir`: the root an admin-API `lookup` reads the
+        // corpus's `data/` CSVs under (rift#1617).
+        options["scriptsDir"] = config.corpus_root.display().to_string().into();
         let options = CString::new(options.to_string())
             .map_err(|e| HarnessError::Embedded(format!("options JSON: {e}")))?;
         // rift-ffi drives its own tokio runtime with `block_on`, which may not run on a thread of

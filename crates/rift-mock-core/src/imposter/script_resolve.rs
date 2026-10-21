@@ -443,8 +443,15 @@ pub(crate) fn resolve_confined(
 /// A link swapped into the path between resolving it and opening it would let the open reach a
 /// file outside the root. So the file is opened first, `request` is resolved again, and the read
 /// goes ahead only when the second resolution is the same path and names the very file that is
-/// open (same device and inode on Unix). Anything else is [`ConfinedPathError::Outside`], the
-/// same answer as any other path out of the root.
+/// open (same device and inode on Unix). Off Unix that identity check is path-only: the second
+/// resolution must land on the same canonical path. Anything else is
+/// [`ConfinedPathError::Outside`], the same answer as any other path out of the root.
+///
+/// Only a regular file is read. The open does not block (`O_NONBLOCK` on Unix), so a FIFO or a
+/// device, under the root or swapped in during the race, cannot hold a worker at `open`, and
+/// anything that is not a regular file once open, a directory included, is refused as
+/// [`ConfinedPathError::Outside`] before it is resolved again or read. Links inside the root are
+/// still followed.
 pub(crate) fn read_confined(
     root: &Path,
     base: &Path,
@@ -452,8 +459,11 @@ pub(crate) fn read_confined(
     canonical: &Path,
 ) -> Result<String, ConfinedPathError> {
     use std::io::Read;
-    let mut file = std::fs::File::open(canonical).map_err(ConfinedPathError::Read)?;
+    let mut file = open_without_blocking(canonical).map_err(ConfinedPathError::Read)?;
     let opened = file.metadata().map_err(ConfinedPathError::Read)?;
+    if !opened.is_file() {
+        return Err(ConfinedPathError::Outside);
+    }
     let again = resolve_confined(root, base, request)?;
     // Fails closed: a path that no longer resolves to a readable file was changed under the read.
     let current = std::fs::metadata(&again).map_err(|_| ConfinedPathError::Outside)?;
@@ -464,6 +474,22 @@ pub(crate) fn read_confined(
     file.read_to_string(&mut text)
         .map_err(ConfinedPathError::Read)?;
     Ok(text)
+}
+
+/// Open `path` for reading without waiting on it: a FIFO with no writer, or a device, would
+/// otherwise block `open` itself. `O_NONBLOCK` changes nothing for a regular file's reads.
+#[cfg(unix)]
+fn open_without_blocking(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_without_blocking(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 /// Whether two metadata reads describe the same file.
@@ -1455,6 +1481,35 @@ mod tests {
         std::os::unix::fs::symlink(root.join("old.csv"), root.join("swap.csv")).expect("relink");
         let err = read_lookup_file("swap.csv", &resolved, &access).expect_err("replaced");
         assert!(matches!(err, LookupFileError::Outside(_)), "{err}");
+    }
+
+    /// A FIFO under the root would block `open` until a writer came, holding a worker; a directory
+    /// would reach the read. Both are refused as fast as any path out of the root.
+    #[cfg(unix)]
+    #[test]
+    fn a_confined_read_refuses_a_fifo_and_a_directory_without_blocking() {
+        let (_dir, base) = lookup_tree();
+        let root = base.join("root");
+        let status = std::process::Command::new("mkfifo")
+            .arg(root.join("pipe.csv"))
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo");
+        let access = ScriptFileAccess::Confined(root.clone());
+        for path in ["pipe.csv", "sub"] {
+            let resolved = resolve_lookup_path(path, &access).expect("inside the root");
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker_access = access.clone();
+            std::thread::spawn(move || {
+                // The receiver is gone only once the test has already failed on the timeout.
+                let _ = tx.send(read_lookup_file(path, &resolved, &worker_access));
+            });
+            let read = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("{path}: the read blocked"));
+            let err = read.expect_err(path);
+            assert!(matches!(err, LookupFileError::Outside(_)), "{path}: {err}");
+        }
     }
 
     #[test]
