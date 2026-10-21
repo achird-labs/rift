@@ -1064,13 +1064,13 @@ Six are Mountebank's own error types, so a client that already maps Mountebank e
 | `insufficient access` | 403 |
 | `no such resource` | 404 |
 | `resource conflict` | 409 |
-| `invalid injection` | 400; 500 for a `wait` function that throws |
+| `invalid injection` | 400 for the `--allowInjection` refusal; 500 for an `inject` or `wait` function that throws at serve time |
 
 The rest name doors Mountebank does not have:
 
 | `type` | Typical status |
 |:-------|:---------------|
-| `invalid predicate injection` | 400 |
+| `invalid predicate injection` | 500 (a predicate `inject` that throws at serve time) |
 | `injection timeout` / `predicate injection timeout` | 504 |
 | `backend unavailable` | 503 |
 | `script error` / `script timeout` | 500 / 504 |

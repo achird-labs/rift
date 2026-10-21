@@ -2010,8 +2010,12 @@ fn execute_mountebank_inject_in(
     );
 
     // Execute the script
-    let result = call_mb_wrapper(context, scripts, &wrapper_script, require)
-        .map_err(|e| anyhow!("Failed to execute inject function: {e}"))?;
+    let result = call_mb_wrapper(context, scripts, &wrapper_script, require).map_err(|e| {
+        anyhow::Error::new(InjectionFailure {
+            detail: format!("Failed to execute inject function: {e}"),
+            data: thrown_message(&e, &mut *context),
+        })
+    })?;
 
     // Save updated state back (config.state/injectState/imposterState all alias the same object).
     let updated_state = global
@@ -2026,6 +2030,35 @@ fn execute_mountebank_inject_in(
     parse_mountebank_response(&mut *context, result)
 }
 
+/// A Mountebank response `inject` that threw at serve time. `detail` is Rift's message text;
+/// `data` is Mountebank's `data` (issue #1581): the thrown value's `message`, kept structured
+/// because the handler cannot recover it from the flattened text.
+#[derive(Debug, thiserror::Error)]
+#[error("{detail}")]
+pub struct InjectionFailure {
+    pub detail: String,
+    /// The thrown value's `message` property as a string; `None` for `throw 'str'`, `throw 42`
+    /// or an object without a `message` (Mountebank leaves `data` out then too).
+    pub data: Option<String>,
+}
+
+/// The `message` of a thrown JS value, or `None` when it is not an object carrying one.
+fn thrown_message(e: &boa_engine::JsError, context: &mut Context) -> Option<String> {
+    // Unconvertible thrown value: no readable message, so no `data` (domain-optional).
+    let thrown = e.clone().into_opaque(context).ok()?;
+    let object = thrown.as_object()?;
+    // A getter that throws, or a non-string `message` that cannot be stringified, means the
+    // message is unreadable: Mountebank would then have no `data` either (domain-optional).
+    let message = object.get(js_string!("message"), context).ok()?;
+    if message.is_undefined() {
+        return None;
+    }
+    message
+        .to_string(context)
+        .ok()
+        .map(|s| s.to_std_string_escaped())
+}
+
 /// A Mountebank predicate `inject` function failed — an object-build failure or the script
 /// itself throwing/erroring. Mountebank's own `InjectionError` fails the request loud rather
 /// than silently treating the predicate as non-matching (issue #440); this type lets the HTTP
@@ -2034,7 +2067,20 @@ fn execute_mountebank_inject_in(
 /// mapping instead of becoming a 400.
 #[derive(Debug, thiserror::Error)]
 #[error("invalid predicate injection: {0}")]
-pub struct PredicateInjectionError(pub String);
+pub struct PredicateInjectionError(pub String, pub Option<String>);
+
+impl PredicateInjectionError {
+    /// A failure with no thrown `message` to report (an object-build failure, not a throw).
+    fn internal(detail: String) -> Self {
+        Self(detail, None)
+    }
+
+    /// Mountebank's `data` for this failure (issue #1581).
+    #[must_use]
+    pub fn data(&self) -> Option<&str> {
+        self.1.as_deref()
+    }
+}
 
 /// Execute a Mountebank-style predicate inject function.
 ///
@@ -2076,9 +2122,10 @@ fn execute_predicate_inject_in(
         Ok(obj) => obj,
         Err(e) => {
             tracing::warn!("inject predicate: failed to build request object: {e:#}");
-            return Err(
-                PredicateInjectionError(format!("failed to build request object: {e}")).into(),
-            );
+            return Err(PredicateInjectionError::internal(format!(
+                "failed to build request object: {e}"
+            ))
+            .into());
         }
     };
 
@@ -2092,9 +2139,10 @@ fn execute_predicate_inject_in(
         Ok(obj) => obj,
         Err(e) => {
             tracing::warn!("inject predicate: failed to build state object: {e:#}");
-            return Err(
-                PredicateInjectionError(format!("failed to build state object: {e}")).into(),
-            );
+            return Err(PredicateInjectionError::internal(format!(
+                "failed to build state object: {e}"
+            ))
+            .into());
         }
     };
 
@@ -2105,9 +2153,10 @@ fn execute_predicate_inject_in(
         Ok(obj) => obj,
         Err(e) => {
             tracing::warn!("inject predicate: failed to build logger object: {e:#}");
-            return Err(
-                PredicateInjectionError(format!("failed to build logger object: {e}")).into(),
-            );
+            return Err(PredicateInjectionError::internal(format!(
+                "failed to build logger object: {e}"
+            ))
+            .into());
         }
     };
 
@@ -2134,7 +2183,9 @@ fn execute_predicate_inject_in(
         || flatten_request_onto(&config_obj, &request_obj, &mut *context).is_err()
     {
         tracing::warn!("inject predicate: failed to build config object");
-        return Err(PredicateInjectionError("failed to build config object".to_string()).into());
+        return Err(
+            PredicateInjectionError::internal("failed to build config object".to_string()).into(),
+        );
     }
 
     let global = context.global_object();
@@ -2161,7 +2212,11 @@ fn execute_predicate_inject_in(
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("inject predicate: script execution error: {e}");
-            return Err(PredicateInjectionError(format!("script execution error: {e}")).into());
+            return Err(PredicateInjectionError(
+                format!("script execution error: {e}"),
+                thrown_message(&e, &mut *context),
+            )
+            .into());
         }
     };
 
@@ -5425,7 +5480,7 @@ function respond(ctx) {
 
     // =========================================================================================
     // Issue #355 Item 5 (AC5): a throwing inject fn surfaces as an Err (the handler maps this to
-    // a Mountebank-shaped 400 — see issue_355_inject_error_parity.rs for the end-to-end assertion).
+    // a Mountebank-shaped 500, issue #1581 — see issue_355_inject_error_parity.rs for the end-to-end assertion).
     // =========================================================================================
     #[test]
     fn mb_inject_throwing_returns_err() {
@@ -5442,6 +5497,56 @@ function respond(ctx) {
             err.to_string().contains("boom-inject"),
             "the error must carry the script's failure message, got: {err}"
         );
+    }
+
+    // Issue #1581: Mountebank's `data` is the thrown value's `message`; absent when it has none.
+    fn thrown_data(body: &str) -> Option<String> {
+        let script = format!("function(config) {{ {body} }}");
+        let err = execute_mountebank_inject(
+            &script,
+            &mb_req("GET", "/throw"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect_err("a throwing inject must be Err");
+        err.downcast_ref::<InjectionFailure>()
+            .expect("an InjectionFailure")
+            .data
+            .clone()
+    }
+
+    #[test]
+    fn inject_failure_data_is_the_thrown_message() {
+        assert_eq!(thrown_data("throw new Error('x');"), Some("x".into()));
+        assert_eq!(thrown_data("throw new TypeError('t');"), Some("t".into()));
+        assert_eq!(
+            thrown_data("return nosuch.x;"),
+            Some("nosuch is not defined".into())
+        );
+        assert_eq!(thrown_data("throw {message: 7};"), Some("7".into()));
+    }
+
+    #[test]
+    fn inject_failure_data_is_absent_without_a_message() {
+        assert_eq!(thrown_data("throw 'str';"), None);
+        assert_eq!(thrown_data("throw 42;"), None);
+        assert_eq!(thrown_data("throw {};"), None);
+    }
+
+    #[test]
+    fn predicate_inject_failure_carries_the_thrown_message() {
+        let err = execute_predicate_inject(
+            "function(config) { throw new Error('pboom'); }",
+            &mb_req("GET", "/p"),
+            test_port(),
+            &trusted_files(),
+        )
+        .expect_err("a throwing predicate must be Err");
+        let failure = err
+            .downcast_ref::<PredicateInjectionError>()
+            .expect("a PredicateInjectionError");
+        assert_eq!(failure.data(), Some("pboom"));
     }
 
     // ============================================

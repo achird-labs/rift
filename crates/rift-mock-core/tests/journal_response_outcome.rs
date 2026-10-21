@@ -164,10 +164,10 @@ async fn an_answered_engine_error_records_the_status_the_client_got() {
     let resp = reqwest::get(format!("http://127.0.0.1:{port}/boom"))
         .await
         .expect("send");
-    assert_eq!(resp.status(), 400);
+    assert_eq!(resp.status(), 500);
 
     let entry = only_entry(&manager, port);
     assert_outcome_fields_paired(&entry);
-    assert_eq!(entry["status"], 400, "{entry}");
+    assert_eq!(entry["status"], 500, "{entry}");
     manager.delete_all().await;
 }

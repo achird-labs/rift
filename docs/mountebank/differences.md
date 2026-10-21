@@ -18,6 +18,7 @@ the response configures. Some responses carry one more marker:
 | `x-rift-proxy-latency: <ms>` | A proxied response, with the upstream's time in milliseconds |
 | `x-rift-proxy-error: true` | The proxy could not reach the upstream (see [Proxy](proxy.md)) |
 | `x-rift-wait-error: true` | A `wait` function threw; the body is Mountebank's `invalid wait injection` error (see [Behaviors](behaviors.md#how-a-wait-string-is-read)) |
+| `x-rift-inject-error: true` | A response or predicate `inject` threw; the body is Mountebank's `invalid injection` error (a throw is `500` with the thrown message in `data`) |
 | `x-rift-inject: true` | An `inject` response produced it |
 | `x-rift-default-response: true` | No stub matched and the imposter's `defaultResponse` answered |
 | `x-rift-no-match: true` | No stub matched and the imposter has no `defaultResponse` |
@@ -35,7 +36,8 @@ header.
 Error envelopes carry `code` (the HTTP status), `type` and `message` — see the
 [API reference](../api/index.md) — where Mountebank's carry `code` (Rift's `type`) and `message`. Rift
 does not add Mountebank's `source`, `name` or `stack` fields, and its messages are worded
-differently.
+differently. A throwing predicate `inject` carries `code` `invalid predicate injection`, where
+Mountebank says `invalid injection`.
 
 When an imposter's address is held by another process, both engines answer `400`; Mountebank's body
 is node's raw `EADDRINUSE` object (`code`, `errno`, `syscall`, `address`, `port`, no `message`), Rift's

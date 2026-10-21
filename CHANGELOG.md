@@ -44,6 +44,10 @@ record.
 
 ### Changed
 
+- **A throwing `inject` answers `500`, as in Mountebank** (#1581). A response or predicate `inject`
+  that throws at request time used to answer `400`. It now answers `500` and carries Mountebank's
+  `data`, the thrown error's message. The `--allowInjection` refusal is still `400`.
+
 - **https imposters print `ca`, `mutualAuth`, `rejectUnauthorized` and `ciphers` in every view,
   `?replayable=true` included** (#1576), as Mountebank does: `ca` is `null` when unset, a
   one-element `ca` array prints (and is stored) as an array instead of a bare string, and `ciphers`

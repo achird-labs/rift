@@ -555,8 +555,8 @@ predicate `inject`, and the `decorate` behavior — all of which run off the asy
 - **On a genuine error** — a compile error, a runtime error, or exceeding the loop/recursion
   bound — a `_rift.script` failure is a `500 Internal Server Error` carrying an
   `x-rift-script-error: true` header; a failing Mountebank `inject` (response or predicate) is a
-  `400` with a Mountebank-shaped `{"errors": [...]}` body (code `invalid injection` /
-  `invalid predicate injection`), and a failing `decorate` serves the undecorated response with an
+  `500` with a Mountebank-shaped `{"errors": [...]}` body (code `invalid injection` /
+  `invalid predicate injection`, and Mountebank's `data`: the thrown error's message), and a failing `decorate` serves the undecorated response with an
   `x-rift-decorate-error: true` header (or a `500` under `strictBehaviors`).
 - **On a wall-clock timeout** the response is instead a **`504 Gateway Timeout`** carrying an
   `x-rift-script-timeout: true` marker on top of the hook's usual signal header, so a transient,

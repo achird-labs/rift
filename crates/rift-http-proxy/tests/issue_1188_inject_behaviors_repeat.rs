@@ -195,7 +195,7 @@ async fn a_failing_inject_runs_no_behavior() {
         .send()
         .await
         .expect("GET");
-    assert_eq!(response.status().as_u16(), 400);
+    assert_eq!(response.status().as_u16(), 500);
     assert_eq!(response.headers()["x-rift-inject-error"], "true");
     assert!(
         start.elapsed() < Duration::from_millis(1200),
