@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use crate::intercept_control::InterceptAuth;
 use crate::intercept_rules::{ForwardTarget, InterceptAction, InterceptRules, ServeStub};
+use crate::listen::{ListenAddr, ListenerSet};
 use base64::Engine;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
@@ -25,13 +26,14 @@ use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
-use rift_mock_core::proxy::HttpTuning;
+use rift_mock_core::extensions::PeerCheck;
 use rift_mock_core::proxy::intercept_ca::SniCertResolver;
+use rift_mock_core::proxy::{HttpTuning, PeerPolicy};
 use rift_mock_core::{FaultCell, FaultIo};
 use rustls::ServerConfig;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
@@ -127,7 +129,9 @@ enum BodyReadError {
 /// here is what makes dropping the listener safe as well — every receiver observes the close and
 /// drains, instead of tunnels outliving the handle that owned them.
 pub struct InterceptListener {
-    local_addr: SocketAddr,
+    /// Every bound address, in bind order; never empty. Two under `--local-only` on a host with
+    /// IPv6 loopback (issue #1572).
+    local_addrs: Vec<SocketAddr>,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
     handle: JoinHandle<()>,
 }
@@ -141,6 +145,9 @@ impl InterceptListener {
     ///
     /// `auth`, when set, requires `Proxy-Authorization: Basic …` on every `CONNECT` (issue #878);
     /// `None` leaves the proxy open, which is the behaviour it has always had.
+    ///
+    /// Binds exactly `addr` and serves every client ([`PeerPolicy::Any`]); see
+    /// [`bind_listeners`](Self::bind_listeners) for `--local-only`.
     pub async fn bind(
         addr: SocketAddr,
         resolver: Arc<SniCertResolver>,
@@ -148,9 +155,38 @@ impl InterceptListener {
         auth: Option<InterceptAuth>,
         outbound_tls: rift_mock_core::proxy::OutboundTls,
     ) -> anyhow::Result<Self> {
-        // Dual-stack on an IPv6 address, as the admin plane it follows is (issue #1528).
-        let listener = TcpListener::from_std(rift_mock_core::proxy::bind_server_listener(addr)?)?;
-        let local_addr = listener.local_addr()?;
+        Self::bind_listeners(
+            ListenAddr::Exact(addr),
+            PeerPolicy::Any,
+            resolver,
+            rules,
+            auth,
+            outbound_tls,
+        )
+        .await
+    }
+
+    /// [`bind`](Self::bind) on every listener `addr` needs (issue #1572): `127.0.0.1` and `[::1]`
+    /// for `Loopback`, as the admin API and `/metrics` bind under `--local-only` (#1528).
+    ///
+    /// `policy` decides which clients are served: a refused one is closed at accept, before the
+    /// `CONNECT` is read, and counted in `rift_blocked_connections_total{listener="intercept"}`.
+    /// `--local-only` passes `LoopbackOnly`, because a loopback bind still accepts a non-loopback
+    /// source routed over loopback, and a listener started on `0.0.0.0` must still refuse
+    /// off-host clients (#1523, #1568).
+    pub(crate) async fn bind_listeners(
+        addr: ListenAddr,
+        policy: PeerPolicy,
+        resolver: Arc<SniCertResolver>,
+        rules: InterceptRules,
+        auth: Option<InterceptAuth>,
+        outbound_tls: rift_mock_core::proxy::OutboundTls,
+    ) -> anyhow::Result<Self> {
+        // An IPv6 address is dual-stack, as the admin plane it follows is (issue #1528).
+        let mut listener = ListenerSet::from_std(addr.bind()?)?;
+        let local_addrs = listener.local_addrs()?;
+        // `from_std` refuses an empty set, so there is always a first address.
+        let mut peer_check = PeerCheck::new(policy, "intercept", local_addrs[0].port());
         let tls = build_tls_acceptor(resolver)?;
 
         // One forward client per listener, cloned per connection (issue #552). Nothing about it
@@ -213,6 +249,13 @@ impl InterceptListener {
                 tokio::select! {
                     _ = shutdown_rx.recv() => break,
                     accepted = listener.accept() => match accepted {
+                        // `--local-only` (issue #1572): refused before the `CONNECT` is read, as
+                        // the admin loop does (#1568). Dropping the stream closes it unanswered;
+                        // the permit goes with it, so a refusal holds no connection slot.
+                        Ok((stream, peer)) if !peer_check.admits(peer) => {
+                            drop(stream);
+                            drop(permit);
+                        }
                         Ok((stream, peer)) => {
                             let tls = tls.clone();
                             let rules = rules.clone();
@@ -245,15 +288,22 @@ impl InterceptListener {
         });
 
         Ok(Self {
-            local_addr,
+            local_addrs,
             shutdown_tx,
             handle,
         })
     }
 
-    /// The address the listener is bound to.
+    /// The first bound address: `127.0.0.1` under a two-address loopback, otherwise the one
+    /// address bound.
     pub fn local_addr(&self) -> SocketAddr {
-        self.local_addr
+        self.local_addrs[0]
+    }
+
+    /// Every bound address, in bind order (issue #1572); two under `--local-only` on a host with
+    /// IPv6 loopback.
+    pub fn local_addrs(&self) -> &[SocketAddr] {
+        &self.local_addrs
     }
 
     /// Signal the accept loop to stop and wait for it to finish.
@@ -1241,6 +1291,7 @@ mod tests {
     use super::*;
     use crate::intercept_rules::{ForwardTarget, InterceptRule};
     use rift_mock_core::proxy::intercept_ca::CertificateAuthority;
+    use tokio::net::TcpListener;
 
     /// A port with nothing listening, for the tests that need a forward target that always fails.
     /// Port 1 is below the privileged threshold, so no test can bind it, and outside the ephemeral

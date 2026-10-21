@@ -240,6 +240,13 @@ interface (`[::]` dual-stack, or `0.0.0.0` on a host without IPv6) — so a bare
 is reachable off-host, and warns unless `--intercept-auth` is set. Pass
 `--host 127.0.0.1` for a loopback-only rig, or use the config-file block, which names its own host.
 
+Under `--local-only` the flag listens on `127.0.0.1` and `[::1]`, as the admin API and `/metrics`
+do, and the proxy refuses every client that is not loopback (#1572). The refusal applies to every
+listener the server starts, however it was started: one brought up at runtime with
+`POST /intercept {"host": "0.0.0.0"}` binds that address but closes an off-host client at accept,
+before the `CONNECT` is read, as an imposter naming its own `host` does. Refusals are counted in
+`rift_blocked_connections_total{listener="intercept"}`.
+
 (Equivalently `RIFT_INTERCEPT_PORT` / `RIFT_INTERCEPT_CA_CERT` / `RIFT_INTERCEPT_CA_KEY`, or the
 inline `RIFT_INTERCEPT_CA_CERT_PEM` / `RIFT_INTERCEPT_CA_KEY_PEM`. The file pair and the PEM pair are
 mutually exclusive — passing both is a startup error. There is no `returnCaKey` at launch; bootstrap

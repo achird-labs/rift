@@ -127,8 +127,9 @@ pub struct Cli {
     )]
     pub allow_injection: bool,
 
-    /// Only accept requests from localhost: the admin API and /metrics listen on `127.0.0.1` and
-    /// `::1`, and they, every imposter port and the front door refuse non-loopback clients
+    /// Only accept requests from localhost: the admin API, /metrics and --intercept-port listen on
+    /// `127.0.0.1` and `::1`, and they, every imposter port and the front door refuse non-loopback
+    /// clients
     #[arg(
         long,
         visible_alias = "localOnly",
@@ -1158,8 +1159,8 @@ impl ServerBuilder {
 
         if cli.local_only {
             info!(
-                "--local-only: admin and /metrics bind loopback; admin, /metrics, imposters and \
-                 the front door refuse non-loopback clients"
+                "--local-only: admin, /metrics and --intercept-port bind loopback; admin, /metrics, \
+                 imposters, the front door and the intercept proxy refuse non-loopback clients"
             );
         }
 
@@ -1247,14 +1248,21 @@ impl ServerBuilder {
         // The policy is set on the control, not passed per start, so every door through it — the
         // flag, the config block, and a runtime `POST /intercept` — is judged the same. Set before
         // the clone handed to the admin server, or the runtime door would inherit the default.
+        // `--local-only` refuses non-loopback clients on every intercept door (issue #1572),
+        // including a runtime `POST /intercept` that names `0.0.0.0`, as an imposter naming its own
+        // `host` does (#1523).
         let intercept = InterceptControl::default()
             .with_exposure_policy(cli.require_admin_auth.into())
             .with_outbound_tls(outbound_tls.clone())
+            .with_peer_policy(server_peer_policy)
             .with_port_reservations(intercept_manager);
         // The origin travels with the listener so a reload knows whether the file's block owns its
         // rules (issue #1271); the two cannot both be set, which `intercept_block` refuses above.
         let start_options = match (intercept_block, intercept_flag_opts) {
             (Some(block), _) => Some((block, InterceptOrigin::ConfigFile)),
+            // Under `--local-only` the flag listens on both loopbacks, as the admin API it follows
+            // does (issue #1572); `start_loopback_from` below ignores the host.
+            (None, Some(flags)) if cli.local_only => Some((flags, InterceptOrigin::Flags)),
             (None, Some(mut flags)) => {
                 // The address the admin plane bound, not the judged one: with no `--host` that is
                 // `[::]`, or `0.0.0.0` where the host has no IPv6 (issue #1528).
@@ -1267,7 +1275,12 @@ impl ServerBuilder {
         };
         if let Some((options, origin)) = start_options {
             let seeded_rules = options.rules.len();
-            if let Err(e) = intercept.start_from(options, origin).await {
+            let started = if cli.local_only && origin == InterceptOrigin::Flags {
+                intercept.start_loopback_from(options, origin).await
+            } else {
+                intercept.start_from(options, origin).await
+            };
+            if let Err(e) = started {
                 // Same contract as the admin-bind arm below: don't orphan a listener already bound
                 // by this call. #655 widens the ways this can fail (rule-capacity, and a CA/bind
                 // error declared by the config block rather than typed as a flag), and `start()` is
@@ -1284,8 +1297,11 @@ impl ServerBuilder {
             info!(
                 "Rift intercept proxy listening (HTTPS forward-proxy) on {} with {} configured rule(s)",
                 intercept
-                    .status()
-                    .expect("intercept listener bound after a successful start"),
+                    .status_addrs()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" and "),
                 seeded_rules
             );
         }
