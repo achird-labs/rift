@@ -1228,6 +1228,7 @@ impl ServerBuilder {
             .with_reported_host(reported_host)
             .with_allow_injection(cli.allow_injection)
             .with_local_only(cli.local_only)
+            .with_mock_debug(cli.mock, cli.debug)
             .with_peer_policy(server_peer_policy)
             .with_exposure_checked();
         if let Some(port) = reported_admin_port {

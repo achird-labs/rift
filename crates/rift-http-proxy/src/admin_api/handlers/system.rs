@@ -80,6 +80,12 @@ pub struct ConfigSnapshot {
     /// `--host` as supplied, `None` when unset (issue #1528) — the flag, for the reason given on
     /// `local_only`: with no `--host` the bind is `[::]` or, without IPv6, `0.0.0.0`.
     pub host: Option<std::sync::Arc<str>>,
+    /// `--mock` as supplied (issue #1569) — the flag, reported as Mountebank's `/config` does. It
+    /// has no effect on Rift (see `docs/configuration/cli.md`).
+    pub mock: bool,
+    /// `--debug` as supplied (issue #1569) — the flag, not "is debug logging on" (an explicit
+    /// `RUST_LOG` can override the level it sets).
+    pub debug: bool,
 }
 
 /// GET /config - Mountebank-compatible config endpoint
@@ -99,6 +105,8 @@ pub fn handle_config(allow_injection: bool, snapshot: ConfigSnapshot) -> Respons
             "host": snapshot.host.as_deref(),
             "allowInjection": allow_injection,
             "localOnly": snapshot.local_only,
+            "mock": snapshot.mock,
+            "debug": snapshot.debug,
             // Accurate rather than aspirational (issue #879): `--ip-whitelist` is accepted and
             // never enforced, so every address may connect. Reporting the supplied list here would
             // re-create the false assurance the flag itself was removed from advertising.
@@ -548,6 +556,8 @@ mod tests {
                 admin_port: 2525,
                 local_only: false,
                 host: None,
+                mock: false,
+                debug: false,
             },
         );
         assert_eq!(resp.status(), StatusCode::OK);
@@ -564,6 +574,8 @@ mod tests {
                 admin_port: 2525,
                 local_only: false,
                 host: None,
+                mock: false,
+                debug: false,
             },
         );
         let bytes = tokio::runtime::Runtime::new()
@@ -592,6 +604,36 @@ mod tests {
         }
     }
 
+    // Issue #1569: `mock` and `debug` echo the flags, as Mountebank's /config does.
+    #[test]
+    fn handle_config_reports_mock_and_debug_flags() {
+        use http_body_util::BodyExt;
+        let read = |mock: bool, debug: bool| {
+            let resp = handle_config(
+                false,
+                ConfigSnapshot {
+                    admin_port: 2525,
+                    local_only: false,
+                    host: None,
+                    mock,
+                    debug,
+                },
+            );
+            let bytes = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(resp.into_body().collect())
+                .unwrap()
+                .to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+        let on = read(true, true);
+        assert_eq!(on["options"]["mock"], serde_json::json!(true));
+        assert_eq!(on["options"]["debug"], serde_json::json!(true));
+        let off = read(false, false);
+        assert_eq!(off["options"]["mock"], serde_json::json!(false));
+        assert_eq!(off["options"]["debug"], serde_json::json!(false));
+    }
+
     // AC7 (#342): the injection flag is threaded explicitly, not read from process env —
     // an embedder sets it without mutating the environment.
     #[test]
@@ -604,6 +646,8 @@ mod tests {
                     admin_port: 2525,
                     local_only: false,
                     host: None,
+                    mock: false,
+                    debug: false,
                 },
             );
             let bytes = tokio::runtime::Runtime::new()

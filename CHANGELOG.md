@@ -17,6 +17,10 @@ record.
   the only directory an imposter posted through it may read `file:` scripts, `require()` modules
   and `lookup` CSV files from. `serveOptions` advertises it.
 
+- **`GET /config` reports `mock` and `debug`, and `--rcfile` accepts both** (#1569): `options.mock`
+  and `options.debug` echo the flags, as Mountebank's do, and an rcfile `mock`/`debug` is no longer
+  skipped as an unsupported key (the CLI flag still wins). `mock` is always present, where
+  Mountebank omits it when unset.
 - **Embedders can bind a front door the way `--front-door` does**: `front_door::bind_front_door_at`
   and `server::parse_front_door_addr` are now public (#1561). A bare port is `ListenAddr::Any`,
   `[::]` dual-stack with an IPv4 fallback, which the `SocketAddr` entry points cannot express.

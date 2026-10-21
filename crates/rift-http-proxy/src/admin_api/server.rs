@@ -87,6 +87,9 @@ pub struct AdminApiServer {
     /// `--local-only` as supplied, reported verbatim by `GET /config` (issue #879). The flag, not
     /// "did we bind loopback" — see `ConfigSnapshot::local_only`.
     local_only: bool,
+    /// `--mock` / `--debug` as supplied, reported verbatim by `GET /config` (issue #1569).
+    mock: bool,
+    debug: bool,
     /// Which clients the accept loop serves (issue #1568). `Any` unless the embedder says
     /// otherwise; see [`with_peer_policy`](AdminApiServer::with_peer_policy).
     peer_policy: PeerPolicy,
@@ -118,6 +121,8 @@ impl AdminApiServer {
             scripts_dir: None,
             authorizer: None,
             local_only: false,
+            mock: false,
+            debug: false,
             peer_policy: PeerPolicy::Any,
             reported_admin_port: None,
             exposure: Some(AdminExposurePolicy::default()),
@@ -154,6 +159,15 @@ impl AdminApiServer {
     #[must_use]
     pub fn with_local_only(mut self, local_only: bool) -> Self {
         self.local_only = local_only;
+        self
+    }
+
+    /// Record `--mock` and `--debug` for `GET /config` to report (issue #1569): the flags, as
+    /// supplied, not whether they changed anything.
+    #[must_use]
+    pub fn with_mock_debug(mut self, mock: bool, debug: bool) -> Self {
+        self.mock = mock;
+        self.debug = debug;
         self
     }
 
@@ -375,6 +389,8 @@ impl AdminApiServer {
                         .unwrap_or_else(|| local_addr.port()),
                     local_only: self.local_only,
                     host: self.reported_host,
+                    mock: self.mock,
+                    debug: self.debug,
                 },
                 rift_mock_core::extensions::PeerCheck::new(
                     self.peer_policy,

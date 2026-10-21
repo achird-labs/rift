@@ -490,18 +490,6 @@
       "note": "the test writes mbrc.json only after start, so at start it is a missing --rcfile, which aborts startup"
     },
     {
-      "id": "cli/rcfileTest.js::--rcfile should load rcfile options and override defaults",
-      "class": "bug",
-      "issue": "#1569",
-      "note": "GET /config options has no mock, and the rcfile subset refuses `mock` as an unsupported key"
-    },
-    {
-      "id": "cli/rcfileTest.js::--rcfile options passed on CLI should override rcfile options",
-      "class": "bug",
-      "issue": "#1569",
-      "note": "GET /config options has no mock or debug"
-    },
-    {
       "id": "cli/rcfileTest.js::--rcfile options passed on CLI using an alias should override rcfile options",
       "class": "bug",
       "issue": "#1586",
