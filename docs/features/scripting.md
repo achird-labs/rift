@@ -110,7 +110,14 @@ config.request.path        // "/api/users/123"
 config.request.query       // { page: "1", limit: "10" }
 config.request.headers     // { "Content-Type": "application/json" }; any spelling finds it, e.g. ["content-type"]
 config.request.body        // Request body (string or parsed object)
+config.request.isDryRun    // true only in a predicateGenerators inject's create-time dry run
 ```
+
+A `predicateGenerators` `inject` runs once when its stub is created, against an empty `GET /` with
+`config.request.isDryRun` set to `true`, and a throw or a non-array return refuses the config, as in
+Mountebank. Return `[]` early on the flag when the script needs a real request (see
+[Proxy: The create-time dry run](../mountebank/proxy.md#the-create-time-dry-run)). Outside the dry
+run the key is absent.
 
 > Path parameters (`request.pathParams`, from a stub's [`routePattern`](../configuration/native.md#route-patterns-routepattern)) are exposed to the `_rift.script` engines — Rhai and JavaScript — not to this Mountebank `inject` `config.request` object.
 

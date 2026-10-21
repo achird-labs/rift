@@ -76,9 +76,12 @@ pub use datadir_file::sweep_interrupted_writes;
 // Builds a `proxy`-stub upstream client under a trust policy (issue #974), so the binary and any
 // embedder share one timeout/pooling configuration.
 pub use core::build_upstream_client;
+// The create-time dry run of `predicateGenerators` injects (issue #1580), for every door that
+// admits a config from a client — rift-cluster's write path included.
 pub use core::{
     ClearedProxyResponses, ClosestMatch, FailedPredicate, VerifyOptions, VerifyOutcome,
 };
+pub use core::{GeneratorDryRun, dry_run_predicate_generators};
 
 // Re-export the imposter request handler (single-port gateway dispatch, issue #212)
 pub use handler::{handle_imposter_request, handle_imposter_request_decorated};

@@ -357,6 +357,16 @@ pub async fn handle_add_space_stub(
     {
         return rejection;
     }
+    // After the gate, before anything is stored (issue #1580).
+    if let Some(rejection) = crate::admin_api::handlers::imposters::reject_failing_generators(
+        std::slice::from_ref(&stub),
+        crate::admin_api::handlers::imposters::imposter_script_timeout_ms(&manager, port),
+        crate::admin_api::handlers::imposters::admin_script_access(&scripts_dir),
+    )
+    .await
+    {
+        return rejection;
+    }
     // Resolve `_rift.script` `file:`/`ref:` sources before persisting (issue #356 B1): escape /
     // unknown-ref / unconfigured `file:` → 400, nothing unresolved is ever stored.
     {

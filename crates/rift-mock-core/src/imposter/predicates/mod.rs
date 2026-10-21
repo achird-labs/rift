@@ -717,6 +717,7 @@ where
                     form: form
                         .filter(|_| body.is_some_and(|b| !b.is_empty()))
                         .map(crate::util::comma_joined),
+                    is_dry_run: false,
                 };
                 execute_predicate_inject(inject_fn, &mb_request, imposter_port, script_files)
             }

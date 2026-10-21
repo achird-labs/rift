@@ -568,6 +568,7 @@ pub fn apply_js_or_rhai_decorate(
             request_from: request.request_from.clone(),
             ip: request.ip.clone(),
             form: request.form.clone(),
+            is_dry_run: false,
         };
         // The executor calls the script as a function value, so a bare body in the `config`
         // convention ("config.response.body = ...;") is wrapped into one first. The test is the

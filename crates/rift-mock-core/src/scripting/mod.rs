@@ -99,6 +99,14 @@ pub enum PredicateGeneratorError {
     /// The generator script errored while executing.
     #[error("script execution error: {0}")]
     Script(String),
+    /// The generator script threw (issue #1580). `message` is what Mountebank reports as the
+    /// error's `data`: the thrown value's `message`, `None` when it has none (`throw 'text'`).
+    /// `detail` is the engine's full rendering, with position and stack, for the log.
+    #[error("script execution error: {detail}")]
+    Threw {
+        message: Option<String>,
+        detail: String,
+    },
     /// The generator ran but did not return a usable predicate array.
     #[error("generator produced invalid output: {0}")]
     Output(String),
@@ -115,7 +123,7 @@ impl PredicateGeneratorError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Pool(_) => "pool-failure",
-            Self::Script(_) => "script-error",
+            Self::Script(_) | Self::Threw { .. } => "script-error",
             Self::Output(_) => "invalid-output",
             Self::Invalid(_) => "invalid-predicate",
         }

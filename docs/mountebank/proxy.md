@@ -183,7 +183,7 @@ Control how requests are matched when generating stubs:
 | Key | Description |
 |:----|:------------|
 | `matches` | Which request fields the generated predicate captures (table above). An object whose keys are request fields: `method`, `path`, `query`, `headers`, `body`, `requestFrom`, `ip`, `form`. `requestFrom` is the client's `address:port` and `ip` its address, as the matcher reads them; a recorded `requestFrom` includes the client's port, so it matches that connection only, as in Mountebank. An imposter with no `host` listens dual-stack in both engines, so both report an IPv4 client as `::ffff:127.0.0.1` and record that; with `"host": "0.0.0.0"` the client is `127.0.0.1`. `form` is the urlencoded body, recorded like `query`; a request without a non-empty urlencoded body records no `form` predicate (Mountebank records `deepEquals: {}`, which also constrains nothing). An IPv6 client's `requestFrom` is written `[::1]:50000` in Rift and `::1:50000` in Mountebank, and under `"predicateOperator": "matches"` the brackets read as a character class, so such a recording does not match its own client |
-| `predicateOperator` | The operator of every generated predicate: `equals`, `deepEquals`, `contains`, `startsWith`, `endsWith`, `matches` or `exists`; omitted, see [What Gets Recorded](#what-gets-recorded). Any other value is refused (400, or a startup error; `rift-lint` E053). Mountebank admits it and then answers `500` to every request after the first recording |
+| `predicateOperator` | The operator of every generated predicate: `equals`, `deepEquals`, `contains`, `startsWith`, `endsWith`, `matches` or `exists`; omitted, see [What Gets Recorded](#what-gets-recorded). Any other value is refused (400, or a startup error; `rift-lint` E053). Mountebank admits it and then answers `500` to every request after the first recording. Mountebank 2.9.5 refuses every generator with `"predicateOperator": "exists"` when the imposter is created (an internal error with no message), although its docs describe it; Rift records `{"exists": …}` as documented |
 | `caseSensitive` | A boolean, copied onto each generated predicate when set (see [Case Sensitivity](#case-sensitivity)) |
 | `except` | A string, copied onto each generated predicate; the recorded values stay whole and the matcher strips the regex from both sides (see [`except`](predicates.md#except)) |
 | `jsonpath` | `{"selector": "$.id"}`: capture only what the selector selects from the body, and scope the generated predicate with the same selector |
@@ -259,7 +259,7 @@ records
 | Matcher | Recorded predicate |
 |:--------|:-------------------|
 | `field: true` | `{"deepEquals": {field: value}}` — the whole field, exactly. A query with an extra parameter is a different request. A query or form key the request repeated is recorded as the array of its values (`{"key": ["first", "second"]}`), as Mountebank records it, so the stub replays to the same values in any order |
-| `query` / `headers: {"name": true, …}` | `{"equals": {field: {name: value, …}}}` over the listed names; a listed name the request lacks is left out, and a listed query key it repeated is the array of its values |
+| `query` / `headers: {"name": true, …}` | `{"equals": {field: {name: value, …}}}` over the listed names; a listed name the request lacks is left out, and a listed query key it repeated is the array of its values. Any value lists the name, as in Mountebank: `{"query": {"q": "mountebank"}}` records the request's `q` |
 | `"predicateOperator": "exists"` | `{"exists": {field: true}}`, or `{"exists": {field: {name: true, …}}}` for `query` and `headers` |
 | any other `predicateOperator` | `{operator: {field: value}}` for each field |
 
@@ -277,6 +277,8 @@ Deviations from Mountebank:
   the kept names, so the ignored name may take any value. Mountebank records `deepEquals` without
   the ignored name and does not persist `ignore`, so its recording never matches a request that
   carries the name.
+- A listed query or form key that the request repeats is recorded as the array of its values.
+  Mountebank records `{}`, which matches any value of that key.
 
 Recordings made by earlier releases hold one `equals` predicate per generator, with `except` already
 applied and `caseSensitive` written; they still load and match as they did.
@@ -334,6 +336,38 @@ without the create-time check (a replayed rift-cluster config, for one).
 
 A generator that legitimately returns an empty array (`[]`) is **not** a failure — it records a
 match-all stub as before. Only genuine generation failures skip recording and set the header.
+
+#### The create-time dry run
+
+A generator `inject` is also run once when its stub is created, as in Mountebank: against an empty
+`GET /` (no query, headers or form, `body` `""`, `requestFrom` `""`, no `ip`) with
+`config.request.isDryRun` set to `true`. An `inject` that throws, returns something other than an
+array, or runs past the script timeout refuses the config, whatever the proxy's `mode`: a `400`
+from `POST`/`PUT /imposters` and every stub route, and a startup or reload error for
+`--configfile`, `--imposters` and `POST /admin/reload`. The answer is Mountebank's:
+
+```json
+{ "errors": [{ "code": "invalid injection", "message": "invalid predicateGenerator injection",
+               "source": "(function (config) { … })(config);", "data": "boom" }] }
+```
+
+A script that cannot run on that request (one that parses `config.request.body`, say) returns early
+on the flag:
+
+```javascript
+function (config) {
+  if (config.request.isDryRun) { return []; }
+  return [{ equals: { body: JSON.parse(config.request.body) } }];
+}
+```
+
+The refusal's `data` is the script's error message, so it can differ from Mountebank's where the
+two JavaScript engines word an error differently (`JSON.parse` of an empty body), and a non-array
+return reports Rift's own message. One edge is stricter: an `inject` that returns a string is
+refused, where Mountebank admits it and records the string's characters as predicates. Only
+generator injects are dry-run; response and predicate injects and `decorate` are not, as in
+Mountebank. Imposters loaded from `--datadir` were admitted when they were written and are not
+dry-run again.
 
 ---
 
