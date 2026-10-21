@@ -349,6 +349,11 @@ record.
 
 ### Documentation
 
+- **Proxy upstream certificate verification is listed as a Mountebank difference** (#1577):
+  Mountebank never verifies a `proxy` upstream's certificate, Rift does; `--upstream-tls-skip-verify`
+  gives Mountebank's behaviour. `--upstream-ca-file` cannot help for an upstream using Mountebank's
+  default https certificate, which is X.509 v1; `tls.md` now says so.
+
 - **`--debug` and Mountebank's per-stub `matches`** (#1573): documented as a difference. Rift's
   `--debug` does not record matches per stub; the request journal's `matchOutcome.stubIndex` is the
   equivalent. Also corrects `differences.md`: a recorded request has no `ip` field.

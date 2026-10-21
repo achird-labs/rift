@@ -2701,5 +2701,27 @@
     "reason": "Mountebank prints its bundled default certificate; Rift's fallback is an operator secret or a per-imposter generated one, so it is not printed",
     "mountebankMatches": "\"-----BEGIN .*-----\\\\n\"",
     "rift": "(absent)"
+  },
+  {
+    "id": "proxy-verifies-upstream-cert/status",
+    "case": "coverage: httpProxy.js:105 a proxy to a self-signed https upstream",
+    "location": "step[1].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift verifies the upstream certificate against the OS trust store plus any `--upstream-ca-file`, so a `proxy` to an https upstream with a self-signed or private-CA certificate answers `502` with `x-rift-proxy-error: true` where Mountebank answers from the upstream.",
+    "reason": "Mountebank never verifies a proxy upstream's certificate (httpProxy.js:105 rejectUnauthorized: false); Rift does",
+    "mountebank": "200",
+    "rift": "502"
+  },
+  {
+    "id": "proxy-verifies-upstream-cert/body",
+    "case": "coverage: httpProxy.js:105 a proxy to a self-signed https upstream",
+    "location": "step[1].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift verifies the upstream certificate against the OS trust store plus any `--upstream-ca-file`, so a `proxy` to an https upstream with a self-signed or private-CA certificate answers `502` with `x-rift-proxy-error: true` where Mountebank answers from the upstream.",
+    "reason": "Mountebank never verifies a proxy upstream's certificate (httpProxy.js:105 rejectUnauthorized: false); Rift does",
+    "mountebank": "from-upstream",
+    "riftMatches": ".*Failed to send proxy request.*"
   }
 ]

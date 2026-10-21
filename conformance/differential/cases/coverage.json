@@ -1,5 +1,5 @@
 {
-  "source": "#1548 — one case per Mountebank code path the differential suite did not reach, named `coverage: <mb file>:<line> <what>`",
+  "source": "#1548 \u2014 one case per Mountebank code path the differential suite did not reach, named `coverage: <mb file>:<line> <what>`",
   "cases": [
     {
       "name": "coverage: httpsServer.js:13 an https imposter with its own key and cert serves its stubs over TLS",
@@ -1176,6 +1176,64 @@
             "stub": {
               "responses": []
             }
+          }
+        }
+      ]
+    },
+    {
+      "name": "coverage: httpProxy.js:105 a proxy to a self-signed https upstream",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4546,
+                "protocol": "https",
+                "stubs": [
+                  {
+                    "responses": [
+                      {
+                        "is": {
+                          "body": "from-upstream"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "responses": [
+                      {
+                        "proxy": {
+                          "to": "https://localhost:4546",
+                          "mode": "proxyAlways"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": []
           }
         }
       ]
