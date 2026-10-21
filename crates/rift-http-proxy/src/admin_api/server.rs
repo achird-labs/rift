@@ -8,7 +8,7 @@ use crate::config_loader::ConfigSource;
 use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
 use crate::front_door::FrontDoorRoutes;
 use crate::gateway::apply_tcp_fault;
-use crate::imposter::{ImposterManager, ServerListener};
+use crate::imposter::{ImposterManager, PeerPolicy, ServerListener};
 use crate::intercept_control::InterceptControl;
 use crate::listen::{ListenAddr, ListenerSet, PortReservation, http_urls, refuse_imposter_port};
 use crate::sources::{ReloadSource, SourceSet};
@@ -87,6 +87,9 @@ pub struct AdminApiServer {
     /// `--local-only` as supplied, reported verbatim by `GET /config` (issue #879). The flag, not
     /// "did we bind loopback" — see `ConfigSnapshot::local_only`.
     local_only: bool,
+    /// Which clients the accept loop serves (issue #1568). `Any` unless the embedder says
+    /// otherwise; see [`with_peer_policy`](AdminApiServer::with_peer_policy).
+    peer_policy: PeerPolicy,
     /// The port `GET /config` reports, when the operator's port is not the one this server bound
     /// (issue #1135). `None` — the default and the CLI's case — reports the bound port, which is
     /// what #879 made truthful. `Some(0)` is a configured 0, not "unset"; that distinction is why
@@ -115,6 +118,7 @@ impl AdminApiServer {
             scripts_dir: None,
             authorizer: None,
             local_only: false,
+            peer_policy: PeerPolicy::Any,
             reported_admin_port: None,
             exposure: Some(AdminExposurePolicy::default()),
         }
@@ -150,6 +154,21 @@ impl AdminApiServer {
     #[must_use]
     pub fn with_local_only(mut self, local_only: bool) -> Self {
         self.local_only = local_only;
+        self
+    }
+
+    /// Refuse clients `policy` does not admit, at accept and before any TLS or HTTP work (issue
+    /// #1568). Defaults to [`PeerPolicy::Any`].
+    ///
+    /// A loopback bind is not a peer check: the kernel routes a connection from another local
+    /// interface's address over loopback, so a `127.0.0.1` listener still accepts it. The CLI sets
+    /// `LoopbackOnly` under `--local-only`, as Mountebank's `--localOnly` refuses such a client on
+    /// its admin port. Stated explicitly rather than inferred from the bind, like
+    /// [`with_local_only`](Self::with_local_only). A refusal closes the connection unanswered and
+    /// counts `rift_blocked_connections_total{listener="admin"}`.
+    #[must_use]
+    pub fn with_peer_policy(mut self, policy: PeerPolicy) -> Self {
+        self.peer_policy = policy;
         self
     }
 
@@ -357,6 +376,11 @@ impl AdminApiServer {
                     local_only: self.local_only,
                     host: self.reported_host,
                 },
+                rift_mock_core::extensions::PeerCheck::new(
+                    self.peer_policy,
+                    "admin",
+                    local_addr.port(),
+                ),
                 loop_cancel,
                 loop_tracker,
             )
@@ -578,6 +602,8 @@ async fn accept_loop(
     authorizer: Option<Arc<dyn AdminAuthorizer>>,
     // The `GET /config` values that used to be hardcoded literals (issue #879).
     config_snapshot: crate::admin_api::handlers::system::ConfigSnapshot,
+    // `--local-only`'s peer check (issue #1568), one per loop like the imposters' (#1523).
+    mut peer_check: rift_mock_core::extensions::PeerCheck,
     cancel: CancellationToken,
     tracker: TaskTracker,
 ) -> anyhow::Result<()> {
@@ -622,7 +648,7 @@ async fn accept_loop(
             _ = cancel.cancelled() => break,
             accepted = listener.accept() => accepted,
         };
-        let (stream, _) = match accepted {
+        let (stream, peer) = match accepted {
             Ok(accepted) => {
                 // Recovery: only the transition out of a systemic-error state logs and resets the
                 // backoff, so a healthy accept path pays one branch.
@@ -684,6 +710,14 @@ async fn accept_loop(
                 }
             },
         };
+        // `--local-only` (issue #1568): refused before any HTTP work. Dropping the stream is
+        // Mountebank's `socket.destroy()`; the permit is released with it, so a refusal holds no
+        // connection slot.
+        if !peer_check.admits(peer) {
+            drop(stream);
+            drop(permit);
+            continue;
+        }
         let manager = Arc::clone(&manager);
         let api_key = api_key.clone();
         let config_source = config_source.clone();

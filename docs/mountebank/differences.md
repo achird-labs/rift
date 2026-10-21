@@ -324,8 +324,10 @@ Three differences:
 - **Admitted set.** Rift admits `127.0.0.0/8`, `::1` and their IPv4-mapped forms. Mountebank admits
   the loopback interface's exact addresses, which adds macOS's `fe80::1%lo0` and, on Linux, excludes
   `127.0.0.2` and above.
-- **Admin API and `/metrics`.** Rift binds them to loopback (`127.0.0.1` and `::1`); Mountebank binds
-  every interface and refuses non-local clients. Rift's front door, which Mountebank has no
+- **Admin API and `/metrics`.** Rift binds them to loopback (`127.0.0.1` and `::1`) **and** refuses a
+  non-loopback client at accept, as it does on the imposters: a loopback bind alone still accepts a
+  connection from another local interface's address, which the kernel routes over loopback (#1568).
+  Mountebank binds every interface and refuses non-local clients there. Rift's front door, which Mountebank has no
   counterpart for, refuses the same clients as the imposters.
 
 An imposter cannot take a port this server already listens on: the admin port, `--metrics-port`,

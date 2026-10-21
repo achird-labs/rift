@@ -538,9 +538,9 @@
     },
     {
       "id": "cli/securityTest.js::security IP blocking should only allow local requests if --localOnly used",
-      "class": "bug",
-      "issue": "#1568",
-      "note": "the --local-only admin accepts a non-loopback source address over loopback",
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#--local-only",
+      "note": "the non-loopback sources are refused (#1568); Rift's admin API also refuses macOS's fe80::1%lo0, which Mountebank admits as a loopback-interface address",
       "mountebankMayFail": "these tests need a routable non-loopback local address; GitHub's Linux runners do not provide one, so they fail on Mountebank there too (they pass on Mountebank on macOS)"
     },
     {
@@ -561,13 +561,6 @@
       "class": "documented",
       "doc": "docs/mountebank/differences.md#command-line",
       "note": "--ipWhitelist is accepted and not enforced (#879)",
-      "mountebankMayFail": "these tests need a routable non-loopback local address; GitHub's Linux runners do not provide one, so they fail on Mountebank there too (they pass on Mountebank on macOS)"
-    },
-    {
-      "id": "cli/securityTest.js::security IP blocking should ignore --ipWhitelist if --localOnly passed",
-      "class": "bug",
-      "issue": "#1568",
-      "note": "the --local-only admin accepts a non-loopback source address (here an en0 link-local) dialling loopback",
       "mountebankMayFail": "these tests need a routable non-loopback local address; GitHub's Linux runners do not provide one, so they fail on Mountebank there too (they pass on Mountebank on macOS)"
     },
     {

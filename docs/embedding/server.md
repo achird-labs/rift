@@ -260,7 +260,8 @@ println!("admin bound to {}", running.local_addr());
 | `with_config_source` | `fn with_config_source(self, source: ConfigSource) -> Self` | Retain the load source so `POST /admin/reload` can re-read it. |
 | `with_imposter_sources` | `fn with_imposter_sources(self, sources: Arc<SourceSet>, datadir: Option<PathBuf>) -> Self` | Retain an `--imposters` source set, and the `--datadir` loaded beside it, so `POST /admin/reload` re-reads both and applies them as one set. Source imposters are applied as `Persistence::Ephemeral` and never written to the datadir (issue #1122). `ImposterManager::apply_config` keeps a running imposter in the store it is in: it persists what it creates, and changes to imposters already in the datadir. |
 | `with_allow_injection` | `fn with_allow_injection(self, allow: bool) -> Self` | Admit scripted configs (`inject`, `decorate`, `shellTransform`, `_rift.script`, …) submitted through this admin API, and report the setting from `GET /config`. The embedder spelling of `--allowInjection`; default `false`. |
-| `with_local_only` | `fn with_local_only(self, local_only: bool) -> Self` | Record `--local-only` for `GET /config` to report (issue #879). Stated explicitly, not inferred from the bind address. |
+| `with_local_only` | `fn with_local_only(self, local_only: bool) -> Self` | Record `--local-only` for `GET /config` to report (issue #879). Stated explicitly, not inferred from the bind address. It reports only; it refuses nothing — pair it with `with_peer_policy`. |
+| `with_peer_policy` | `fn with_peer_policy(self, policy: PeerPolicy) -> Self` | Which clients the admin accept loop serves (issue #1568). Default `PeerPolicy::Any`. `LoopbackOnly` closes a non-loopback client at accept, before any HTTP work, and counts `rift_blocked_connections_total{listener="admin"}`. `ServerBuilder::start` sets `LoopbackOnly` under `--local-only`: a loopback bind alone still accepts a non-loopback source routed over loopback. |
 | `with_admin_authorizer` | `fn with_admin_authorizer(self, authorizer: Arc<dyn AdminAuthorizer>) -> Self` | Install the per-request authorization hook (issue #854); `ServerBuilder::admin_authorizer` is the builder spelling. |
 | `with_intercept` | `fn with_intercept(self, control: InterceptControl) -> Self` | Serve the `/intercept*` routes against this shared control slot. Without it every `/intercept*` route answers `404`. See [Intercept proxy](../features/intercept-proxy.md). |
 | `with_scripts_dir` | `fn with_scripts_dir(self, dir: PathBuf) -> Self` | Root that `_rift.script` `file:` references resolve under for imposters created through this API (issue #356), and the only place their scripts may `require()` from (issue #1611). Without it both are refused. |
@@ -290,6 +291,7 @@ than reading `--host`/`--port` yourself — `--local-only` pins loopback and out
 check about *which address is being judged* (issues #1131, #1528):
 
 ```rust
+use rift_http_proxy::imposter::PeerPolicy;
 use rift_http_proxy::server::{admin_bind_addr, admin_listen_addr};
 
 let listen = admin_listen_addr(&cli)?;      // Loopback, Any (no --host) or Exact(--host), on --port
@@ -297,6 +299,7 @@ let running = AdminApiServer::new(admin_bind_addr(&cli)?, manager, cli.api_key.c
     .listen(listen)
     .with_require_admin_auth(cli.require_admin_auth)
     .with_local_only(cli.local_only)
+    .with_peer_policy(if cli.local_only { PeerPolicy::LoopbackOnly } else { PeerPolicy::Any })
     .bind()
     .await?;
 ```
@@ -331,7 +334,7 @@ metrics.shutdown().await;
 |:------------------|:----------|:--------|
 | `run_metrics_server` | `async fn run_metrics_server(addr: SocketAddr) -> anyhow::Result<()>` | Serve metrics forever on a fixed address. |
 | `bind_metrics_server` | `async fn bind_metrics_server(addr: SocketAddr) -> anyhow::Result<RunningMetrics>` | Bind (supports `:0`) and return a handle. |
-| `bind_metrics_listeners` | `async fn bind_metrics_listeners(addr: ListenAddr) -> anyhow::Result<RunningMetrics>` | `bind_metrics_server` on every listener a `ListenAddr` needs (issue #1528); `ServerBuilder::start` binds `Any` or, under `--local-only`, `Loopback`. |
+| `bind_metrics_listeners` | `async fn bind_metrics_listeners(addr: ListenAddr, policy: PeerPolicy) -> anyhow::Result<RunningMetrics>` | `bind_metrics_server` on every listener a `ListenAddr` needs (issue #1528), serving the clients `policy` admits (issue #1568); a refused one is closed unanswered and counted in `rift_blocked_connections_total{listener="metrics"}`. `ServerBuilder::start` binds `Any` with `PeerPolicy::Any` or, under `--local-only`, `Loopback` with `PeerPolicy::LoopbackOnly`. `bind_metrics_server` passes `PeerPolicy::Any`. |
 | `RunningMetrics::local_addr` | `fn local_addr(&self) -> SocketAddr` | The first bound metrics address. |
 | `RunningMetrics::local_addrs` | `fn local_addrs(&self) -> &[SocketAddr]` | Every bound metrics address (two under `ListenAddr::Loopback`). |
 | `RunningMetrics::shutdown` | `async fn shutdown(&self)` | Stop the metrics server. |
