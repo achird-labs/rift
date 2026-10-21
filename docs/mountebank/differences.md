@@ -281,6 +281,14 @@ The setting is described in [Predicates](predicates.md#keycasesensitive).
 and leaves recorded requests alone, and there is no `GET`. To clear saved proxy responses on Rift, use
 `savedProxyResponses`.
 
+## Proxy upstream certificates are verified
+
+Mountebank never verifies the certificate of a `proxy` upstream: `httpProxy.js:105` hard-codes `rejectUnauthorized: false`, and no stub field changes it (`cert`, `key`, `passphrase`, `ciphers` and `secureProtocol` are client-side options for mutual auth). Rift verifies the upstream certificate against the OS trust store plus any `--upstream-ca-file`, so a `proxy` to an https upstream with a self-signed or private-CA certificate answers `502` with `x-rift-proxy-error: true` where Mountebank answers from the upstream. This is deliberate: a recording proxy that skips verification records MITM'd traffic as truth.
+
+To get Mountebank's behaviour, start Rift with `--upstream-tls-skip-verify` (or `RIFT_UPSTREAM_TLS_SKIP_VERIFY=true`). To keep verifying against a private CA, use `--upstream-ca-file <pem>`. `--upstream-ca-file` cannot help when the upstream is a Mountebank https imposter on its default certificate: that certificate is X.509 v1 (`CN=mountebank`, no SAN), which Rift's TLS library refuses even as a trust anchor (`UnsupportedCertVersion` in the server log), so for that upstream `--upstream-tls-skip-verify` is the only route. See [TLS](../features/tls.md#trusting-a-private-ca).
+
+`cert`, `key`, `passphrase`, `ciphers` and `secureProtocol` on a `proxy` response are dropped, and Rift cannot present a client certificate to an upstream.
+
 ## A proxy without generators records into a store, not a stub
 
 A proxy without `predicateGenerators` (and without `addWaitBehavior`/`addDecorateBehavior`) records into an internal store keyed per request, not into a stub, so `GET /imposters/:port` and `?replayable=true` do not show its recordings. Mountebank records an empty-predicate stub there, which answers every later request with the

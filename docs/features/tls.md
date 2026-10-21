@@ -387,6 +387,11 @@ a response never leaks the TLS error chain to the caller.
 rift --upstream-tls-skip-verify      # or RIFT_UPSTREAM_TLS_SKIP_VERIFY=true
 ```
 
+This is what Mountebank does: its proxy never verifies the upstream certificate
+(see [the difference](../mountebank/differences.md#proxy-upstream-certificates-are-verified)). It is also
+the only route to an upstream presenting an X.509 v1 certificate, such as Mountebank's own default
+https certificate, which `--upstream-ca-file` cannot make acceptable.
+
 Accepts any certificate and logs a warning. If `--upstream-ca-file` is also set, that CA is not
 used for anything, and a second warning says so. Prefer `--upstream-ca-file`: a recording proxy with verification
 disabled will faithfully record MITM'd traffic.
@@ -543,6 +548,7 @@ openssl verify -CAfile ca.crt server.crt
 | Error | Cause | Solution |
 |:------|:------|:---------|
 | `502` + `x-rift-proxy-error` from a `proxy` stub; log shows `invalid peer certificate: UnknownIssuer` | Origin's CA is not in the OS trust store | `--upstream-ca-file <pem>`, or `--upstream-tls-skip-verify` in development |
+| `502` + `x-rift-proxy-error` from a `proxy` stub; log shows `invalid peer certificate: Other(OtherError(UnsupportedCertVersion))` | The upstream presents an X.509 v1 certificate, such as Mountebank's default https certificate; no trust anchor can make that acceptable | `--upstream-tls-skip-verify`, or give the upstream a v3 certificate. `--upstream-ca-file` does not help |
 | `curl: (60) SSL certificate problem` calling an imposter | Your client does not trust the imposter's certificate | `--cacert ca.crt`, or `-k` for the generated self-signed certificate |
 | `curl: (56) ... alert certificate required` (LibreSSL: `reason(1116)`) | The imposter has `mutualAuth` and the client sent no certificate | `--cert client.crt --key client.key` |
 | `... alert certificate unknown` | The client certificate does not chain to the imposter's `ca` | Issue it from a CA listed in `ca`, or add that CA |
