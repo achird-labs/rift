@@ -228,6 +228,22 @@ record.
 - **Rhai `import` is disabled** (#1611). Rhai's default resolver loaded any `.rhai` file on the
   host from a `_rift.script`. `import` was never documented and now resolves no module, on every
   door.
+- **A network-written script can no longer borrow another imposter's `require`** (#1645). Hooks
+  shared one JavaScript realm per script worker, and `require` was a global of it. An admin-API
+  `inject` could queue a promise job, or patch a builtin such as `JSON.stringify`, that later ran
+  inside a `--configfile` imposter's hook and called *its* unconfined `require`. Now `require` is a
+  binding of each hook's own scope, as in Node (`globalThis.require` is `undefined`), a worker keeps
+  a separate realm for each script access, so code from one never runs in another's, and the
+  promise jobs a hook leaves queued are dropped before the next run instead of running in it.
+- **An admin stub write can no longer race a reload into running trusted** (#1645). The admin stub
+  routes made a `--configfile` imposter confined and then wrote the stub as two steps, and
+  `POST /admin/reload` made it trusted again before patching its stubs, so a reload between the two
+  left the posted stub running with the unconfined `require`. The stub and the access are now
+  written in one step, and a write in place only ever narrows an imposter's access. A reload that
+  would widen it (a `--configfile` imposter an admin stub was posted to) replaces the imposter,
+  which resets its response cycles and recorded requests. **Embedders:** a door that writes stubs
+  into a running imposter should use the new `add_stub_from`, `replace_stubs_from`,
+  `replace_stub_from` and `replace_stub_by_id_from`, not `set_script_file_access` before a write.
 - `--allowInjection` admits code that runs with Rift's privileges, `shellTransform` included; the
   docs now say so, and that `--scripts-dir` is defence in depth, not a sandbox.
 

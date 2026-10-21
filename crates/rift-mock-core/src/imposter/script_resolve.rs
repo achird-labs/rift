@@ -341,6 +341,26 @@ impl ScriptFileAccess {
         let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self::Trusted { base }
     }
+
+    /// The access that allows no more than either (issue #1645): what a running imposter's scripts
+    /// keep when a door writes some of its stubs and leaves the rest. Two different roots allow
+    /// nothing in common, so they meet at [`Self::Refused`]; two trusted doors keep `other`'s base.
+    #[must_use]
+    pub fn meet(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::Trusted { .. }, other) => other.clone(),
+            (narrower, Self::Trusted { .. }) => narrower.clone(),
+            (Self::Confined(a), Self::Confined(b)) if a == b => self.clone(),
+            _ => Self::Refused,
+        }
+    }
+
+    /// Whether `other` allows no more than `self`, so an imposter's access can become `other` in
+    /// place without any of its stubs gaining access (issue #1645).
+    #[must_use]
+    pub fn admits(&self, other: &Self) -> bool {
+        self.meet(other) == *other
+    }
 }
 
 /// Why [`resolve_confined`] refused a path.

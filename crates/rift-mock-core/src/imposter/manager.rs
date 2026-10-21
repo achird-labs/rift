@@ -2202,10 +2202,6 @@ impl ImposterManager {
             return;
         };
 
-        // Before any stub this door wrote can serve (issue #1611): the imposter's scripts are now
-        // this door's.
-        existing.set_script_file_access(script_files.clone());
-
         // Retag before anything below can write the file, so every write in this iteration
         // (the enabled toggle, a stub patch, a replace's re-create) goes to the new store.
         let persistence = requested.unwrap_or_else(|| existing.persistence());
@@ -2245,7 +2241,9 @@ impl ImposterManager {
             }
         }
 
-        match existing.reconcile_stubs(&config.stubs) {
+        // The imposter's scripts become this door's in the same critical section as the stub
+        // patch (issues #1611, #1645), and only if that widens nothing; a wider door replaces it.
+        match existing.reconcile_stubs_from(&config.stubs, &script_files) {
             StubReconcile::Unchanged => {
                 if retagged
                     && persistence == Persistence::Datadir
@@ -2270,7 +2268,7 @@ impl ImposterManager {
                     report.failed.push((port, e));
                 }
             }
-            StubReconcile::Degenerate => {
+            StubReconcile::Degenerate | StubReconcile::Widens => {
                 self.replace_imposter(port, config, persistence, requested, script_files, report)
                     .await;
             }
@@ -2376,11 +2374,15 @@ impl ImposterManager {
         }
     }
 
-    /// Set what the scripts of the imposter on `port` may `require()` (issue #1611). A door that
-    /// writes stubs into a running imposter calls this before it writes them: the imposter's
-    /// scripts are then that door's, whoever created it. The admin API's stub routes do, so a stub
-    /// posted over the network never runs with the unconfined `require` of a `--configfile`
-    /// imposter.
+    /// Set what the scripts of the imposter on `port` may `require()` (issue #1611), wider or
+    /// narrower.
+    ///
+    /// Not for a door that writes stubs into a running imposter: a set followed by a separate write
+    /// races a concurrent [`apply_config_from`](Self::apply_config_from), which can make the
+    /// imposter trusted again between the two (issue #1645). Such a door writes through
+    /// [`add_stub_from`](Self::add_stub_from), [`replace_stubs_from`](Self::replace_stubs_from),
+    /// [`replace_stub_from`](Self::replace_stub_from) or
+    /// [`replace_stub_by_id_from`](Self::replace_stub_by_id_from) instead.
     pub fn set_script_file_access(
         &self,
         port: u16,
@@ -2396,17 +2398,44 @@ impl ImposterManager {
         self.imposters.len()
     }
 
-    /// Add stub to an imposter
+    /// Add stub to an imposter. Its scripts run with the imposter's access as it stands; a door
+    /// that must not lend its stub more uses [`add_stub_from`](Self::add_stub_from).
     pub async fn add_stub(
         &self,
         port: u16,
         stub: Stub,
         index: Option<usize>,
     ) -> Result<(), ImposterError> {
+        self.add_stub_inner(port, stub, index, None).await
+    }
+
+    /// [`add_stub`](Self::add_stub) by a door whose scripts get `script_files` (issue #1645): in
+    /// the same critical section as the write, the imposter's access narrows to what both it and
+    /// the door allow ([`ScriptFileAccess::meet`]). So the stub never runs with more than its door
+    /// gives it, whatever reload runs alongside, and a `--configfile` imposter an admin stub lands
+    /// in is confined from then on (issue #1611).
+    pub async fn add_stub_from(
+        &self,
+        port: u16,
+        stub: Stub,
+        index: Option<usize>,
+        script_files: ScriptFileAccess,
+    ) -> Result<(), ImposterError> {
+        self.add_stub_inner(port, stub, index, Some(&script_files))
+            .await
+    }
+
+    async fn add_stub_inner(
+        &self,
+        port: u16,
+        stub: Stub,
+        index: Option<usize>,
+        door: Option<&ScriptFileAccess>,
+    ) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
         // Reject a duplicate `id` atomically (issue #202); stubs without an id are unaffected.
         let id = stub.id.clone();
-        if !imposter.add_stub_unique(stub, index) {
+        if !imposter.add_stub_unique_from(door, stub, index) {
             return Err(ImposterError::StubIdConflict(id.unwrap_or_default()));
         }
         self.emit(ImposterEvent::StubsChanged(port));
@@ -2420,8 +2449,32 @@ impl ImposterManager {
         id: &str,
         stub: Stub,
     ) -> Result<(), ImposterError> {
+        self.replace_stub_by_id_inner(port, id, stub, None).await
+    }
+
+    /// [`replace_stub_by_id`](Self::replace_stub_by_id) by a door whose scripts get
+    /// `script_files`, narrowing the imposter's access as [`add_stub_from`](Self::add_stub_from)
+    /// does (issue #1645).
+    pub async fn replace_stub_by_id_from(
+        &self,
+        port: u16,
+        id: &str,
+        stub: Stub,
+        script_files: ScriptFileAccess,
+    ) -> Result<(), ImposterError> {
+        self.replace_stub_by_id_inner(port, id, stub, Some(&script_files))
+            .await
+    }
+
+    async fn replace_stub_by_id_inner(
+        &self,
+        port: u16,
+        id: &str,
+        stub: Stub,
+        door: Option<&ScriptFileAccess>,
+    ) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
-        if !imposter.replace_stub_by_id(id, stub) {
+        if !imposter.replace_stub_by_id_from(door, id, stub) {
             return Err(ImposterError::StubNotFound(id.to_string()));
         }
         self.emit(ImposterEvent::StubsChanged(port));
@@ -2484,6 +2537,29 @@ impl ImposterManager {
         index: usize,
         stub: Stub,
     ) -> Result<(), ImposterError> {
+        self.replace_stub_inner(port, index, stub, None).await
+    }
+
+    /// [`replace_stub`](Self::replace_stub) by a door whose scripts get `script_files`, narrowing
+    /// the imposter's access as [`add_stub_from`](Self::add_stub_from) does (issue #1645).
+    pub async fn replace_stub_from(
+        &self,
+        port: u16,
+        index: usize,
+        stub: Stub,
+        script_files: ScriptFileAccess,
+    ) -> Result<(), ImposterError> {
+        self.replace_stub_inner(port, index, stub, Some(&script_files))
+            .await
+    }
+
+    async fn replace_stub_inner(
+        &self,
+        port: u16,
+        index: usize,
+        stub: Stub,
+        door: Option<&ScriptFileAccess>,
+    ) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
         // An index-addressed replace restarts the stub's cycle, as Mountebank's
         // `overwriteAtIndex` does (#1515); the old key's cursor goes with it, as on a delete.
@@ -2494,7 +2570,7 @@ impl ImposterManager {
         } else {
             None
         };
-        imposter.replace_stub(index, stub)?;
+        imposter.replace_stub_from(door, index, stub)?;
         if let (Some(sequencer), Some(key)) = (&self.sequencer, replaced_key) {
             sequencer.reset_scope(port, Some(&key));
         }
@@ -2565,8 +2641,31 @@ impl ImposterManager {
 
     /// Replace all stubs for an imposter
     pub async fn replace_stubs(&self, port: u16, stubs: Vec<Stub>) -> Result<(), ImposterError> {
+        self.replace_stubs_inner(port, stubs, None).await
+    }
+
+    /// [`replace_stubs`](Self::replace_stubs) by a door whose scripts get `script_files`,
+    /// narrowing the imposter's access as [`add_stub_from`](Self::add_stub_from) does (issue
+    /// #1645). Even though every stub is new, the access only narrows here: a request that matched
+    /// an old stub may still be about to run it.
+    pub async fn replace_stubs_from(
+        &self,
+        port: u16,
+        stubs: Vec<Stub>,
+        script_files: ScriptFileAccess,
+    ) -> Result<(), ImposterError> {
+        self.replace_stubs_inner(port, stubs, Some(&script_files))
+            .await
+    }
+
+    async fn replace_stubs_inner(
+        &self,
+        port: u16,
+        stubs: Vec<Stub>,
+        door: Option<&ScriptFileAccess>,
+    ) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
-        imposter.replace_stubs(stubs);
+        imposter.replace_stubs_from(door, stubs);
         if let Some(sequencer) = &self.sequencer {
             sequencer.reset_scope(port, None);
         }
@@ -4225,6 +4324,184 @@ mod tests {
         assert!(
             manager
                 .set_script_file_access(1, ScriptFileAccess::Refused)
+                .is_err(),
+            "no imposter on the port"
+        );
+    }
+
+    fn stub_with_body(body: &str) -> Stub {
+        serde_json::from_value(json!({"responses": [{"is": {"body": body}}]})).expect("stub")
+    }
+
+    // Issue #1645 (2): a reload never makes a running imposter's scripts more trusted in place.
+    // An imposter a network door has written stubs into holds them until a write replaces every
+    // one, so the object serving the admin stub never runs it with the reload's trusted access; the
+    // reload replaces the imposter instead.
+    #[tokio::test]
+    async fn a_reload_never_widens_script_access_in_place() {
+        let trusted = ScriptFileAccess::Trusted {
+            base: PathBuf::from("/srv"),
+        };
+        let confined = ScriptFileAccess::Confined(PathBuf::from("/srv/scripts"));
+        let config = || {
+            imposter_cfg(json!({"protocol": "http", "stubs": [
+                {"responses": [{"is": {"body": "from-configfile"}}]}
+            ]}))
+        };
+        let manager = ImposterManager::new();
+        let port = manager
+            .create_imposter_from(config(), Persistence::Ephemeral, trusted.clone())
+            .await
+            .expect("create");
+        let served = manager.get_imposter(port).unwrap();
+
+        // The admin door's stub write (#1611 claims the imposter for it).
+        manager
+            .set_script_file_access(port, confined.clone())
+            .expect("claim");
+        manager
+            .add_stub(port, stub_with_body("from-admin"), None)
+            .await
+            .expect("admin stub");
+
+        let report = manager
+            .apply_config_from(vec![at(port, config())], trusted.clone())
+            .await
+            .expect("reload");
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert_eq!(
+            *served.script_file_access(),
+            confined,
+            "the imposter that held the admin stub never ran it trusted"
+        );
+        let live = manager.get_imposter(port).unwrap();
+        assert_eq!(*live.script_file_access(), trusted);
+        assert_eq!(live.get_stubs().len(), 1, "only the configfile's stub");
+    }
+
+    // Issue #1645 (2): a door's stub write narrows the imposter's script access in the same
+    // critical section as the write, so a reload landing anywhere around it cannot leave the stub
+    // running with the reload's trusted access. (With a separate claim before the write, a reload
+    // between the two left the admin stub on a trusted imposter.)
+    #[tokio::test]
+    async fn a_doors_stub_write_never_runs_with_more_than_the_doors_access() {
+        let trusted = ScriptFileAccess::Trusted {
+            base: PathBuf::from("/srv"),
+        };
+        let confined = ScriptFileAccess::Confined(PathBuf::from("/srv/scripts"));
+        let config = || {
+            imposter_cfg(json!({"protocol": "http", "stubs": [
+                {"responses": [{"is": {"body": "from-configfile"}}]}
+            ]}))
+        };
+        let manager = ImposterManager::new();
+        let port = manager
+            .create_imposter_from(config(), Persistence::Ephemeral, trusted.clone())
+            .await
+            .expect("create");
+        manager
+            .apply_config_from(vec![at(port, config())], trusted.clone())
+            .await
+            .expect("reload");
+        let with_admin = |imposter: &Imposter| {
+            imposter
+                .get_stubs()
+                .iter()
+                .any(|s| serde_json::to_string(s).unwrap().contains("from-admin"))
+        };
+
+        manager
+            .add_stub_from(port, stub_with_body("from-admin"), None, confined.clone())
+            .await
+            .expect("add");
+        let live = manager.get_imposter(port).unwrap();
+        assert!(with_admin(&live));
+        assert_eq!(*live.script_file_access(), confined);
+
+        // Every network write narrows the same way.
+        for write in 0..3 {
+            let port = manager
+                .create_imposter_from(
+                    imposter_cfg(json!({"protocol": "http", "stubs": [
+                        {"id": "s", "responses": [{"is": {"body": "from-configfile"}}]}
+                    ]})),
+                    Persistence::Ephemeral,
+                    trusted.clone(),
+                )
+                .await
+                .expect("create");
+            match write {
+                0 => manager
+                    .replace_stubs_from(port, vec![stub_with_body("from-admin")], confined.clone())
+                    .await
+                    .expect("replace all"),
+                1 => manager
+                    .replace_stub_from(port, 0, stub_with_body("from-admin"), confined.clone())
+                    .await
+                    .expect("replace one"),
+                _ => manager
+                    .replace_stub_by_id_from(
+                        port,
+                        "s",
+                        stub_with_body("from-admin"),
+                        confined.clone(),
+                    )
+                    .await
+                    .expect("replace by id"),
+            }
+            let live = manager.get_imposter(port).unwrap();
+            assert!(with_admin(&live), "write {write}");
+            assert_eq!(*live.script_file_access(), confined, "write {write}");
+        }
+    }
+
+    // Issue #1645: in place, a write only narrows the access, to what both the imposter's and the
+    // door's allow; it never widens it.
+    #[tokio::test]
+    async fn an_in_place_write_meets_the_access_and_never_widens_it() {
+        let root = |p: &str| ScriptFileAccess::Confined(PathBuf::from(p));
+        let trusted = ScriptFileAccess::Trusted {
+            base: PathBuf::from("/srv"),
+        };
+        let manager = ImposterManager::new();
+        for (current, door, kept) in [
+            (trusted.clone(), root("/a"), root("/a")),
+            (root("/a"), root("/a"), root("/a")),
+            (root("/a"), trusted.clone(), root("/a")),
+            (root("/a"), root("/b"), ScriptFileAccess::Refused),
+            (
+                ScriptFileAccess::Refused,
+                root("/a"),
+                ScriptFileAccess::Refused,
+            ),
+            (
+                ScriptFileAccess::Refused,
+                trusted.clone(),
+                ScriptFileAccess::Refused,
+            ),
+        ] {
+            let port = manager
+                .create_imposter_from(
+                    imposter_cfg(json!({"protocol": "http", "stubs": []})),
+                    Persistence::Ephemeral,
+                    current.clone(),
+                )
+                .await
+                .expect("create");
+            manager
+                .add_stub_from(port, stub_with_body("x"), None, door.clone())
+                .await
+                .expect("add");
+            assert_eq!(
+                *manager.get_imposter(port).unwrap().script_file_access(),
+                kept,
+                "{current:?} written by {door:?}"
+            );
+        }
+        assert!(
+            manager
+                .add_stub_from(1, stub_with_body("x"), None, trusted)
+                .await
                 .is_err(),
             "no imposter on the port"
         );

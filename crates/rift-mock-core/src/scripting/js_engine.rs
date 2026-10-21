@@ -268,11 +268,16 @@ const JS_SCRIPT_STACK_SIZE_LIMIT: usize = 10 * 1024;
 /// rather than `Context::default()`.
 pub(crate) fn bounded_js_context() -> Context {
     let mut context = Context::default();
+    bound_js_context(&mut context);
+    context
+}
+
+/// Apply the loop, recursion and stack limits every script context runs under (issue #327).
+fn bound_js_context(context: &mut Context) {
     let limits = context.runtime_limits_mut();
     limits.set_loop_iteration_limit(JS_SCRIPT_LOOP_ITERATION_LIMIT);
     limits.set_recursion_limit(JS_SCRIPT_RECURSION_LIMIT);
     limits.set_stack_size_limit(JS_SCRIPT_STACK_SIZE_LIMIT);
-    context
 }
 
 /// Cap on distinct parsed scripts retained per MB pool worker (issue #476). Same clear-when-full
@@ -293,24 +298,94 @@ const MB_SCRIPT_CACHE_CAPACITY: usize = 64;
 /// destroyed first, and the `Gc` handles inside the context then panic in a destructor (process
 /// abort). The worker loop drops it on a live thread instead.
 ///
-/// Reusing a realm means one script's writes to JS globals are visible to later scripts on the
-/// same worker — Mountebank parity: MB evals every injection in one shared Node process, so
-/// injected globals leak there too. Every global the hooks *contract* on is re-set per run
-/// (`__config`/`__logger`/state globals, and a fresh `require()` bound to the running imposter,
-/// issue #1611), and the per-imposter state object is rebuilt per run from the port-keyed
-/// `IMPOSTER_STATE` map, so cross-imposter isolation of *state* is unaffected. A `require` that a
-/// script keeps in a global answers only during the run that installed it, so it never carries
-/// one imposter's module cache or root into another's run.
+/// A worker keeps one realm per [`ScriptFileAccess`] it has run hooks under (issue #1645): a hook
+/// only ever runs in the realm of its own imposter's access. Reusing a realm means one script's
+/// writes to JS globals are visible to later scripts of the same access on that worker —
+/// Mountebank parity: MB evals every injection in one shared Node process, so injected globals
+/// leak there too. They never reach a run of another access, so a builtin a network-written
+/// script patches, or a promise job it leaves queued, never runs inside a trusted run or in that
+/// of a tenant with another root (rift-cluster). Imposters of one access still share globals, as in
+/// Mountebank: none can borrow more file access from another, but one can see what another's
+/// script passes through a builtin it patched. Every global the hooks *contract* on is re-set per run
+/// (`__config`/`__logger`/state globals), and the per-imposter state object is rebuilt per run
+/// from the port-keyed `IMPOSTER_STATE` map, so cross-imposter isolation of *state* is unaffected.
+/// `require` is never a global: each run passes its own into the hook's scope, and a `require` a
+/// script keeps answers only during the run that made it (issue #1611).
 struct MbJsThread {
-    context: Context,
-    scripts: MbScriptCache,
+    /// Most recently used first; at most [`MB_REALMS_PER_WORKER`].
+    realms: Vec<MbRealm>,
 }
+
+/// Distinct [`ScriptFileAccess`] realms one MB worker keeps (issue #1645). Plain rift has at most
+/// three (trusted, confined to `--scripts-dir`, refused); an embedder with a root per tenant
+/// rebuilds the least recently used realm past this.
+const MB_REALMS_PER_WORKER: usize = 8;
 
 impl MbJsThread {
     fn new() -> Self {
+        Self { realms: Vec::new() }
+    }
+
+    /// The realm for hooks running under `files`, with no job left queued in it (issue #1645).
+    fn realm(&mut self, files: &ScriptFileAccess) -> &mut MbRealm {
+        match self.realms.iter().position(|realm| realm.access == *files) {
+            Some(0) => {}
+            Some(i) => {
+                let realm = self.realms.remove(i);
+                self.realms.insert(0, realm);
+            }
+            None => {
+                self.realms.truncate(MB_REALMS_PER_WORKER - 1);
+                self.realms.insert(0, MbRealm::new(files.clone()));
+            }
+        }
+        let realm = &mut self.realms[0];
+        realm.discard_jobs();
+        realm
+    }
+}
+
+/// One access's reused Boa context and its parsed scripts (issues #476, #1645).
+struct MbRealm {
+    access: ScriptFileAccess,
+    context: Context,
+    scripts: MbScriptCache,
+    /// The context's job executor. Its stop signal, set, makes the next `run_jobs` drop every
+    /// queued job without running it.
+    jobs: std::rc::Rc<boa_engine::job::SimpleJobExecutor>,
+}
+
+impl MbRealm {
+    fn new(access: ScriptFileAccess) -> Self {
+        let executor = std::rc::Rc::new(boa_engine::job::SimpleJobExecutor::new());
+        let mut context = boa_engine::context::ContextBuilder::new()
+            .job_executor(std::rc::Rc::clone(&executor))
+            .build()
+            // As `Context::default()` does: building a context with the default realm cannot fail.
+            .expect("building a Boa context with the default realm cannot fail");
+        bound_js_context(&mut context);
         Self {
-            context: bounded_js_context(),
+            access,
+            context,
             scripts: std::collections::HashMap::new(),
+            jobs: executor,
+        }
+    }
+
+    /// Drop every promise job an earlier run left queued, without running it (issue #1645). A hook
+    /// that queues a job and returns never drains it (only an `async` decorate runs jobs), so
+    /// without this the job would run inside some later run, with that run's objects in reach.
+    /// Discarded rather than drained: draining here would run code after its own run ended, and an
+    /// endless chain of jobs would hold the worker forever.
+    fn discard_jobs(&mut self) {
+        self.jobs
+            .get_cancellation_token()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Err(e) = self.context.run_jobs() {
+            // With the stop signal set the executor clears its queues and returns before running
+            // anything, so this is not reached; if it were, a fresh realm is the closed outcome.
+            tracing::error!("MB realm could not discard its queued jobs ({e}); rebuilding it");
+            *self = Self::new(self.access.clone());
         }
     }
 }
@@ -367,6 +442,22 @@ fn eval_mb_script(
     }
     scripts.insert(key, (source.to_string(), script.clone()));
     script.evaluate(context)
+}
+
+/// Evaluate a hook wrapper `(function (require) { ... })` and call it with this run's `require`
+/// (issue #1645), so `require` is a binding of the hook's scope, as in Node, and never a global
+/// that code from another run could read.
+fn call_mb_wrapper(
+    context: &mut Context,
+    scripts: &mut MbScriptCache,
+    source: &str,
+    require: JsValue,
+) -> JsResult<JsValue> {
+    let wrapper = eval_mb_script(context, scripts, source)?;
+    let wrapper = wrapper.as_callable().ok_or_else(|| {
+        JsNativeError::typ().with_message("the hook wrapper did not evaluate to a function")
+    })?;
+    wrapper.call(&JsValue::undefined(), &[require], context)
 }
 
 /// A unit of work for the MB script pool: runs on a worker with that worker's reused context.
@@ -1806,10 +1897,12 @@ fn execute_mountebank_inject_in(
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
 ) -> Result<MountebankInjectResponse> {
-    let MbJsThread { context, scripts } = thread;
+    let MbRealm {
+        context, scripts, ..
+    } = thread.realm(files);
     // Mountebank gives every injection `require` (issue #1611); this run's is bound to its own
-    // imposter and dies with the guard.
-    let _require = install_require(&mut *context, files)?;
+    // imposter, passed into the hook's scope (#1645), and dies with the guard.
+    let (_run, require) = install_require(&mut *context, files);
 
     // Create request object
     let request_obj = create_mountebank_request_object(&mut *context, request)?;
@@ -1882,6 +1975,7 @@ fn execute_mountebank_inject_in(
     // `config.callback` was invoked with instead (synchronous stand-in for MB's async wait).
     let wrapper_script = format!(
         r#"
+        (function (require) {{
         var __callbackResult = null;
         var __done = function(r) {{ __callbackResult = r; }};
         __config.callback = __done;
@@ -1890,12 +1984,13 @@ fn execute_mountebank_inject_in(
         if (__directResult === undefined) {{
             __directResult = __callbackResult;
         }}
-        __directResult;
+        return __directResult;
+        }})
         "#
     );
 
     // Execute the script
-    let result = eval_mb_script(context, scripts, &wrapper_script)
+    let result = call_mb_wrapper(context, scripts, &wrapper_script, require)
         .map_err(|e| anyhow!("Failed to execute inject function: {e}"))?;
 
     // Save updated state back (config.state/injectState/imposterState all alias the same object).
@@ -1952,12 +2047,10 @@ fn execute_predicate_inject_in(
     imposter_port: u16,
     files: &Arc<ScriptFileAccess>,
 ) -> anyhow::Result<bool> {
-    let MbJsThread { context, scripts } = thread;
-    let _require = install_require(&mut *context, files).map_err(|e| {
-        anyhow::Error::from(PredicateInjectionError(format!(
-            "failed to install require: {e}"
-        )))
-    })?;
+    let MbRealm {
+        context, scripts, ..
+    } = thread.realm(files);
+    let (_run, require) = install_require(&mut *context, files);
 
     let request_obj = match create_mountebank_request_object(&mut *context, request) {
         Ok(obj) => obj,
@@ -2036,13 +2129,15 @@ fn execute_predicate_inject_in(
 
     let wrapper_script = format!(
         r#"
+        (function (require) {{
         var __injectFn = {inject_fn};
         var __result = __injectFn(__config, __logger, __imposterState);
-        Boolean(__result);
+        return Boolean(__result);
+        }})
         "#
     );
 
-    let result = match eval_mb_script(context, scripts, &wrapper_script) {
+    let result = match call_mb_wrapper(context, scripts, &wrapper_script, require) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("inject predicate: script execution error: {e}");
@@ -2096,9 +2191,10 @@ fn execute_predicate_generator_inject_in(
     existing_predicates: &[serde_json::Value],
     files: &Arc<ScriptFileAccess>,
 ) -> Result<Vec<serde_json::Value>, PredicateGeneratorError> {
-    let MbJsThread { context, scripts } = thread;
-    let _require = install_require(&mut *context, files)
-        .map_err(|e| PredicateGeneratorError::Script(format!("failed to install require: {e}")))?;
+    let MbRealm {
+        context, scripts, ..
+    } = thread.realm(files);
+    let (_run, require) = install_require(&mut *context, files);
 
     let request_obj = create_mountebank_request_object(&mut *context, request).map_err(|e| {
         PredicateGeneratorError::Script(format!("failed to build request object: {e}"))
@@ -2127,14 +2223,16 @@ fn execute_predicate_generator_inject_in(
 
     let wrapper_script = format!(
         r#"
+        (function (require) {{
         var __injectFn = {inject_fn};
         var __config = {{ request: __request }};
         var __result = __injectFn(__config, __logger, __predicates);
-        JSON.stringify(__result);
+        return JSON.stringify(__result);
+        }})
         "#
     );
 
-    let result = eval_mb_script(context, scripts, &wrapper_script)
+    let result = call_mb_wrapper(context, scripts, &wrapper_script, require)
         .map_err(|e| PredicateGeneratorError::Script(format!("script execution error: {e}")))?;
 
     let json_str = result
@@ -2518,15 +2616,16 @@ impl Drop for RequireRunGuard {
     }
 }
 
-/// Give this hook run a fresh `require` global bound to its own imposter's `files` (issues #305,
-/// #1611): a new module cache, a new run id, and top-level relative paths resolved from the
-/// root (or, for a trusted door, its base). Every Mountebank-style hook calls this before its
-/// script runs, so no run sees another run's modules, cache or root. Keep the guard for the whole
-/// run; dropping it ends the `require`.
+/// Make this hook run a fresh `require` bound to its own imposter's `files` (issues #305, #1611):
+/// a new module cache, a new run id, and top-level relative paths resolved from the root (or, for
+/// a trusted door, its base). Every Mountebank-style hook calls this before its script runs and
+/// passes the function into the hook's scope, never onto the global object (issue #1645), so no
+/// run sees another run's modules, cache or root. Keep the guard for the whole run; dropping it
+/// ends the `require`.
 fn install_require(
     context: &mut Context,
     files: &Arc<ScriptFileAccess>,
-) -> Result<RequireRunGuard> {
+) -> (RequireRunGuard, JsValue) {
     let id = NEXT_REQUIRE_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let previous = REQUIRE_RUN.with_borrow_mut(|run| run.replace((id, Arc::clone(files))));
     let guard = RequireRunGuard { previous };
@@ -2538,12 +2637,7 @@ fn install_require(
     let cache: RequireCache = boa_engine::gc::Gc::new(boa_engine::gc::GcRefCell::new(
         std::collections::HashMap::new(),
     ));
-    let require = require_function(context, cache, id, base);
-    context
-        .global_object()
-        .set(js_string!("require"), require, false, context)
-        .map_err(|e| anyhow!("Failed to set require: {e}"))?;
-    Ok(guard)
+    (guard, require_function(context, cache, id, base))
 }
 
 /// A `require` function for run `run`, resolving a relative path from `base`. The captures are all
@@ -2775,7 +2869,9 @@ fn execute_mountebank_decorate_in(
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
 ) -> Result<crate::behaviors::Decorated> {
-    let MbJsThread { context, scripts } = thread;
+    let MbRealm {
+        context, scripts, ..
+    } = thread.realm(files);
 
     let request_obj = create_mountebank_request_object(&mut *context, request)?;
 
@@ -2860,9 +2956,9 @@ fn execute_mountebank_decorate_in(
         .map_err(|e| anyhow!("Failed to set config.logger: {e}"))?;
     flatten_request_onto(&config_obj, &request_obj, &mut *context)?;
 
-    // A fresh CommonJS `require()` bound to this imposter (issues #305, #1611), live until the
-    // run returns.
-    let _require = install_require(&mut *context, files)?;
+    // A fresh CommonJS `require()` bound to this imposter (issues #305, #1611), passed into the
+    // hook's scope (#1645) and live until the run returns.
+    let (_run, require) = install_require(&mut *context, files);
 
     let global = context.global_object();
     for (name, value) in [
@@ -2879,11 +2975,13 @@ fn execute_mountebank_decorate_in(
     // The script's completion value is what the function returned.
     let wrapper_script = format!(
         r#"
+        (function (require) {{
         var __decorateFn = {decorate_fn};
-        __decorateFn(__config, __response, __logger, __state);
+        return __decorateFn(__config, __response, __logger, __state);
+        }})
         "#
     );
-    let returned = eval_mb_script(context, scripts, &wrapper_script)
+    let returned = call_mb_wrapper(context, scripts, &wrapper_script, require)
         .map_err(|e| anyhow!("Failed to execute decorate function: {e}"))?;
     let returned = settle_promise(returned, &mut *context)?;
 
@@ -4051,19 +4149,20 @@ function respond(ctx) {
         .expect("first run");
         assert_eq!(first.body.as_deref(), Some("A>B:true"));
 
-        let refused = Arc::new(ScriptFileAccess::Refused);
         let replay = format!(
             "config => {{ try {{ return {{ body: String(__stashed({:?})) }}; }} \
              catch (e) {{ return {{ body: 'ERR:' + String(e) }}; }} }}",
             tree.outside.join("mod.js").to_str().unwrap()
         );
+        // A later run of the same access shares the realm, so it can reach the stashed function,
+        // which is dead.
         let second = execute_mountebank_inject_in(
             &mut thread,
             &replay,
             &mb_req("GET", "/b"),
             test_port(),
             None,
-            &refused,
+            &trusted,
         )
         .expect("second run");
         let body = second.body.expect("a body");
@@ -4072,6 +4171,23 @@ function respond(ctx) {
             "{body}"
         );
         assert!(!body.contains("CANARY_1611"), "{body}");
+
+        // A run of another access does not even see the global (issue #1645).
+        let refused = Arc::new(ScriptFileAccess::Refused);
+        let third = execute_mountebank_inject_in(
+            &mut thread,
+            &replay,
+            &mb_req("GET", "/c"),
+            test_port(),
+            None,
+            &refused,
+        )
+        .expect("third run");
+        let body = third.body.expect("a body");
+        assert!(
+            body.starts_with("ERR:ReferenceError") && !body.contains("CANARY_1611"),
+            "{body}"
+        );
     }
 
     // Every Mountebank hook gets its own `require` (MB exposes it to all injection), each bound
@@ -4128,6 +4244,200 @@ function respond(ctx) {
         )
         .expect("generator");
         assert_eq!(generated, vec![json!({"equals": {"body": "B"}})]);
+    }
+
+    // Issue #1645 (1): a promise job one imposter's hook leaves queued never runs in another's
+    // run, where it would reach that run's `require`. Here a confined inject queues a job that
+    // requires a file outside its root; a trusted imposter's `async` decorate then runs the jobs
+    // on the same worker.
+    #[test]
+    fn a_queued_promise_job_never_runs_under_another_imposters_require() {
+        let tree = scripts_tree();
+        let mut thread = MbJsThread::new();
+        let confined = Arc::new(ScriptFileAccess::Confined(tree.root.clone()));
+        let trusted = Arc::new(ScriptFileAccess::Trusted {
+            base: tree.root.clone(),
+        });
+        let plant = format!(
+            "config => {{ Promise.resolve().then(() => {{ \
+               try {{ globalThis.__x = String(require({:?})); }} \
+               catch (e) {{ globalThis.__x = 'ERR:' + String(e); }} }}); \
+             return {{ body: 'planted' }}; }}",
+            tree.outside.join("mod.js").to_str().unwrap()
+        );
+        execute_mountebank_inject_in(
+            &mut thread,
+            &plant,
+            &mb_req("GET", "/a"),
+            test_port(),
+            None,
+            &confined,
+        )
+        .expect("plant");
+        let decorated = execute_mountebank_decorate_in(
+            &mut thread,
+            "async config => { config.response.body = 'trusted'; }",
+            &config_req(),
+            "orig",
+            &crate::behaviors::ResponseStatus::Code(200),
+            &HashMap::new(),
+            test_port(),
+            None,
+            &trusted,
+        )
+        .expect("trusted async decorate");
+        assert_eq!(decorated.body, "trusted");
+        let read = execute_mountebank_inject_in(
+            &mut thread,
+            "config => ({ body: String(globalThis.__x) })",
+            &mb_req("GET", "/b"),
+            test_port(),
+            None,
+            &confined,
+        )
+        .expect("read");
+        let body = read.body.expect("a body");
+        assert!(!body.contains("CANARY_1611"), "{body}");
+    }
+
+    // Issue #1645 (1), variant: a builtin one imposter patches never runs in another imposter's
+    // run, so the patch cannot call that run's `require`.
+    #[test]
+    fn a_patched_builtin_never_runs_under_another_imposters_require() {
+        let tree = scripts_tree();
+        let mut thread = MbJsThread::new();
+        let confined = Arc::new(ScriptFileAccess::Confined(tree.root.clone()));
+        let trusted = Arc::new(ScriptFileAccess::Trusted {
+            base: tree.root.clone(),
+        });
+        let patch = format!(
+            "config => {{ var orig = JSON.stringify; \
+               JSON.stringify = function () {{ \
+                 try {{ globalThis.__y = String(require({:?})); }} catch (e) {{ }} \
+                 return orig.apply(this, arguments); }}; \
+             return {{ body: 'patched' }}; }}",
+            tree.outside.join("mod.js").to_str().unwrap()
+        );
+        execute_mountebank_inject_in(
+            &mut thread,
+            &patch,
+            &mb_req("GET", "/a"),
+            test_port(),
+            None,
+            &confined,
+        )
+        .expect("patch");
+        let trusted_run = execute_mountebank_inject_in(
+            &mut thread,
+            "config => ({ body: JSON.stringify({ a: 1 }) + ':' + typeof globalThis.__y })",
+            &mb_req("GET", "/t"),
+            test_port(),
+            None,
+            &trusted,
+        )
+        .expect("trusted inject");
+        assert_eq!(
+            trusted_run.body.as_deref(),
+            Some(r#"{"a":1}:undefined"#),
+            "the trusted run sees neither the patch nor the other imposter's globals"
+        );
+        let read = execute_mountebank_inject_in(
+            &mut thread,
+            "config => ({ body: String(globalThis.__y) })",
+            &mb_req("GET", "/b"),
+            test_port(),
+            None,
+            &confined,
+        )
+        .expect("read");
+        let body = read.body.expect("a body");
+        assert!(!body.contains("CANARY_1611"), "{body}");
+    }
+
+    // Issue #1645 (1a): `require` is a binding of the hook's own scope, as in Node, not a global
+    // that code from another run could read.
+    #[test]
+    fn require_is_in_the_hooks_scope_and_not_a_global() {
+        let tree = scripts_tree();
+        let mut thread = MbJsThread::new();
+        let confined = Arc::new(ScriptFileAccess::Confined(tree.root.clone()));
+        let probe = "typeof globalThis.require + ':' + typeof require";
+        let injected = execute_mountebank_inject_in(
+            &mut thread,
+            &format!("config => ({{ body: {probe} }})"),
+            &mb_req("GET", "/a"),
+            test_port(),
+            None,
+            &confined,
+        )
+        .expect("inject");
+        assert_eq!(injected.body.as_deref(), Some("undefined:function"));
+        let decorated = execute_mountebank_decorate_in(
+            &mut thread,
+            &format!("config => {{ config.response.body = {probe}; }}"),
+            &config_req(),
+            "orig",
+            &crate::behaviors::ResponseStatus::Code(200),
+            &HashMap::new(),
+            test_port(),
+            None,
+            &confined,
+        )
+        .expect("decorate");
+        assert_eq!(decorated.body, "undefined:function");
+        assert!(
+            execute_predicate_inject_in(
+                &mut thread,
+                &format!("config => ({probe}) === 'undefined:function'"),
+                &mb_req("GET", "/p"),
+                test_port(),
+                &confined,
+            )
+            .expect("predicate inject")
+        );
+        let generated = execute_predicate_generator_inject_in(
+            &mut thread,
+            &format!("config => [{{ equals: {{ body: {probe} }} }}]"),
+            &mb_req("GET", "/g"),
+            &[],
+            &confined,
+        )
+        .expect("generator");
+        assert_eq!(
+            generated,
+            vec![json!({"equals": {"body": "undefined:function"}})]
+        );
+    }
+
+    // Issue #1645 (1b): a job a hook leaves queued is discarded before the next run on the realm,
+    // so no run ever executes code queued by another — even one of the same imposter.
+    #[test]
+    fn a_hooks_leftover_promise_jobs_are_discarded_before_the_next_run() {
+        let mut thread = MbJsThread::new();
+        let refused = Arc::new(ScriptFileAccess::Refused);
+        execute_mountebank_inject_in(
+            &mut thread,
+            "config => { Promise.resolve().then(() => { globalThis.__ran = 'yes'; }); \
+             return { body: 'queued' }; }",
+            &mb_req("GET", "/a"),
+            test_port(),
+            None,
+            &refused,
+        )
+        .expect("queue");
+        let decorated = execute_mountebank_decorate_in(
+            &mut thread,
+            "async config => { await null; config.response.body = String(globalThis.__ran); }",
+            &config_req(),
+            "orig",
+            &crate::behaviors::ResponseStatus::Code(200),
+            &HashMap::new(),
+            test_port(),
+            None,
+            &refused,
+        )
+        .expect("async decorate runs its own jobs");
+        assert_eq!(decorated.body, "undefined");
     }
 
     fn mb_req(method: &str, path: &str) -> MountebankRequest {

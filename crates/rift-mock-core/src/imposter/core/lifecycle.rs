@@ -27,19 +27,44 @@ impl Imposter {
         })
     }
 
+    /// [`Self::reconcile_stubs_from`] by a door with the imposter's own access.
+    #[cfg(test)]
+    pub(crate) fn reconcile_stubs(&self, desired: &[Stub]) -> StubReconcile {
+        let access = self.script_file_access();
+        self.reconcile_stubs_from(desired, &access)
+    }
+
     /// Reconcile live stubs toward `desired` under one write critical section (issue #316).
     ///
     /// Only a patch stores a new snapshot: `Unchanged` and `Degenerate` leave the current one, and
     /// its match index, in place rather than rebuilding an identical copy (issue #1254), which is
     /// why this does not go through [`mutate_stubs`](Self::mutate_stubs).
-    pub(crate) fn reconcile_stubs(&self, desired: &[Stub]) -> StubReconcile {
+    ///
+    /// `door` is what the writing door's scripts get (issue #1645). After an `Unchanged` or
+    /// `Patched` outcome every stub is the door's, so the imposter's access becomes `door`, set in
+    /// the same critical section and before the patched stubs are stored. A `door` that allows more
+    /// than the current access is refused in place (`Widens`): until the patch lands, the stubs
+    /// another door wrote would serve with it, so only a replace, whose every stub is new, may
+    /// widen it.
+    pub(crate) fn reconcile_stubs_from(
+        &self,
+        desired: &[Stub],
+        door: &crate::imposter::ScriptFileAccess,
+    ) -> StubReconcile {
         let (outcome, swapped) = {
             let _writer = self.stubs_write.lock();
+            if !self.script_files.load().admits(door) {
+                return StubReconcile::Widens;
+            }
             let current = self.stubs_snapshot.load_full();
             match plan_stub_reconcile(current.stubs(), desired, &self.load_clock) {
-                StubPlan::Unchanged => (StubReconcile::Unchanged, None),
+                StubPlan::Unchanged => {
+                    self.script_files.store(Arc::new(door.clone()));
+                    (StubReconcile::Unchanged, None)
+                }
                 StubPlan::Degenerate => (StubReconcile::Degenerate, None),
                 StubPlan::Patched { next, removed_keys } => {
+                    self.script_files.store(Arc::new(door.clone()));
                     let after = Arc::new(StubSnapshot::build(next));
                     self.stubs_snapshot.store(Arc::clone(&after));
                     self.stub_warnings.store(None);
@@ -72,7 +97,18 @@ impl Imposter {
     /// can't race. Returns `false` (not added) on id conflict — the caller holds the id for the error.
     #[must_use]
     pub fn add_stub_unique(&self, stub: Stub, index: Option<usize>) -> bool {
-        self.mutate_stubs(|stubs| {
+        self.add_stub_unique_from(None, stub, index)
+    }
+
+    /// [`Self::add_stub_unique`] for a door that writes scripts: see
+    /// [`Self::mutate_stubs_from`] (issue #1645).
+    pub(crate) fn add_stub_unique_from(
+        &self,
+        door: Option<&crate::imposter::ScriptFileAccess>,
+        stub: Stub,
+        index: Option<usize>,
+    ) -> bool {
+        self.mutate_stubs_from(door, |stubs| {
             if let Some(id) = stub.id.as_deref()
                 && stubs.iter().any(|s| s.stub.id.as_deref() == Some(id))
             {
@@ -94,8 +130,19 @@ impl Imposter {
     /// a Mountebank route, so parity does not reach it, and rift-cluster drives `proxyAlways`
     /// merges through it, which must not restart a recording's cycle (#1515).
     #[must_use]
-    pub fn replace_stub_by_id(&self, id: &str, mut stub: Stub) -> bool {
-        self.mutate_stubs(|stubs| {
+    pub fn replace_stub_by_id(&self, id: &str, stub: Stub) -> bool {
+        self.replace_stub_by_id_from(None, id, stub)
+    }
+
+    /// [`Self::replace_stub_by_id`] for a door that writes scripts: see
+    /// [`Self::mutate_stubs_from`] (issue #1645).
+    pub(crate) fn replace_stub_by_id_from(
+        &self,
+        door: Option<&crate::imposter::ScriptFileAccess>,
+        id: &str,
+        mut stub: Stub,
+    ) -> bool {
+        self.mutate_stubs_from(door, |stubs| {
             match stubs.iter().position(|s| s.stub.id.as_deref() == Some(id)) {
                 Some(i) => {
                     stub.id = Some(id.to_string());
@@ -164,7 +211,18 @@ impl Imposter {
     /// Replace a stub at a specific index. The stub starts its response cycle over, even with
     /// identical content, as Mountebank's `overwriteAtIndex` rewraps it (#1515).
     pub fn replace_stub(&self, index: usize, stub: Stub) -> Result<(), ImposterError> {
-        self.mutate_stubs(|stubs| {
+        self.replace_stub_from(None, index, stub)
+    }
+
+    /// [`Self::replace_stub`] for a door that writes scripts: see [`Self::mutate_stubs_from`]
+    /// (issue #1645).
+    pub(crate) fn replace_stub_from(
+        &self,
+        door: Option<&crate::imposter::ScriptFileAccess>,
+        index: usize,
+        stub: Stub,
+    ) -> Result<(), ImposterError> {
+        self.mutate_stubs_from(door, |stubs| {
             if index >= stubs.len() {
                 return Err(ImposterError::StubIndexOutOfBounds(index));
             }

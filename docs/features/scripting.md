@@ -73,9 +73,11 @@ from:
 
 A path outside `--scripts-dir` (absolute, `..`, or a link that points out) is refused with one
 message, `require('<path>'): outside --scripts-dir`, whether or not anything exists there. A stub
-added over the admin API to a running `--configfile` imposter confines that imposter from then on.
-Every hook run gets its own `require` and module cache, so no run sees another imposter's
-modules.
+added over the admin API to a running `--configfile` imposter confines that imposter from then on;
+a reload of the config file makes it unconfined again only by replacing the imposter, which drops
+the posted stub and restarts its response cycles. Every hook run gets its own `require` and module
+cache, so no run sees another imposter's modules. As in Node, `require` is a name in the hook's own
+scope, not a global: `globalThis.require` is `undefined`.
 
 `--scripts-dir` confines file access through `file:` references and `require()`; it is defence in
 depth for authors you already trust, not a sandbox. Rhai `import` is not supported: an `import`
@@ -566,8 +568,11 @@ predicate `inject`, and the `decorate` behavior — all of which run off the asy
 - **Amortized JavaScript startup.** The Mountebank hooks reuse a per-worker-thread Boa context and
   a parsed-script cache keyed by source content, so steady-state execution skips both JS realm
   construction and re-parsing. Like Mountebank itself — which evaluates every injection in one
-  shared Node.js process — scripts on the same worker thread share JS globals; per-imposter
-  `state` isolation is unaffected.
+  shared Node.js process — scripts on the same worker thread share JS globals, but only with
+  scripts of the same `require()` access: a worker keeps a separate realm for each, so a global or
+  patched builtin from an admin-API imposter never reaches a `--configfile` imposter's script.
+  Per-imposter `state` isolation is unaffected. A promise job a hook leaves queued is dropped when
+  the hook returns, where Node would run it; only an `async` `decorate` waits for its own jobs.
 
 ```json
 {

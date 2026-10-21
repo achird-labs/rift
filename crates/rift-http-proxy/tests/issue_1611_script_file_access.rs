@@ -602,4 +602,18 @@ async fn an_admin_stub_write_confines_a_configfile_imposter() {
         assert_no_canary(path, &body);
         assert!(body.contains("outside --scripts-dir"), "{path}: {body}");
     }
+
+    // Issue #1645: a reload makes the imposter the config file's again only by replacing it, so
+    // the posted stub is gone before anything runs trusted, never served by it.
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/admin/reload", server.admin))
+        .send()
+        .await
+        .expect("reload");
+    let status = resp.status();
+    let report: Value = resp.json().await.expect("reload report");
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(get(port, "/own").await.2, "OK:\"CANARY_OUTSIDE_1611\"");
+    let (_, _, body) = get(port, "/posted").await;
+    assert_no_canary("/posted", &body);
 }

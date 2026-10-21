@@ -42,20 +42,6 @@ pub(crate) fn admin_script_access(scripts_dir: &Option<Arc<PathBuf>>) -> ScriptF
     ScriptFileAccess::network(scripts_dir.as_deref().map(PathBuf::as_path))
 }
 
-/// Make the scripts of the imposter on `port` this admin door's before a stub is written into it
-/// (issue #1611), so a stub posted over the network never runs with the unconfined `require` of a
-/// `--configfile` imposter. `Some` is the error response when the imposter does not exist.
-pub(crate) fn claim_scripts_for_admin(
-    manager: &ImposterManager,
-    port: u16,
-    scripts_dir: &Option<Arc<PathBuf>>,
-) -> Option<Response<Full<Bytes>>> {
-    manager
-        .set_script_file_access(port, admin_script_access(scripts_dir))
-        .err()
-        .map(Into::into)
-}
-
 /// The `_rift.scripts` registry of the imposter on `port` (already resolved when the imposter was
 /// created), for resolving a newly-added stub's `{ "ref": "name" }` against. Empty when the
 /// imposter doesn't exist or declares no registry.

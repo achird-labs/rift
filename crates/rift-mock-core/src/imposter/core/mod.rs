@@ -695,9 +695,13 @@ impl Imposter {
         self.script_files.load_full()
     }
 
-    /// Set what this imposter's scripts may `require()`: the access of the door now writing its
-    /// stubs (issue #1611). A request already running keeps the access it started with.
+    /// Set what this imposter's scripts may `require()` (issue #1611), in the stub writers'
+    /// critical section. A request already running keeps the access it started with. Not for a
+    /// door about to write stubs: a set and a separate write race a concurrent reload (issue
+    /// #1645); such a door writes through the `_from` stub writes, which narrow the access in the
+    /// same critical section as the write.
     pub(crate) fn set_script_file_access(&self, access: crate::imposter::ScriptFileAccess) {
+        let _writer = self.stubs_write.lock();
         self.script_files.store(Arc::new(access));
     }
 
@@ -761,8 +765,27 @@ impl Imposter {
     /// content-identical clone. Any `f` added here must uphold that: never partially mutate the
     /// vector and then return an error/no-op, or the partial change would be committed silently.
     pub(crate) fn mutate_stubs<R>(&self, f: impl FnOnce(&mut Vec<Arc<StubState>>) -> R) -> R {
+        self.mutate_stubs_from(None, f)
+    }
+
+    /// [`Self::mutate_stubs`] for a door that writes scripts (issue #1645): `door`, when given,
+    /// narrows the imposter's script access to what both it and the current access allow
+    /// ([`ScriptFileAccess::meet`](crate::imposter::ScriptFileAccess::meet)), in the same critical
+    /// section as the write and stored before the new stubs are. A request loads the stub snapshot
+    /// before the access, so it can never pair a stub this door wrote with an access wider than the
+    /// door's, whatever write or reload runs alongside. In place the access only ever narrows; it
+    /// widens only when an imposter is created with every stub new.
+    pub(crate) fn mutate_stubs_from<R>(
+        &self,
+        door: Option<&crate::imposter::ScriptFileAccess>,
+        f: impl FnOnce(&mut Vec<Arc<StubState>>) -> R,
+    ) -> R {
         let (result, before, after) = {
             let _writer = self.stubs_write.lock();
+            if let Some(door) = door {
+                let narrowed = self.script_files.load().meet(door);
+                self.script_files.store(Arc::new(narrowed));
+            }
             let before = self.stubs_snapshot.load_full();
             let mut next: Vec<Arc<StubState>> = before.stubs().to_vec();
             let result = f(&mut next);
@@ -888,7 +911,17 @@ impl Imposter {
     /// shares one stamp from the load clock (issues #1301, #1303) — a stub that moved keeps nothing,
     /// since what it answers may have changed.
     pub fn replace_stubs(&self, new_stubs: Vec<Stub>) {
-        self.mutate_stubs(|stubs| self.overwrite_all(stubs, new_stubs));
+        self.replace_stubs_from(None, new_stubs);
+    }
+
+    /// [`Self::replace_stubs`] for a door that writes scripts: see [`Self::mutate_stubs_from`]
+    /// (issue #1645).
+    pub(crate) fn replace_stubs_from(
+        &self,
+        door: Option<&crate::imposter::ScriptFileAccess>,
+        new_stubs: Vec<Stub>,
+    ) {
+        self.mutate_stubs_from(door, |stubs| self.overwrite_all(stubs, new_stubs));
     }
 
     /// [`Self::replace_stubs`]' body, for a caller already inside [`Self::mutate_stubs`]: every
