@@ -1,9 +1,10 @@
 //! Issue #1568: `rift_blocked_connections_total{listener="admin"|"metrics"}` exists only when a
-//! policy can refuse. Without `--local-only` neither series is created, so "not enforced" reads
-//! differently from "nothing refused" (`docs/features/metrics.md`).
+//! policy can refuse, and so does `listener="intercept"` (issue #1572). Without `--local-only` none
+//! of these series is created, so "not enforced" reads differently from "nothing refused"
+//! (`docs/features/metrics.md`).
 //!
 //! Its own test binary: the registry is process-wide, and any `--local-only` server started earlier
-//! in the same process would have materialised both series.
+//! in the same process would have materialised these series.
 
 use clap::Parser;
 use rift_http_proxy::server::{Cli, ServerBuilder};
@@ -11,7 +12,16 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn without_local_only_the_admin_and_metrics_blocked_series_are_absent() {
-    let cli = Cli::try_parse_from(["rift", "--port", "0", "--metrics-port", "0"]).expect("cli");
+    let cli = Cli::try_parse_from([
+        "rift",
+        "--port",
+        "0",
+        "--metrics-port",
+        "0",
+        "--intercept-port",
+        "0",
+    ])
+    .expect("cli");
     let server = ServerBuilder::from_cli(cli).start().await.expect("start");
     let metrics = server.metrics_addr().expect("metrics bound");
     let scrape = reqwest::Client::builder()
@@ -26,7 +36,7 @@ async fn without_local_only_the_admin_and_metrics_blocked_series_are_absent() {
         .text()
         .await
         .expect("metrics text");
-    for listener in ["admin", "metrics"] {
+    for listener in ["admin", "metrics", "intercept"] {
         let series = format!("rift_blocked_connections_total{{listener=\"{listener}\"}}");
         assert!(
             !scrape.contains(&series),

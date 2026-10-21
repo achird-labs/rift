@@ -167,7 +167,7 @@ Configure Rift behavior via environment variables:
 | `MB_CONFIGFILE` | Imposter config file | |
 | `MB_DATADIR` | Persistent storage directory | |
 | `MB_ALLOW_INJECTION` | Enable JavaScript injection | `false` |
-| `MB_LOCAL_ONLY` | Localhost only: the admin API and `/metrics` listen on `127.0.0.1` and `::1`, and every imposter port and the front door refuse non-loopback clients | `false` |
+| `MB_LOCAL_ONLY` | Localhost only: the admin API, `/metrics` and `--intercept-port` listen on `127.0.0.1` and `::1`, and they, every imposter port and the front door refuse non-loopback clients | `false` |
 | `MB_LOGLEVEL` | Log level: `trace`, `debug`, `info`, `warn`, `error` | `info` |
 | `MB_APIKEY` | Admin API key | |
 | `RIFT_METRICS_PORT` | Prometheus metrics port | `9090` |

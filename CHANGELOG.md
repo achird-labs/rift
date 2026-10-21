@@ -137,6 +137,17 @@ record.
 
 ### Fixed
 
+- **`--local-only` with `--intercept-port` listens on `[::1]` too, and the intercept proxy refuses
+  non-loopback clients** (#1572). The admin API and `/metrics` bind `127.0.0.1` and `[::1]` under
+  `--local-only` (#1528), but the intercept listener bound `127.0.0.1` only, so a `localhost` client
+  that tries `::1` first was refused. It also had no peer check: like the admin API before #1568, a
+  connection from another of the host's own addresses routed over loopback was served, and so was
+  every off-host client of a listener started at runtime with `POST /intercept {"host": "0.0.0.0"}`.
+  Under `--local-only` every intercept listener, however it was started, now closes such a client at
+  accept and counts it in `rift_blocked_connections_total{listener="intercept"}`. An explicit
+  config-file `intercept.host` or `POST /intercept` `host` still binds exactly that address.
+  Embedders: `InterceptControl::with_peer_policy(PeerPolicy)` sets the policy, default `Any`.
+
 - **A `wait` function that throws now answers `500` with Mountebank's `invalid wait injection`**
   (#1616), instead of serving the stub after 100 ms. The error's `code` and `type` are
   `invalid injection`, `data` is the thrown message, and the response carries

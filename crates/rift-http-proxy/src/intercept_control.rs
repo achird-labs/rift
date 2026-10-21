@@ -18,11 +18,11 @@ use crate::intercept::InterceptListener;
 use crate::intercept_rules::{
     InterceptRule, InterceptRules, InterceptState, RulesAtCapacity, SeededReplaced,
 };
-use crate::listen::{PortReservation, refuse_imposter_port};
-use rift_mock_core::proxy::OutboundTls;
+use crate::listen::{ListenAddr, PortReservation, refuse_imposter_port};
 use rift_mock_core::proxy::intercept_ca::{
     CaInputs, CaSource, CertificateAuthority, SniCertResolver,
 };
+use rift_mock_core::proxy::{OutboundTls, PeerPolicy};
 use serde::Serialize;
 
 /// Log an `anyhow`-typed intercept-start failure with its whole cause chain (issue #683).
@@ -192,6 +192,20 @@ struct InterceptPolicy {
     /// untouched default means system roots only, which is what a listener started before this
     /// existed effectively had.
     outbound_tls: OutboundTls,
+    /// Which clients a listener started through this control serves (issue #1572): `LoopbackOnly`
+    /// under `--local-only`, so a runtime `POST /intercept {"host": "0.0.0.0"}` still refuses
+    /// off-host clients. The default, `Any`, serves everyone.
+    peer: PeerPolicy,
+}
+
+/// Where [`InterceptControl::start_on`] binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindAt {
+    /// Exactly the requested `host` (default `127.0.0.1`).
+    Requested,
+    /// `127.0.0.1` and, where the host has IPv6 loopback, `[::1]`: `--intercept-port` under
+    /// `--local-only`, matching the admin API and `/metrics` (issue #1572).
+    Loopback,
 }
 
 /// Start options — the exact shape (and serde attributes) of the FFI's former `InterceptOptions`,
@@ -432,6 +446,17 @@ impl InterceptControl {
         self.policy_lock().outbound_tls = outbound_tls;
     }
 
+    /// Set which clients every listener started through this control — and through every clone of
+    /// it — serves (issue #1572). The standalone server passes `LoopbackOnly` under
+    /// `--local-only`; a refused client is closed at accept and counted in
+    /// `rift_blocked_connections_total{listener="intercept"}`. Only affects listeners started
+    /// afterwards.
+    #[must_use]
+    pub fn with_peer_policy(self, policy: PeerPolicy) -> Self {
+        self.policy_lock().peer = policy;
+        self
+    }
+
     /// The outbound trust currently configured on this control.
     #[must_use]
     pub fn outbound_tls(&self) -> OutboundTls {
@@ -502,7 +527,7 @@ impl InterceptControl {
         if let Some(manager) = self.reservations_lock().as_ref() {
             plane.reservation = Some(PortReservation::new(
                 manager,
-                &[plane.listener.local_addr()],
+                plane.listener.local_addrs(),
                 ServerListener::Intercept,
             ));
         }
@@ -530,18 +555,52 @@ impl InterceptControl {
         opts: InterceptStartOptions,
         origin: InterceptOrigin,
     ) -> Result<StartedIntercept, InterceptStartError> {
+        self.start_on(opts, origin, BindAt::Requested).await
+    }
+
+    /// [`start_from`](Self::start_from) for `--intercept-port` under `--local-only` (issue #1572):
+    /// binds `127.0.0.1` and `[::1]` on the requested port, as the admin API and `/metrics` do,
+    /// whatever `opts.host` says. An explicit config-file `intercept.host` or `POST /intercept`
+    /// `host` goes through `start_from` and binds exactly what it names.
+    pub(crate) async fn start_loopback_from(
+        &self,
+        opts: InterceptStartOptions,
+        origin: InterceptOrigin,
+    ) -> Result<StartedIntercept, InterceptStartError> {
+        self.start_on(opts, origin, BindAt::Loopback).await
+    }
+
+    async fn start_on(
+        &self,
+        mut opts: InterceptStartOptions,
+        origin: InterceptOrigin,
+        bind_at: BindAt,
+    ) -> Result<StartedIntercept, InterceptStartError> {
         if self.is_occupied() {
             return Err(InterceptStartError::AlreadyRunning);
         }
 
+        let port = opts.port.unwrap_or(0);
+        let listen = match bind_at {
+            BindAt::Loopback => {
+                let listen = ListenAddr::Loopback(port);
+                // The spec records what is judged, so it never names a host this did not bind.
+                opts.host = Some(rift_mock_core::proxy::bind_host(&listen.judged()));
+                listen
+            }
+            BindAt::Requested => {
+                let host = opts.host.as_deref().unwrap_or("127.0.0.1");
+                let addr = rift_mock_core::proxy::bind_addr(host, port).ok_or_else(|| {
+                    InterceptStartError::InvalidAddr(format!(
+                        "`{host}` is not an IP literal (IPv4, or IPv6 bare `::1` or bracketed `[::1]`)"
+                    ))
+                })?;
+                ListenAddr::Exact(addr)
+            }
+        };
+        // The address the exposure check judges: `127.0.0.1` for the two-address loopback.
+        let addr = listen.judged();
         let spec = ListenerSpec::of(&opts);
-        let host = opts.host.as_deref().unwrap_or("127.0.0.1");
-        let addr =
-            rift_mock_core::proxy::bind_addr(host, opts.port.unwrap_or(0)).ok_or_else(|| {
-                InterceptStartError::InvalidAddr(format!(
-                    "`{host}` is not an IP literal (IPv4, or IPv6 bare `::1` or bracketed `[::1]`)"
-                ))
-            })?;
 
         // Validate the credential before any side effect: a blank secret must never reach the
         // listener, where it would switch the gate on and then admit everyone (issue #878/#844).
@@ -618,13 +677,19 @@ impl InterceptControl {
             )?;
         }
         let resolver = Arc::new(SniCertResolver::new(ca.clone()));
-        let listener =
-            InterceptListener::bind(addr, resolver, rules.clone(), auth, policy.outbound_tls)
-                .await
-                .map_err(|e| {
-                    warn_intercept_start_failure(&e, "bind failed");
-                    InterceptStartError::Bind(e)
-                })?;
+        let listener = InterceptListener::bind_listeners(
+            listen,
+            policy.peer,
+            resolver,
+            rules.clone(),
+            auth,
+            policy.outbound_tls,
+        )
+        .await
+        .map_err(|e| {
+            warn_intercept_start_failure(&e, "bind failed");
+            InterceptStartError::Bind(e)
+        })?;
         let bound = listener.local_addr();
 
         match self.install(InterceptPlane {
@@ -666,9 +731,20 @@ impl InterceptControl {
         }
     }
 
-    /// Bound address of the running listener, if any.
+    /// Bound address of the running listener, if any: the first one, `127.0.0.1`, when it listens
+    /// on both loopbacks.
     pub fn status(&self) -> Option<SocketAddr> {
         self.lock().as_ref().map(|p| p.listener.local_addr())
+    }
+
+    /// Every address the running listener is bound to, in bind order (issue #1572); empty when
+    /// none is running.
+    #[must_use]
+    pub fn status_addrs(&self) -> Vec<SocketAddr> {
+        self.lock()
+            .as_ref()
+            .map(|p| p.listener.local_addrs().to_vec())
+            .unwrap_or_default()
     }
 
     /// Re-judge a listener that is **already running** against the current exposure policy

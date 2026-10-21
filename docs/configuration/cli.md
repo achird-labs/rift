@@ -174,7 +174,7 @@ Server options:
       --datadir <DIR>              Directory for persistent imposter storage
       --scripts-dir <DIR>          Root directory for admin-API `file:`/`ref:` script resolution and for `require()` in admin-API, `--datadir` and `https:` imposters; paths that escape it are rejected (unset ⇒ both are refused)
       --allow-injection            Enable JavaScript injection in responses (alias: --allowInjection)
-      --local-only                 Only accept requests from localhost: the admin API and /metrics listen on `127.0.0.1` and `::1`, and they, every imposter port and the front door refuse non-loopback clients (alias: --localOnly)
+      --local-only                 Only accept requests from localhost: the admin API, /metrics and --intercept-port listen on `127.0.0.1` and `::1`, and they, every imposter port and the front door refuse non-loopback clients (alias: --localOnly)
       --require-admin-auth         Refuse to start when the admin API would bind a non-loopback address with no --api-key (default: warn)
       --loglevel <LEVEL>           Log level: trace, debug, info, warn, error (an unrecognised value is refused) [default: info]
       --runtime <MODE>             Runtime topology: work-stealing (default) or per-core[=N] (RFC-712; experimental, Linux-first — macOS falls back with a warning, Windows rejects it)
@@ -245,7 +245,7 @@ What does work inside Rift:
 
 | Goal | Use |
 |:-----|:----|
-| Refuse connections from other hosts | `--local-only`: the admin API and `/metrics` bind `127.0.0.1` and `::1` (`/metrics` since 0.17.0), and they (#1568), every imposter port and the front door (#1523) refuse non-loopback clients at accept |
+| Refuse connections from other hosts | `--local-only`: the admin API, `/metrics` and `--intercept-port` bind `127.0.0.1` and `::1` (`/metrics` since 0.17.0), and they (#1568, #1572), every imposter port and the front door (#1523) refuse non-loopback clients at accept |
 | Require a credential on the admin API | `--api-key <token>` |
 | Fail startup if the admin plane is exposed and keyless | `--require-admin-auth` |
 
@@ -400,7 +400,9 @@ does not narrow imposter binds. As in Mountebank, an imposter still listens wher
 but refuses every client that is not loopback (`127.0.0.0/8`, `::1`, and their IPv4-mapped forms):
 the connection is closed at accept, before TLS, and the request is not recorded. The front door
 refuses the same clients, and so do the admin API and `/metrics` (#1568): their loopback bind alone
-would still accept a connection from another local interface's address, routed over loopback.
+would still accept a connection from another local interface's address, routed over loopback. The
+intercept proxy does too (#1572): `--intercept-port` listens on `127.0.0.1` and `::1`, and a
+listener started at runtime on another `host` still refuses non-loopback clients.
 `rift_blocked_connections_total{listener}` counts the refusals.
 
 The same rule applies at every door onto the admin plane, so an embedded host gets it too: the
