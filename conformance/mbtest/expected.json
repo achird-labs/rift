@@ -478,16 +478,10 @@
       "note": "runs since #1575; fails here because the host's name resolves to ::1, so localhost reaches the imposter, as it would on Mountebank"
     },
     {
-      "id": "cli/rcfileTest.js::--rcfile should still start if rcfile does not exist",
-      "class": "bug",
-      "issue": "#1574",
-      "note": "a missing --rcfile aborts startup"
-    },
-    {
       "id": "cli/rcfileTest.js::--rcfile should still start if rcfile is not JSON",
       "class": "bug",
-      "issue": "#1574",
-      "note": "the test writes mbrc.json only after start, so at start it is a missing --rcfile, which aborts startup"
+      "issue": "#1569",
+      "note": "starts now (#1574); fails on the later assertion that GET /config options.debug is false, which Rift does not report"
     },
     {
       "id": "cli/rcfileTest.js::--rcfile options passed on CLI using an alias should override rcfile options",

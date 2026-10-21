@@ -60,6 +60,10 @@ record.
   about or refused. A name that does not resolve is a startup error naming it. Embedders:
   `server::admin_bind_addr` and `admin_listen_addr` now resolve a name instead of returning an
   error for it.
+- **A `--rcfile` path that does not exist now warns and starts**, as Mountebank does (#1574):
+  `--rcfile <path> not found; starting without it`. #1114 had made it fatal. A file that exists but
+  cannot be read, is not JSON, or has a wrong-typed key still aborts startup, where Mountebank
+  warns and starts. New `bootstrap::rcfile_not_found` and `missing_rcfile_warning` for embedders.
 
 - **Embedding API: `server::bind_metrics_listeners` takes a `PeerPolicy`** (#1568):
   `bind_metrics_listeners(addr, PeerPolicy::Any)` keeps the old behaviour. `AdminApiServer` gains

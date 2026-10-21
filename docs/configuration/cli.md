@@ -192,7 +192,7 @@ Server options:
       --pidfile <FILE>             Write the server's PID here (off unless set; stop/restart read ./rift.pid when omitted)
       --origin <ORIGIN>            Accepted for Mountebank compatibility; NOT implemented — the admin API sends no CORS headers
       --api-key <TOKEN>            Require this token in the Authorization header (or Mountebank's x-api-key) for all admin API requests; Authorization wins when both are sent (alias: --apikey)
-      --rcfile <FILE>              RC file with default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/apiKey/datadir/configfile/noParse/mock/debug); one that cannot be read or applied aborts startup
+      --rcfile <FILE>              RC file with default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/apiKey/datadir/configfile/noParse/mock/debug); a path that does not exist warns and starts; one that exists but cannot be read or applied aborts startup
       --default-tls-cert <FILE>    Default TLS certificate (PEM) for HTTPS imposters without their own
       --default-tls-key <FILE>     Default TLS private key (PEM), paired with --default-tls-cert
       --no-self-signed-tls         Disable the self-signed fallback; an HTTPS imposter with no cert is an error
@@ -332,7 +332,11 @@ Rules:
 - **Lowest precedence.** A key is applied only when the setting is still at its built-in default, so
   a flag or environment variable wins. The check is by value: `--port 2525` on the command line does
   not stop an rcfile `port` from applying, because 2525 is the default.
-- **Refused, not ignored.** A file that cannot be read or parsed, is not a JSON object, or gives a
+- **A missing file warns.** A `--rcfile` path that does not exist prints
+  `--rcfile <path> not found; starting without it` and the server starts without it, as Mountebank
+  does (issue #1574). Only that case: a path that exists but cannot be read (a directory, no
+  permission) still aborts, as below.
+- **Refused, not ignored.** A file that exists but cannot be read or parsed, is not a JSON object, or gives a
   recognised key the wrong type (`"localOnly": "yes"`, `"port": 70000`) aborts startup, naming the
   file — and nothing from it is applied. An `apiKey` of the wrong type is reported by its type, never
   echoed.
@@ -916,7 +920,7 @@ rift healthcheck --url http://localhost:9090/metrics    # probe something else
 ```
 
 Pass the same `--rcfile` the server was started with, or the probe knocks on the default port
-(issue #1133). An rcfile the server would refuse (a missing file, a wrong-typed key) refuses the
+(issue #1133). An rcfile the server would refuse (a wrong-typed key, an unparseable file) refuses the
 probe too, and reports unhealthy: a server started with that file would not have started either.
 
 **A keyed server needs no extra configuration** (issue #1154). The probe presents the admin API

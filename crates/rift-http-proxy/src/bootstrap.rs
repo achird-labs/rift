@@ -100,10 +100,41 @@ pub fn log_filter_with(cli: &Cli, rust_log: Option<&str>) -> anyhow::Result<EnvF
 /// on the command line). Only a subset of keys is supported; unrecognised keys are logged with
 /// `warn!` — see [`apply_rcfile_defaults_reporting`] to get them back instead.
 pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow::Error> {
-    for key in apply_rcfile_defaults_reporting(cli, rcfile)? {
-        warn!("--rcfile: unsupported key '{}' (ignored)", key);
+    match apply_rcfile_defaults_reporting(cli, rcfile) {
+        Ok(keys) => {
+            for key in keys {
+                warn!("--rcfile: unsupported key '{}' (ignored)", key);
+            }
+            Ok(())
+        }
+        Err(err) if rcfile_not_found(&err) => {
+            warn!("{}", missing_rcfile_warning(rcfile));
+            Ok(())
+        }
+        Err(err) => Err(err),
     }
-    Ok(())
+}
+
+/// True when `err`, from [`apply_rcfile_defaults_reporting`], is the rcfile path not existing.
+///
+/// Mountebank warns about a `--rcfile` that does not exist and starts without it (issue #1574), so
+/// a caller treats this one error as a warning. Only `NotFound` qualifies: a file that exists but
+/// is unreadable, is not JSON, or has a wrong-typed key stays an error (issue #1114), since starting
+/// without it would drop settings the operator believes are in force.
+#[must_use]
+pub fn rcfile_not_found(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|io| io.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// The warning for a `--rcfile` path that does not exist (see [`rcfile_not_found`]).
+#[must_use]
+pub fn missing_rcfile_warning(rcfile: &Path) -> String {
+    format!(
+        "--rcfile {} not found; starting without it",
+        rcfile.display()
+    )
 }
 
 /// [`apply_rcfile_defaults`], returning the unsupported keys (in key order) instead of logging them,
@@ -112,7 +143,8 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
 ///
 /// # Errors
 ///
-/// The file cannot be read or parsed, is not a JSON object, or gives a recognised key a value of the
+/// The file cannot be read (a path that does not exist included: [`rcfile_not_found`] lets a caller
+/// downgrade that one case to a warning) or parsed, is not a JSON object, or gives a recognised key a value of the
 /// wrong type (a non-boolean flag, a non-string path or host, a `port` that is not an integer from 0
 /// to 65535). Nothing is applied then.
 pub fn apply_rcfile_defaults_reporting(

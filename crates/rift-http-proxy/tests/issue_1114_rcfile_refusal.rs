@@ -62,10 +62,43 @@ fn a_non_boolean_require_admin_auth_aborts_startup() {
     );
 }
 
+// Issue #1574: Mountebank warns about a `--rcfile` that does not exist and starts without it, so
+// Rift does too. (#1114 had made it fatal, alongside the wrong-typed file it was really about.)
 #[test]
-fn a_missing_rcfile_aborts_startup() {
+fn a_missing_rcfile_warns_and_the_server_starts() {
     let dir = tempfile::tempdir().expect("tempdir");
     let rcfile = dir.path().join("does-not-exist.rc");
+
+    let mut child = Command::new(support::server_bin())
+        .arg("--rcfile")
+        .arg(&rcfile)
+        .args(["--host", "127.0.0.1", "--port", "0", "--metrics-port", "0"])
+        .arg("--pidfile")
+        .arg(dir.path().join("rift.pid"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the server");
+    // Still running after the window an aborting startup needs to exit: it started.
+    std::thread::sleep(Duration::from_secs(3));
+    let exited = child.try_wait().expect("poll the server");
+    child.kill().ok();
+    let output = child.wait_with_output().expect("collect output");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(exited.is_none(), "the server exited; stderr: {stderr}");
+    assert!(
+        stderr.contains("not found; starting without it")
+            && stderr.contains(&rcfile.display().to_string()),
+        "the warning names the file: {stderr}"
+    );
+}
+
+// Only a path that does not exist is tolerated: a file that is there but is not JSON still aborts.
+#[test]
+fn an_rcfile_that_is_not_json_still_aborts_startup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rcfile = dir.path().join("rift.rc");
+    std::fs::write(&rcfile, "debug: true").expect("write rcfile");
 
     let output = start_with_rcfile(
         &rcfile,
@@ -77,6 +110,23 @@ fn a_missing_rcfile_aborts_startup() {
     assert!(
         stderr.contains(&rcfile.display().to_string()),
         "the error names the file: {stderr}"
+    );
+}
+
+// A directory exists, so it is not "missing": reading it fails and that stays fatal.
+#[test]
+fn an_rcfile_path_that_is_a_directory_still_aborts_startup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let output = start_with_rcfile(
+        dir.path(),
+        &dir.path().join("rift.pid"),
+        Duration::from_secs(20),
+    );
+    assert!(
+        !output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
