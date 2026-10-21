@@ -27,6 +27,11 @@ record.
 
 ### Changed
 
+- **Embedding API: `server::bind_metrics_listeners` takes a `PeerPolicy`** (#1568):
+  `bind_metrics_listeners(addr, PeerPolicy::Any)` keeps the old behaviour. `AdminApiServer` gains
+  `with_peer_policy(PeerPolicy)`, default `Any`. `bind_metrics_server` and `run_metrics_server` are
+  unchanged and serve every client.
+
 - **BREAKING: an admin-API, `--datadir` or `https:` imposter's `require()` of a path outside
   `--scripts-dir` now fails** (#1611), and every `require` in one fails when no `--scripts-dir` is
   set. **Migration:** set `--scripts-dir` and keep the modules under it; or load the imposter from
@@ -209,6 +214,15 @@ record.
   the body's imposters, so one created concurrently by `POST /imposters` no longer appears in it.
 
 ### Security
+
+- **`--local-only` admin API and `/metrics` refuse a non-loopback client** (#1568). Both were
+  protected only by their loopback bind, and a loopback listener still accepts a connection whose
+  source is another of the host's own addresses (`curl --interface 192.168.x.y
+  http://127.0.0.1:2525/imposters`): the kernel routes it over loopback, so a local process using a
+  non-loopback source, or traffic forwarded onto loopback, got `200`. Mountebank's `--localOnly`
+  refuses it on the admin port. Rift now closes it at accept, as it does on the imposters and front
+  door (#1523), and counts it in `rift_blocked_connections_total{listener="admin"|"metrics"}`. The
+  loopback bind stays.
 
 - **`require()` in a network-written imposter reads only under `--scripts-dir`** (#1611). A
   `decorate` (or any Mountebank-style hook) in an imposter created over the admin API, loaded from

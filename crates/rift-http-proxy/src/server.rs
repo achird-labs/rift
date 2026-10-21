@@ -128,7 +128,7 @@ pub struct Cli {
     pub allow_injection: bool,
 
     /// Only accept requests from localhost: the admin API and /metrics listen on `127.0.0.1` and
-    /// `::1`, and every imposter port and the front door refuse non-loopback clients
+    /// `::1`, and they, every imposter port and the front door refuse non-loopback clients
     #[arg(
         long,
         visible_alias = "localOnly",
@@ -1055,17 +1055,24 @@ impl ServerBuilder {
         // while leaving `/metrics` on every interface — the same class of surprise as #863, one
         // listener over. `--host` deliberately still does NOT move metrics: that would relocate it
         // for anyone who binds the admin plane to a specific interface, which is a separate call.
-        let metrics_addr = if cli.local_only {
-            ListenAddr::Loopback(cli.metrics_port)
+        //
+        // The loopback bind alone is not a peer check (issue #1568): a connection from another local
+        // interface's address is routed over loopback and accepted. So `--local-only` also refuses
+        // non-loopback clients at accept, here and on the admin API, as Mountebank does.
+        let (metrics_addr, server_peer_policy) = if cli.local_only {
+            (
+                ListenAddr::Loopback(cli.metrics_port),
+                PeerPolicy::LoopbackOnly,
+            )
         } else {
-            ListenAddr::Any(cli.metrics_port)
+            (ListenAddr::Any(cli.metrics_port), PeerPolicy::Any)
         };
         //
         // A startup imposter already on the metrics port keeps it (issue #1557): the bind is refused
         // rather than sharing the port with the imposter, which macOS would allow.
         let metrics =
             match refuse_imposter_port(&manager, cli.metrics_port, ServerListener::Metrics) {
-                Ok(()) => bind_metrics_listeners(metrics_addr).await,
+                Ok(()) => bind_metrics_listeners(metrics_addr, server_peer_policy).await,
                 Err(e) => Err(e.into()),
             };
         let metrics = match metrics {
@@ -1205,6 +1212,7 @@ impl ServerBuilder {
             .with_reported_host(cli.host)
             .with_allow_injection(cli.allow_injection)
             .with_local_only(cli.local_only)
+            .with_peer_policy(server_peer_policy)
             .with_exposure_checked();
         if let Some(port) = reported_admin_port {
             server = server.with_reported_admin_port(port);
@@ -1521,14 +1529,22 @@ pub fn admin_bind_addr(cli: &Cli) -> anyhow::Result<SocketAddr> {
 
 /// Bind the metrics listener on exactly `addr` (`:0` is fine; an IPv6 address is dual-stack) and
 /// start serving, returning a handle that reports the bound address and can be shut down
-/// gracefully (issue #342).
+/// gracefully (issue #342). Serves every client ([`PeerPolicy::Any`]).
 pub async fn bind_metrics_server(addr: SocketAddr) -> anyhow::Result<RunningMetrics> {
-    bind_metrics_listeners(ListenAddr::Exact(addr)).await
+    bind_metrics_listeners(ListenAddr::Exact(addr), PeerPolicy::Any).await
 }
 
 /// [`bind_metrics_server`] on every listener `addr` needs (issue #1528): `[::]` dual-stack with an
 /// IPv4 fallback for `Any`, `127.0.0.1` and `[::1]` for `Loopback`.
-pub async fn bind_metrics_listeners(addr: ListenAddr) -> anyhow::Result<RunningMetrics> {
+///
+/// `policy` decides which clients are served (issue #1568): a refused one is closed unanswered and
+/// counted in `rift_blocked_connections_total{listener="metrics"}`. `ServerBuilder::start` passes
+/// `LoopbackOnly` under `--local-only`, because a loopback bind still accepts a non-loopback source
+/// routed over loopback.
+pub async fn bind_metrics_listeners(
+    addr: ListenAddr,
+    policy: PeerPolicy,
+) -> anyhow::Result<RunningMetrics> {
     let listener = ListenerSet::from_std(addr.bind()?)?;
     let local_addrs = listener.local_addrs()?;
     info!(
@@ -1539,8 +1555,11 @@ pub async fn bind_metrics_listeners(addr: ListenAddr) -> anyhow::Result<RunningM
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
     let (loop_cancel, loop_tracker) = (cancel.clone(), tracker.clone());
+    // `from_std` refuses an empty set, so there is always a first address.
+    let peer_check =
+        rift_mock_core::extensions::PeerCheck::new(policy, "metrics", local_addrs[0].port());
     let task = tokio::spawn(async move {
-        let result = metrics_accept_loop(listener, loop_cancel, loop_tracker).await;
+        let result = metrics_accept_loop(listener, peer_check, loop_cancel, loop_tracker).await;
         // Preserve the pre-#342 behavior: an accept-loop failure is logged. Otherwise it would
         // only surface via join(), which RunningServer does not call for the metrics task.
         if let Err(ref e) = result {
@@ -1624,6 +1643,7 @@ impl RunningMetrics {
 
 async fn metrics_accept_loop(
     mut listener: ListenerSet,
+    mut peer_check: rift_mock_core::extensions::PeerCheck,
     cancel: CancellationToken,
     tracker: TaskTracker,
 ) -> anyhow::Result<()> {
@@ -1679,7 +1699,7 @@ async fn metrics_accept_loop(
             _ = cancel.cancelled() => break,
             accepted = listener.accept() => accepted,
         };
-        let (stream, _) = match accepted {
+        let (stream, peer) = match accepted {
             Ok(accepted) => {
                 // Recovery: only the transition out of a systemic-error state logs and resets the
                 // backoff, so a healthy accept path pays one branch.
@@ -1735,6 +1755,13 @@ async fn metrics_accept_loop(
                 }
             },
         };
+        // `--local-only` (issue #1568): refused before any HTTP work; the permit is released with
+        // the stream, so a refusal holds no connection slot.
+        if !peer_check.admits(peer) {
+            drop(stream);
+            drop(permit);
+            continue;
+        }
         let conn_cancel = cancel.clone();
 
         tracker.spawn(async move {

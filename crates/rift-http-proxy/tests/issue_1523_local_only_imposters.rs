@@ -8,6 +8,11 @@
 //! that a manager injected through `ServerBuilder::manager` keeps its own policy (rift-cluster
 //! injects one). Every port is OS-assigned.
 //!
+//! Issue #1568 extends this to the admin API and `/metrics`: under `--local-only` they bind loopback,
+//! but a loopback bind still accepts a connection whose *source* is another local interface's
+//! address (the kernel routes it over `lo0`). Mountebank refuses it on the admin server's
+//! `connection` event (`mountebank.js:228-229`); Rift now refuses it at accept too.
+//!
 //! "Remote" is this host's own off-host address (#1517's UDP trick), which is not loopback. A host
 //! with no such address skips the test with a message.
 
@@ -56,6 +61,37 @@ async fn raw_get(ip: IpAddr, port: u16, path: &str) -> String {
     match tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut buf)).await {
         Ok(_) => String::from_utf8_lossy(&buf).into_owned(),
         Err(_) => panic!("{ip}:{port}{path}: the connection neither answered nor closed"),
+    }
+}
+
+/// [`raw_get`] to `127.0.0.1:port` from a client socket bound to `source` (issue #1568). The
+/// destination is loopback, so the connection rides `lo0` and reaches a loopback-bound listener;
+/// only its source address is non-loopback.
+async fn raw_get_from(source: IpAddr, port: u16, path: &str) -> String {
+    let socket = match source {
+        IpAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+        IpAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+    }
+    .expect("client socket");
+    socket
+        .bind(SocketAddr::new(source, 0))
+        .expect("bind the client to the non-loopback source");
+    let destination = match source {
+        IpAddr::V4(_) => V4_LOOPBACK,
+        IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+    };
+    let connect = socket.connect(SocketAddr::new(destination, port));
+    let Ok(Ok(mut stream)) = tokio::time::timeout(Duration::from_secs(2), connect).await else {
+        return String::new();
+    };
+    let request = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).await.is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    match tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut buf)).await {
+        Ok(_) => String::from_utf8_lossy(&buf).into_owned(),
+        Err(_) => panic!("{source} -> {destination}:{port}{path}: neither answered nor closed"),
     }
 }
 
@@ -240,4 +276,81 @@ async fn an_injected_manager_does_not_inherit_local_only() {
 
     server.shutdown().await;
     manager.delete_all().await;
+}
+
+/// Issue #1568: the admin API and `/metrics` are bound to loopback under `--local-only`, but that
+/// alone admits a non-loopback source arriving over loopback. Both now refuse it, and count it.
+#[tokio::test]
+#[serial]
+async fn local_only_refuses_a_non_loopback_source_on_admin_and_metrics() {
+    let Some(remote) = remote_or_skip("admin and metrics") else {
+        return;
+    };
+    let server = start(&["--local-only"]).await;
+    let admin = server.admin_addr().port();
+    let metrics = server.metrics_addr().expect("metrics bound").port();
+
+    let admin_before = blocked(&server, "admin").await;
+    let metrics_before = blocked(&server, "metrics").await;
+
+    let local = raw_get(V4_LOOPBACK, admin, "/imposters").await;
+    assert!(
+        served(&local),
+        "the admin API must serve loopback: {local:?}"
+    );
+    let local = raw_get(V4_LOOPBACK, metrics, "/metrics").await;
+    assert!(served(&local), "/metrics must serve loopback: {local:?}");
+
+    let refused = raw_get_from(remote, admin, "/imposters").await;
+    assert!(
+        refused.is_empty(),
+        "a client from {remote} must get a closed admin connection under --local-only, got \
+         {refused:?}"
+    );
+    let refused = raw_get_from(remote, metrics, "/metrics").await;
+    assert!(
+        refused.is_empty(),
+        "a client from {remote} must get a closed /metrics connection under --local-only, got \
+         {refused:?}"
+    );
+
+    // Materialised at zero under `--local-only`, as the imposter and front-door series are.
+    let admin_before = admin_before.expect("the admin series exists under --local-only");
+    let metrics_before = metrics_before.expect("the metrics series exists under --local-only");
+    assert_eq!(
+        blocked(&server, "admin").await,
+        Some(admin_before + 1),
+        "one admin refusal is counted"
+    );
+    assert_eq!(
+        blocked(&server, "metrics").await,
+        Some(metrics_before + 1),
+        "one metrics refusal is counted"
+    );
+    server.shutdown().await;
+}
+
+/// Without `--local-only` a loopback-bound admin plane (`--host 127.0.0.1`) still serves a
+/// non-loopback source: the bind narrows, the peer policy stays `Any` (issue #1568).
+#[tokio::test]
+#[serial]
+async fn without_local_only_a_loopback_admin_serves_a_non_loopback_source() {
+    let Some(remote) = remote_or_skip("admin without local only") else {
+        return;
+    };
+    let server = start(&["--host", "127.0.0.1"]).await;
+    let admin = server.admin_addr().port();
+    let metrics = server.metrics_addr().expect("metrics bound").port();
+
+    let response = raw_get_from(remote, admin, "/imposters").await;
+    assert!(
+        served(&response),
+        "the admin API must serve {remote} without --local-only: {response:?}"
+    );
+    let response = raw_get_from(remote, metrics, "/metrics").await;
+    assert!(
+        served(&response),
+        "/metrics must serve {remote} without --local-only: {response:?}"
+    );
+    server.shutdown().await;
 }

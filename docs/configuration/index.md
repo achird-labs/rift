@@ -195,7 +195,7 @@ Options:
       --imposters <URI,...>  Load imposters from file: paths or https:// URLs
       --datadir <DIR>        Persist admin-API imposters as <DIR>/<port>.json
       --allow-injection      Enable JavaScript injection and scripts
-      --local-only           Bind the admin API and /metrics to loopback (`127.0.0.1` and `::1`); imposters and the front door refuse non-loopback clients
+      --local-only           Bind the admin API and /metrics to loopback (`127.0.0.1` and `::1`); they, imposters and the front door refuse non-loopback clients
       --api-key <TOKEN>      Require this token on every admin API request
       --rcfile <FILE>        Read defaults from a Mountebank-style JSON rcfile
       --loglevel <LEVEL>     trace, debug, info, warn, error [default: info]
