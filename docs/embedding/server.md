@@ -322,6 +322,26 @@ metrics listener it must not have to unwind; an embedder binding the admin plane
 `ConfigSource` (from `rift-http-proxy`) is either `File { path, no_parse }` (a single `--configfile`,
 with optional EJS preprocessing) or `Dir(PathBuf)` (a `--datadir` of one-imposter-per-file configs).
 
+### Front door
+
+`bind_front_door(addr: SocketAddr, manager, routes)` binds exactly one address. When the bind comes
+from a user-facing `--front-door`-style value, use `bind_front_door_at` with `server::parse_front_door_addr`
+instead, so a bare port gets the CLI's rule: every interface, `[::]` dual-stack with an IPv4
+fallback (issue #1528).
+
+```rust
+use rift_http_proxy::front_door::bind_front_door_at;
+use rift_http_proxy::server::parse_front_door_addr;
+
+let listen = parse_front_door_addr("8080")?;   // Any(8080); "0.0.0.0:8080" is Exact
+let running = bind_front_door_at(listen, manager, routes, None).await?;
+```
+
+| Function | Signature | Purpose |
+|:---------|:----------|:--------|
+| `bind_front_door_at` | `async fn bind_front_door_at(addr: ListenAddr, manager: Arc<ImposterManager>, routes: Arc<ArcSwap<CompiledRoutes>>, observer: Option<Arc<dyn RouteObserver>>) -> anyhow::Result<RunningFrontDoor>` | Bind every listener a `ListenAddr` needs (issue #1561). `bind_front_door` and `bind_front_door_with_observer` are this with `ListenAddr::Exact`. |
+| `parse_front_door_addr` | `fn parse_front_door_addr(value: &str) -> anyhow::Result<ListenAddr>` | The `--front-door` rule: `HOST:PORT` is `Exact`, a bare port is `Any`, anything else is an error naming the value. |
+
 ### Metrics server
 
 ```rust

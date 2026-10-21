@@ -1927,7 +1927,10 @@ fn partition_gated_datadir(
 /// fallback (issue #1528) — the same convenience `--metrics-port`/`--intercept-port` offer by being
 /// port-only flags to begin with. A value that is neither is a startup error naming what was
 /// rejected, never a silent default (issue #19 / U-11).
-fn parse_front_door_addr(value: &str) -> anyhow::Result<ListenAddr> {
+///
+/// Public so an embedder that takes the same flag text gets the same rule and the same error;
+/// hand the result to [`crate::front_door::bind_front_door_at`].
+pub fn parse_front_door_addr(value: &str) -> anyhow::Result<ListenAddr> {
     if let Ok(addr) = value.parse::<SocketAddr>() {
         return Ok(ListenAddr::Exact(addr));
     }

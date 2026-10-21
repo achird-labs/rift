@@ -74,7 +74,12 @@ pub async fn bind_front_door_with_observer(
 
 /// [`bind_front_door_with_observer`] on every listener `addr` needs: `--front-door` with a bare
 /// port is `ListenAddr::Any`, `[::]` dual-stack with an IPv4 fallback (issue #1528).
-pub(crate) async fn bind_front_door_at(
+///
+/// Prefer this over [`bind_front_door`] whenever the bind comes from a user-facing
+/// `--front-door`-style value: parse it with `server::parse_front_door_addr` and pass the result
+/// here, so a bare port answers on IPv4 and IPv6 exactly as the CLI does. [`bind_front_door`] takes
+/// a `SocketAddr` and so can only bind that one address.
+pub async fn bind_front_door_at(
     addr: ListenAddr,
     manager: Arc<ImposterManager>,
     routes: Arc<ArcSwap<CompiledRoutes>>,

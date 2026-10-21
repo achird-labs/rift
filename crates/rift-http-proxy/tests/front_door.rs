@@ -3,9 +3,10 @@
 use arc_swap::ArcSwap;
 use rift_http_proxy::front_door::{
     CompiledRoutes, RouteMatch, RouteObserver, RouteTable, RouteTarget, bind_front_door,
-    bind_front_door_with_observer,
+    bind_front_door_at, bind_front_door_with_observer,
 };
 use rift_http_proxy::imposter::ImposterManager;
+use rift_http_proxy::server::{ListenAddr, parse_front_door_addr};
 use std::sync::{Arc, Mutex};
 
 /// A route with everything defaulted except what the test cares about.
@@ -484,4 +485,48 @@ async fn an_unmatched_request_is_not_observed() {
     assert!(observer.seen().is_empty());
 
     running.shutdown().await;
+}
+
+/// Whether this host can listen on `[::1]` at all; CI runners without IPv6 skip the v6 half.
+fn has_ipv6_loopback() -> bool {
+    std::net::TcpListener::bind("[::1]:0").is_ok()
+}
+
+/// Issue #1561: an embedder reaches the CLI's bare-port rule, `ListenAddr::Any`, through the public
+/// `bind_front_door_at`, and the port answers on IPv4 and (where bindable) IPv6.
+#[tokio::test]
+async fn bind_front_door_at_any_listens_on_both_families() {
+    let manager = Arc::new(ImposterManager::new());
+    let compiled = Arc::new(ArcSwap::new(Arc::new(CompiledRoutes::new(
+        &RouteTable::default(),
+    ))));
+    let running = bind_front_door_at(ListenAddr::Any(0), manager, compiled, None)
+        .await
+        .expect("bind front door");
+    let port = running.local_addr().port();
+
+    tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("IPv4 loopback must accept");
+    if has_ipv6_loopback() {
+        tokio::net::TcpStream::connect(("::1", port))
+            .await
+            .expect("IPv6 loopback must accept");
+    }
+    running.shutdown().await;
+}
+
+/// Issue #1561: the public parser applies the CLI's rule and its error message.
+#[test]
+fn parse_front_door_addr_is_public_and_applies_the_cli_rule() {
+    assert_eq!(
+        parse_front_door_addr("8080").expect("port"),
+        ListenAddr::Any(8080)
+    );
+    assert_eq!(
+        parse_front_door_addr("127.0.0.1:8080").expect("addr"),
+        ListenAddr::Exact("127.0.0.1:8080".parse().expect("addr"))
+    );
+    let err = parse_front_door_addr("nonsense").expect_err("neither port nor HOST:PORT");
+    assert!(err.to_string().contains("'nonsense'"), "{err}");
 }

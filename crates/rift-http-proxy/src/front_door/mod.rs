@@ -19,8 +19,9 @@ pub mod listener;
 pub mod observer;
 pub mod route_table;
 
-pub(crate) use listener::bind_front_door_at;
-pub use listener::{RunningFrontDoor, bind_front_door, bind_front_door_with_observer};
+pub use listener::{
+    RunningFrontDoor, bind_front_door, bind_front_door_at, bind_front_door_with_observer,
+};
 pub use observer::RouteObserver;
 pub use route_table::{
     CompiledRoutes, HeaderMatch, Route, RouteMatch, RouteTable, RouteTableError, RouteTarget,
