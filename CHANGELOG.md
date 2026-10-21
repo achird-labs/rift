@@ -244,6 +244,19 @@ record.
   which resets its response cycles and recorded requests. **Embedders:** a door that writes stubs
   into a running imposter should use the new `add_stub_from`, `replace_stubs_from`,
   `replace_stub_from` and `replace_stub_by_id_from`, not `set_script_file_access` before a write.
+- **Dynamic `import()` loads no module** (#1645). Boa's default module loader resolved `import()`
+  from the server's working directory, so an `async` `decorate` in any imposter, confined or not,
+  could read any JavaScript or JSON file under it (`await import('x.json', { with: { type: 'json'
+  } })`). Every JavaScript context Rift builds now has the module system off, and `import()`
+  rejects. `require()` is the way a script loads a module.
+- **A `POST /imposters/:port/verify` `inject` predicate runs with the admin door's access**
+  (#1645). It ran with the access of the imposter it verified, so against a `--configfile`
+  imposter an admin client's predicate could `require()` any file on the host and answer, through
+  the match count, what it held. It now gets only what both the imposter and the admin door
+  allow: files under `--scripts-dir`, or nothing without one. **Embedders:** `Imposter::verify`
+  keeps the imposter's own access; a door that takes predicates from someone else calls the new
+  `Imposter::verify_from(&opts, &door)`. `rift_verify` is a host call and keeps the imposter's
+  access.
 - `--allowInjection` admits code that runs with Rift's privileges, `shellTransform` included; the
   docs now say so, and that `--scripts-dir` is defence in depth, not a sandbox.
 

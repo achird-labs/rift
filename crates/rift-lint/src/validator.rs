@@ -89,7 +89,7 @@ pub(crate) struct JsSyntaxError(pub String);
 /// JavaScript syntax validator using boa_engine.
 #[cfg(feature = "javascript")]
 mod js_validator {
-    use boa_engine::{Context, Script, Source};
+    use boa_engine::{Script, Source};
 
     /// True when `trimmed` is an anonymous function *expression* — `function`, `async function`,
     /// `function*`, or `async function*` (a generator/async body), with any spacing, immediately
@@ -149,7 +149,12 @@ mod js_validator {
     }
 
     fn parse(source: &str) -> Result<(), super::JsSyntaxError> {
-        let mut context = Context::default();
+        // No module loader: only parsed here, but no rift-built Boa context resolves `import()`
+        // (review of #1645).
+        let mut context = boa_engine::context::ContextBuilder::new()
+            .module_loader(std::rc::Rc::new(boa_engine::module::IdleModuleLoader))
+            .build()
+            .map_err(|e| super::JsSyntaxError(e.to_string()))?;
         Script::parse(Source::from_bytes(source), None, &mut context)
             .map(|_| ())
             .map_err(|e| super::JsSyntaxError(e.to_string()))

@@ -146,7 +146,7 @@ impl JsEngine {
         // "ctx is not defined" and, for a wrapper-form script, would run its top-level side
         // effects at construction time, not request time. `Script::parse` catches genuine syntax
         // errors without executing anything.
-        let mut context = Context::default();
+        let mut context = sealed_js_context();
         boa_engine::Script::parse(Source::from_bytes(script.as_bytes()), None, &mut context)
             .map_err(|e| anyhow!("Failed to compile JavaScript script: {e}"))?;
 
@@ -188,7 +188,7 @@ impl JsEngine {
 pub fn compile_js_to_bytecode(script: &str) -> Result<Vec<u8>> {
     // Validate the script PARSES (not that it runs) — see the comment on `JsEngine::new` for why
     // a bare v2 script can't be blind-evaluated here (issue #357 Items 2/4).
-    let mut context = Context::default();
+    let mut context = sealed_js_context();
     boa_engine::Script::parse(Source::from_bytes(script.as_bytes()), None, &mut context)
         .map_err(|e| anyhow!("Failed to compile JavaScript script: {e}"))?;
 
@@ -267,9 +267,26 @@ const JS_SCRIPT_STACK_SIZE_LIMIT: usize = 10 * 1024;
 /// for these sync call sites — every one of them must build its `Context` through this helper
 /// rather than `Context::default()`.
 pub(crate) fn bounded_js_context() -> Context {
-    let mut context = Context::default();
+    let mut context = sealed_js_context();
     bound_js_context(&mut context);
     context
+}
+
+/// A [`ContextBuilder`](boa_engine::context::ContextBuilder) whose context loads no module. Boa's
+/// default loader resolves `import()` from the working directory, so a script of any imposter,
+/// whatever its `require()` access, could read any JS or JSON file under it (review of #1645).
+/// Every Boa context rift builds starts here.
+pub(crate) fn sealed_js_context_builder() -> boa_engine::context::ContextBuilder {
+    boa_engine::context::ContextBuilder::new()
+        .module_loader(std::rc::Rc::new(boa_engine::module::IdleModuleLoader))
+}
+
+/// A context with Boa's defaults except the module loader: see [`sealed_js_context_builder`].
+pub(crate) fn sealed_js_context() -> Context {
+    sealed_js_context_builder()
+        .build()
+        // As `Context::default()` does: building a context with the default realm cannot fail.
+        .expect("building a Boa context with the default realm cannot fail")
 }
 
 /// Apply the loop, recursion and stack limits every script context runs under (issue #327).
@@ -358,7 +375,7 @@ struct MbRealm {
 impl MbRealm {
     fn new(access: ScriptFileAccess) -> Self {
         let executor = std::rc::Rc::new(boa_engine::job::SimpleJobExecutor::new());
-        let mut context = boa_engine::context::ContextBuilder::new()
+        let mut context = sealed_js_context_builder()
             .job_executor(std::rc::Rc::clone(&executor))
             .build()
             // As `Context::default()` does: building a context with the default realm cannot fail.
@@ -372,7 +389,7 @@ impl MbRealm {
         }
     }
 
-    /// Drop every promise job an earlier run left queued, without running it (issue #1645). A hook
+    /// Drop every job an earlier run left queued, without running it (issue #1645). A hook
     /// that queues a job and returns never drains it (only an `async` decorate runs jobs), so
     /// without this the job would run inside some later run, with that run's objects in reach.
     /// Discarded rather than drained: draining here would run code after its own run ended, and an
@@ -382,8 +399,11 @@ impl MbRealm {
             .get_cancellation_token()
             .store(true, std::sync::atomic::Ordering::Relaxed);
         if let Err(e) = self.context.run_jobs() {
-            // With the stop signal set the executor clears its queues and returns before running
-            // anything, so this is not reached; if it were, a fresh realm is the closed outcome.
+            // With the stop signal set the executor clears its promise, async, timer and generic
+            // queues and returns before running anything, so this is not reached; if it were, a
+            // fresh realm is the closed outcome. Its `FinalizationRegistry` cleanup queue is not
+            // cleared: such a callback can run in a later run's job loop, but only an `async`
+            // decorate runs one, and only in this realm, so only code of the same access.
             tracing::error!("MB realm could not discard its queued jobs ({e}); rebuilding it");
             *self = Self::new(self.access.clone());
         }
@@ -576,7 +596,7 @@ where
 pub(crate) fn declared_functions_js(script: &str) -> Result<Vec<String>> {
     // Phase 1: syntax only.
     {
-        let mut parse_ctx = Context::default();
+        let mut parse_ctx = sealed_js_context();
         boa_engine::Script::parse(Source::from_bytes(script.as_bytes()), None, &mut parse_ctx)
             .map_err(|e| anyhow!("Syntax error: {e}"))?;
     }
@@ -599,7 +619,7 @@ pub(crate) fn declared_functions_js(script: &str) -> Result<Vec<String>> {
     // never inspects state, only which functions the script declared.
     set_current_flow_store(Arc::new(crate::extensions::flow_state::NoOpFlowStore));
 
-    let mut context = Context::default();
+    let mut context = sealed_js_context();
     context
         .runtime_limits_mut()
         .set_loop_iteration_limit(JS_SCRIPT_LOOP_ITERATION_LIMIT);
@@ -682,7 +702,7 @@ fn execute_js_script_inner_bounded(
     // leak an entry forever. Reset per execution, mirroring the per-task flow-store reset.
     SCRIPT_RESULT_REGISTRY.with(|r| r.borrow_mut().clear());
 
-    let mut context = Context::default();
+    let mut context = sealed_js_context();
     context
         .runtime_limits_mut()
         .set_loop_iteration_limit(loop_iteration_limit);
@@ -4438,6 +4458,107 @@ function respond(ctx) {
         )
         .expect("async decorate runs its own jobs");
         assert_eq!(decorated.body, "undefined");
+    }
+
+    /// A JSON canary and an ES-module canary in a fresh directory under the working directory,
+    /// where Boa's default module loader resolves from; their paths relative to it.
+    fn import_canaries() -> (tempfile::TempDir, String, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(".rift-1645-import-")
+            .tempdir_in(".")
+            .expect("tempdir in cwd");
+        std::fs::write(
+            dir.path().join("canary.json"),
+            r#"{"s":"CANARY_IMPORT_1645"}"#,
+        )
+        .expect("json canary");
+        std::fs::write(
+            dir.path().join("canary.mjs"),
+            "export default 'CANARY_IMPORT_1645';",
+        )
+        .expect("module canary");
+        let name = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        (
+            dir,
+            format!("{name}/canary.json"),
+            format!("{name}/canary.mjs"),
+        )
+    }
+
+    // Review of #1645: Boa's default module loader resolves `import()` from the working
+    // directory, so an `async` decorate could read any JS or JSON file under it, whatever its
+    // imposter's access. No hook may load a module, on any access.
+    #[test]
+    fn a_hooks_dynamic_import_loads_no_module_on_any_access() {
+        let (_dir, json_path, module_path) = import_canaries();
+        let tree = scripts_tree();
+        let mut thread = MbJsThread::new();
+        for files in [
+            Arc::new(ScriptFileAccess::Confined(tree.root.clone())),
+            Arc::new(ScriptFileAccess::Refused),
+            Arc::new(ScriptFileAccess::Trusted {
+                base: tree.root.clone(),
+            }),
+        ] {
+            for import in [
+                format!("import({json_path:?}, {{ with: {{ type: 'json' }} }})"),
+                format!("import({module_path:?})"),
+            ] {
+                let decorate = format!(
+                    "async config => {{ try {{ const m = await {import}; \
+                       config.response.body = 'LEAK:' + JSON.stringify(m.default); }} \
+                     catch (e) {{ config.response.body = 'ERR:' + String(e); }} }}"
+                );
+                let decorated = execute_mountebank_decorate_in(
+                    &mut thread,
+                    &decorate,
+                    &config_req(),
+                    "orig",
+                    &crate::behaviors::ResponseStatus::Code(200),
+                    &HashMap::new(),
+                    test_port(),
+                    None,
+                    &files,
+                )
+                .expect("decorate runs");
+                assert!(
+                    decorated.body.starts_with("ERR:") && !decorated.body.contains("CANARY"),
+                    "{files:?} {import}: {}",
+                    decorated.body
+                );
+            }
+        }
+    }
+
+    // The same for every other context the engine builds: `_rift.script` and the parse contexts
+    // share the bounded one.
+    #[test]
+    fn the_bounded_script_context_loads_no_module() {
+        let (_dir, json_path, _module_path) = import_canaries();
+        let mut context = bounded_js_context();
+        let script = format!(
+            "var __out = 'pending'; \
+             import({json_path:?}, {{ with: {{ type: 'json' }} }}) \
+               .then(m => {{ __out = 'LEAK:' + JSON.stringify(m.default); }}, \
+                     e => {{ __out = 'ERR:' + String(e); }});"
+        );
+        context
+            .eval(Source::from_bytes(script.as_bytes()))
+            .expect("script runs");
+        context.run_jobs().expect("jobs run");
+        let out = context
+            .global_object()
+            .get(js_string!("__out"), &mut context)
+            .expect("__out")
+            .display()
+            .to_string();
+        assert!(out.contains("ERR:") && !out.contains("CANARY"), "{out}");
     }
 
     fn mb_req(method: &str, path: &str) -> MountebankRequest {

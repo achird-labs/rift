@@ -2400,6 +2400,10 @@ impl ImposterManager {
 
     /// Add stub to an imposter. Its scripts run with the imposter's access as it stands; a door
     /// that must not lend its stub more uses [`add_stub_from`](Self::add_stub_from).
+    ///
+    /// Door-less: the written scripts run with whatever access the imposter has, so this is safe
+    /// only for a caller that never makes imposters `Trusted` (or is itself the trusted author).
+    /// A caller that serves more than one door writes through the `_from` variant (issue #1645).
     pub async fn add_stub(
         &self,
         port: u16,
@@ -2485,6 +2489,10 @@ impl ImposterManager {
     /// #1513): they join the tail of its current response cycle and its cursor is kept, where
     /// [`replace_stub_by_id`](Self::replace_stub_by_id) with the extended list would serve them in
     /// display order.
+    ///
+    /// Door-less: appended responses (an `inject` or `decorate` among them) run with whatever
+    /// access the imposter has, so this is safe only for a caller that never makes imposters
+    /// `Trusted`, or is itself the trusted author (issue #1645). There is no `_from` variant yet.
     pub async fn append_stub_responses_by_id(
         &self,
         port: u16,
@@ -2639,7 +2647,11 @@ impl ImposterManager {
             .map_err(ImposterError::Backend)
     }
 
-    /// Replace all stubs for an imposter
+    /// Replace all stubs for an imposter.
+    ///
+    /// Door-less: the written scripts run with whatever access the imposter has, so this is safe
+    /// only for a caller that never makes imposters `Trusted` (or is itself the trusted author).
+    /// A caller that serves more than one door writes through the `_from` variant (issue #1645).
     pub async fn replace_stubs(&self, port: u16, stubs: Vec<Stub>) -> Result<(), ImposterError> {
         self.replace_stubs_inner(port, stubs, None).await
     }

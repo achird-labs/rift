@@ -576,7 +576,11 @@ pub unsafe extern "C" fn rift_verify(
                 return std::ptr::null_mut();
             }
         };
-        let outcome = match imposter.verify(&opts) {
+        // A host call is a trusted door (its caller already has the process), so a predicate's
+        // `require` keeps the imposter's own access; the admin plane's verify route passes
+        // `network(None)` instead (review of #1645).
+        let door = rift_http_proxy::imposter::ScriptFileAccess::trusted_cwd();
+        let outcome = match imposter.verify_from(&opts, &door) {
             Ok(o) => o,
             Err(e) => {
                 set_last_error(format!("rift_verify: {e}"));

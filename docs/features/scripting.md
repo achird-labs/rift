@@ -77,7 +77,10 @@ added over the admin API to a running `--configfile` imposter confines that impo
 a reload of the config file makes it unconfined again only by replacing the imposter, which drops
 the posted stub and restarts its response cycles. Every hook run gets its own `require` and module
 cache, so no run sees another imposter's modules. As in Node, `require` is a name in the hook's own
-scope, not a global: `globalThis.require` is `undefined`.
+scope, not a global: `globalThis.require` is `undefined`. Dynamic `import()` loads no module on
+any door; it rejects. An `inject` predicate sent to `POST /imposters/:port/verify` is the admin
+client's code, so its `require` reads only under `--scripts-dir`, even against a `--configfile`
+imposter.
 
 `--scripts-dir` confines file access through `file:` references and `require()`; it is defence in
 depth for authors you already trust, not a sandbox. Rhai `import` is not supported: an `import`
