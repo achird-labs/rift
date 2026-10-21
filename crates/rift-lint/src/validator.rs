@@ -238,6 +238,20 @@ fn check_ignored_keys(file: &Path, imposter: &Value, result: &mut LintResult) {
                 .to_owned(),
         );
     }
+    // Issue #1576: stored and printed (upper-cased), never applied — rustls' default suites serve.
+    // https only: on any other protocol the engine drops it, as Mountebank does.
+    let https = imposter
+        .get("protocol")
+        .and_then(Value::as_str)
+        .is_some_and(|p| p.eq_ignore_ascii_case("https"));
+    if https && imposter.get("ciphers").is_some_and(|v| !v.is_null()) {
+        ignored(
+            result,
+            "ciphers".to_owned(),
+            "`ciphers` is parsed but has no effect: the TLS listener uses rustls' default suites"
+                .to_owned(),
+        );
+    }
     let Some(stubs) = imposter.get("stubs").and_then(Value::as_array) else {
         return;
     };
@@ -3469,6 +3483,26 @@ mod ignored_behaviors_tests {
             .filter(|i| i.code == "W017")
             .map(|i| i.location.clone().unwrap_or_default())
             .collect()
+    }
+
+    // Issue #1576: `ciphers` is W017 on https only; on http the engine drops it, as Mountebank
+    // does, so there is no ignored key to report (and the engine reports none).
+    #[test]
+    fn ciphers_is_reported_on_https_only() {
+        let at = |protocol: &str| {
+            let mut result = LintResult::new();
+            let imposter = json!({"port": 4545, "protocol": protocol, "ciphers": "x", "stubs": []});
+            check_ignored_keys(Path::new("test.json"), &imposter, &mut result);
+            result
+                .issues
+                .iter()
+                .filter(|i| i.code == "W017")
+                .map(|i| i.location.clone().unwrap_or_default())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(at("https"), vec!["ciphers".to_owned()]);
+        assert!(at("http").is_empty());
+        assert!(at("tcp").is_empty());
     }
 
     #[test]

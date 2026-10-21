@@ -44,6 +44,11 @@ fn fixtures() -> Vec<(&'static str, Value)> {
             base(json!({"_rift": {"proxy": {"upstream": {"host": "x", "port": 1}}}})),
         ),
         ("recordMatches", base(json!({"recordMatches": true}))),
+        // Issue #1576: stored and printed, not applied.
+        (
+            "ciphers",
+            base(json!({"protocol": "https", "ciphers": "aes128-sha"})),
+        ),
         (
             "stubs[0].responses[0]._rift",
             base(json!({"stubs": [{"responses": [{

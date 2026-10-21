@@ -35,7 +35,7 @@
 use anyhow::Context;
 use parking_lot::Mutex;
 use rift_http_proxy::admin_api::{
-    AdminApiServer, RunningAdminApi, SERVE_OPTION_KEYS, filter_proxy_stubs, replayable_config,
+    AdminApiServer, RunningAdminApi, SERVE_OPTION_KEYS, filter_proxy_stubs, replayable_value,
     tls_header,
 };
 use rift_http_proxy::config_loader::{self, ConfigSource};
@@ -620,7 +620,7 @@ enum StubRef {
 
 /// `rift_list_imposters`/`rift_get_imposter` options (all optional, default `false`): `replayable`
 /// returns the full `ImposterConfig` projection instead of the summary/detail shape, built by the SAME
-/// [`replayable_config`] both admin `?replayable=true` routes use; `removeProxies` strips proxy
+/// [`replayable_value`] both admin `?replayable=true` routes use; `removeProxies` strips proxy
 /// responses from it.
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
@@ -656,11 +656,17 @@ pub unsafe extern "C" fn rift_list_imposters(
         };
         let imposters = handle.manager.list_imposters();
         let body = if opts.replayable {
-            let configs: Vec<ImposterConfig> = imposters
+            match imposters
                 .iter()
-                .map(|i| replayable_config(i, opts.remove_proxies))
-                .collect();
-            json!({ "imposters": configs })
+                .map(|i| replayable_value(i, opts.remove_proxies))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(configs) => json!({ "imposters": configs }),
+                Err(e) => {
+                    set_last_error(format!("rift_list_imposters: encode failed: {e}"));
+                    return std::ptr::null_mut();
+                }
+            }
         } else {
             let summaries: Vec<Value> = imposters
                 .iter()
@@ -698,10 +704,12 @@ pub unsafe extern "C" fn rift_list_imposters(
 }
 
 /// Get one imposter. `options_json` — same shape as [`rift_list_imposters`]. Replayable returns
-/// the single `ImposterConfig` (same `removeProxies` projection); otherwise a detail object
+/// the single `ImposterConfig` (same `removeProxies` projection, an https imposter's TLS metadata
+/// included as in the detail); otherwise a detail object
 /// `{"protocol","port","name"?,"defaultResponse"?,"numberOfRequests","enabled","recordRequests",
 /// "allowCORS"?,"stubs","requests"}` (`allowCORS` as configured, when truthy), plus the TLS metadata `GET /imposters/{port}` prints for an https imposter
-/// (`mutualAuth`, `rejectUnauthorized`, and `cert`/`key`/`ca` when configured).
+/// (`mutualAuth`, `rejectUnauthorized`, `ca` — `null` when unset — `ciphers` upper-cased when set,
+/// and `cert`/`key` when configured).
 /// Returns (caller frees) null on any error (null handle, unknown port, or malformed options).
 ///
 /// # Safety
@@ -730,7 +738,7 @@ pub unsafe extern "C" fn rift_get_imposter(
             }
         };
         let body = if opts.replayable {
-            match serde_json::to_value(replayable_config(&imposter, opts.remove_proxies)) {
+            match replayable_value(&imposter, opts.remove_proxies) {
                 Ok(v) => v,
                 Err(e) => {
                     set_last_error(format!("rift_get_imposter: encode failed: {e}"));

@@ -2501,47 +2501,61 @@ fn is_default_enabled(enabled: &bool) -> bool {
     *enabled
 }
 
-/// `ca` accepts a single PEM string or an array of them, matching Mountebank.
+/// PEM trust anchor(s) as configured (Mountebank `ca`): one PEM string or an array of them.
+///
+/// The spelling is kept, not normalized (issue #1576): Mountebank echoes `ca` exactly as it was
+/// posted, so `["X"]` serializes back as `["X"]` and `"X"` as `"X"` — in the stored form and in
+/// every printed view. The SDK parse-fidelity corpus compares reconstructed documents, so turning
+/// one spelling into the other is a real difference, not a cosmetic one. Read the anchors through
+/// [`PemList::anchors`], which is the same for both spellings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PemList {
+    /// Posted as a bare PEM string.
+    One(String),
+    /// Posted as an array (of any length, one included).
+    Many(Vec<String>),
+}
+
+impl PemList {
+    /// The anchors, whichever spelling they were posted in.
+    #[must_use]
+    pub fn anchors(&self) -> &[String] {
+        match self {
+            Self::One(pem) => std::slice::from_ref(pem),
+            Self::Many(pems) => pems,
+        }
+    }
+}
+
+impl Serialize for PemList {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::One(pem) => serializer.serialize_str(pem),
+            Self::Many(pems) => pems.serialize(serializer),
+        }
+    }
+}
+
+/// `ca` accepts a single PEM string or an array of them, matching Mountebank; `null` is unset.
 ///
 /// Hand-written rather than `#[serde(untagged)]` for the reason stated on `TcpFaultSpec` below: an
 /// untagged enum reports only "data did not match any variant", which at the `POST /imposters`
 /// boundary tells an author nothing about what they got wrong.
 pub(crate) mod ca_pem_list {
+    use super::PemList;
     use serde::Deserialize;
     use serde::de::{Deserializer, Error as _};
-    use serde::ser::{SerializeSeq, Serializer};
-
-    /// One anchor serializes back as a bare string, many as an array — so a document round-trips
-    /// through `GET /imposters` in the spelling it arrived in. This mirrors the multi-value-header
-    /// helper (issue #238); the SDK parse-fidelity corpus compares reconstructed documents, so
-    /// normalizing one spelling into the other is a real difference, not a cosmetic one.
-    pub fn serialize<S: Serializer>(
-        ca: &Option<Vec<String>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        match ca.as_deref() {
-            None => serializer.serialize_none(),
-            Some([single]) => serializer.serialize_str(single),
-            Some(many) => {
-                let mut seq = serializer.serialize_seq(Some(many.len()))?;
-                for pem in many {
-                    seq.serialize_element(pem)?;
-                }
-                seq.end()
-            }
-        }
-    }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<Option<Vec<String>>, D::Error> {
+    ) -> Result<Option<PemList>, D::Error> {
         let value = Option::<serde_json::Value>::deserialize(deserializer)?;
         let Some(value) = value else {
             return Ok(None);
         };
         match value {
             serde_json::Value::Null => Ok(None),
-            serde_json::Value::String(pem) => Ok(Some(vec![pem])),
+            serde_json::Value::String(pem) => Ok(Some(PemList::One(pem))),
             serde_json::Value::Array(items) => items
                 .into_iter()
                 .map(|item| match item {
@@ -2552,7 +2566,7 @@ pub(crate) mod ca_pem_list {
                     ))),
                 })
                 .collect::<Result<Vec<_>, _>>()
-                .map(Some),
+                .map(|pems| Some(PemList::Many(pems))),
             other => Err(D::Error::custom(format!(
                 "`ca` must be a PEM string or an array of them, got {}",
                 kind_of(&other)
@@ -2658,14 +2672,20 @@ pub struct ImposterConfig {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "ca_pem_list::deserialize",
-        serialize_with = "ca_pem_list::serialize"
+        deserialize_with = "ca_pem_list::deserialize"
     )]
     #[cfg_attr(
         feature = "schema",
         schemars(with = "Option<rift_types::schema::PemList>")
     )]
-    pub ca: Option<Vec<String>>,
+    pub ca: Option<PemList>,
+    /// Mountebank's OpenSSL cipher-list string for the https listener, stored verbatim (issue
+    /// #1576). Printed upper-cased in the admin views, as Mountebank prints it, but **not
+    /// applied**: the TLS listener uses rustls' default suites, so the imposter reports it as an
+    /// ignored key. `https` only, as in Mountebank: on any other protocol the imposter drops it
+    /// (not stored, not printed) when it is built — never at decode, so stored bytes still read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ciphers: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default)]
@@ -2808,6 +2828,7 @@ impl Default for ImposterConfig {
             mutual_auth: false,
             reject_unauthorized: false,
             ca: None,
+            ciphers: None,
             name: None,
             record_requests: false,
             enabled: default_enabled(),
@@ -2825,6 +2846,19 @@ impl Default for ImposterConfig {
 }
 
 impl ImposterConfig {
+    /// Removes `ciphers` unless this imposter terminates TLS, and returns what was removed.
+    ///
+    /// `ciphers` is an https key: Mountebank's `httpsServer` reads it and its http server drops it
+    /// without a word (issue #1576). Dropped where an imposter is built and where `apply_config`
+    /// compares configs — never at decode, so an older engine's stored bytes still decode.
+    pub(crate) fn take_non_https_ciphers(&mut self) -> Option<String> {
+        if self.protocol.eq_ignore_ascii_case("https") {
+            None
+        } else {
+            self.ciphers.take()
+        }
+    }
+
     /// The engine for a script that names none and whose `file` extension does not decide it:
     /// `_rift.scriptEngine.defaultEngine`, else `"rhai"` (issue #1159). The value is not checked
     /// here — an unknown one is refused where a script is actually built with it, so a config that
@@ -4667,14 +4701,14 @@ mod tests {
         let one: ImposterConfig =
             serde_json::from_value(serde_json::json!({"protocol": "https", "ca": "PEM-A"}))
                 .expect("a bare string parses");
-        assert_eq!(one.ca.as_deref(), Some(["PEM-A".to_string()].as_slice()));
+        assert_eq!(one.ca, Some(PemList::One("PEM-A".to_string())));
 
         let many: ImposterConfig = serde_json::from_value(
             serde_json::json!({"protocol": "https", "ca": ["PEM-A", "PEM-B"]}),
         )
         .expect("an array parses");
         assert_eq!(
-            many.ca.as_deref(),
+            many.ca.as_ref().map(PemList::anchors),
             Some(["PEM-A".to_string(), "PEM-B".to_string()].as_slice())
         );
 
@@ -4709,6 +4743,8 @@ mod tests {
 
     // Wire compatibility: an imposter that never mentions client auth must serialize exactly as it
     // did before #977, or every SDK's parse-fidelity gate breaks on a field it has never seen.
+    // This is the stored form (`--datadir`, rift-cluster's `PutImposter` bytes); the printed https
+    // views add the flags and `ca: null` on top of it (issue #1576), the stored form does not.
     #[test]
     fn client_auth_defaults_are_not_serialized() {
         let cfg: ImposterConfig =
@@ -4734,6 +4770,50 @@ mod tests {
         assert_eq!(out["rejectUnauthorized"], serde_json::json!(true));
         // One anchor round-trips as the bare string it arrived as (issue #238's precedent).
         assert_eq!(out["ca"], serde_json::json!("PEM"));
+    }
+
+    // Issue #1576: the stored form (the `--datadir` file, rift-cluster's committed `PutImposter`
+    // bytes) of an https imposter without client auth carries no client-auth keys either. The
+    // admin views print them (`ca: null` included); the stored form must not.
+    #[test]
+    fn https_client_auth_defaults_are_not_stored() {
+        let cfg: ImposterConfig =
+            serde_json::from_value(serde_json::json!({"port": 4545, "protocol": "https"}))
+                .expect("config");
+        let out = serde_json::to_value(&cfg).expect("serialize");
+        let obj = out.as_object().expect("object");
+        for k in ["mutualAuth", "rejectUnauthorized", "ca", "ciphers"] {
+            assert!(!obj.contains_key(k), "`{k}` must be omitted when unset");
+        }
+    }
+
+    // Issue #1576: `ca` keeps the spelling it arrived in — a one-element array stays an array, as
+    // Mountebank echoes it — and a bare string stays a string.
+    #[test]
+    fn ca_keeps_the_spelling_it_arrived_in() {
+        for ca in [serde_json::json!(["PEM"]), serde_json::json!("PEM")] {
+            let cfg: ImposterConfig = serde_json::from_value(serde_json::json!({
+                "protocol": "https", "mutualAuth": true, "rejectUnauthorized": true, "ca": ca
+            }))
+            .expect("config");
+            let out = serde_json::to_value(&cfg).expect("serialize");
+            assert_eq!(out["ca"], ca);
+        }
+    }
+
+    // Issue #1576: `ciphers` is stored verbatim — never upper-cased at decode — so it survives a
+    // restart and a replayable export instead of being silently dropped.
+    #[test]
+    fn ciphers_is_stored_verbatim() {
+        let cfg: ImposterConfig = serde_json::from_value(serde_json::json!({
+            "protocol": "https", "ciphers": "ecdhe-rsa-aes128-gcm-sha256"
+        }))
+        .expect("config");
+        let out = serde_json::to_value(&cfg).expect("serialize");
+        assert_eq!(
+            out["ciphers"],
+            serde_json::json!("ecdhe-rsa-aes128-gcm-sha256")
+        );
     }
 
     // Issue #1050: the wiring half. The algorithm is covered in `wire.rs`; what these pin is that

@@ -3554,6 +3554,53 @@ fn ffi_imposter_views_print_default_response_and_tls() {
         assert_eq!(hdet["mutualAuth"], false, "https detail: {hdet}");
         assert_eq!(hdet["rejectUnauthorized"], false);
         assert!(hdet.get("cert").is_none(), "no configured cert to print");
+        // Issue #1576: `ca` is printed `null` when unset, as Mountebank does.
+        assert_eq!(hdet.get("ca"), Some(&serde_json::Value::Null), "{hdet}");
+
+        // Issue #1576: the replayable export carries the same https keys as the detail, in both
+        // the single and the list form, and re-imports.
+        let replayable = cstr(r#"{"replayable":true}"#);
+        let one: serde_json::Value = serde_json::from_str(&take_json(rift_get_imposter(
+            h,
+            https_port,
+            replayable.as_ptr(),
+        )))
+        .unwrap();
+        let all: serde_json::Value =
+            serde_json::from_str(&take_json(rift_list_imposters(h, replayable.as_ptr()))).unwrap();
+        let listed = all["imposters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["port"] == https_port)
+            .cloned()
+            .unwrap_or_else(|| panic!("port {https_port} missing: {all}"));
+        for view in [&one, &listed] {
+            assert_eq!(view["mutualAuth"], false, "replayable: {view}");
+            assert_eq!(view["rejectUnauthorized"], false, "replayable: {view}");
+            assert_eq!(view.get("ca"), Some(&serde_json::Value::Null), "{view}");
+        }
+        let plain = all["imposters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["port"] == port)
+            .cloned()
+            .unwrap();
+        assert!(plain.get("ca").is_none(), "http replayable: {plain}");
+        assert_eq!(
+            rift_delete_imposter(h, https_port),
+            0,
+            "{}",
+            take_last_error()
+        );
+        let again = cstr(&one.to_string());
+        assert_eq!(
+            rift_create_imposter(h, again.as_ptr()),
+            https_port,
+            "the replayable https export re-imports: {}",
+            take_last_error()
+        );
 
         rift_stop(h);
     }

@@ -23,7 +23,7 @@ mod server;
 pub mod types;
 
 pub use handlers::imposters::{
-    filter_proxy_responses, filter_proxy_stubs, replayable_config, tls_header,
+    filter_proxy_responses, filter_proxy_stubs, replayable_config, replayable_value, tls_header,
 };
 /// The space-stub shape guard (issue #336), for an embedder that terminates
 /// `POST /imposters/:port/spaces/:flowId/stubs` itself rather than proxying to the handler here.

@@ -2679,5 +2679,27 @@
     "reason": "Mountebank's xpath.js maps over the selection, which a string() result is not; Rift keeps string() as the way to read an element's whole text",
     "mountebankMatches": "\\{\"errors\":\\[\\{\"message\":\"result\\.map is not a function\",\"name\":\"TypeError\".*",
     "rift": "matched"
+  },
+  {
+    "id": "https-default-cert/key",
+    "case": "coverage: httpsServer.js:16 an https imposter with the engine's default certificate",
+    "location": "*/key",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "The default certificate is not printed.",
+    "reason": "Mountebank prints its bundled default certificate; Rift's fallback is an operator secret or a per-imposter generated one, so it is not printed",
+    "mountebankMatches": "\"-----BEGIN .*-----\\\\n\"",
+    "rift": "(absent)"
+  },
+  {
+    "id": "https-default-cert/cert",
+    "case": "coverage: httpsServer.js:16 an https imposter with the engine's default certificate",
+    "location": "*/cert",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "The default certificate is not printed.",
+    "reason": "Mountebank prints its bundled default certificate; Rift's fallback is an operator secret or a per-imposter generated one, so it is not printed",
+    "mountebankMatches": "\"-----BEGIN .*-----\\\\n\"",
+    "rift": "(absent)"
   }
 ]

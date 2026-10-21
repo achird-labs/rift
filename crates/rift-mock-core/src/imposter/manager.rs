@@ -993,7 +993,12 @@ impl ImposterManager {
             return Ok(ClientAuth::RequireAny);
         }
 
-        let Some(ca_pems) = config.ca.as_deref().filter(|pems| !pems.is_empty()) else {
+        let Some(ca_pems) = config
+            .ca
+            .as_ref()
+            .map(super::PemList::anchors)
+            .filter(|pems| !pems.is_empty())
+        else {
             return Err(ImposterError::Tls(
                 "`rejectUnauthorized` requires `ca`: supply the PEM trust anchor(s) client \
                  certificates must chain to. (Mountebank falls back to the public CA bundle here; \
@@ -5143,6 +5148,33 @@ mod tests {
             assert!(report.stub_patched.is_empty() && report.toggled.is_empty());
             assert!(report.deleted.is_empty() && report.failed.is_empty());
             assert!(Arc::ptr_eq(&before, &manager.get_imposter(port_0).unwrap()));
+            manager.delete_all().await;
+        }
+
+        // Issue #1576: `ciphers` is an https key. On any other protocol it is dropped, as
+        // Mountebank's http server drops it: not kept in the imposter's config (so not in the
+        // datadir file or the replayable export), and re-applying the same document is unchanged.
+        #[tokio::test]
+        async fn ciphers_on_a_non_https_imposter_is_dropped() {
+            let manager = ImposterManager::new();
+            let posted = |port: Option<u16>| {
+                let mut body = json!({"protocol": "http", "ciphers": "aes128-sha", "stubs": []});
+                if let Some(port) = port {
+                    body["port"] = json!(port);
+                }
+                imposter_cfg(body)
+            };
+            let port = manager.create_imposter(posted(None)).await.expect("create");
+            let before = manager.get_imposter(port).unwrap();
+            let stored = serde_json::to_value(before.current_config()).unwrap();
+            assert!(stored.get("ciphers").is_none(), "{stored}");
+
+            let report = manager
+                .apply_one(posted(Some(port)))
+                .await
+                .expect("re-apply");
+            assert!(report.replaced.is_empty(), "{report:?}");
+            assert!(Arc::ptr_eq(&before, &manager.get_imposter(port).unwrap()));
             manager.delete_all().await;
         }
 

@@ -151,14 +151,10 @@ a divergence (to be fixed in Rift and then covered here), or nobody has written 
 | `httpRequest.js:63-73` | A `gzip`/`br` `Content-Encoding` whose body does not decode |
 | `xpath.js:36-40` | A malformed `xpath` selector: Mountebank creates the imposter and answers `500` per request, Rift refuses it at creation |
 | `helpers.js:104-107` | An unknown `fault` |
-| `httpsServer.js:35-37` | `ciphers` on an `https` imposter |
 
-The `https` cases create their imposters with `PUT /imposters` and remove them with an empty one,
-whose answers are the list form, so what they compare is what is served over TLS. An `https`
-imposter's detail and replayable forms differ: Mountebank prints `ca: null` and its default `key`
-and `cert`, and its replayable export keeps `mutualAuth` and `rejectUnauthorized`. Once those agree
-(or are listed in `docs/mountebank/differences.md`), the cases can create with `POST` and keep the
-stored-imposter check.
+The `https` cases create their imposters with `POST /imposters` and keep them, so the create answer,
+the detail and the replayable export are compared too (#1576). The default certificate's `key` and
+`cert`, which Mountebank prints and Rift does not, are allow-listed.
 
 **Out of reach of a case:**
 

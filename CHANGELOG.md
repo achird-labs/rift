@@ -44,6 +44,15 @@ record.
 
 ### Changed
 
+- **https imposters print `ca`, `mutualAuth`, `rejectUnauthorized` and `ciphers` in every view,
+  `?replayable=true` included** (#1576), as Mountebank does: `ca` is `null` when unset, a
+  one-element `ca` array prints (and is stored) as an array instead of a bare string, and `ciphers`
+  is now kept and printed upper-cased instead of silently dropped. `ciphers` is not applied, and
+  the imposter reports it in `_rift.warnings` (`rift-lint` W017). On a non-https imposter it is
+  dropped, not stored or printed, as Mountebank's http server drops it. The `--datadir` file and the
+  stored config are unchanged for every existing input; the default certificate is still not
+  printed.
+
 - **`--host` accepts a DNS name for the admin API**, as Mountebank does (#1575): the name is
   resolved once at startup and the admin API binds its first address. It used to refuse anything
   but an IP literal, although imposters already resolved names (#1137). The `--require-admin-auth`

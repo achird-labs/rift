@@ -1725,6 +1725,13 @@
         "null"
       ]
     },
+    "ciphers": {
+      "description": "Mountebank's OpenSSL cipher-list string for the https listener, stored verbatim (issue\n#1576). Printed upper-cased in the admin views, as Mountebank prints it, but **not\napplied**: the TLS listener uses rustls' default suites, so the imposter reports it as an\nignored key. `https` only, as in Mountebank: on any other protocol the imposter drops it\n(not stored, not printed) when it is built — never at decode, so stored bytes still read.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "defaultForward": {
       "description": "Fallback upstream for unmatched requests (issue #196): when set and no stub matches,\nthe request is transparently forwarded to `defaultForward + path` (no recording).\nTakes precedence over `defaultResponse`.",
       "type": [
