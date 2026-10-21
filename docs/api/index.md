@@ -935,6 +935,8 @@ Get current configuration.
     "port": 2525,
     "allowInjection": true,
     "localOnly": false,
+    "mock": false,
+    "debug": false,
     "ipWhitelist": ["*"]
   },
   "serveOptions": [
@@ -966,6 +968,10 @@ Field notes (issue #879 — these were previously hardcoded literals):
   and every imposter created without a `host`, while `/metrics` stays on every interface (and an
   imposter that names its own `host` binds that) — so reporting `true` there would tell you nothing
   is reachable off-host while a listener still is.
+- **`mock`** and **`debug`** (issue #1569) echo whether `--mock` / `--debug` were supplied (on the
+  command line or in an `--rcfile`), as Mountebank's `/config` does. `mock` has no effect in Rift;
+  `debug` reports the flag, not whether debug logging is on (an explicit `RUST_LOG` overrides the
+  level it sets). Unlike Mountebank, which omits `mock` when unset, both are always present.
 - **`ipWhitelist`** is always `["*"]`. `--ip-whitelist` is accepted for Mountebank compatibility and
   **never enforced**, so every address may connect; see the
   [CLI reference](../configuration/cli.md#--ip-whitelist-does-not-filter-anything).

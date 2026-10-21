@@ -202,6 +202,16 @@ pub fn apply_rcfile_defaults_reporting(
                     cli.local_only = val.as_bool().unwrap_or(false);
                 }
             }
+            "mock" => {
+                if !cli.mock {
+                    cli.mock = val.as_bool().unwrap_or(false);
+                }
+            }
+            "debug" => {
+                if !cli.debug {
+                    cli.debug = val.as_bool().unwrap_or(false);
+                }
+            }
             "requireAdminAuth" | "require_admin_auth" => {
                 if !cli.require_admin_auth {
                     cli.require_admin_auth = val.as_bool().unwrap_or(false);
@@ -283,7 +293,9 @@ fn describe_json_type(val: &serde_json::Value) -> &'static str {
 fn expected_rcfile_type(key: &str) -> Option<RcfileType> {
     match key {
         "allowInjection" | "allow_injection" | "localOnly" | "local_only" | "requireAdminAuth"
-        | "require_admin_auth" | "noParse" | "no_parse" => Some(RcfileType::Boolean),
+        | "require_admin_auth" | "noParse" | "no_parse" | "mock" | "debug" => {
+            Some(RcfileType::Boolean)
+        }
         "host" | "logLevel" | "loglevel" | "datadir" | "configfile" | "apiKey" | "api_key" => {
             Some(RcfileType::String)
         }
@@ -751,6 +763,24 @@ mod tests {
         let mut cli = Cli::try_parse_from(["rift"]).expect("cli parse");
         apply_rcfile_defaults(&mut cli, &rcfile).expect("unknown keys are not fatal");
         assert!(logs_contain("unsupported key 'bogusKey'"));
+    }
+
+    // Issue #1569: `mock` and `debug` are rcfile keys; the CLI flag wins over a `false`, and an
+    // rcfile `debug: true` reaches the log filter (the rcfile is applied before it is built).
+    #[test]
+    fn rcfile_mock_and_debug_apply_with_lowest_precedence() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rcfile = dir.path().join("rift.rc");
+        std::fs::write(&rcfile, r#"{"mock": true, "debug": true}"#).expect("write rcfile");
+        let mut c = cli(&[]);
+        apply_rcfile_defaults(&mut c, &rcfile).expect("applies");
+        assert!(c.mock && c.debug);
+        assert!(rendered(&c, None).contains("debug"));
+
+        std::fs::write(&rcfile, r#"{"mock": false, "debug": false}"#).expect("write rcfile");
+        let mut c = cli(&["--mock", "--debug"]);
+        apply_rcfile_defaults(&mut c, &rcfile).expect("applies");
+        assert!(c.mock && c.debug, "the CLI flag beats an rcfile false");
     }
 
     // Issue #1528: an rcfile `host` applies only when no `--host` was given. It used to compare

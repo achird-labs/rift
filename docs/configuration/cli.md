@@ -192,7 +192,7 @@ Server options:
       --pidfile <FILE>             Write the server's PID here (off unless set; stop/restart read ./rift.pid when omitted)
       --origin <ORIGIN>            Accepted for Mountebank compatibility; NOT implemented — the admin API sends no CORS headers
       --api-key <TOKEN>            Require this token in the Authorization header (or Mountebank's x-api-key) for all admin API requests; Authorization wins when both are sent (alias: --apikey)
-      --rcfile <FILE>              RC file with default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/apiKey/datadir/configfile/noParse); one that cannot be read or applied aborts startup
+      --rcfile <FILE>              RC file with default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/apiKey/datadir/configfile/noParse/mock/debug); one that cannot be read or applied aborts startup
       --default-tls-cert <FILE>    Default TLS certificate (PEM) for HTTPS imposters without their own
       --default-tls-key <FILE>     Default TLS private key (PEM), paired with --default-tls-cert
       --no-self-signed-tls         Disable the self-signed fallback; an HTTPS imposter with no cert is an error
@@ -320,6 +320,8 @@ keys are recognised (the snake_case spellings are accepted too):
 | `datadir` | string | `--datadir` |
 | `configfile` | string | `--configfile` |
 | `noParse` | boolean | `--no-parse` |
+| `mock` | boolean | `--mock` (accepted, no effect) |
+| `debug` | boolean | `--debug` |
 
 ```json
 { "port": 3000, "apiKey": "s3cr3t", "requireAdminAuth": true, "datadir": "/data/mb" }
