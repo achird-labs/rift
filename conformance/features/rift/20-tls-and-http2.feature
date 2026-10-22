@@ -35,7 +35,7 @@ Feature: TLS termination options and HTTP/2 negotiation (rift docs/features/tls.
 
     Examples:
       | case                                  | message                                   |
-      | a key that does not match the cert    | cert/key mismatch?                        |
+      | a key that does not match the cert    | cert/key mismatch                         |
       | a cert without a key                  | must provide both                         |
       | rejectUnauthorized without mutualAuth | require `mutualAuth: true`                |
       | ca without rejectUnauthorized         | `ca` requires `rejectUnauthorized: true`  |

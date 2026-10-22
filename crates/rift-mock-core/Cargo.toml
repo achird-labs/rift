@@ -45,6 +45,10 @@ rcgen = { version = "0.14", features = ["x509-parser"] }
 # crates are already in the tree through rcgen.
 time = "0.3"
 x509-parser = "0.18"
+# Issue #1599: verifies an X.509 v1 client certificate's handshake signature against its raw public
+# key (`RawPublicKeyEntity`), since webpki refuses to parse a v1 end-entity. Already in the tree
+# through rustls, at the features rustls itself enables.
+rustls-webpki = { version = "0.103", default-features = false, features = ["alloc", "std"] }
 # Bounded LRU cache for per-SNI intercept leaves (issue #539 — MITM-intercept DoS)
 lru = "0.18"
 

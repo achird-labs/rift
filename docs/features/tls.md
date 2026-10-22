@@ -94,7 +94,8 @@ TLS 1.2 and 1.3 are offered; older versions are not.
 - `key` may be PKCS#8 (`BEGIN PRIVATE KEY`), PKCS#1 RSA (`BEGIN RSA PRIVATE KEY`) or SEC1 EC
   (`BEGIN EC PRIVATE KEY`).
 - `cert` may hold a chain — leaf first, then intermediates — and the whole chain is served.
-- A key that does not match the certificate is refused (`cert/key mismatch?`).
+- A key that does not match the certificate is refused (`cert/key mismatch`).
+- `cert` may be X.509 v1, as Mountebank's own default certificate is.
 
 PEM has to be JSON-escaped to go in a string. `jq` does it for you, so you can create the imposter
 straight from the files:
@@ -237,7 +238,10 @@ A client certificate issued by some other CA fails the same way; curl reports a
 still fails, but any client certificate, from any issuer, gets through step 2.
 
 A client certificate needs no special extensions. If it has an Extended Key Usage, that must
-include `clientAuth` — a server-only certificate (`serverAuth` alone) is rejected. The client's
+include `clientAuth` — a server-only certificate (`serverAuth` alone) is rejected. Under
+`mutualAuth` alone it may be X.509 v1 (what `openssl x509 -req` makes without extensions); under
+`rejectUnauthorized` it must be v3, because chain validation is rustls' (webpki), which refuses a
+v1 end-entity. An imposter's own `cert` may be v1 either way. The client's
 identity is not passed to predicates or recorded requests: it gates the connection, nothing more.
 
 Every combination that cannot take effect is refused at creation with a `400`, rather than accepted
@@ -549,6 +553,7 @@ openssl verify -CAfile ca.crt server.crt
 |:------|:------|:---------|
 | `502` + `x-rift-proxy-error` from a `proxy` stub; log shows `invalid peer certificate: UnknownIssuer` | Origin's CA is not in the OS trust store | `--upstream-ca-file <pem>`, or `--upstream-tls-skip-verify` in development |
 | `502` + `x-rift-proxy-error` from a `proxy` stub; log shows `invalid peer certificate: Other(OtherError(UnsupportedCertVersion))` | The upstream presents an X.509 v1 certificate, such as Mountebank's default https certificate; no trust anchor can make that acceptable | `--upstream-tls-skip-verify`, or give the upstream a v3 certificate. `--upstream-ca-file` does not help |
+| A client certificate is refused (`certificate unknown` alert) by an imposter with `rejectUnauthorized`, although it chains to `ca` | The client certificate is X.509 v1. Mountebank accepts one here; Rift's chain validation does not | Issue the client a v3 certificate (any `-extfile` with `openssl x509 -req`, e.g. `extendedKeyUsage=clientAuth`) |
 | `curl: (60) SSL certificate problem` calling an imposter | Your client does not trust the imposter's certificate | `--cacert ca.crt`, or `-k` for the generated self-signed certificate |
 | `curl: (56) ... alert certificate required` (LibreSSL: `reason(1116)`) | The imposter has `mutualAuth` and the client sent no certificate | `--cert client.crt --key client.key` |
 | `... alert certificate unknown` | The client certificate does not chain to the imposter's `ca` | Issue it from a CA listed in `ca`, or add that CA |
@@ -556,6 +561,6 @@ openssl verify -CAfile ca.crt server.crt
 | hostname mismatch / `NotValidForName` | The name you call is not in the certificate's SAN | Add it to `subjectAltName` |
 | ``TLS configuration error: https imposter must provide both `cert` and `key`, or neither`` | Only one of `cert`/`key` set | Supply both, or neither |
 | `TLS configuration error: Failed to parse ...` / `No private key found in key PEM` | `key` is not PEM, or JSON escaping broke its line breaks | Build the body with `jq --rawfile` or EJS `stringify` |
-| `TLS configuration error: ... (cert/key mismatch?)` | `key` does not belong to `cert` | Pair the key with its certificate |
+| `TLS configuration error: ... (cert/key mismatch)` | `key` does not belong to `cert` | Pair the key with its certificate |
 | `TLS configuration error: ... self-signed generation is disabled` | `--no-self-signed-tls` and no certificate from any source | Add `cert`/`key`, or `--default-tls-cert`/`--default-tls-key` |
 | `Permission denied (os error 13)` at startup in Docker | Mounted key not readable by uid 1000 | See [Docker with TLS](#docker-with-tls) |

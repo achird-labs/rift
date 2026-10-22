@@ -269,22 +269,10 @@
       "note": "a stub added with POST /imposters/:id/stubs prints its generated `id`; stubs created with the imposter print none, nor does Mountebank"
     },
     {
-      "id": "api/https/httpsCertificateTest.js::https imposter should support sending key/cert pair during imposter creation",
-      "class": "bug",
-      "issue": "#1599",
-      "note": "mbTest's fixture certificate is X.509 v1 (and expired); rustls refuses it (UnsupportedCertVersion)"
-    },
-    {
-      "id": "api/https/httpsCertificateTest.js::https imposter should work with mutual auth",
-      "class": "bug",
-      "issue": "#1599",
-      "note": "the client presents the X.509 v1 fixture certificate, which rustls refuses (alert certificate unknown)"
-    },
-    {
       "id": "api/https/httpsCertificateTest.js::https imposter should support proxying to origin server requiring mutual auth",
-      "class": "bug",
-      "issue": "#1599",
-      "note": "the proxy presents the X.509 v1 fixture certificate to a mutualAuth origin"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#proxy-upstream-certificates-are-verified",
+      "note": "the proxy verifies the origin's certificate (#1577, documented) and cannot present `proxy.key`/`cert` to a mutualAuth origin (tls.md); Mountebank's origin never requests one"
     },
     {
       "id": "api/impostersControllerTest.js::POST /imposters should return 400 on invalid input",

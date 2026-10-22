@@ -113,6 +113,43 @@
       ]
     },
     {
+      "name": "coverage: httpsServer.js:16 an https imposter created with an X.509 v1 key and cert",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "https",
+                "key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAsEct34nlV05BIBEkdb/B/U4gcBVXPvht+jYYBn9sBuTaFVBC\nN7UQ48SwN7sG1m3DQhDq9oHMvbg6bAmWtN7UqF2Un3A5CXcRN8Iu8yYb9U+aY4i5\n8IAk9tSeMR191TtcRLWmrhKR0SjM9IZFuxX7EGRIOt1wV7Nrz7nimd6lMMQJ0sGL\nKMQRsVjSlu2DUilsk4iKGuM6cASIs55IR+IKCBIFKQcnBurkufUXEsnH5BupIYc4\nfWKwciYU5ocQEDbBhM8yaqMfg1rhsio/YQ058zw8KXJxDCL2TiMXpL1XngJPPsXq\ngk6H0NLQV8fmdNQYH6RUogxcBZUq84FhA4kW9wIDAQABAoIBAC7ZnB2PPr7nc3Oc\nWr5YyqwR+ZkQcvGvgTtA6T3A2+sxI60Kea7olqaSfesx7+1Jmt2SNYBymwHJVu2j\n1sQXfRmKVZfScbZMSO0y1NuWw1N9ZqERk6mRxUE83RZcqjbj4e/4/2XAVbTrTR2o\nGhxRCTsgC/ppJBSLARpiYxFWFT1SS7K2wrg1IH2RNa26hOpVeXUiViLDBsIvjzE4\nBEtA56QQ9s0u7+/23DblSpE8vDi0QVikoMgC4le+F4T7QEi4WomcUIOKihwy+bKi\n8qXpUBdra1zZ2XtSsPQbr+h9HVsVbrpD6iJ5k7OpKjfM+rH02XPuxqhCeUCxtvus\nCnzV44ECgYEA5UMLum/2QvBGr6GdMDAvw0WZqgTFyrPtaRGMOX+TgQW8IP9MjcsJ\nMzaoPzeuNljeJ3E2jjvqeu0sTO4ivzswTT9KbnGkEsHUFoN15CeKCwEK8rwrxdix\nLGVokZfdIgfAwCAPwztHhkxmgDk/JXrUNqc86slnumg10ImVUp3kQhcCgYEAxNY4\nxx/7cpdOHPowvsOkLyFfnYy0zDj8B9dYfrqXVUoM1Q1HS55BKlRVnFpWxxwP04LI\nZhvoZ3O+cZekWT1PEgjOQDoXKKQOkfTRBuDMnJuLKjSdQtx97LrzjKlb70V/LGqZ\nhFX+XHnqmFuR2+N12d/890d5fJ5qnbyu2o+dPiECgYBJdXUhlNRcWG7dwbQDB72W\nHQwCnSrfK03L17KNjeIuei7wh7z4xfC5ty6rquSoR0tPaggoBOy53JrQP5Fkost0\nRO5Nex4uYGrbl93DcCPcKMZgRojkCO2kIw4hcH6Lc95/8QX78VeWoY5KUY15LeUn\naeir9kLFSLTNj/gHk83amwKBgHc/sTYx0gwiTliP2mg37of/GAZC8GWpQEcf16Uv\nNe+d5RhN6xuMzL3wSc1njZsjDRN+8BmsXqgOHxqCXDcURYsPeqS+jLk6avlR8DDS\nkCNwuGbhaUTQgBmjSVm2YNQcrmciTc82qdssoUucbklhDEzqvj6xNpChCMZ3QRd4\nWjMBAoGBAMdLkQrQsorb67JcRkYgw2tlLlCOER1kCg56KpWCWLbuYWI/EMWomh4Z\nyBX+44wm1HrxRcI/fWVoAcRSJDGsk2n2/hGZkWCKbrJ8bKAXur8ufoCB+XgBkW85\n4V8PLj5cjIEfhM8oryjHmKUQKcRu1PbbnMAIWXiUMGH9p9bnDW0l\n-----END RSA PRIVATE KEY-----\n",
+                "cert": "-----BEGIN CERTIFICATE-----\nMIICnzCCAYcCAgY/MA0GCSqGSIb3DQEBCwUAMBQxEjAQBgNVBAMMCWxvY2FsaG9z\ndDAgFw0yNjEwMjIwMzE3MzNaGA8yMTI2MDkyODAzMTczM1owFDESMBAGA1UEAwwJ\nbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsEct34nl\nV05BIBEkdb/B/U4gcBVXPvht+jYYBn9sBuTaFVBCN7UQ48SwN7sG1m3DQhDq9oHM\nvbg6bAmWtN7UqF2Un3A5CXcRN8Iu8yYb9U+aY4i58IAk9tSeMR191TtcRLWmrhKR\n0SjM9IZFuxX7EGRIOt1wV7Nrz7nimd6lMMQJ0sGLKMQRsVjSlu2DUilsk4iKGuM6\ncASIs55IR+IKCBIFKQcnBurkufUXEsnH5BupIYc4fWKwciYU5ocQEDbBhM8yaqMf\ng1rhsio/YQ058zw8KXJxDCL2TiMXpL1XngJPPsXqgk6H0NLQV8fmdNQYH6RUogxc\nBZUq84FhA4kW9wIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQAQZHHkg0G7uO+h6Tzv\nBGhxUazr2wab9Mb/fBGlKXaXKcPq3ZcRQGGFUmJxrDkHYZ/QgXqzb7Pv61JY4HaO\nXUWnoX242DU4uFBCiP4As7xYooahZzAbfKD083SBERIWql9AuZ7NpUkpea1WnxP2\nqu2ZWCI1iP6XBtU/47ekFNxNRozK4PnqXSfv5t7La1z0fuHfEWs8LiALnYBOkyo/\neBT0J5gFr3Jtzm9+ZFaTVc5pWmE++KjoMpFKowgIyS/gbzw2pHbHWre6HDCiwRT6\nwYqeBtuYfnVriUUvDbUFpD2xtnZsCEk3EFKH9oIOm0AI2yE0ehjeFL8840Fg1+CN\nJQE7\n-----END CERTIFICATE-----\n",
+                "stubs": [
+                  {
+                    "responses": [
+                      {
+                        "is": {
+                          "body": "v1"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "scheme": "https",
+          "path": "/"
+        }
+      ]
+    },
+    {
       "name": "coverage: httpsServer.js:13 an https imposter counts the requests it receives over TLS",
       "steps": [
         {

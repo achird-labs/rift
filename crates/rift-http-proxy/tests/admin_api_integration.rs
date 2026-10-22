@@ -3126,4 +3126,261 @@ mod mutual_tls {
             let _ = manager.delete_imposter(p as u16).await;
         }
     }
+
+    // Issue #1599: X.509 v1 certificates. Mountebank's default certificate and mbTest's fixture are
+    // v1, and webpki refuses to parse a v1 end-entity, so Rift refused a v1 imposter `cert` at
+    // creation and failed the handshake of a v1 client certificate under bare `mutualAuth`. The
+    // fixtures in `tests/fixtures/x509-v1/` were made with LibreSSL's `openssl x509 -req` (which
+    // emits v1 when given no extensions): a self-signed v1 `server` pair, a v3 `ca`, and a v1
+    // `client` certificate that `ca` signed.
+    //
+    // reqwest cannot drive these: its `Identity` goes through rustls' `with_client_auth_cert`,
+    // whose key-match check parses the certificate with webpki and so refuses v1 on the *client*
+    // side. The client below is raw rustls with a resolver, which presents a certificate unparsed.
+    mod x509_v1 {
+        use super::*;
+        use rustls::client::danger::{
+            HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+        };
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+        use rustls::{DigitallySignedStruct, SignatureScheme, SupportedProtocolVersion};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        const SERVER_CERT: &str = include_str!("fixtures/x509-v1/server.crt");
+        const SERVER_KEY: &str = include_str!("fixtures/x509-v1/server.key");
+        const CA_CERT: &str = include_str!("fixtures/x509-v1/ca.crt");
+        const CA_KEY: &str = include_str!("fixtures/x509-v1/ca.key");
+        const CLIENT_CERT: &str = include_str!("fixtures/x509-v1/client.crt");
+        const CLIENT_KEY: &str = include_str!("fixtures/x509-v1/client.key");
+
+        const TLS13: &[&SupportedProtocolVersion] = &[&rustls::version::TLS13];
+        const TLS12: &[&SupportedProtocolVersion] = &[&rustls::version::TLS12];
+
+        /// The imposter's certificate is not under test here, so the client trusts any of them.
+        /// Signatures are not checked either: the server-side check is the one under test.
+        #[derive(Debug)]
+        struct TrustAnyServer;
+
+        impl ServerCertVerifier for TrustAnyServer {
+            fn verify_server_cert(
+                &self,
+                _: &CertificateDer<'_>,
+                _: &[CertificateDer<'_>],
+                _: &ServerName<'_>,
+                _: &[u8],
+                _: UnixTime,
+            ) -> Result<ServerCertVerified, rustls::Error> {
+                Ok(ServerCertVerified::assertion())
+            }
+            fn verify_tls12_signature(
+                &self,
+                _: &[u8],
+                _: &CertificateDer<'_>,
+                _: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+            fn verify_tls13_signature(
+                &self,
+                _: &[u8],
+                _: &CertificateDer<'_>,
+                _: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+            fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+                rustls::crypto::ring::default_provider()
+                    .signature_verification_algorithms
+                    .supported_schemes()
+            }
+        }
+
+        /// `cert_pem` presented with the private key `key_pem` — which need not be its own: a
+        /// mismatched pair is how the proof-of-possession test forges a client.
+        fn identity(cert_pem: &str, key_pem: &str) -> rustls::sign::CertifiedKey {
+            let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+                .collect::<Result<Vec<_>, _>>()
+                .expect("cert pem");
+            let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
+                .expect("key pem")
+                .expect("a key");
+            let signing = rustls::crypto::ring::default_provider()
+                .key_provider
+                .load_private_key(key)
+                .expect("load key");
+            rustls::sign::CertifiedKey::new(certs, signing)
+        }
+
+        /// One `GET /` over TLS, answering the raw HTTP/1.1 response, or the transport error. Under
+        /// TLS 1.3 a refused client certificate surfaces after the client's side of the handshake,
+        /// as an alert on the first read, so the whole exchange is the unit of success.
+        async fn get(
+            port: u16,
+            versions: &'static [&'static SupportedProtocolVersion],
+            client: Option<rustls::sign::CertifiedKey>,
+        ) -> Result<String, String> {
+            let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(versions)
+            .expect("versions")
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(TrustAnyServer));
+            let config = match client {
+                Some(ck) => builder
+                    .with_client_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(ck))),
+                None => builder.with_no_client_auth(),
+            };
+            let exchange = async {
+                let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .map_err(|e| format!("connect: {e}"))?;
+                let mut tls = tokio_rustls::TlsConnector::from(Arc::new(config))
+                    .connect(ServerName::try_from("localhost").expect("name"), tcp)
+                    .await
+                    .map_err(|e| format!("handshake: {e}"))?;
+                tls.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .await
+                    .map_err(|e| format!("write: {e}"))?;
+                let mut out = Vec::new();
+                tls.read_to_end(&mut out)
+                    .await
+                    .map_err(|e| format!("read: {e}"))?;
+                Ok(String::from_utf8_lossy(&out).into_owned())
+            };
+            tokio::time::timeout(Duration::from_secs(5), exchange)
+                .await
+                .map_err(|_| "timed out".to_string())?
+        }
+
+        fn assert_served(resp: &Result<String, String>, what: &str) {
+            let body = resp
+                .as_ref()
+                .unwrap_or_else(|e| panic!("{what}: the exchange failed: {e}"));
+            assert!(
+                body.starts_with("HTTP/1.1 200") && body.ends_with("mtls-ok"),
+                "{what}: expected the stub's 200, got {body:?}"
+            );
+        }
+
+        fn assert_refused(resp: &Result<String, String>, what: &str) {
+            // A refusal is a TLS failure, never an HTTP answer — nothing reaches the application.
+            if let Ok(body) = resp {
+                assert!(
+                    !body.starts_with("HTTP/"),
+                    "{what}: must be refused at the handshake, got {body:?}"
+                );
+            }
+        }
+
+        fn v1_cfg(extra: serde_json::Value) -> serde_json::Value {
+            let mut c = cfg(extra);
+            c["cert"] = SERVER_CERT.into();
+            c["key"] = SERVER_KEY.into();
+            c
+        }
+
+        #[tokio::test]
+        async fn an_https_imposter_serves_a_v1_certificate() {
+            let manager = Arc::new(ImposterManager::new());
+            let port = manager
+                .create_imposter(
+                    serde_json::from_value(v1_cfg(serde_json::json!({}))).expect("cfg"),
+                )
+                .await
+                .expect("an X.509 v1 cert/key pair is a valid https imposter, as in Mountebank");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            for (versions, name) in [(TLS13, "TLS 1.3"), (TLS12, "TLS 1.2")] {
+                assert_served(&get(port, versions, None).await, name);
+            }
+            let _ = manager.delete_imposter(port).await;
+        }
+
+        #[tokio::test]
+        async fn an_https_imposter_refuses_a_v1_certificate_with_another_key() {
+            let manager = Arc::new(ImposterManager::new());
+            let mut c = v1_cfg(serde_json::json!({}));
+            c["key"] = CLIENT_KEY.into();
+            let err = manager
+                .create_imposter(serde_json::from_value(c).expect("cfg"))
+                .await
+                .expect_err("the cert/key consistency check must survive the v1 parse");
+            assert!(
+                err.to_string().contains("does not match"),
+                "expected the mismatch error, got: {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn mutual_auth_accepts_a_v1_client_certificate() {
+            let manager = Arc::new(ImposterManager::new());
+            let port = serve(&manager, cfg(serde_json::json!({"mutualAuth": true}))).await;
+            for (versions, name) in [(TLS13, "TLS 1.3"), (TLS12, "TLS 1.2")] {
+                let resp = get(port, versions, Some(identity(CLIENT_CERT, CLIENT_KEY))).await;
+                assert_served(&resp, name);
+            }
+            let _ = manager.delete_imposter(port).await;
+        }
+
+        #[tokio::test]
+        async fn mutual_auth_refuses_a_v1_certificate_without_its_key() {
+            // Proof of possession: a client replaying someone's v1 certificate, but signing the
+            // handshake with a key of its own, must not get through. This is what separates the
+            // v1 path from stubbing the signature check out.
+            let manager = Arc::new(ImposterManager::new());
+            let port = serve(&manager, cfg(serde_json::json!({"mutualAuth": true}))).await;
+            for (versions, name) in [(TLS13, "TLS 1.3"), (TLS12, "TLS 1.2")] {
+                let forged = identity(CLIENT_CERT, SERVER_KEY);
+                assert_refused(&get(port, versions, Some(forged)).await, name);
+                // Control: the same connection with the certificate's own key is served, so the
+                // refusal above is the signature check, not something else about the client.
+                let genuine = identity(CLIENT_CERT, CLIENT_KEY);
+                assert_served(&get(port, versions, Some(genuine)).await, name);
+            }
+            let _ = manager.delete_imposter(port).await;
+        }
+
+        #[tokio::test]
+        async fn mutual_auth_still_refuses_a_client_with_no_certificate() {
+            let manager = Arc::new(ImposterManager::new());
+            let port = serve(&manager, v1_cfg(serde_json::json!({"mutualAuth": true}))).await;
+            for (versions, name) in [(TLS13, "TLS 1.3"), (TLS12, "TLS 1.2")] {
+                assert_refused(&get(port, versions, None).await, name);
+            }
+            let _ = manager.delete_imposter(port).await;
+        }
+
+        #[tokio::test]
+        async fn reject_unauthorized_still_refuses_a_v1_client_certificate() {
+            // Chain validation stays webpki's, which refuses a v1 end-entity. Mountebank accepts
+            // one here; Rift fails closed rather than hand-roll path validation
+            // (docs/mountebank/differences.md).
+            let manager = Arc::new(ImposterManager::new());
+            let port = serve(
+                &manager,
+                cfg(serde_json::json!({
+                    "mutualAuth": true, "rejectUnauthorized": true, "ca": CA_CERT
+                })),
+            )
+            .await;
+
+            // Control: a v3 certificate from the same CA is accepted, so the refusal below is the
+            // v1 encoding and not the CA or the imposter.
+            let ca_key = rcgen::KeyPair::from_pem(CA_KEY).expect("ca key");
+            let issuer = rcgen::Issuer::from_ca_cert_pem(CA_CERT, ca_key).expect("issuer");
+            let mut leaf =
+                CertificateParams::new(vec!["rift-1599-v3-client".to_string()]).expect("leaf");
+            leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+            let leaf_key = KeyPair::generate().expect("leaf key");
+            let v3 = leaf.signed_by(&leaf_key, &issuer).expect("sign v3 leaf");
+
+            for (versions, name) in [(TLS13, "TLS 1.3"), (TLS12, "TLS 1.2")] {
+                let v3_id = identity(&v3.pem(), &leaf_key.serialize_pem());
+                assert_served(&get(port, versions, Some(v3_id)).await, name);
+                let v1_id = identity(CLIENT_CERT, CLIENT_KEY);
+                assert_refused(&get(port, versions, Some(v1_id)).await, name);
+            }
+            let _ = manager.delete_imposter(port).await;
+        }
+    }
 }
