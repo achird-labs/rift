@@ -260,6 +260,10 @@ record.
 
 ### Fixed
 
+- **`+` in a query string or form body is a space, as in Mountebank** (#1607). `?q=x+y` and a form
+  body `q=x+y` now give `"x y"` to predicates, recorded requests, templates and scripts. A predicate
+  written as `"x+y"` to match that request must be rewritten as `"x y"`; send `%2B` for a literal
+  plus.
 - **Recorded requests carry `ip`, and `form` for a form body** (#1602), as Mountebank's do. Both are
   derived when the request is printed (`GET /imposters/:port`, `savedRequests`, the SSE stream, the
   FFI journal), so nothing is stored and the journal's byte budget is unchanged.

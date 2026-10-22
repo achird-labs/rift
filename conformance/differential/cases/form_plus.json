@@ -1,0 +1,277 @@
+{
+  "source": "issue #1607 (Node querystring.parse: '+' is a space before percent-decoding; query and form share it)",
+  "cases": [
+    {
+      "name": "plus in a query or form body is a space: scripts see the decoded text",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "function (config) { return { statusCode: 200, body: JSON.stringify(config.request.query) + ' ' + JSON.stringify(config.request.form || null) }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?q=x+y%21&r=1%2B1&a+b=2&s=%2B+%20&t=a+%ZZ"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "q=x+y%21&a+b=1&r=1%2B1&s=%2B+%20&t=a+%ZZ"
+        }
+      ]
+    },
+    {
+      "name": "plus in a query or form body is a space: equals against the spaced and the plus spelling",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "form": {
+                        "q": "x y!"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "form-space"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "form": {
+                        "q": "x+y!"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "form-plus"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "form": {
+                        "a b": "1"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "key-space"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "form": {
+                        "q": "1+1"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "lit-plus"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "q": "x y!"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "query-space"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "q": "x+y!"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "query-plus"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "t": "a %ZZ"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "bad-escape-space"
+                    }
+                  }
+                ]
+              },
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "nomatch"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "q=x+y%21"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "q=x%20y%21"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "a+b=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "q=1%2B1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "q=1+1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?q=x+y%21"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?q=x%20y%21"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?t=a+%ZZ"
+        }
+      ]
+    }
+  ]
+}

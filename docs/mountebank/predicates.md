@@ -231,6 +231,8 @@ Unlike the other operators, `matches` folds case per **Unicode**, not ASCII — 
 
 The `path` field is the request path as the client sent it. Rift does not percent-decode it, so a request for `/caf%C3%A9` is matched as `/caf%C3%A9`.
 
+Query and form values are decoded as `application/x-www-form-urlencoded`, as in Mountebank: `+` is a space and `%2B` is a plus. The path is not decoded.
+
 ### exists
 
 Check field existence:
