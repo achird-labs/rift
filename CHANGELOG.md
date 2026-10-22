@@ -276,6 +276,7 @@ record.
 
 ### Fixed
 
+- **An installed `AdminAuthorizer` now receives the `x-api-key` value as `AuthzRequest.credential` when `Authorization` is absent**, the same credential the admin gate accepted (#1623). Previously such a request reached the hook as `credential: None`, indistinguishable from anonymous; an embedder treating `None` as anonymous will now see `Some(token)` for those requests. `Authorization` still wins when both are sent. Embedders fronting the admin API themselves can call `rift_http_proxy::admin_api::authz::credential`.
 - **`+` in a query string or form body is a space, as in Mountebank** (#1607). `?q=x+y` and a form
   body `q=x+y` now give `"x y"` to predicates, recorded requests, templates and scripts. A predicate
   written as `"x+y"` to match that request must be rewritten as `"x y"`; send `%2B` for a literal

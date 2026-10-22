@@ -831,10 +831,7 @@ async fn accept_loop(
                                 .map(|(name, value)| (*name, value.as_str()))
                                 .collect();
                             let decision = authorizer.authorize(AuthzRequest {
-                                credential: req
-                                    .headers()
-                                    .get("authorization")
-                                    .and_then(|v| v.to_str().ok()),
+                                credential: authz::credential(req.headers()),
                                 action: target.action,
                                 port: target.port,
                                 space: target.space.as_deref(),
@@ -1022,14 +1019,10 @@ async fn accept_loop(
 /// from `x-api-key` (issue #1565). When `Authorization` is present it decides alone and
 /// `x-api-key` is ignored: accepting whichever of two headers happens to match would let a request
 /// carrying a wrong `Authorization` authenticate on the other one. A header that is not visible
-/// ASCII reads as `""` (fails closed: no key matches it, a blank one included).
+/// ASCII reads as `""` (fails closed: no key matches it, a blank one included). The selection is
+/// [`authz::credential`], shared with the authorizer hook (issue #1623).
 fn admin_key_accepted(headers: &hyper::HeaderMap, expected: &str) -> bool {
-    let presented = headers
-        .get(hyper::header::AUTHORIZATION)
-        .or_else(|| headers.get("x-api-key"))
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    api_key_matches(presented, expected)
+    api_key_matches(authz::credential(headers).unwrap_or(""), expected)
 }
 
 /// Constant-time equality for the admin API key.
@@ -1393,6 +1386,45 @@ mod tests {
         assert!(admin_key_accepted(&headers(&[("authorization", "k")]), "k"));
         assert!(!admin_key_accepted(&headers(&[("x-api-key", "no")]), "k"));
         assert!(!admin_key_accepted(&headers(&[]), "k"));
+    }
+
+    // Issue #1623: the authorizer is handed exactly the value the gate checked, on every header
+    // combination, so the two can never disagree about which header counts.
+    #[test]
+    fn the_hook_credential_is_the_one_the_gate_checked() {
+        let mut opaque = headers(&[("x-api-key", "k")]);
+        opaque.insert(
+            hyper::header::AUTHORIZATION,
+            hyper::header::HeaderValue::from_bytes(b"\x80k").expect("opaque bytes"),
+        );
+        let cases = [
+            (headers(&[]), None),
+            (headers(&[("x-api-key", "k")]), Some("k")),
+            (headers(&[("authorization", "k")]), Some("k")),
+            (
+                headers(&[("authorization", "k"), ("x-api-key", "no")]),
+                Some("k"),
+            ),
+            (
+                headers(&[("authorization", "no"), ("x-api-key", "k")]),
+                Some("no"),
+            ),
+            // Empty Authorization still decides alone: no fall-through to x-api-key.
+            (
+                headers(&[("authorization", ""), ("x-api-key", "k")]),
+                Some(""),
+            ),
+            // Unreadable Authorization: the hook sees none, and the gate reads "" (refuses).
+            (opaque, None),
+        ];
+        for (map, want) in cases {
+            assert_eq!(authz::credential(&map), want, "{map:?}");
+            assert_eq!(
+                admin_key_accepted(&map, "k"),
+                want == Some("k"),
+                "gate vs hook disagree for {map:?}"
+            );
+        }
     }
 
     // Issue #1565: Authorization, when present, decides alone, in both directions.
