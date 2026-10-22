@@ -1394,6 +1394,234 @@
           "path": "/imposters"
         }
       ]
+    },
+    {
+      "name": "admin_api: DELETE /imposters removeProxies=true keeps the replayable shape",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "A"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:9999"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "B"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters?removeProxies=true"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: DELETE /imposters replayable=false answers the detail without proxies",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "A"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:9999"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "B"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters?removeProxies=true&replayable=false"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: DELETE /imposters/:port replayable=TRUE removeProxies=true answers the export",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "A"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:9999"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "B"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4546?removeProxies=true&replayable=TRUE"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: DELETE /imposters/:port removeProxies=true answers the detail without proxies",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "A"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:9999"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "B"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4546?removeProxies=true"
+        }
+      ]
     }
   ]
 }

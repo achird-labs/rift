@@ -325,7 +325,9 @@ A request still in a `wait` behavior is cut off, as in Mountebank: its connectio
 response (over HTTP/2, the whole connection closes), so the delete does not wait for it and the
 deleted imposter never answers it. Any other in-flight response is still finished.
 
-The handler reads no query parameters.
+Query parameters, read as on `GET /imposters/{port}`: `replayable=true` answers the replayable export
+instead of the detail, and `removeProxies=true` strips proxy responses from either. Values are
+case-insensitive and the default is the detail, as in Mountebank.
 
 With `--datadir`, the imposter's `<datadir>/<port>.json` is removed first. If that fails, the call
 returns `503` naming the file and the imposter is **not** deleted: it keeps serving, and deleting it
@@ -362,6 +364,10 @@ Delete all imposters.
 Each entry in `imposters` is the imposter as it was at delete time: the same document a
 `GET /imposters?replayable=true` issued just before would list, stubs added or replaced through the
 stub routes or recorded by a proxy included. That makes the response usable as a save-before-reset export, as in Mountebank.
+
+Query parameters: `removeProxies=true` strips proxy responses from each entry, and
+`replayable=false` (any case) answers each imposter's detail, the document `GET /imposters/{port}`
+prints, instead of the export. Unlike `DELETE /imposters/{port}`, the default is the export.
 
 If an imposter's `<datadir>/<port>.json` cannot be removed, that imposter is not deleted and keeps
 serving. The call then returns `503` with an `errors` entry naming each such port and file, and

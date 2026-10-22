@@ -316,7 +316,7 @@ fn imposters_value(
         })
     };
 
-    if params.replayable {
+    if params.replayable() {
         let configs = imposters
             .iter()
             .map(|i| replayable_value(i, params.remove_proxies))
@@ -620,14 +620,20 @@ fn replace_failure_status(failed: &[(u16, ImposterError)]) -> StatusCode {
 /// DELETE /imposters - Delete all imposters
 pub async fn handle_delete_all(
     manager: Arc<ImposterManager>,
-    _base_url: &str,
+    query: Option<&str>,
+    base_url: &str,
 ) -> Response<Full<Bytes>> {
+    let params = ImposterQueryParams::parse(query);
+    // Snapshot before deleting, as Mountebank renders before `deleteAll()`: the deleted imposters
+    // are rendered from these, so the detail view (counters, stubs) is available to print.
+    let snapshot = manager.list_imposters();
     let report = manager.delete_all().await;
+    let deleted = match deleted_value(&snapshot, &report, base_url, &params) {
+        Ok(deleted) => deleted,
+        Err(resp) => return *resp,
+    };
     if report.failed.is_empty() {
-        return json_response(
-            StatusCode::OK,
-            &serde_json::json!({ "imposters": report.deleted }),
-        );
+        return json_response(StatusCode::OK, &serde_json::json!({ "imposters": deleted }));
     }
     // Issue #1124: an imposter whose datadir file could not be removed is still serving. The client
     // is told which, and which were deleted, in the Mountebank envelope plus the deleted list.
@@ -652,9 +658,45 @@ pub async fn handle_delete_all(
                     failures.join("; ")
                 ),
             }],
-            "imposters": report.deleted,
+            "imposters": deleted,
         }),
     )
+}
+
+/// The deleted imposters as `DELETE /imposters` prints them: the replayable export unless
+/// `replayable=false` (Mountebank's `isFlagFalse`), else the detail; `removeProxies` strips proxy
+/// responses either way (issue #1591). Rendered from `snapshot`, which was taken before the
+/// delete; an imposter created after it is not in the snapshot and is not listed.
+fn deleted_value(
+    snapshot: &[Arc<Imposter>],
+    report: &crate::imposter::DeleteAllReport,
+    base_url: &str,
+    params: &ImposterQueryParams,
+) -> Result<Vec<serde_json::Value>, Box<Response<Full<Bytes>>>> {
+    let replayable = params.replayable_unless_false();
+    let ports: Vec<u16> = report.deleted.iter().filter_map(|c| c.port).collect();
+    snapshot
+        .iter()
+        .filter_map(|i| i.config.port.filter(|p| ports.contains(p)).map(|p| (i, p)))
+        .map(|(imposter, port)| {
+            let value = if replayable {
+                replayable_value(imposter, params.remove_proxies)
+            } else {
+                serde_json::to_value(imposter_detail(
+                    imposter,
+                    port,
+                    base_url,
+                    params.remove_proxies,
+                ))
+            };
+            value.map_err(|e| {
+                Box::new(error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("failed to serialize response body: {e}"),
+                ))
+            })
+        })
+        .collect()
 }
 
 /// The document `GET /imposters/:port` prints for an imposter. `DELETE /imposters/:port` answers
@@ -742,38 +784,52 @@ pub async fn handle_get(
     let params = ImposterQueryParams::parse(query);
 
     match manager.get_imposter(port) {
-        // The same document `GET /imposters?replayable=true` lists for this imposter (issue #1219).
-        Ok(imposter) if params.replayable => {
-            match replayable_value(&imposter, params.remove_proxies) {
-                Ok(value) => json_response(StatusCode::OK, &value),
-                Err(e) => error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("failed to serialize response body: {e}"),
-                ),
-            }
-        }
-        Ok(imposter) => json_response(
-            StatusCode::OK,
-            &imposter_detail(&imposter, port, base_url, params.remove_proxies),
-        ),
+        Ok(imposter) => render_imposter(&imposter, port, base_url, params.replayable(), &params),
         Err(e) => e.into(),
+    }
+}
+
+/// One imposter as `GET /imposters/:port` and `DELETE /imposters/:port` print it: the replayable
+/// export (the same document `GET /imposters?replayable=true` lists, issue #1219) or the detail,
+/// with proxies stripped when `removeProxies` is set. One function so the routes cannot drift
+/// (issues #1399, #1591).
+fn render_imposter(
+    imposter: &Imposter,
+    port: u16,
+    base_url: &str,
+    replayable: bool,
+    params: &ImposterQueryParams,
+) -> Response<Full<Bytes>> {
+    if replayable {
+        match replayable_value(imposter, params.remove_proxies) {
+            Ok(value) => json_response(StatusCode::OK, &value),
+            Err(e) => error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to serialize response body: {e}"),
+            ),
+        }
+    } else {
+        json_response(
+            StatusCode::OK,
+            &imposter_detail(imposter, port, base_url, params.remove_proxies),
+        )
     }
 }
 
 /// DELETE /imposters/:port - Delete a specific imposter
 pub async fn handle_delete(
     port: u16,
+    query: Option<&str>,
     base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
+    let params = ImposterQueryParams::parse(query);
     match manager.delete_imposter_returning(port).await {
         // The imposter as it was, as GET prints it, with the counters it ended on (issue #1399).
+        // `replayable` and `removeProxies` apply as on GET (issue #1591).
         Ok(imposter) => {
             info!("Deleted imposter on port {}", port);
-            json_response(
-                StatusCode::OK,
-                &imposter_detail(&imposter, port, base_url, false),
-            )
+            render_imposter(&imposter, port, base_url, params.replayable(), &params)
         }
         // Mountebank's teardown is idempotent: a port with no imposter answers `200` with `{}`
         // (issue #1371). The C-ABI `rift_delete_imposter` keeps its documented `-1`.
@@ -3066,7 +3122,7 @@ mod delete_persistence_tests {
     async fn delete_of_a_missing_imposter_answers_200_with_an_empty_object() {
         let port = UNUSED_PORT;
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_delete(port, "http://localhost:2525", manager).await;
+        let resp = handle_delete(port, None, "http://localhost:2525", manager).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             resp.headers()
@@ -3094,7 +3150,7 @@ mod delete_persistence_tests {
             .expect("create");
         assert!(dir.path().join(format!("{port_a}.json")).exists());
 
-        let resp = handle_delete(port_b, "http://localhost:2525", Arc::clone(&manager)).await;
+        let resp = handle_delete(port_b, None, "http://localhost:2525", Arc::clone(&manager)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await, serde_json::json!({}));
         assert!(
@@ -3110,7 +3166,7 @@ mod delete_persistence_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (manager, port) = manager_with_unremovable_file(dir.path()).await;
 
-        let resp = handle_delete(port, "http://localhost:2525", Arc::clone(&manager)).await;
+        let resp = handle_delete(port, None, "http://localhost:2525", Arc::clone(&manager)).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp).await;
         let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -3136,7 +3192,7 @@ mod delete_persistence_tests {
             .await
             .expect("create ephemeral");
 
-        let resp = handle_delete_all(Arc::clone(&manager), "http://localhost:2525").await;
+        let resp = handle_delete_all(Arc::clone(&manager), None, "http://localhost:2525").await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp).await;
         let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -3300,5 +3356,150 @@ mod https_view_tests {
         manager.delete_all().await;
         manager.create_imposter(again).await.expect("re-import");
         manager.delete_all().await;
+    }
+
+    // Issue #1591: both DELETE routes read `replayable` and `removeProxies` as Mountebank does.
+    // `DELETE /imposters` defaults to the replayable export, `DELETE /imposters/:id` to the detail.
+
+    /// An `is` imposter and a proxy imposter whose stub answers `[proxy, is]`.
+    async fn manager_with_is_and_proxy() -> (Arc<ImposterManager>, u16, u16) {
+        let manager = Arc::new(ImposterManager::new());
+        let mut ports = Vec::new();
+        for responses in [
+            serde_json::json!([{"is": {"statusCode": 200}}]),
+            serde_json::json!([
+                {"proxy": {"to": "http://127.0.0.1:42999"}},
+                {"is": {"statusCode": 201}}
+            ]),
+        ] {
+            let config = serde_json::from_value(serde_json::json!({
+                "protocol": "http",
+                "stubs": [{"responses": responses}]
+            }))
+            .expect("config");
+            ports.push(manager.create_imposter(config).await.expect("create"));
+        }
+        (manager, ports[0], ports[1])
+    }
+
+    fn has_proxy_response(imposter: &serde_json::Value) -> bool {
+        imposter["stubs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|stub| stub["responses"].as_array().into_iter().flatten())
+            .any(|response| response.get("proxy").is_some())
+    }
+
+    fn is_detail(imposter: &serde_json::Value) -> bool {
+        imposter.get("requests").is_some() && imposter.get("_links").is_some()
+    }
+
+    async fn delete_all_body(query: Option<&str>) -> (serde_json::Value, u16) {
+        let (manager, _, proxy_port) = manager_with_is_and_proxy().await;
+        let resp = handle_delete_all(manager, query, "http://localhost:2525").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        (body_json(resp).await, proxy_port)
+    }
+
+    async fn delete_one_body(query: Option<&str>) -> serde_json::Value {
+        let (manager, _, proxy_port) = manager_with_is_and_proxy().await;
+        let resp = handle_delete(proxy_port, query, "http://localhost:2525", manager).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_json(resp).await
+    }
+
+    fn proxy_imposter_of(body: &serde_json::Value, port: u16) -> &serde_json::Value {
+        body["imposters"]
+            .as_array()
+            .and_then(|all| all.iter().find(|i| i["port"] == port))
+            .expect("the proxy imposter is listed")
+    }
+
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn delete_all_defaults_to_the_replayable_export_with_proxies_kept() {
+        let (body, proxy_port) = delete_all_body(None).await;
+        let imposter = proxy_imposter_of(&body, proxy_port);
+        assert!(!is_detail(imposter), "got: {imposter}");
+        assert!(has_proxy_response(imposter), "got: {imposter}");
+    }
+
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn delete_all_remove_proxies_strips_proxy_responses() {
+        let (body, proxy_port) = delete_all_body(Some("removeProxies=true")).await;
+        let imposter = proxy_imposter_of(&body, proxy_port);
+        assert!(!is_detail(imposter), "got: {imposter}");
+        assert!(!has_proxy_response(imposter), "got: {imposter}");
+    }
+
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn delete_all_replayable_false_in_any_case_answers_the_detail() {
+        for query in ["replayable=false", "replayable=FALSE"] {
+            let (body, proxy_port) = delete_all_body(Some(query)).await;
+            let imposter = proxy_imposter_of(&body, proxy_port);
+            assert!(is_detail(imposter), "{query}: {imposter}");
+            assert!(has_proxy_response(imposter), "{query}: {imposter}");
+        }
+    }
+
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn delete_all_detail_with_remove_proxies_strips_proxy_responses() {
+        let (body, proxy_port) = delete_all_body(Some("removeProxies=true&replayable=false")).await;
+        let imposter = proxy_imposter_of(&body, proxy_port);
+        assert!(is_detail(imposter), "got: {imposter}");
+        assert!(!has_proxy_response(imposter), "got: {imposter}");
+    }
+
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn delete_all_replayable_export_drops_proxy_response_times() {
+        let manager = Arc::new(ImposterManager::new());
+        let config = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "_proxyResponseTime": 7}}]}]
+        }))
+        .expect("config");
+        manager.create_imposter(config).await.expect("create");
+        let resp = handle_delete_all(manager, None, "http://localhost:2525").await;
+        let text = body_json(resp).await.to_string();
+        assert!(!text.contains("_proxyResponseTime"), "got: {text}");
+    }
+
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn delete_one_defaults_to_the_detail_with_proxies_kept() {
+        let body = delete_one_body(None).await;
+        assert!(is_detail(&body), "got: {body}");
+        assert!(has_proxy_response(&body), "got: {body}");
+    }
+
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn delete_one_replayable_true_in_any_case_answers_the_export() {
+        for query in ["replayable=true", "replayable=TRUE"] {
+            let body = delete_one_body(Some(query)).await;
+            assert!(!is_detail(&body), "{query}: {body}");
+            assert!(has_proxy_response(&body), "{query}: {body}");
+        }
+    }
+
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn delete_one_remove_proxies_strips_proxy_responses() {
+        let body = delete_one_body(Some("removeProxies=true")).await;
+        assert!(is_detail(&body), "got: {body}");
+        assert!(!has_proxy_response(&body), "got: {body}");
+    }
+
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn delete_one_replayable_export_with_remove_proxies() {
+        let body = delete_one_body(Some("removeProxies=true&replayable=true")).await;
+        assert!(!is_detail(&body), "got: {body}");
+        assert!(!has_proxy_response(&body), "got: {body}");
     }
 }

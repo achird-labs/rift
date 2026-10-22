@@ -246,6 +246,12 @@ record.
   and now fails. A body that is not XML still never runs the selector. Embedders:
   `ExtractionMethod::extract`/`matches`, `LookupKey::extract`, `extract_xpath`,
   `extract_xpath_with_ns` and `apply_copy_behaviors` now return `Result<_, XPathSelectorError>`.
+- **`DELETE /imposters` and `DELETE /imposters/:id` honour `replayable` and `removeProxies`** (#1591),
+  with Mountebank's defaults: `DELETE /imposters` answers the replayable export unless
+  `replayable=false`, `DELETE /imposters/:id` answers the detail unless `replayable=true`. The
+  export `DELETE /imposters` prints now drops `_proxyResponseTime`, as `GET` does. Flag values are
+  case-insensitive on every imposter route (`?replayable=TRUE`), and a name only matches whole
+  (`notreplayable=true` no longer sets `replayable`).
 
 - **`copy`/`lookup` from a missing field, and tokens in header names** (#1583). A regex `copy` or
   `lookup` whose request field is absent now reads the text `undefined`, as Mountebank does (`.*`
