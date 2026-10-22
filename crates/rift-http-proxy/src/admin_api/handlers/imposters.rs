@@ -322,6 +322,19 @@ fn imposters_value(
             .map(|i| replayable_value(i, params.remove_proxies))
             .collect::<Result<Vec<_>, _>>();
         render(configs.map(|v| serde_json::json!({ "imposters": v })))
+    } else if params.remove_proxies {
+        // `removeProxies` without `replayable` is the full imposters with proxies stripped, the
+        // projection `GET /imposters/:port` serves: Mountebank lists only when neither flag is set
+        // (`list: !(replayable || removeProxies)`, issue #1614).
+        let details = imposters
+            .iter()
+            .filter_map(|i| {
+                i.config
+                    .port
+                    .map(|port| imposter_detail(i, port, base_url, true))
+            })
+            .collect::<Vec<_>>();
+        render(serde_json::to_value(details).map(|v| serde_json::json!({ "imposters": v })))
     } else if params.list {
         // Mountebank-compatible abbreviated listing: port, protocol, name, numberOfRequests, _links
         let entries: Vec<ImposterListEntry> = imposters
