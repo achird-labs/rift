@@ -485,6 +485,15 @@ process died mid-write. It is never loaded, and the next start removes it with a
 Because each write creates a new file, a mode or ownership set by hand on `<port>.json`, or a hard
 link to it, does not carry over to the next write.
 
+Beside it, `<port>.cursors` holds the imposter's **response cycle positions**, so a restart resumes
+each stub where it stopped, as Mountebank does. It is runtime state, not config: written every
+second while the cycles move and on a graceful stop, through `<port>.cursors.tmp` the same way, so a
+crash can lose up to a second of advances. Each position is keyed by the stub's `id`, or else by its
+content, so a stub edited by hand in `<port>.json` starts its cycle over and the others resume. A
+`<port>.cursors` that cannot be read is ignored with a `WARN` line (every cycle starts over); it
+never stops the imposter from loading. Deleting the imposter deletes it too. Neither file is ever
+loaded as an imposter, and an older Rift ignores both.
+
 The directory is keyed by port, so each file is held to that:
 
 - It holds **one imposter object** (not an `{"imposters": [...]}` wrapper), as plain JSON. EJS tags

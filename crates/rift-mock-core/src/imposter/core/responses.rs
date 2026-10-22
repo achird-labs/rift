@@ -13,7 +13,12 @@ impl Imposter {
         stub_state: &'a StubState,
     ) -> anyhow::Result<Option<&'a StubResponse>> {
         match &self.sequencer {
-            None => Ok(stub_state.get_next_response()),
+            None => {
+                let response = stub_state.get_next_response();
+                // After the advance, so a flush that clears the mark sees it (issue #1603).
+                self.mark_cursors_dirty();
+                Ok(response)
+            }
             Some(sequencer) => self.via_sequencer(stub_state, sequencer.as_ref(), true),
         }
     }

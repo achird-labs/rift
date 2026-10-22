@@ -188,6 +188,23 @@ let report = manager.apply_one(config).await?;
 - Nothing serializes `apply_one` against a concurrent `apply_config`, whose delete sweep can remove
   the port, just as two concurrent `apply_config` calls are not serialized.
 
+### Response cycle positions in the datadir (`start_cursor_flusher`)
+
+A manager built `with_datadir(Some(dir))` saves each datadir imposter's response cycle positions to
+`<dir>/<port>.cursors` (issue #1603), so a restart resumes them as Mountebank does. Nothing is written
+until something flushes: `ServerBuilder::start` starts the flusher on its manager, and an embedder
+that drives the manager itself starts its own.
+
+| Item | Signature | Purpose |
+|:-----|:----------|:--------|
+| `start_cursor_flusher` | `fn start_cursor_flusher(self: &Arc<Self>, period: Duration) -> Option<CursorFlusher>` | Flush every `period` on the current runtime. `None` without a datadir, or with a `ResponseSequencer`, which holds the cursors itself. |
+| `CursorFlusher::stop` | `async fn stop(self) -> Vec<(u16, ImposterError)>` | Stop it and flush once more, for a graceful stop; returns the ports that could not be written. Dropping it stops the flush without the last one. |
+| `flush_cursors` | `async fn flush_cursors(&self) -> Vec<(u16, ImposterError)>` | Write every position that moved since the last flush. A failed port is retried by the next one. |
+| `create_imposter_resuming` | `async fn create_imposter_resuming(&self, config: ImposterConfig, script_files: ScriptFileAccess) -> Result<u16, ImposterError>` | Create a datadir imposter loaded from its `<port>.json`, resuming from `<port>.cursors`. Every other create starts each cycle at the first response and removes a `<port>.cursors` an earlier imposter on the port left. `apply_desired` resumes the imposters it creates with `Persistence::Datadir`. |
+
+A missing `<port>.cursors` resumes nothing, and one that cannot be read is ignored with a warning.
+Deleting the imposter deletes the file.
+
 ### Replaying admitted configs (`deserialize_replayed`, `admission_check`)
 
 Decoding an `ImposterConfig`, `Stub` or `StubResponse` runs the engine's admission checks. A

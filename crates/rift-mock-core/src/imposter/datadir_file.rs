@@ -25,6 +25,16 @@ pub(crate) fn temp_path(datadir: &Path, port: u16) -> PathBuf {
     datadir.join(format!("{port}.json.tmp"))
 }
 
+/// `{port}.cursors` — the response-cycle positions of the imposter on `port` (issue #1603).
+pub(crate) fn cursors_path(datadir: &Path, port: u16) -> PathBuf {
+    datadir.join(format!("{port}.cursors"))
+}
+
+/// `{port}.cursors.tmp` — a write of `{port}.cursors` in progress, or one a crash interrupted.
+pub(crate) fn cursors_temp_path(datadir: &Path, port: u16) -> PathBuf {
+    datadir.join(format!("{port}.cursors.tmp"))
+}
+
 /// Replace `{port}.json` with `bytes`, so that a reader, or a crash, only ever sees the old document
 /// or the new one.
 ///
@@ -41,8 +51,37 @@ pub(crate) async fn write_replacing(
     bytes: Vec<u8>,
     persist: tokio::sync::OwnedMutexGuard<()>,
 ) -> io::Result<()> {
-    let target = data_path(datadir, port);
-    let temp = temp_path(datadir, port);
+    replace_file(
+        data_path(datadir, port),
+        temp_path(datadir, port),
+        bytes,
+        persist,
+    )
+    .await
+}
+
+/// [`write_replacing`] for `{port}.cursors` (issue #1603), through `{port}.cursors.tmp`.
+pub(crate) async fn write_cursors_replacing(
+    datadir: &Path,
+    port: u16,
+    bytes: Vec<u8>,
+    persist: tokio::sync::OwnedMutexGuard<()>,
+) -> io::Result<()> {
+    replace_file(
+        cursors_path(datadir, port),
+        cursors_temp_path(datadir, port),
+        bytes,
+        persist,
+    )
+    .await
+}
+
+async fn replace_file(
+    target: PathBuf,
+    temp: PathBuf,
+    bytes: Vec<u8>,
+    persist: tokio::sync::OwnedMutexGuard<()>,
+) -> io::Result<()> {
     tokio::task::spawn_blocking(move || {
         let _persist = persist;
         let written = write_and_sync(&temp, &bytes).and_then(|()| std::fs::rename(&temp, &target));
@@ -69,10 +108,11 @@ fn write_and_sync(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_data()
 }
 
-/// Remove every `{port}.json.tmp` in `datadir` — each one a write that a previous process did not
-/// finish — and return their paths. `{port}.json` beside it is that imposter's last complete state.
+/// Remove every `{port}.json.tmp` and `{port}.cursors.tmp` in `datadir` — each one a write that a
+/// previous process did not finish — and return their paths. The file beside it is that imposter's
+/// last complete state.
 ///
-/// Only names of exactly that shape are touched: an operator's `notes.json.tmp` is not rift's to
+/// Only names of exactly those shapes are touched: an operator's `notes.json.tmp` is not rift's to
 /// delete. Call it at startup, before any manager writes to `datadir`: run beside a live writer it
 /// would unlink that writer's temp file and fail its rename.
 pub fn sweep_interrupted_writes(datadir: &Path) -> io::Result<Vec<PathBuf>> {
@@ -82,7 +122,10 @@ pub fn sweep_interrupted_writes(datadir: &Path) -> io::Result<Vec<PathBuf>> {
         let is_ours = path
             .file_name()
             .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_suffix(".json.tmp"))
+            .and_then(|name| {
+                name.strip_suffix(".json.tmp")
+                    .or_else(|| name.strip_suffix(".cursors.tmp"))
+            })
             // Exactly the spelling rift writes: no sign, no leading zero.
             .is_some_and(|stem| {
                 stem.parse::<u16>()
@@ -157,8 +200,11 @@ mod tests {
         for name in [
             "4545.json.tmp",
             "65535.json.tmp",
+            "4546.cursors.tmp",
             "4545.json",
+            "4546.cursors",
             "notes.json.tmp",
+            "notes.cursors.tmp",
             "65536.json.tmp",
             "+80.json.tmp",
             "04545.json.tmp",
@@ -172,12 +218,15 @@ mod tests {
             removed,
             vec![
                 dir.path().join("4545.json.tmp"),
+                dir.path().join("4546.cursors.tmp"),
                 dir.path().join("65535.json.tmp")
             ]
         );
         for kept in [
             "4545.json",
+            "4546.cursors",
             "notes.json.tmp",
+            "notes.cursors.tmp",
             "65536.json.tmp",
             "+80.json.tmp",
             "04545.json.tmp",
