@@ -242,6 +242,10 @@ record.
   from request to request; they now match Mountebank. As in a JS object, integer-like keys (`?2=y`)
   come first, ascending. `MB_REQUEST`'s own keys are in Mountebank's order too, where they were
   sorted.
+- **An imposter answers `CONNECT` with a tunnel back into itself** (#1595), as Mountebank does,
+  instead of forwarding the CONNECT to its proxy origin. A client using an `http` or `https` imposter
+  as its proxy now reaches the imposter's stubs. The CONNECT target is never contacted, and the
+  CONNECT itself is not matched, recorded or counted.
 - **An `async` inject is awaited, and a callback from a promise or a timer is honoured** (#1593).
   An `async` inject served an empty `200` with no error, because the script engine never ran its
   promise jobs; `Promise.resolve().then(() => callback(...))` and `setTimeout(() => callback(...))`

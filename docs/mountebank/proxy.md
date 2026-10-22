@@ -569,6 +569,30 @@ verification disabled will faithfully record MITM'd traffic.
 > imposter is read back. Rift cannot present a client certificate to an upstream, and its outbound
 > trust is process-wide, configured by the two flags above.
 
+### CONNECT
+
+An imposter answers `CONNECT` by tunnelling the client back into itself, whatever the target, as
+Mountebank does. A client configured with an `http` or `https` imposter as its proxy therefore
+reaches that imposter's stubs: the request it sends through the tunnel is matched as an ordinary
+request, so a `proxy` stub forwards it to its `to` origin.
+
+```bash
+# The CONNECT target is ignored; the inner request is answered by the imposter on 4545.
+curl -k --proxy https://localhost:4545 --proxy-insecure https://api.example.com/repos/x
+```
+
+- The tunnel reaches nothing but the imposter. Rift never connects to the `CONNECT` target, so an
+  imposter is not an open forward proxy.
+- Over an `https` imposter, the client's inner TLS handshake gets the imposter's certificate, so the
+  client must not verify it (`curl -k`).
+- The `CONNECT` itself is answered with a bare `200`. It is not matched, recorded or counted in
+  `numberOfRequests`; only the requests sent through the tunnel are.
+- Only an HTTP/1 `CONNECT` opens a tunnel. Mountebank has no HTTP/2, and an HTTP/2 `CONNECT` is matched
+  against the stubs like any other request. A `CONNECT` sent inside a tunnel opens a nested tunnel, up
+  to eight deep. A `CONNECT` beyond that depth is matched against the stubs like any other request.
+
+To intercept traffic to real hosts, use the [intercept proxy](../features/intercept-proxy.md).
+
 ---
 
 ## Header Manipulation
