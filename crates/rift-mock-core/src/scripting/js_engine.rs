@@ -284,18 +284,47 @@ pub(crate) fn bounded_js_context() -> Context {
 /// A [`ContextBuilder`](boa_engine::context::ContextBuilder) whose context loads no module. Boa's
 /// default loader resolves `import()` from the working directory, so a script of any imposter,
 /// whatever its `require()` access, could read any JS or JSON file under it (review of #1645).
-/// Every Boa context rift builds starts here.
-pub(crate) fn sealed_js_context_builder() -> boa_engine::context::ContextBuilder {
+/// Every Boa context rift builds starts here, and is finished by [`build_sealed_js_context`].
+fn sealed_js_context_builder() -> boa_engine::context::ContextBuilder {
     boa_engine::context::ContextBuilder::new()
         .module_loader(std::rc::Rc::new(boa_engine::module::IdleModuleLoader))
 }
 
-/// A context with Boa's defaults except the module loader: see [`sealed_js_context_builder`].
-pub(crate) fn sealed_js_context() -> Context {
-    sealed_js_context_builder()
+/// Build a sealed context, then remove `Atomics.waitAsync` from it (review of #1593). A waiter
+/// that call registers is linked into Boa's process-wide futex list, with its `SharedArrayBuffer`,
+/// and only a notify or its own timeout unlinks it. A hook's run drops both when it ends, so every
+/// such call would leak its buffer for the life of the process (256 MiB a request for
+/// `new SharedArrayBuffer(1 << 28)`). No Mountebank script needs it. `Atomics.wait` stays: a
+/// context built here cannot block (`[[CanBlock]]` is false), so it throws.
+fn build_sealed_js_context(builder: boa_engine::context::ContextBuilder) -> Context {
+    let mut context = builder
         .build()
         // As `Context::default()` does: building a context with the default realm cannot fail.
-        .expect("building a Boa context with the default realm cannot fail")
+        .expect("building a Boa context with the default realm cannot fail");
+    let removed = context
+        .global_object()
+        .get(js_string!("Atomics"), &mut context)
+        .ok()
+        .and_then(|atomics| atomics.as_object())
+        .map(|atomics| atomics.delete_property_or_throw(js_string!("waitAsync"), &mut context));
+    // Fail closed: a context that kept `waitAsync` must not run scripts. Not reached: Boa defines
+    // `Atomics` and its methods as configurable data properties of a fresh realm.
+    assert!(
+        matches!(removed, Some(Ok(_))),
+        "could not remove Atomics.waitAsync from a script context"
+    );
+    context
+}
+
+/// A context with Boa's defaults except the module loader and `Atomics.waitAsync`: see
+/// [`build_sealed_js_context`].
+pub(crate) fn sealed_js_context() -> Context {
+    build_sealed_js_context(sealed_js_context_builder())
+}
+
+/// [`sealed_js_context`] running its jobs on `jobs` (issue #1593).
+pub(crate) fn sealed_js_context_on(jobs: std::rc::Rc<super::js_runtime::MbJobExecutor>) -> Context {
+    build_sealed_js_context(sealed_js_context_builder().job_executor(jobs))
 }
 
 /// Apply the loop, recursion and stack limits every script context runs under (issue #327).
@@ -383,11 +412,7 @@ struct MbRealm {
 impl MbRealm {
     fn new(access: ScriptFileAccess) -> Self {
         let executor = std::rc::Rc::new(super::js_runtime::MbJobExecutor::new());
-        let mut context = sealed_js_context_builder()
-            .job_executor(std::rc::Rc::clone(&executor))
-            .build()
-            // As `Context::default()` does: building a context with the default realm cannot fail.
-            .expect("building a Boa context with the default realm cannot fail");
+        let mut context = sealed_js_context_on(std::rc::Rc::clone(&executor));
         bound_js_context(&mut context);
         Self {
             access,
@@ -2152,7 +2177,9 @@ fn execute_mountebank_inject_within(
     // left with none, which `parse_mountebank_response` refuses below.
     let drained = jobs
         .drain(&mut *context, budget.deadline, |context| {
-            // A getter cannot run here: the outcome is the wrapper's own plain object.
+            // The outcome is the wrapper's own object, but the inject source is pasted into the
+            // wrapper's scope, so a script can reach `__outcome` and give it a getter. That runs
+            // only this run's code, in its own realm; a getter that throws reads as no answer.
             let called = outcome
                 .get(js_string!("called"), context)
                 .is_ok_and(|v| v.to_boolean());
@@ -6775,5 +6802,42 @@ function respond(ctx) {
         let body = read.body.expect("a body");
         assert!(!body.contains("CANARY_1611"), "{body}");
         assert_eq!(body, "undefined");
+    }
+
+    // Review of #1593: no script context has `Atomics.waitAsync`, whose waiter would leak its
+    // buffer in Boa's process-wide futex list once the run drops it. `Atomics.wait` stays, and
+    // throws, as no context may block.
+    #[test]
+    fn no_script_context_has_atomics_wait_async() {
+        let probe = "[typeof Atomics.waitAsync, typeof Atomics.wait, (() => { \
+            try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1); return 'ran'; } \
+            catch (e) { return 'threw'; } })()].join(',')";
+        let expected = "undefined,function,threw";
+        let resp = inject(&format!("() => ({{ body: {probe} }})")).expect("inject");
+        assert_eq!(resp.body_text(), expected, "an MB pool realm");
+        let decorated = execute_mountebank_decorate(
+            &format!("config => {{ config.response.body = {probe}; }}"),
+            &config_req(),
+            "orig",
+            &crate::behaviors::ResponseStatus::Code(200),
+            &HashMap::new(),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("decorate");
+        assert_eq!(decorated.body, expected, "a decorate realm");
+        for (name, mut context) in [
+            ("sealed", sealed_js_context()),
+            ("bounded", bounded_js_context()),
+        ] {
+            let value = context
+                .eval(Source::from_bytes(probe.as_bytes()))
+                .expect("probe")
+                .to_string(&mut context)
+                .expect("string")
+                .to_std_string_escaped();
+            assert_eq!(value, expected, "the {name} context");
+        }
     }
 }

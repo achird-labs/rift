@@ -35,9 +35,10 @@ pub(crate) enum Drained {
 /// The job executor of an MB pool realm (issue #1593). FIFO promise, generic and async jobs, and
 /// timers ordered by due time; see the module doc.
 ///
-/// An async job (a dynamic `import()`, which the sealed module loader refuses, or
-/// `Atomics.waitAsync`) is a future, polled within the drain that started it; one still pending
-/// when the drain ends is dropped with it. `FinalizationRegistry` cleanups are dropped when
+/// An async job (a dynamic `import()`, which the sealed module loader refuses) is a future, polled
+/// within the drain that started it; one still pending when the drain ends is dropped with it.
+/// `Atomics.waitAsync`, whose waiter would outlive that drop in Boa's process-wide futex list, is
+/// removed from every script context (`js_engine::build_sealed_js_context`). `FinalizationRegistry` cleanups are dropped when
 /// queued: the spec lets a host skip them, and they would otherwise wait for a collection that
 /// may never come.
 #[derive(Default)]
@@ -347,10 +348,7 @@ mod tests {
 
     fn context() -> (Context, Rc<MbJobExecutor>) {
         let jobs = Rc::new(MbJobExecutor::new());
-        let mut context = crate::scripting::js_engine::sealed_js_context_builder()
-            .job_executor(Rc::clone(&jobs))
-            .build()
-            .expect("context");
+        let mut context = crate::scripting::js_engine::sealed_js_context_on(Rc::clone(&jobs));
         install_timers(&mut context).expect("timers");
         (context, jobs)
     }
