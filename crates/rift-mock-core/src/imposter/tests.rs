@@ -3342,14 +3342,11 @@ async fn test_script_header_access_is_case_insensitive() {
     );
 }
 
-// Issue #1025: the scripting boundaries are single-valued, so a repeated header must expose its
-// FIRST value to a script. This is a behaviour change worth pinning rather than only documenting:
-// the live path used to hand over whichever value survived the last-wins collapse — the LAST one —
-// so flipping `.first()` to `.last()` in any of the four single-value conversions (`_rift.script`,
-// response `inject`, `predicateGenerators`, the debug endpoint) would restore the old answer with
-// nothing failing.
+// Issue #1025 pinned a repeated header's FIRST value (the live path once handed over the LAST);
+// issue #1629 gives a script every value, as Mountebank does, so this now pins the array and its
+// wire order.
 #[tokio::test]
-async fn test_script_sees_the_first_value_of_a_repeated_header() {
+async fn test_script_sees_every_value_of_a_repeated_header_in_order() {
     let script = "fn respond(ctx) { \
          let f = ctx.request.header(\"x-flow-id\"); if f == () { f = \"MISS\"; }; \
          http(200, f) }";
@@ -3383,8 +3380,8 @@ async fn test_script_sees_the_first_value_of_a_repeated_header() {
     let _ = manager.delete_imposter(port_0).await;
 
     assert_eq!(
-        body, "first",
-        "a script sees the first value of a repeated header, not the last, got: {body}"
+        body, r#"["first","second"]"#,
+        "a script sees every value of a repeated header, in wire order, got: {body}"
     );
 }
 

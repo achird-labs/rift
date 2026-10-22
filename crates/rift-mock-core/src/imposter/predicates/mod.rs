@@ -736,15 +736,13 @@ where
                 let mb_request = MountebankRequest {
                     method: method.to_string(),
                     path: path.to_string(),
-                    // Reuse the once-per-request query map instead of re-parsing (issue #480). A
-                    // script sees a repeated key comma-joined (`docs/mountebank/responses.md`).
-                    query: crate::util::comma_joined(query_map),
-                    // `MountebankRequest.headers` is the fixed single-value scripting boundary
-                    // (out of scope for #704/#994), so a repeated header exposes only its first
-                    // value to an inject script.
+                    // The once-per-request query map (issue #480). A repeated key or header
+                    // reaches the script as an array (issue #1629).
+                    query: query_map.clone(),
                     headers: headers
                         .entries()
-                        .filter_map(|(k, v)| v.first().map(|first| (k.to_string(), first.clone())))
+                        .filter(|(_, v)| !v.is_empty())
+                        .map(|(k, v)| (k.to_string(), v.to_vec()))
                         .collect(),
                     // `body` is already the classified string from the caller (base64 for a
                     // binary request body, issue #636); this predicate-inject path doesn't thread
@@ -761,7 +759,7 @@ where
                     // for a non-empty body, as Mountebank builds `request.form`.
                     form: form
                         .filter(|_| body.is_some_and(|b| !b.is_empty()))
-                        .map(crate::util::comma_joined),
+                        .cloned(),
                     is_dry_run: false,
                 };
                 execute_predicate_inject(inject_fn, &mb_request, imposter_port, script_files)

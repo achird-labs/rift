@@ -828,14 +828,12 @@ impl Imposter {
                     let mb_request = MountebankRequest {
                         method: method.to_string(),
                         path: path.to_string(),
-                        // A script sees a repeated key comma-joined (`docs/mountebank/responses.md`).
-                        query: crate::util::comma_joined(&query_map),
-                        // `MountebankRequest.headers` is the fixed single-value scripting boundary
-                        // (out of scope for #704/#1025), so a repeated header exposes only its
-                        // first value to a predicateGenerator inject script.
+                        // A repeated key or header reaches the script as an array (issue #1629).
+                        query: query_map,
                         headers: headers
                             .iter()
-                            .filter_map(|(k, v)| v.first().map(|first| (k.clone(), first.clone())))
+                            .filter(|(_, v)| !v.is_empty())
+                            .map(|(k, v)| (k.clone(), v.clone()))
                             .collect(),
                         // `body` is already the classified string from the caller (base64 for a
                         // binary request body, issue #636); this path doesn't thread the mode
@@ -857,7 +855,6 @@ impl Imposter {
                             Some(crate::util::OrderedMap::default())
                         } else {
                             crate::imposter::Imposter::request_form(headers, body)
-                                .map(|form| crate::util::comma_joined(&form))
                         },
                         is_dry_run: dry_run,
                     };

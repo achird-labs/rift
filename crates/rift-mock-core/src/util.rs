@@ -122,8 +122,8 @@ pub type MultiValueMap = OrderedMap<String, Vec<String>>;
 /// URL-decodes keys and values with [`decode_form_component`]. A bare parameter with no `=` (`?flag`) is a
 /// key with an empty value. A **repeated key keeps every value, in order** (issue #1553), as
 /// Mountebank's `querystring.parse` builds an array: `?color=red&color=green` gives
-/// `color => ["red", "green"]`. The predicate engine matches each value; the surfaces that still
-/// show one string per key (templates, scripts) read [`comma_joined`].
+/// `color => ["red", "green"]`. The predicate engine matches each value and scripts see the array
+/// ([`values_as_json`], issue #1629); templates render it [`comma_joined`].
 #[must_use]
 pub fn parse_query_string(query: &str) -> MultiValueMap {
     let mut map = MultiValueMap::default();
@@ -140,9 +140,9 @@ pub fn parse_query_string(query: &str) -> MultiValueMap {
 }
 
 /// The one-string-per-key view of a [`MultiValueMap`]: a repeated key's values comma-joined in
-/// order (`["red", "green"]` → `"red,green"`). What templates, `inject`, `decorate` and
-/// `shellTransform` see, as documented in `docs/mountebank/responses.md`; Mountebank gives those an
-/// array, which is a separate change of script-visible types.
+/// order (`["red", "green"]` → `"red,green"`). What `${request.query.x}` templates render, as
+/// JavaScript's `String(array)` would (`docs/mountebank/responses.md`). Scripts see the array
+/// instead ([`values_as_json`], issue #1629).
 #[must_use]
 pub fn comma_joined(map: &MultiValueMap) -> OrderedMap<String, String> {
     map.iter().map(|(k, v)| (k.clone(), v.join(","))).collect()
@@ -180,7 +180,8 @@ impl<V: serde::Serialize, S> serde::Serialize for JsKeyOrder<'_, V, S> {
 
 /// A field's values as Mountebank shows them (`querystring.parse`, `headersMap`): one value is a
 /// string, several are an array. The shape a recorded request, `predicateGenerators` and the
-/// verify API's report all use for a query or form key (issue #1553).
+/// verify API's report all use for a query or form key (issue #1553), and every script sees for a
+/// query key, form key or header (issue #1629).
 #[must_use]
 pub fn values_as_json(values: &[String]) -> serde_json::Value {
     match values {
@@ -191,6 +192,15 @@ pub fn values_as_json(values: &[String]) -> serde_json::Value {
                 .collect(),
         ),
     }
+}
+
+/// A whole [`MultiValueMap`] as a script sees it (issue #1629): each key's [`values_as_json`], in
+/// the map's order.
+#[must_use]
+pub fn map_values_as_json(map: &MultiValueMap) -> OrderedMap<String, serde_json::Value> {
+    map.iter()
+        .map(|(k, v)| (k.clone(), values_as_json(v)))
+        .collect()
 }
 
 /// The terminal fallback for the builders below: a 500 assembled without the builder, so it cannot

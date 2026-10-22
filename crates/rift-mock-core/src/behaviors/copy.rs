@@ -65,13 +65,13 @@ impl CopySource {
                     // multi-valued request field (issue #1553).
                     ignoring_case(&request.query, name).and_then(|v| v.first().cloned())
                 } else if let Some(name) = map.get("headers") {
-                    ignoring_case(&request.headers, name).cloned()
+                    ignoring_case(&request.headers, name).and_then(|v| v.first().cloned())
                 } else if let Some(name) = map.get("form") {
                     request
                         .form
                         .as_ref()
                         .and_then(|form| ignoring_case(form, name))
-                        .cloned()
+                        .and_then(|v| v.first().cloned())
                 } else {
                     None
                 }
@@ -271,13 +271,13 @@ mod tests {
                 "q".into(),
                 vec!["qv".into(), "second".into()],
             )]),
-            headers: crate::util::OrderedMap::from_iter([("X-Test".into(), "hv".into())]),
+            headers: crate::util::OrderedMap::from_iter([("X-Test".into(), vec!["hv".into()])]),
             body: Some("b".into()),
             ip: Some("::ffff:127.0.0.1".into()),
             request_from: Some("::ffff:127.0.0.1:55333".into()),
             form: Some(crate::util::OrderedMap::from_iter([(
                 "f".into(),
-                "fv".into(),
+                vec!["fv".into()],
             )])),
             ..Default::default()
         }
@@ -391,7 +391,10 @@ mod tests {
         query.insert("name".to_string(), vec!["Alice".to_string()]);
 
         let mut headers = crate::util::OrderedMap::default();
-        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "content-type".to_string(),
+            vec!["application/json".to_string()],
+        );
 
         let request = RequestContext {
             method: "GET".to_string(),

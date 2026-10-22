@@ -724,19 +724,21 @@ Available properties in injection function:
 ```javascript
 request.method    // "GET", "POST", etc.
 request.path      // "/api/users/123"
-request.query     // { page: "1" } - keys in the order the client sent them, as in Mountebank
-request.headers   // { "Content-Type": "application/json" } - in the order the client sent them, one value per name, the first sent, names Title-Cased; a lookup in any case finds the header ([why](differences.md#request-header-names))
+request.query     // { page: "1", q: ["1", "2"] } - keys in the order the client sent them; a repeated key is an array, as in Mountebank
+request.headers   // { "Content-Type": "application/json" } - in the order the client sent them, a repeated header an array, names Title-Cased; a lookup in any case finds the header ([why](differences.md#request-header-names))
 request.body      // Request body as a string; call JSON.parse yourself for JSON. `""` when the request has no body, as in Mountebank
 request.requestFrom // "127.0.0.1:53124" - the client's address:port
 request.ip        // "127.0.0.1" - the client's address
-request.form      // { a: "1" } - the parsed body, only for a non-empty application/x-www-form-urlencoded body; undefined otherwise
+request.form      // { a: "1" } - the parsed body, only for a non-empty application/x-www-form-urlencoded body; undefined otherwise. A repeated key is an array
 ```
 
 `requestFrom` and `ip` are the values the `requestFrom` and `ip` predicates match. On the default
 bind address an IPv4 client is `127.0.0.1` in Rift and `::ffff:127.0.0.1` in Mountebank — see
-[Client address](differences.md#client-address). A query or form key the client repeated reaches
-the script as one comma-joined string (`"1,2"`), where Mountebank gives an array
-([differences](differences.md#scripts-and-templates-see-a-repeated-key-comma-joined)). The same request object reaches a predicate
+[Client address](differences.md#client-address). A query key, form key or header the client
+repeated reaches the script as an array (`?q=1&q=2` gives `["1", "2"]`), as in Mountebank; one sent
+once is a string. Releases up to 0.23.0 joined a repeated key into one string (`"1,2"`) and showed
+only the first value of a repeated header, so a script that split on commas should test
+`Array.isArray` instead. The same request object reaches a predicate
 `inject`, a proxy's `predicateGenerators` `inject`, `decorate` and `shellTransform`'s `MB_REQUEST`.
 
 Rift also accepts Mountebank's current `function (config) { ... }` form: `config.request`,

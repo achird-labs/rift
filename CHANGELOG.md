@@ -59,6 +59,18 @@ record.
 
 ### Changed
 
+- **BREAKING: scripts see a repeated query key, form key or header as an array**, as Mountebank
+  does (#1629). `inject`, predicate `inject`, `predicateGenerators` `inject`, `decorate` (JavaScript
+  and Rhai), `shellTransform`'s `MB_REQUEST` and `_rift.script` (`ctx.request.query`,
+  `ctx.request.headers`, `ctx.request.header(name)`) now get `["1", "2"]` for `?q=1&q=2`, where
+  they got the comma-joined string `"1,2"`; a repeated header was its first value only. A key or
+  header sent once is still a string. `${request.query.x}` templates still render `1,2`.
+  **Migration:** a script that split a repeated key on commas should accept both shapes, e.g.
+  `[].concat(request.query.q)` in JavaScript; Mountebank scripts need no change. **Embedders:**
+  `ScriptRequest`'s `headers` / `query`, `MountebankRequest`'s `query` / `headers` / `form` and
+  `RequestContext`'s `headers` / `form` are now `MultiValueMap` (every value, in order), and
+  `RequestContext::query_joined` is removed (`util::comma_joined(&ctx.query)` gives the old view);
+  `RequestContext::first_header` reads a header's first value.
 - **Recorded request `timestamp` now uses Mountebank's format**, millisecond precision with a `Z`
   suffix (`2026-10-17T10:00:00.123Z`), instead of microseconds and `+00:00`. Older values are still
   accepted wherever a journal is read back (#1610).

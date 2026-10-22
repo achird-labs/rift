@@ -1,5 +1,5 @@
 {
-  "source": "issue #1606 (Mountebank httpRequest.js:18: headersMap.ofRaw(request.rawHeaders) keeps the client's header order, a repeated name at its first position). Only the x- names are compared, lower-cased since Rift Title-Cases request names (docs/mountebank/differences.md), so the client's own headers do not matter; and only names, since a repeated header's value is an array in Mountebank and its first value in Rift's single-value script view. The body is not JSON, so the harness compares it byte for byte.",
+  "source": "issue #1606 (Mountebank httpRequest.js:18: headersMap.ofRaw(request.rawHeaders) keeps the client's header order, a repeated name at its first position). Only the x- names are compared, lower-cased since Rift Title-Cases request names (docs/mountebank/differences.md), so the client's own headers do not matter; and only names: the values are compared by script_multi_value.json (#1629). The body is not JSON, so the harness compares it byte for byte.",
   "cases": [
     {
       "name": "header order: an inject sees request headers in the order the client sent them",
