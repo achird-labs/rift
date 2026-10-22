@@ -4662,6 +4662,27 @@ mod tests {
     }
 
     #[test]
+    fn a_costly_encrypted_key_is_refused_fast_at_admission() {
+        // The key states its own KDF cost; a door must refuse it before deriving anything.
+        use crate::proxy::client_identity::tests::{pbkdf2_key, scrypt_key};
+        for key in [scrypt_key(40, 8, 1), pbkdf2_key(4_000_000_000)] {
+            let json = proxy_stub(&serde_json::json!({
+                "cert": IDENTITY_CERT, "key": key, "passphrase": "x",
+            }));
+            let started = std::time::Instant::now();
+            let door = serde_json::from_str::<Stub>(&json)
+                .expect_err("refused")
+                .to_string();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "took {:?}: {door}",
+                started.elapsed()
+            );
+            assert!(door.contains("too costly"), "{door}");
+        }
+    }
+
+    #[test]
     fn a_passphrase_alone_or_empty_strings_present_no_identity() {
         for identity in [
             serde_json::json!({"passphrase": "x"}),

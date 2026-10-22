@@ -100,10 +100,13 @@ fn decode_key(
                 "proxy.key is encrypted (ENCRYPTED PRIVATE KEY) but no proxy.passphrase was given"
             );
         };
+        // Fixed texts: a decoder's message can quote the bytes it choked on.
         let (_, document) = pkcs8::Document::from_pem(block)
-            .map_err(|e| anyhow!("proxy.key is not a readable encrypted PKCS#8 key: {e}"))?;
+            .map_err(|_| anyhow!("proxy.key is not a readable encrypted PKCS#8 key"))?;
         let encrypted = pkcs8::EncryptedPrivateKeyInfoRef::try_from(document.as_bytes())
-            .map_err(|e| anyhow!("proxy.key is not a readable encrypted PKCS#8 key: {e}"))?;
+            .map_err(|_| anyhow!("proxy.key is not a readable encrypted PKCS#8 key"))?;
+        // Before deriving anything: the key names its own KDF cost, and pkcs5 runs whatever it says.
+        refuse_costly_kdf(&encrypted.encryption_algorithm)?;
         // A wrong passphrase surfaces here: the padding check or the inner decode fails.
         let decrypted = encrypted.decrypt(passphrase).map_err(|_| {
             anyhow!("proxy.passphrase does not decrypt proxy.key (wrong passphrase?)")
@@ -111,14 +114,63 @@ fn decode_key(
         let der = PrivatePkcs8KeyDer::from(decrypted.as_bytes().to_vec());
         return Ok((PrivateKeyDer::Pkcs8(der), false));
     }
+    // A fixed text: rustls-pemfile's `IllegalSectionStart` quotes the offending line, which for a
+    // key run into its header is key material.
     let key = rustls_pemfile::private_key(&mut pem.as_bytes())
-        .map_err(|e| anyhow!("proxy.key is not a readable PEM private key: {e}"))?
+        .map_err(|_| anyhow!("proxy.key is not a readable PEM private key"))?
         .ok_or_else(|| {
             anyhow!(
                 "proxy.key contains no private key: expected a PKCS#8, RSA or EC PRIVATE KEY block"
             )
         })?;
     Ok((key, passphrase.is_some()))
+}
+
+/// Most memory one scrypt derivation may take, as `128 · N · r · p` bytes: 64 MiB, the order of
+/// OpenSSL's own `maxmem` default. OpenSSL 3 writes N = 2^14, r = 8, p = 1 (16 MiB).
+const MAX_SCRYPT_BYTES: u128 = 64 * 1024 * 1024;
+
+/// Most PBKDF2 iterations one derivation may run. RFC 8018 calls 10,000,000 appropriate "for
+/// especially critical keys"; OpenSSL 3 writes 2048.
+const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
+
+/// Refuse a PBES2 key whose KDF parameters would cost more than the caps above, or that pkcs5 could
+/// not run safely (a scrypt `N` that is not a power of two at least 2: pkcs5 computes `log2(N)` with
+/// an expression that underflows at 0). The key states its own cost, and the derivation runs before
+/// any passphrase check, so without this a posted key could abort the process (scrypt's buffer is
+/// `128 · N · r` bytes) or pin a thread for minutes. Fixed text: nothing of the key is quoted.
+fn refuse_costly_kdf(scheme: &pkcs8::pkcs5::EncryptionScheme) -> anyhow::Result<()> {
+    use pkcs8::pkcs5::pbes2::Kdf;
+    let too_costly = || {
+        anyhow!(
+            "proxy.key's encryption is too costly to derive (scrypt over 64 MiB or PBKDF2 over              10,000,000 iterations); re-encrypt it with `openssl pkcs8 -topk8`, which writes the              OpenSSL defaults"
+        )
+    };
+    let Some(params) = scheme.pbes2() else {
+        bail!(
+            "proxy.key is encrypted with PBES1, which Rift does not read; re-encrypt it with                `openssl pkcs8 -topk8`"
+        );
+    };
+    match &params.kdf {
+        Kdf::Pbkdf2(pbkdf2) if pbkdf2.iteration_count <= MAX_PBKDF2_ITERATIONS => Ok(()),
+        Kdf::Pbkdf2(_) => Err(too_costly()),
+        Kdf::Scrypt(scrypt) => {
+            let n = scrypt.cost_parameter;
+            if n < 2 || !n.is_power_of_two() {
+                bail!("proxy.key's scrypt cost N must be a power of two of at least 2");
+            }
+            let bytes = 128
+                * u128::from(n)
+                * u128::from(scrypt.block_size)
+                * u128::from(scrypt.parallelization);
+            if bytes > MAX_SCRYPT_BYTES {
+                return Err(too_costly());
+            }
+            Ok(())
+        }
+        // `Kdf` is non-exhaustive: a KDF this check does not know is one it cannot bound.
+        _ => bail!("proxy.key is encrypted with a key-derivation function Rift does not read"),
+    }
 }
 
 /// The `ENCRYPTED PRIVATE KEY` block in `pem`, delimiters included, without any text around it.
@@ -129,7 +181,7 @@ fn encrypted_block(pem: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // Made with OpenSSL 3.6.4 (see testdata/client-identity): a P-256 CA, a v3 clientAuth
@@ -239,6 +291,116 @@ mod tests {
     fn an_x509_v1_certificate_and_its_key_load() {
         // rustls' own `keys_match` refuses v1 (#1599); the mbTest fixture is v1.
         ClientIdentity::from_pem(V1_CERT, V1_KEY, None).expect("a v1 pair loads");
+    }
+
+    /// An `ENCRYPTED PRIVATE KEY` whose PBES2 KDF is `kdf`. Its ciphertext is junk: only the cost
+    /// of deriving the key is under test, and a capped one is refused before it is derived.
+    pub(crate) fn key_with_kdf(kdf: pkcs8::pkcs5::pbes2::Kdf) -> String {
+        use pkcs8::der::EncodePem;
+        use pkcs8::pkcs5::pbes2;
+        let info = pkcs8::EncryptedPrivateKeyInfoOwned {
+            encryption_algorithm: pkcs8::pkcs5::EncryptionScheme::Pbes2(pbes2::Parameters {
+                kdf,
+                encryption: pbes2::EncryptionScheme::Aes256Cbc { iv: [7; 16] },
+            }),
+            encrypted_data: pkcs8::der::asn1::OctetString::new(vec![0u8; 48])
+                .expect("octet string"),
+        };
+        info.to_pem(pkcs8::LineEnding::LF).expect("pem")
+    }
+
+    pub(crate) fn scrypt_key(log_n: u32, r: u16, p: u16) -> String {
+        key_with_kdf(pkcs8::pkcs5::pbes2::Kdf::Scrypt(
+            pkcs8::pkcs5::pbes2::ScryptParams {
+                salt: pkcs8::pkcs5::pbes2::Salt::new([1u8; 16]).expect("salt"),
+                cost_parameter: 1u64 << log_n,
+                block_size: r,
+                parallelization: p,
+                key_length: None,
+            },
+        ))
+    }
+
+    pub(crate) fn pbkdf2_key(iterations: u32) -> String {
+        key_with_kdf(pkcs8::pkcs5::pbes2::Kdf::Pbkdf2(
+            pkcs8::pkcs5::pbes2::Pbkdf2Params {
+                salt: pkcs8::pkcs5::pbes2::Salt::new([1u8; 16]).expect("salt"),
+                iteration_count: iterations,
+                key_length: None,
+                prf: pkcs8::pkcs5::pbes2::Pbkdf2Prf::HmacWithSha256,
+            },
+        ))
+    }
+
+    fn refused_fast(key: &str) -> String {
+        let started = std::time::Instant::now();
+        let msg = refusal(CERT, key, Some(PASSPHRASE));
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(1),
+            "took {took:?} to refuse: {msg}"
+        );
+        msg
+    }
+
+    #[test]
+    fn a_costly_scrypt_key_is_refused_before_it_is_derived() {
+        // 1 GiB of scrypt memory (N = 2^20, r = 8): far past the cap, cheap to describe.
+        let msg = refused_fast(&scrypt_key(20, 8, 1));
+        assert!(msg.contains("too costly"), "{msg}");
+    }
+
+    #[test]
+    fn a_costly_pbkdf2_key_is_refused_before_it_is_derived() {
+        let msg = refused_fast(&pbkdf2_key(20_000_000));
+        assert!(msg.contains("too costly"), "{msg}");
+    }
+
+    #[test]
+    fn an_unbounded_kdf_is_refused_not_run() {
+        // These would abort the process (2^40 scrypt blocks) or pin a thread for minutes.
+        for key in [
+            scrypt_key(40, 8, 1),
+            pbkdf2_key(4_000_000_000),
+            scrypt_key(14, 8, 60_000),
+        ] {
+            let msg = refused_fast(&key);
+            assert!(msg.contains("too costly"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn a_zero_scrypt_cost_is_refused_not_a_panic() {
+        // pkcs5 computes log2(N) with `BITS - leading_zeros - 1`, which underflows for N = 0.
+        let key = key_with_kdf(pkcs8::pkcs5::pbes2::Kdf::Scrypt(
+            pkcs8::pkcs5::pbes2::ScryptParams {
+                salt: pkcs8::pkcs5::pbes2::Salt::new([1u8; 16]).expect("salt"),
+                cost_parameter: 0,
+                block_size: 8,
+                parallelization: 1,
+                key_length: None,
+            },
+        ));
+        let msg = refused_fast(&key);
+        assert!(msg.contains("proxy.key"), "{msg}");
+    }
+
+    #[test]
+    fn an_openssl_default_cost_still_loads() {
+        // The fixtures: PBKDF2 with 2048 iterations and scrypt N = 2^14, r = 8, p = 1.
+        ClientIdentity::from_pem(CERT, PBES2_KEY, Some(PASSPHRASE)).expect("PBES2");
+        ClientIdentity::from_pem(CERT, SCRYPT_KEY, Some(PASSPHRASE)).expect("scrypt");
+    }
+
+    #[test]
+    fn a_malformed_key_never_echoes_its_bytes() {
+        // A header run into its body: rustls-pemfile's `IllegalSectionStart` carries the line.
+        let body = KEY.lines().nth(1).expect("a body line");
+        let broken = KEY.replacen("-----\n", "-----", 1);
+        assert!(broken.contains(&format!("-----BEGIN PRIVATE KEY-----{body}")));
+        let msg = refusal(CERT, &broken, None);
+        assert!(!msg.contains(body), "the key leaked: {msg}");
+        assert!(msg.contains("proxy.key"), "{msg}");
     }
 
     #[test]

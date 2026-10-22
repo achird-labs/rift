@@ -587,6 +587,8 @@ with the same three keys Mountebank's proxy takes (the PEMs are elided):
   SEC1 (`EC PRIVATE KEY`), or encrypted PKCS#8 (`ENCRYPTED PRIVATE KEY`, what OpenSSL 3 writes),
   decrypted with `passphrase`. OpenSSL's legacy encryption (`Proc-Type: 4,ENCRYPTED`) is refused;
   convert it with `openssl pkcs8 -topk8 -in key.pem -out key-p8.pem`.
+  An encrypted key whose own parameters ask for more than 64 MiB of scrypt memory or 10,000,000
+  PBKDF2 iterations is refused before anything is derived (OpenSSL 3 writes 16 MiB and 2048).
 - The pair is checked when the imposter is created: half a pair, a PEM with no certificate or key, a
   wrong passphrase or a key that does not match the certificate is a `400`. Mountebank accepts any
   of these and fails every proxied request instead
