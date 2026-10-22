@@ -246,6 +246,14 @@ record.
   instead of forwarding the CONNECT to its proxy origin. A client using an `http` or `https` imposter
   as its proxy now reaches the imposter's stubs. The CONNECT target is never contacted, and the
   CONNECT itself is not matched, recorded or counted.
+- **A JSONPath predicate matches key names case-insensitively by default** (#1601), as Mountebank
+  does: `$..TITLE` finds `title` and `$.book.title` finds `Book.Title`, for every operator. Unless
+  `keyCaseSensitive` (which defaults to `caseSensitive`) is true, the selector is lowercased and selects from a view
+  of the body whose keys (and, except under `matches`, string values) are lowercased; of two keys
+  that differ only in case, the later wins. Behaviour change: a `matches` predicate whose filter
+  literal has upper case (`$[?(@.n=='A')]`) no longer selects an upper-case value, as in
+  Mountebank, and `exists: false` on a differently cased key no longer holds.
+
 - **An `async` inject is awaited, and a callback from a promise or a timer is honoured** (#1593).
   An `async` inject served an empty `200` with no error, because the script engine never ran its
   promise jobs; `Promise.resolve().then(() => callback(...))` and `setTimeout(() => callback(...))`

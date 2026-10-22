@@ -5633,6 +5633,280 @@
       ]
     },
     {
+      "name": "targeted: a case-insensitive jsonpath predicate matches key names without regard to case and folds the selector's literals, as Mountebank does; matches keeps values as written (#1601)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/equals"
+                    }
+                  },
+                  {
+                    "equals": {
+                      "body": "Catcher in the Rye"
+                    },
+                    "jsonpath": {
+                      "selector": "$..TITLE"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "equals"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/matches"
+                    }
+                  },
+                  {
+                    "matches": {
+                      "body": "^ab"
+                    },
+                    "jsonpath": {
+                      "selector": "$..TITLE"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "matches"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/matches-key"
+                    }
+                  },
+                  {
+                    "matches": {
+                      "body": "^ab"
+                    },
+                    "jsonpath": {
+                      "selector": "$..title"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "matches-key"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/deep"
+                    }
+                  },
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "b": "1"
+                      }
+                    },
+                    "jsonpath": {
+                      "selector": "$.A"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "deep"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/filter-equals"
+                    }
+                  },
+                  {
+                    "equals": {
+                      "body": "1"
+                    },
+                    "jsonpath": {
+                      "selector": "$[?(@.n=='A')].v"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "filter-equals"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/filter-matches"
+                    }
+                  },
+                  {
+                    "matches": {
+                      "body": "1"
+                    },
+                    "jsonpath": {
+                      "selector": "$[?(@.n=='A')].v"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "filter-matches"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/duplicate"
+                    }
+                  },
+                  {
+                    "equals": {
+                      "body": "1"
+                    },
+                    "jsonpath": {
+                      "selector": "$.a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "duplicate"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/exists-false"
+                    }
+                  },
+                  {
+                    "exists": {
+                      "body": false
+                    },
+                    "jsonpath": {
+                      "selector": "$..MISSING"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "exists-false"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/equals",
+          "body": "{\"books\":[{\"title\":\"Catcher in the Rye\"}]}"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/matches",
+          "body": "{\"title\":\"abc\"}"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/matches-key",
+          "body": "{\"Title\":\"ABC\"}"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/deep",
+          "body": "{\"a\":{\"B\":\"1\"}}"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/filter-equals",
+          "body": "[{\"n\":\"a\",\"v\":\"1\"}]"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/filter-matches",
+          "body": "[{\"n\":\"A\",\"v\":\"1\"}]"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/duplicate",
+          "body": "{\"a\":\"2\",\"A\":\"1\"}"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/exists-false",
+          "body": "{\"missing\":\"x\"}"
+        }
+      ]
+    },
+    {
       "name": "targeted: except strips digits from an xpath-selected value, in both orders (#1486)",
       "steps": [
         {

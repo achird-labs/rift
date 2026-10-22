@@ -506,12 +506,6 @@
       "note": "the proxy's https origin has a self-signed certificate; Rift verifies it and answers 502"
     },
     {
-      "id": "docs:/docs/api/jsonpath#jsonpath",
-      "class": "bug",
-      "issue": "#1601",
-      "note": "with caseSensitive false, a jsonpath selector's key names are not folded ($..TITLE does not select title)"
-    },
-    {
       "id": "docs:/docs/api/overview#home",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#the-admin-api-serves-json-only",

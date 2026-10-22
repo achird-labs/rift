@@ -305,6 +305,13 @@ the document stays readable (see [Predicates](predicates.md#xpath-predicates)). 
 - Rift lowercases ASCII letters only, as every case-insensitive comparison in Rift does; Mountebank
   lowercases any letter.
 
+## Case-insensitive JSONPath
+
+A JSONPath predicate whose keys are not case sensitive matches key names, and (unless it is
+`matches` or `caseSensitive: true`) string values, without regard to case, as Mountebank's
+lowercasing of the body and the selector does (see [Predicates](predicates.md#jsonpath-predicates)).
+Rift lowercases ASCII letters only, as for XPath; Mountebank also folds `É` and every other letter.
+
 ## An XPath selector that returns a string
 
 An XPath selector that evaluates to a string, such as `string(//a)`, works in Rift's predicates and `copy`. Mountebank fails the request with a `500` `TypeError` (`result.map is not a function`): its XPath code handles node sets only.
@@ -337,7 +344,8 @@ Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mounteban
   `caseSensitive: true, keyCaseSensitive: false` compares keys exactly there and relaxes them in Rift.
 - With a `jsonpath` selector that has an upper-case letter, `keyCaseSensitive: true` still matches in
   Rift; in Mountebank it never matches (the selector keeps its case while the body's keys are
-  lowercased).
+  lowercased). The mirror image holds too: with `keyCaseSensitive: true` and a lower-case selector
+  (`$..title`), Mountebank still matches a `Title` key, because it lowercases the body; Rift does not.
 
 Header names are compared against the Title-Cased names the listener stores (`X-Tenant`), because
 Rift cannot see the spelling the client sent (see [Request header names](#request-header-names)).

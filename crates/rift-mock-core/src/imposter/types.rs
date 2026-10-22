@@ -790,8 +790,27 @@ fn validate_predicate(predicate: &Predicate) -> Result<(), String> {
     use crate::behaviors::{validate_jsonpath_selector, validate_xpath_selector};
 
     match &predicate.parameters.selector {
-        Some(PredicateSelector::JsonPath { selector }) => validate_jsonpath_selector(selector)
-            .map_err(|e| format!("predicate `jsonpath` selector `{selector}` is invalid: {e}"))?,
+        Some(PredicateSelector::JsonPath { selector }) => {
+            validate_jsonpath_selector(selector).map_err(|e| {
+                format!("predicate `jsonpath` selector `{selector}` is invalid: {e}")
+            })?;
+            // Unless keys are case sensitive the matcher runs the lowercased selector (issue
+            // #1601). As for XPath, one that compiles only as written is warned about, not refused.
+            let case_sensitive = predicate.parameters.case_sensitive.unwrap_or(false);
+            let folds = !predicate
+                .parameters
+                .key_case_sensitive
+                .unwrap_or(case_sensitive);
+            if folds
+                && let Some(e) =
+                    validate_jsonpath_selector(&crate::behaviors::fold_selector(selector)).err()
+            {
+                tracing::warn!(
+                    "predicate `jsonpath` selector `{selector}` does not compile once lowercased \
+                     for a key-case-insensitive match ({e}); it selects nothing"
+                );
+            }
+        }
         Some(PredicateSelector::XPath { selector, .. }) => {
             validate_xpath_selector(selector)
                 .map_err(|e| format!("predicate `xpath` selector `{selector}` is invalid: {e}"))?;
@@ -802,7 +821,7 @@ fn validate_predicate(predicate: &Predicate) -> Result<(), String> {
                 && crate::imposter::predicates::folds_xpath_names(&predicate.operation);
             if folds
                 && let Some(e) =
-                    validate_xpath_selector(&crate::behaviors::fold_xpath_selector(selector)).err()
+                    validate_xpath_selector(&crate::behaviors::fold_selector(selector)).err()
             {
                 tracing::warn!(
                     "predicate `xpath` selector `{selector}` does not compile once lowercased for \
