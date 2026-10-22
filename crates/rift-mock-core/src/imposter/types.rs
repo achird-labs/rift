@@ -90,26 +90,29 @@ pub(crate) mod multi_value_query {
 
 /// A recorded request's headers in request order, array-index names first, as a JS object lists
 /// them (issues #1596, #1606); a single value is a string and several an array.
-fn serialize_recorded_headers<S: serde::Serializer>(
-    headers: &Headers,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
+fn serialize_recorded_headers<H, S>(headers: &H, serializer: S) -> Result<S::Ok, S::Error>
+where
+    H: std::ops::Deref<Target = Headers>,
+    S: serde::Serializer,
+{
     #[derive(Serialize)]
     #[serde(untagged)]
     enum Shown<'a> {
         One(&'a str),
         Many(&'a [String]),
     }
-    serializer.collect_map(crate::util::js_key_order(headers).into_iter().filter_map(
-        |(name, values)| {
-            let shown = match values.as_slice() {
-                [] => return None, // a name with no values was never a header line; omit it
-                [one] => Shown::One(one),
-                many => Shown::Many(many),
-            };
-            Some((name, shown))
-        },
-    ))
+    serializer.collect_map(
+        crate::util::js_key_order(&**headers)
+            .into_iter()
+            .filter_map(|(name, values)| {
+                let shown = match values.as_slice() {
+                    [] => return None, // a name with no values was never a header line; omit it
+                    [one] => Shown::One(one),
+                    many => Shown::Many(many),
+                };
+                Some((name, shown))
+            }),
+    )
 }
 
 fn boxed_single_value_headers<'de, D: serde::Deserializer<'de>>(
@@ -137,11 +140,8 @@ pub struct RecordedRequest {
     pub query: multi_value_query::Query,
     /// Every header in the order the client sent it (issue #1606), as Mountebank's
     /// `headersMap.ofRaw` records `requests[].headers`.
-    #[serde(
-        default,
-        deserialize_with = "multi_value_headers::deserialize",
-        serialize_with = "serialize_recorded_headers"
-    )]
+    /// Printed by [`RecordedRequestWire`], in [`js_key_order`](crate::util::js_key_order).
+    #[serde(default, deserialize_with = "multi_value_headers::deserialize")]
     pub headers: Headers,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
@@ -240,8 +240,8 @@ struct RecordedRequestWire<'a> {
     path: &'a str,
     #[serde(with = "multi_value_query")]
     query: &'a multi_value_query::Query,
-    #[serde(with = "multi_value_headers")]
-    headers: &'a HashMap<String, Vec<String>>,
+    #[serde(serialize_with = "serialize_recorded_headers")]
+    headers: &'a Headers,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
