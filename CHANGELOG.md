@@ -13,6 +13,13 @@ record.
 
 ### Added
 
+- **Mountebank's short flags** (#1586): `-p`, `-d`, `-i`, `-l`, `-m`, `-w` and `-o` are accepted as
+  `--port`, `--debug`, `--allow-injection`, `--local-only`, `--mock`, `--ip-whitelist` and
+  `--origin`, before or after a subcommand, and `save -r` is `save --remove-proxies`. These follow
+  `mb`'s `cli.js` (`-r` is `removeProxies`, `-o` is `origin`), not the `-r`→`--rcfile` /
+  `-o`→`--pidfile` mapping the issue's triage first proposed. `-h` stays `--help` (Mountebank's
+  `-h` is `--host`).
+
 - **`rift_serve_admin` takes `scriptsDir`** (#1617), the embedded admin plane's `--scripts-dir`:
   the only directory an imposter posted through it may read `file:` scripts, `require()` modules
   and `lookup` CSV files from. `serveOptions` advertises it.

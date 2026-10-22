@@ -57,8 +57,11 @@ pub struct Cli {
     pub command: Option<Commands>,
 
     // === Mountebank-compatible options ===
+    // `mb`'s short aliases (`src/cli/cli.js:5-15` at v2.9.5) are accepted as `short`s (issue
+    // #1586): -p -d -i -l -m -w -o here, and `save`'s -r (`--remove-proxies`). `-h` stays `--help`,
+    // not Mountebank's `--host`.
     /// Port for the admin API (Mountebank mode)
-    #[arg(long, default_value_t = DEFAULT_ADMIN_PORT, env = "MB_PORT", global = true, help_heading = "Server options")]
+    #[arg(short = 'p', long, default_value_t = DEFAULT_ADMIN_PORT, env = "MB_PORT", global = true, help_heading = "Server options")]
     pub port: u16,
 
     /// Address to bind the admin API and host-less imposters to (IPv4, IPv6 bare `::1` or bracketed `[::1]`, or a DNS name, resolved at startup) [default: every interface, IPv6 and IPv4]
@@ -121,6 +124,7 @@ pub struct Cli {
 
     /// Allow JavaScript injection in responses (for inject and decorate)
     #[arg(
+        short = 'i',
         long,
         visible_alias = "allowInjection",
         env = "MB_ALLOW_INJECTION",
@@ -133,6 +137,7 @@ pub struct Cli {
     /// `127.0.0.1` and `::1`, and they, every imposter port and the front door refuse non-loopback
     /// clients
     #[arg(
+        short = 'l',
         long,
         visible_alias = "localOnly",
         env = "MB_LOCAL_ONLY",
@@ -212,15 +217,15 @@ pub struct Cli {
     pub pidfile: Option<PathBuf>,
 
     /// Accepted for Mountebank compatibility; NOT implemented — the admin API sends no CORS headers
-    #[arg(long, global = true, help_heading = "Server options")]
+    #[arg(short = 'o', long, global = true, help_heading = "Server options")]
     pub origin: Option<String>,
 
     /// Accepted for Mountebank compatibility; no effect — set `recordRequests: true` per imposter
-    #[arg(long, global = true, help_heading = "Server options")]
+    #[arg(short = 'm', long, global = true, help_heading = "Server options")]
     pub mock: bool,
 
     /// Enable debug mode
-    #[arg(long, global = true, help_heading = "Server options")]
+    #[arg(short = 'd', long, global = true, help_heading = "Server options")]
     pub debug: bool,
 
     /// Metrics server port
@@ -280,6 +285,7 @@ pub struct Cli {
     /// a feature. Use `--local-only` to bind loopback, `--api-key` to authenticate the admin plane,
     /// or `--require-admin-auth` (issue #863) to make an exposed keyless plane a startup failure.
     #[arg(
+        short = 'w',
         long,
         visible_alias = "ipWhitelist",
         value_delimiter = ',',
@@ -627,7 +633,7 @@ pub enum Commands {
         savefile: PathBuf,
 
         /// Drop `proxy` responses from the saved stubs, keeping the recorded ones (Mountebank removeProxies)
-        #[arg(long, visible_alias = "removeProxies")]
+        #[arg(short = 'r', long, visible_alias = "removeProxies")]
         remove_proxies: bool,
     },
 
@@ -2857,6 +2863,68 @@ mod tests {
         let help = err.to_string();
         assert!(help.contains("Server options"), "got: {help}");
         assert!(help.contains("--port"), "got: {help}");
+    }
+
+    // Issue #1586: Mountebank's short aliases (`src/cli/cli.js:5-15` at v2.9.5), global like the
+    // long flags, so they parse on either side of a subcommand.
+    #[test]
+    fn mountebank_short_flags_alias_the_long_ones() {
+        for argv in [
+            &[
+                "rift", "-p", "3525", "-d", "-i", "-l", "-m", "-w", "1.2.3.4",
+            ][..],
+            &[
+                "rift", "start", "-p", "3525", "-d", "-i", "-l", "-m", "-w", "1.2.3.4",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(argv)
+                .unwrap_or_else(|e| panic!("{argv:?} should be accepted: {e}"));
+            assert_eq!(cli.port, 3525, "{argv:?}");
+            assert!(cli.debug, "{argv:?}");
+            assert!(cli.allow_injection, "{argv:?}");
+            assert!(cli.local_only, "{argv:?}");
+            assert!(cli.mock, "{argv:?}");
+            assert_eq!(
+                cli.ip_whitelist.as_deref(),
+                Some(&["1.2.3.4".to_string()][..]),
+                "{argv:?}"
+            );
+        }
+        let cli = Cli::try_parse_from(["rift", "save", "-p", "3525"]).expect("parse");
+        assert_eq!(cli.port, 3525);
+
+        // `-o` is `--origin` (global); `-r` is `save`'s `--remove-proxies`, only on `save`, as in
+        // mb, where `removeProxies` is a `save` option.
+        for argv in [
+            &["rift", "-o", "http://a.test"][..],
+            &["rift", "start", "-o", "http://a.test"],
+        ] {
+            let cli = Cli::try_parse_from(argv)
+                .unwrap_or_else(|e| panic!("{argv:?} should be accepted: {e}"));
+            assert_eq!(cli.origin.as_deref(), Some("http://a.test"), "{argv:?}");
+        }
+        let cli = Cli::try_parse_from(["rift", "save", "-r"])
+            .unwrap_or_else(|e| panic!("`save -r` should be accepted: {e}"));
+        match cli.command {
+            Some(Commands::Save { remove_proxies, .. }) => assert!(remove_proxies),
+            other => panic!("expected `save`, got {other:?}"),
+        }
+    }
+
+    // Issue #1586: Mountebank's `-h` is `--host`; Rift keeps it as `--help`.
+    #[test]
+    fn short_h_stays_help() {
+        let err = Cli::try_parse_from(["rift", "-h"]).expect_err("-h prints help");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(err.to_string().contains("--port"), "got: {err}");
+    }
+
+    // clap's own consistency check: no short letter is claimed twice across the global flags and
+    // any subcommand's.
+    #[test]
+    fn cli_definition_is_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
     }
 
     #[test]

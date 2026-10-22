@@ -467,12 +467,6 @@
       "note": "runs since #1575; fails here because the host's name resolves to ::1, so localhost reaches the imposter, as it would on Mountebank"
     },
     {
-      "id": "cli/rcfileTest.js::--rcfile options passed on CLI using an alias should override rcfile options",
-      "class": "bug",
-      "issue": "#1586",
-      "note": "the short flag -d is refused (exit 2)"
-    },
-    {
       "id": "cli/replayTest.js::mb replay should remove proxies",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#command-line",
