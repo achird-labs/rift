@@ -1,7 +1,7 @@
 //! Lookup behavior - query external data sources.
 
 use super::copy::CopySource;
-use super::extraction::ExtractionMethod;
+use super::extraction::{ExtractionMethod, XPathSelectorError};
 use super::request::RequestContext;
 use super::spliced::{Spliced, SplicedHeaders, authored_headers, plain_headers};
 use crate::imposter::{ScriptFileAccess, read_lookup_file, resolve_lookup_path};
@@ -44,16 +44,22 @@ pub struct LookupKey {
 
 impl LookupKey {
     /// The key this lookup reads the row by, or `None` when the request yields none.
-    pub fn extract(&self, request: &RequestContext) -> Option<String> {
-        let source = self.from.extract(request)?;
+    ///
+    /// # Errors
+    ///
+    /// An XPath `using` that fails when it runs (issue #1585).
+    pub fn extract(&self, request: &RequestContext) -> Result<Option<String>, XPathSelectorError> {
+        let Some(source) = self.from.extract(request) else {
+            return Ok(None);
+        };
         match self.index {
             None => self.extraction.extract(&source),
-            Some(index) => self
+            Some(index) => Ok(self
                 .extraction
-                .matches(&source)
+                .matches(&source)?
                 .into_iter()
                 .nth(index)
-                .flatten(),
+                .flatten()),
         }
     }
 }
@@ -566,8 +572,15 @@ pub(crate) fn apply_lookup_spliced(
     stub: crate::imposter::headers::StubRef<'_>,
 ) {
     for behavior in behaviors {
-        // Extract key from request
-        let key_value = behavior.key.extract(request);
+        // Mountebank's `lookup` catches a key selector that fails (issue #1585), logs it at error
+        // level and leaves the response as it is, so the token stays as authored.
+        let key_value = match behavior.key.extract(request) {
+            Ok(key) => key,
+            Err(e) => {
+                tracing::error!("lookup key: {e}; the response is served without this lookup");
+                continue;
+            }
+        };
 
         if let Some(key) = key_value {
             // Load CSV data

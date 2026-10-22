@@ -113,6 +113,23 @@ pub enum ExtractionMethod {
     },
 }
 
+/// An XPath selector that failed when it ran (issue #1585): a prefix its `ns` map does not bind,
+/// an unknown function or variable, a function given the wrong arguments — or, for a stored config
+/// that skipped admission, a selector that does not compile at all.
+///
+/// Mountebank's `xpathSelect` throws on every one of these and fails the request with `500
+/// malformed xpath predicate selector`. Reading it as "nothing selected" instead let
+/// `equals {body: ""}`, `exists {body: false}` and `not` behind such a selector match every
+/// request (the open half of #181), so it is an error, never an empty value.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("malformed xpath predicate selector {selector:?}: {detail}")]
+pub struct XPathSelectorError {
+    /// The selector as it ran (lowercased for a case-insensitive predicate, as Mountebank runs it).
+    pub selector: String,
+    /// Why it failed.
+    pub detail: String,
+}
+
 /// An `ns` that is an object of strings, else `None`.
 fn lenient_namespaces<'de, D>(deserializer: D) -> Result<Option<HashMap<String, String>>, D::Error>
 where
@@ -123,26 +140,33 @@ where
 }
 
 impl ExtractionMethod {
-    /// Apply extraction to a value
-    pub fn extract(&self, value: &str) -> Option<String> {
+    /// Apply extraction to a value: `Ok(None)` when nothing matched or the value does not parse.
+    ///
+    /// # Errors
+    ///
+    /// An XPath selector that fails when it runs on an XML value (issue #1585). A regex or JSONPath
+    /// never errors here: Mountebank reads a failing JSONPath as no match.
+    pub fn extract(&self, value: &str) -> Result<Option<String>, XPathSelectorError> {
         match self {
             ExtractionMethod::Regex { selector, options } => {
                 let opts = options.as_ref();
-                let re = RegexBuilder::new(selector)
+                // Domain-optional: admission refuses a regex that does not compile (#1258), so this
+                // only covers a replayed config, which then extracts nothing.
+                let Ok(re) = RegexBuilder::new(selector)
                     .case_insensitive(opts.is_some_and(|o| o.ignore_case))
                     .multi_line(opts.is_some_and(|o| o.multiline))
                     .build()
-                    .ok()?;
-                if let Some(caps) = re.captures(value) {
-                    // Return first capture group if exists, otherwise full match
+                else {
+                    return Ok(None);
+                };
+                // Return first capture group if exists, otherwise full match
+                Ok(re.captures(value).and_then(|caps| {
                     caps.get(1)
                         .or_else(|| caps.get(0))
                         .map(|m| m.as_str().to_string())
-                } else {
-                    None
-                }
+                }))
             }
-            ExtractionMethod::JsonPath { selector } => extract_jsonpath(value, selector),
+            ExtractionMethod::JsonPath { selector } => Ok(extract_jsonpath(value, selector)),
             ExtractionMethod::XPath {
                 selector,
                 namespaces,
@@ -156,38 +180,46 @@ impl ExtractionMethod {
     /// For a regex this is `RegExp.exec`'s array: the whole match at 0, then each capture group, a
     /// group that did not participate being `None`. For JSONPath and XPath it is each selected
     /// value, in document order. No match, or a body that does not parse, is an empty list.
-    pub fn matches(&self, value: &str) -> Vec<Option<String>> {
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::extract`]: an XPath selector that fails when it runs (issue #1585).
+    pub fn matches(&self, value: &str) -> Result<Vec<Option<String>>, XPathSelectorError> {
         match self {
             ExtractionMethod::Regex { selector, options } => {
                 let opts = options.as_ref();
+                // Domain-optional, as in `extract`.
                 let Ok(re) = RegexBuilder::new(selector)
                     .case_insensitive(opts.is_some_and(|o| o.ignore_case))
                     .multi_line(opts.is_some_and(|o| o.multiline))
                     .build()
                 else {
-                    return Vec::new();
+                    return Ok(Vec::new());
                 };
-                re.captures(value)
+                Ok(re
+                    .captures(value)
                     .map(|caps| {
                         caps.iter()
                             .map(|m| m.map(|m| m.as_str().to_string()))
                             .collect()
                     })
-                    .unwrap_or_default()
+                    .unwrap_or_default())
             }
             ExtractionMethod::JsonPath { selector } => {
+                // Domain-optional: a value that is not JSON, or a selector that does not compile,
+                // selects nothing, as Mountebank's `jsonpath.js` reads both.
                 let Ok(json) = serde_json::from_str::<serde_json::Value>(value) else {
-                    return Vec::new();
+                    return Ok(Vec::new());
                 };
                 let Some(json_path) = cached_jsonpath(selector) else {
-                    return Vec::new();
+                    return Ok(Vec::new());
                 };
-                json_path
+                Ok(json_path
                     .query(&json)
                     .all()
                     .into_iter()
                     .map(|node| Some(json_node_text(node)))
-                    .collect()
+                    .collect())
             }
             ExtractionMethod::XPath {
                 selector,
@@ -209,18 +241,20 @@ pub(crate) fn json_node_text(node: &serde_json::Value) -> String {
     }
 }
 
-/// Every value an XPath selector yields against `xml_str`, in document order.
+/// Every value an XPath selector yields against `xml_str`, in document order. A body that is not
+/// XML yields nothing: Mountebank never runs the selector then.
 fn xpath_all(
     xml_str: &str,
     selector: &str,
     ns: Option<&HashMap<String, String>>,
-) -> Vec<Option<String>> {
+) -> Result<Vec<Option<String>>, XPathSelectorError> {
     let Some(package) = parse_xml_like_mountebank(xml_str) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    eval_xpath_all_on(&package.as_document(), selector, ns)
-        .map(|values| values.into_iter().map(Some).collect())
-        .unwrap_or_default()
+    Ok(eval_xpath_all_on(&package.as_document(), selector, ns)?
+        .into_iter()
+        .map(Some)
+        .collect())
 }
 
 /// Normalize a JSONPath selector to an RFC 9535 rooted path.
@@ -489,35 +523,48 @@ pub(crate) fn jsonpath_selection(json: &serde_json::Value, path: &str) -> Option
     })
 }
 
-/// What a predicate's XPath selector selects, in document order. `None` when the selector does not
-/// compile or does not evaluate.
+/// What a predicate's XPath selector selects, in document order.
+///
+/// # Errors
+///
+/// The selector failed when it ran (issue #1585).
 pub(crate) fn xpath_selection(
     document: &sxd_document::dom::Document,
     selector: &str,
     ns: Option<&HashMap<String, String>>,
-) -> Option<Selection> {
+) -> Result<Selection, XPathSelectorError> {
     eval_xpath_all_on(document, selector, ns).map(Selection::from_texts)
 }
 
 /// Extract value using XPath, optionally with namespace prefix bindings.
 /// Used by copy behaviors and predicate xpath parameter.
-pub fn extract_xpath(xml_str: &str, path: &str) -> Option<String> {
+///
+/// # Errors
+///
+/// As [`extract_xpath_with_ns`].
+pub fn extract_xpath(xml_str: &str, path: &str) -> Result<Option<String>, XPathSelectorError> {
     extract_xpath_with_ns(xml_str, path, None)
 }
 
-/// Extract value using XPath with optional namespace prefix→URI map.
+/// Extract value using XPath with optional namespace prefix→URI map: `Ok(None)` when the body is
+/// not XML (Mountebank never runs the selector then) or nothing is selected.
 ///
 /// String-only entry point for callers that only have the raw body (copy behaviors). It parses the
 /// body itself — bumping `DOM_PARSE` — then delegates to [`eval_xpath_on`]. Predicates use
 /// [`xpath_selection`] against the request's shared DOM instead (issues #711, #1257).
+///
+/// # Errors
+///
+/// The selector failed when it ran on an XML body (issue #1585).
 pub fn extract_xpath_with_ns(
     xml_str: &str,
     path: &str,
     ns: Option<&HashMap<String, String>>,
-) -> Option<String> {
-    let package = parse_xml_like_mountebank(xml_str)?;
-    let document = package.as_document();
-    eval_xpath_on(&document, path, ns)
+) -> Result<Option<String>, XPathSelectorError> {
+    let Some(package) = parse_xml_like_mountebank(xml_str) else {
+        return Ok(None);
+    };
+    eval_xpath_on(&package.as_document(), path, ns)
 }
 
 // Thread-local cache of compiled XPath selectors, keyed by selector text.
@@ -532,16 +579,80 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
-/// A compiled selector and every namespace prefix its text may use.
+/// A compiled selector, every namespace prefix its text may use, and the prefixes it names.
 struct CompiledXPath {
     xpath: sxd_xpath::XPath,
+    /// An over-approximation, bound so `sxd_xpath` never meets an unbound prefix.
     prefixes: Vec<String>,
+    /// The prefixes the selector names outside its string literals ([`xpath_named_prefixes`]): one
+    /// the `ns` map does not bind fails the evaluation, as in Mountebank (issue #1585).
+    named_prefixes: Vec<String>,
 }
 
-/// The URI an unbound prefix is bound to. `sxd_xpath` panics when a name test's prefix has no
-/// binding (`No namespace for prefix`), which dropped the connection mid-request; bound to a URI no
-/// document declares, the step selects nothing, as for any other name absent from the document.
+/// The URI every prefix the selector may use but the `ns` map does not bind is bound to.
+/// `sxd_xpath` panics when a name test's prefix has no binding (`No namespace for prefix`), which
+/// dropped the connection mid-request. A prefix the selector names is refused before evaluation
+/// ([`unbound_prefix`]), so this binding only covers what [`xpath_prefixes`] over-approximates.
 const UNBOUND_PREFIX_URI: &str = "urn:rift:unbound-xpath-prefix";
+
+/// Matches a `prefix:` of a `prefix:name` / `prefix:*` (not an axis's `::`), the prefix in group 1.
+static QNAME_PREFIX: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?:^|::|[^\w.:])([^\W\d][\w.-]*):(?:[^\W\d]|\*)")
+        .expect("static regex compiles")
+});
+
+/// `selector` with every string literal's content blanked, so a `p:x` inside quotes is not read as
+/// a prefix. XPath 1.0 literals have no escapes: `'…'` or `"…"`. An unterminated literal is blanked
+/// to the end, as the tokenizer would refuse it anyway.
+fn without_literals(selector: &str) -> String {
+    let mut out = String::with_capacity(selector.len());
+    let mut quote: Option<char> = None;
+    for c in selector.chars() {
+        match quote {
+            Some(q) if c == q => {
+                quote = None;
+                out.push(c);
+            }
+            Some(_) => out.push(' '),
+            None => {
+                if c == '\'' || c == '"' {
+                    quote = Some(c);
+                }
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// The namespace prefixes `selector` names, outside its string literals, in a name test, a
+/// function name or a variable — what Mountebank's `xpath` resolves against the `ns` map. An NCName
+/// takes every `-` and `.` it can, as the tokenizer reads `my-ns:x` as prefix `my-ns`.
+fn xpath_named_prefixes(selector: &str) -> Vec<String> {
+    let mut prefixes: Vec<String> = QNAME_PREFIX
+        .captures_iter(&without_literals(selector))
+        .map(|caps| caps[1].to_string())
+        .collect();
+    prefixes.sort_unstable();
+    prefixes.dedup();
+    prefixes
+}
+
+/// The first prefix `xpath` names that `ns` does not bind. Mountebank resolves a prefix from its
+/// `ns` map only: not from the document's declarations, and not `xml` either.
+///
+/// Mountebank fails only when its evaluation reaches the step (`//absent/x:a` on a document
+/// without `absent` does not fail); Rift fails whenever the body is XML.
+fn unbound_prefix<'x>(
+    xpath: &'x CompiledXPath,
+    ns: Option<&HashMap<String, String>>,
+) -> Option<&'x str> {
+    xpath
+        .named_prefixes
+        .iter()
+        .map(String::as_str)
+        .find(|prefix| !ns.is_some_and(|ns| ns.contains_key(*prefix)))
+}
 
 /// Every `prefix` in a `prefix:name` / `prefix:*` of `selector`. An over-approximation — a
 /// `p:x` inside a string literal is listed too — which is harmless: binding a prefix the
@@ -549,10 +660,6 @@ const UNBOUND_PREFIX_URI: &str = "urn:rift:unbound-xpath-prefix";
 /// part of a name (`my-ns:x`) or the minus operator (`count(//a)-p:x`), so both readings are
 /// listed.
 fn xpath_prefixes(selector: &str) -> Vec<String> {
-    static QNAME_PREFIX: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r"(?:^|::|[^\w.:])([^\W\d][\w.-]*):(?:[^\W\d]|\*)")
-            .expect("static regex compiles")
-    });
     let mut prefixes: Vec<String> = Vec::new();
     for caps in QNAME_PREFIX.captures_iter(selector) {
         let name = &caps[1];
@@ -594,28 +701,34 @@ fn xpath_context(
 const MAX_CACHED_XPATHS: usize = 1024;
 
 /// Return the compiled XPath for `selector`, compiling and caching it in this thread's cache on
-/// first use. Returns `None` when `selector` fails to compile (callers treat this as "no
-/// extraction"), preserving today's behavior on a bad selector.
+/// first use. `Err` names why `selector` does not compile: admission refuses such a selector
+/// (#1220), so only a replayed config reaches it, and it fails the request as in Mountebank.
 ///
 /// The key is the selector alone: `sxd_xpath` compiles a namespace-independent `XPath`, and the
 /// prefix→URI bindings are applied at *evaluation* time by [`xpath_context`] (issue #1384).
-fn cached_xpath(selector: &str) -> Option<Rc<CompiledXPath>> {
+fn cached_xpath(selector: &str) -> Result<Rc<CompiledXPath>, String> {
     XPATH_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some(xpath) = cache.get(selector) {
-            return Some(Rc::clone(xpath));
+            return Ok(Rc::clone(xpath));
         }
         #[cfg(test)]
         counters::bump_xpath_compile();
+        let compiled = match sxd_xpath::Factory::new().build(selector) {
+            Ok(Some(xpath)) => xpath,
+            Ok(None) => return Err("the selector is empty".to_string()),
+            Err(e) => return Err(e.to_string()),
+        };
         let xpath = Rc::new(CompiledXPath {
-            xpath: sxd_xpath::Factory::new().build(selector).ok()??,
+            xpath: compiled,
             prefixes: xpath_prefixes(selector),
+            named_prefixes: xpath_named_prefixes(selector),
         });
         if cache.len() >= MAX_CACHED_XPATHS {
             cache.clear();
         }
         cache.insert(selector.to_string(), Rc::clone(&xpath));
-        Some(xpath)
+        Ok(xpath)
     })
 }
 
@@ -640,62 +753,94 @@ pub(crate) fn validate_xpath_selector(selector: &str) -> Result<(), String> {
     }
 }
 
+/// Run `selector` against `document`: every way it can fail is an [`XPathSelectorError`], never an
+/// empty value (issue #1585).
+fn evaluate_xpath<'d>(
+    document: &sxd_document::dom::Document<'d>,
+    selector: &str,
+    ns: Option<&HashMap<String, String>>,
+) -> Result<sxd_xpath::Value<'d>, XPathSelectorError> {
+    let failed = |detail: String| XPathSelectorError {
+        selector: selector.to_string(),
+        detail,
+    };
+    let xpath = cached_xpath(selector).map_err(failed)?;
+    if let Some(prefix) = unbound_prefix(&xpath, ns) {
+        // Mountebank's `xpath` throws `Cannot resolve QName <prefix>`.
+        return Err(failed(format!(
+            "the namespace prefix `{prefix}` is not bound in `ns`"
+        )));
+    }
+    let context = xpath_context(&xpath, ns);
+    xpath
+        .xpath
+        .evaluate(&context, document.root())
+        .map_err(|e| failed(e.to_string()))
+}
+
 /// Evaluate an XPath selector against an already-parsed DOM `Document`, using the thread-local
 /// compiled-selector cache: the first selected value, in document order.
+///
+/// # Errors
+///
+/// The selector failed when it ran (issue #1585).
 pub(crate) fn eval_xpath_on(
     document: &sxd_document::dom::Document,
     selector: &str,
     ns: Option<&HashMap<String, String>>,
-) -> Option<String> {
+) -> Result<Option<String>, XPathSelectorError> {
     use sxd_xpath::Value;
 
-    let xpath = cached_xpath(selector)?;
-    let context = xpath_context(&xpath, ns);
-    match xpath.xpath.evaluate(&context, document.root()) {
-        Ok(Value::String(s)) => Some(s),
-        Ok(Value::Number(n)) => Some(n.to_string()),
-        Ok(Value::Boolean(b)) => Some(b.to_string()),
+    Ok(match evaluate_xpath(document, selector, ns)? {
+        Value::String(s) => Some(s),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Boolean(b) => Some(b.to_string()),
         // The node set is a hash set: take the first node in document order, not whichever node
         // iteration happens to yield first (issue #1257).
-        Ok(Value::Nodeset(nodes)) => nodes.document_order_first().map(mb_node_value),
-        _ => None,
-    }
+        Value::Nodeset(nodes) => nodes.document_order_first().map(mb_node_value),
+    })
 }
 
 /// Every value an XPath selector yields against `document`, in document order — what a predicate
-/// matches against (issue #1257). `None` when the selector does not compile or does not evaluate.
+/// matches against (issue #1257).
+///
+/// # Errors
+///
+/// The selector failed when it ran (issue #1585).
 fn eval_xpath_all_on(
     document: &sxd_document::dom::Document,
     selector: &str,
     ns: Option<&HashMap<String, String>>,
-) -> Option<Vec<String>> {
+) -> Result<Vec<String>, XPathSelectorError> {
     use sxd_xpath::Value;
 
-    let xpath = cached_xpath(selector)?;
-    let context = xpath_context(&xpath, ns);
-    match xpath.xpath.evaluate(&context, document.root()) {
-        Ok(Value::String(s)) => Some(vec![s]),
-        Ok(Value::Number(n)) => Some(vec![n.to_string()]),
-        Ok(Value::Boolean(b)) => Some(vec![b.to_string()]),
-        Ok(Value::Nodeset(nodes)) => Some(
-            nodes
-                .document_order()
-                .into_iter()
-                .map(mb_node_value)
-                .collect(),
-        ),
-        Err(_) => None,
-    }
+    Ok(match evaluate_xpath(document, selector, ns)? {
+        Value::String(s) => vec![s],
+        Value::Number(n) => vec![n.to_string()],
+        Value::Boolean(b) => vec![b.to_string()],
+        Value::Nodeset(nodes) => nodes
+            .document_order()
+            .into_iter()
+            .map(mb_node_value)
+            .collect(),
+    })
 }
 
-/// [`xpath_selection`] against a raw body, for a caller without a pre-parsed DOM.
+/// [`xpath_selection`] against a raw body, for a caller without a pre-parsed DOM: `Ok(None)` when
+/// the body is not XML.
+///
+/// # Errors
+///
+/// The selector failed when it ran on an XML body (issue #1585).
 pub(crate) fn xpath_selection_in(
     xml_str: &str,
     selector: &str,
     ns: Option<&HashMap<String, String>>,
-) -> Option<Selection> {
-    let package = parse_xml_like_mountebank(xml_str)?;
-    xpath_selection(&package.as_document(), selector, ns)
+) -> Result<Option<Selection>, XPathSelectorError> {
+    let Some(package) = parse_xml_like_mountebank(xml_str) else {
+        return Ok(None);
+    };
+    xpath_selection(&package.as_document(), selector, ns).map(Some)
 }
 
 /// The DOM an XPath selector sees, parsed the way Mountebank's xmldom 0.9 reads the body (issues
@@ -1510,8 +1655,11 @@ mod tests {
             selector: r"/users/(\d+)".to_string(),
             options: None,
         };
-        assert_eq!(method.extract("/users/123"), Some("123".to_string()));
-        assert_eq!(method.extract("/posts/456"), None);
+        assert_eq!(
+            method.extract("/users/123").expect("evaluates"),
+            Some("123".to_string())
+        );
+        assert_eq!(method.extract("/posts/456").expect("evaluates"), None);
     }
 
     #[test]
@@ -1521,7 +1669,7 @@ mod tests {
             options: None,
         };
         assert_eq!(
-            method.extract("hello world"),
+            method.extract("hello world").expect("evaluates"),
             Some("hello world".to_string())
         );
     }
@@ -1532,7 +1680,10 @@ mod tests {
             selector: "$.user.name".to_string(),
         };
         let json = r#"{"user": {"name": "Alice", "age": 30}}"#;
-        assert_eq!(method.extract(json), Some("Alice".to_string()));
+        assert_eq!(
+            method.extract(json).expect("evaluates"),
+            Some("Alice".to_string())
+        );
     }
 
     #[test]
@@ -1541,7 +1692,10 @@ mod tests {
             selector: "$.items[0]".to_string(),
         };
         let json = r#"{"items": ["first", "second"]}"#;
-        assert_eq!(method.extract(json), Some("first".to_string()));
+        assert_eq!(
+            method.extract(json).expect("evaluates"),
+            Some("first".to_string())
+        );
     }
 
     // =========================================================================
@@ -1707,7 +1861,10 @@ mod tests {
     fn xpath_extraction_takes_the_first_node_in_document_order() {
         let xml = "<r><n>first</n><n>second</n><n>third</n><n>fourth</n><n>fifth</n></r>";
         for _ in 0..50 {
-            assert_eq!(extract_xpath(xml, "//n"), Some("first".to_string()));
+            assert_eq!(
+                extract_xpath(xml, "//n").expect("evaluates"),
+                Some("first".to_string())
+            );
         }
     }
 
@@ -1923,8 +2080,11 @@ mod tests {
                 multiline: false,
             }),
         };
-        assert_eq!(method.extract("HELLO world"), Some("HELLO".to_string()));
-        assert_eq!(method.extract("nope"), None);
+        assert_eq!(
+            method.extract("HELLO world").expect("evaluates"),
+            Some("HELLO".to_string())
+        );
+        assert_eq!(method.extract("nope").expect("evaluates"), None);
     }
 
     #[test]
@@ -1937,7 +2097,7 @@ mod tests {
             }),
         };
         assert_eq!(
-            method.extract("line1\nline2\nline3"),
+            method.extract("line1\nline2\nline3").expect("evaluates"),
             Some("line2".to_string())
         );
     }
@@ -1961,7 +2121,10 @@ mod tests {
     #[test]
     fn test_extract_xpath_without_namespaces() {
         let xml = r#"<root><child>value</child></root>"#;
-        assert_eq!(extract_xpath(xml, "//child"), Some("value".to_string()));
+        assert_eq!(
+            extract_xpath(xml, "//child").expect("evaluates"),
+            Some("value".to_string())
+        );
     }
 
     #[test]
@@ -1969,7 +2132,7 @@ mod tests {
         let xml = r#"<ns:root xmlns:ns="http://example.com/ns"><ns:item>hello</ns:item></ns:root>"#;
         let mut ns = std::collections::HashMap::new();
         ns.insert("ns".to_string(), "http://example.com/ns".to_string());
-        let result = extract_xpath_with_ns(xml, "//ns:item", Some(&ns));
+        let result = extract_xpath_with_ns(xml, "//ns:item", Some(&ns)).expect("evaluates");
         assert_eq!(result, Some("hello".to_string()));
     }
 
@@ -1979,7 +2142,7 @@ mod tests {
         let mut ns = std::collections::HashMap::new();
         ns.insert("a".to_string(), "http://a.com".to_string());
         ns.insert("b".to_string(), "http://b.com".to_string());
-        let result = extract_xpath_with_ns(xml, "//a:x/b:y", Some(&ns));
+        let result = extract_xpath_with_ns(xml, "//a:x/b:y", Some(&ns)).expect("evaluates");
         assert_eq!(result, Some("found".to_string()));
     }
 
@@ -1994,23 +2157,33 @@ mod tests {
         }))
         .unwrap();
         let xml = r#"<mb:root xmlns:mb="http://example.com/mb"><mb:name>first</mb:name><mb:name>second</mb:name></mb:root>"#;
-        assert_eq!(method.extract(xml), Some("first".to_string()));
         assert_eq!(
-            method.matches(xml),
+            method.extract(xml).expect("evaluates"),
+            Some("first".to_string())
+        );
+        assert_eq!(
+            method.matches(xml).expect("evaluates"),
             vec![Some("first".to_string()), Some("second".to_string())]
         );
     }
 
+    /// Issue #1585: a prefix the `ns` map does not bind fails, as in Mountebank, even when the
+    /// document declares it; it is not read as nothing selected.
     #[test]
-    fn xpath_extraction_method_without_ns_selects_nothing_prefixed() {
+    fn xpath_extraction_method_without_ns_fails_on_a_prefix() {
         let method: ExtractionMethod = serde_json::from_value(serde_json::json!({
             "method": "xpath",
             "selector": "//mb:name"
         }))
         .unwrap();
         let xml = r#"<mb:root xmlns:mb="http://example.com/mb"><mb:name>first</mb:name></mb:root>"#;
-        assert_eq!(method.extract(xml), None);
-        assert!(method.matches(xml).is_empty());
+        let failed = method.extract(xml).expect_err("an unbound prefix fails");
+        assert_eq!(failed.selector, "//mb:name");
+        assert!(failed.detail.contains("`mb`"), "{failed}");
+        assert!(method.matches(xml).is_err());
+        // A body that is not XML never runs the selector.
+        assert_eq!(method.extract("not xml"), Ok(None));
+        assert_eq!(method.matches("not xml"), Ok(Vec::new()));
     }
 
     /// A stored `ns` the engine never read must still decode (rift-cluster replays stored bytes):
@@ -2077,24 +2250,87 @@ mod tests {
     }
 
     /// An unbound prefix used to panic inside `sxd_xpath` (`No namespace for prefix`) and drop
-    /// the request; it now selects nothing, on the copy and on the predicate path.
+    /// the request, then selected nothing; it now fails, as in Mountebank (issue #1585), on the
+    /// copy and on the predicate path.
     #[test]
-    fn an_unbound_prefix_selects_nothing_instead_of_panicking() {
+    fn an_unbound_prefix_fails_instead_of_panicking() {
         let xml = r#"<mb:root xmlns:mb="http://example.com/mb"><mb:name>first</mb:name></mb:root>"#;
-        assert_eq!(extract_xpath(xml, "//mb:name"), None);
-        assert!(xpath_all(xml, "//mb:name", None).is_empty());
+        assert!(extract_xpath(xml, "//mb:name").is_err());
+        assert!(xpath_all(xml, "//mb:name", None).is_err());
         let mut ns = HashMap::new();
         ns.insert("other".to_string(), "urn:other".to_string());
-        assert_eq!(extract_xpath_with_ns(xml, "//mb:name", Some(&ns)), None);
-        assert_eq!(
-            extract_xpath(xml, "count(//mb:name)-mb:n"),
-            Some("NaN".to_string())
-        );
+        assert!(extract_xpath_with_ns(xml, "//mb:name", Some(&ns)).is_err());
+        assert!(extract_xpath(xml, "count(//mb:name)-mb:n").is_err());
+        // `xml` is no exception: Mountebank resolves a prefix from its `ns` map only.
+        assert!(extract_xpath(r#"<a xml:lang="en"/>"#, "//@xml:lang").is_err());
         let package = sxd_document::parser::parse(xml).unwrap();
-        let selection = xpath_selection(&package.as_document(), "//mb:name", None);
-        assert!(
-            matches!(&selection, Some(Selection::One(s)) if s.is_empty()),
-            "nothing selected reads as the empty string: {selection:?}"
+        let failed = xpath_selection(&package.as_document(), "//mb:name", None)
+            .expect_err("an unbound prefix fails");
+        assert_eq!(failed.selector, "//mb:name");
+        // A bound one evaluates.
+        ns.insert("mb".to_string(), "http://example.com/mb".to_string());
+        assert_eq!(
+            xpath_selection(&package.as_document(), "//mb:name", Some(&ns)),
+            Ok(Selection::One("first".to_string()))
+        );
+    }
+
+    /// Issue #1585: every way a compiled selector can fail when it runs is an error, never an empty
+    /// value — the hole #181 left open after #1220 refused selectors that do not compile.
+    #[test]
+    fn a_selector_that_cannot_be_evaluated_is_an_error() {
+        let package = sxd_document::parser::parse("<a><b>1</b></a>").unwrap();
+        let doc = package.as_document();
+        for selector in [
+            "//x:a",
+            "nosuch(//a)",
+            "$v",
+            "count('a')",
+            "p:f(//a)",
+            "//[",
+        ] {
+            let failed = eval_xpath_all_on(&doc, selector, None)
+                .expect_err("the selector cannot be evaluated");
+            assert_eq!(failed.selector, selector);
+            assert!(eval_xpath_on(&doc, selector, None).is_err(), "{selector}");
+        }
+        assert_eq!(
+            eval_xpath_all_on(&doc, "//b", None),
+            Ok(vec!["1".to_string()])
+        );
+    }
+
+    /// A `p:x` inside a string literal is text, not a prefix: it needs no binding.
+    #[test]
+    fn a_prefix_inside_a_string_literal_needs_no_binding() {
+        let package = sxd_document::parser::parse("<a><b>p:x</b></a>").unwrap();
+        let doc = package.as_document();
+        assert_eq!(
+            eval_xpath_all_on(&doc, "//b[.='p:x']", None),
+            Ok(vec!["p:x".to_string()])
+        );
+        assert_eq!(
+            eval_xpath_all_on(&doc, r#"//b[.!="q:y"]"#, None),
+            Ok(vec!["p:x".to_string()])
+        );
+    }
+
+    #[test]
+    fn named_prefixes_skip_literals_and_take_the_whole_ncname() {
+        assert_eq!(
+            xpath_named_prefixes("//a:x/child::b:y[@c:z='q:1']/d:*"),
+            vec!["a", "b", "c", "d"]
+        );
+        assert_eq!(xpath_named_prefixes("//my-ns:x"), vec!["my-ns"]);
+        assert_eq!(xpath_named_prefixes("count(//a)-p:n"), vec!["p"]);
+        assert_eq!(xpath_named_prefixes("$p:v + f:g(1)"), vec!["f", "p"]);
+        assert_eq!(
+            xpath_named_prefixes(r#"concat("http://x", 'a:b')"#),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            xpath_named_prefixes("/root/child::item[1]"),
+            Vec::<String>::new()
         );
     }
 
@@ -2106,19 +2342,27 @@ mod tests {
         let package = sxd_document::parser::parse("<r><a>x</a><a>y</a></r>").unwrap();
         let doc = package.as_document();
         assert_eq!(
-            eval_xpath_on(&doc, "string(//a)", None).as_deref(),
+            eval_xpath_on(&doc, "string(//a)", None)
+                .expect("evaluates")
+                .as_deref(),
             Some("x")
         );
         assert_eq!(
-            eval_xpath_on(&doc, "boolean(//a)", None).as_deref(),
+            eval_xpath_on(&doc, "boolean(//a)", None)
+                .expect("evaluates")
+                .as_deref(),
             Some("true")
         );
         assert_eq!(
-            eval_xpath_on(&doc, "boolean(//zz)", None).as_deref(),
+            eval_xpath_on(&doc, "boolean(//zz)", None)
+                .expect("evaluates")
+                .as_deref(),
             Some("false")
         );
         assert_eq!(
-            eval_xpath_on(&doc, "count(//a)", None).as_deref(),
+            eval_xpath_on(&doc, "count(//a)", None)
+                .expect("evaluates")
+                .as_deref(),
             Some("2")
         );
     }
@@ -2143,11 +2387,15 @@ mod tests {
         let xml = r#"<r xmlns:a="urn:a" xmlns:b="urn:b"><a:n>from-a</a:n><b:n>from-b</b:n></r>"#;
         let bind = |uri: &str| HashMap::from([("p".to_string(), uri.to_string())]);
         assert_eq!(
-            extract_xpath_with_ns(xml, "//p:n", Some(&bind("urn:a"))).as_deref(),
+            extract_xpath_with_ns(xml, "//p:n", Some(&bind("urn:a")))
+                .expect("evaluates")
+                .as_deref(),
             Some("from-a")
         );
         assert_eq!(
-            extract_xpath_with_ns(xml, "//p:n", Some(&bind("urn:b"))).as_deref(),
+            extract_xpath_with_ns(xml, "//p:n", Some(&bind("urn:b")))
+                .expect("evaluates")
+                .as_deref(),
             Some("from-b")
         );
     }
@@ -2189,16 +2437,20 @@ mod tests {
                 namespaces: None,
             };
             let all: Vec<Option<String>> = expected.iter().map(|v| Some(v.to_string())).collect();
-            assert_eq!(method.matches(body), all, "copy, all values: {body:?}");
             assert_eq!(
-                extract_xpath(body, selector).as_deref(),
+                method.matches(body).expect("evaluates"),
+                all,
+                "copy, all values: {body:?}"
+            );
+            assert_eq!(
+                extract_xpath(body, selector).expect("evaluates").as_deref(),
                 expected.first().copied(),
                 "copy, first value: {body:?}"
             );
             let dom = LazyXmlDom::new(body);
             let values = dom
                 .document()
-                .and_then(|doc| eval_xpath_all_on(&doc, selector, None));
+                .map(|doc| eval_xpath_all_on(&doc, selector, None).expect("evaluates"));
             assert_eq!(
                 values,
                 Some(expected.iter().map(|v| v.to_string()).collect()),
@@ -2220,8 +2472,12 @@ mod tests {
                 LazyXmlDom::new(body).document().is_none(),
                 "{body:?} parsed"
             );
-            assert_eq!(extract_xpath(body, "//b"), None, "{body:?}");
-            assert!(xpath_selection_in(body, "//b", None).is_none(), "{body:?}");
+            assert_eq!(
+                extract_xpath(body, "//b").expect("evaluates"),
+                None,
+                "{body:?}"
+            );
+            assert_eq!(xpath_selection_in(body, "//b", None), Ok(None), "{body:?}");
             assert!(!holds(exists("//b", true), body), "{body:?}");
         }
 
@@ -2510,7 +2766,7 @@ mod tests {
                 parse_xml_folding_names("<!DOCTYPE A><A><![CDATA[XY]]></A>").expect("parses");
             assert_eq!(
                 eval_xpath_all_on(&package.as_document(), "//a", None),
-                Some(vec!["xy".to_string()])
+                Ok(vec!["xy".to_string()])
             );
         }
 
@@ -2531,7 +2787,7 @@ mod tests {
             let package = parse_xml_folding_names("<r><a>1</a><A>2</A></r>").expect("parses");
             assert_eq!(
                 eval_xpath_all_on(&package.as_document(), "//a", None),
-                Some(vec!["1".to_string(), "2".to_string()])
+                Ok(vec!["1".to_string(), "2".to_string()])
             );
         }
 
@@ -2543,7 +2799,7 @@ mod tests {
                 let doc = dom.folded_document().expect("parses");
                 assert_eq!(
                     eval_xpath_all_on(&doc, "//b", None),
-                    Some(vec!["1".to_string()])
+                    Ok(vec!["1".to_string()])
                 );
             }
             assert!(dom.document().is_some());

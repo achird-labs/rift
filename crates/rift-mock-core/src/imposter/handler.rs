@@ -389,7 +389,38 @@ fn proxy_leg_error_response(
     upstream_error_response(e, log_context, marker, client_prefix)
 }
 
+/// Mountebank's answer to an XPath selector that fails when it runs, in a predicate or a `copy`
+/// (issue #1585): `500` with `{"errors":[{"code":"bad data","message":"malformed xpath predicate
+/// selector"}]}`, as its HTTP server writes the `ValidationError` `xpathSelect` throws. `code`
+/// reuses the frozen `bad data` slug, as the `wait` door reuses `invalid injection`; `source` (the
+/// selector), `inner`, `name` and `stack` are left out, as on every Rift error envelope, and the
+/// selector and the cause go to the log instead.
+pub(crate) fn xpath_selector_error_response(
+    e: &crate::behaviors::XPathSelectorError,
+) -> Response<Full<Bytes>> {
+    tracing::warn!("{e}");
+    let kind = crate::response::ErrorKind::BadData.slug();
+    build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [
+            ("x-rift-imposter", "true"),
+            ("content-type", "application/json"),
+        ],
+        serde_json::json!({
+            "errors": [{
+                "code": kind,
+                "type": kind,
+                "message": "malformed xpath predicate selector",
+            }]
+        })
+        .to_string(),
+    )
+}
+
 fn matcher_error_response(e: &anyhow::Error) -> Response<Full<Bytes>> {
+    if let Some(xpath) = e.downcast_ref::<crate::behaviors::XPathSelectorError>() {
+        return xpath_selector_error_response(xpath);
+    }
     if let Some(t) = e.downcast_ref::<crate::scripting::ScriptTimeoutError>() {
         return inject_timeout_response(
             crate::response::ErrorKind::PredicateInjectionTimeout,

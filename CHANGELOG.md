@@ -197,6 +197,17 @@ record.
 
 ### Fixed
 
+- **An XPath selector that cannot be evaluated fails the request** (#1585). A selector that
+  compiled but could not run (a namespace prefix `ns` does not bind, an unknown function or
+  variable, a function given the wrong arguments) was read as empty, so `equals {body: ""}`,
+  `exists {body: false}` and `not` behind it matched every request. In a predicate or a `copy` it now
+  answers `500 malformed xpath predicate selector`, as Mountebank does; a `lookup` whose key
+  selector fails is skipped and logged, as in Mountebank. A prefix must be bound in `ns` even when
+  the document declares it, which Mountebank also requires: such a selector used to select nothing
+  and now fails. A body that is not XML still never runs the selector. Embedders:
+  `ExtractionMethod::extract`/`matches`, `LookupKey::extract`, `extract_xpath`,
+  `extract_xpath_with_ns` and `apply_copy_behaviors` now return `Result<_, XPathSelectorError>`.
+
 - **`--local-only` with `--intercept-port` listens on `[::1]` too, and the intercept proxy refuses
   non-loopback clients** (#1572). The admin API and `/metrics` bind `127.0.0.1` and `[::1]` under
   `--local-only` (#1528), but the intercept listener bound `127.0.0.1` only, so a `localhost` client

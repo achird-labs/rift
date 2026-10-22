@@ -35,7 +35,7 @@ pub(crate) use copy::apply_copy_spliced;
 pub(crate) use extraction::counters;
 #[allow(unused_imports)]
 pub use extraction::{
-    ExtractionMethod, extract_jsonpath, extract_jsonpath_value, extract_xpath,
+    ExtractionMethod, XPathSelectorError, extract_jsonpath, extract_jsonpath_value, extract_xpath,
     extract_xpath_with_ns,
 };
 pub(crate) use extraction::{

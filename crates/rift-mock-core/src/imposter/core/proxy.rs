@@ -271,7 +271,16 @@ fn selected_body(selector: &crate::imposter::PredicateSelector, body: &str) -> s
         PredicateSelector::XPath {
             selector,
             namespaces,
-        } => xpath_selection_in(body, selector, namespaces.as_ref()),
+        } => match xpath_selection_in(body, selector, namespaces.as_ref()) {
+            Ok(selection) => selection,
+            // Not yet the failure it is in Mountebank, whose `predicateGenerators` xpath throws
+            // too (issue #1585 covers predicates and `copy`): captured as nothing selected, and
+            // logged at error level so the recording is not quietly wrong.
+            Err(e) => {
+                tracing::error!("predicateGenerator: {e}; the body is recorded as \"\"");
+                None
+            }
+        },
     };
     match selection.unwrap_or(Selection::One(String::new())) {
         Selection::One(value) => serde_json::Value::String(value),
