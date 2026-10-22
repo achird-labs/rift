@@ -5,10 +5,110 @@
 
 use rustls::DigitallySignedStruct;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::crypto::WebPkiSupportedAlgorithms;
+use rustls::pki_types::{CertificateDer, ServerName, SubjectPublicKeyInfoDer, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::{CertificateError, OtherError, PeerMisbehaved};
 use std::sync::Arc;
 use tokio_rustls::TlsAcceptor;
+use x509_parser::x509::X509Version;
+
+/// An end-entity certificate as x509-parser reads it: its version and its SubjectPublicKeyInfo
+/// (issue #1599).
+///
+/// webpki — and so every rustls convenience that parses a certificate — refuses X.509 v1
+/// (`UnsupportedCertVersion`). Mountebank's own default certificate and mbTest's fixtures are v1,
+/// and OpenSSL/LibreSSL `x509 -req` still emits v1, so Rift reads such a certificate with
+/// x509-parser instead, wherever only its public key is needed.
+struct EndEntityKey {
+    version: X509Version,
+    spki: SubjectPublicKeyInfoDer<'static>,
+}
+
+fn end_entity_key(cert: &CertificateDer<'_>) -> Result<EndEntityKey, String> {
+    let (rest, parsed) =
+        x509_parser::parse_x509_certificate(cert.as_ref()).map_err(|e| e.to_string())?;
+    // Fail closed on trailing bytes, as webpki does (`TrailingData`): a DER blob that is a
+    // certificate plus something else is not a certificate.
+    if !rest.is_empty() {
+        return Err(format!(
+            "{} trailing byte(s) after the certificate",
+            rest.len()
+        ));
+    }
+    Ok(EndEntityKey {
+        version: parsed.tbs_certificate.version,
+        spki: SubjectPublicKeyInfoDer::from(parsed.tbs_certificate.subject_pki.raw.to_vec()),
+    })
+}
+
+/// The SPKI of `cert` when it is X.509 **v1**, so the caller must verify against the raw key;
+/// `None` when it is anything else, so the caller keeps rustls' own certificate-based check.
+///
+/// A certificate x509-parser cannot parse also answers `None` — this is not a swallow but a
+/// dispatch: the bytes go to webpki exactly as they did before #1599, and webpki's refusal is the
+/// error the handshake reports. Only an encoding webpki would refuse as v1 takes the new path.
+fn v1_client_spki(cert: &CertificateDer<'_>) -> Option<SubjectPublicKeyInfoDer<'static>> {
+    match end_entity_key(cert) {
+        Ok(key) if key.version == X509Version::V1 => Some(key.spki),
+        _ => None,
+    }
+}
+
+/// Map a webpki signature-check failure to the rustls error rustls' own (private) `pki_error`
+/// would give, for the cases a raw-key signature check can produce.
+fn signature_error(e: webpki::Error) -> rustls::Error {
+    match e {
+        webpki::Error::InvalidSignatureForPublicKey => CertificateError::BadSignature.into(),
+        webpki::Error::BadDer | webpki::Error::BadDerTime | webpki::Error::TrailingData(_) => {
+            CertificateError::BadEncoding.into()
+        }
+        webpki::Error::UnsupportedSignatureAlgorithmForPublicKeyContext(cx) => {
+            CertificateError::UnsupportedSignatureAlgorithmForPublicKeyContext {
+                signature_algorithm_id: cx.signature_algorithm_id,
+                public_key_algorithm_id: cx.public_key_algorithm_id,
+            }
+            .into()
+        }
+        other => CertificateError::Other(OtherError(Arc::new(other))).into(),
+    }
+}
+
+/// TLS 1.2 `CertificateVerify` check against a raw SPKI (issue #1599).
+///
+/// Mirrors `rustls::crypto::verify_tls12_signature` step for step, except that the key comes from
+/// `spki` rather than from webpki's parse of the certificate: a TLS 1.2 scheme maps to several
+/// candidate algorithms, tried in order, skipping only those that do not fit the key's type.
+fn verify_tls12_signature_with_raw_key(
+    message: &[u8],
+    spki: &SubjectPublicKeyInfoDer<'_>,
+    dss: &DigitallySignedStruct,
+    supported: &WebPkiSupportedAlgorithms,
+) -> Result<HandshakeSignatureValid, rustls::Error> {
+    let candidates = supported
+        .mapping
+        .iter()
+        .find(|(scheme, _)| *scheme == dss.scheme)
+        .map(|(_, algs)| *algs)
+        .ok_or(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme)?;
+    let key = webpki::RawPublicKeyEntity::try_from(spki).map_err(signature_error)?;
+    let mut unfit = None;
+    for alg in candidates {
+        match key.verify_signature(*alg, message, dss.signature()) {
+            Ok(()) => return Ok(HandshakeSignatureValid::assertion()),
+            Err(e @ webpki::Error::UnsupportedSignatureAlgorithmForPublicKeyContext(_)) => {
+                unfit = Some(e);
+            }
+            Err(e) => return Err(signature_error(e)),
+        }
+    }
+    // Every candidate was the wrong algorithm for this key (or there were none): a refusal either
+    // way, reported with the last candidate's context when there is one.
+    Err(match unfit {
+        Some(e) => signature_error(e),
+        None => PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme.into(),
+    })
+}
 
 /// No-op certificate verifier for development/testing with self-signed certificates.
 ///
@@ -129,12 +229,13 @@ impl ClientCertVerifier for AcceptAnyClientCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
+        let algs = &self.provider.signature_verification_algorithms;
+        // Issue #1599: a v1 certificate's key is read by x509-parser, then checked exactly as
+        // rustls would check it. Anything else keeps rustls' own path, unchanged.
+        match v1_client_spki(cert) {
+            Some(spki) => verify_tls12_signature_with_raw_key(message, &spki, dss, algs),
+            None => rustls::crypto::verify_tls12_signature(message, cert, dss, algs),
+        }
     }
 
     fn verify_tls13_signature(
@@ -143,12 +244,13 @@ impl ClientCertVerifier for AcceptAnyClientCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
+        let algs = &self.provider.signature_verification_algorithms;
+        match v1_client_spki(cert) {
+            Some(spki) => {
+                rustls::crypto::verify_tls13_signature_with_raw_key(message, &spki, dss, algs)
+            }
+            None => rustls::crypto::verify_tls13_signature(message, cert, dss, algs),
+        }
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
@@ -277,12 +379,47 @@ pub fn tls_server_config_from_pem(
             builder.with_client_cert_verifier(verifier)
         }
     };
-    let mut config = builder.with_single_cert(certs, key).map_err(|e| {
-        anyhow::anyhow!("Failed to build TLS configuration (cert/key mismatch?): {e}")
-    })?;
+    let certified = certified_key(certs, key, &provider)?;
+    let mut config =
+        builder.with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified)));
     configure_session_resumption(&mut config)?;
 
     Ok(config)
+}
+
+/// Pair an imposter's own certificate chain with its private key (issue #1599).
+///
+/// `with_single_cert` does this too, but its consistency check parses the end-entity with webpki,
+/// which refuses X.509 v1 — so a v1 `cert` (Mountebank's default certificate and mbTest's fixture
+/// both are) failed creation with a misleading "cert/key mismatch?". Serving a certificate needs
+/// no parse of it; only the check does. This keeps the check, reading the certificate's public key
+/// with x509-parser instead, and then builds the same [`rustls::sign::SingleCertAndKey`]
+/// `with_single_cert` builds.
+fn certified_key(
+    certs: Vec<CertificateDer<'static>>,
+    key: rustls::pki_types::PrivateKeyDer<'static>,
+    provider: &rustls::crypto::CryptoProvider,
+) -> Result<rustls::sign::CertifiedKey, anyhow::Error> {
+    let signing = provider
+        .key_provider
+        .load_private_key(key)
+        .map_err(|e| anyhow::anyhow!("Failed to load the TLS private key: {e}"))?;
+    let end_entity = certs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No certificates found in certificate PEM"))?;
+    let cert_key = end_entity_key(end_entity)
+        .map_err(|e| anyhow::anyhow!("Failed to parse the TLS certificate: {e}"))?;
+    // `None` is rustls' `InconsistentKeys::Unknown`: the key type cannot report its public half.
+    // `CertifiedKey::from_der` accepts that case too, so this is the same rule, not a new opening.
+    if let Some(key_spki) = signing.public_key()
+        && key_spki != cert_key.spki
+    {
+        anyhow::bail!(
+            "Failed to build TLS configuration: the private key does not match the certificate's \
+             public key (cert/key mismatch)"
+        );
+    }
+    Ok(rustls::sign::CertifiedKey::new(certs, signing))
 }
 
 /// Build the [`TlsAcceptors`] pair for one imposter from in-memory PEM bytes (issue #1029).
@@ -407,6 +544,79 @@ mod tests {
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .unwrap()
+    }
+
+    // Issue #1599: made with LibreSSL's `openssl x509 -req -signkey`, which emits X.509 v1, as
+    // Mountebank's default certificate and mbTest's fixture are. `client.key` is an unrelated key.
+    const V1_CERT: &str = include_str!("testdata/x509-v1/server.crt");
+    const V1_KEY: &str = include_str!("testdata/x509-v1/server.key");
+    const OTHER_KEY: &str = include_str!("testdata/x509-v1/client.key");
+
+    #[test]
+    fn the_fixture_is_x509_v1() {
+        // Guards the tests below: regenerated as v3, they would pass on the code they guard.
+        let der = rustls_pemfile::certs(&mut V1_CERT.as_bytes())
+            .next()
+            .expect("one cert")
+            .expect("pem");
+        assert_eq!(
+            end_entity_key(&der).expect("parses").version,
+            X509Version::V1
+        );
+        assert!(v1_client_spki(&der).is_some());
+    }
+
+    #[test]
+    fn a_v1_certificate_and_its_key_build_a_server_config() {
+        for auth in [ClientAuth::Off, ClientAuth::RequireAny] {
+            tls_server_config_from_pem(V1_CERT.as_bytes(), V1_KEY.as_bytes(), &auth)
+                .unwrap_or_else(|e| panic!("a v1 cert/key pair must be servable ({auth:?}): {e}"));
+        }
+    }
+
+    #[test]
+    fn a_v1_certificate_with_another_key_is_still_a_mismatch() {
+        let err =
+            tls_server_config_from_pem(V1_CERT.as_bytes(), OTHER_KEY.as_bytes(), &ClientAuth::Off)
+                .expect_err("the key-match check must survive reading the cert with x509-parser");
+        assert!(err.to_string().contains("does not match"), "{err}");
+    }
+
+    #[test]
+    fn a_v3_certificate_with_another_key_is_a_mismatch() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let err = tls_server_config_from_pem(
+            cert.cert.pem().as_bytes(),
+            OTHER_KEY.as_bytes(),
+            &ClientAuth::Off,
+        )
+        .expect_err("a v3 cert with someone else's key");
+        assert!(err.to_string().contains("does not match"), "{err}");
+    }
+
+    #[test]
+    fn a_v3_client_certificate_keeps_rustls_own_signature_path() {
+        // Only v1 takes the raw-key path; every other certificate goes to webpki as before #1599.
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        assert!(v1_client_spki(cert.cert.der()).is_none());
+        // So do bytes x509-parser cannot read: webpki's refusal is the one that reports.
+        assert!(
+            v1_client_spki(&CertificateDer::from(vec![0x30, 0x03, 0x02, 0x01, 0x00])).is_none()
+        );
+    }
+
+    #[test]
+    fn trailing_bytes_after_a_certificate_are_refused() {
+        let mut der = rustls_pemfile::certs(&mut V1_CERT.as_bytes())
+            .next()
+            .expect("one cert")
+            .expect("pem")
+            .to_vec();
+        der.push(0);
+        let err = end_entity_key(&CertificateDer::from(der))
+            .err()
+            .expect("trailing data");
+        assert!(err.contains("trailing"), "{err}");
     }
 
     #[test]

@@ -249,6 +249,14 @@ record.
   `inject`, `decorate` and `wait`. An `async` decorate waits for its timers. There is still no
   `process`, `Buffer` or Node core module, by decision; see
   `docs/mountebank/differences.md#scripts-run-in-an-ecmascript-sandbox-not-node`.
+- **X.509 v1 certificates** (#1599). An https imposter accepts a v1 `cert` with its `key`, as
+  Mountebank does (its own default certificate and mbTest's fixtures are v1, and `openssl x509
+  -req` still emits v1); creation used to answer `400 ... (cert/key mismatch?):
+  UnsupportedCertVersion`. The key is still checked against the certificate, and the error now
+  says "mismatch" only when the key really does not match. Under bare `mutualAuth` a client may
+  present a v1 certificate; its handshake signature is still verified against the certificate's
+  key. Under `rejectUnauthorized` a client certificate must still be v3 (see
+  [Differences](docs/mountebank/differences.md#an-https-imposters-tls-keys)).
 
 - **`rift-lint` agrees with the engine and Mountebank on behaviors** (#1587), following #1582.
   `E035` now flags a `null` `repeat` on the response or in an object-form block, as well as `0`. A
