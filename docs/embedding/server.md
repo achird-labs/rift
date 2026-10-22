@@ -197,8 +197,9 @@ that drives the manager itself starts its own.
 
 | Item | Signature | Purpose |
 |:-----|:----------|:--------|
-| `start_cursor_flusher` | `fn start_cursor_flusher(self: &Arc<Self>, period: Duration) -> Option<CursorFlusher>` | Flush every `period` on the current runtime. `None` without a datadir, or with a `ResponseSequencer`, which holds the cursors itself. |
+| `start_cursor_flusher` | `fn start_cursor_flusher(self: &Arc<Self>, period: Duration) -> Option<CursorFlusher>` | Flush every `period` on the current runtime. `None` without a datadir. It also writes recorded requests behind (issue #1608); a `ResponseSequencer`, which holds the cursors itself, leaves only that half to do. |
 | `CursorFlusher::stop` | `async fn stop(self) -> Vec<(u16, ImposterError)>` | Stop it and flush once more, for a graceful stop; returns the ports that could not be written. Dropping it stops the flush without the last one. |
+| `flush_recorded_requests` | `async fn flush_recorded_requests(&self) -> Vec<(u16, ImposterError)>` | Write every datadir imposter's recorded requests to `<port>.requests.jsonl` (issue #1608), including any still waiting for a response, as a graceful stop does. The flusher writes them behind every period and `CursorFlusher::stop` calls this. |
 | `flush_cursors` | `async fn flush_cursors(&self) -> Vec<(u16, ImposterError)>` | Write every position that moved since the last flush. A failed port is retried by the next one. |
 | `create_imposter_resuming` | `async fn create_imposter_resuming(&self, config: ImposterConfig, script_files: ScriptFileAccess) -> Result<u16, ImposterError>` | Create a datadir imposter loaded from its `<port>.json`, resuming from `<port>.cursors`. Every other create starts each cycle at the first response and removes a `<port>.cursors` an earlier imposter on the port left. `apply_desired` resumes the imposters it creates with `Persistence::Datadir`. |
 

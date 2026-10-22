@@ -262,6 +262,10 @@ ceiling admits, even a binary one, which is journalled base64-encoded (a third l
 larger than the whole budget (possible only with a budget set lower) is recorded without its body
 and flagged `"_bodyOmitted": true`, never dropped.
 A cursor read past evicted entries reports it with `x-rift-truncated`.
+With `--datadir`, the same budget bounds what a restart restores from `<port>.requests.jsonl`.
+Mountebank writes each recorded request to its datadir before answering it, so a crash loses none;
+Rift writes them behind, about once a second and on a graceful stop, so a crash can lose the last
+~2 seconds of recorded requests.
 
 ## `--debug`
 

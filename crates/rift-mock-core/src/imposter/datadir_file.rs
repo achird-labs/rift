@@ -35,6 +35,17 @@ pub(crate) fn cursors_temp_path(datadir: &Path, port: u16) -> PathBuf {
     datadir.join(format!("{port}.cursors.tmp"))
 }
 
+/// `{port}.requests.jsonl` — the recorded requests of the imposter on `port` (issue #1608).
+pub(crate) fn requests_path(datadir: &Path, port: u16) -> PathBuf {
+    datadir.join(format!("{port}.requests.jsonl"))
+}
+
+/// `{port}.requests.jsonl.tmp` — a rewrite of `{port}.requests.jsonl` in progress, or one a crash
+/// interrupted.
+pub(crate) fn requests_temp_path(datadir: &Path, port: u16) -> PathBuf {
+    datadir.join(format!("{port}.requests.jsonl.tmp"))
+}
+
 /// Replace `{port}.json` with `bytes`, so that a reader, or a crash, only ever sees the old document
 /// or the new one.
 ///
@@ -108,7 +119,8 @@ fn write_and_sync(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_data()
 }
 
-/// Remove every `{port}.json.tmp` and `{port}.cursors.tmp` in `datadir` — each one a write that a
+/// Remove every `{port}.json.tmp`, `{port}.cursors.tmp` and `{port}.requests.jsonl.tmp` in `datadir`
+/// — each one a write that a
 /// previous process did not finish — and return their paths. The file beside it is that imposter's
 /// last complete state.
 ///
@@ -125,6 +137,7 @@ pub fn sweep_interrupted_writes(datadir: &Path) -> io::Result<Vec<PathBuf>> {
             .and_then(|name| {
                 name.strip_suffix(".json.tmp")
                     .or_else(|| name.strip_suffix(".cursors.tmp"))
+                    .or_else(|| name.strip_suffix(".requests.jsonl.tmp"))
             })
             // Exactly the spelling rift writes: no sign, no leading zero.
             .is_some_and(|stem| {
@@ -201,8 +214,11 @@ mod tests {
             "4545.json.tmp",
             "65535.json.tmp",
             "4546.cursors.tmp",
+            "4547.requests.jsonl.tmp",
             "4545.json",
             "4546.cursors",
+            "4547.requests.jsonl",
+            "notes.requests.jsonl.tmp",
             "notes.json.tmp",
             "notes.cursors.tmp",
             "65536.json.tmp",
@@ -219,12 +235,15 @@ mod tests {
             vec![
                 dir.path().join("4545.json.tmp"),
                 dir.path().join("4546.cursors.tmp"),
+                dir.path().join("4547.requests.jsonl.tmp"),
                 dir.path().join("65535.json.tmp")
             ]
         );
         for kept in [
             "4545.json",
             "4546.cursors",
+            "4547.requests.jsonl",
+            "notes.requests.jsonl.tmp",
             "notes.json.tmp",
             "notes.cursors.tmp",
             "65536.json.tmp",

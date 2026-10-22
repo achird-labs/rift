@@ -1067,7 +1067,8 @@ impl ServerBuilder {
             intercept_block = loaded.intercept;
             routes_block = loaded.routes;
         }
-        // Write each datadir imposter's response-cycle positions behind (issue #1603); `None`
+        // Write each datadir imposter's response-cycle positions (issue #1603) and recorded
+        // requests (issue #1608) behind; `None`
         // without a datadir. Stopped, with a last flush, by `RunningServer::shutdown`.
         let cursor_flusher = manager.start_cursor_flusher(CURSOR_FLUSH_PERIOD);
 
@@ -1486,7 +1487,7 @@ impl RunningServer {
             for (port, e) in flusher.stop().await {
                 error!(
                     port,
-                    "could not save the imposter's response cycle positions: {e}"
+                    "could not save the imposter's datadir runtime state: {e}"
                 );
             }
         }

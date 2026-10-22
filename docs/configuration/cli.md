@@ -494,6 +494,23 @@ content, so a stub edited by hand in `<port>.json` starts its cycle over and the
 never stops the imposter from loading. Deleting the imposter deletes it too. Neither file is ever
 loaded as an imposter, and an older Rift ignores both.
 
+For an imposter created with `recordRequests: true`, `<port>.requests.jsonl` holds its **recorded
+requests**, so a restart brings them back, as Mountebank does. It is JSON Lines: a `{"version":1}`
+header, then one request per line, as `GET /imposters/:port` prints it. Rift appends to it about
+once a second, holding back a request still waiting for its response for up to two seconds, and
+writes the rest on a graceful stop; a crash can lose the last ~2 seconds of requests (Mountebank
+writes each one before answering it). A request that takes longer than that to answer (a long `wait`
+behavior, a slow proxy) is written without its `status` and `latencyMs`, and that line is not
+updated later. What a restart restores is held to `--journal-max-bytes`
+like live recording, oldest first, and the file is compacted once it is more than twice the size of
+what the journal retains (and over 2 MiB), so the disk holds at most about twice the budget per
+imposter. `DELETE /imposters/:port/savedRequests` removes the file, a scoped clear rewrites it, and
+deleting the imposter deletes it. `numberOfRequests` still starts at 0 after a restart, as in
+Mountebank. A truncated last line (a crash mid-write) is dropped; any other unreadable line is
+skipped with a `WARN`; the file never stops the imposter from loading. Rewrites go through
+`<port>.requests.jsonl.tmp`, which the next start removes. A journal injected by an embedder
+(`with_request_journal`) and `--configfile` imposters are not written.
+
 The directory is keyed by port, so each file is held to that:
 
 - It holds **one imposter object** (not an `{"imposters": [...]}` wrapper), as plain JSON. EJS tags

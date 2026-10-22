@@ -246,6 +246,36 @@ impl LocalJournal {
         }
         Arc::clone(self.ports.write().entry(port).or_default())
     }
+
+    /// Visit, in index order and under the read lock, each retained entry of `port` with an index
+    /// above `after`, with the flow id it was recorded under, until `visit` returns `false`. For
+    /// the `--datadir` journal file (issue #1608), which serializes entries without cloning them.
+    pub(crate) fn scan_after(
+        &self,
+        port: u16,
+        after: u64,
+        mut visit: impl FnMut(u64, &str, &RecordedRequest) -> bool,
+    ) {
+        let slot = self.slot(port);
+        let entries = slot.entries.read();
+        // Ascending by index (assigned under the write lock), so the cut is a partition point.
+        let start = entries.partition_point(|(index, _, _, _)| *index <= after);
+        for (index, flow, req, _) in entries.range(start..) {
+            if !visit(*index, flow, req) {
+                break;
+            }
+        }
+    }
+
+    /// The index of the oldest retained entry of `port`, `None` when it retains none.
+    pub(crate) fn oldest_index(&self, port: u16) -> Option<u64> {
+        self.slot(port).entries.read().front().map(|e| e.0)
+    }
+
+    /// The last index handed out for `port` (`0` before the first record).
+    pub(crate) fn last_index(&self, port: u16) -> u64 {
+        self.slot(port).last_index.load(Ordering::SeqCst)
+    }
 }
 
 impl RequestJournal for LocalJournal {

@@ -531,6 +531,10 @@ pub struct Imposter {
     /// Recorded-request storage (issue #314); defaults to a private LocalJournal,
     /// or the embedder's shared journal injected via the manager.
     pub(crate) journal: Arc<dyn crate::imposter::journal::RequestJournal>,
+    /// `{port}.requests.jsonl` (issue #1608): set by the manager when `journal` is the imposter's
+    /// own [`LocalJournal`](crate::imposter::LocalJournal), it records requests, and the manager
+    /// has a datadir. Written only while [`persistence`](Self::persistence) is `Datadir`.
+    pub(crate) journal_file: Option<Arc<JournalFile>>,
     /// Whether imposter is enabled
     pub enabled: AtomicBool,
     /// Whether a response cycle may have moved since the manager last wrote `{port}.cursors` (issue
@@ -690,6 +694,7 @@ impl Imposter {
             exchange_inspector: None,
             journal: journal
                 .unwrap_or_else(|| Arc::new(crate::imposter::journal::LocalJournal::default())),
+            journal_file: None,
             enabled: AtomicBool::new(enabled),
             cursors_dirty: AtomicBool::new(false),
             persist_to_datadir: AtomicBool::new(true),
@@ -1167,6 +1172,10 @@ impl Imposter {
 mod bitset;
 mod cursors;
 pub(crate) use cursors::CursorFile;
+mod journal_file;
+#[cfg(test)]
+pub(crate) use journal_file::settle_ticks as journal_settle_ticks;
+pub(crate) use journal_file::{Flush, JournalFile, remove_files as journal_file_remove};
 mod lifecycle;
 mod matching;
 pub(crate) use matching::ScenarioStampingStore;

@@ -123,16 +123,51 @@ impl Imposter {
     /// Clear recorded requests. Also resets the request count to match Mountebank behavior.
     /// Propagates a backend clear failure (issue #330) so callers never report a clean clear
     /// over stale recorded state.
+    ///
+    /// With `--datadir`, `{port}.requests.jsonl` is removed first (issue #1608); one that cannot
+    /// be removed fails the clear with the requests still recorded.
     pub fn clear_recorded_requests(&self) -> anyhow::Result<()> {
-        self.journal.clear(self.journal_port())
+        let clear = || self.journal.clear(self.journal_port());
+        match &self.journal_file {
+            Some(file) => file.clear(self.persists_journal(), clear),
+            None => clear(),
+        }
+    }
+
+    /// Whether this imposter's journal is written to its datadir (issue #1608).
+    fn persists_journal(&self) -> bool {
+        self.persistence() == crate::imposter::Persistence::Datadir
+    }
+
+    /// Run a scoped deletion on the journal and, with `--datadir`, rewrite `{port}.requests.jsonl`
+    /// from what it kept (issue #1608), so a restart does not bring the deleted entries back.
+    pub(super) fn delete_recorded<R>(
+        &self,
+        delete: impl FnOnce() -> R,
+    ) -> (R, std::io::Result<()>) {
+        match &self.journal_file {
+            Some(file) => file.deleting(self.persists_journal(), delete),
+            None => (delete(), Ok(())),
+        }
     }
 
     /// Retain only the recorded requests for which `keep` returns true.
     /// Used for targeted clears (a single correlated slice); unlike
     /// `clear_recorded_requests` it does not reset the total request count,
     /// since other slices' requests remain.
+    ///
+    /// With `--datadir` the file is rewritten from what is kept (issue #1608). A rewrite that fails
+    /// is logged at error level and retried by the next flush; until then a restart could bring
+    /// back what this removed.
     pub fn retain_recorded_requests<F: Fn(&RecordedRequest) -> bool>(&self, keep: F) {
-        self.journal.retain(self.journal_port(), &keep);
+        let ((), written) =
+            self.delete_recorded(|| self.journal.retain(self.journal_port(), &keep));
+        if let Err(e) = written {
+            tracing::error!(
+                port = self.journal_port(),
+                "could not rewrite the recorded requests file after a scoped clear: {e}"
+            );
+        }
     }
 
     /// Clear saved proxy responses, as Mountebank's `deleteSavedProxyResponses` does: the proxy
