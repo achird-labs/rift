@@ -185,12 +185,6 @@
       "note": "an unreachable proxy upstream answers 502 (proxy.md); #1569 item 3 tracks the decision"
     },
     {
-      "id": "api/http/httpProxyStubTest.js::http proxy stubs should proxy to different host",
-      "class": "bug",
-      "issue": "#1594",
-      "note": "the proxy follows the upstream's 30x itself; Mountebank relays it"
-    },
-    {
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should handle the connect method",
       "class": "bug",
       "issue": "#1595",
@@ -220,12 +214,6 @@
       "class": "documented",
       "doc": "docs/mountebank/differences.md#a-proxy-without-generators-records-into-a-store-not-a-stub",
       "note": "the decorate now applies (#1567); a proxy without predicateGenerators records into a store, not a stub, so stubs[0].responses[0].is is absent"
-    },
-    {
-      "id": "api/http/httpProxyStubTest.js::http proxy stubs should support http proxy to https server",
-      "class": "bug",
-      "issue": "#1594",
-      "note": "the proxy follows the upstream's 30x itself; Mountebank relays it"
     },
     {
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should maintain case of headers from origin",
