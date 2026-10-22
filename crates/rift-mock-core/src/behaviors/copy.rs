@@ -330,7 +330,12 @@ mod tests {
             },
             index: None,
         };
-        assert_eq!(key.extract(&ctx_1590()).as_deref(), Some("Pth"));
+        assert_eq!(
+            key.extract(&ctx_1590())
+                .expect("a regex never fails")
+                .as_deref(),
+            Some("Pth")
+        );
     }
 
     #[test]
