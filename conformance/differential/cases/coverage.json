@@ -2866,6 +2866,232 @@
           "path": "/search?q=other"
         }
       ]
+    },
+    {
+      "name": "coverage: responseResolver.js:62 predicates.js:378 an inject that throws at serve time answers 500 with data (#1581)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "responses": [
+                      {
+                        "inject": "function (config) { throw new Error('boom'); }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "responses": [
+                      {
+                        "inject": "function (config) { return nosuch.x; }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "responses": [
+                      {
+                        "inject": "function (config) { throw 'str'; }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "inject": "function (config) { throw new Error('pboom'); }"
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "body": "unreached"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 201,
+                          "body": "fallback"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "inject": "function (config) { return nosuch.x; }"
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "body": "unreached"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 201,
+                          "body": "fallback"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "inject": "function (config) { throw 'str'; }"
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "body": "unreached"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 201,
+                          "body": "fallback"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": []
+          }
+        }
+      ]
     }
   ]
 }

@@ -344,10 +344,10 @@ async fn an_inject_error_never_echoes_an_outside_file() {
     for path in ["/dotenv", "/syntax", "/module"] {
         let (status, _, body) = get(port, path).await;
         assert_no_canary(path, &body);
-        assert_eq!(status, 400, "{path}: {body}");
+        assert_eq!(status, 500, "{path}: {body}");
         assert!(
             body.contains("outside --scripts-dir"),
-            "{path}: the 400 names the fixed refusal: {body}"
+            "{path}: the 500 names the fixed refusal: {body}"
         );
     }
 }

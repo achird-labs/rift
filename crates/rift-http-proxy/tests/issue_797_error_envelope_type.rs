@@ -50,7 +50,7 @@ async fn disabled_imposter_door() {
     assert_door(&body, "503", "imposter disabled", "disabled imposter");
 }
 
-// A throwing response-`inject` answers 400 with Mountebank's slug already in `code` (#355). On the
+// A throwing response-`inject` answers 500 with Mountebank's slug already in `code` (#355). On the
 // five doors whose `code` is already a slug, `type` must equal it — invariant 3.
 #[tokio::test]
 async fn response_inject_error_door_has_type_equal_to_code() {
@@ -65,7 +65,7 @@ async fn response_inject_error_door_has_type_equal_to_code() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let (status, body) = get(&format!("http://127.0.0.1:{port}/x")).await;
-    assert_eq!(status, 400);
+    assert_eq!(status, 500);
     assert_door(
         &body,
         "invalid injection",
@@ -74,7 +74,7 @@ async fn response_inject_error_door_has_type_equal_to_code() {
     );
 }
 
-// A throwing predicate-`inject` answers 400 with the predicate-specific slug.
+// A throwing predicate-`inject` answers 500 with the predicate-specific slug.
 #[tokio::test]
 async fn predicate_inject_error_door_has_type_equal_to_code() {
     let manager = ImposterManager::new();
@@ -89,7 +89,7 @@ async fn predicate_inject_error_door_has_type_equal_to_code() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let (status, body) = get(&format!("http://127.0.0.1:{port}/x")).await;
-    assert_eq!(status, 400);
+    assert_eq!(status, 500);
     assert_door(
         &body,
         "invalid predicate injection",

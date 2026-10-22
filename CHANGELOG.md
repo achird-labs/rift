@@ -44,6 +44,9 @@ record.
 
 ### Changed
 
+- **A throwing `inject` answers `500`, as in Mountebank** (#1581). A response or predicate `inject`
+  that throws at request time used to answer `400`. It now answers `500` and carries Mountebank's
+  `data`, the thrown error's message. The `--allowInjection` refusal is still `400`.
 - **A `predicateGenerators` `inject` that throws or returns a non-array is refused when the imposter
   is created, as in Mountebank** (#1580). It is run once against an empty `GET /` with
   `config.request.isDryRun` set; guard on that to skip it. It used to be admitted and then fail at

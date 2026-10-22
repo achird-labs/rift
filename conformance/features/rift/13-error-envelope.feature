@@ -70,8 +70,8 @@ Feature: Error-response envelope — the standard {"errors":[{code,message}]} co
       | door               | fixture                   | path             | status | code                        |
       | response-timeout   | inject-response-timeout   | /inject-response | 504    | injection timeout           |
       | predicate-timeout  | inject-predicate-timeout  | /anything        | 504    | predicate injection timeout |
-      | response-error     | inject-response-error     | /inject-response | 400    | invalid injection           |
-      | predicate-error    | inject-predicate-error    | /anything        | 400    | invalid predicate injection |
+      | response-error     | inject-response-error     | /inject-response | 500    | invalid injection           |
+      | predicate-error    | inject-predicate-error    | /anything        | 500    | invalid predicate injection |
 
   # The two strictBehaviors DECORATE doors (the non-strict forms serve an undecorated 200 and are
   # not error doors — see the header comment). Both carry the status as their code.

@@ -66,6 +66,17 @@
     "rift": "true"
   },
   {
+    "id": "marker-x-rift-inject-error",
+    "case": "*",
+    "location": "step*.header.x-rift-inject-error",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "| `x-rift-inject-error: true` | A response or predicate `inject` threw; the body is Mountebank's `invalid injection` error (a throw is `500` with the thrown message in `data`) |",
+    "reason": "Rift marker header x-rift-inject-error",
+    "mountebank": "(absent)",
+    "rift": "true"
+  },
+  {
     "id": "marker-x-rift-wait-error",
     "case": "*",
     "location": "step*.header.x-rift-wait-error",
@@ -174,6 +185,17 @@
     "reason": "error message wording is Rift's own",
     "mountebankMatches": "(?s:\".+\")",
     "riftMatches": "(?s:\".+\")"
+  },
+  {
+    "id": "predicate-inject-error-code",
+    "case": "coverage: responseResolver.js:62 predicates.js:378 an inject that throws at serve time answers 500 with data (#1581)",
+    "location": "step*.body/errors/*/code",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A throwing predicate `inject` carries `code` `invalid predicate injection`, where",
+    "reason": "a throwing predicate inject names its own slug; Mountebank uses `invalid injection` for both (#1581)",
+    "mountebank": "\"invalid injection\"",
+    "rift": "\"invalid predicate injection\""
   },
   {
     "id": "error-envelope-no-source",

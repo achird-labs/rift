@@ -51,9 +51,9 @@ fn assert_json_content_type(resp: &reqwest::Response, door: &str) {
     );
 }
 
-// Contract 1: a throwing response `inject` → 400 Mountebank error body + inject-error header.
+// Contract 1: a throwing response `inject` → 500 (issue #1581) Mountebank error body + inject-error header.
 #[tokio::test]
-async fn throwing_inject_response_returns_400() {
+async fn throwing_inject_response_returns_500() {
     let manager = ImposterManager::new();
     let port = create(
         &manager,
@@ -66,7 +66,11 @@ async fn throwing_inject_response_returns_400() {
     .await;
 
     let resp = get(port).await;
-    assert_eq!(resp.status(), 400, "a throwing inject is a 400, not a 500");
+    assert_eq!(
+        resp.status(),
+        500,
+        "a throwing inject is a 500, as in Mountebank"
+    );
     assert!(resp.headers().contains_key("x-rift-imposter"));
     assert!(
         resp.headers().contains_key("x-rift-inject-error"),
@@ -75,6 +79,10 @@ async fn throwing_inject_response_returns_400() {
     assert_json_content_type(&resp, "response inject error");
     let body: serde_json::Value = resp.json().await.expect("json body");
     assert_eq!(body["errors"][0]["code"], "invalid injection");
+    assert_eq!(
+        body["errors"][0]["data"], "boom-inject",
+        "data is the thrown error's message, got: {body}"
+    );
     assert!(
         body["errors"][0]["message"]
             .as_str()
@@ -156,12 +164,12 @@ async fn decorate_error_strict_returns_500() {
     let _ = manager.delete_imposter(port).await;
 }
 
-// Contract 3: a throwing predicate `inject` (matcher error) → 400 with the DISTINCT
+// Contract 3: a throwing predicate `inject` (matcher error) → 500 with the DISTINCT
 // "invalid predicate injection" code (vs "invalid injection" for a response inject), and the
 // inject-error header. Any other matcher error keeps the 5xx backend mapping (unit-tested in
 // handler.rs `matcher_error_response_tests`, since a listener test can't easily provoke it).
 #[tokio::test]
-async fn predicate_inject_error_returns_400() {
+async fn predicate_inject_error_returns_500() {
     let manager = ImposterManager::new();
     let port = create(
         &manager,
@@ -175,7 +183,7 @@ async fn predicate_inject_error_returns_400() {
     .await;
 
     let resp = get(port).await;
-    assert_eq!(resp.status(), 400, "a throwing predicate inject is a 400");
+    assert_eq!(resp.status(), 500, "a throwing predicate inject is a 500");
     assert!(resp.headers().contains_key("x-rift-inject-error"));
     assert_json_content_type(&resp, "predicate inject error");
     let body: serde_json::Value = resp.json().await.expect("json body");
