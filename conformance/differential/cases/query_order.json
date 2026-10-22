@@ -1,0 +1,58 @@
+{
+  "source": "issue #1596 (Mountebank httpRequest.js: querystring.parse keeps the client's key order; JSON.stringify lists integer-like keys first). The body is not JSON, so the harness compares it byte for byte.",
+  "cases": [
+    {
+      "name": "query order: an inject sees query and form keys in the order the client sent them",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "function (config) { return { statusCode: 200, body: 'Q ' + JSON.stringify(config.request.query) + ' F ' + JSON.stringify(config.request.form || null) }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?b=1&a=2&c=3",
+          "times": 5
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?b=1&10=x&2=y&a=3"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?b=1&a=2&c=3&d=4&e=5&f=6"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/x",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "z=1&y=2&x=3&w=4&v=5",
+          "times": 5
+        }
+      ]
+    }
+  ]
+}

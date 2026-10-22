@@ -715,7 +715,7 @@ mod tests {
         RequestContext {
             method: "GET".to_string(),
             path: "/orders".to_string(),
-            query: std::collections::HashMap::new(),
+            query: Default::default(),
             headers: std::collections::HashMap::new(),
             body: Some("REQ-BODY".to_string()),
             ..Default::default()
@@ -809,7 +809,7 @@ mod tests {
         let request = RequestContext {
             method: "POST".to_string(),
             path: "/orders".to_string(),
-            query: std::collections::HashMap::new(),
+            query: Default::default(),
             headers: std::collections::HashMap::new(),
             body: Some(r#"{"order": {"id": 42, "items": ["a", "b"]}}"#.to_string()),
             ..Default::default()
@@ -848,7 +848,7 @@ mod tests {
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/orders".to_string(),
-            query: std::collections::HashMap::new(),
+            query: Default::default(),
             headers: std::collections::HashMap::new(),
             body: None,
             ..Default::default()

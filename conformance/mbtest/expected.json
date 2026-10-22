@@ -191,13 +191,6 @@
       "note": "a CONNECT request through an https imposter's proxy answers 400; Mountebank tunnels it (Mountebank #600)"
     },
     {
-      "id": "api/http/httpProxyStubTest.js::http proxy stubs should match entire object graphs",
-      "class": "bug",
-      "issue": "#1596",
-      "note": "request.query in a script lists keys in an arbitrary order, not the client's",
-      "flaky": "the key order is arbitrary per request, so the test passes when it happens to match"
-    },
-    {
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should persist behaviors from origin server",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#a-proxy-without-generators-records-into-a-store-not-a-stub",
@@ -553,13 +546,6 @@
       "class": "bug",
       "issue": "#1602",
       "note": "recorded requests carry no `ip`; the extra journal fields (status, latencyMs, matchOutcome) and Vary are documented"
-    },
-    {
-      "id": "api/http/httpProxyStubTest.js::http proxy stubs should match sub-objects",
-      "class": "bug",
-      "issue": "#1596",
-      "note": "request.query in a script lists keys in an arbitrary order, not the client's",
-      "flaky": "the key order is arbitrary per request, so the test passes when it happens to match"
     },
     {
       "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support lookup from CSV file keyed by regex",

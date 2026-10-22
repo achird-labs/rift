@@ -702,7 +702,7 @@ mod tests {
             std::env::temp_dir().join(format!("rift_lookup_1067_{}.csv", std::process::id()));
         std::fs::write(&path, "id,name\nhi,Wor\u{1b}ld\n").expect("write csv");
 
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
@@ -764,7 +764,7 @@ mod tests {
             std::env::temp_dir().join(format!("rift_lookup_1075_{}.csv", std::process::id()));
         std::fs::write(&path, "id,name\nhi,Wor\u{1b}ld\n").expect("write csv");
 
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
@@ -839,7 +839,7 @@ mod tests {
             std::env::temp_dir().join(format!("rift_lookup_1067c_{}.csv", std::process::id()));
         std::fs::write(&path, "id,name\nhi,Wor\u{1b}ld\n").expect("write csv");
 
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
@@ -905,7 +905,7 @@ mod tests {
             std::env::temp_dir().join(format!("rift_lookup_1067b_{}.csv", std::process::id()));
         std::fs::write(&path, "id,name\nhi,World\n").expect("write csv");
 
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
@@ -965,7 +965,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("rift_lookup_272_{}.csv", std::process::id()));
         std::fs::write(&path, "id,name\nhi,World\n").expect("write csv");
 
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
@@ -1113,7 +1113,7 @@ mod tests {
         let request = RequestContext {
             method: "GET".to_string(),
             path: path.to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: body.map(str::to_string),
             ..Default::default()
@@ -1636,7 +1636,7 @@ mod tests {
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/ab-cd".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             ..Default::default()
@@ -1725,7 +1725,7 @@ mod tests {
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/${row}[name]".to_string(),
-            query: HashMap::from([("id".to_string(), vec!["k".to_string()])]),
+            query: crate::util::OrderedMap::from_iter([("id".to_string(), vec!["k".to_string()])]),
             ..Default::default()
         };
         let mut body = Spliced::authored("${v}|${row}[name]".to_string());

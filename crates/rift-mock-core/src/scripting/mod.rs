@@ -401,8 +401,8 @@ pub struct ScriptRequest {
     pub path: String,
     pub headers: HashMap<String, String>,
     pub body: Value,
-    /// Query parameters parsed from the URL
-    pub query: HashMap<String, String>,
+    /// Query parameters parsed from the URL, in request order (issue #1596)
+    pub query: crate::util::OrderedMap<String, String>,
     /// Path parameters extracted from route patterns (e.g., /users/:id)
     pub path_params: HashMap<String, String>,
     /// The raw request body text, exactly as received (issue #357 Item 1: `ctx.request.body` is
@@ -911,7 +911,7 @@ mod tests {
             path: "/api/users".to_string(),
             headers: HashMap::new(),
             body: serde_json::json!({"name": "test"}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
         assert_eq!(request.method, "POST");
@@ -931,7 +931,7 @@ mod tests {
             path: "/api/data".to_string(),
             headers,
             body: serde_json::json!(null),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
         assert_eq!(request.headers.len(), 2);
@@ -943,7 +943,7 @@ mod tests {
 
     #[test]
     fn test_script_request_with_query_params() {
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("page".to_string(), "1".to_string());
         query.insert("limit".to_string(), "10".to_string());
 
@@ -974,7 +974,7 @@ mod tests {
             path: "/api/users/123/edit".to_string(),
             headers: HashMap::new(),
             body: serde_json::json!({"name": "updated"}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params,
         };
         assert_eq!(request.path_params.get("id"), Some(&"123".to_string()));
@@ -989,7 +989,7 @@ mod tests {
             path: "/api/items/456".to_string(),
             headers: HashMap::new(),
             body: serde_json::json!(null),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
         let cloned = request.clone();
@@ -1006,7 +1006,7 @@ mod tests {
             path: "/test".to_string(),
             headers: HashMap::new(),
             body: serde_json::json!(null),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
         let debug_str = format!("{request:?}");
@@ -1140,7 +1140,7 @@ mod tests {
             path: "/test".to_string(),
             headers: HashMap::new(),
             body: serde_json::json!(null),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 

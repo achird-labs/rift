@@ -69,6 +69,20 @@ impl<SH: BuildHasher> RequestHeaders for HashMap<String, Vec<String>, SH> {
     }
 }
 
+/// A parsed query or form (issue #1596): the same shape as the header map above, kept in request
+/// order.
+impl<SH: BuildHasher> RequestHeaders for indexmap::IndexMap<String, Vec<String>, SH> {
+    fn entries(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+    }
+
+    fn len(&self) -> usize {
+        self.values().filter(|v| !v.is_empty()).count()
+    }
+}
+
 /// Check if a stub matches a request based on its predicates.
 ///
 /// `Err` propagates a predicate-`inject` failure (issue #440: object-build failure or the

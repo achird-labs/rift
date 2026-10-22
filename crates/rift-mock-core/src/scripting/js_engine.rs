@@ -610,7 +610,7 @@ pub(crate) fn declared_functions_js(script: &str) -> Result<Vec<String>> {
         path: "/".to_string(),
         headers: std::collections::HashMap::new(),
         body: Value::Null,
-        query: std::collections::HashMap::new(),
+        query: crate::util::OrderedMap::default(),
         path_params: std::collections::HashMap::new(),
         raw_body: None,
     };
@@ -2336,7 +2336,8 @@ fn execute_predicate_generator_inject_in(
 pub struct MountebankRequest {
     pub method: String,
     pub path: String,
-    pub query: std::collections::HashMap<String, String>,
+    /// Request order, as Mountebank's `querystring.parse` (issue #1596).
+    pub query: crate::util::OrderedMap<String, String>,
     pub headers: std::collections::HashMap<String, String>,
     pub body: Option<String>,
     /// The request's body did not decode (issue #1584): the script sees no `body` key at all, as
@@ -2357,7 +2358,7 @@ pub struct MountebankRequest {
     /// without a non-empty urlencoded body for `form`.
     pub request_from: Option<String>,
     pub ip: Option<String>,
-    pub form: Option<std::collections::HashMap<String, String>>,
+    pub form: Option<crate::util::OrderedMap<String, String>>,
     /// Set only for the create-time dry run of a `predicateGenerators` inject (issue #1580), which
     /// runs it once over an empty `GET /`. Exposed as `request.isDryRun: true` then and absent
     /// otherwise, as in Mountebank, so a script can skip the dry run.
@@ -3334,7 +3335,7 @@ function respond(ctx) {
             path: "/api/test".to_string(),
             headers,
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 
@@ -3362,7 +3363,7 @@ function respond(ctx) {
             path: "/".to_string(),
             headers: HashMap::new(),
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
         let script = "function respond(ctx) { while (true) {} }";
@@ -3385,7 +3386,7 @@ function respond(ctx) {
             path: "/".to_string(),
             headers: HashMap::new(),
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
         let script = "function respond(ctx) { let n = 0; for (let i = 0; i < 100; i++) { n++; } return n === 100 ? delay(1) : pass(); }";
@@ -3417,7 +3418,7 @@ function respond(ctx) {
             path: "/api/test".to_string(),
             headers: HashMap::new(),
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 
@@ -3458,7 +3459,7 @@ function respond(ctx) {
             path: "/api/test".to_string(),
             headers,
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 
@@ -3507,7 +3508,7 @@ function respond(ctx) {
             path: "/api/test".to_string(),
             headers,
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 
@@ -3567,7 +3568,7 @@ function respond(ctx) {
             path: "/api/bytecode".to_string(),
             headers,
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 
@@ -3618,7 +3619,7 @@ function respond(ctx) {
                 },
                 "array": [1, 2, 3]
             }),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 
@@ -3646,7 +3647,7 @@ function respond(ctx) {
                 },
                 "array": [4, 5, 6]
             }),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 
@@ -3674,7 +3675,7 @@ function respond(ctx) {
             path: "/api/test".to_string(),
             headers: HashMap::new(),
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 
@@ -3712,7 +3713,7 @@ function respond(ctx) {
         let engine = JsEngine::new(script, "test-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("name".to_string(), "Alice".to_string());
         query.insert("page".to_string(), "42".to_string());
 
@@ -3766,7 +3767,7 @@ function respond(ctx) {
             path: "/users/123/update".to_string(),
             headers: HashMap::new(),
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params,
         };
 
@@ -3795,7 +3796,7 @@ function respond(ctx) {
             mode: Some(ResponseMode::Text),
             method: "GET".to_string(),
             path: "/test".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             ..Default::default()
@@ -3854,7 +3855,10 @@ function respond(ctx) {
         let with = MountebankRequest {
             request_from: Some("127.0.0.1:50000".to_string()),
             ip: Some("127.0.0.1".to_string()),
-            form: Some(HashMap::from([("a".to_string(), "1".to_string())])),
+            form: Some(crate::util::OrderedMap::from_iter([(
+                "a".to_string(),
+                "1".to_string(),
+            )])),
             ..without
         };
         assert_eq!(run(&with), "true|true|true|true|true|true");
@@ -3868,7 +3872,7 @@ function respond(ctx) {
             mode: Some(ResponseMode::Text),
             method: "GET".to_string(),
             path: "/api/users".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             ..Default::default()
@@ -3902,7 +3906,7 @@ function respond(ctx) {
             mode: Some(ResponseMode::Text),
             method: "GET".to_string(),
             path: "/api/users".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             ..Default::default()
@@ -3935,7 +3939,7 @@ function respond(ctx) {
             mode: Some(ResponseMode::Text),
             method: "GET".to_string(),
             path: "/test".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             ..Default::default()
@@ -3968,7 +3972,7 @@ function respond(ctx) {
             mode: Some(ResponseMode::Text),
             method: "POST".to_string(),
             path: "/req".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: Some("REQ-BODY".to_string()),
             ..Default::default()
@@ -4665,7 +4669,7 @@ function respond(ctx) {
             mode: Some(ResponseMode::Text),
             method: method.to_string(),
             path: path.to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             ..Default::default()
@@ -5603,7 +5607,7 @@ function respond(ctx) {
                 path: "/api/orders".to_string(),
                 headers,
                 body: json!(null),
-                query: HashMap::new(),
+                query: Default::default(),
                 path_params: HashMap::new(),
                 raw_body: raw_body.map(|s| s.to_string()),
             }

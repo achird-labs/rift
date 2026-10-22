@@ -28,9 +28,14 @@ pub mod fastmap {
     pub type FastMap<K, V> = std::collections::HashMap<K, V, foldhash::fast::RandomState>;
     /// A `HashSet` using the fast, non-cryptographic `foldhash` hasher. See the [module docs](self).
     pub type FastSet<K> = std::collections::HashSet<K, foldhash::fast::RandomState>;
+    /// A [`FastMap`] that iterates in insertion order (issue #1596). The rule: *a map whose
+    /// iteration order is visible to a user (scripts, the journal, `MB_REQUEST`) keeps request
+    /// order*, because Mountebank's `querystring.parse` does and a script can `JSON.stringify` it.
+    /// A plain `FastMap` re-seeds per map, so its order changes from request to request.
+    pub type OrderedMap<K, V> = indexmap::IndexMap<K, V, foldhash::fast::RandomState>;
 }
 
-pub use fastmap::{FastMap, FastSet};
+pub use fastmap::{FastMap, FastSet, OrderedMap};
 
 /// Whether HTTP/2 auto-negotiation should be force-disabled on the serve listeners, read once from
 /// the `RIFT_DISABLE_HTTP2` env var (issue #378). An operational escape hatch: the listeners
@@ -100,7 +105,7 @@ pub fn decode_or_raw(value: &str) -> String {
 
 /// A parsed query string or urlencoded form: every key with all of its values, in request order
 /// (issue #1553). Never holds an empty vector — a key is present only because it was sent.
-pub type MultiValueMap = FastMap<String, Vec<String>>;
+pub type MultiValueMap = OrderedMap<String, Vec<String>>;
 
 /// Parse a raw query string into a map. The one query parser: predicates, the recorded request,
 /// scripts and templates all read a request's query through this, so they cannot disagree about it
@@ -132,10 +137,38 @@ pub fn parse_query_string(query: &str) -> MultiValueMap {
 /// `shellTransform` see, as documented in `docs/mountebank/responses.md`; Mountebank gives those an
 /// array, which is a separate change of script-visible types.
 #[must_use]
-pub fn comma_joined<S: std::hash::BuildHasher + Default>(
-    map: &FastMap<String, Vec<String>>,
-) -> std::collections::HashMap<String, String, S> {
+pub fn comma_joined(map: &MultiValueMap) -> OrderedMap<String, String> {
     map.iter().map(|(k, v)| (k.clone(), v.join(","))).collect()
+}
+
+/// Whether `key` is an array index in the ECMAScript sense: the canonical decimal form of an
+/// integer in `0..=2^32-2`. `"01"`, `"-1"`, `"+1"` and `"4294967295"` are ordinary string keys.
+fn is_array_index(key: &str) -> bool {
+    key.parse::<u32>()
+        .is_ok_and(|n| n != u32::MAX && n.to_string() == key)
+}
+
+/// The entries of an insertion-ordered map in the order a JS object would list them (ECMAScript
+/// `OrdinaryOwnPropertyKeys`): array-index keys first in ascending numeric order, then every other
+/// key in insertion order (issue #1596). What `JSON.stringify` prints for Mountebank's
+/// `querystring.parse` result, so a serialized query matches Mountebank byte for byte.
+#[must_use]
+pub fn js_key_order<V, S>(map: &indexmap::IndexMap<String, V, S>) -> Vec<(&String, &V)> {
+    let (mut indexed, other): (Vec<_>, Vec<_>) =
+        map.iter().partition(|(key, _)| is_array_index(key));
+    // Sorting by the parsed number: every key here parsed as a `u32` in `is_array_index`.
+    indexed.sort_by_key(|(key, _)| key.parse::<u32>().unwrap_or(u32::MAX));
+    indexed.extend(other);
+    indexed
+}
+
+/// Serializes an insertion-ordered map as a JSON object in [`js_key_order`] (issue #1596).
+pub struct JsKeyOrder<'a, V, S>(pub &'a indexmap::IndexMap<String, V, S>);
+
+impl<V: serde::Serialize, S> serde::Serialize for JsKeyOrder<'_, V, S> {
+    fn serialize<Ser: serde::Serializer>(&self, serializer: Ser) -> Result<Ser::Ok, Ser::Error> {
+        serializer.collect_map(js_key_order(self.0))
+    }
 }
 
 /// A field's values as Mountebank shows them (`querystring.parse`, `headersMap`): one value is a
@@ -346,6 +379,48 @@ mod tests {
 }
 
 #[cfg(test)]
+mod key_order_tests {
+    use super::{JsKeyOrder, OrderedMap, js_key_order, parse_query_string};
+
+    // Issue #1596: a repeated key keeps the position of its first occurrence.
+    #[test]
+    fn parsing_keeps_first_occurrence_order() {
+        let params = parse_query_string("b=1&a=2&c=3&a=4");
+        let keys: Vec<&str> = params.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["b", "a", "c"]);
+        assert_eq!(params["a"], ["2", "4"]);
+    }
+
+    fn json_of(keys: &[&str]) -> String {
+        let map: OrderedMap<String, u8> = keys.iter().map(|k| (k.to_string(), 0)).collect();
+        serde_json::to_string(&JsKeyOrder(&map)).expect("serializes")
+    }
+
+    #[test]
+    fn array_index_keys_come_first_ascending_then_insertion_order() {
+        assert_eq!(
+            json_of(&["b", "10", "2", "a"]),
+            r#"{"2":0,"10":0,"b":0,"a":0}"#
+        );
+    }
+
+    #[test]
+    fn only_canonical_array_indexes_sort_first() {
+        // "01", "-1", "+1" and "1.5" are strings; 2^32-1 is not an array index, 2^32-2 is.
+        assert_eq!(
+            json_of(&["01", "-1", "+1", "1.5", "4294967295", "4294967294", "0"]),
+            r#"{"0":0,"4294967294":0,"01":0,"-1":0,"+1":0,"1.5":0,"4294967295":0}"#
+        );
+    }
+
+    #[test]
+    fn an_empty_map_has_no_entries() {
+        let map: OrderedMap<String, u8> = OrderedMap::default();
+        assert!(js_key_order(&map).is_empty());
+    }
+}
+
+#[cfg(test)]
 mod parse_query_string_tests {
     use super::parse_query_string;
 
@@ -397,7 +472,7 @@ mod parse_query_string_tests {
             Some(["red", "green", "blue"].map(String::from).as_slice())
         );
         assert_eq!(one(&params, "one"), Some("1"));
-        let joined: std::collections::HashMap<String, String> = super::comma_joined(&params);
+        let joined = super::comma_joined(&params);
         assert_eq!(
             joined.get("color").map(String::as_str),
             Some("red,green,blue")

@@ -231,6 +231,13 @@ record.
 
 ### Fixed
 
+- **Scripts and recorded requests see query and form keys in the order the client sent them**
+  (#1596): `JSON.stringify(request.query)` in an inject, `MB_REQUEST` for a `shellTransform`, and
+  `requests[].query` in `GET /imposters/:port` used to list keys in an arbitrary order that changed
+  from request to request; they now match Mountebank. As in a JS object, integer-like keys (`?2=y`)
+  come first, ascending. `MB_REQUEST`'s own keys are in Mountebank's order too, where they were
+  sorted.
+
 - **`rift-lint` agrees with the engine and Mountebank on behaviors** (#1587), following #1582.
   `E035` now flags a `null` `repeat` on the response or in an object-form block, as well as `0`. A
   `behaviors` element with two behavior types is the error `E059` (formerly the warning `W018`,
