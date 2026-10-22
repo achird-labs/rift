@@ -4031,6 +4031,590 @@
           }
         }
       ]
+    },
+    {
+      "name": "coverage: behaviorsValidator.js:167 behavior validation (#1582)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "a"
+                    },
+                    "repeat": 0
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "a"
+                    },
+                    "repeat": null
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "a"
+                    },
+                    "_behaviors": {
+                      "repeat": 0
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "a"
+                    },
+                    "_behaviors": {
+                      "repeat": null
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "a"
+                    },
+                    "behaviors": [
+                      {
+                        "repeat": 2
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "${P}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "q",
+                            "headers": "x"
+                          },
+                          "into": "${P}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "${P}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {},
+                          "into": "${P}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "a"
+                    },
+                    "behaviors": [
+                      {
+                        "nosuch": 1
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "${P}"
+                    },
+                    "behaviors": [
+                      {
+                        "wait": 1,
+                        "copy": {
+                          "from": "path",
+                          "into": "${P}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "a"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {}
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "a"
+                    },
+                    "behaviors": [
+                      {
+                        "wait": 1,
+                        "nosuch": 1
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "${P}"
+                    },
+                    "_behaviors": {
+                      "wait": 1,
+                      "copy": [
+                        {
+                          "from": "path",
+                          "into": "${P}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".+"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "a"
+                    },
+                    "_behaviors": {
+                      "nosuch": 1
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "name=${row}[name]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": "path",
+                            "using": {
+                              "method": "regex",
+                              "selector": "^/(\\d+)-(\\d+)$"
+                            },
+                            "index": -1
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "data/products.csv",
+                              "keyColumn": "id"
+                            }
+                          },
+                          "into": "${row}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/123-456"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "name=${row}[name]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": "path",
+                            "using": {
+                              "method": "regex",
+                              "selector": "^/(\\d+)-(\\d+)$"
+                            },
+                            "index": "1"
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "data/products.csv",
+                              "keyColumn": "id"
+                            }
+                          },
+                          "into": "${row}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/123-456"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "name=${row}[name]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": "path",
+                            "using": {
+                              "method": "regex",
+                              "selector": "^/(\\d+)-(\\d+)$"
+                            },
+                            "index": 1.5
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "data/products.csv",
+                              "keyColumn": "id"
+                            }
+                          },
+                          "into": "${row}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/123-456"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "name=${row}[name]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": "path",
+                            "using": {
+                              "method": "regex",
+                              "selector": "^/(\\d+)-(\\d+)$"
+                            },
+                            "index": 2
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "data/products.csv",
+                              "keyColumn": "id"
+                            }
+                          },
+                          "into": "${row}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/123-456"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545"
+        }
+      ]
     }
   ]
 }

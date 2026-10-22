@@ -114,6 +114,29 @@ const BAD_COPY_NS: &str = r#"{
     }]
 }"#;
 
+/// Issue #1582: a `repeat` of `0`, which Mountebank refuses and engines up to v0.23.0 admitted and
+/// served as `1`. Door-only: an older engine stored it, so a store must replay it.
+const ZERO_REPEAT: &str = r#"{ "responses": [{ "is": { "statusCode": 200 }, "repeat": 0 }] }"#;
+
+/// Issue #1582: a `copy.from` with two keys (Rift read `query` and ignored the rest), and a lookup
+/// `key.from` with none. Door-only: stored as written by older engines, so a store must replay them.
+const TWO_KEY_COPY_FROM: &str = r#"{
+    "responses": [{
+        "is": { "statusCode": 200, "body": "${T}" },
+        "_behaviors": { "copy": { "from": { "query": "q", "headers": "x" }, "into": "${T}",
+                                   "using": { "method": "regex", "selector": ".+" } } }
+    }]
+}"#;
+
+const EMPTY_LOOKUP_FROM: &str = r#"{
+    "responses": [{
+        "is": { "statusCode": 200, "body": "${R}" },
+        "behaviors": [{ "lookup": { "key": { "from": {}, "using": { "method": "regex", "selector": ".+" } },
+                                    "fromDataSource": { "csv": { "path": "x.csv", "keyColumn": "id" } },
+                                    "into": "${R}" } }]
+    }]
+}"#;
+
 fn replayed<T: DeserializeOwned>(json: &str) -> Result<T, serde_json::Error> {
     let mut deserializer = serde_json::Deserializer::from_str(json);
     let value = deserialize_replayed(&mut deserializer)?;
@@ -463,4 +486,115 @@ fn a_stub_level_refusal_is_reported_before_the_binary_mode_one() {
         checked.starts_with("predicate `matches` field `path` has an invalid regex"),
         "admission_check: {checked}"
     );
+}
+
+/// Issue #1582: every behaviors refusal it added is door-only. `compile_behaviors` splits a
+/// multi-key element into one step per key and drops a `null` `repeat`, and engines up to v0.23.0
+/// stored a `0` `repeat` and a `from` of any size, so these replay to the value those engines stored
+/// and `admission_check` passes: a store (rift-cluster's log, `--datadir`) never drops them.
+#[test]
+fn the_door_only_behavior_shapes_replay_to_their_pre_1582_value() {
+    let cases = [
+        (
+            ZERO_REPEAT,
+            "\"repeat\" field must be an integer greater than 0",
+            serde_json::json!({ "is": { "statusCode": 200 } }),
+        ),
+        (
+            r#"{ "responses": [{ "is": {}, "_behaviors": { "wait": 1, "repeat": 0 } }] }"#,
+            "\"repeat\" field must be an integer greater than 0",
+            serde_json::json!({ "is": {}, "behaviors": [{ "wait": 1 }] }),
+        ),
+        (
+            r#"{ "responses": [{ "is": {}, "behaviors": [{ "repeat": 0 }] }] }"#,
+            "Unrecognized behavior: \"repeat\"",
+            serde_json::json!({ "is": {} }),
+        ),
+        (
+            TWO_KEY_COPY_FROM,
+            "copy behavior \"from\" field must have exactly one key",
+            serde_json::json!({
+                "is": { "statusCode": 200, "body": "${T}" },
+                "behaviors": [{ "copy": { "from": { "query": "q", "headers": "x" }, "into": "${T}",
+                                          "using": { "method": "regex", "selector": ".+" } } }]
+            }),
+        ),
+        (
+            EMPTY_LOOKUP_FROM,
+            "lookup behavior \"key.from\" field must have exactly one key",
+            serde_json::json!({
+                "is": { "statusCode": 200, "body": "${R}" },
+                "behaviors": [{ "lookup": {
+                    "key": { "from": {}, "using": { "method": "regex", "selector": ".+" } },
+                    "fromDataSource": { "csv": { "path": "x.csv", "keyColumn": "id" } },
+                    "into": "${R}" } }]
+            }),
+        ),
+        (
+            r#"{ "responses": [{ "is": {}, "repeat": null }] }"#,
+            "\"repeat\" field must be an integer greater than 0",
+            serde_json::json!({ "is": {} }),
+        ),
+        (
+            r#"{ "responses": [{ "is": {}, "_behaviors": { "wait": 1, "repeat": null } }] }"#,
+            "\"repeat\" field must be an integer greater than 0",
+            serde_json::json!({ "is": {}, "behaviors": [{ "wait": 1 }] }),
+        ),
+        (
+            r#"{ "responses": [{ "is": {}, "behaviors": [{ "wait": 1 }, { "repeat": 2 }] }] }"#,
+            "Unrecognized behavior: \"repeat\"",
+            serde_json::json!({ "is": {}, "repeat": 2, "behaviors": [{ "wait": 1 }] }),
+        ),
+        (
+            r#"{ "responses": [{ "is": {}, "behaviors": [{ "wait": 1 }, { "nosuch": 1 }] }] }"#,
+            "Unrecognized behavior: \"nosuch\"",
+            serde_json::json!({ "is": {}, "behaviors": [{ "wait": 1, "nosuch": 1 }] }),
+        ),
+        (
+            r#"{ "responses": [{ "is": {}, "behaviors": [{ "wait": 1, "decorate": "function () {}" }] }] }"#,
+            "Each behavior object must have only one behavior type",
+            serde_json::json!({ "is": {}, "behaviors": [{ "wait": 1 }, { "decorate": "function () {}" }] }),
+        ),
+    ];
+    for (stub, refusal, replays_to) in cases {
+        let door = serde_json::from_str::<Stub>(stub)
+            .expect_err("the validating decode refuses")
+            .to_string();
+        assert!(door.starts_with(refusal), "door: {door}");
+
+        let decoded: Stub = replayed(stub).expect("the replayed decode admits the bytes");
+        assert_eq!(
+            serde_json::to_value(&decoded.responses[0]).expect("print"),
+            replays_to,
+            "{stub}"
+        );
+        assert_eq!(admission_check_stub(&decoded), Ok(()), "door-only: {stub}");
+        let config: ImposterConfig = replayed(&imposter_with(stub)).expect("replay admits");
+        assert_eq!(admission_check(&config), Ok(()), "{stub}");
+    }
+}
+
+/// Issue #1582: a lookup `key.index` that is not a match position (Mountebank reads it as a
+/// property name and finds no row) is admitted on both paths, and prints back as written.
+#[test]
+fn any_lookup_key_index_decodes_on_both_paths() {
+    for index in ["-1", "\"1\"", "1.5", "{}"] {
+        let stub = format!(
+            r#"{{ "responses": [{{ "is": {{ "body": "${{R}}" }},
+                 "_behaviors": {{ "lookup": {{
+                   "key": {{ "from": "path", "using": {{ "method": "regex", "selector": ".+" }},
+                            "index": {index} }},
+                   "fromDataSource": {{ "csv": {{ "path": "x.csv", "keyColumn": "id" }} }},
+                   "into": "${{R}}" }} }} }}] }}"#
+        );
+        let checked: Stub = serde_json::from_str(&stub).expect("the door admits it");
+        let replay: Stub = replayed(&stub).expect("the replayed decode admits it");
+        let printed = serde_json::to_value(&checked).expect("print");
+        assert_eq!(printed, serde_json::to_value(&replay).expect("print"));
+        assert_eq!(
+            printed["responses"][0]["behaviors"][0]["lookup"]["key"]["index"],
+            serde_json::from_str::<serde_json::Value>(index).expect("json"),
+        );
+        assert_eq!(admission_check_stub(&checked), Ok(()));
+    }
 }

@@ -64,7 +64,7 @@ Behaviors can also be specified as an array of behavior objects:
 }
 ```
 
-The array form is a program, as in Mountebank: every element runs, in array order. Two `decorate` elements both run, two `wait` elements both delay, and a `decorate` written before a `copy` runs before it. A `copy`, `lookup` or `shellTransform` holding a list is one step per item. A `null` for a behavior removes every earlier step of that behavior; an empty list adds nothing and removes nothing. `repeat` is not a step: the last element to set it wins. An element that sets several behaviors runs them in the object form's order (see [Behavior Order](#behavior-order)), not the order written — `rift-lint` flags it as `W018`; give each behavior its own element. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
+The array form is a program, as in Mountebank: every element runs, in array order. Two `decorate` elements both run, two `wait` elements both delay, and a `decorate` written before a `copy` runs before it. A `copy`, `lookup` or `shellTransform` holding a list is one step per item. A `null` for a behavior removes every earlier step of that behavior; an empty list adds nothing and removes nothing. `repeat` is not a step and is not written in the array: put it on the response (see [`repeat`](#repeat)). An element that sets several behaviors is refused (`400`), as in Mountebank (`Each behavior object must have only one behavior type`); use one element per behavior, or the `_behaviors` object form. An element with no behavior in it, such as `{"repeat": 2}` or a misspelt key, is refused as `Unrecognized behavior`; a custom key beside one behavior is allowed, as in Mountebank. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
 
 `_behaviors` must be an object; the array form is only accepted under `behaviors`, and each of its elements must be an object (a non-object element is skipped). Any other shape — an array or scalar `_behaviors`, or a scalar `behaviors` — is refused: `POST /imposters` returns `400` and a config file fails to load. This holds with `--allowInjection` on too.
 
@@ -87,22 +87,29 @@ Mountebank loads, so a saved file can be posted to Mountebank as is:
 }
 ```
 
-- `repeat` is written on the response, never as an element — Mountebank refuses a `{"repeat": n}`
-  element. A `repeat` of `0` is not written; Rift serves it as `1`, like an absent `repeat`.
+- `repeat` is written on the response, never as an element — Mountebank and Rift refuse a
+  `{"repeat": n}` element. `repeat` must be an integer greater than 0: `0` and `null` are refused,
+  as in Mountebank. A `0` stored by an older engine and replayed by an embedder is served as `1`,
+  like an absent `repeat`, and is not written.
 - Elements come in the order they run: an array's own order, and for the object form `wait`,
   `lookup`, `copy`, `shellTransform`, `decorate`.
 - Every step is its own element: a `copy`, `lookup` or `shellTransform` holding several items is
   written one element per item, in order, which is how Mountebank spells it.
 - A `null` or empty behavior is not written.
 
-Two shapes still do not load in Mountebank: a `wait` written as a `{"min", "max"}` range or
-`{"inject": …}` object is a Rift extension; and a key that is not a behavior at all is kept and
-written back, and Mountebank refuses it as `Unrecognized behavior`.
+- A key that is not a behavior configures nothing. It is written inside the element before it,
+  where Mountebank and Rift allow a custom key; with no behavior before it, inside the first one
+  after it; with no behavior at all, it is not written.
 
-Rift reads both its current and its pre-0.18.0 spelling (a `{"repeat": n}` element, a list inside
-one `copy`), so older saved files still load. The reverse does not hold: a `--datadir` written by
-0.18.0 and loaded by 0.17.0 or older loses `repeat`, which those releases do not read on the
-response.
+One shape still does not load in Mountebank: a `wait` written as a `{"min", "max"}` range or
+`{"inject": …}` object is a Rift extension.
+
+Rift reads a list inside one `copy`, its pre-0.18.0 spelling. A pre-0.18.0 `{"repeat": n}` element
+is refused by `POST /imposters` and `--configfile` in releases after 0.23.0, as Mountebank refuses it:
+move it to the response's `repeat`. A `--datadir` holding one still loads, as does every other shape
+an older release stored (see [Data directory](../configuration/cli.md#data-directory---datadir)). The reverse
+does not hold either: a `--datadir` written by 0.18.0 and loaded by 0.17.0 or older loses `repeat`,
+which those releases do not read on the response.
 
 ---
 
@@ -588,9 +595,12 @@ match and `n` is the `n`th capture group; for `jsonpath` and `xpath`, `n` is the
 value, counting from `0`. An index past the last match finds no row. Without `index` the key is what
 [`copy`](#copy) extracts: the first capture group (the whole match when the pattern has none), or the
 first selected value. Mountebank's default is index `0`, the whole match, so a Mountebank config
-that relies on that default with a capture-group pattern should say `"index": 0`. `index` must be a
-non-negative integer; anything else is refused when the imposter is created (`rift-lint` `E051`).
-The same `index` is kept on a `_rift.dataset` block's `key`.
+that relies on that default with a capture-group pattern should say `"index": 0`. Any value is
+accepted and written back as written, and read as Mountebank reads `keyValues[index || 0]`: `0`,
+`""` and `false` are the first match, a non-negative integer or a numeric string such as `"1"`
+picks that match, and anything else (`-1`, `1.5`, `"01"`, `true`) finds no row. Releases up to
+0.23.0 refused an index that was not a non-negative integer. The same `index` is kept on a
+`_rift.dataset` block's `key`.
 
 As with [`copy`](#copy), a `lookup` token in a **header** value is repaired after substitution: the
 request chooses which row is read, so a CSV cell holding a character a header value cannot carry
@@ -711,9 +721,11 @@ Mountebank itself stores `repeat` on the response rather than in the block, and 
 { "is": { "statusCode": 200, "body": "First response" }, "repeat": 3 }
 ```
 
-It is held to the same rule as the block's — a value that is not a whole number within 32 bits
-refuses the imposter, and `rift-lint` reports that and a `0` as `E035` — and when both are written
-the top-level one wins, as in Mountebank. Rift writes it back the same way — on the response, not
+It is held to the same rule as the block's — `repeat` must be an integer greater than 0 and within
+32 bits, so `0`, `null`, `-1`, `"2"` and `2.5` refuse the imposter, and `rift-lint` reports it as
+`E035` — and when both are written the top-level one wins, as in Mountebank. Mountebank refuses `0`
+and `null` too, but accepts a numeric string or a fraction (see
+[Differences](differences.md#repeat-is-a-whole-number)). Rift writes it back the same way — on the response, not
 in the `behaviors` array — see [How Rift writes behaviors back](#how-rift-writes-behaviors-back).
 
 ### Per-Response Repeat

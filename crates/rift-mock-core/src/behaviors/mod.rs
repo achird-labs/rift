@@ -45,8 +45,8 @@ pub(crate) use extraction::{
 pub(crate) use lookup::apply_lookup_spliced;
 #[allow(unused_imports)]
 pub use lookup::{
-    CsvCache, CsvData, CsvDataSource, DataSource, DatasetBinding, LookupBehavior, LookupKey,
-    apply_lookup_behaviors,
+    CsvCache, CsvData, CsvDataSource, DataSource, DatasetBinding, LookupBehavior, LookupIndex,
+    LookupKey, apply_lookup_behaviors,
 };
 pub use request::{RequestContext, header_to_title_case};
 pub use sequencer::{LocalSequencer, ResponseSequencer, SequenceKey};

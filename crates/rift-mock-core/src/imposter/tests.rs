@@ -445,15 +445,29 @@ fn test_behaviors_array_compiles_to_an_ordered_program() {
 /// is hoisted to the front (it replaced #1099's last-write-wins fold).
 #[test]
 fn test_behaviors_array_keeps_every_step_and_hoists_repeat() {
-    let (block, program) = compiled(serde_json::json!([
-        {"wait": 50},
-        {"repeat": 2},
-        {"wait": 5}
-    ]));
+    let (block, program) = compiled(serde_json::json!([{"wait": 50}, {"wait": 5}]));
+    assert_eq!(block, serde_json::json!([{"wait": 50}, {"wait": 5}]));
+    assert_eq!(program.steps.len(), 2);
+    // A `{"repeat": n}` element is refused at a door since #1582; an older engine's stored config
+    // replays with it hoisted.
+    let written =
+        serde_json::json!({"is": {}, "behaviors": [{"wait": 50}, {"repeat": 2}, {"wait": 5}]});
+    assert!(serde_json::from_value::<StubResponse>(written.clone()).is_err());
+    let response: StubResponse =
+        crate::imposter::deserialize_replayed(written).expect("replay admits it");
+    let StubResponse::Is {
+        behaviors,
+        behaviors_parsed,
+        ..
+    } = response
+    else {
+        panic!("Expected Is response");
+    };
     assert_eq!(
-        block,
-        serde_json::json!([{"repeat": 2}, {"wait": 50}, {"wait": 5}])
+        behaviors,
+        Some(serde_json::json!([{"repeat": 2}, {"wait": 50}, {"wait": 5}]))
     );
+    let program = behaviors_parsed.expect("the program parses");
     assert_eq!(program.repeat, Some(2));
     assert_eq!(program.steps.len(), 2);
 }

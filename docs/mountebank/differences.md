@@ -142,6 +142,25 @@ field is read as `undefined` in both, as Mountebank does — see [Behaviors](beh
 group that did not take part in the match is replaced with an empty string (Mountebank inserts a
 comma), and inserted text is never re-scanned for tokens — see [Behaviors](behaviors.md#copy).
 
+## Behavior validation stops at the first error
+
+Rift refuses a behaviors block with the same rules as Mountebank, but names only the first problem:
+where Mountebank lists every one (a `copy` missing `from`, `into` and `using` is three errors
+there), Rift's `400` names the first.
+
+## `repeat` is a whole number
+
+`repeat` must be a whole number from 1 to 4294967295, written as a number. Mountebank also accepts
+a numeric string (`"2"`, `" 2"`) or a fraction (`1.5` repeats twice), and a string that is not a
+number (`"abc"`), which it then serves zero times. Rift refuses each of these when the imposter is
+created.
+
+## `lookup` without `key.index`
+
+Without `key.index`, a lookup keys the row by the first capture group (the whole match when the
+pattern has none). Mountebank's default is index `0`, the whole match. `"key.index": null` is the
+same as leaving it out. See [Behaviors](behaviors.md#lookup).
+
 ## `exists` with an object over an array
 
 `{"exists": {"body": {"items": {"id": true}}}}` against `{"items": [...]}` holds in Mountebank for

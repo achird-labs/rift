@@ -192,43 +192,21 @@ async fn a_failed_step_continues_leniently_and_stops_strictly() {
     admin.stop(port).await;
 }
 
-/// An element that sets several behaviors runs them in Rift's canonical order — the order written
-/// is not recoverable (`preserve_order` is off) — and rift-lint says so (W018).
+/// An element that sets several behaviors is refused at a door, as Mountebank refuses it (#1582);
+/// one an older engine stored replays split into its steps in Rift's canonical order, which
+/// `issue_1267_replay_decode.rs` pins. rift-lint's W018 still only warns about it until #1587.
 #[tokio::test]
-async fn a_multi_key_element_runs_in_canonical_order_and_lints_w018() {
+async fn a_multi_key_element_is_refused() {
     let admin = Admin::start(true).await;
     let behaviors = json!([{"decorate": REPLACE_T, "copy": copy_path_into("${T}")}]);
-    let port = admin.serve("${T}", behaviors.clone(), false).await;
-    assert_eq!(admin.get(port).await.text().await.expect("body"), "/p");
-    admin.stop(port).await;
-
-    let w018 = |behaviors: Value| {
-        let imposter = json!({"port": 4545, "protocol": "http", "stubs": [{"responses": [
-            {"is": {"body": "x"}, "behaviors": behaviors}
-        ]}]});
-        rift_lint::lint_json(
-            &imposter.to_string(),
-            "fixture.json",
-            &rift_lint::LintOptions::default(),
-        )
-        .issues
-        .into_iter()
-        .filter(|i| i.code == "W018")
-        .map(|i| i.location.unwrap_or_default())
-        .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        w018(behaviors),
-        vec!["stubs[0].responses[0].behaviors[0]".to_string()]
-    );
-    assert_eq!(
-        w018(json!([{"decorate": REPLACE_T}, {"copy": copy_path_into("${T}")}])),
-        Vec::<String>::new()
-    );
-    // `repeat` is not a step, so it does not make an element multi-step.
-    assert_eq!(
-        w018(json!([{"wait": 1, "repeat": 2}])),
-        Vec::<String>::new()
+    let imposter = json!({"protocol": "http",
+        "stubs": [{"responses": [{"is": {"body": "${T}"}, "behaviors": behaviors}]}]});
+    let response = admin.post(&imposter).await;
+    assert_eq!(response.status().as_u16(), 400);
+    let text = response.text().await.expect("body");
+    assert!(
+        text.contains("Each behavior object must have only one behavior type"),
+        "{text}"
     );
 }
 

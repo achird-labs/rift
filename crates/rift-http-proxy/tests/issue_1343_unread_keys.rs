@@ -428,12 +428,9 @@ fn unread_in_behaviors(block: &Value, path: &str, unread: &mut Vec<String>) -> R
 /// The `from` and `using` a `copy` or a lookup `key` shares.
 fn unread_in_extraction(holder: &Value, path: &str, unread: &mut Vec<String>) {
     if let Some(from) = holder.get("from") {
-        // `CopySource::Nested` reads `query`, else `headers`.
+        // `CopySource::Nested` reads `query` or `headers`; a door refuses both at once (#1582).
         let from_path = join(path, "from");
         unread_outside(from, &["query", "headers"], &from_path, unread);
-        if from.get("query").is_some() && from.get("headers").is_some() {
-            unread.push(join(&from_path, "headers"));
-        }
     }
     if let Some(using) = holder.get("using") {
         // `ExtractionMethod` is internally tagged by `method`.
@@ -1272,16 +1269,13 @@ fn alternatives_the_engine_reads_only_one_of_are_reported() {
                          "jsonpath": { "selector": "$.a" }, "xpath": { "selector": "//a" } }],
         "rules": [{ "equals": { "path": "/" } }],
         "responses": [{ "is": { "body": "${X}" }, "_behaviors": {
-            "wait": { "min": 1, "max": 2, "inject": "function () { return 1; }" },
-            "copy": { "from": { "query": "q", "headers": "h" }, "into": "${X}",
-                      "using": { "method": "regex", "selector": ".*" } }
+            "wait": { "min": 1, "max": 2, "inject": "function () { return 1; }" }
         } }]
     }));
     let reported = unread(document);
     assert_eq!(
         reported[1..],
         [
-            "stubs.0.responses.0._behaviors.copy.from.headers",
             "stubs.0.responses.0._behaviors.wait.inject",
             "stubs.0.rules",
         ],

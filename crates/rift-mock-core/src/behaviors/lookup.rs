@@ -38,10 +38,67 @@ pub struct LookupKey {
     pub extraction: ExtractionMethod,
     /// Which of the selector's matches keys the row, as in Mountebank (issue #1240): for a regex,
     /// `0` is the whole match and `n` the `n`th capture group; for JSONPath/XPath, the `n`th
-    /// selected value. Absent keeps Rift's default, the first capture group (or the whole match
-    /// when the pattern has none) and the first selected value.
+    /// selected value. Absent (or `null`) keeps Rift's default, the first capture group (or the
+    /// whole match when the pattern has none) and the first selected value. Any JSON value is
+    /// admitted and read as Mountebank reads it (issue #1582); see [`LookupIndex`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index: Option<usize>,
+    pub index: Option<LookupIndex>,
+}
+
+/// A lookup `key.index`, any JSON value, kept as written (issue #1582). Mountebank has no rule for
+/// it and reads `keyValues[key.index || 0]`, so `0`, `""` and `false` are the first match, a
+/// non-negative integer or a numeric string such as `"1"` picks that match, and anything else
+/// finds no row.
+//
+// Kept as JSON so it prints back unchanged and every stored stub keeps its bytes and `stub_key`;
+// resolved by `position` when the key is read.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct LookupIndex(pub serde_json::Value);
+
+impl LookupIndex {
+    /// The match position this index names, or `None` when it names none, so no row is found and
+    /// the token is left, as when the position is past the matches:
+    /// - a falsy value (`0`, `""`, `false`) is `|| 0`, the first position;
+    /// - a non-negative integral number is that position (`1.0` is the property `"1"`);
+    /// - a string that is a canonical array index (`"1"`, not `"01"` or `" 1"`) is that position;
+    /// - anything else (`-1`, `1.5`, `"x"`, `true`, an array or object) is no property of the
+    ///   match array.
+    #[must_use]
+    pub fn position(&self) -> Option<usize> {
+        use serde_json::Value;
+        match &self.0 {
+            Value::Null | Value::Bool(false) => Some(0),
+            Value::Number(n) => match n.as_u64() {
+                Some(n) => usize::try_from(n).ok(),
+                None => n
+                    .as_f64()
+                    .filter(|f| *f >= 0.0 && f.fract() == 0.0 && *f < 2f64.powi(53))
+                    // A whole, non-negative f64 below 2^53 is exact, so the cast loses nothing.
+                    .and_then(|f| usize::try_from(f as u64).ok()),
+            },
+            Value::String(s) if s.is_empty() => Some(0),
+            Value::String(s) => {
+                let canonical =
+                    s.bytes().all(|b| b.is_ascii_digit()) && (s == "0" || !s.starts_with('0'));
+                // Domain-optional: a string that is not a canonical index in range names a property
+                // the match array does not have, which is no row, not an error.
+                if canonical {
+                    s.parse::<usize>().ok()
+                } else {
+                    None
+                }
+            }
+            Value::Bool(true) | Value::Array(_) | Value::Object(_) => None,
+        }
+    }
+}
+
+impl From<usize> for LookupIndex {
+    fn from(index: usize) -> Self {
+        Self(serde_json::Value::from(index))
+    }
 }
 
 impl LookupKey {
@@ -57,14 +114,20 @@ impl LookupKey {
         else {
             return Ok(None);
         };
-        match self.index {
+        match &self.index {
             None => self.extraction.extract(&source),
-            Some(index) => Ok(self
-                .extraction
-                .matches(&source)?
-                .into_iter()
-                .nth(index)
-                .flatten()),
+            Some(index) => {
+                // Domain-optional: an index that is no array position finds no row (issue #1582).
+                let Some(position) = index.position() else {
+                    return Ok(None);
+                };
+                Ok(self
+                    .extraction
+                    .matches(&source)?
+                    .into_iter()
+                    .nth(position)
+                    .flatten())
+            }
         }
     }
 }
@@ -1137,14 +1200,56 @@ mod tests {
         );
     }
 
+    /// Issue #1582: Mountebank has no rule for `key.index` and reads `keyValues[index || 0]`, so a
+    /// value that is not a match position loads and finds no row.
     #[test]
-    fn a_negative_lookup_index_is_refused() {
-        let parsed: Result<LookupKey, _> = serde_json::from_value(serde_json::json!({
-            "from": "path",
-            "using": {"method": "regex", "selector": ".*"},
-            "index": -1
-        }));
-        assert!(parsed.is_err(), "a negative index cannot address a match");
+    fn a_lookup_index_that_is_no_position_loads_and_finds_no_row() {
+        for index in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("x"),
+        ] {
+            let mut key = regex_key(None);
+            key["index"] = index.clone();
+            let parsed: LookupKey = serde_json::from_value(key.clone()).expect("admitted");
+            assert_eq!(
+                serde_json::to_value(&parsed).expect("print")["index"],
+                index,
+                "printed as written"
+            );
+            assert_eq!(
+                lookup_with_key("nopos", key, "/ab-cd", None),
+                "${row}[name]",
+                "{index}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lookup_index_resolves_as_a_javascript_property_of_the_match_array() {
+        use serde_json::json;
+        for (index, position) in [
+            (json!(0), Some(0)),
+            (json!(2), Some(2)),
+            (json!(1.0), Some(1)),
+            (json!(-0.0), Some(0)),
+            (json!(""), Some(0)),
+            (json!(false), Some(0)),
+            (json!(null), Some(0)),
+            (json!("0"), Some(0)),
+            (json!("12"), Some(12)),
+            (json!("01"), None),
+            (json!(" 1"), None),
+            (json!("1e0"), None),
+            (json!("99999999999999999999999"), None),
+            (json!(-1), None),
+            (json!(1.5), None),
+            (json!(true), None),
+            (json!([1]), None),
+            (json!({}), None),
+        ] {
+            assert_eq!(LookupIndex(index.clone()).position(), position, "{index}");
+        }
     }
 
     /// `_rift.dataset.key` is a [`LookupKey`] and must hand back the `index` the operator wrote.
