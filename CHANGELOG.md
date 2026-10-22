@@ -44,6 +44,9 @@ record.
 
 ### Changed
 
+- **A throwing `inject` answers `500`, as in Mountebank** (#1581). A response or predicate `inject`
+  that throws at request time used to answer `400`. It now answers `500` and carries Mountebank's
+  `data`, the thrown error's message. The `--allowInjection` refusal is still `400`.
 - **A `predicateGenerators` `inject` that throws or returns a non-array is refused when the imposter
   is created, as in Mountebank** (#1580). It is run once against an empty `GET /` with
   `config.request.isDryRun` set; guard on that to skip it. It used to be admitted and then fail at
@@ -207,6 +210,14 @@ record.
   and now fails. A body that is not XML still never runs the selector. Embedders:
   `ExtractionMethod::extract`/`matches`, `LookupKey::extract`, `extract_xpath`,
   `extract_xpath_with_ns` and `apply_copy_behaviors` now return `Result<_, XPathSelectorError>`.
+
+- **`copy`/`lookup` from a missing field, and tokens in header names** (#1583). A regex `copy` or
+  `lookup` whose request field is absent now reads the text `undefined`, as Mountebank does (`.*`
+  copies `undefined`; a JSONPath or XPath selector still extracts nothing and leaves the token). A
+  token in a response header *name* is substituted, and the renamed header replaces one already of
+  that name, where Rift used to answer `500 Response build error`. A token left in a name still
+  answers `500`, now naming the header. Text a copy inserts into a name is never expanded by a later
+  `lookup` (#1203).
 
 - **`--local-only` with `--intercept-port` listens on `[::1]` too, and the intercept proxy refuses
   non-loopback clients** (#1572). The admin API and `/metrics` bind `127.0.0.1` and `[::1]` under

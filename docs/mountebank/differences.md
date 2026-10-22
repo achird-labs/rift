@@ -18,6 +18,7 @@ the response configures. Some responses carry one more marker:
 | `x-rift-proxy-latency: <ms>` | A proxied response, with the upstream's time in milliseconds |
 | `x-rift-proxy-error: true` | The proxy could not reach the upstream (see [Proxy](proxy.md)) |
 | `x-rift-wait-error: true` | A `wait` function threw; the body is Mountebank's `invalid wait injection` error (see [Behaviors](behaviors.md#how-a-wait-string-is-read)) |
+| `x-rift-inject-error: true` | A response or predicate `inject` threw; the body is Mountebank's `invalid injection` error (a throw is `500` with the thrown message in `data`) |
 | `x-rift-inject: true` | An `inject` response produced it |
 | `x-rift-default-response: true` | No stub matched and the imposter's `defaultResponse` answered |
 | `x-rift-no-match: true` | No stub matched and the imposter has no `defaultResponse` |
@@ -35,7 +36,9 @@ header.
 Error envelopes carry `code` (the HTTP status), `type` and `message` — see the
 [API reference](../api/index.md) — where Mountebank's carry `code` (Rift's `type`) and `message`. Rift
 does not add Mountebank's `source`, `name` or `stack` fields, and its messages are worded
-differently. Nor does it add `inner`, the error Mountebank wraps in a `bad data` one.
+differently. Nor does it add `inner`, the error Mountebank wraps in a `bad data` one. A throwing
+predicate `inject` carries `code` `invalid predicate injection`, where Mountebank says
+`invalid injection`.
 
 When an imposter's address is held by another process, both engines answer `400`; Mountebank's body
 is node's raw `EADDRINUSE` object (`code`, `errno`, `syscall`, `address`, `port`, no `message`), Rift's
@@ -126,14 +129,12 @@ A command that fails, or prints anything other than JSON, is a `500` in Mounteba
 response as it was before the command, with `x-rift-shelltransform-error: true`, and answers `500`
 only under `strictBehaviors`, as for `decorate`.
 
-## `copy` from an absent source
+## `copy` or `lookup` from a whole `query` or `headers` object
 
-A `copy` whose source is absent (a query parameter or header the request does not carry) leaves its
-token in place. A request without a body is not an absent source: its body is `""`, as in
-Mountebank. So does Mountebank, unless the regex matches the text `undefined`: Mountebank runs
-the regex against JavaScript's `undefined` coerced to a string, so `.*` copies the literal word
-`undefined` into the response. Rift does not reproduce that coercion — see
-[Behaviors](behaviors.md#copy).
+A `copy` or `lookup` whose `from` is the string `"query"` or `"headers"` (the whole object, not one
+key of it) extracts nothing in Rift, so its token is left in place. Mountebank reads the object as
+the text `[object Object]`, or fails the request with a `500` `TypeError` for `query`. A missing
+field is read as `undefined` in both, as Mountebank does — see [Behaviors](behaviors.md#copy).
 
 ## `copy` indexed tokens
 

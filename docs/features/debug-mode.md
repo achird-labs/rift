@@ -277,7 +277,7 @@ with `Content-Type: application/json`:
 | Situation | Status | Extra header | Body |
 |:----------|:-------|:-------------|:-----|
 | The matching run panicked | `500` | — | `{"errors":[{"code":"...","message":"Debug matching failed"}]}` |
-| A predicate `inject` threw | `400` | — | `invalid predicate injection`, as on the normal path |
+| A predicate `inject` threw | `500` | — | `invalid predicate injection`, as on the normal path |
 | A predicate `inject` missed its own deadline | `504` | `x-rift-script-timeout: true` | `predicate injection timeout`, as on the normal path |
 | The matching run exceeded `_rift.scriptEngine.timeoutMs` | `504` | `x-rift-script-timeout: true` | `{"errors":[{"code":"...","message":"Debug matching timed out"}]}` |
 

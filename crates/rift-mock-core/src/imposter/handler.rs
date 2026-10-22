@@ -236,6 +236,34 @@ fn build_failure_response(e: &hyper::http::Error, log_context: &str) -> Response
     )
 }
 
+/// The first of `names` that is not a valid header name (issue #1583): a `copy` or `lookup`
+/// token whose source had no value stays in the name, as authored.
+fn invalid_header_name<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    names
+        .into_iter()
+        .find(|name| hyper::header::HeaderName::from_bytes(name.as_bytes()).is_err())
+}
+
+/// The 500 for a response header name hyper refuses (issue #1583) — Mountebank answers 500
+/// `ERR_INVALID_HTTP_TOKEN` for it. The same door as [`build_failure_response`], but the message
+/// names the header, so the author can see which token was left in it. Truncated, because a name
+/// can hold request text a `copy` inserted.
+fn invalid_header_name_response(name: &str) -> Response<Full<Bytes>> {
+    let message = format!(
+        "Response build error: invalid header name {:?}",
+        super::response::truncate_with_ellipsis(name, 256)
+    );
+    warn!("stub response build failed: {message}");
+    build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [
+            ("x-rift-imposter", "true"),
+            ("content-type", "application/json"),
+        ],
+        crate::response::error_body(StatusCode::INTERNAL_SERVER_ERROR, &message),
+    )
+}
+
 /// Whether a requested response behavior that fails should serve a 500 rather than its fallback
 /// (issue #375): per imposter (`strictBehaviors`) or process-wide (`RIFT_STRICT_BEHAVIORS`).
 ///
@@ -313,10 +341,9 @@ fn strip_non_base64(body: &str) -> std::borrow::Cow<'_, str> {
 /// Map a matcher error (`find_matching_stub_with_client`) to its response.
 ///
 /// A predicate-`inject` failure (issue #440 — an object-build failure or the script itself
-/// throwing) is Mountebank-shaped error parity with the response-inject case just below: a 400
-/// with `{"errors":[{"code":"invalid predicate injection","message":"..."}]}`, not a bare 500 —
-/// the script failed to produce a valid match decision, a client (config) problem, not a server
-/// fault. A predicate-matching *deadline* (issue #499) is instead a 504 `predicate injection
+/// throwing) is Mountebank-shaped error parity with the response-inject case: a 500 (issue
+/// #1581; `baseHttpServer.js:150-155` answers an `InjectionError` so) with
+/// `{"errors":[{"code":"invalid predicate injection","message":"...","data":"..."}]}`. A predicate-matching *deadline* (issue #499) is instead a 504 `predicate injection
 /// timeout` a client can retry — checked first, since it too surfaces during matching. Every other
 /// matcher error (e.g. a scenario-state backend failure, issue #318) keeps the existing
 /// [`backend_error_response`] 5xx mapping.
@@ -417,6 +444,25 @@ pub(crate) fn xpath_selector_error_response(
     )
 }
 
+#[cfg(feature = "javascript")]
+/// The `{"errors":[...]}` body of a throwing `inject`: `message` is Rift's text, `data` is
+/// Mountebank's (the thrown error's `message`), left out when the script threw no message.
+fn inject_failure_body(
+    kind: crate::response::ErrorKind,
+    message: &str,
+    data: Option<&str>,
+) -> String {
+    let mut error = serde_json::json!({
+        "code": kind.slug(),
+        "type": kind.slug(),
+        "message": message,
+    });
+    if let Some(data) = data {
+        error["data"] = serde_json::Value::String(data.to_owned());
+    }
+    serde_json::json!({ "errors": [error] }).to_string()
+}
+
 fn matcher_error_response(e: &anyhow::Error) -> Response<Full<Bytes>> {
     if let Some(xpath) = e.downcast_ref::<crate::behaviors::XPathSelectorError>() {
         return xpath_selector_error_response(xpath);
@@ -430,16 +476,13 @@ fn matcher_error_response(e: &anyhow::Error) -> Response<Full<Bytes>> {
     #[cfg(feature = "javascript")]
     {
         if let Some(pred_err) = e.downcast_ref::<crate::scripting::PredicateInjectionError>() {
-            let body = serde_json::json!({
-                "errors": [{
-                    "code": crate::response::ErrorKind::InvalidPredicateInjection.slug(),
-                    "type": crate::response::ErrorKind::InvalidPredicateInjection.slug(),
-                    "message": pred_err.to_string(),
-                }]
-            })
-            .to_string();
+            let body = inject_failure_body(
+                crate::response::ErrorKind::InvalidPredicateInjection,
+                &pred_err.to_string(),
+                pred_err.data(),
+            );
             return build_response_with_headers(
-                StatusCode::BAD_REQUEST,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 [
                     ("x-rift-imposter", "true"),
                     ("x-rift-inject-error", "true"),
@@ -812,7 +855,7 @@ fn render_template_parts(
                 Err(e) => return TemplateRender::Failed(e),
             }
         }
-        rendered_headers.insert(name, rendered_values);
+        rendered_headers.insert(name.into(), rendered_values);
     }
 
     TemplateRender::Rendered {
@@ -1468,7 +1511,7 @@ async fn handle_request_inner(
                     let mut response = Response::builder().status(served);
                     for (k, values) in &parts.headers {
                         for v in values {
-                            response = response.header(k, v.as_str());
+                            response = response.header(k.as_str(), v.as_str());
                         }
                     }
 
@@ -1478,10 +1521,13 @@ async fn handle_request_inner(
                     return Ok(response
                         .body(Full::new(Bytes::from(parts.body.into_text())))
                         .unwrap_or_else(|e| {
-                            build_failure_response(
-                                &e,
-                                "inject response build failed (bad injected header?)",
-                            )
+                            match invalid_header_name(parts.headers.keys().map(|k| k.as_str())) {
+                                Some(name) => invalid_header_name_response(name),
+                                None => build_failure_response(
+                                    &e,
+                                    "inject response build failed (bad injected header?)",
+                                ),
+                            }
                         }));
                 }
                 Err(e) => {
@@ -1494,20 +1540,20 @@ async fn handle_request_inner(
                             &t.to_string(),
                         ));
                     }
-                    // Mountebank-shaped error parity (issue #355 Item 5): a failing inject is a
-                    // 400 with `{"errors":[{"code":"invalid injection","message":"..."}]}`, not a
-                    // bare 500 — the script failed to produce a valid response, which is a client
-                    // (config) problem, not a server fault.
-                    let body = serde_json::json!({
-                        "errors": [{
-                            "code": crate::response::ErrorKind::InvalidInjection.slug(),
-                            "type": crate::response::ErrorKind::InvalidInjection.slug(),
-                            "message": format!("{e}"),
-                        }]
-                    })
-                    .to_string();
+                    // Mountebank-shaped error parity (issues #355 Item 5, #1581): a failing
+                    // inject is a 500 with `{"errors":[{"code":"invalid injection","message":
+                    // "...","data":"<thrown message>"}]}`, as `baseHttpServer.js:150-155` answers
+                    // an `InjectionError`. (#355 had assumed 400; Mountebank's status is 500.)
+                    let data = e
+                        .downcast_ref::<crate::scripting::InjectionFailure>()
+                        .and_then(|f| f.data.as_deref());
+                    let body = inject_failure_body(
+                        crate::response::ErrorKind::InvalidInjection,
+                        &format!("{e}"),
+                        data,
+                    );
                     return Ok(build_response_with_headers(
-                        StatusCode::BAD_REQUEST,
+                        StatusCode::INTERNAL_SERVER_ERROR,
                         [
                             ("x-rift-imposter", "true"),
                             ("x-rift-inject-error", "true"),
@@ -2232,7 +2278,12 @@ async fn handle_request_inner(
             }
 
             return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|e| {
-                build_failure_response(&e, "stub response build failed (bad stub header?)")
+                match invalid_header_name(headers.keys().map(String::as_str)) {
+                    Some(name) => invalid_header_name_response(name),
+                    None => {
+                        build_failure_response(&e, "stub response build failed (bad stub header?)")
+                    }
+                }
             }));
         }
     }
@@ -2674,7 +2725,7 @@ async fn apply_rift_fault(
 }
 
 // Issue #500: `matcher_error_response` splits a matcher failure two ways — a predicate-`inject`
-// error (`PredicateInjectionError`) is a Mountebank-shaped 400, while every other matcher error
+// error (`PredicateInjectionError`) is a Mountebank-shaped 500, while every other matcher error
 // (e.g. a scenario-state backend failure) keeps the 5xx backend mapping. The end-to-end handler
 // tests exercise the 400 branch over the wire; this pins the "other error → 5xx" branch directly,
 // since it needs a non-predicate error that a listener test can't easily provoke.
@@ -2746,11 +2797,14 @@ mod matcher_error_response_tests {
     }
 
     #[test]
-    fn predicate_inject_error_maps_to_400() {
-        let err: anyhow::Error =
-            crate::scripting::PredicateInjectionError("bad predicate".to_string()).into();
+    fn predicate_inject_error_maps_to_500() {
+        let err: anyhow::Error = crate::scripting::PredicateInjectionError(
+            "bad predicate".to_string(),
+            Some("bad".to_string()),
+        )
+        .into();
         let resp = matcher_error_response(&err);
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(
             resp.headers().contains_key("x-rift-inject-error"),
             "a predicate-inject error must carry the inject-error marker"

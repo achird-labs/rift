@@ -40,7 +40,7 @@ mod js_engine;
 pub(crate) use js_engine::bounded_js_context;
 #[cfg(feature = "javascript")]
 pub use js_engine::{
-    JsEngine, MountebankRequest, PredicateInjectionError, clear_imposter_state,
+    InjectionFailure, JsEngine, MountebankRequest, PredicateInjectionError, clear_imposter_state,
     compile_js_to_bytecode, execute_mountebank_decorate, execute_mountebank_inject,
     execute_mountebank_inject_bounded, execute_predicate_generator_inject,
     execute_predicate_inject,

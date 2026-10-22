@@ -1,5 +1,5 @@
 {
-  "source": "#1548 \u2014 one case per Mountebank code path the differential suite did not reach, named `coverage: <mb file>:<line> <what>`",
+  "source": "#1548 — one case per Mountebank code path the differential suite did not reach, named `coverage: <mb file>:<line> <what>`",
   "cases": [
     {
       "name": "coverage: httpsServer.js:13 an https imposter with its own key and cert serves its stubs over TLS",
@@ -1849,6 +1849,489 @@
       ]
     },
     {
+      "name": "coverage: behaviors.js:362 copy: missing source and header-name tokens (#1583)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/q-any"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "nosuch"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/h-any"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "headers": "X-None"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/q-word"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "nosuch"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\w+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/q-und"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "nosuch"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "und"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/q-digit"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "nosuch"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\d+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/q-jsonpath"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "nosuch"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "jsonpath",
+                            "selector": "$.a"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/q-xpath"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "nosuch"
+                          },
+                          "into": "${v}",
+                          "using": {
+                            "method": "xpath",
+                            "selector": "//a"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/unknown-field"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "nosuch",
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/no-body"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/name/"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-${v}": "1"
+                      },
+                      "body": "name"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\w+$"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/both/"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "X-${v}": "${v}"
+                      },
+                      "body": "both"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\w+$"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/keys/"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "Content-Type": "application/json"
+                      },
+                      "body": {
+                        "k-${v}": "${v}",
+                        "n": {
+                          "${v}": 1
+                        }
+                      }
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": "\\w+$"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/lookup"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "row=${row}[name]"
+                    },
+                    "behaviors": [
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": {
+                              "query": "nosuch"
+                            },
+                            "using": {
+                              "method": "regex",
+                              "selector": ".*"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "../../conformance/differential/data/undefined-key.csv",
+                              "keyColumn": "id"
+                            }
+                          },
+                          "into": "${row}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q-any"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/h-any"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q-word"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q-und"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q-digit"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q-jsonpath"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q-xpath"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/unknown-field"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/no-body"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/name/p"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/both/p"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/keys/p"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/lookup"
+        }
+      ]
+    },
+    {
       "name": "coverage: responseResolver.js:159 a predicateGenerator inject that throws is refused when the imposter is created",
       "steps": [
         {
@@ -2385,6 +2868,232 @@
       ]
     },
     {
+      "name": "coverage: responseResolver.js:62 predicates.js:378 an inject that throws at serve time answers 500 with data (#1581)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "responses": [
+                      {
+                        "inject": "function (config) { throw new Error('boom'); }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "responses": [
+                      {
+                        "inject": "function (config) { return nosuch.x; }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "responses": [
+                      {
+                        "inject": "function (config) { throw 'str'; }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "inject": "function (config) { throw new Error('pboom'); }"
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "body": "unreached"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 201,
+                          "body": "fallback"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "inject": "function (config) { return nosuch.x; }"
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "body": "unreached"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 201,
+                          "body": "fallback"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [
+                  {
+                    "predicates": [
+                      {
+                        "inject": "function (config) { throw 'str'; }"
+                      }
+                    ],
+                    "responses": [
+                      {
+                        "is": {
+                          "body": "unreached"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "responses": [
+                      {
+                        "is": {
+                          "statusCode": 201,
+                          "body": "fallback"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": []
+          }
+        }
+      ]
+    },
+    {
       "name": "coverage: xpath.js:36 an xpath selector that cannot be evaluated fails the request with 500 (#1585)",
       "steps": [
         {
@@ -2782,12 +3491,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/eq-empty",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "<a><b>1</b></a>"
         },
         {
@@ -2795,12 +3498,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/eq",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "<a><b>1</b></a>"
         },
         {
@@ -2808,12 +3505,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/exists-false",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "<a><b>1</b></a>"
         },
         {
@@ -2821,12 +3512,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/not",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "<a><b>1</b></a>"
         },
         {
@@ -2834,12 +3519,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/deep",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "<a><b>1</b></a>"
         },
         {
@@ -2847,12 +3526,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/fn-prefix",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "<a><b>1</b></a>"
         },
         {
@@ -2860,12 +3533,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/case",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "<a><b>1</b></a>"
         },
         {
@@ -2873,12 +3540,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/declared",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "<r xmlns:x=\"urn:x\"><x:a>1</x:a></r>"
         },
         {
@@ -2886,12 +3547,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/bound",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "<r xmlns:x=\"urn:x\"><x:a>1</x:a></r>"
         },
         {
@@ -2899,12 +3554,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/literal",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "<a><b>1</b></a>"
         },
         {
@@ -2912,12 +3561,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/not-xml",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "not xml"
         },
         {
@@ -2925,12 +3568,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/copy",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "<a><b>1</b></a>"
         },
         {
@@ -2938,12 +3575,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/copy-fn",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "<a><b>1</b></a>"
         },
         {
@@ -2951,12 +3582,6 @@
           "port": 4545,
           "method": "POST",
           "path": "/copy",
-          "headers": [
-            [
-              "Content-Type",
-              "application/xml"
-            ]
-          ],
           "body": "not xml"
         }
       ]
