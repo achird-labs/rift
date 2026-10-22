@@ -51,6 +51,13 @@ record.
 
 ### Changed
 
+- **With `--datadir`, recorded requests survive a restart**, as in Mountebank (#1608). An imposter
+  with `recordRequests: true` keeps them in `<port>.requests.jsonl`, written behind about once a
+  second and on a graceful stop, so a crash can lose the last ~2 seconds (Mountebank's write is
+  synchronous). A restart restores them under `--journal-max-bytes`; `numberOfRequests` still starts
+  at 0, as Mountebank's does. `DELETE …/savedRequests` and deleting the imposter remove the file.
+  Older datadirs, which have no such file, load as before.
+
 - **A `--datadir` restart resumes each stub's response cycle where it stopped**, as Mountebank does
   (#1603). The positions are saved beside the imposter in `<port>.cursors`, written behind every
   second and on a graceful stop, so a crash can lose up to a second of advances. Deleting the

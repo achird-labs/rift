@@ -1413,16 +1413,31 @@ impl ImposterManager {
         // Create imposter
         // A private journal per imposter unless one is shared, sized by the manager's byte
         // budget when one is set (issue #1441).
-        let journal = self.request_journal.clone().or_else(|| {
-            std::num::NonZeroUsize::new(
-                self.journal_max_bytes
-                    .load(std::sync::atomic::Ordering::SeqCst),
+        let own_journal = self.request_journal.is_none().then(|| {
+            Arc::new(
+                std::num::NonZeroUsize::new(
+                    self.journal_max_bytes
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                )
+                .map_or_else(
+                    super::journal::LocalJournal::default,
+                    super::journal::LocalJournal::with_max_bytes,
+                ),
             )
-            .map(|max| {
-                Arc::new(super::journal::LocalJournal::with_max_bytes(max))
-                    as Arc<dyn RequestJournal>
-            })
         });
+        let journal = self.request_journal.clone().or_else(|| {
+            own_journal
+                .clone()
+                .map(|local| local as Arc<dyn RequestJournal>)
+        });
+        // Only the imposter's own journal is written to the datadir (issue #1608): an injected
+        // one owns its storage.
+        let journal_file = match (&self.datadir, own_journal) {
+            (Some(datadir), Some(local)) if config.record_requests => Some(Arc::new(
+                super::core::JournalFile::new(datadir, port, local),
+            )),
+            _ => None,
+        };
         let mut imposter = Imposter::new_with_hooks_and_journal(
             config,
             self.flow_store_provider.as_ref(),
@@ -1430,6 +1445,7 @@ impl ImposterManager {
             journal,
         )
         .map_err(|e| ImposterError::FlowStoreConfig(format!("{e:#}")))?;
+        imposter.journal_file = journal_file;
         imposter.set_persistence(persistence);
         imposter.set_script_file_access(script_files);
         let floor = self.load_floors.lock().get(&port).copied();
@@ -1469,6 +1485,8 @@ impl ImposterManager {
         // Before the listener starts, so no request is served from the first response (#1603).
         if cursors == CursorStart::Resume {
             self.resume_cursors(&imposter, port).await;
+            // And its recorded requests come back (issue #1608), before any new one is recorded.
+            self.restore_journal(&imposter).await;
         }
 
         // Create shutdown channel for this imposter
@@ -2070,16 +2088,28 @@ impl ImposterManager {
             // the unlink and the removal.
             let _persist = self.persist_lock.lock().await;
             let imposter = self.get_imposter(port)?;
-            self.remove_persisted_imposter(&imposter).await?;
+            // Before the unlink, so a scoped clear or a flush cannot write its recorded requests
+            // back after it (issue #1608); undone if the imposter stays.
+            detach_journal(&imposter);
+            if let Err(e) = self.remove_persisted_imposter(&imposter).await {
+                if let Some(file) = &imposter.journal_file {
+                    file.reattach();
+                }
+                return Err(e);
+            }
             self.record_load_floor(port, &imposter);
             self.imposters
                 .remove_if_same(port, &imposter)
                 .ok_or(ImposterError::NotFound(port))?
         } else {
             self.record_load_floor(port, &*self.get_imposter(port)?);
-            self.imposters
+            let imposter = self
+                .imposters
                 .remove(port)
-                .ok_or(ImposterError::NotFound(port))?
+                .ok_or(ImposterError::NotFound(port))?;
+            // Before a replace's create on the port removes the file (issue #1608).
+            detach_journal(&imposter);
+            imposter
         };
 
         // Signal the accept loop and every live connection to stop (issue #207), then **await** the
@@ -3029,6 +3059,14 @@ impl ImposterManager {
             );
             imposter.mark_cursors_dirty();
         }
+        // The same for an earlier imposter's recorded requests (issue #1608).
+        if clear_cursors && let Err(e) = remove_journal_files(imposter, datadir, port).await {
+            // Runtime state: the create stands, and this imposter's first write replaces the file.
+            warn!(
+                port,
+                "could not remove a previous imposter's recorded requests file: {e}"
+            );
+        }
         let mut snapshot = imposter.config.clone();
         snapshot.stubs = imposter.get_stubs();
         // The atomic is the runtime truth; the retained config only holds the
@@ -3092,6 +3130,81 @@ impl ImposterManager {
                 "ignoring an unreadable cursor file; every cycle starts over: {e}"
             ),
         }
+    }
+
+    /// Read `{port}.requests.jsonl` back into a datadir imposter's journal before it serves (issue
+    /// #1608); see [`JournalFile::restore`](super::core::JournalFile). Runtime state, so a file
+    /// that cannot be read is ignored with a warning naming it and never refuses the imposter.
+    async fn restore_journal(&self, imposter: &Imposter) {
+        if imposter.persistence() == Persistence::Ephemeral {
+            return;
+        }
+        let Some(file) = imposter.journal_file.clone() else {
+            return;
+        };
+        let path = file.path().to_path_buf();
+        match tokio::task::spawn_blocking(move || file.restore()).await {
+            Ok(Ok(restored)) => {
+                if restored.skipped > 0 {
+                    warn!(
+                        ?path,
+                        skipped = restored.skipped,
+                        "skipped unreadable lines of the recorded requests file"
+                    );
+                }
+                debug!(
+                    restored = restored.entries,
+                    "restored recorded requests from {path:?}"
+                );
+            }
+            Ok(Err(e)) => warn!(
+                ?path,
+                "ignoring an unreadable recorded requests file; the journal starts empty: {e}"
+            ),
+            Err(e) => warn!(
+                ?path,
+                "restoring the recorded requests ended abnormally: {e}"
+            ),
+        }
+    }
+
+    /// Write behind every datadir imposter's recorded requests (issue #1608) and return the ones
+    /// that could not be written; a failed one is retried by the next flush. Writes everything
+    /// retained, for a graceful stop: the periodic flush of
+    /// [`start_cursor_flusher`](Self::start_cursor_flusher) holds back an entry still waiting for
+    /// its response, and calls this once more when stopped.
+    pub async fn flush_recorded_requests(&self) -> Vec<(u16, ImposterError)> {
+        self.flush_journals(super::core::Flush::Final).await
+    }
+
+    async fn flush_journals(&self, flush: super::core::Flush) -> Vec<(u16, ImposterError)> {
+        let mut failed = Vec::new();
+        for imposter in self.imposters.imposters() {
+            if imposter.persistence() == Persistence::Ephemeral {
+                continue;
+            }
+            let Some(file) = imposter.journal_file.clone() else {
+                continue;
+            };
+            if !file.has_work() {
+                continue;
+            }
+            let (port, path) = (file.port(), file.path().to_path_buf());
+            let written = tokio::task::spawn_blocking(move || file.flush(flush))
+                .await
+                .map_err(std::io::Error::other)
+                .and_then(|written| written);
+            if let Err(e) = written {
+                failed.push((
+                    port,
+                    ImposterError::PersistError(
+                        anyhow::Error::new(e)
+                            .context(format!("Failed to write recorded requests to {path:?}")),
+                    ),
+                ));
+            }
+        }
+        failed
     }
 
     /// Write `{port}.cursors` for every datadir imposter whose response cycles moved since the last
@@ -3163,12 +3276,12 @@ impl ImposterManager {
     /// loses at most one period of advances; [`CursorFlusher::stop`] flushes once more, so a
     /// graceful stop loses none.
     ///
-    /// `None`, and nothing spawned, when there is nothing to write: no datadir, or a
-    /// [`ResponseSequencer`](crate::behaviors::ResponseSequencer) holding the cursors.
+    /// It also writes each datadir imposter's recorded requests behind (issue #1608), holding back
+    /// an entry still waiting for its response for up to two periods, and its stop writes them all.
+    ///
+    /// `None`, and nothing spawned, without a datadir: there is nothing to write.
     pub fn start_cursor_flusher(self: &Arc<Self>, period: Duration) -> Option<CursorFlusher> {
-        if self.datadir.is_none() || self.sequencer.is_some() {
-            return None;
-        }
+        self.datadir.as_ref()?;
         let stop = tokio_util::sync::CancellationToken::new();
         let manager = Arc::downgrade(self);
         let cancelled = stop.clone();
@@ -3177,6 +3290,7 @@ impl ImposterManager {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // Ports whose last flush failed, so a broken datadir logs once, not every period.
             let mut failing = std::collections::HashSet::new();
+            let mut failing_requests = std::collections::HashSet::new();
             loop {
                 tokio::select! {
                     () = cancelled.cancelled() => break,
@@ -3185,7 +3299,16 @@ impl ImposterManager {
                 let Some(manager) = manager.upgrade() else {
                     break;
                 };
-                failing = log_new_flush_failures(&failing, manager.flush_cursors().await);
+                failing = log_new_flush_failures(
+                    &failing,
+                    manager.flush_cursors().await,
+                    "response cycle positions",
+                );
+                failing_requests = log_new_flush_failures(
+                    &failing_requests,
+                    manager.flush_journals(super::core::Flush::Tick).await,
+                    "recorded requests",
+                );
             }
         });
         Some(CursorFlusher {
@@ -3210,8 +3333,8 @@ impl ImposterManager {
     }
 
     /// Remove `{port}.json` from the datadir (if configured), whatever store the imposter was in,
-    /// its `{port}.cursors`, and any temp file a crash left beside them, so a deleted imposter leaves
-    /// nothing behind.
+    /// its `{port}.cursors` and `{port}.requests.jsonl`, and any temp file a crash left beside them,
+    /// so a deleted imposter leaves nothing behind.
     ///
     /// Callers must hold `persist_lock`: unlocked, the temp removal could land inside a concurrent
     /// write and fail its rename.
@@ -3221,11 +3344,14 @@ impl ImposterManager {
         };
         // The leftovers first: if one cannot be removed, the delete fails with `{port}.json` still in
         // place, so `Err` keeps meaning "not deleted" (issue #1124). `{port}.cursors` goes too (issue
-        // #1603), or a later imposter on the port with the same stubs would resume its positions.
+        // #1603), or a later imposter on the port with the same stubs would resume its positions,
+        // and `{port}.requests.jsonl` (issue #1608), or it would inherit the recorded requests.
         for path in [
             datadir_file::temp_path(datadir, port),
             datadir_file::cursors_temp_path(datadir, port),
             datadir_file::cursors_path(datadir, port),
+            datadir_file::requests_temp_path(datadir, port),
+            datadir_file::requests_path(datadir, port),
             datadir_file::data_path(datadir, port),
         ] {
             match tokio::fs::remove_file(&path).await {
@@ -3290,28 +3416,58 @@ async fn remove_cursor_files(datadir: &std::path::Path, port: u16) -> std::io::R
     Ok(())
 }
 
+/// Remove `{port}.requests.jsonl` and its temp file left by an earlier imposter on the port (issue
+/// #1608): through `imposter`'s own file when it has one, so a flush of it cannot interleave.
+/// Callers hold `persist_lock`.
+async fn remove_journal_files(
+    imposter: &Imposter,
+    datadir: &std::path::Path,
+    port: u16,
+) -> std::io::Result<()> {
+    match imposter.journal_file.clone() {
+        Some(file) => tokio::task::spawn_blocking(move || file.reset())
+            .await
+            .map_err(std::io::Error::other)?,
+        None => {
+            let (temp, path) = (
+                datadir_file::requests_temp_path(datadir, port),
+                datadir_file::requests_path(datadir, port),
+            );
+            tokio::task::spawn_blocking(move || super::core::journal_file_remove(&temp, &path))
+                .await
+                .map_err(std::io::Error::other)?
+        }
+    }
+}
+
+/// Stop `imposter` writing its recorded requests (issue #1608): it is leaving the manager.
+fn detach_journal(imposter: &Imposter) {
+    if let Some(file) = &imposter.journal_file {
+        file.detach();
+    }
+}
+
 /// Log each flush failure whose port was not already failing; return this round's failing ports.
 /// A failed port stays marked and is retried every period, so absence from a round means it was
 /// written (or deleted).
 fn log_new_flush_failures(
     failing: &std::collections::HashSet<u16>,
     failed: Vec<(u16, ImposterError)>,
+    what: &str,
 ) -> std::collections::HashSet<u16> {
     failed
         .into_iter()
         .map(|(port, e)| {
             if !failing.contains(&port) {
-                error!(
-                    port,
-                    "could not write the imposter's response cycle positions: {e}"
-                );
+                error!(port, "could not write the imposter's {what}: {e}");
             }
             port
         })
         .collect()
 }
 
-/// The datadir cursor flusher [`ImposterManager::start_cursor_flusher`] started (issue #1603).
+/// The datadir flusher [`ImposterManager::start_cursor_flusher`] started: response cycle
+/// positions (issue #1603) and recorded requests (issue #1608).
 /// Dropping it stops the periodic flush without the final one; [`stop`](Self::stop) does both.
 #[derive(Debug)]
 pub struct CursorFlusher {
@@ -3331,7 +3487,11 @@ impl CursorFlusher {
             error!("the cursor flusher ended abnormally: {e}");
         }
         match self.manager.upgrade() {
-            Some(manager) => manager.flush_cursors().await,
+            Some(manager) => {
+                let mut failed = manager.flush_cursors().await;
+                failed.extend(manager.flush_recorded_requests().await);
+                failed
+            }
             None => Vec::new(),
         }
     }
@@ -10487,12 +10647,11 @@ mod cursor_persistence_tests {
             assert!(std::time::Instant::now() < deadline, "written behind");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let flusher = {
-            drop(flusher);
-            manager
-                .start_cursor_flusher(Duration::from_secs(3600))
-                .expect("restarted")
-        };
+        // Stopped and awaited, not dropped: a dropped flusher's tick can still be writing.
+        assert!(flusher.stop().await.is_empty());
+        let flusher = manager
+            .start_cursor_flusher(Duration::from_secs(3600))
+            .expect("restarted");
         serve(&manager, port, 0);
         assert!(flusher.stop().await.is_empty());
         let file = std::fs::read(cursors(dir.path(), port)).expect("written");
@@ -10512,5 +10671,519 @@ mod cursor_persistence_tests {
                 .start_cursor_flusher(Duration::from_secs(1))
                 .is_none()
         );
+    }
+}
+
+/// Issue #1608: each datadir imposter's recorded requests in `{port}.requests.jsonl`, written behind
+/// by the flusher, rewritten by scoped clears, removed by a clear or a delete, and read back when
+/// the imposter is loaded from its datadir file.
+#[cfg(test)]
+mod journal_persistence_tests {
+    use super::super::core::Flush;
+    use super::*;
+    use crate::imposter::types::RecordedRequest;
+    use serde_json::json;
+
+    fn recording() -> ImposterConfig {
+        serde_json::from_value(json!({"protocol": "http", "recordRequests": true, "stubs": []}))
+            .expect("config")
+    }
+
+    fn request(path: &str, body: Option<&str>) -> RecordedRequest {
+        serde_json::from_value(json!({
+            "requestFrom": "127.0.0.1:1",
+            "method": if body.is_some() { "POST" } else { "GET" },
+            "path": path,
+            "query": {},
+            "headers": {"Host": "localhost"},
+            "body": body,
+            "timestamp": format!("2026-10-22T00:00:00.{:03}Z", path.len()),
+        }))
+        .expect("request")
+    }
+
+    /// Record `path` the way the handler does: journalled, then answered.
+    fn serve(manager: &ImposterManager, port: u16, path: &str, body: Option<&str>) -> u64 {
+        let imposter = manager.get_imposter(port).expect("running");
+        imposter.increment_request_count();
+        let index = imposter
+            .record_request(request(path, body))
+            .expect("recorded");
+        imposter.attach_response_outcome(index, 200, 1);
+        index
+    }
+
+    fn file(dir: &std::path::Path, port: u16) -> std::path::PathBuf {
+        datadir_file::requests_path(dir, port)
+    }
+
+    /// The paths in `{port}.requests.jsonl`, after checking its header.
+    fn paths_on_disk(dir: &std::path::Path, port: u16) -> Vec<String> {
+        let text = std::fs::read_to_string(file(dir, port)).expect("written");
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some(r#"{"version":1}"#));
+        lines
+            .map(|line| {
+                let line: serde_json::Value = serde_json::from_str(line).expect("a JSON line");
+                line["request"]["path"].as_str().expect("path").to_string()
+            })
+            .collect()
+    }
+
+    fn paths(manager: &ImposterManager, port: u16) -> Vec<String> {
+        manager
+            .get_imposter(port)
+            .expect("running")
+            .get_recorded_requests()
+            .into_iter()
+            .map(|r| r.path)
+            .collect()
+    }
+
+    fn persisted(dir: &std::path::Path, port: u16) -> ImposterConfig {
+        let text = std::fs::read_to_string(datadir_file::data_path(dir, port)).expect("persisted");
+        serde_json::from_str(&text).expect("decodes")
+    }
+
+    async fn exit(manager: &ImposterManager, port: u16) {
+        manager
+            .delete_imposter_inner(port, false)
+            .await
+            .expect("stopped");
+    }
+
+    async fn reload(dir: &std::path::Path, port: u16, manager: ImposterManager) -> ImposterManager {
+        manager
+            .create_imposter_resuming(persisted(dir, port), ScriptFileAccess::Refused)
+            .await
+            .expect("load");
+        manager
+    }
+
+    #[tokio::test]
+    async fn recorded_requests_come_back_in_the_next_process_and_the_count_starts_over() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = first.create_imposter(recording()).await.expect("create");
+        serve(&first, port, "/a", None);
+        serve(&first, port, "/b", Some("hello"));
+        assert!(first.flush_recorded_requests().await.is_empty());
+        exit(&first, port).await;
+
+        let second = reload(
+            dir.path(),
+            port,
+            ImposterManager::with_datadir(Some(dir.path().into())),
+        )
+        .await;
+        let imposter = second.get_imposter(port).expect("running");
+        assert_eq!(imposter.get_request_count(), 0, "numberOfRequests restarts");
+        serve(&second, port, "/c", None);
+        let requests = imposter.get_recorded_requests();
+        assert_eq!(paths(&second, port), ["/a", "/b", "/c"]);
+        assert_eq!(requests[1].body.as_deref(), Some("hello"));
+        assert_eq!(requests[1].timestamp, "2026-10-22T00:00:00.002Z");
+        assert_eq!(requests[1].status, Some(200), "annotations survive");
+        assert_eq!(imposter.get_request_count(), 1);
+        second.delete_all().await;
+        assert!(!file(dir.path(), port).exists(), "a delete removes it");
+    }
+
+    #[tokio::test]
+    async fn an_entry_waiting_for_its_response_holds_the_flush_back_and_is_written_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = manager.create_imposter(recording()).await.expect("create");
+        let imposter = manager.get_imposter(port).expect("running");
+        serve(&manager, port, "/done", None);
+        let waiting = imposter
+            .record_request(request("/waiting", None))
+            .expect("recorded");
+        serve(&manager, port, "/after", None);
+        assert!(manager.flush_journals(Flush::Tick).await.is_empty());
+        assert_eq!(
+            paths_on_disk(dir.path(), port),
+            ["/done"],
+            "nothing past the entry still waiting"
+        );
+        imposter.attach_response_outcome(waiting, 201, 5);
+        assert!(manager.flush_journals(Flush::Tick).await.is_empty());
+        assert_eq!(
+            paths_on_disk(dir.path(), port),
+            ["/done", "/waiting", "/after"]
+        );
+        let text = std::fs::read_to_string(file(dir.path(), port)).expect("written");
+        assert!(text.contains(r#""status":201"#), "with its outcome: {text}");
+        assert!(manager.flush_journals(Flush::Tick).await.is_empty());
+        assert_eq!(paths_on_disk(dir.path(), port).len(), 3, "written once");
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn an_entry_that_never_gets_a_response_is_written_after_two_flushes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = manager.create_imposter(recording()).await.expect("create");
+        let imposter = manager.get_imposter(port).expect("running");
+        imposter
+            .record_request(request("/aborted", None))
+            .expect("recorded");
+        for _ in 0..SETTLE {
+            manager.flush_journals(Flush::Tick).await;
+            assert!(!file(dir.path(), port).exists());
+        }
+        manager.flush_journals(Flush::Tick).await;
+        assert_eq!(paths_on_disk(dir.path(), port), ["/aborted"]);
+        manager.delete_all().await;
+    }
+
+    const SETTLE: u32 = super::super::core::journal_settle_ticks();
+
+    #[tokio::test]
+    async fn the_final_flush_writes_an_entry_still_waiting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = manager.create_imposter(recording()).await.expect("create");
+        let imposter = manager.get_imposter(port).expect("running");
+        imposter
+            .record_request(request("/in-flight", None))
+            .expect("recorded");
+        assert!(manager.flush_recorded_requests().await.is_empty());
+        assert_eq!(paths_on_disk(dir.path(), port), ["/in-flight"]);
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_restore_applies_the_byte_budget_and_compacts_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = first.create_imposter(recording()).await.expect("create");
+        let body = "x".repeat(1000);
+        for i in 0..10 {
+            serve(&first, port, &format!("/{i}"), Some(&body));
+        }
+        first.flush_recorded_requests().await;
+        exit(&first, port).await;
+        assert_eq!(paths_on_disk(dir.path(), port).len(), 10);
+
+        // Room for three of them.
+        let cost = crate::imposter::journal::entry_cost(&request("/0", Some(&body)));
+        let second = reload(
+            dir.path(),
+            port,
+            ImposterManager::with_datadir(Some(dir.path().into()))
+                .with_journal_max_bytes(std::num::NonZeroUsize::new(3 * cost).expect("non-zero")),
+        )
+        .await;
+        assert_eq!(paths(&second, port), ["/7", "/8", "/9"]);
+        assert_eq!(
+            paths_on_disk(dir.path(), port),
+            ["/7", "/8", "/9"],
+            "compacted on load"
+        );
+        second.delete_all().await;
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_truncated_last_line_is_dropped_quietly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = first.create_imposter(recording()).await.expect("create");
+        serve(&first, port, "/a", None);
+        serve(&first, port, "/b", None);
+        first.flush_recorded_requests().await;
+        exit(&first, port).await;
+        let mut text = std::fs::read_to_string(file(dir.path(), port)).expect("written");
+        text.truncate(text.len() - 20);
+        std::fs::write(file(dir.path(), port), text).expect("truncate");
+
+        let second = reload(
+            dir.path(),
+            port,
+            ImposterManager::with_datadir(Some(dir.path().into())),
+        )
+        .await;
+        assert_eq!(paths(&second, port), ["/a"]);
+        assert!(!logs_contain("skipped unreadable lines"));
+        assert_eq!(paths_on_disk(dir.path(), port), ["/a"], "rewritten whole");
+        serve(&second, port, "/c", None);
+        second.flush_recorded_requests().await;
+        assert_eq!(paths_on_disk(dir.path(), port), ["/a", "/c"]);
+        second.delete_all().await;
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_corrupt_line_is_skipped_with_one_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = first.create_imposter(recording()).await.expect("create");
+        for path in ["/a", "/b", "/c"] {
+            serve(&first, port, path, None);
+        }
+        first.flush_recorded_requests().await;
+        exit(&first, port).await;
+        let text = std::fs::read_to_string(file(dir.path(), port)).expect("written");
+        let mut lines: Vec<&str> = text.lines().collect();
+        lines[2] = "{not json";
+        lines.insert(1, "[]");
+        std::fs::write(file(dir.path(), port), lines.join("\n") + "\n").expect("corrupt");
+
+        let second = reload(
+            dir.path(),
+            port,
+            ImposterManager::with_datadir(Some(dir.path().into())),
+        )
+        .await;
+        assert_eq!(paths(&second, port), ["/a", "/c"]);
+        logs_assert(|lines: &[&str]| {
+            let warned: Vec<_> = lines
+                .iter()
+                .filter(|l| l.contains("skipped unreadable lines"))
+                .collect();
+            match warned.as_slice() {
+                [line] if line.contains("skipped=2") && line.contains(".requests.jsonl") => Ok(()),
+                other => Err(format!("expected one warning naming the file: {other:?}")),
+            }
+        });
+        second.delete_all().await;
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_file_of_another_version_is_ignored_with_a_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = first.create_imposter(recording()).await.expect("create");
+        exit(&first, port).await;
+        std::fs::write(file(dir.path(), port), "{\"version\":2}\n{}\n").expect("seed");
+        let second = reload(
+            dir.path(),
+            port,
+            ImposterManager::with_datadir(Some(dir.path().into())),
+        )
+        .await;
+        assert!(paths(&second, port).is_empty());
+        assert!(logs_contain(
+            "ignoring an unreadable recorded requests file"
+        ));
+        second.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_scoped_clear_rewrites_the_file_and_a_clear_removes_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = manager.create_imposter(recording()).await.expect("create");
+        let imposter = manager.get_imposter(port).expect("running");
+        for path in ["/a", "/b", "/c"] {
+            serve(&manager, port, path, None);
+        }
+        manager.flush_recorded_requests().await;
+        imposter.retain_recorded_requests(|r| r.path != "/b");
+        assert_eq!(paths_on_disk(dir.path(), port), ["/a", "/c"], "retain");
+        // No space is resolved for these requests, so every entry is in the default flow.
+        imposter.teardown_space("other").expect("teardown");
+        assert_eq!(paths_on_disk(dir.path(), port), ["/a", "/c"]);
+        imposter.clear_recorded_requests().expect("clear");
+        assert!(!file(dir.path(), port).exists(), "clear removes it");
+        manager.flush_journals(Flush::Tick).await;
+        assert!(
+            !file(dir.path(), port).exists(),
+            "and a flush does not bring it back"
+        );
+        serve(&manager, port, "/d", None);
+        manager.flush_journals(Flush::Tick).await;
+        assert_eq!(paths_on_disk(dir.path(), port), ["/d"]);
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_clear_flow_rewrites_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = manager.create_imposter(recording()).await.expect("create");
+        let imposter = manager.get_imposter(port).expect("running");
+        let local = imposter.journal_file.as_ref().expect("persisted").journal();
+        local.record_indexed(port, "space-a", request("/a", None));
+        local.record_indexed(port, "space-b", request("/b", None));
+        manager.flush_recorded_requests().await;
+        imposter.teardown_space("space-a").expect("teardown");
+        assert_eq!(paths_on_disk(dir.path(), port), ["/b"]);
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_clear_that_cannot_remove_the_file_fails_and_keeps_the_requests() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = manager.create_imposter(recording()).await.expect("create");
+        let imposter = manager.get_imposter(port).expect("running");
+        serve(&manager, port, "/a", None);
+        // A non-empty directory where the file goes cannot be unlinked.
+        std::fs::create_dir(file(dir.path(), port)).expect("block");
+        std::fs::write(file(dir.path(), port).join("x"), "x").expect("block");
+        assert!(imposter.clear_recorded_requests().is_err());
+        assert_eq!(paths(&manager, port), ["/a"], "not cleared");
+        std::fs::remove_dir_all(file(dir.path(), port)).expect("unblock");
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_write_of_a_deleted_imposter_does_not_bring_its_file_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = manager.create_imposter(recording()).await.expect("create");
+        serve(&manager, port, "/a", None);
+        // What the flusher and a racing admin call hold across the delete.
+        let imposter = manager.get_imposter(port).expect("running");
+        manager.delete_imposter(port).await.expect("delete");
+        let journal_file = imposter.journal_file.clone().expect("persisted");
+        journal_file.flush(Flush::Final).expect("a no-op");
+        assert!(
+            !file(dir.path(), port).exists(),
+            "a flush brings nothing back"
+        );
+        imposter.retain_recorded_requests(|_| true);
+        assert!(!file(dir.path(), port).exists(), "nor does a scoped clear");
+        imposter.clear_recorded_requests().expect("clear");
+        assert!(!file(dir.path(), port).exists());
+    }
+
+    #[tokio::test]
+    async fn a_replace_does_not_inherit_the_old_imposters_requests() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = manager.create_imposter(recording()).await.expect("create");
+        serve(&manager, port, "/old", None);
+        manager.flush_recorded_requests().await;
+        let old = manager.get_imposter(port).expect("running");
+        let mut renamed = persisted(dir.path(), port);
+        renamed.name = Some("renamed".into());
+        let report = manager.apply_config(vec![renamed]).await.expect("apply");
+        assert_eq!(report.replaced, vec![port]);
+        assert!(!file(dir.path(), port).exists(), "the replace drops it");
+        old.retain_recorded_requests(|_| true);
+        assert!(
+            !file(dir.path(), port).exists(),
+            "and the replaced imposter writes nothing more"
+        );
+        old.journal_file
+            .as_ref()
+            .expect("persisted")
+            .flush(Flush::Final)
+            .expect("a no-op");
+        assert!(!file(dir.path(), port).exists());
+        serve(&manager, port, "/new", None);
+        manager.flush_recorded_requests().await;
+        assert_eq!(paths_on_disk(dir.path(), port), ["/new"]);
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn nothing_is_written_without_recording_for_an_injected_journal_or_an_ephemeral_imposter()
+    {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()));
+        let quiet: ImposterConfig =
+            serde_json::from_value(json!({"protocol": "http", "stubs": []})).expect("config");
+        let port = manager.create_imposter(quiet).await.expect("create");
+        let imposter = manager.get_imposter(port).expect("running");
+        assert!(imposter.journal_file.is_none());
+        assert!(imposter.record_request(request("/a", None)).is_none());
+        let ephemeral = manager
+            .create_imposter_as(recording(), Persistence::Ephemeral)
+            .await
+            .expect("create");
+        serve(&manager, ephemeral, "/a", None);
+        assert!(manager.flush_recorded_requests().await.is_empty());
+        assert!(!file(dir.path(), port).exists());
+        assert!(!file(dir.path(), ephemeral).exists());
+        manager.delete_all().await;
+
+        let injected = ImposterManager::with_datadir(Some(dir.path().into()))
+            .with_request_journal(Arc::new(crate::imposter::journal::LocalJournal::default()));
+        let port = injected.create_imposter(recording()).await.expect("create");
+        serve(&injected, port, "/a", None);
+        assert!(
+            injected
+                .get_imposter(port)
+                .expect("running")
+                .journal_file
+                .is_none()
+        );
+        assert!(injected.flush_recorded_requests().await.is_empty());
+        assert!(!file(dir.path(), port).exists());
+        injected.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn compaction_bounds_the_file_and_leaves_exactly_the_retained_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let body = "x".repeat(10 * 1024);
+        let cost = crate::imposter::journal::entry_cost(&request("/00000", Some(&body)));
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()))
+            .with_journal_max_bytes(std::num::NonZeroUsize::new(8 * cost).expect("non-zero"));
+        let port = manager.create_imposter(recording()).await.expect("create");
+        let mut largest = 0;
+        let mut compacted = false;
+        for i in 0..400 {
+            serve(&manager, port, &format!("/{i:05}"), Some(&body));
+            assert!(manager.flush_journals(Flush::Tick).await.is_empty());
+            let size = std::fs::metadata(file(dir.path(), port))
+                .expect("written")
+                .len();
+            compacted |= size < largest;
+            largest = largest.max(size);
+        }
+        assert!(compacted, "the file was compacted at least once");
+        // Twice the 1 MiB floor, plus the one line the flush that crossed it appended.
+        assert!(largest <= 2 * 1024 * 1024 + 11 * 1024, "bounded: {largest}");
+        // One more flush that crosses the threshold leaves exactly what the journal retains.
+        loop {
+            let before = std::fs::metadata(file(dir.path(), port))
+                .expect("written")
+                .len();
+            serve(&manager, port, "/99999", Some(&body));
+            manager.flush_journals(Flush::Tick).await;
+            if std::fs::metadata(file(dir.path(), port))
+                .expect("written")
+                .len()
+                < before
+            {
+                break;
+            }
+        }
+        assert_eq!(paths_on_disk(dir.path(), port), paths(&manager, port));
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn the_flusher_writes_requests_behind_and_its_stop_writes_the_rest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = Arc::new(ImposterManager::with_datadir(Some(dir.path().into())));
+        let port = manager.create_imposter(recording()).await.expect("create");
+        let flusher = manager
+            .start_cursor_flusher(Duration::from_millis(20))
+            .expect("a datadir manager flushes");
+        serve(&manager, port, "/a", None);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !file(dir.path(), port).exists() {
+            assert!(std::time::Instant::now() < deadline, "written behind");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Stopped and awaited, not dropped: a dropped flusher's tick can still be writing.
+        assert!(flusher.stop().await.is_empty());
+        let flusher = manager
+            .start_cursor_flusher(Duration::from_secs(3600))
+            .expect("restarted");
+        manager
+            .get_imposter(port)
+            .expect("running")
+            .record_request(request("/in-flight", None));
+        assert!(flusher.stop().await.is_empty());
+        assert_eq!(paths_on_disk(dir.path(), port), ["/a", "/in-flight"]);
+        manager.delete_all().await;
     }
 }

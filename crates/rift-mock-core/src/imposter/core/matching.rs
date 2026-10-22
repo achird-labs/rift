@@ -785,7 +785,15 @@ impl Imposter {
         // stale, but the first failure still surfaces (issues #318, #330) — never report a
         // clean teardown while stale recorded requests or scenario state persist in the backend.
         let mut first_err = None;
-        if let Err(e) = self.journal.clear_flow(self.journal_port(), space) {
+        let (cleared, written) =
+            self.delete_recorded(|| self.journal.clear_flow(self.journal_port(), space));
+        // A rewrite of `{port}.requests.jsonl` that failed (issue #1608) is a clear a restart undoes.
+        let cleared = cleared.and_then(|()| {
+            written.map_err(|e| {
+                anyhow::Error::new(e).context("could not rewrite the recorded requests file")
+            })
+        });
+        if let Err(e) = cleared {
             warn!("space teardown: failed to clear recorded requests for '{space}': {e:#}");
             first_err.get_or_insert(e);
         }
