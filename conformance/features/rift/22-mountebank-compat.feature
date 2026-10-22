@@ -247,15 +247,14 @@ Feature: Mountebank compatibility — predicates, imposter options and response 
     And the client sends "POST" "/lookup-xpath-ns"
     Then the response body is "n=second"
 
-  # Rift-only divergence: a selector prefix with no `ns` binding selects nothing, so the token stays
-  # (as #1402 does for an empty selection) and the request is answered 200. Mountebank 2.9.5 fails the
-  # request with 500 "malformed xpath predicate selector".
-  Scenario: copy using xpath with an unbound prefix leaves the token
+  # A selector prefix with no `ns` binding fails the request, as in Mountebank 2.9.5, even though the
+  # document declares it (issue #1585; it used to select nothing and leave the token).
+  Scenario: copy using xpath with an unbound prefix fails the request
     Given a fresh imposter from fixture "mbcompat/behaviors"
     When the request body is "<r xmlns:a=\"urn:a\"><a:id>9</a:id></r>"
     And the client sends "POST" "/copy-xpath-unbound"
-    Then the response status is 200
-    And the response body is "v=$X"
+    Then the response status is 500
+    And the error envelope message contains "malformed xpath predicate selector"
 
   # The regex returns the first capture group (a documented Mountebank divergence: MB returns the
   # whole match), and options.ignoreCase lets /COPY-REGEX/ match /copy-regex/.

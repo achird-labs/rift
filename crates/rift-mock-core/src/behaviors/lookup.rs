@@ -1,7 +1,7 @@
 //! Lookup behavior - query external data sources.
 
 use super::copy::CopySource;
-use super::extraction::ExtractionMethod;
+use super::extraction::{ExtractionMethod, XPathSelectorError};
 use super::request::RequestContext;
 use super::spliced::{
     Spliced, SplicedHeaders, authored_headers, plain_headers, replace_response_token,
@@ -104,18 +104,29 @@ impl From<usize> for LookupIndex {
 impl LookupKey {
     /// The key this lookup reads the row by, or `None` when the request yields none. An absent
     /// request field is `undefined`, which a regex reads as text (issue #1583).
-    pub fn extract(&self, request: &RequestContext) -> Option<String> {
-        let source =
-            super::copy::source_or_undefined(&self.extraction, self.from.extract(request))?;
+    ///
+    /// # Errors
+    ///
+    /// An XPath `using` that fails when it runs (issue #1585).
+    pub fn extract(&self, request: &RequestContext) -> Result<Option<String>, XPathSelectorError> {
+        let Some(source) =
+            super::copy::source_or_undefined(&self.extraction, self.from.extract(request))
+        else {
+            return Ok(None);
+        };
         match &self.index {
             None => self.extraction.extract(&source),
             Some(index) => {
-                let position = index.position()?;
-                self.extraction
-                    .matches(&source)
+                // Domain-optional: an index that is no array position finds no row (issue #1582).
+                let Some(position) = index.position() else {
+                    return Ok(None);
+                };
+                Ok(self
+                    .extraction
+                    .matches(&source)?
                     .into_iter()
                     .nth(position)
-                    .flatten()
+                    .flatten())
             }
         }
     }
@@ -629,8 +640,15 @@ pub(crate) fn apply_lookup_spliced(
     stub: crate::imposter::headers::StubRef<'_>,
 ) {
     for behavior in behaviors {
-        // Extract key from request
-        let key_value = behavior.key.extract(request);
+        // Mountebank's `lookup` catches a key selector that fails (issue #1585), logs it at error
+        // level and leaves the response as it is, so the token stays as authored.
+        let key_value = match behavior.key.extract(request) {
+            Ok(key) => key,
+            Err(e) => {
+                tracing::error!("lookup key: {e}; the response is served without this lookup");
+                continue;
+            }
+        };
 
         if let Some(key) = key_value {
             // Load CSV data
@@ -1722,7 +1740,8 @@ mod tests {
             &[copy],
             &request,
             FIXTURE_STUB,
-        );
+        )
+        .expect("copies");
         apply_lookup_spliced(
             &mut body,
             &mut headers,

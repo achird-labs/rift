@@ -75,13 +75,17 @@ async fn copy_xpath_with_ns_copies_the_prefixed_value() {
 }
 
 #[tokio::test]
-async fn copy_xpath_without_ns_selects_nothing_prefixed() {
+async fn copy_xpath_without_ns_fails_on_the_prefix() {
     let body = served_body(copy_stub(
         json!({ "method": "xpath", "selector": "//mb:name" }),
     ))
     .await;
-    // Nothing selected leaves the token as authored, as Mountebank does (issue #1402).
-    assert_eq!(body, "hello ${NAME}");
+    // Mountebank resolves a prefix from the `ns` map only, even one the document declares, and
+    // fails the request when it cannot (issue #1585).
+    assert!(
+        body.contains("malformed xpath predicate selector"),
+        "{body}"
+    );
 }
 
 #[tokio::test]

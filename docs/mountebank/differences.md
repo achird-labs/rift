@@ -36,8 +36,9 @@ header.
 Error envelopes carry `code` (the HTTP status), `type` and `message` — see the
 [API reference](../api/index.md) — where Mountebank's carry `code` (Rift's `type`) and `message`. Rift
 does not add Mountebank's `source`, `name` or `stack` fields, and its messages are worded
-differently. A throwing predicate `inject` carries `code` `invalid predicate injection`, where
-Mountebank says `invalid injection`.
+differently. Nor does it add `inner`, the error Mountebank wraps in a `bad data` one. A throwing
+predicate `inject` carries `code` `invalid predicate injection`, where Mountebank says
+`invalid injection`.
 
 When an imposter's address is held by another process, both engines answer `400`; Mountebank's body
 is node's raw `EADDRINUSE` object (`code`, `errno`, `syscall`, `address`, `port`, no `message`), Rift's
@@ -276,7 +277,7 @@ the document stays readable (see [Predicates](predicates.md#xpath-predicates)). 
 - A body with a DOCTYPE still matches a case-insensitive XPath predicate in Rift. In Mountebank it never matches: the lowercased `<!doctype` is no document to xmldom.
 - Rift lowercases the prefixes of `ns` as well as its URIs; Mountebank lowercases only the URIs, so
   in Mountebank an upper-case prefix (`"ns": {"SOAP": …}` with `//SOAP:Body`) is left unbound once
-  the selector is lowercased and selects nothing.
+  the selector is lowercased, and the request fails with `500`.
 - Rift lowercases ASCII letters only, as every case-insensitive comparison in Rift does; Mountebank
   lowercases any letter.
 
@@ -287,6 +288,20 @@ An XPath selector that evaluates to a string, such as `string(//a)`, works in Ri
 Rift keeps it because it is the way to read an element's whole text: a selector that selects an
 element reads, as in Mountebank, only the element's first child node (see
 [XPath predicates](predicates.md#xpath-predicates)).
+
+## XPath selectors that do not compile or cannot run
+
+Rift refuses an imposter whose `jsonpath` or `xpath` selector (in a predicate, `copy` or `lookup`)
+does not compile, with `400` when it is loaded. Mountebank accepts it, then fails every request that
+reaches an XPath one with `500` and never matches a JSONPath one. The same holds for an `inject`
+response whose JavaScript does not compile. An imposter that can only fail is reported when it is
+loaded.
+
+An XPath selector that compiles but fails when it runs answers `500`, as in Mountebank (see
+[XPath predicates](predicates.md#xpath-predicates)). Rift checks the prefixes a selector names
+against `ns` before it runs, so it fails on an XML body even when Mountebank's evaluation would never
+reach the prefixed step, as in `//absent/x:a` on a document with no `absent` element, or
+`//b or x:a` where `//b` is found.
 
 ## keyCaseSensitive is honoured as written
 

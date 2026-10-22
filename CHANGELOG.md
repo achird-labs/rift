@@ -222,6 +222,17 @@ record.
 
 ### Fixed
 
+- **An XPath selector that cannot be evaluated fails the request** (#1585). A selector that
+  compiled but could not run (a namespace prefix `ns` does not bind, an unknown function or
+  variable, a function given the wrong arguments) was read as empty, so `equals {body: ""}`,
+  `exists {body: false}` and `not` behind it matched every request. In a predicate or a `copy` it now
+  answers `500 malformed xpath predicate selector`, as Mountebank does; a `lookup` whose key
+  selector fails is skipped and logged, as in Mountebank. A prefix must be bound in `ns` even when
+  the document declares it, which Mountebank also requires: such a selector used to select nothing
+  and now fails. A body that is not XML still never runs the selector. Embedders:
+  `ExtractionMethod::extract`/`matches`, `LookupKey::extract`, `extract_xpath`,
+  `extract_xpath_with_ns` and `apply_copy_behaviors` now return `Result<_, XPathSelectorError>`.
+
 - **`copy`/`lookup` from a missing field, and tokens in header names** (#1583). A regex `copy` or
   `lookup` whose request field is absent now reads the text `undefined`, as Mountebank does (`.*`
   copies `undefined`; a JSONPath or XPath selector still extracts nothing and leaves the token). A
