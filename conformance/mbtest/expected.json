@@ -132,15 +132,15 @@
     },
     {
       "id": "api/http/httpInjectionTest.js::http imposter POST /imposters with injections should allow access to the global process object",
-      "class": "bug",
-      "issue": "#1593",
-      "note": "inject runs in Boa, not Node: no `process`, `require` or timers"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#scripts-run-in-an-ecmascript-sandbox-not-node",
+      "note": "reads `process.env`: scripts have no `process` (owner decision on #1593)"
     },
     {
       "id": "api/http/httpInjectionTest.js::http imposter POST /imposters with injections should allow asynchronous injection",
-      "class": "bug",
-      "issue": "#1593",
-      "note": "an async (callback) inject needs Node's `require('http')`/timers"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#scripts-run-in-an-ecmascript-sandbox-not-node",
+      "note": "the inject calls `require('http')`: scripts have no Node core modules (#1593)"
     },
     {
       "id": "api/http/httpInjectionTest.js::https imposter POST /imposters with injections should allow synchronous javascript injection for responses (old interface)",
@@ -156,15 +156,15 @@
     },
     {
       "id": "api/http/httpInjectionTest.js::https imposter POST /imposters with injections should allow access to the global process object",
-      "class": "bug",
-      "issue": "#1593",
-      "note": "inject runs in Boa, not Node: no `process`, `require` or timers"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#scripts-run-in-an-ecmascript-sandbox-not-node",
+      "note": "reads `process.env`: scripts have no `process` (owner decision on #1593)"
     },
     {
       "id": "api/http/httpInjectionTest.js::https imposter POST /imposters with injections should allow asynchronous injection",
-      "class": "bug",
-      "issue": "#1593",
-      "note": "an async (callback) inject needs Node's `require('http')`/timers"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#scripts-run-in-an-ecmascript-sandbox-not-node",
+      "note": "the inject calls `require('http')`: scripts have no Node core modules (#1593)"
     },
     {
       "id": "api/http/httpMetricsTest.js::Metrics GET /metrics should return imposter metrics after imposters calls",
@@ -520,9 +520,9 @@
     },
     {
       "id": "docs:/docs/api/injection#predicate response",
-      "class": "bug",
-      "issue": "#1593",
-      "note": "the inject calls require('http')"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#scripts-run-in-an-ecmascript-sandbox-not-node",
+      "note": "the inject calls `require('http')`: scripts have no Node core modules (#1593)"
     },
     {
       "id": "docs:/docs/api/json#json",
