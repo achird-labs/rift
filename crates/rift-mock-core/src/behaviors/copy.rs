@@ -81,14 +81,18 @@ impl CopySource {
 }
 
 /// The value under `name`, matched ASCII-case-insensitively as Mountebank's `getKeyIgnoringCase`
-/// does. An exact key wins so the result does not depend on `HashMap` order when both spellings
-/// exist.
-fn ignoring_case<'a, V>(map: &'a HashMap<String, V>, name: &str) -> Option<&'a V> {
-    map.get(name).or_else(|| {
-        map.iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v)
-    })
+/// does. An exact key wins so the result does not depend on map order when both spellings exist.
+/// Takes any map's entries, so the insertion-ordered query and form (issue #1596) and the headers
+/// share it.
+fn ignoring_case<'a, V: 'a>(
+    map: impl IntoIterator<Item = (&'a String, &'a V)> + Clone,
+    name: &str,
+) -> Option<&'a V> {
+    map.clone()
+        .into_iter()
+        .find(|(k, _)| k.as_str() == name)
+        .or_else(|| map.into_iter().find(|(k, _)| k.eq_ignore_ascii_case(name)))
+        .map(|(_, v)| v)
 }
 
 /// Apply copy behaviors to response body. Treats `body` and `headers` as authored text; the
@@ -263,12 +267,18 @@ mod tests {
         RequestContext {
             method: "POST".into(),
             path: "/Pth".into(),
-            query: HashMap::from([("q".into(), vec!["qv".into(), "second".into()])]),
+            query: crate::util::OrderedMap::from_iter([(
+                "q".into(),
+                vec!["qv".into(), "second".into()],
+            )]),
             headers: HashMap::from([("X-Test".into(), "hv".into())]),
             body: Some("b".into()),
             ip: Some("::ffff:127.0.0.1".into()),
             request_from: Some("::ffff:127.0.0.1:55333".into()),
-            form: Some(HashMap::from([("f".into(), "fv".into())])),
+            form: Some(crate::util::OrderedMap::from_iter([(
+                "f".into(),
+                "fv".into(),
+            )])),
             ..Default::default()
         }
     }
