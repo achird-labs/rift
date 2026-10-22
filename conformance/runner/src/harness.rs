@@ -98,6 +98,9 @@ impl Mode {
             (Self::Embedded, "front-door") => Some(
                 "drives the front door of `rift --front-door`, which rift_serve_admin has no option for",
             ),
+            (Self::Embedded, "log-ring") => Some(
+                "reads entries from GET /logs, which the binary fills through its own tracing subscriber; rift_serve_admin installs none, so the host owns logging and /logs answers `No logfile`",
+            ),
             (Self::Container, "upstream-trust") => Some(
                 "starts a second engine with --upstream-ca-file, which this harness only spawns in external mode",
             ),
@@ -1872,7 +1875,7 @@ mod tests {
 
     #[test]
     fn only_embedded_excludes_the_spawned_engine_tags() {
-        for tag in ["upstream-trust", "front-door"] {
+        for tag in ["upstream-trust", "front-door", "log-ring"] {
             assert!(Mode::Embedded.excludes(tag).is_some(), "{tag}");
             assert!(Mode::External.excludes(tag).is_none(), "{tag}");
         }
