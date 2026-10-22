@@ -21,3 +21,8 @@ futures = { workspace = true }
 # imposter over TLS, accepting its self-signed certificate.
 reqwest = { workspace = true, features = ["rustls"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time", "net", "io-util", "sync"] }
+
+[dev-dependencies]
+# tests/generative.rs (issue #1549): random imposters and admin sequences, shrunk to cases. A
+# dev-dependency only: the generator is a test target, not part of the library.
+proptest = { workspace = true }

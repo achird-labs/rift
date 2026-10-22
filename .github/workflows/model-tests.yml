@@ -8,6 +8,12 @@ name: Model tests
 #
 # A failing case is shrunk and its seed written to tests/proptest-regressions/model.txt, which is
 # uploaded: check the line in alongside the fix, and every later run replays it first.
+#
+# Issue #1549: the `generative` job runs the same generators against Mountebank as the oracle
+# (conformance/differential/tests/generative.rs) for 20 minutes, seeded by the run id. A divergence
+# is shrunk, re-run three times, uploaded as a case file, and filed — or, when an open issue
+# already carries its `gen-sig:` signature, commented on. An infrastructure failure (ports, an
+# engine that stopped answering) fails the job without filing anything.
 on:
   schedule:
     - cron: "41 2 * * *" # nightly 02:41 UTC
@@ -17,6 +23,14 @@ on:
         description: "Random cases to run (PROPTEST_CASES)"
         required: false
         default: "2048"
+      gen_seconds:
+        description: "Generative differential budget in seconds (RIFT_GEN_SECONDS)"
+        required: false
+        default: "1200"
+      gen_seed:
+        description: "Generative differential seed (RIFT_GEN_SEED; empty: the run id)"
+        required: false
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}
@@ -53,3 +67,107 @@ jobs:
           name: proptest-regressions
           path: crates/rift-mock-core/tests/proptest-regressions/model.txt
           if-no-files-found: ignore
+
+  generative:
+    name: generative differential (Mountebank oracle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      issues: write
+    env:
+      # The same pin as ci.yml's `differential` job.
+      MB_VERSION: "2.9.5"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Mountebank ${{ env.MB_VERSION }}
+        run: |
+          npm install --prefix "$HOME/bench-mb" "@mbtest/mountebank@$MB_VERSION"
+          "$HOME/bench-mb/node_modules/.bin/mb" --version
+
+      - name: Build the Rift server under test
+        run: cargo build -p rift-http-proxy --bin rift-http-proxy
+
+      - name: Run generated cases against Mountebank
+        env:
+          RIFT_DIFFERENTIAL_REQUIRE_MB: "1"
+          RIFT_SERVER_BIN: ${{ github.workspace }}/target/debug/rift-http-proxy
+          RIFT_GEN_SEED: ${{ inputs.gen_seed || github.run_id }}
+          RIFT_GEN_SECONDS: ${{ inputs.gen_seconds || '1200' }}
+          RIFT_GEN_OUT: ${{ github.workspace }}/target/generative
+        run: cargo test -p rift-differential --test generative -- --nocapture
+
+      - name: Upload the shrunk case
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: generative
+          path: target/generative/
+          if-no-files-found: ignore
+
+      # At most one issue per run: a run stops at its first divergence. The signature (the
+      # de-indexed locations, hashed) is the de-duplication key against open agent-found issues.
+      - name: File or update the divergence issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          verdict=target/generative/verdict.json
+          if [[ ! -f "$verdict" ]]; then
+            echo "no verdict: the job failed before or outside the generated run"
+            exit 0
+          fi
+          kind=$(jq -r .kind "$verdict")
+          if [[ "$kind" == infrastructure ]]; then
+            echo "infrastructure failure, nothing to file:"
+            jq . "$verdict"
+            exit 0
+          fi
+          seed=$(jq -r .seed "$verdict")
+          sig=$(jq -r .sig "$verdict")
+          case_file=$(jq -r .case "$verdict")
+          existing=$(gh issue list --state open --label agent-found \
+            --search "\"gen-sig:$sig\" in:body" --json number --jq '.[0].number // empty')
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" \
+              --body "Seed \`$seed\` reproduces \`gen-sig:$sig\` again ($kind): $RUN_URL"
+            exit 0
+          fi
+          {
+            echo "The nightly generative differential run (#1549) found a $kind: Rift and"
+            echo "Mountebank $MB_VERSION answered differently, and no allow-list entry explains it."
+            echo
+            echo "- Signature: \`gen-sig:$sig\`"
+            echo "- Seed: \`$seed\` (reproduce: \`RIFT_GEN_SEED=$seed cargo test -p rift-differential --test generative\`)"
+            echo "- Run: $RUN_URL"
+            echo "- Unexplained at:"
+            jq -r '.locations[] | "  - `" + . + "`"' "$verdict"
+            echo
+            echo "Mountebank against Rift:"
+            echo
+            echo '```'
+            # An issue body holds 65,536 characters; the full text is in the uploaded artifact.
+            jq -r .differences "$verdict" | head -c 25000
+            echo '```'
+            echo
+            echo "Shrunk case, for \`conformance/differential/cases/generated.json\` once triaged:"
+            echo
+            echo '```json'
+            head -c 30000 "$case_file"
+            echo '```'
+          } > issue.md
+          gh issue create \
+            --title "generative differential: Rift and Mountebank differ ($kind, gen-sig:$sig)" \
+            --label agent-found --label needs-triage --label compatibility \
+            --body-file issue.md
