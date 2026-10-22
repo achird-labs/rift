@@ -1,6 +1,6 @@
 //! Copy behavior - copy request fields into response.
 
-use super::extraction::ExtractionMethod;
+use super::extraction::{ExtractionMethod, XPathSelectorError};
 use super::request::RequestContext;
 use super::spliced::{
     Spliced, SplicedHeaders, authored_headers, plain_headers, replace_response_token,
@@ -75,16 +75,20 @@ impl CopySource {
 
 /// Apply copy behaviors to response body. Treats `body` and `headers` as authored text; the
 /// serve path uses [`apply_copy_spliced`] so text an earlier pass inserted is not re-scanned.
+///
+/// # Errors
+///
+/// An XPath `using` that fails when it runs (issue #1585): Mountebank fails the request.
 pub fn apply_copy_behaviors(
     body: &str,
     headers: &mut HashMap<String, Vec<String>>,
     behaviors: &[CopyBehavior],
     request: &RequestContext,
     stub: crate::imposter::headers::StubRef<'_>,
-) -> String {
+) -> Result<String, XPathSelectorError> {
     let mut spliced_body = Spliced::authored(body.to_string());
     let mut spliced_headers = authored_headers(std::mem::take(headers));
-    apply_copy_spliced(
+    let applied = apply_copy_spliced(
         &mut spliced_body,
         &mut spliced_headers,
         &mut None,
@@ -93,7 +97,7 @@ pub fn apply_copy_behaviors(
         stub,
     );
     *headers = plain_headers(spliced_headers);
-    spliced_body.into_text()
+    applied.map(|()| spliced_body.into_text())
 }
 
 /// Apply copy behaviors, replacing only tokens that are not wholly inside text an earlier pass
@@ -102,6 +106,10 @@ pub fn apply_copy_behaviors(
 ///
 /// `status` is a `statusCode` string (issue #1558): Mountebank's `globalObjectReplace` replaces
 /// tokens in every string field of the response, so it is scanned like a header value.
+///
+/// An XPath `using` that fails when it runs is the error (issue #1585), with the copies before it
+/// applied: Mountebank's `copy` throws, and the request fails with `500`. It runs whether or not
+/// the response spells the token, as Mountebank selects before it replaces.
 pub(crate) fn apply_copy_spliced(
     body: &mut Spliced,
     headers: &mut SplicedHeaders,
@@ -109,7 +117,7 @@ pub(crate) fn apply_copy_spliced(
     behaviors: &[CopyBehavior],
     request: &RequestContext,
     stub: crate::imposter::headers::StubRef<'_>,
-) {
+) -> Result<(), XPathSelectorError> {
     for behavior in behaviors {
         // Mountebank (behaviors.js replaceArrayValuesIn) only replaces a token it has a value
         // for: a selector that extracts nothing leaves the token as authored. An absent source is
@@ -124,14 +132,14 @@ pub(crate) fn apply_copy_spliced(
         // multi-node selector over a large request costs no more than the tokens written.
         let indices = written_indices(&behavior.into, body, headers, status.as_ref());
         if indices.is_empty() {
-            let Some(bare) = behavior.extraction.extract(&source) else {
+            let Some(bare) = behavior.extraction.extract(&source)? else {
                 continue;
             };
             replace_response_token(body, headers, status, &behavior.into, &bare, stub);
             continue;
         }
 
-        let values = behavior.extraction.matches(&source);
+        let values = behavior.extraction.matches(&source)?;
         let Some(bare) = bare_value(&behavior.extraction, &values) else {
             continue;
         };
@@ -155,6 +163,7 @@ pub(crate) fn apply_copy_spliced(
         }
         replace_response_token(body, headers, status, &behavior.into, bare, stub);
     }
+    Ok(())
 }
 
 /// The indices of every `${into}[n]` the body, the status and the header names and values spell,
@@ -338,7 +347,8 @@ mod tests {
         let body = r#"{"userId": "${PATH}", "greeting": "Hello, ${NAME}!"}"#;
         let mut headers = HashMap::new();
 
-        let result = apply_copy_behaviors(body, &mut headers, &behaviors, &request, FIXTURE_STUB);
+        let result = apply_copy_behaviors(body, &mut headers, &behaviors, &request, FIXTURE_STUB)
+            .expect("copies");
         assert_eq!(result, r#"{"userId": "123", "greeting": "Hello, Alice!"}"#);
     }
 
@@ -373,7 +383,7 @@ mod tests {
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-Echo".to_string(), vec!["v=${q}".to_string()]);
 
-        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB);
+        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB).expect("copies");
 
         assert_eq!(
             headers["X-Echo"],
@@ -412,7 +422,8 @@ mod tests {
         // `traced_test` this assertion passed even when the repair ran and warned (issue #1079).
         let mut body = String::new();
         let events = crate::test_support::captured_logs(|| {
-            body = apply_copy_behaviors("x=${b}", &mut headers, &behaviors, &request, FIXTURE_STUB);
+            body = apply_copy_behaviors("x=${b}", &mut headers, &behaviors, &request, FIXTURE_STUB)
+                .expect("copies");
         });
 
         assert_eq!(
@@ -477,7 +488,8 @@ mod tests {
                     index: 2,
                     id: Some("echo"),
                 },
-            );
+            )
+            .expect("copies");
         });
 
         assert_eq!(
@@ -541,7 +553,8 @@ mod tests {
                     index: 2,
                     id: Some("echo"),
                 },
-            );
+            )
+            .expect("copies");
         });
 
         assert_eq!(headers["X-Echo"], vec!["v=onetwo".to_string()]);
@@ -582,7 +595,7 @@ mod tests {
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-Echo".to_string(), vec!["bad\nvalue=${q}".to_string()]);
 
-        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB);
+        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB).expect("copies");
 
         assert_eq!(
             headers["X-Echo"],
@@ -623,7 +636,7 @@ mod tests {
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-Literal".to_string(), vec!["bad\nvalue".to_string()]);
 
-        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB);
+        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB).expect("copies");
 
         assert_eq!(
             headers["X-Literal"],
@@ -662,7 +675,7 @@ mod tests {
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-Echo".to_string(), vec!["bad\nvalue=${q}".to_string()]);
 
-        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB);
+        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB).expect("copies");
 
         assert_eq!(
             headers["X-Echo"],
@@ -703,7 +716,7 @@ mod tests {
             vec!["a=1".to_string(), "b=${q}".to_string()],
         );
 
-        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB);
+        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB).expect("copies");
 
         // Both cookie lines survive (no fold) and the token is substituted in place.
         assert_eq!(
@@ -745,7 +758,7 @@ mod tests {
             vec!["a=1".to_string(), "b=${q}".to_string()],
         );
 
-        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB);
+        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB).expect("copies");
 
         assert_eq!(
             headers["Set-Cookie"],
@@ -768,7 +781,8 @@ mod tests {
         .expect("the copy parses");
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-C".to_string(), vec!["<$C>".to_string()]);
-        let served = apply_copy_behaviors(body, &mut headers, &[behavior], request, FIXTURE_STUB);
+        let served = apply_copy_behaviors(body, &mut headers, &[behavior], request, FIXTURE_STUB)
+            .expect("copies");
         (served, headers.remove("X-C").expect("header kept"))
     }
 
@@ -889,7 +903,8 @@ mod tests {
             &behaviors,
             &request_with_body(""),
             FIXTURE_STUB,
-        );
+        )
+        .expect("copies");
         assert_eq!(served, "$A/abc");
     }
 
@@ -991,7 +1006,8 @@ mod tests {
             &[behavior],
             &request_with_body("ab-cd"),
             FIXTURE_STUB,
-        );
+        )
+        .expect("copies");
         assert_eq!(
             headers["Set-Cookie"],
             vec!["a=ab".to_string(), "b=cd".to_string(), "c=1".to_string()]
@@ -1028,7 +1044,8 @@ mod tests {
             &behaviors,
             &request,
             FIXTURE_STUB,
-        );
+        )
+        .expect("copies");
         assert_eq!(served, "cd");
     }
 
@@ -1096,7 +1113,7 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), vec![(*v).to_string()]))
             .collect();
-        apply_copy_behaviors("", &mut map, &[behavior], &request, FIXTURE_STUB);
+        apply_copy_behaviors("", &mut map, &[behavior], &request, FIXTURE_STUB).expect("copies");
         map
     }
 
@@ -1145,7 +1162,8 @@ mod tests {
             &[behavior],
             &request_with_body(""),
             FIXTURE_STUB,
-        );
+        )
+        .expect("copies");
         assert_eq!(
             headers,
             HashMap::from([("X-${v}".to_string(), vec!["1".to_string()])])
@@ -1162,7 +1180,8 @@ mod tests {
         let mut request = request_with_body("");
         request.path = "/ab-cd".to_string();
         let mut headers = HashMap::from([("X-$C[2]".to_string(), vec!["1".to_string()])]);
-        apply_copy_behaviors("", &mut headers, &[behavior], &request, FIXTURE_STUB);
+        apply_copy_behaviors("", &mut headers, &[behavior], &request, FIXTURE_STUB)
+            .expect("copies");
         assert_eq!(
             headers,
             HashMap::from([("X-cd".to_string(), vec!["1".to_string()])])

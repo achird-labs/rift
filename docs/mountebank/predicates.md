@@ -388,6 +388,14 @@ stray end tag still means no document. See
 [Differences from Mountebank](differences.md#malformed-xml-for-xpath) for the recoveries Rift does
 not copy.
 
+An XPath selector that fails when it runs (an undeclared prefix, an unknown function or variable,
+a function given the wrong arguments) fails the request with `500` "malformed xpath predicate
+selector", as in Mountebank; it never reads as an empty value, so `equals {body: ""}`,
+`exists {body: false}` or `not` behind it cannot match. A prefix must be bound in `ns`, even when the
+document declares it. The selector only runs on a body that parses as XML: for any other body it
+selects nothing, and the request is answered normally. See
+[Differences from Mountebank](differences.md#xpath-selectors-that-do-not-compile-or-cannot-run).
+
 Unless the predicate sets `"caseSensitive": true`, an XPath predicate ignores case, as in
 Mountebank: the body, the selector (string literals included) and the `ns` map are compared in
 lower case, so `//b` selects `<B>`, `//a/@id` selects `Id="7"`, and

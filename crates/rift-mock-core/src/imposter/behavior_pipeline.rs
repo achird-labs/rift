@@ -4,7 +4,7 @@
 //! One function so every response type that carries behaviors runs the same pipeline with the
 //! same failure contract (issue #1184): the `is`, `inject` and `proxy` serve paths call it.
 
-use super::handler::SCRIPT_TIMEOUT_HEADER;
+use super::handler::{SCRIPT_TIMEOUT_HEADER, xpath_selector_error_response};
 use super::headers::StubRef;
 use super::response::{apply_decorate_bounded, body_text};
 use super::types::{IsResponse, StatusValue};
@@ -273,14 +273,18 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     }
                 }
                 BehaviorStep::Copy(copy) => {
-                    apply_copy_spliced(
+                    // An XPath `using` that fails when it runs is the response (issue #1585), with
+                    // or without `strictBehaviors`: Mountebank's copy throws and fails the request.
+                    if let Err(e) = apply_copy_spliced(
                         &mut body,
                         &mut headers,
                         &mut status_text,
                         std::slice::from_ref(copy),
                         request_context.get_or_init(build_request_context),
                         self.stub,
-                    );
+                    ) {
+                        return BehaviorOutcome::StrictFailure(xpath_selector_error_response(&e));
+                    }
                 }
                 BehaviorStep::Lookup(lookup) => {
                     apply_lookup_spliced(

@@ -465,6 +465,9 @@ where
             // predicate other than `matches` (issue #1478, see `fold_xml_names`). The prefixes are
             // lowercased too, which Mountebank does not do, so an upper-case prefix still binds
             // once the selector is folded.
+            // A selector that fails when it runs fails the request (issue #1585), as Mountebank's
+            // `xpathSelect` does; it never reads as the empty string. A body that is not XML never
+            // runs the selector, so it reads as `""`, as in Mountebank.
             let selection = if !case_sensitive && folds_xpath_names(&predicate.operation) {
                 let namespaces = namespaces.as_ref().map(|ns| {
                     ns.iter()
@@ -473,16 +476,19 @@ where
                         })
                         .collect::<HashMap<_, _>>()
                 });
-                dom.folded_document().and_then(|document| {
-                    xpath_selection(
-                        &document,
-                        &fold_xpath_selector(selector),
-                        namespaces.as_ref(),
-                    )
-                })
+                dom.folded_document()
+                    .map(|document| {
+                        xpath_selection(
+                            &document,
+                            &fold_xpath_selector(selector),
+                            namespaces.as_ref(),
+                        )
+                    })
+                    .transpose()?
             } else {
                 dom.document()
-                    .and_then(|document| xpath_selection(&document, selector, namespaces.as_ref()))
+                    .map(|document| xpath_selection(&document, selector, namespaces.as_ref()))
+                    .transpose()?
             };
             Some(selection.unwrap_or(Selection::One(String::new())))
         }
