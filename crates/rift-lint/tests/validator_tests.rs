@@ -1379,11 +1379,12 @@ fn e035_not_fired_for_valid_repeat() {
     assert!(!has_code(&r, "E035"), "unexpected E035: {:?}", codes(&r));
 }
 
-// Issue #1093: `null` for a behavior key is the key absent, as it is to the engine.
+// Issue #1093: `null` for a behavior key is the key absent, as it is to the engine. Not `repeat`:
+// a `null` one is refused since #1582, as Mountebank refuses it (issue #1587).
 #[test]
 fn null_behavior_keys_are_absent() {
     let behavior = json!({
-        "wait": null, "repeat": null, "decorate": null,
+        "wait": null, "decorate": null,
         "shellTransform": null, "copy": null, "lookup": null
     });
     let mut r = LintResult::new();
@@ -1393,6 +1394,7 @@ fn null_behavior_keys_are_absent() {
     for (bad, code) in [
         (json!({ "wait": true }), "E025"),
         (json!({ "repeat": "3" }), "E035"),
+        (json!({ "repeat": null }), "E035"),
     ] {
         let mut r = LintResult::new();
         validate_behavior(path(), &bad, "loc", &mut r, &opts());
@@ -1479,10 +1481,11 @@ fn e051_copy_or_lookup_regex_selector_that_does_not_compile() {
     assert!(codes(&r).is_empty(), "{:?}", codes(&r));
 }
 
-/// Issue #1240: the engine reads `key.index` as a match position, so it refuses anything but a
-/// non-negative integer; the linter reports the same, and accepts a valid index.
+/// Issue #1587: the engine accepts any `key.index` since #1582 and reads it as Mountebank reads
+/// `keyValues[index || 0]`, so a `-1`, `1.5` or `"1"` (which finds no row, or picks match 1) is not
+/// an error. It was E051 from #1240.
 #[test]
-fn e051_lookup_key_index_that_is_not_a_non_negative_integer() {
+fn a_lookup_key_index_of_any_value_is_not_an_error() {
     let lookup = |index: serde_json::Value| {
         json!({ "lookup": {
             "key": { "from": "path", "using": { "method": "regex", "selector": "(a)(b)" }, "index": index },
@@ -1490,15 +1493,18 @@ fn e051_lookup_key_index_that_is_not_a_non_negative_integer() {
             "into": "${R}"
         } })
     };
-    for bad in [json!(-1), json!(1.5), json!("1")] {
+    for index in [
+        json!(-1),
+        json!(1.5),
+        json!("1"),
+        json!(true),
+        json!(2),
+        json!(null),
+    ] {
         let mut r = LintResult::new();
-        validate_behavior(path(), &lookup(bad.clone()), "loc", &mut r, &opts());
-        assert_eq!(codes(&r), vec!["E051"], "{bad}");
-        assert_eq!(r.issues[0].location.as_deref(), Some("loc.lookup.key"));
+        validate_behavior(path(), &lookup(index.clone()), "loc", &mut r, &opts());
+        assert!(codes(&r).is_empty(), "{index}: {:?}", codes(&r));
     }
-    let mut r = LintResult::new();
-    validate_behavior(path(), &lookup(json!(2)), "loc", &mut r, &opts());
-    assert!(codes(&r).is_empty(), "{:?}", codes(&r));
 }
 
 #[test]
@@ -1807,37 +1813,198 @@ fn null_underscore_behaviors_falls_back_to_the_array() {
     );
 }
 
-/// W018 (issue #1198): an element that sets several steps runs them in the engine's order, not the
-/// order written. One step per element, and `repeat` beside a step, are not flagged; nor is the
-/// object form, which has no written order to lose.
+/// E059 (issue #1587, formerly the warning W018): an element of the `behaviors` array with two or
+/// more behavior keys is refused by the engine (#1582) and by Mountebank (`behaviorsValidator.js`)
+/// with `Each behavior object must have only one behavior type`. A `null` behavior counts, as it
+/// does there; `repeat` and any custom key do not; the object form is never refused for it.
 #[test]
-fn w018_flags_an_element_with_several_steps() {
-    let w018 = |resp: Value| {
-        behavior_findings(&resp)
-            .into_iter()
-            .filter(|(code, _)| code == "W018")
+fn e059_flags_an_element_with_several_behavior_types() {
+    let e059 = |resp: Value| {
+        let mut r = LintResult::new();
+        validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+        r.issues
+            .iter()
+            .filter(|i| i.code == "E059")
+            .map(|i| {
+                assert_eq!(i.severity, Severity::Error, "{i:?}");
+                assert!(
+                    i.message
+                        .contains("Each behavior object must have only one behavior type"),
+                    "{i:?}"
+                );
+                i.location.clone().unwrap_or_default()
+            })
             .collect::<Vec<_>>()
     };
     let decorate = "function (req, res) {}";
     assert_eq!(
-        w018(json!({"is": {}, "behaviors": [
+        e059(json!({"is": {}, "behaviors": [
             { "wait": 1 },
             { "decorate": decorate, "shellTransform": "cat" }
         ]})),
-        vec![finding("W018", "loc.behaviors[1]")]
+        vec!["loc.behaviors[1]"]
     );
     assert_eq!(
-        w018(json!({"is": {}, "behaviors": [{ "decorate": decorate, "wait": null }]})),
-        vec![]
+        e059(json!({"is": {}, "behaviors": [{ "decorate": decorate, "wait": null }]})),
+        vec!["loc.behaviors[0]"]
     );
     assert_eq!(
-        w018(json!({"is": {}, "behaviors": [{ "wait": 1, "repeat": 2 }]})),
-        vec![]
+        e059(json!({"is": {}, "behaviors": [{ "wait": 1, "copy": [] }]})),
+        vec!["loc.behaviors[0]"]
     );
+    for clean in [
+        json!({"is": {}, "behaviors": [{ "wait": 1, "repeat": 2 }]}),
+        json!({"is": {}, "behaviors": [{ "wait": 1, "custom": true }]}),
+        json!({"is": {}, "_behaviors": { "decorate": decorate, "shellTransform": "cat" }}),
+        json!({"is": {}, "behaviors": { "decorate": decorate, "shellTransform": "cat" }}),
+    ] {
+        assert_eq!(e059(clean.clone()), Vec::<String>::new(), "{clean}");
+    }
+    // No longer a warning.
+    let mut r = LintResult::new();
+    let two = json!({"is": {}, "behaviors": [{ "wait": 1, "decorate": decorate }]});
+    validate_response(path(), &two, "loc", &mut r, &opts(), &Value::Null);
+    assert!(!has_code(&r, "W018"), "{:?}", codes(&r));
+}
+
+/// E060 (issue #1587): an element of the `behaviors` array that holds no behavior key, but some
+/// other key, is refused by the engine (#1582) and by Mountebank with `Unrecognized behavior:
+/// "<key>"`. That covers a `{"repeat": n}` element, whatever `n` is: `repeat` is a response field
+/// there. A custom key beside one behavior is admitted; an empty element holds no key to name.
+#[test]
+fn e060_flags_an_element_with_no_behavior() {
+    let findings = |behaviors: Value| {
+        let mut r = LintResult::new();
+        let resp = json!({ "is": {}, "behaviors": behaviors });
+        validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+        r.issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| {
+                (
+                    i.code.clone(),
+                    i.message.clone(),
+                    i.location.clone().unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    for (element, key) in [
+        (json!({ "repeat": 2 }), "repeat"),
+        (json!({ "repeat": 0 }), "repeat"),
+        (json!({ "repeat": null }), "repeat"),
+        (json!({ "bogus": 1 }), "bogus"),
+        (json!({ "wiat": 100 }), "wiat"),
+    ] {
+        let found = findings(json!([{ "wait": 1 }, element]));
+        assert_eq!(found.len(), 1, "{element}: {found:?}");
+        let (code, message, location) = &found[0];
+        assert_eq!(code, "E060", "{element}: {found:?}");
+        assert!(
+            message.contains(&format!("Unrecognized behavior: \"{key}\"")),
+            "{element}: {message}"
+        );
+        assert_eq!(location, "loc.behaviors[1]", "{element}");
+    }
+    for clean in [
+        json!([{ "wait": 1, "custom": true }]),
+        json!([{}]),
+        json!([{ "wait": null }]),
+    ] {
+        assert_eq!(findings(clean.clone()), vec![], "{clean}");
+    }
+    // The object forms are upcast key by key, so an unknown key or a `repeat` there is admitted.
+    for block in ["_behaviors", "behaviors"] {
+        let mut r = LintResult::new();
+        let resp = json!({ "is": {}, block: { "bogus": 1, "repeat": 2 } });
+        validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+        assert!(!has_code(&r, "E060"), "{resp}: {:?}", codes(&r));
+    }
+}
+
+/// E035 (issue #1587): the engine refuses a `0` or `null` `repeat` on the response and in an
+/// object-form block since #1582, as Mountebank does. In an array element beside a behavior a
+/// `null` clears `repeat`, which both admit.
+#[test]
+fn e035_flags_a_zero_or_null_repeat_on_the_response_and_in_the_block() {
+    let e035 = |resp: Value| {
+        let mut r = LintResult::new();
+        validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+        r.issues
+            .iter()
+            .filter(|i| i.code == "E035")
+            .map(|i| i.location.clone().unwrap_or_default())
+            .collect::<Vec<_>>()
+    };
+    for repeat in [json!(0), json!(null)] {
+        assert_eq!(
+            e035(json!({ "is": {}, "repeat": repeat })),
+            vec!["loc.repeat"],
+            "{repeat}"
+        );
+        assert_eq!(
+            e035(json!({ "is": {}, "_behaviors": { "wait": 1, "repeat": repeat } })),
+            vec!["loc._behaviors.repeat"],
+            "{repeat}"
+        );
+        assert_eq!(
+            e035(json!({ "is": {}, "behaviors": { "wait": 1, "repeat": repeat } })),
+            vec!["loc.behaviors.repeat"],
+            "{repeat}"
+        );
+    }
     assert_eq!(
-        w018(json!({"is": {}, "_behaviors": { "decorate": decorate, "shellTransform": "cat" }})),
-        vec![]
+        e035(json!({ "is": {}, "behaviors": [{ "wait": 1, "repeat": null }] })),
+        Vec::<String>::new()
     );
+    assert_eq!(e035(json!({ "is": {}, "repeat": 1 })), Vec::<String>::new());
+}
+
+/// E051 (issue #1587): a `copy.from` or lookup `key.from` object names exactly one request field,
+/// as Mountebank's `singleKeyOnly` rule and the engine (#1582) require. Checked on the element as
+/// written, so one a later `null` clears is still refused.
+#[test]
+fn e051_flags_a_from_object_without_exactly_one_key() {
+    let using = json!({ "method": "regex", "selector": ".*" });
+    let csv = json!({ "csv": { "path": "x.csv", "keyColumn": "id" } });
+    let copy = |from: Value| json!({ "from": from, "into": "${P}", "using": using });
+    let lookup = |from: Value| json!({ "key": { "from": from, "using": using }, "fromDataSource": csv, "into": "${R}" });
+    let messages = |resp: Value| {
+        let mut r = LintResult::new();
+        validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+        r.issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| format!("{} {}", i.code, i.message))
+            .collect::<Vec<_>>()
+    };
+    for from in [json!({}), json!({ "query": "q", "headers": "h" })] {
+        let copied = messages(json!({ "is": {}, "_behaviors": { "copy": copy(from.clone()) } }));
+        assert_eq!(copied.len(), 1, "{from}: {copied:?}");
+        assert!(
+            copied[0].starts_with("E051")
+                && copied[0].contains("copy behavior \"from\" field must have exactly one key"),
+            "{from}: {copied:?}"
+        );
+        let looked =
+            messages(json!({ "is": {}, "_behaviors": { "lookup": [lookup(from.clone())] } }));
+        assert_eq!(looked.len(), 1, "{from}: {looked:?}");
+        assert!(
+            looked[0].starts_with("E051")
+                && looked[0]
+                    .contains("lookup behavior \"key.from\" field must have exactly one key"),
+            "{from}: {looked:?}"
+        );
+        let cleared = messages(json!({ "is": {}, "behaviors": [
+            { "copy": copy(from.clone()) }, { "copy": null }
+        ] }));
+        assert_eq!(cleared.len(), 1, "{from}: {cleared:?}");
+    }
+    for fine in [json!("path"), json!({ "query": "q" })] {
+        let resp = json!({ "is": {}, "_behaviors": { "copy": copy(fine.clone()),
+                                                    "lookup": lookup(fine.clone()) } });
+        assert_eq!(messages(resp), Vec::<String>::new(), "{fine}");
+    }
 }
 
 /// Every element of the array is a step the engine runs (issue #1198), so an earlier bad value is
@@ -1855,11 +2022,12 @@ fn behaviors_array_every_step_is_validated() {
 }
 
 /// `repeat` is not a step: the last element to set it wins, so an earlier bad one is never read.
+/// It is written beside a behavior: an element holding only `repeat` is E060 (issue #1587).
 #[test]
 fn behaviors_array_repeat_is_last_write_wins() {
     let resp = json!({
         "is": { "statusCode": 200 },
-        "behaviors": [{ "repeat": 0.5 }, { "repeat": 2 }]
+        "behaviors": [{ "wait": 1, "repeat": 0.5 }, { "wait": 2, "repeat": 2 }]
     });
     assert_eq!(behavior_findings(&resp), vec![]);
 }
@@ -1881,7 +2049,7 @@ fn behaviors_array_reports_the_malformed_element() {
 fn behaviors_array_disjoint_keys_are_each_validated_at_their_element() {
     let resp = json!({
         "is": { "statusCode": 200 },
-        "behaviors": [{ "wait": true }, 5, { "repeat": 0 }]
+        "behaviors": [{ "wait": true }, 5, { "wait": 1, "repeat": 0 }]
     });
     // The skipped `5` is itself E048 (issue #1101) and does not shift the indexes after it.
     assert_eq!(

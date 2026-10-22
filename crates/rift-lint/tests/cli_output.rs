@@ -1340,7 +1340,7 @@ fn cli_reports_e047_for_a_yaml_float_port() {
     assert!(!success, "an error exits non-zero");
 }
 
-/// Issue #1093, through the binary.
+/// Issue #1093, through the binary. (A `null` `repeat` beside it is E035 since #1587.)
 #[test]
 fn cli_is_clean_for_a_null_wait() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1348,7 +1348,7 @@ fn cli_is_clean_for_a_null_wait() {
     std::fs::write(
         &f,
         r#"{"port":3000,"protocol":"http","stubs":[
-            {"responses":[{"is":{"statusCode":200},"_behaviors":{"wait":null,"repeat":null}}]}
+            {"responses":[{"is":{"statusCode":200},"_behaviors":{"wait":null,"copy":null}}]}
         ]}"#,
     )
     .expect("write");

@@ -20,9 +20,10 @@ defined in rift's
 | `E049.json` | E049 | error | an EJS tag the engine does not evaluate | #1108 |
 | `E050.json` | E050 | error | `intercept.returnCaKey: true` in a config file | linting.md |
 | `E051.json` | E051 | error | a `copy` item that is not an object | linting.md |
+| `E059.json` | E059 | error | one `behaviors` element sets two behaviors (formerly `W018.json`) | #1587 |
+| `E060.json` | E060 | error | a `{"repeat": n}` element in `behaviors` | #1587 |
 | `W012.json` | W012 | warning | a number literal that is not exactly representable as a double | #1083 |
 | `W013.json` | W013 | warning | `process.env.RIFT_LINT_T_204_UNSET` with no default, unset | #1108, #1116 |
 | `W014.json` | W014 | warning | a script uses `ctx.state` with no `_rift.flowState` | #1156 |
 | `W016.json` | W016 | warning | `defaultEngine: "lua"` | linting.md |
-| `W018.json` | W018 | warning | one `behaviors` element sets two behaviors | linting.md |
 | `I005.json` | I005 | info | a `_rift.dataset` carrier | linting.md |

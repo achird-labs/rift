@@ -44,8 +44,9 @@ fn lookup_with(key: Value, source: Value, into: Value) -> Value {
     json!({ "lookup": { "key": key, "fromDataSource": source, "into": into } })
 }
 
-/// Blocks whose verdict the two must agree on. `repeat: 0` (lint-only, stricter by design) and
-/// JavaScript syntax (E028, checked by a different mechanism) are deliberately absent.
+/// Blocks whose verdict the two must agree on. JavaScript syntax (E028, checked by a different
+/// mechanism) is deliberately absent. `repeat: 0` was too, as lint-only, until the engine refused
+/// it in #1582 (issue #1587).
 fn blocks() -> Vec<Value> {
     vec![
         // wait
@@ -64,6 +65,10 @@ fn blocks() -> Vec<Value> {
         json!({ "repeat": 4_294_967_296_u64 }),
         json!({ "repeat": 2.0 }),
         json!({ "repeat": "3" }),
+        // Issue #1587: refused by both since #1582, as Mountebank refuses them.
+        json!({ "repeat": 0 }),
+        json!({ "repeat": null }),
+        json!({ "wait": 1, "repeat": 0 }),
         // decorate / shellTransform
         json!({ "decorate": "function (r, s) {}" }),
         json!({ "decorate": 5 }),
@@ -95,6 +100,9 @@ fn blocks() -> Vec<Value> {
         json!({ "copy": [{ "from": "path", "into": "${P}", "using": using() }, "oops"] }),
         json!({ "copy": [null] }),
         json!({ "copy": "path" }),
+        // Issue #1587: a `from` object names exactly one field (Mountebank's `singleKeyOnly`).
+        json!({ "copy": { "from": {}, "into": "${P}", "using": using() } }),
+        json!({ "copy": { "from": { "query": "q", "headers": "h" }, "into": "${P}", "using": using() } }),
         // lookup
         lookup_with(
             json!({ "from": "path", "using": using() }),
@@ -141,10 +149,38 @@ fn blocks() -> Vec<Value> {
         json!({ "lookup": { "fromDataSource": csv(), "into": "${R}" } }),
         json!({ "lookup": [5] }),
         json!({ "lookup": "x" }),
-        // null keys are absent to both. A `null` `repeat` is refused by the engine since #1582, as
-        // Mountebank refuses it; rift-lint follows in #1587, so it is left out until then.
+        // null keys are absent to both, except `repeat`: both refuse a `null` one since #1582
+        // (issue #1587), as Mountebank does.
         json!({ "wait": null, "copy": null, "lookup": null,
                 "decorate": null, "shellTransform": null }),
+        json!({ "wait": null, "repeat": null, "copy": null, "lookup": null,
+                "decorate": null, "shellTransform": null }),
+        // Issue #1587: two `from` keys on a lookup `key`; any `index` is accepted since #1582.
+        lookup_with(
+            json!({ "from": { "query": "q", "headers": "h" }, "using": using() }),
+            csv(),
+            json!("${R}"),
+        ),
+        lookup_with(
+            json!({ "from": {}, "using": using() }),
+            csv(),
+            json!("${R}"),
+        ),
+        lookup_with(
+            json!({ "from": "path", "using": using(), "index": -1 }),
+            csv(),
+            json!("${R}"),
+        ),
+        lookup_with(
+            json!({ "from": "path", "using": using(), "index": "1" }),
+            csv(),
+            json!("${R}"),
+        ),
+        lookup_with(
+            json!({ "from": "path", "using": using(), "index": 1.5 }),
+            csv(),
+            json!("${R}"),
+        ),
     ]
 }
 
@@ -176,6 +212,20 @@ fn arrays() -> Vec<Value> {
         json!([{ "wait": true }, { "wait": 5 }]),
         json!([{ "wait": 5 }, { "wait": true }]),
         json!([{ "decorate": 5 }, { "decorate": "function (r, s) {}" }]),
+        // Issue #1587: an element with two behavior types, a `null` one included, or with none.
+        json!([{ "wait": 1, "decorate": "function (r, s) {}" }]),
+        json!([{ "wait": 1, "copy": null }]),
+        json!([{ "wait": 1, "copy": [] }]),
+        json!([{ "wait": 1 }, { "repeat": 2 }]),
+        json!([{ "repeat": 0 }]),
+        json!([{ "bogus": 1 }]),
+        json!([{ "wait": 1, "custom": true }]),
+        json!([{ "wait": 1, "repeat": 2 }]),
+        json!([{ "wait": 1, "repeat": null }]),
+        json!([{}]),
+        // A `from` of the wrong size a later `null` clears is still refused: it is judged as written.
+        json!([{ "copy": { "from": { "query": "q", "headers": "h" }, "into": "${P}", "using": using() } },
+               { "copy": null }]),
     ]
 }
 
@@ -207,6 +257,39 @@ fn the_linter_errors_on_exactly_the_behaviors_blocks_the_engine_refuses() {
         for response in [
             json!({ "is": { "statusCode": 200 }, "_behaviors": block }),
             json!({ "proxy": { "to": "http://localhost:1" }, "_behaviors": block }),
+        ] {
+            let engine = engine_refuses(&response);
+            let lint = lint_errors(&response);
+            if engine != !lint.is_empty() {
+                disagreements.push(format!(
+                    "{response}\n    engine refuses: {engine}, lint errors: {lint:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        disagreements.is_empty(),
+        "rift-lint and the engine disagree:\n  {}",
+        disagreements.join("\n  ")
+    );
+}
+
+/// A response-level `repeat` (issue #1587): `0` and `null` are refused by both since #1582.
+#[test]
+fn the_linter_errors_on_exactly_the_response_repeats_the_engine_refuses() {
+    let mut disagreements = Vec::new();
+    for repeat in [
+        json!(1),
+        json!(0),
+        json!(null),
+        json!(-1),
+        json!("2"),
+        json!(2.5),
+    ] {
+        for response in [
+            json!({ "is": { "statusCode": 200 }, "repeat": repeat }),
+            json!({ "proxy": { "to": "http://localhost:1" }, "repeat": repeat }),
+            json!({ "is": { "statusCode": 200 }, "repeat": repeat, "_behaviors": { "wait": 1 } }),
         ] {
             let engine = engine_refuses(&response);
             let lint = lint_errors(&response);

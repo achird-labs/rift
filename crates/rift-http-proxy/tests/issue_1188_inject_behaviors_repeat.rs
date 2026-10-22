@@ -557,8 +557,14 @@ fn the_linter_validates_a_top_level_repeat_like_the_engine() {
         .collect::<Vec<_>>()
     };
     assert_eq!(lint(json!(3)), Vec::<String>::new());
-    assert_eq!(lint(json!(null)), Vec::<String>::new());
-    for bad in [json!(2.0), json!(4_294_967_296_u64), json!("2"), json!(0)] {
+    // A `null` is refused by the engine since #1582, as Mountebank refuses it (#1587).
+    for bad in [
+        json!(2.0),
+        json!(4_294_967_296_u64),
+        json!("2"),
+        json!(0),
+        json!(null),
+    ] {
         assert_eq!(
             lint(bad.clone()),
             vec!["stubs[0].responses[0].repeat".to_string()],
