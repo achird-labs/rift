@@ -28,7 +28,7 @@ use tracing::warn;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{hook} timed out after {timeout_ms}ms")]
 pub struct ScriptTimeoutError {
-    /// Which hook hit the deadline: `"inject"`, `"predicate inject"`, or `"_rift.script"`.
+    /// Which hook hit the deadline: `"inject"`, `"predicate inject"`, `"decorate"` or `"_rift.script"`.
     pub hook: &'static str,
     pub timeout_ms: u64,
 }

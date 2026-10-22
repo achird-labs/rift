@@ -9356,6 +9356,152 @@
           "path": "/nan"
         }
       ]
+    },
+    {
+      "name": "targeted: an async inject is awaited (#1593)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "async config => ({ statusCode: 201, body: 'asyncret' })"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "targeted: an inject's callback from a .then is honoured (#1593)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "(config, state, logger, callback) => { Promise.resolve('p').then(v => callback({ body: v })); }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "targeted: an inject's callback from a setTimeout is honoured (#1593)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "(config, state, logger, callback) => { setTimeout(() => callback({ body: 'late' }), 20); }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "targeted: console.log in an inject returns normally (#1593)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "() => { console.log('x'); return { body: 'logged' }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "targeted: an async decorate awaits a setTimeout (#1593)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "orig"
+                    },
+                    "_behaviors": {
+                      "decorate": "async config => { await new Promise(r => setTimeout(r, 10)); config.response.body = 'after-timer'; return config.response; }"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
     }
   ]
 }

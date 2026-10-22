@@ -181,7 +181,10 @@ A string `wait`, bare or in `{"inject": ...}`, is read the way Mountebank reads 
    parenthesised function.
 
 The result is read as Node's `setTimeout` reads a delay: a number is floored, and a result that is
-not a number, is negative, or is `NaN` or infinite means no delay. A wait function that throws,
+not a number, is negative, or is `NaN` or infinite means no delay. A returned promise is not
+awaited, as in Mountebank, so it is no delay, and a timer the function sets never runs. A wait
+function has `console` and the timers like any script
+([What a script can use](responses.md#what-a-script-can-use)). A wait function that throws,
 or does not parse, answers `500` with `invalid wait injection`, as Mountebank does, with or without
 `strictBehaviors`:
 
@@ -249,6 +252,13 @@ The function changes the response in one of two ways:
   an empty body when there is none, as in Mountebank. An `async` function's promise is settled
   first and the same rule applies to its value. Returning anything truthy that is not an object
   fails the decorate.
+
+While a returned promise is pending, its promise jobs and timers run, so an `async` decorate may
+`await` a `setTimeout`. Waiting is bounded by the imposter's script timeout; a decorate still
+pending then fails with the decorate timeout. A decorate that returns no promise is not waited for,
+as in Mountebank: a timer it sets never runs. Decorate scripts have the same globals as `inject`
+(`console`, timers, Promises) and no `process` or Node core modules; see
+[What a script can use](responses.md#what-a-script-can-use).
 
 A decorate that is neither a function value nor a bare body using `config.request` or
 `config.response` (which Rift wraps in `function (config) { ... }`) runs as a Rhai script; see

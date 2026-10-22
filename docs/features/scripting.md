@@ -581,8 +581,9 @@ predicate `inject`, and the `decorate` behavior — all of which run off the asy
   shared Node.js process — scripts on the same worker thread share JS globals, but only with
   scripts of the same `require()` access: a worker keeps a separate realm for each, so a global or
   patched builtin from an admin-API imposter never reaches a `--configfile` imposter's script.
-  Per-imposter `state` isolation is unaffected. A promise job a hook leaves queued is dropped when
-  the hook returns, where Node would run it; only an `async` `decorate` waits for its own jobs.
+  Per-imposter `state` isolation is unaffected. A hook's promise jobs and timers run only while its
+  answer is awaited (an `inject` until it answers, an `async` `decorate` until its promise
+  settles), within `timeoutMs`; what is left when the hook ends is dropped, where Node would run it.
 
 ```json
 {

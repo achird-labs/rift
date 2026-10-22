@@ -229,6 +229,20 @@ record.
 
 ### Fixed
 
+- **An `async` inject is awaited, and a callback from a promise or a timer is honoured** (#1593).
+  An `async` inject served an empty `200` with no error, because the script engine never ran its
+  promise jobs; `Promise.resolve().then(() => callback(...))` and `setTimeout(() => callback(...))`
+  answered `400`. A hook's promise jobs and timers now run while its answer is awaited, within the
+  imposter's script timeout: past it, the request gets the script timeout. A rejected inject
+  promise fails like a throw. As in Mountebank, the first answer wins: a callback called before
+  the function returns a value keeps its value (the return value used to win).
+- **Scripts have `console` and timers** (#1593): `console.log`/`info`/`warn`/`error`/`debug` threw
+  `console is not defined`; they now log at target `rift::script`, as `logger` does.
+  `setTimeout`, `clearTimeout`, `setInterval` and `clearInterval` exist in `inject`, predicate
+  `inject`, `decorate` and `wait`. An `async` decorate waits for its timers. There is still no
+  `process`, `Buffer` or Node core module, by decision; see
+  `docs/mountebank/differences.md#scripts-run-in-an-ecmascript-sandbox-not-node`.
+
 - **`rift-lint` agrees with the engine and Mountebank on behaviors** (#1587), following #1582.
   `E035` now flags a `null` `repeat` on the response or in an object-form block, as well as `0`. A
   `behaviors` element with two behavior types is the error `E059` (formerly the warning `W018`,
