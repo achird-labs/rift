@@ -132,15 +132,15 @@
     },
     {
       "id": "api/http/httpInjectionTest.js::http imposter POST /imposters with injections should allow synchronous javascript injection for responses (old interface)",
-      "class": "bug",
-      "issue": "#1592",
-      "note": "Mountebank's default response carries `Connection: close`; Rift sends no Connection header"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#connections-stay-open",
+      "note": "Mountebank answers `Connection: close` unless the response sets it; Rift keeps the connection alive (#1592)"
     },
     {
       "id": "api/http/httpInjectionTest.js::http imposter POST /imposters with injections should allow synchronous javascript injection for responses",
-      "class": "bug",
-      "issue": "#1592",
-      "note": "Mountebank's default response carries `Connection: close`; Rift sends no Connection header"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#connections-stay-open",
+      "note": "Mountebank answers `Connection: close` unless the response sets it; Rift keeps the connection alive (#1592)"
     },
     {
       "id": "api/http/httpInjectionTest.js::http imposter POST /imposters with injections should allow access to the global process object",
@@ -156,15 +156,15 @@
     },
     {
       "id": "api/http/httpInjectionTest.js::https imposter POST /imposters with injections should allow synchronous javascript injection for responses (old interface)",
-      "class": "bug",
-      "issue": "#1592",
-      "note": "Mountebank's default response carries `Connection: close`; Rift sends no Connection header"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#connections-stay-open",
+      "note": "Mountebank answers `Connection: close` unless the response sets it; Rift keeps the connection alive (#1592)"
     },
     {
       "id": "api/http/httpInjectionTest.js::https imposter POST /imposters with injections should allow synchronous javascript injection for responses",
-      "class": "bug",
-      "issue": "#1592",
-      "note": "Mountebank's default response carries `Connection: close`; Rift sends no Connection header"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#connections-stay-open",
+      "note": "Mountebank answers `Connection: close` unless the response sets it; Rift keeps the connection alive (#1592)"
     },
     {
       "id": "api/http/httpInjectionTest.js::https imposter POST /imposters with injections should allow access to the global process object",
@@ -225,7 +225,7 @@
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should support retrieving replayable JSON with proxies removed for later playback",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
-      "note": "recordedFrom and recordMatches are Rift-only replayable keys, the recorded headers carry Rift's markers and Content-Length framing (#marker-headers-on-served-responses, #http-framing); the recorded `Connection: close` is #1592"
+      "note": "recordedFrom and recordMatches are Rift-only replayable keys, the recorded headers carry Rift's markers and Content-Length framing (#marker-headers-on-served-responses, #http-framing); the recorded `Connection: close` is #connections-stay-open"
     },
     {
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should persist decorated proxy responses and only run decorator once",
