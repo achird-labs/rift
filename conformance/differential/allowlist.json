@@ -1102,7 +1102,7 @@
     "reason": "Rift's `/requests` alias means recorded requests (documented deviation)",
     "id": "requests-alias-clears-requests/step#1",
     "location": "step[2].admin.body/requests/0",
-    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
+    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"ip\":\"::ffff:127.0.0.1\",\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
     "rift": "(absent)",
     "doc": "docs/mountebank/differences.md",
     "quote": "`DELETE /imposters/:port/requests` clears the imposter's recorded requests, like `DELETE /imposters/:port/savedRequests`, and `GET /imposters/:port/requests` reads them."
@@ -1113,7 +1113,7 @@
     "reason": "Rift's `/requests` alias means recorded requests (documented deviation)",
     "id": "requests-alias-clears-requests/step#2",
     "location": "step[2].admin.body/requests/1",
-    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
+    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"ip\":\"::ffff:127.0.0.1\",\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
     "rift": "(absent)",
     "doc": "docs/mountebank/differences.md",
     "quote": "`DELETE /imposters/:port/requests` clears the imposter's recorded requests, like `DELETE /imposters/:port/savedRequests`, and `GET /imposters/:port/requests` reads them."
@@ -1124,7 +1124,7 @@
     "reason": "Rift's `/requests` alias means recorded requests (documented deviation)",
     "id": "requests-alias-clears-requests/step#3",
     "location": "step[2].admin.body/requests/2",
-    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
+    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"ip\":\"::ffff:127.0.0.1\",\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
     "rift": "(absent)",
     "doc": "docs/mountebank/differences.md",
     "quote": "`DELETE /imposters/:port/requests` clears the imposter's recorded requests, like `DELETE /imposters/:port/savedRequests`, and `GET /imposters/:port/requests` reads them."
@@ -1146,7 +1146,7 @@
     "reason": "Rift's `/requests` alias means recorded requests (documented deviation)",
     "id": "requests-alias-clears-requests/stored#1",
     "location": "stored[4545]/requests/0",
-    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
+    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"ip\":\"::ffff:127.0.0.1\",\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
     "rift": "(absent)",
     "doc": "docs/mountebank/differences.md",
     "quote": "`DELETE /imposters/:port/requests` clears the imposter's recorded requests, like `DELETE /imposters/:port/savedRequests`, and `GET /imposters/:port/requests` reads them."
@@ -1157,7 +1157,7 @@
     "reason": "Rift's `/requests` alias means recorded requests (documented deviation)",
     "id": "requests-alias-clears-requests/stored#2",
     "location": "stored[4545]/requests/1",
-    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
+    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"ip\":\"::ffff:127.0.0.1\",\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
     "rift": "(absent)",
     "doc": "docs/mountebank/differences.md",
     "quote": "`DELETE /imposters/:port/requests` clears the imposter's recorded requests, like `DELETE /imposters/:port/savedRequests`, and `GET /imposters/:port/requests` reads them."
@@ -1168,7 +1168,7 @@
     "reason": "Rift's `/requests` alias means recorded requests (documented deviation)",
     "id": "requests-alias-clears-requests/stored#3",
     "location": "stored[4545]/requests/2",
-    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
+    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"ip\":\"::ffff:127.0.0.1\",\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
     "rift": "(absent)",
     "doc": "docs/mountebank/differences.md",
     "quote": "`DELETE /imposters/:port/requests` clears the imposter's recorded requests, like `DELETE /imposters/:port/savedRequests`, and `GET /imposters/:port/requests` reads them."

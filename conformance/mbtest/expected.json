@@ -513,9 +513,9 @@
     },
     {
       "id": "docs:/docs/api/stubs#example",
-      "class": "bug",
-      "issue": "#1602",
-      "note": "recorded requests carry no `ip`; the extra journal fields (status, latencyMs, matchOutcome) and Vary are documented"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#the-admin-api-serves-json-only",
+      "note": "after #1602: Vary, `enabled`, `_rift.warnings` and the journal's `matchOutcome`/`status`/`latencyMs`"
     },
     {
       "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support lookup from CSV file keyed by regex",

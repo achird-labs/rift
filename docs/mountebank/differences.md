@@ -76,8 +76,8 @@ not rewrite an address into the `::ffff:` form, because a script would then see 
 `ip` predicate never matches. An IPv6 client's `requestFrom` is written `[::1]:50000` in Rift and
 `::1:50000` in Mountebank.
 
-A recorded request (`requests[]`, the journal) carries `requestFrom` but no separate `ip` field;
-Mountebank's carries both.
+A recorded request (`requests[]`, the journal) carries both `requestFrom` and `ip`, as Mountebank's
+does; `ip` is the same value the `ip` predicate sees.
 
 ## `decorate` and a response without headers
 

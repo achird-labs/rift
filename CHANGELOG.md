@@ -236,6 +236,10 @@ record.
 
 ### Fixed
 
+- **Recorded requests carry `ip`, and `form` for a form body** (#1602), as Mountebank's do. Both are
+  derived when the request is printed (`GET /imposters/:port`, `savedRequests`, the SSE stream, the
+  FFI journal), so nothing is stored and the journal's byte budget is unchanged.
+
 - **Scripts and recorded requests see query and form keys in the order the client sent them**
   (#1596): `JSON.stringify(request.query)` in an inject, `MB_REQUEST` for a `shellTransform`, and
   `requests[].query` in `GET /imposters/:port` used to list keys in an arbitrary order that changed
