@@ -3293,6 +3293,27 @@ mod https_view_tests {
         assert_eq!(json["ciphers"], "ECDHE-RSA-AES128-GCM-SHA256");
     }
 
+    // #1613: a default `recordMatches` is not printed in a replayable view; `recordRequests` is.
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn replayable_views_do_not_print_a_default_record_matches() {
+        let manager = Arc::new(ImposterManager::new());
+        let port = manager
+            .create_imposter(config(serde_json::json!({"protocol": "http", "stubs": []})))
+            .await
+            .expect("create");
+        let one =
+            body_json(handle_get(port, Some("replayable=true"), BASE, Arc::clone(&manager)).await)
+                .await;
+        let list =
+            body_json(handle_list(Arc::clone(&manager), Some("replayable=true"), BASE).await).await;
+        let listed = list["imposters"][0].clone();
+        for view in [one, listed] {
+            assert!(view.get("recordMatches").is_none(), "{view}");
+            assert_eq!(view["recordRequests"], false, "{view}");
+        }
+    }
+
     #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn replayable_https_views_carry_the_client_auth_flags_and_ca_null() {

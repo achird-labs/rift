@@ -138,9 +138,9 @@
     "kind": "documented",
     "doc": "docs/api/index.md",
     "quote": "Rift-only config keys — `defaultForward`, `strictBehaviors`, `recordMatches`, `serviceName`, `serviceInfo` and the config `_rift` block — appear only with `?replayable=true`",
-    "reason": "Rift prints its recordMatches default in replayable forms",
+    "reason": "Rift prints recordMatches: true in replayable forms; Mountebank never prints it",
     "mountebank": "(absent)",
-    "riftMatches": "true|false"
+    "riftMatches": "true"
   },
   {
     "id": "recorded-from",

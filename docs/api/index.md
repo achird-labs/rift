@@ -300,7 +300,8 @@ same TLS keys (#1576); the `--datadir` file stores only what was posted. `allowC
 value, read by JavaScript truthiness, and the create response, the detail, `?replayable=true` and the
 list all print it exactly as configured, as Mountebank 2.9.2+ does. Rift-only config keys —
 `defaultForward`, `strictBehaviors`, `recordMatches`, `serviceName`, `serviceInfo` and the config
-`_rift` block — appear only with `?replayable=true`; Mountebank prints none of them, and the
+`_rift` block — appear only with `?replayable=true`, and only when set (`recordMatches` only when
+`true`, so an export re-posts to the same imposter); Mountebank prints none of them, and the
 detail's `_rift` key carries `warnings` and a redacted `flowState` instead. Use `?replayable=true` to copy an imposter.
 
 **Example:**
