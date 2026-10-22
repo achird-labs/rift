@@ -101,18 +101,6 @@
   ],
   "expected": [
     {
-      "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support copying from request fields using jsonpath",
-      "class": "bug",
-      "issue": "#1590",
-      "note": "copy.from \"BODY\" (upper case) copies nothing; Mountebank reads request field names case-insensitively"
-    },
-    {
-      "id": "api/http/httpBehaviorsTest.js::https imposter POST /imposters with stubs should support copying from request fields using jsonpath",
-      "class": "bug",
-      "issue": "#1590",
-      "note": "copy.from \"BODY\" (upper case) copies nothing; Mountebank reads request field names case-insensitively"
-    },
-    {
       "id": "api/http/httpFaultTest.js::https imposter POST /imposters with stubs should write garbage then drop the connection when fault RANDOM_DATA_THEN_CLOSE is specified",
       "class": "bug",
       "issue": "#1600",
