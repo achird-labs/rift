@@ -93,7 +93,9 @@ Earlier releases followed an internal hash map order, which could vary between c
 **Query Parameters:**
 
 - `replayable` (boolean) - Return each imposter's full config, for export
-- `removeProxies` (boolean, with `replayable`) - Strip proxy responses from the export
+- `removeProxies` (boolean) - Strip proxy responses. With `replayable` it applies to the export; on
+  its own it returns the full imposters (the `GET /imposters/{port}` document for each) with proxies
+  removed, as Mountebank does, instead of the summary
 - `list` (boolean) - Return a shorter entry per imposter: `protocol`, `port`, `name`,
   `defaultResponse`, `numberOfRequests`, `_links`
 
