@@ -90,6 +90,9 @@ pub fn build_upstream_client(
         policy
             .reqwest_builder()?
             .timeout(PROXY_HTTP_CLIENT_TIMEOUT)
+            // Relay a 30x as Mountebank does (issue #1594); following it would also record the
+            // redirect target's answer under the origin's predicates.
+            .redirect(reqwest::redirect::Policy::none())
             // Keep connection pooling on (issue #482): every proxied request otherwise paid a
             // fresh TCP + TLS handshake. Staleness is bounded by reqwest's default
             // `pool_idle_timeout` (90s) — the standard reqwest pooling tradeoff.

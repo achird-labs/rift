@@ -440,9 +440,11 @@ replaces any header already of that name (case-insensitively). A token left in a
 source had no value) is not a valid name, so the response is a `500` naming the header, as
 Mountebank answers `500` for it.
 
-`from` names the request field: `"path"`, `"method"` or `"body"` as a string, or
-`{"query": "<name>"}` / `{"headers": "<name>"}` for one query parameter or header. `using` extracts
-from that value:
+`from` names the request field: `"path"`, `"method"`, `"body"`, `"ip"` or `"requestFrom"` as a
+string, or `{"query": "<name>"}` / `{"headers": "<name>"}` / `{"form": "<name>"}` for one query
+parameter, header or urlencoded form field. As in Mountebank, the field name and the name inside the
+object are matched case-insensitively (`"BODY"`, `{"query": "Q"}` find `body` and `?q=`), while the
+object's own key (`query`, `headers`, `form`) is exact. `using` extracts from that value:
 
 | `method` | `selector` | Result |
 |:---------|:-----------|:-------|
@@ -593,7 +595,7 @@ Request to `/users/123` returns `{ "id": "123" }`.
 ## lookup
 
 Look up a row in a CSV file, keyed by a value extracted from the request. `key` takes the same
-`from` and `using` as [`copy`](#copy). Each column of the matched row replaces the token
+`from` and `using` as [`copy`](#copy), so `key.from` matches field names case-insensitively too. Each column of the matched row replaces the token
 `<into>[<column>]`, so with `"into": "${row}"` the `email` column fills `${row}[email]`. As in
 Mountebank, the column may also be quoted: `${row}["email"]` and `${row}['email']` are replaced too.
 Tokens are replaced in the body, in header names and values and in a `statusCode` string, as with

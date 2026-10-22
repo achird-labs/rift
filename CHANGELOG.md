@@ -51,6 +51,8 @@ record.
 
 ### Changed
 
+- **A `proxy` stub no longer follows upstream redirects** (#1594). It relays the `30x` and records it, as Mountebank does: the caller gets the redirect and its `Location` untouched, the redirect target is never contacted, and a `proxyOnce` recording holds the redirect rather than the target's answer. Anyone who relied on Rift following the redirect needs a second proxy stub for the `Location` target.
+
 - **A throwing `inject` answers `500`, as in Mountebank** (#1581). A response or predicate `inject`
   that throws at request time used to answer `400`. It now answers `500` and carries Mountebank's
   `data`, the thrown error's message. The `--allowInjection` refusal is still `400`.
@@ -266,6 +268,10 @@ record.
   export `DELETE /imposters` prints now drops `_proxyResponseTime`, as `GET` does. Flag values are
   case-insensitive on every imposter route (`?replayable=TRUE`), and a name only matches whole
   (`notreplayable=true` no longer sets `replayable`).
+- **`copy`/`lookup` `from` matches names case-insensitively and reaches `ip`, `requestFrom` and
+  `form`** (#1590), as Mountebank's `getFrom` does: `"BODY"`, `"Path"` and `{"query": "Q"}` now
+  resolve, and `"ip"`, `"requestFrom"` and `{"form": "<name>"}` copy instead of leaving the token.
+  The object's own key (`query`, `headers`, `form`) stays exact.
 
 - **`copy`/`lookup` from a missing field, and tokens in header names** (#1583). A regex `copy` or
   `lookup` whose request field is absent now reads the text `undefined`, as Mountebank does (`.*`

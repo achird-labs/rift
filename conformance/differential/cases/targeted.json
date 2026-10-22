@@ -1,5 +1,5 @@
 {
-  "source": "#1341 — the miss classes the retired suite could not see, plus one case per documented deviation the allow-list cites",
+  "source": "#1341 \u2014 the miss classes the retired suite could not see, plus one case per documented deviation the allow-list cites",
   "cases": [
     {
       "name": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
@@ -315,7 +315,7 @@
                 "predicates": [
                   {
                     "equals": {
-                      "body": "josé"
+                      "body": "jos\u00e9"
                     },
                     "caseSensitive": false
                   }
@@ -332,7 +332,7 @@
                 "predicates": [
                   {
                     "matches": {
-                      "body": "^josé$"
+                      "body": "^jos\u00e9$"
                     },
                     "caseSensitive": false
                   }
@@ -358,7 +358,7 @@
               "text/plain; charset=utf-8"
             ]
           ],
-          "body": "JOSÉ"
+          "body": "JOS\u00c9"
         }
       ]
     },
@@ -6483,13 +6483,13 @@
           "path": "/first",
           "body": "<a><![CDATA[p]]>q</a>"
         },
-          {
-            "do": "send",
-            "port": 4545,
-            "method": "POST",
-            "path": "/text",
-            "body": "<a>x<![CDATA[]]>y</a>"
-          }
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/text",
+          "body": "<a>x<![CDATA[]]>y</a>"
+        }
       ]
     },
     {
@@ -9500,6 +9500,194 @@
           "do": "send",
           "port": 4545,
           "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a copy from BODY matches the field name case-insensitively (#1590)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=TOK"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "BODY",
+                          "into": "TOK",
+                          "using": {
+                            "method": "jsonpath",
+                            "selector": "$..name"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"name\":\"mountebank\"}"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a copy from a query parameter matches its name case-insensitively (#1590)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=TOK"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "Q"
+                          },
+                          "into": "TOK",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?q=qv"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a copy from ip reads the client address (#1590)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=TOK"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "ip",
+                          "into": "TOK",
+                          "using": {
+                            "method": "regex",
+                            "selector": "^(.)"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a copy from a form field matches its name case-insensitively (#1590)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=TOK"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "form": "F"
+                          },
+                          "into": "TOK",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "f=fv"
         }
       ]
     }

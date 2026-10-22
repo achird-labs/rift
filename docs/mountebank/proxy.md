@@ -26,6 +26,9 @@ Forward every request to a backend server:
 Without `"mode": "proxyTransparent"` the proxy is `proxyOnce`: it forwards the first request for
 each method, path, query and body, then replays that response (see [Proxy Modes](#proxy-modes)).
 
+The proxy never follows redirects, as in Mountebank: a `30x` from the origin is returned to the
+caller, and recorded, as-is, `Location` included.
+
 ### `to` is an origin
 
 `to` names where to send the request, not what to send. The upstream receives the request's own

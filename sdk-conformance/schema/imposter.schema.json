@@ -64,14 +64,14 @@
     "CopySource": {
       "anyOf": [
         {
-          "description": "Simple field: \"path\", \"body\", \"method\"",
+          "description": "Request field: \"path\", \"method\", \"body\", \"ip\" or \"requestFrom\". The name is matched\ncase-insensitively, as Mountebank does.",
           "type": "string"
         },
         {
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Nested field: {\"query\": \"name\"} or {\"headers\": \"Content-Type\"}",
+          "description": "Nested field: {\"query\": \"name\"}, {\"headers\": \"Content-Type\"} or {\"form\": \"name\"}. The\ncontainer key is exact; the name inside it is matched case-insensitively.",
           "type": "object"
         }
       ],
