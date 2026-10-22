@@ -109,7 +109,9 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // #1558 renames the three `present_status_code` and the flat form's
         // `deserialize_optional_status_code` to `present_status_value`/`optional_status_value`,
         // which accept any string: same count, fewer refusals.
-        18,
+        // #1582 `present_value` on the response's `repeat`, so a door can tell a written `null`
+        // from an absent one: decodes any JSON value as before, one more attribute, no refusal.
+        19,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",
@@ -148,7 +150,11 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // admission_check_stub, fixtures in issue_1267_replay_decode.rs); its call and its parse.
         // #1553 `multi_value_query::deserialize`: the map decode a string-valued query already
         // went through, now over string-or-array values (see `untagged`). No new refusal.
-        25,
+        // #1582 `refuse_door_only_behavior_shapes` and the two `refuse_from_key_count` calls in it:
+        // door-only (Admission::Checked only, not re-run by admission_check_stub, so a store that
+        // replays, `--datadir` included, loads what older engines wrote; fixtures in
+        // issue_1267_replay_decode.rs).
+        28,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",
@@ -163,7 +169,11 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // (the create/apply doors and `admission_check` call it through `check_binary_mode`).
         // Unreachable on replay by construction: `mode` is never serialized, so stored bytes do not
         // carry it. Fixtures in issue_1267_replay_decode.rs.
-        25,
+        // #1582 `refuse_from_key_count` and `refuse_door_only_behavior_shapes`, four: door-only
+        // (see above). The lookup
+        // `key.index` decode widens from `usize` to any value: one fewer refusal, which the
+        // derive makes and this census does not count.
+        30,
     ),
     ("crates/rift-types/src/wire.rs", "::custom", 4),
     ("crates/rift-types/src/wire.rs", "serde error helper", 0),

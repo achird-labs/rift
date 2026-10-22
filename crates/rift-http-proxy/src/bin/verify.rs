@@ -2722,9 +2722,12 @@ mod verify_tests {
     /// view of a response is the engine's own serialized selection, not the source file's.
     #[test]
     fn verify_reads_the_engines_folded_behaviors_selection() {
+        // Decoded as an embedder replays a stored config, which normalises as a door does: a
+        // `{"repeat": n}` element is refused at a door since #1582, but an older engine stored it.
         let wire = |stub: serde_json::Value| -> Vec<serde_json::Value> {
             let parsed: rift_mock_core::imposter::Stub =
-                serde_json::from_value(stub).expect("stub parses in the engine");
+                rift_mock_core::imposter::deserialize_replayed(stub)
+                    .expect("stub parses in the engine");
             let serialized = serde_json::to_value(&parsed).expect("stub serializes");
             serialized["responses"]
                 .as_array()

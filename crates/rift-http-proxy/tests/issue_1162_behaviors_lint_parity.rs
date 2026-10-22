@@ -141,8 +141,9 @@ fn blocks() -> Vec<Value> {
         json!({ "lookup": { "fromDataSource": csv(), "into": "${R}" } }),
         json!({ "lookup": [5] }),
         json!({ "lookup": "x" }),
-        // null keys are absent to both
-        json!({ "wait": null, "repeat": null, "copy": null, "lookup": null,
+        // null keys are absent to both. A `null` `repeat` is refused by the engine since #1582, as
+        // Mountebank refuses it; rift-lint follows in #1587, so it is left out until then.
+        json!({ "wait": null, "copy": null, "lookup": null,
                 "decorate": null, "shellTransform": null }),
     ]
 }

@@ -671,6 +671,11 @@ where
 /// door, and when the top-level `repeat` is itself malformed, both refuse but this names it first.
 /// A response with more than one type, or none (#1551), is door-only for the same reason: the
 /// decoded response holds exactly one type, so what the door refused cannot reach this function.
+/// So are the behaviors rules #1582 added: a `behaviors` element with two behavior types or none,
+/// a `0` or `null` `repeat`, and a `copy.from` or lookup `key.from` without exactly one key. The
+/// compiled program no longer holds some of them, and engines up to v0.23.0 stored all of them, so
+/// a store that replays (rift-cluster's log, `--datadir`) must not refuse them. The door checks
+/// them after everything this function re-runs, so where both refuse they name the same failure.
 ///
 /// Then the imposter-level binary-mode check (#1578), after every stub's, because the door decodes
 /// every stub before it runs: see [`check_binary_mode`]. A replayed config never carries `mode`
@@ -1213,8 +1218,11 @@ pub(crate) struct StubResponseRaw {
     pub mode: Option<ResponseMode>,
     /// Mountebank's canonical `repeat` (issue #1188): it lifts `_behaviors.repeat` to the response,
     /// so this is the form `mb save` writes. Merged into the behaviors block at parse, where it
-    /// wins over a `repeat` inside the block, as it does in Mountebank. `null` is absent.
-    #[serde(default)]
+    /// wins over a `repeat` inside the block, as it does in Mountebank. Must be greater than 0: a
+    /// config door refuses `0` and `null`, as Mountebank does (issue #1582).
+    // Decoded with its presence, so a written `null` is `Some(Null)` for the door to refuse; a
+    // replayed decode reads it as absent, as every engine before #1582 did.
+    #[serde(default, deserialize_with = "present_value")]
     #[cfg_attr(
         feature = "schema",
         schemars(with = "Option<u32>", range(max = 4_294_967_295_u64))
@@ -1229,7 +1237,7 @@ pub(crate) struct StubResponseRaw {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StubResponseOut {
     /// Mountebank's response-level `repeat` (issue #1191): Mountebank reads it only here, and
-    /// refuses a `{"repeat": n}` element in `behaviors`.
+    /// refuses a `{"repeat": n}` element in `behaviors`, as a config door does since #1582.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repeat: Option<serde_json::Value>,
     /// Mountebank-style behaviors as array (standard Mountebank output format)
@@ -1596,6 +1604,105 @@ fn refuse_unparseable_object(block: &serde_json::Value) -> Result<(), String> {
     Err("behaviors block is malformed".to_string())
 }
 
+/// Mountebank's message for a `repeat` it refuses (`dryRunValidator.js` `addRepeatErrorsTo`).
+const REPEAT_NOT_POSITIVE: &str = "\"repeat\" field must be an integer greater than 0";
+
+/// The `copy` or `lookup` items of a behaviors block or program element: one object, or a list.
+fn behavior_items<'a>(block: &'a serde_json::Value, key: &str) -> Vec<&'a serde_json::Value> {
+    match block.get(key) {
+        Some(serde_json::Value::Array(items)) => items.iter().collect(),
+        Some(item @ serde_json::Value::Object(_)) => vec![item],
+        _ => Vec::new(),
+    }
+}
+
+/// A `copy.from` or lookup `key.from` written as an object names exactly one request field, as
+/// Mountebank's `singleKeyOnly` rule requires (issue #1582). `CopySource` decodes any map, and read
+/// `query` before `headers` and ignored the rest, so a two-key `from` loaded and silently picked
+/// one; an empty one extracted nothing. Checked on the JSON as written, so the map cannot hide the
+/// count.
+fn refuse_from_key_count(block: &serde_json::Value) -> Result<(), String> {
+    let copies = behavior_items(block, "copy")
+        .into_iter()
+        .map(|copy| ("copy behavior \"from\"", copy.get("from")));
+    let lookups = behavior_items(block, "lookup").into_iter().map(|lookup| {
+        (
+            "lookup behavior \"key.from\"",
+            lookup.get("key").and_then(|key| key.get("from")),
+        )
+    });
+    for (field, from) in copies.chain(lookups) {
+        if let Some(serde_json::Value::Object(from)) = from
+            && from.len() != 1
+        {
+            return Err(format!("{field} field must have exactly one key"));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse, at a config door, what Mountebank's `behaviorsValidator.js` and `dryRunValidator.js`
+/// refuse in a behaviors block and engines up to v0.23.0 admitted (issue #1582), in the order
+/// Mountebank reports them:
+/// - a `copy.from` or lookup `key.from` object without exactly one key;
+/// - in the `behaviors` array form, an element with no behavior key but some other key
+///   (`Unrecognized behavior: "<key>"`, which covers a `{"repeat": n}` element: `repeat` is a
+///   response field there), and an element with two or more behavior keys. An unknown key beside
+///   one behavior is admitted, as there. The `_behaviors` object form is upcast key by key, so it
+///   is never refused for either;
+/// - a `repeat` of `0` or `null`, on the response or in an object-form block.
+///
+/// The first key named is the first in the element's sorted keys, which is the written order for
+/// the one-key element this is almost always about.
+///
+/// **Door-only.** [`compile_behaviors`] splits a multi-key element into one step per key and drops
+/// a `null` `repeat`, which is the stored program shape (#1198), so [`admission_check_stub`] cannot
+/// see those. A `0` `repeat` and a `from` of the wrong size it could see, and does not check either:
+/// engines up to v0.23.0 stored all of these (a `from` as written), and a store replays what it
+/// holds, `--datadir` included, so a check there would make an upgrade drop a stored imposter. A
+/// replayed decode ([`Admission::Skipped`]) keeps the value those engines stored.
+fn refuse_door_only_behavior_shapes(
+    raw: &StubResponseRaw,
+    admission: Admission,
+) -> Result<(), String> {
+    use serde_json::Value;
+    if admission == Admission::Skipped {
+        return Ok(());
+    }
+    let not_positive = |repeat: Option<&Value>| {
+        repeat.is_some_and(|repeat| repeat.is_null() || repeat.as_u64() == Some(0))
+    };
+    let known = |key: &String| crate::behaviors::CANONICAL_ORDER.contains(&key.as_str());
+    match raw.underscore_behaviors.as_ref().or(raw.behaviors.as_ref()) {
+        Some(Value::Array(elements)) => {
+            for element in elements {
+                refuse_from_key_count(element)?;
+                let Some(element) = element.as_object() else {
+                    continue;
+                };
+                let behaviors = element.keys().filter(|key| known(key)).count();
+                if let (0, Some(first)) = (behaviors, element.keys().next()) {
+                    return Err(format!("Unrecognized behavior: \"{first}\""));
+                }
+                if behaviors > 1 {
+                    return Err("Each behavior object must have only one behavior type".to_string());
+                }
+            }
+        }
+        Some(block @ Value::Object(_)) => {
+            refuse_from_key_count(block)?;
+            if not_positive(block.get("repeat")) {
+                return Err(REPEAT_NOT_POSITIVE.to_string());
+            }
+        }
+        _ => {}
+    }
+    if not_positive(raw.repeat.as_ref()) {
+        return Err(REPEAT_NOT_POSITIVE.to_string());
+    }
+    Ok(())
+}
+
 /// Every `copy` and `lookup` selector compiles (issue #1258). The extractors read a selector that
 /// does not compile as "nothing extracted", so the token became the empty string (or the lookup
 /// found no row) on every request, the behavior twin of the predicate refusal in
@@ -1617,17 +1724,10 @@ fn validate_behavior_selectors(
 /// (issue #1326). Read from the raw block: the decode reads a malformed `ns` as absent, because the
 /// key was ignored before #1326 and stored configs may carry any shape there.
 fn refuse_bad_extraction_namespaces(block: &serde_json::Value) -> Result<(), String> {
-    fn items(value: Option<&serde_json::Value>) -> Vec<&serde_json::Value> {
-        match value {
-            Some(serde_json::Value::Array(items)) => items.iter().collect(),
-            Some(item @ serde_json::Value::Object(_)) => vec![item],
-            _ => Vec::new(),
-        }
-    }
-    let copies = items(block.get("copy"))
+    let copies = behavior_items(block, "copy")
         .into_iter()
         .map(|copy| ("copy", copy.get("using")));
-    let lookups = items(block.get("lookup"))
+    let lookups = behavior_items(block, "lookup")
         .into_iter()
         .map(|lookup| ("lookup", lookup.get("key").and_then(|key| key.get("using"))));
     for (key, using) in copies.chain(lookups) {
@@ -1751,6 +1851,8 @@ impl TryFrom<StubResponseRaw> for StubResponse {
     fn try_from(raw: StubResponseRaw) -> Result<Self, Self::Error> {
         // First, as Mountebank's `resolve` checks it before anything else in the response.
         refuse_response_type_count(&raw, admission())?;
+        // Judged on the block as written, which the compile below consumes; reported last.
+        let door_only = refuse_door_only_behavior_shapes(&raw, admission());
         // `_behaviors` when present, else `behaviors`, compiled into the program that runs
         // (issue #1198). Checked before the response type is chosen, so a block on a `proxy`,
         // `inject` or `fault` response is held to the same rule rift-lint applies to every response.
@@ -1761,7 +1863,8 @@ impl TryFrom<StubResponseRaw> for StubResponse {
         // Both are checked before the merge, so a malformed `repeat` in the block is refused even
         // when the top-level one replaces it — the rule rift-lint applies to each.
         refuse_unparseable_behaviors(behaviors.as_ref(), admission())?;
-        if let Some(repeat) = raw.repeat {
+        // A `null` one is absent here; a door has refused it below.
+        if let Some(repeat) = raw.repeat.clone().filter(|repeat| !repeat.is_null()) {
             let alone = serde_json::json!({ "repeat": repeat });
             refuse_unparseable_behaviors(Some(&alone), admission())?;
             // Appended, so it is the last `repeat` and wins, as it does in Mountebank.
@@ -1781,6 +1884,9 @@ impl TryFrom<StubResponseRaw> for StubResponse {
             refuse_unreadable_generators(raw.proxy.as_ref(), admission())?;
             refuse_proxy_to_path(raw.proxy.as_ref(), admission())?;
         }
+        // Last, so a response that also fails a check `admission_check_stub` re-runs is refused
+        // with that check's message, the one `admission_check` names for it.
+        door_only?;
         // Priority: is > proxy > inject > fault > rift-script-only. A door has refused two types or
         // none above, so this order only decides what a replayed config admitted before #1551 decodes
         // to; it must not change.
@@ -1908,27 +2014,49 @@ impl From<StubResponse> for StubResponseOut {
 /// `repeat` and its `behaviors` array.
 ///
 /// - `repeat` is a response field in Mountebank, and a `{"repeat": n}` element is refused. A `0`
-///   is not written: Mountebank refuses it, and Rift serves it as `1`, which is what an absent
-///   `repeat` means.
-/// - Elements come in execution order, then any other key alphabetically.
+///   is not written: Mountebank and a config door refuse it (issue #1582), and Rift serves one it
+///   replays from an older engine as `1`, which is what an absent `repeat` means.
+/// - Elements come in execution order.
 /// - Every step is its own element: a `copy`, `lookup` or `shellTransform` holding several items is
 ///   written one element per item, the only spelling Mountebank accepts (issue #1199).
+/// - A step for a key that is not a behavior configures nothing, and an element holding only such
+///   keys is refused by Mountebank and by a config door (#1582), so it is written inside the
+///   element before it, where both admit it and [`compile_behaviors`] reads it back as the same
+///   step. One with no behavior before it goes into the first behavior after it; one with no
+///   behavior at all is not written, as Mountebank's upcast of `_behaviors` drops it.
 /// - A `null` or empty-list behavior configures nothing and is not written.
 fn behaviors_out(
     block: serde_json::Value,
 ) -> (Option<serde_json::Value>, Option<Vec<serde_json::Value>>) {
-    use serde_json::Value;
+    use serde_json::{Map, Value};
     let Some(Value::Array(program)) = compile_behaviors(block) else {
         return (None, None);
     };
     let mut repeat = None;
-    let mut elements = Vec::new();
+    let mut elements: Vec<Map<String, Value>> = Vec::new();
+    let mut leading = Map::new();
     for element in program {
-        match element.get("repeat") {
-            Some(value) => repeat = Some(value.clone()).filter(|r| r.as_u64() != Some(0)),
-            None => elements.push(element),
+        let Value::Object(element) = element else {
+            continue;
+        };
+        if let Some(value) = element.get("repeat") {
+            repeat = Some(value.clone()).filter(|r| r.as_u64() != Some(0));
+            continue;
+        }
+        let behavior = element
+            .keys()
+            .any(|key| crate::behaviors::CANONICAL_ORDER.contains(&key.as_str()));
+        match elements.last_mut() {
+            Some(previous) if !behavior => previous.extend(element),
+            _ if !behavior => leading.extend(element),
+            _ => {
+                let mut element = element;
+                element.append(&mut leading);
+                elements.push(element);
+            }
         }
     }
+    let elements: Vec<Value> = elements.into_iter().map(Value::Object).collect();
     (repeat, (!elements.is_empty()).then_some(elements))
 }
 
@@ -5577,8 +5705,10 @@ mod tests {
         }
     }
 
-    // `repeat` is last-wins, so a bad one a later element overrides configures nothing and loads;
-    // a step a later `null` removes loads too. rift-lint checks the array the same way.
+    // `repeat` is last-wins, so a bad one a later element overrides configures nothing; a step a
+    // later `null` removes configures nothing too. rift-lint checks the array the same way. The
+    // `{"repeat": 3}` element is refused at a door since #1582 (`Unrecognized behavior`), so this
+    // is what a config an older engine stored replays to.
     #[test]
     fn an_overridden_bad_value_in_a_behaviors_array_still_loads() {
         {
@@ -5588,7 +5718,11 @@ mod tests {
                 later,
                 { "repeat": 3 }
             ] });
-            let resp: StubResponse = serde_json::from_value(response.clone())
+            let door = serde_json::from_value::<StubResponse>(response.clone())
+                .expect_err("a door refuses the repeat element")
+                .to_string();
+            assert!(door.contains("Unrecognized behavior: \"repeat\""), "{door}");
+            let resp: StubResponse = crate::imposter::deserialize_replayed(response.clone())
                 .unwrap_or_else(|e| panic!("{response}: {e}"));
             let StubResponse::Is {
                 behaviors_parsed, ..
@@ -5636,11 +5770,12 @@ mod tests {
         ));
     }
 
-    /// An all-`null` block is no behaviors at all: it loads, with nothing to run.
+    /// An all-`null` block is no behaviors at all: it loads, with nothing to run. A `null`
+    /// `repeat` is refused (#1582), as Mountebank refuses it.
     #[test]
     fn an_all_null_block_loads_as_no_behaviors() {
         let response = json!({ "is": { "statusCode": 200 }, "_behaviors": {
-            "wait": null, "repeat": null, "copy": null, "lookup": null,
+            "wait": null, "copy": null, "lookup": null,
             "decorate": null, "shellTransform": null
         } });
         let resp: StubResponse = serde_json::from_value(response).expect("loads");
@@ -5996,9 +6131,9 @@ mod tests {
         for shape in shapes {
             for spelling in [
                 json!({"_behaviors": {"wait": 500, "repeat": 2}}),
-                json!({"behaviors": [{"wait": 500}, {"repeat": 2}]}),
+                json!({"behaviors": [{"wait": 500}], "repeat": 2}),
                 // A null `_behaviors` is absent, so `behaviors` is the block read.
-                json!({"_behaviors": null, "behaviors": [{"wait": 500}, {"repeat": 2}]}),
+                json!({"_behaviors": null, "behaviors": [{"wait": 500}], "repeat": 2}),
             ] {
                 let mut written = shape.clone();
                 for (k, v) in spelling.as_object().expect("object") {
@@ -6234,6 +6369,18 @@ mod mountebank_output_tests {
         serde_json::to_value(StubResponseOut::from(parsed)).expect("json")
     }
 
+    /// [`out`] for a shape a config door refuses since #1582 but an older engine admitted and an
+    /// embedder replays: what it is written back as.
+    fn replayed_out(response: Value) -> Value {
+        assert!(
+            serde_json::from_value::<StubResponse>(response.clone()).is_err(),
+            "{response} is refused at a config door"
+        );
+        let parsed: StubResponse = crate::imposter::deserialize_replayed(response.clone())
+            .unwrap_or_else(|e| panic!("{response} does not replay: {e}"));
+        serde_json::to_value(StubResponseOut::from(parsed)).expect("json")
+    }
+
     #[test]
     fn repeat_is_a_top_level_field_on_every_response_shape() {
         for shape in [
@@ -6245,11 +6392,16 @@ mod mountebank_output_tests {
         ] {
             for (spelling, value) in [
                 ("_behaviors", json!({"repeat": 3, "wait": 500})),
+                // Rift's pre-0.18.0 spelling, refused at a door since #1582.
                 ("behaviors", json!([{"wait": 500}, {"repeat": 3}])),
             ] {
                 let mut written = shape.clone();
                 written[spelling] = value;
-                let saved = out(written.clone());
+                let saved = if spelling == "behaviors" {
+                    replayed_out(written.clone())
+                } else {
+                    out(written.clone())
+                };
                 assert_eq!(saved["repeat"], json!(3), "{written} -> {saved}");
                 assert_eq!(
                     saved["behaviors"],
@@ -6270,14 +6422,15 @@ mod mountebank_output_tests {
         assert!(saved.get("behaviors").is_none(), "{saved}");
     }
 
-    /// Mountebank refuses `repeat <= 0`; Rift serves `0` as `1`, which is what an absent `repeat` is.
+    /// Mountebank and a config door (#1582) refuse a `0` or `null` `repeat`; one an older engine
+    /// admitted replays, and Rift serves `0` as `1`, which is what an absent `repeat` is.
     #[test]
     fn a_zero_or_null_repeat_is_not_written() {
         for block in [
             json!({"repeat": 0, "wait": 1}),
             json!({"repeat": null, "wait": 1}),
         ] {
-            let saved = out(json!({"is": {"body": "a"}, "_behaviors": block}));
+            let saved = replayed_out(json!({"is": {"body": "a"}, "_behaviors": block}));
             assert!(saved.get("repeat").is_none(), "{block} -> {saved}");
             assert_eq!(
                 saved["behaviors"],
@@ -6359,9 +6512,11 @@ mod mountebank_output_tests {
         use crate::behaviors::HasRepeatBehavior;
         for response in [
             json!({"is": {}, "repeat": 4, "_behaviors": {"repeat": 2, "wait": 1}}),
+            // Refused at a door since #1582; an older engine's stored config replays.
             json!({"is": {}, "repeat": 4, "behaviors": [{"repeat": 2}, {"wait": 1}]}),
         ] {
-            let parsed: StubResponse = serde_json::from_value(response.clone()).expect("parses");
+            let parsed: StubResponse =
+                crate::imposter::deserialize_replayed(response.clone()).expect("parses");
             assert_eq!(parsed.get_repeat(), Some(4), "{response}");
             assert_eq!(
                 parsed.behaviors_block(),
