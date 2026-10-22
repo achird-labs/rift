@@ -269,7 +269,7 @@ curl http://localhost:2525/imposters/4545
       "query": {},
       "headers": {...},
       "ip": "::ffff:127.0.0.1",
-      "timestamp": "2024-01-15T10:30:00.123456+00:00",
+      "timestamp": "2024-01-15T10:30:00.123Z",
       "status": 200,
       "latencyMs": 0
     }
