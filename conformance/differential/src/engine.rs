@@ -334,7 +334,9 @@ pub async fn start_rift(bin: &Path, cwd: &Path, scripts_dir: &Path) -> Result<En
         .args(["--port", "0", "--allow-injection", "--local-only"])
         .arg("--scripts-dir")
         .arg(scripts_dir)
-        .args(["--loglevel", "error"])
+        // `--nologfile`, as Mountebank is launched with: both engines then answer `GET /logs`
+        // with the `No logfile` sentinel instead of their own, differently worded entries (#1615).
+        .args(["--loglevel", "error", "--nologfile"])
         .env("RUST_LOG", format!("error,{ADMIN_LISTENING_TARGET}=info"))
         .env("NO_COLOR", "1")
         .current_dir(cwd)

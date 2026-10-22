@@ -43,6 +43,7 @@ const ACTIVE_ALLOCATOR: &str = "system";
 
 use anyhow::Context as _;
 use clap::Parser;
+use rift_http_proxy::admin_api::LogRing;
 use rift_http_proxy::bootstrap::{
     DEFAULT_PIDFILE, apply_rcfile_defaults_reporting, log_filter, missing_rcfile_warning,
     rcfile_not_found, save_imposters, stop_server,
@@ -149,7 +150,13 @@ fn main() -> Result<(), anyhow::Error> {
             let file_appender = tracing_appender::rolling::never(dir, filename);
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
             log_guard = Some(guard);
-            Some(fmt::layer().with_writer(non_blocking).boxed())
+            Some(
+                fmt::layer()
+                    .with_writer(non_blocking)
+                    // A file is not a terminal: without this it held escape codes (issue #1615).
+                    .with_ansi(false)
+                    .boxed(),
+            )
         })
     } else {
         None
@@ -157,8 +164,14 @@ fn main() -> Result<(), anyhow::Error> {
     // Named, not `_`: a `let _ =` binding would drop the guard immediately.
     let _log_guard = log_guard;
 
+    // The buffer behind `GET /logs` (issue #1615): a sibling of the console layer, so it sees
+    // exactly what `--loglevel` / `RUST_LOG` let through. `--nologfile` is Mountebank's "no log
+    // buffer" switch, and `/logs` then answers its `No logfile` sentinel.
+    let log_ring = (!cli.nologfile).then(LogRing::new);
+
     tracing_subscriber::registry()
         .with(fmt::layer())
+        .with(log_ring.clone())
         .with(env_filter)
         .with(file_layer)
         .init();
@@ -189,7 +202,7 @@ fn main() -> Result<(), anyhow::Error> {
         Some(Commands::Replay) => {
             // Load the (global) config file and start
             replay_configfile(&cli)?;
-            return run_mountebank_mode(cli);
+            return run_mountebank_mode(cli, log_ring);
         }
         // Already handled (and returned) above, before the server bootstrap; kept here so the
         // match stays exhaustive and correct if that ever changes.
@@ -226,7 +239,7 @@ fn main() -> Result<(), anyhow::Error> {
             "off"
         }
     );
-    run_mountebank_mode(cli)
+    run_mountebank_mode(cli, log_ring)
 }
 
 /// The PID file `stop`/`restart` act on: the single global `--pidfile` binding, falling back to
@@ -238,7 +251,7 @@ fn pidfile_or_default(cli: &Cli) -> std::path::PathBuf {
 }
 
 /// Run in Mountebank-compatible mode
-fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
+fn run_mountebank_mode(cli: Cli, log_ring: Option<LogRing>) -> Result<(), anyhow::Error> {
     // Write the PID file here — the one place every serving entry converges (plain start, the
     // `restart` fall-through, and `Replay`'s re-entry). Writing it before the subcommand dispatch
     // meant `rift --pidfile p restart` recorded its OWN pid and then SIGTERMed itself, and a
@@ -252,7 +265,7 @@ fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
     // the way out, on success and on error alike (issue #1155). It never used to, so a Ctrl+C, a
     // plain `kill` or a `docker stop` all left a stale file behind.
     let written_pidfile = cli.pidfile.clone();
-    let result = serve_topology(cli);
+    let result = serve_topology(cli, log_ring);
     if let Some(pidfile) = written_pidfile {
         remove_own_pidfile(&pidfile);
     }
@@ -285,7 +298,7 @@ fn remove_own_pidfile(pidfile: &std::path::Path) {
 
 /// Pick the runtime topology and serve on it until the admin plane exits or a termination signal
 /// arrives.
-fn serve_topology(cli: Cli) -> Result<(), anyhow::Error> {
+fn serve_topology(cli: Cli, log_ring: Option<LogRing>) -> Result<(), anyhow::Error> {
     // Topology selection (RFC-712, issue #744). Clap already applied RIFT_RUNTIME env fallback
     // into `cli.runtime`, so resolve() only sees the merged value; the platform gate then
     // downgrades or rejects per RFC D5 (macOS falls back with a warning, Windows refuses).
@@ -303,7 +316,7 @@ fn serve_topology(cli: Cli) -> Result<(), anyhow::Error> {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            let result = runtime.block_on(serve(ServerBuilder::from_cli(cli)));
+            let result = runtime.block_on(serve(with_ring(ServerBuilder::from_cli(cli), log_ring)));
             // Bounded, not an implicit drop — a stuck `decorate` would otherwise hold the process
             // after a graceful shutdown for ever. See `runtime::BLOCKING_DRAIN`.
             runtime.shutdown_timeout(runtime::BLOCKING_DRAIN);
@@ -332,12 +345,20 @@ fn serve_topology(cli: Cli) -> Result<(), anyhow::Error> {
             // threads the runtime handles into the manager, which binds one SO_REUSEPORT
             // listener per worker per imposter port.
             let result = control.block_on(serve(
-                ServerBuilder::from_cli(cli).accept_runtimes(workers.handles()),
+                with_ring(ServerBuilder::from_cli(cli), log_ring)
+                    .accept_runtimes(workers.handles()),
             ));
             workers.shutdown();
             control.shutdown_timeout(runtime::BLOCKING_DRAIN);
             result
         }
+    }
+}
+
+fn with_ring(builder: ServerBuilder, ring: Option<LogRing>) -> ServerBuilder {
+    match ring {
+        Some(ring) => builder.log_ring(ring),
+        None => builder,
     }
 }
 

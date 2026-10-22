@@ -2,6 +2,7 @@
 
 use crate::admin_api::authz;
 use crate::admin_api::handlers::events::{self, box_full};
+use crate::admin_api::log_ring::LogRing;
 use crate::admin_api::router::{self, route_request};
 use crate::admin_api::types::{ADMIN_JSON_CONTENT_TYPE, error_response};
 use crate::config_loader::ConfigSource;
@@ -84,6 +85,8 @@ pub struct AdminApiServer {
     allow_injection: bool,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
+    /// The buffer `GET /logs` serves (issue #1615); see [`with_log_ring`](Self::with_log_ring).
+    log_ring: Option<LogRing>,
     /// `--local-only` as supplied, reported verbatim by `GET /config` (issue #879). The flag, not
     /// "did we bind loopback" — see `ConfigSnapshot::local_only`.
     local_only: bool,
@@ -119,6 +122,7 @@ impl AdminApiServer {
             allow_injection: false,
             intercept: None,
             scripts_dir: None,
+            log_ring: None,
             authorizer: None,
             local_only: false,
             mock: false,
@@ -300,6 +304,15 @@ impl AdminApiServer {
         self
     }
 
+    /// Serve `GET /logs` from `ring` (issue #1615). Without it the route answers Mountebank's
+    /// `--nologfile` sentinel. The ring only fills once it is also installed as a `tracing` layer
+    /// (`registry().with(ring.clone())`); `rift-ffi` installs none, so FFI hosts get the sentinel.
+    #[must_use]
+    pub fn with_log_ring(mut self, ring: LogRing) -> Self {
+        self.log_ring = Some(ring);
+        self
+    }
+
     /// Bind the listener (`:0` is fine) and start serving on the current runtime, returning a
     /// handle that reports the bound address and can be shut down gracefully (issue #342).
     pub async fn bind(self) -> anyhow::Result<RunningAdminApi> {
@@ -391,6 +404,7 @@ impl AdminApiServer {
                     host: self.reported_host,
                     mock: self.mock,
                     debug: self.debug,
+                    log_ring: self.log_ring,
                 },
                 rift_mock_core::extensions::PeerCheck::new(
                     self.peer_policy,

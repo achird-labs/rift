@@ -98,6 +98,9 @@ impl Mode {
             (Self::Embedded, "front-door") => Some(
                 "drives the front door of `rift --front-door`, which rift_serve_admin has no option for",
             ),
+            (Self::Embedded, "log-ring") => Some(
+                "reads entries from GET /logs, which the binary fills through its own tracing subscriber; rift_serve_admin installs none, so the host owns logging and /logs answers `No logfile`",
+            ),
             (Self::Container, "upstream-trust") => Some(
                 "starts a second engine with --upstream-ca-file, which this harness only spawns in external mode",
             ),
@@ -753,7 +756,7 @@ static ENGINE_SEQ: AtomicUsize = AtomicUsize::new(0);
 /// Names each [`Harness::scratch_file`].
 static SCRATCH_SEQ: AtomicUsize = AtomicUsize::new(0);
 
-/// Spawn `rift --port 0 --nologfile --metrics-port 0 --allow-injection --scripts-dir <corpus root>
+/// Spawn `rift --port 0 --metrics-port 0 --allow-injection --scripts-dir <corpus root>
 /// <args>` (plus `--front-door 0` when asked) in the corpus root, output to a fresh log file, and
 /// return the child and that log. `--scripts-dir` is what lets an admin-API `lookup` read the
 /// corpus's `data/` CSVs (rift#1617); a relative path resolves from it as it did from the cwd.
@@ -782,7 +785,9 @@ fn spawn_engine(config: &Config, opts: &SpawnOptions) -> Result<(Child, PathBuf)
     })?;
     let binary = config.build_dir.join("rift");
     let mut command = Command::new(&binary);
-    command.args(["--port", "0", "--nologfile", "--metrics-port", "0"]);
+    // No `--nologfile`: it would turn `GET /logs` into the `No logfile` sentinel, and the
+    // `21-admin-rest` feature asserts real entries (issue #1615).
+    command.args(["--port", "0", "--metrics-port", "0"]);
     command.arg("--scripts-dir").arg(&config.corpus_root);
     if !opts.no_injection {
         command.arg("--allow-injection");
@@ -1870,7 +1875,7 @@ mod tests {
 
     #[test]
     fn only_embedded_excludes_the_spawned_engine_tags() {
-        for tag in ["upstream-trust", "front-door"] {
+        for tag in ["upstream-trust", "front-door", "log-ring"] {
             assert!(Mode::Embedded.excludes(tag).is_some(), "{tag}");
             assert!(Mode::External.excludes(tag).is_none(), "{tag}");
         }
