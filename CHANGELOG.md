@@ -236,10 +236,17 @@ record.
 
 ### Fixed
 
+- **`RANDOM_DATA_THEN_CLOSE` on an https imposter sends its garbage inside TLS** (#1600), as
+  Mountebank does: the client completes the handshake and fails to parse the decrypted bytes as
+  HTTP. Rift wrote them on the socket beneath TLS, so the client saw a TLS record error. The
+  malformed-chunk fault (`MALFORMED_RESPONSE_CHUNK`) had the same defect. A reset and an empty
+  response still act on the socket.
+
 - **An imposter answers `CONNECT` with a tunnel back into itself** (#1595), as Mountebank does,
   instead of forwarding the CONNECT to its proxy origin. A client using an `http` or `https` imposter
   as its proxy now reaches the imposter's stubs. The CONNECT target is never contacted, and the
   CONNECT itself is not matched, recorded or counted.
+
 - **An `async` inject is awaited, and a callback from a promise or a timer is honoured** (#1593).
   An `async` inject served an empty `200` with no error, because the script engine never ran its
   promise jobs; `Promise.resolve().then(() => callback(...))` and `setTimeout(() => callback(...))`

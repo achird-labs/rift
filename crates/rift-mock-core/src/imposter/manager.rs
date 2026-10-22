@@ -5,7 +5,7 @@
 
 use super::core::Imposter;
 use super::datadir_file;
-use super::fault_io::{FaultCell, FaultIo, TcpFaultKind};
+use super::fault_io::{FaultCell, FaultIo, TcpFaultKind, TlsPayloadFault};
 use super::handler::handle_imposter_request_decorated;
 use super::reconcile::{
     ApplyReport, DeleteAllReport, DesiredImposter, EventContext, ImposterEvent,
@@ -1836,7 +1836,10 @@ impl ImposterManager {
                                 // armed by the handler, applied by FaultIo on the response write.
                                 let fault_cell = FaultCell::new();
                                 // FaultIo sits beneath TLS so #239 connection faults still break
-                                // an HTTPS connection.
+                                // an HTTPS connection: a reset needs the raw socket. The payload
+                                // faults (random data, malformed chunk) are written above TLS by
+                                // `TlsPayloadFault` instead, sharing this cell, so the client
+                                // decrypts them as Mountebank's (issue #1600).
                                 let faulted = FaultIo::new(stream, fault_cell.clone());
                                 match tls_acceptor {
                                     // Bound the TLS handshake so a stalled/half-open client
@@ -1849,7 +1852,7 @@ impl ImposterManager {
                                     {
                                         Ok(Ok(tls)) => {
                                             serve_imposter_connection(
-                                                tls,
+                                                TlsPayloadFault::new(tls, fault_cell.clone()),
                                                 Some(acceptor),
                                                 imposter,
                                                 addr,
