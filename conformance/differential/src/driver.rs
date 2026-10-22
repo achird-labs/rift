@@ -2,7 +2,9 @@
 
 use crate::canon;
 use crate::case::{Case, Request, Scheme, Step};
-use crate::diff::{Difference, Observation, compare_json, compare_observations, unified};
+use crate::diff::{
+    Difference, FailureClass, Observation, compare_json, compare_observations, unified,
+};
 use crate::engine::{Engine, Outgoing, free_ports, send};
 use crate::ports::PortMap;
 use serde_json::Value;
@@ -28,6 +30,10 @@ pub struct CaseReport {
     /// Why the case could not be compared as written (port allocation, an unreadable imposter
     /// list or export, a failed cleanup). Any entry fails the case.
     pub errors: Vec<String>,
+    /// Steps where neither engine could be connected to. The two answers are equal, so this is no
+    /// difference; a hand-written case may send to a deleted imposter on purpose. A generated case
+    /// never does, so there it means the run itself broke (issue #1549).
+    pub unreachable: Vec<String>,
 }
 
 pub async fn run_case(client: &reqwest::Client, engines: &Engines, case: &Case) -> CaseReport {
@@ -72,6 +78,9 @@ pub async fn run_case(client: &reqwest::Client, engines: &Engines, case: &Case) 
             Step::Admin { method, path, body } => {
                 let (mut mb, mut rift) =
                     admin_both(client, engines, &maps, method, path, body.as_ref()).await;
+                if both_unreachable(&mb, &rift) {
+                    report.unreachable.push(format!("{at}.admin"));
+                }
                 if creates_unported_imposter(method, path, body.as_ref()) {
                     for (map, observation) in maps.iter_mut().zip([&mut mb, &mut rift]) {
                         if let Some(port) = body_port(observation) {
@@ -104,6 +113,9 @@ pub async fn run_case(client: &reqwest::Client, engines: &Engines, case: &Case) 
                         send(client, &outgoing[0], &maps[0]),
                         send(client, &outgoing[1], &maps[1]),
                     );
+                    if both_unreachable(&mb, &rift) {
+                        report.unreachable.push(at.clone());
+                    }
                     report
                         .differences
                         .extend(compare_observations(&at, &mb, &rift, false));
@@ -262,6 +274,12 @@ async fn compare_stored(
             }
         }
     }
+}
+
+/// Both engines refused the connection: nothing listened on either side.
+fn both_unreachable(mountebank: &Observation, rift: &Observation) -> bool {
+    let refused = |o: &Observation| matches!(o, Observation::Failed(FailureClass::Connect));
+    refused(mountebank) && refused(rift)
 }
 
 fn stored_document(observation: &Observation, recorded: &BTreeSet<usize>) -> Option<Value> {

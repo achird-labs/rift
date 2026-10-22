@@ -274,7 +274,21 @@ pub fn free_ports(n: usize) -> std::io::Result<Vec<u16>> {
 /// A bad coverage directory, spawn failure, or the admin API not answering within the startup
 /// window.
 pub async fn start_mountebank(mb: &Path, cwd: &Path) -> Result<Engine, String> {
-    let coverage = mb_coverage_dir()?;
+    start_mountebank_profiled(mb, cwd, mb_coverage_dir()?).await
+}
+
+/// [`start_mountebank`] with the coverage directory given instead of read from
+/// `RIFT_DIFFERENTIAL_MB_COVERAGE`: `None` runs Mountebank unprofiled. The generated cases
+/// (`tests/generative.rs`, issue #1549) pass `None`, so the coverage ratchet measures the committed
+/// cases only and does not move when the generator's vocabulary or random stream does.
+///
+/// # Errors
+/// As [`start_mountebank`].
+pub async fn start_mountebank_profiled(
+    mb: &Path,
+    cwd: &Path,
+    coverage: Option<PathBuf>,
+) -> Result<Engine, String> {
     let admin_port = free_ports(1).map_err(|e| e.to_string())?[0];
     let pidfile = std::env::temp_dir().join(format!(
         "rift-differential-mb-{}-{admin_port}.pid",

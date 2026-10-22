@@ -582,6 +582,13 @@ record.
   tests against Mountebank (the baseline) and then Rift. Every Rift failure is classified in
   `conformance/mbtest/expected.json` as a bug with its issue, a documented difference or a harness
   limit, and a listed test that starts passing fails the run, so the list can only shrink.
+- **Generated cases against Mountebank** (#1549): `conformance/differential/tests/generative.rs`
+  draws random imposters and request/admin sequences from the model test's generators, runs each
+  on Mountebank and Rift, and shrinks any unexplained difference to a minimal case file ready for
+  `cases/generated.json`. Every pull request runs 32 cases on a fixed seed; a nightly job in
+  `model-tests.yml` runs 20 minutes on a fresh seed and files each new divergence once, keyed by a
+  signature of where it occurs. Against v0.22.0 it shrinks to a one-operation `PUT /imposters` case
+  within a second.
 
 ## [0.23.0] - 2026-10-16
 
