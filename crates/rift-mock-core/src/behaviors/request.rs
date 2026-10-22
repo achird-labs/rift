@@ -28,6 +28,11 @@ pub struct RequestContext {
     pub query: HashMap<String, Vec<String>>,
     pub headers: HashMap<String, String>,
     pub body: Option<String>,
+    /// The request's `gzip` / `br` body did not decode (issue #1584), so it has no body at all:
+    /// `body` is `None`, `copy`/`lookup` find no `body` source, and `decorate`/`shellTransform` see
+    /// no `body` key, as Mountebank's `request.body` is `undefined`. When `false`, a `None` body is
+    /// a request without one, which every consumer reads as `""`.
+    pub body_undefined: bool,
     /// `requestFrom` / `ip` / `form` for `decorate` and `MB_REQUEST`, as Mountebank's
     /// `httpRequest.transform` builds them (issue #1451). `None` when there is no client socket,
     /// and `form` only for a non-empty urlencoded body.
@@ -102,6 +107,7 @@ impl RequestContext {
             query: query_map,
             headers: header_map,
             body: body.map(|s| s.to_string()),
+            body_undefined: false,
             request_from: client_addr.map(|addr| addr.to_string()),
             ip: client_addr.map(|addr| addr.ip().to_string()),
             form: crate::imposter::Imposter::request_form(headers, body)

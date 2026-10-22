@@ -374,6 +374,29 @@ mirroring how binary **response** bodies are represented:
 The `body` is standard base64 (with padding). `_mode` is **absent** for a normal text/JSON body, so
 recordings of text traffic are unchanged — check for it rather than assuming it is present.
 
+#### Compressed request bodies
+
+A request sent with `Content-Encoding: gzip` or `Content-Encoding: br` is decoded before it is
+matched and recorded, as in Mountebank. Predicates, scripts, behaviors and `savedRequests` all see
+the decoded body, and a decoded body that is UTF-8 is recorded as text, with no `_mode`. The header
+itself is kept as the client sent it. Only those two exact values are decoded: `GZIP`, `x-gzip`,
+`deflate` and a list such as `gzip, br` leave the body as sent, as Mountebank compares the value
+exactly. A proxy forwards the body still encoded, with its header.
+
+A body that does not decode (it is not really gzip or brotli, it is truncated, or it is empty) has
+no `body` at all, as Mountebank leaves `request.body` undefined:
+
+- a predicate sees the body as missing, so `exists: {body: false}` and `equals: {body: ""}` match;
+- a response `inject`, a `decorate` or a `shellTransform` gets a request with no `body` property
+  (a predicate `inject` still sees `""`);
+- a recorded request has no `body` key (and no `_bodyOmitted`);
+- a `copy` or `lookup` from `body` finds no source.
+
+The decoded size is what `--max-body-size` limits, and it is charged to `--body-memory-budget`
+like a raw body of that size, so a small body that inflates past the ceiling gets `413`
+(see [Body size limits](../configuration/cli.md#body-size-limits)). Mountebank decodes without a
+limit.
+
 Scripts see the same distinction: `ctx.request.body` carries the base64 string and
 `ctx.request.isBinary` is `true`. Where rift cannot determine the encoding (the `decorate` and
 predicate-`inject` paths do not carry it), `isBinary` is **absent** rather than `false` — so a
