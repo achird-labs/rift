@@ -338,12 +338,6 @@
       "note": "ECONNREFUSED on 4542: the request arrived between the pidfile write and the imposter bind. Once bound, the gzip body matches (SUCCESS) since #1584"
     },
     {
-      "id": "cli/datadirTest.js::--datadir should load previously saved imposters until they are deleted",
-      "class": "bug",
-      "issue": "#1603",
-      "note": "a --datadir restart resets each stub's response cycle; Mountebank resumes it (serves 'second')"
-    },
-    {
       "id": "cli/datadirTest.js::--datadir should allow configfile to overwrite imposters loaded from datadir",
       "class": "bug",
       "issue": "#1604",

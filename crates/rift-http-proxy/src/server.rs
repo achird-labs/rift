@@ -1067,6 +1067,9 @@ impl ServerBuilder {
             intercept_block = loaded.intercept;
             routes_block = loaded.routes;
         }
+        // Write each datadir imposter's response-cycle positions behind (issue #1603); `None`
+        // without a datadir. Stopped, with a last flush, by `RunningServer::shutdown`.
+        let cursor_flusher = manager.start_cursor_flusher(CURSOR_FLUSH_PERIOD);
 
         // Bind the metrics server now so a `:0` request can report its port. A bind failure
         // stays non-fatal and only logs — matching the binary, which spawned the metrics
@@ -1350,6 +1353,7 @@ impl ServerBuilder {
             metrics_reservation: Mutex::new(metrics_reservation),
             intercept,
             front_door,
+            cursor_flusher: Mutex::new(cursor_flusher),
         })
     }
 }
@@ -1365,7 +1369,13 @@ pub struct RunningServer {
     metrics_reservation: Mutex<Option<PortReservation>>,
     intercept: InterceptControl,
     front_door: Option<RunningFrontDoor>,
+    /// The `--datadir` cursor flusher (issue #1603), stopped with a last flush by `shutdown`.
+    cursor_flusher: Mutex<Option<rift_mock_core::imposter::CursorFlusher>>,
 }
+
+/// How often a datadir imposter's response-cycle positions are written behind (issue #1603): what
+/// a crash can lose. A graceful stop flushes, and loses none.
+const CURSOR_FLUSH_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl RunningServer {
     /// Build a `RunningServer` whose admin accept loop is an arbitrary future — the seam for
@@ -1389,6 +1399,7 @@ impl RunningServer {
             metrics_reservation: Mutex::new(None),
             intercept: InterceptControl::default(),
             front_door: None,
+            cursor_flusher: Mutex::new(None),
         }
     }
     /// The bound admin API address (resolves a `:0` request to the assigned port).
@@ -1464,6 +1475,20 @@ impl RunningServer {
         self.intercept.stop().await;
         if let Some(front_door) = &self.front_door {
             front_door.shutdown().await;
+        }
+        // Last, so the positions written are the ones the stopped planes left (issue #1603).
+        let flusher = self
+            .cursor_flusher
+            .lock()
+            .expect("cursor flusher mutex poisoned")
+            .take();
+        if let Some(flusher) = flusher {
+            for (port, e) in flusher.stop().await {
+                error!(
+                    port,
+                    "could not save the imposter's response cycle positions: {e}"
+                );
+            }
         }
     }
 }
@@ -2330,13 +2355,10 @@ async fn create_startup_imposters(
             }
             StartupOrigin::Datadir(path) => {
                 info!("Loading imposter on port {:?} from {:?}", config.port, path);
-                // The datadir holds what the admin API persisted, so it is a network door.
+                // The datadir holds what the admin API persisted, so it is a network door. Its
+                // response cycles resume where the last process left them (issue #1603).
                 match manager
-                    .create_imposter_from(
-                        config,
-                        Persistence::Datadir,
-                        ScriptFileAccess::network(scripts_dir),
-                    )
+                    .create_imposter_resuming(config, ScriptFileAccess::network(scripts_dir))
                     .await
                 {
                     Ok(port) => info!("Created imposter on port {} from {:?}", port, path),

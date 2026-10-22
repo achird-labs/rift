@@ -1278,7 +1278,35 @@ impl ImposterManager {
         // `false`: the direct-create contract is all-or-nothing whatever `serve_unbound` says
         // (issue #143) — `Err` here means "the imposter does not exist" to every caller.
         let (port, _) = self
-            .create_imposter_staged(config, false, persistence, script_files)
+            .create_imposter_staged(config, false, persistence, script_files, CursorStart::Fresh)
+            .await?;
+        self.emit(ImposterEvent::Created(port));
+        Ok(port)
+    }
+
+    /// Create a [`Persistence::Datadir`] imposter from its own `{port}.json`, resuming each stub's
+    /// response cycle from `{port}.cursors` beside it, as Mountebank resumes a stub's `nextIndex`
+    /// from its datadir (issue #1603). For a loader that reads the datadir at startup; every other
+    /// door creates with [`create_imposter_from`](Self::create_imposter_from), whose cycles start at
+    /// the first response.
+    ///
+    /// A missing cursor file resumes nothing. One that cannot be read or parsed is ignored with a
+    /// warning naming it: it is runtime state, and starting the cycles over beats refusing the
+    /// imposter. Resumes nothing when the manager has no datadir or a
+    /// [`ResponseSequencer`](crate::behaviors::ResponseSequencer) holds the cursors.
+    pub async fn create_imposter_resuming(
+        &self,
+        config: ImposterConfig,
+        script_files: ScriptFileAccess,
+    ) -> Result<u16, ImposterError> {
+        let (port, _) = self
+            .create_imposter_staged(
+                config,
+                false,
+                Persistence::Datadir,
+                script_files,
+                CursorStart::Resume,
+            )
             .await?;
         self.emit(ImposterEvent::Created(port));
         Ok(port)
@@ -1297,6 +1325,7 @@ impl ImposterManager {
         allow_unbound: bool,
         persistence: Persistence,
         script_files: ScriptFileAccess,
+        cursors: CursorStart,
     ) -> Result<(u16, Option<ImposterError>), ImposterError> {
         // Validate protocol first
         match config.protocol.as_str() {
@@ -1433,6 +1462,11 @@ impl ImposterManager {
             imposter.exchange_inspector = provider.provide(&imposter.config);
         }
 
+        // Before the listener starts, so no request is served from the first response (#1603).
+        if cursors == CursorStart::Resume {
+            self.resume_cursors(&imposter, port).await;
+        }
+
         // Create shutdown channel for this imposter
         let (shutdown_tx, _) = broadcast::channel(1);
         imposter.shutdown_tx = Some(shutdown_tx.clone());
@@ -1473,7 +1507,10 @@ impl ImposterManager {
         // must fail loudly rather than return a success that vanishes on restart (issue #563).
         // On failure roll back the insert and stop the listener so `Err` keeps meaning "not
         // running" for every caller (create_for_apply / replace_imposter rely on that).
-        if let Err(e) = self.persist_imposter_checked(&imposter).await {
+        if let Err(e) = self
+            .persist_imposter_with(&imposter, cursors == CursorStart::Fresh)
+            .await
+        {
             self.imposters.remove(port);
             // No file to clean up: a failed persist leaves `{port}.json` exactly as it was (issue
             // #1158). The unlink that used to be here, for a truncated file, also deleted a reload's
@@ -2308,8 +2345,15 @@ impl ImposterManager {
                 // No explicit port (absent or `0`) → nothing to reconcile against; always an
                 // auto-assigned create.
                 let persistence = requested.unwrap_or(Persistence::Datadir);
-                self.create_for_apply(config, 0, persistence, script_files, &mut report)
-                    .await;
+                self.create_for_apply(
+                    config,
+                    0,
+                    persistence,
+                    script_files,
+                    CursorStart::Fresh,
+                    &mut report,
+                )
+                .await;
                 continue;
             };
 
@@ -2385,7 +2429,14 @@ impl ImposterManager {
     ) {
         let Ok(existing) = self.get_imposter(port) else {
             let persistence = requested.unwrap_or(Persistence::Datadir);
-            self.create_for_apply(config, port, persistence, script_files, report)
+            // A new imposter read from its datadir file resumes where that file's imposter stopped
+            // (issue #1603): `POST /admin/reload` is a load of the datadir, like startup.
+            let cursors = if requested == Some(Persistence::Datadir) {
+                CursorStart::Resume
+            } else {
+                CursorStart::Fresh
+            };
+            self.create_for_apply(config, port, persistence, script_files, cursors, report)
                 .await;
             return;
         };
@@ -2486,10 +2537,17 @@ impl ImposterManager {
         fail_port: u16,
         persistence: Persistence,
         script_files: ScriptFileAccess,
+        cursors: CursorStart,
         report: &mut ApplyReport,
     ) {
         match self
-            .create_imposter_staged(config, self.serve_unbound, persistence, script_files)
+            .create_imposter_staged(
+                config,
+                self.serve_unbound,
+                persistence,
+                script_files,
+                cursors,
+            )
             .await
         {
             Ok((assigned, bind_failure)) => {
@@ -2530,8 +2588,15 @@ impl ImposterManager {
             report.failed.push((port, e));
             return;
         }
+        // A replace resets every cycle (its doc), so the replaced imposter's cursors go with it.
         match self
-            .create_imposter_staged(config, self.serve_unbound, persistence, script_files)
+            .create_imposter_staged(
+                config,
+                self.serve_unbound,
+                persistence,
+                script_files,
+                CursorStart::Fresh,
+            )
             .await
         {
             Ok((_, bind_failure)) => {
@@ -2920,6 +2985,19 @@ impl ImposterManager {
     /// Awaits the write and returns an error if it fails, so the caller can
     /// surface a 503 to the API client instead of silently losing the change.
     async fn persist_imposter_checked(&self, imposter: &Imposter) -> Result<(), ImposterError> {
+        self.persist_imposter_with(imposter, false).await
+    }
+
+    /// [`persist_imposter_checked`](Self::persist_imposter_checked), first removing a
+    /// `{port}.cursors` left by an earlier imposter on the port when `clear_cursors` (issue #1603):
+    /// this one starts every cycle over, and a restart must not resume the old positions on stubs
+    /// with the same content. In the same critical section as the write, so a flush of the old
+    /// imposter that holds the lock first is undone, never the other way round.
+    async fn persist_imposter_with(
+        &self,
+        imposter: &Imposter,
+        clear_cursors: bool,
+    ) -> Result<(), ImposterError> {
         let Some(ref datadir) = self.datadir else {
             return Ok(());
         };
@@ -2932,12 +3010,17 @@ impl ImposterManager {
         let persist = Arc::clone(&self.persist_lock).lock_owned().await;
         // A delete that ran first has removed both the file and the imposter; writing now would bring
         // back, on the next restart, an imposter that no longer exists (issue #1124).
-        if !self
-            .imposters
-            .get(port)
-            .is_some_and(|current| std::ptr::eq(Arc::as_ptr(&current), imposter))
-        {
+        if !self.is_current(port, imposter) {
             return Ok(());
+        }
+        if clear_cursors && let Err(e) = remove_cursor_files(datadir, port).await {
+            // Runtime state, not config: the create stands. Marked so the flusher overwrites it
+            // with this imposter's positions; until then a restart could resume the old ones.
+            warn!(
+                port,
+                "could not remove a previous imposter's cursor file: {e}"
+            );
+            imposter.mark_cursors_dirty();
         }
         let mut snapshot = imposter.config.clone();
         snapshot.stubs = imposter.get_stubs();
@@ -2962,6 +3045,149 @@ impl ImposterManager {
             })
     }
 
+    /// Whether `imposter` is the one registered on `port`: a write for any other would bring back
+    /// state of an imposter that a delete or replace has already removed (issue #1124).
+    fn is_current(&self, port: u16, imposter: &Imposter) -> bool {
+        self.imposters
+            .get(port)
+            .is_some_and(|current| std::ptr::eq(Arc::as_ptr(&current), imposter))
+    }
+
+    /// Resume `imposter`'s cycles from `{port}.cursors` (issue #1603); see
+    /// [`create_imposter_resuming`](Self::create_imposter_resuming).
+    async fn resume_cursors(&self, imposter: &Imposter, port: u16) {
+        let Some(ref datadir) = self.datadir else {
+            return;
+        };
+        if self.sequencer.is_some() || imposter.persistence() == Persistence::Ephemeral {
+            return;
+        }
+        let path = datadir_file::cursors_path(datadir, port);
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
+            // Domain-optional: an imposter that never served, or an older engine's datadir.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                warn!(
+                    ?path,
+                    "could not read the cursor file; every cycle starts over: {e}"
+                );
+                return;
+            }
+        };
+        match super::core::CursorFile::parse(&bytes) {
+            Ok(file) => {
+                let resumed = imposter.restore_cursors(&file);
+                debug!(port, resumed, "resumed response cycles from {path:?}");
+            }
+            Err(e) => warn!(
+                ?path,
+                "ignoring an unreadable cursor file; every cycle starts over: {e}"
+            ),
+        }
+    }
+
+    /// Write `{port}.cursors` for every datadir imposter whose response cycles moved since the last
+    /// flush (issue #1603), and return the ones that could not be written. A failed imposter stays
+    /// marked, so the next flush retries it. Writes nothing without a datadir, or when a
+    /// [`ResponseSequencer`](crate::behaviors::ResponseSequencer) holds the cursors.
+    ///
+    /// [`start_cursor_flusher`](Self::start_cursor_flusher) calls this every period and once more
+    /// when stopped; call it directly before a graceful stop that does not go through it.
+    pub async fn flush_cursors(&self) -> Vec<(u16, ImposterError)> {
+        let mut failed = Vec::new();
+        let Some(datadir) = self.datadir.clone() else {
+            return failed;
+        };
+        if self.sequencer.is_some() {
+            return failed;
+        }
+        for imposter in self.imposters.imposters() {
+            if imposter.persistence() == Persistence::Ephemeral || !imposter.take_cursors_dirty() {
+                continue;
+            }
+            let Some(port) = imposter.config.port else {
+                continue;
+            };
+            if let Err(e) = self.write_cursors(&datadir, port, &imposter).await {
+                imposter.mark_cursors_dirty();
+                failed.push((port, e));
+            }
+        }
+        failed
+    }
+
+    /// Replace `{port}.cursors` with `imposter`'s positions, or remove it when every cycle is at its
+    /// start. Under `persist_lock`, and only while `imposter` is still the one on `port`: a delete
+    /// holds the lock while it unlinks the files, so a flush that lost the race writes nothing.
+    async fn write_cursors(
+        &self,
+        datadir: &std::path::Path,
+        port: u16,
+        imposter: &Imposter,
+    ) -> Result<(), ImposterError> {
+        let persist = Arc::clone(&self.persist_lock).lock_owned().await;
+        if !self.is_current(port, imposter) {
+            return Ok(());
+        }
+        let file = imposter.cursor_snapshot();
+        let written = if file.is_empty() {
+            let removed = remove_cursor_files(datadir, port).await;
+            drop(persist);
+            removed
+        } else {
+            let bytes = serde_json::to_vec(&file).map_err(|e| {
+                ImposterError::PersistError(
+                    anyhow::Error::new(e).context(format!("Failed to serialize cursors of {port}")),
+                )
+            })?;
+            datadir_file::write_cursors_replacing(datadir, port, bytes, persist).await
+        };
+        written.map_err(|e| {
+            let path = datadir_file::cursors_path(datadir, port);
+            ImposterError::PersistError(
+                anyhow::Error::new(e).context(format!("Failed to write cursors to {path:?}")),
+            )
+        })
+    }
+
+    /// Flush response-cycle positions to the datadir every `period` (issue #1603), on the current
+    /// runtime, until the returned [`CursorFlusher`] is stopped or the manager is dropped. A crash
+    /// loses at most one period of advances; [`CursorFlusher::stop`] flushes once more, so a
+    /// graceful stop loses none.
+    ///
+    /// `None`, and nothing spawned, when there is nothing to write: no datadir, or a
+    /// [`ResponseSequencer`](crate::behaviors::ResponseSequencer) holding the cursors.
+    pub fn start_cursor_flusher(self: &Arc<Self>, period: Duration) -> Option<CursorFlusher> {
+        if self.datadir.is_none() || self.sequencer.is_some() {
+            return None;
+        }
+        let stop = tokio_util::sync::CancellationToken::new();
+        let manager = Arc::downgrade(self);
+        let cancelled = stop.clone();
+        let task = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(period);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Ports whose last flush failed, so a broken datadir logs once, not every period.
+            let mut failing = std::collections::HashSet::new();
+            loop {
+                tokio::select! {
+                    () = cancelled.cancelled() => break,
+                    _ = tick.tick() => {}
+                }
+                let Some(manager) = manager.upgrade() else {
+                    break;
+                };
+                failing = log_new_flush_failures(&failing, manager.flush_cursors().await);
+            }
+        });
+        Some(CursorFlusher {
+            stop,
+            task: Some(task),
+            manager: Arc::downgrade(self),
+        })
+    }
+
     /// Remove an imposter's file from datadir (if configured and the imposter belongs there).
     ///
     /// Awaited, not spawned: a delete that returned before its unlink ran let a following create on
@@ -2977,7 +3203,8 @@ impl ImposterManager {
     }
 
     /// Remove `{port}.json` from the datadir (if configured), whatever store the imposter was in,
-    /// and any `{port}.json.tmp` a crash left beside it, so a deleted imposter leaves nothing behind.
+    /// its `{port}.cursors`, and any temp file a crash left beside them, so a deleted imposter leaves
+    /// nothing behind.
     ///
     /// Callers must hold `persist_lock`: unlocked, the temp removal could land inside a concurrent
     /// write and fail its rename.
@@ -2985,10 +3212,13 @@ impl ImposterManager {
         let Some(ref datadir) = self.datadir else {
             return Ok(());
         };
-        // The leftover first: if it cannot be removed, the delete fails with `{port}.json` still in
-        // place, so `Err` keeps meaning "not deleted" (issue #1124).
+        // The leftovers first: if one cannot be removed, the delete fails with `{port}.json` still in
+        // place, so `Err` keeps meaning "not deleted" (issue #1124). `{port}.cursors` goes too (issue
+        // #1603), or a later imposter on the port with the same stubs would resume its positions.
         for path in [
             datadir_file::temp_path(datadir, port),
+            datadir_file::cursors_temp_path(datadir, port),
+            datadir_file::cursors_path(datadir, port),
             datadir_file::data_path(datadir, port),
         ] {
             match tokio::fs::remove_file(&path).await {
@@ -3025,6 +3255,85 @@ impl ImposterManager {
 impl Default for ImposterManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// How a create starts its response cycles (issue #1603).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorStart {
+    /// From `{port}.cursors`: the imposter is being loaded from its datadir file.
+    Resume,
+    /// At the first response, removing any `{port}.cursors` an earlier imposter left.
+    Fresh,
+}
+
+/// Remove `{port}.cursors` and its temp file; an absent one is already the desired end state.
+/// Callers hold `persist_lock`.
+async fn remove_cursor_files(datadir: &std::path::Path, port: u16) -> std::io::Result<()> {
+    for path in [
+        datadir_file::cursors_temp_path(datadir, port),
+        datadir_file::cursors_path(datadir, port),
+    ] {
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Log each flush failure whose port was not already failing; return this round's failing ports.
+/// A failed port stays marked and is retried every period, so absence from a round means it was
+/// written (or deleted).
+fn log_new_flush_failures(
+    failing: &std::collections::HashSet<u16>,
+    failed: Vec<(u16, ImposterError)>,
+) -> std::collections::HashSet<u16> {
+    failed
+        .into_iter()
+        .map(|(port, e)| {
+            if !failing.contains(&port) {
+                error!(
+                    port,
+                    "could not write the imposter's response cycle positions: {e}"
+                );
+            }
+            port
+        })
+        .collect()
+}
+
+/// The datadir cursor flusher [`ImposterManager::start_cursor_flusher`] started (issue #1603).
+/// Dropping it stops the periodic flush without the final one; [`stop`](Self::stop) does both.
+#[derive(Debug)]
+pub struct CursorFlusher {
+    stop: tokio_util::sync::CancellationToken,
+    task: Option<tokio::task::JoinHandle<()>>,
+    manager: std::sync::Weak<ImposterManager>,
+}
+
+impl CursorFlusher {
+    /// Stop the periodic flush, wait for one in progress, then flush once more so a graceful stop
+    /// loses no advance. Returns the imposters whose positions could not be written.
+    pub async fn stop(mut self) -> Vec<(u16, ImposterError)> {
+        self.stop.cancel();
+        if let Some(task) = self.task.take()
+            && let Err(e) = task.await
+        {
+            error!("the cursor flusher ended abnormally: {e}");
+        }
+        match self.manager.upgrade() {
+            Some(manager) => manager.flush_cursors().await,
+            None => Vec::new(),
+        }
+    }
+}
+
+impl Drop for CursorFlusher {
+    fn drop(&mut self) {
+        // Not an abort: a flush in progress finishes its write, then the loop sees the token.
+        self.stop.cancel();
     }
 }
 
@@ -9773,5 +10082,428 @@ mod tests {
             assert!(manager.imposter_listens_on(port));
             manager.delete_all().await;
         }
+    }
+}
+
+/// Issue #1603: each datadir imposter's response-cycle positions in `{port}.cursors`, written
+/// behind by a flusher that races deletes and replaces (the #1124/#1158 shape).
+#[cfg(test)]
+mod cursor_persistence_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn config(stubs: serde_json::Value) -> ImposterConfig {
+        serde_json::from_value(json!({"protocol": "http", "stubs": stubs})).expect("config")
+    }
+
+    fn bodies(labels: &[&str]) -> serde_json::Value {
+        json!(
+            labels
+                .iter()
+                .map(|l| json!({"is": {"body": l}}))
+                .collect::<Vec<_>>()
+        )
+    }
+
+    fn two_stubs() -> ImposterConfig {
+        config(json!([
+            {"predicates": [{"equals": {"path": "/a"}}], "responses": bodies(&["a1", "a2", "a3"])},
+            {"responses": bodies(&["b1", "b2", "b3"])},
+        ]))
+    }
+
+    /// Serve stub `index` of the imposter on `port` once, as a matched request does.
+    fn serve(manager: &ImposterManager, port: u16, index: usize) -> String {
+        let imposter = manager.get_imposter(port).expect("running");
+        let snapshot = imposter.snapshot();
+        let response = imposter
+            .next_stub_response(&snapshot.stubs()[index])
+            .expect("no sequencer")
+            .expect("has responses");
+        serde_json::to_value(response).expect("prints")["is"]["body"]
+            .as_str()
+            .expect("string body")
+            .to_string()
+    }
+
+    fn cursors(dir: &std::path::Path, port: u16) -> std::path::PathBuf {
+        datadir_file::cursors_path(dir, port)
+    }
+
+    /// What a restart reads: the persisted config, decoded, with its port.
+    fn persisted(dir: &std::path::Path, port: u16) -> ImposterConfig {
+        let text = std::fs::read_to_string(datadir_file::data_path(dir, port)).expect("persisted");
+        serde_json::from_str(&text).expect("decodes")
+    }
+
+    /// Stop `manager`'s imposter the way a process exit does: gone from memory, files kept.
+    async fn exit(manager: &ImposterManager, port: u16) {
+        manager
+            .delete_imposter_inner(port, false)
+            .await
+            .expect("stopped");
+    }
+
+    #[tokio::test]
+    async fn a_flushed_cycle_resumes_in_the_next_process() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = Arc::new(ImposterManager::with_datadir(Some(dir.path().into())));
+        let port = first.create_imposter(two_stubs()).await.expect("create");
+        assert_eq!(serve(&first, port, 0), "a1");
+        assert_eq!(serve(&first, port, 1), "b1");
+        assert_eq!(serve(&first, port, 1), "b2");
+        assert!(first.flush_cursors().await.is_empty());
+        exit(&first, port).await;
+
+        let second = ImposterManager::with_datadir(Some(dir.path().into()));
+        second
+            .create_imposter_resuming(persisted(dir.path(), port), ScriptFileAccess::Refused)
+            .await
+            .expect("load");
+        assert_eq!(serve(&second, port, 0), "a2");
+        assert_eq!(serve(&second, port, 1), "b3");
+        second.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn an_old_datadir_without_a_cursor_file_loads_at_the_first_response() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = first.create_imposter(two_stubs()).await.expect("create");
+        exit(&first, port).await;
+        assert!(!cursors(dir.path(), port).exists());
+
+        let second = ImposterManager::with_datadir(Some(dir.path().into()));
+        second
+            .create_imposter_resuming(persisted(dir.path(), port), ScriptFileAccess::Refused)
+            .await
+            .expect("an engine's own pre-#1603 datadir still loads");
+        assert_eq!(serve(&second, port, 0), "a1");
+        second.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn deleting_an_imposter_removes_its_cursor_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = manager.create_imposter(two_stubs()).await.expect("create");
+        serve(&manager, port, 0);
+        manager.flush_cursors().await;
+        assert!(cursors(dir.path(), port).exists(), "flushed");
+        std::fs::write(datadir_file::cursors_temp_path(dir.path(), port), "x").expect("leftover");
+
+        manager.delete_imposter(port).await.expect("delete");
+        assert!(!cursors(dir.path(), port).exists());
+        assert!(!datadir_file::cursors_temp_path(dir.path(), port).exists());
+        manager.flush_cursors().await;
+        assert!(!cursors(dir.path(), port).exists(), "nothing left to flush");
+    }
+
+    #[tokio::test]
+    async fn a_hand_edited_stub_starts_over_while_its_unchanged_sibling_resumes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = first.create_imposter(two_stubs()).await.expect("create");
+        serve(&first, port, 0);
+        serve(&first, port, 1);
+        first.flush_cursors().await;
+        exit(&first, port).await;
+
+        let mut edited = persisted(dir.path(), port);
+        edited.stubs[0].responses.truncate(2);
+        let second = ImposterManager::with_datadir(Some(dir.path().into()));
+        second
+            .create_imposter_resuming(edited, ScriptFileAccess::Refused)
+            .await
+            .expect("load");
+        assert_eq!(serve(&second, port, 0), "a1", "changed content restarts");
+        assert_eq!(serve(&second, port, 1), "b2", "the unchanged stub resumes");
+        second.delete_all().await;
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_corrupt_cursor_file_loads_the_imposter_with_a_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = first.create_imposter(two_stubs()).await.expect("create");
+        exit(&first, port).await;
+        std::fs::write(cursors(dir.path(), port), "{not json").expect("corrupt");
+
+        let second = ImposterManager::with_datadir(Some(dir.path().into()));
+        second
+            .create_imposter_resuming(persisted(dir.path(), port), ScriptFileAccess::Refused)
+            .await
+            .expect("an unreadable cursor file never refuses the imposter");
+        assert_eq!(serve(&second, port, 0), "a1");
+        assert!(logs_contain("ignoring an unreadable cursor file"));
+        assert!(
+            logs_contain(&format!("{port}.cursors")),
+            "the warning names it"
+        );
+        second.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_stub_replace_that_resets_the_cycle_is_written_at_the_next_flush() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = manager.create_imposter(two_stubs()).await.expect("create");
+        serve(&manager, port, 1);
+        manager.flush_cursors().await;
+        assert!(cursors(dir.path(), port).exists());
+
+        // `PUT /imposters/:port/stubs` with the same stubs: every cycle restarts.
+        manager
+            .replace_stubs(port, two_stubs().stubs)
+            .await
+            .expect("replace");
+        manager.flush_cursors().await;
+        assert!(
+            !cursors(dir.path(), port).exists(),
+            "every cycle is back at its start, so nothing is left to resume"
+        );
+        serve(&manager, port, 1);
+        manager.flush_cursors().await;
+        let file = std::fs::read(cursors(dir.path(), port)).expect("written");
+        let file = super::super::core::CursorFile::parse(&file).expect("parses");
+        assert_eq!(file.stubs.len(), 1);
+        assert_eq!((file.stubs[0].response, file.stubs[0].repeat), (1, 0));
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_put_imposters_recreate_does_not_inherit_the_old_positions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = first.create_imposter(two_stubs()).await.expect("create");
+        serve(&first, port, 0);
+        first.flush_cursors().await;
+        // An imposter-level change replaces it wholesale: all runtime state resets.
+        let mut renamed = persisted(dir.path(), port);
+        renamed.name = Some("renamed".into());
+        let report = first.apply_config(vec![renamed]).await.expect("apply");
+        assert_eq!(report.replaced, vec![port]);
+        assert!(
+            !cursors(dir.path(), port).exists(),
+            "the replace drops them"
+        );
+        exit(&first, port).await;
+
+        let second = ImposterManager::with_datadir(Some(dir.path().into()));
+        second
+            .create_imposter_resuming(persisted(dir.path(), port), ScriptFileAccess::Refused)
+            .await
+            .expect("load");
+        assert_eq!(serve(&second, port, 0), "a1");
+        second.delete_all().await;
+    }
+
+    /// Hold `persist_lock` while `first` and then `second` queue on it (tokio's mutex is FIFO), so
+    /// the two run in exactly that order once it is released.
+    async fn in_order<A, B>(
+        manager: &ImposterManager,
+        first: A,
+        second: B,
+    ) -> (A::Output, B::Output)
+    where
+        A: std::future::Future + Send + 'static,
+        A::Output: Send + 'static,
+        B: std::future::Future + Send + 'static,
+        B::Output: Send + 'static,
+    {
+        let held = Arc::clone(&manager.persist_lock).lock_owned().await;
+        let first = tokio::spawn(first);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let second = tokio::spawn(second);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(held);
+        (first.await.expect("first"), second.await.expect("second"))
+    }
+
+    // #1124's shape: a write that lands after a delete's unlink brings the imposter's state back.
+    #[tokio::test]
+    async fn a_flush_queued_before_a_delete_is_undone_by_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = Arc::new(ImposterManager::with_datadir(Some(dir.path().into())));
+        let port = manager.create_imposter(two_stubs()).await.expect("create");
+        serve(&manager, port, 0);
+        let (flush, delete) = in_order(
+            &manager,
+            {
+                let m = Arc::clone(&manager);
+                async move { m.flush_cursors().await }
+            },
+            {
+                let m = Arc::clone(&manager);
+                async move { m.delete_imposter(port).await.map(|_| ()) }
+            },
+        )
+        .await;
+        assert!(flush.is_empty());
+        delete.expect("delete");
+        assert!(!cursors(dir.path(), port).exists());
+        assert!(!datadir_file::data_path(dir.path(), port).exists());
+    }
+
+    #[tokio::test]
+    async fn a_flush_queued_after_a_delete_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = Arc::new(ImposterManager::with_datadir(Some(dir.path().into())));
+        let port = manager.create_imposter(two_stubs()).await.expect("create");
+        serve(&manager, port, 0);
+        // The imposter the flusher snapshotted, as `flush_cursors` holds it across the lock wait.
+        let imposter = manager.get_imposter(port).expect("running");
+        let (delete, write) = in_order(
+            &manager,
+            {
+                let m = Arc::clone(&manager);
+                async move { m.delete_imposter(port).await.map(|_| ()) }
+            },
+            {
+                let m = Arc::clone(&manager);
+                let dir = dir.path().to_path_buf();
+                async move { m.write_cursors(&dir, port, &imposter).await }
+            },
+        )
+        .await;
+        delete.expect("delete");
+        write.expect("a write for a deleted imposter is a no-op, not an error");
+        assert!(
+            !cursors(dir.path(), port).exists(),
+            "the deleted imposter's positions must not come back"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_flush_of_the_replaced_imposter_does_not_survive_the_replace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = Arc::new(ImposterManager::with_datadir(Some(dir.path().into())));
+        let port = manager.create_imposter(two_stubs()).await.expect("create");
+        serve(&manager, port, 0);
+        let mut renamed = persisted(dir.path(), port);
+        renamed.name = Some("renamed".into());
+        let (flush, report) = in_order(
+            &manager,
+            {
+                let m = Arc::clone(&manager);
+                async move { m.flush_cursors().await }
+            },
+            {
+                let m = Arc::clone(&manager);
+                async move { m.apply_config(vec![renamed]).await }
+            },
+        )
+        .await;
+        assert!(flush.is_empty());
+        assert_eq!(report.expect("apply").replaced, vec![port]);
+        assert!(
+            !cursors(dir.path(), port).exists(),
+            "the replace's create runs after the flush and drops the old positions"
+        );
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_datadir_reload_resumes_a_new_imposter_and_keeps_a_running_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = first.create_imposter(two_stubs()).await.expect("create");
+        serve(&first, port, 0);
+        first.flush_cursors().await;
+        exit(&first, port).await;
+
+        let second = ImposterManager::with_datadir(Some(dir.path().into()));
+        let desired = || DesiredImposter {
+            config: persisted(dir.path(), port),
+            persistence: Persistence::Datadir,
+            script_files: ScriptFileAccess::Refused,
+        };
+        let report = second.apply_desired(vec![desired()]).await.expect("reload");
+        assert_eq!(report.created, vec![port]);
+        assert_eq!(
+            serve(&second, port, 0),
+            "a2",
+            "created from its file: resumed"
+        );
+        let report = second.apply_desired(vec![desired()]).await.expect("reload");
+        assert!(report.created.is_empty() && report.replaced.is_empty());
+        assert_eq!(
+            serve(&second, port, 0),
+            "a3",
+            "a running imposter keeps its own cursor"
+        );
+        second.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn an_ephemeral_imposter_writes_no_cursor_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = manager
+            .create_imposter_as(two_stubs(), Persistence::Ephemeral)
+            .await
+            .expect("create");
+        serve(&manager, port, 0);
+        assert!(manager.flush_cursors().await.is_empty());
+        assert!(!cursors(dir.path(), port).exists());
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_flush_is_reported_and_retried() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().into()));
+        let port = manager.create_imposter(two_stubs()).await.expect("create");
+        serve(&manager, port, 0);
+        std::fs::create_dir(datadir_file::cursors_temp_path(dir.path(), port)).expect("block");
+        let failed = manager.flush_cursors().await;
+        assert_eq!(failed.len(), 1);
+        assert!(matches!(failed[0], (p, ImposterError::PersistError(_)) if p == port));
+        std::fs::remove_dir(datadir_file::cursors_temp_path(dir.path(), port)).expect("unblock");
+        assert!(manager.flush_cursors().await.is_empty(), "retried");
+        assert!(cursors(dir.path(), port).exists());
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn the_flusher_writes_behind_and_its_stop_flushes_the_rest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = Arc::new(ImposterManager::with_datadir(Some(dir.path().into())));
+        let port = manager.create_imposter(two_stubs()).await.expect("create");
+        let flusher = manager
+            .start_cursor_flusher(Duration::from_millis(20))
+            .expect("a datadir manager flushes");
+        serve(&manager, port, 0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !cursors(dir.path(), port).exists() {
+            assert!(std::time::Instant::now() < deadline, "written behind");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let flusher = {
+            drop(flusher);
+            manager
+                .start_cursor_flusher(Duration::from_secs(3600))
+                .expect("restarted")
+        };
+        serve(&manager, port, 0);
+        assert!(flusher.stop().await.is_empty());
+        let file = std::fs::read(cursors(dir.path(), port)).expect("written");
+        let file = super::super::core::CursorFile::parse(&file).expect("parses");
+        assert_eq!(
+            file.stubs[0].response, 2,
+            "the stop's flush wrote the last advance"
+        );
+        manager.delete_all().await;
+    }
+
+    #[test]
+    fn no_flusher_without_a_datadir() {
+        let manager = Arc::new(ImposterManager::new());
+        assert!(
+            manager
+                .start_cursor_flusher(Duration::from_secs(1))
+                .is_none()
+        );
     }
 }

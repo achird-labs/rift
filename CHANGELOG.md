@@ -51,6 +51,12 @@ record.
 
 ### Changed
 
+- **A `--datadir` restart resumes each stub's response cycle where it stopped**, as Mountebank does
+  (#1603). The positions are saved beside the imposter in `<port>.cursors`, written behind every
+  second and on a graceful stop, so a crash can lose up to a second of advances. Deleting the
+  imposter deletes the file; a file that cannot be read is ignored with a `WARN` and the cycles start
+  over. Older datadirs, which have no such file, load as before.
+
 - **HTTP/1.1 response header names are Title-Case** (#1597): imposter and front-door responses
   carry `Content-Type`, `X-Rift-Imposter` and the like, where they were lower case. A stub's own
   spelling is not reproduced (`lower-hdr` is sent as `Lower-Hdr`); HTTP/2 stays lower-case. See

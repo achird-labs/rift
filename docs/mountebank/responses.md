@@ -408,7 +408,10 @@ See [Behaviors](behaviors.md#repeat) for more on the repeat behavior.
 - State is **kept** when another stub is inserted, deleted or replaced, when the stub is moved,
   when it is replaced by id (`PUT …/stubs/by-id/:id`, a Rift extension), and when a reload leaves
   the stub unchanged
-- State is **not persisted** - restarting Rift resets all cycling positions
+- State is **persisted with `--datadir`**: each stub's position is saved to `<port>.cursors` and
+  resumed on restart, as in Mountebank. It is written every second and on a graceful stop
+  (`SIGTERM`/`SIGINT`, `rift stop`), so a crash can lose up to a second of advances. Without
+  `--datadir`, and for `--configfile` imposters, a restart starts every cycle over
 
 ### Mixed Response Types
 
