@@ -170,27 +170,27 @@ grow its own dialect of the config format.
 rift [OPTIONS] [COMMAND]
 
 Server options:
-      --port <PORT>                Admin API port [default: 2525]
+  -p, --port <PORT>                Admin API port [default: 2525]
       --host <HOST>                Address to bind the admin API and host-less imposters to (IPv4, IPv6 bare `::1` or bracketed `[::1]`, or a DNS name, resolved at startup) [default: every interface, IPv6 and IPv4]
       --configfile <FILE>          Load imposters from a JSON/YAML file on startup (sugar for --imposters file:<FILE>)
       --imposters <URI[,URI...]>   Load imposters from one or more source URIs: file:<path>, a bare path, or https://… (see Imposter Sources below)
       --datadir <DIR>              Directory for persistent imposter storage
       --scripts-dir <DIR>          Root directory for admin-API `file:`/`ref:` script resolution and for `require()` and `lookup` CSV files in admin-API, `--datadir` and `https:` imposters; paths that escape it are rejected (unset ⇒ all are refused)
-      --allow-injection            Enable JavaScript injection in responses (alias: --allowInjection)
-      --local-only                 Only accept requests from localhost: the admin API, /metrics and --intercept-port listen on `127.0.0.1` and `::1`, and they, every imposter port and the front door refuse non-loopback clients (alias: --localOnly)
+  -i, --allow-injection            Enable JavaScript injection in responses (alias: --allowInjection)
+  -l, --local-only                 Only accept requests from localhost: the admin API, /metrics and --intercept-port listen on `127.0.0.1` and `::1`, and they, every imposter port and the front door refuse non-loopback clients (alias: --localOnly)
       --require-admin-auth         Refuse to start when the admin API would bind a non-loopback address with no --api-key (default: warn)
       --loglevel <LEVEL>           Log level: trace, debug, info, warn, error (an unrecognised value is refused) [default: info]
       --runtime <MODE>             Runtime topology: work-stealing (default) or per-core[=N] (RFC-712; experimental, Linux-first — macOS falls back with a warning, Windows rejects it)
       --runtime-affinity           Pin per-core worker threads to CPU cores (with --runtime per-core; effective on Linux)
       --metrics-port <PORT>        Prometheus metrics port [default: 9090]
       --front-door <ADDR>          Serve every imposter from one address, routed by host/path/header (see Features -> Front Door)
-      --ip-whitelist <IPS>         Comma-separated allowed IPs (accepted for Mountebank compatibility; NOT enforced) (alias: --ipWhitelist)
-      --mock                       Accepted for Mountebank compatibility; no effect — set `recordRequests: true` per imposter
-      --debug                      Enable debug mode (same as RIFT_DEBUG=1; also sets the log level to debug unless RUST_LOG is set; does not add Mountebank's per-stub `matches`)
+  -w, --ip-whitelist <IPS>         Comma-separated allowed IPs (accepted for Mountebank compatibility; NOT enforced) (alias: --ipWhitelist)
+  -m, --mock                       Accepted for Mountebank compatibility; no effect — set `recordRequests: true` per imposter
+  -d, --debug                      Enable debug mode (same as RIFT_DEBUG=1; also sets the log level to debug unless RUST_LOG is set; does not add Mountebank's per-stub `matches`)
       --nologfile                  Do not write the --log file (stdout only)
       --log <FILE>                 Also write logs to this file (off unless set) (alias: --logfile)
       --pidfile <FILE>             Write the server's PID here (off unless set; stop/restart read ./rift.pid when omitted)
-      --origin <ORIGIN>            Accepted for Mountebank compatibility; NOT implemented — the admin API sends no CORS headers
+  -o, --origin <ORIGIN>            Accepted for Mountebank compatibility; NOT implemented — the admin API sends no CORS headers
       --api-key <TOKEN>            Require this token in the Authorization header (or Mountebank's x-api-key) for all admin API requests; Authorization wins when both are sent (alias: --apikey)
       --rcfile <FILE>              RC file with default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/apiKey/datadir/configfile/noParse/mock/debug); a path that does not exist warns and starts; one that exists but cannot be read or applied aborts startup
       --default-tls-cert <FILE>    Default TLS certificate (PEM) for HTTPS imposters without their own
@@ -224,6 +224,13 @@ Mountebank's spellings `--localOnly`, `--logfile`, `--ipWhitelist` and `--apikey
 `--local-only`, `--log`, `--ip-whitelist` and `--api-key`, alongside `--allowInjection` and `--noParse` (and `save`'s
 `--removeProxies`, of `--remove-proxies`). Unlike `mb`, `--logfile` has no default: Rift writes no
 log file unless one is named.
+
+Mountebank's short flags `-p`, `-d`, `-i`, `-l`, `-m`, `-w` and `-o` are accepted as `--port`,
+`--debug`, `--allow-injection`, `--local-only`, `--mock`, `--ip-whitelist` and `--origin`, on
+either side of a subcommand like the long flags, and `save -r` is `save --remove-proxies`. They
+mean what they mean in `mb` (`src/cli/cli.js`): `-r` is `removeProxies` and `-o` is `origin`, not
+`--rcfile` and `--pidfile` as issue #1586's triage first proposed. `-h` is `--help`, not
+Mountebank's `--host`: spell `--host` out.
 
 `--formatter`, `--protofile`, `--ip-whitelist`, `--origin` and `--mock` are accepted for Mountebank
 command-line compatibility but have no effect in Rift. Each logs a warning when given. `--origin`
@@ -849,7 +856,7 @@ rift save --savefile mocks.json --remove-proxies
 | Flag | Description | Default |
 |:-----|:------------|:--------|
 | `--savefile <FILE>` | Output file | `mb.json` |
-| `--remove-proxies` | Request the `removeProxies=true` view (alias: `--removeProxies`) | off |
+| `-r`, `--remove-proxies` | Request the `removeProxies=true` view (alias: `--removeProxies`) | off |
 
 A keyed server needs no extra flag: `save` presents the admin API key the process already holds
 (`MB_APIKEY`, `--api-key`, or an rcfile `apiKey`), as `healthcheck` does (issue #1154). A non-2xx

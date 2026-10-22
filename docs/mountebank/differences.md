@@ -459,6 +459,8 @@ Rift's answer as JSON and Mountebank's as text.
 
 ## Command line
 
+- `-h` prints help. In `mb` it is `--host`; spell `--host` out. Mountebank's other short flags
+  `-p -d -i -l -m -w -o` and `save -r` mean what they mean in `mb` (#1586).
 - `--logfile` (an alias of `--log`) has no default. `mb` writes `mb.log` unless told otherwise;
   Rift writes no log file unless one is named.
 - `--apikey` (an alias of `--api-key`) reads the key from `x-api-key`, as `mb` does, and also from
