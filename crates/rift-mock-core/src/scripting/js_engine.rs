@@ -854,13 +854,13 @@ fn parse_json_or_null(context: &mut Context, raw: &str) -> Result<JsValue> {
 
 /// Captures for the `ctx.request` case-insensitive `header(name)` getter: the
 /// (non-lowercased) source headers, looked up case-insensitively at call time.
-type HeaderGetterCaptures = std::collections::HashMap<String, String>;
+type HeaderGetterCaptures = std::collections::HashMap<String, Vec<String>>;
 
 fn header_getter(
     _this: &JsValue,
     args: &[JsValue],
     captures: &HeaderGetterCaptures,
-    _context: &mut Context,
+    context: &mut Context,
 ) -> JsResult<JsValue> {
     let name = args
         .first()
@@ -870,17 +870,18 @@ fn header_getter(
         captures
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(&n))
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v)
     });
+    // The same value `ctx.request.headers[name]` holds: an array for a repeated header (#1629).
     Ok(match found {
-        Some(v) => JsValue::from(js_string!(v)),
+        Some(values) => values_to_js(context, values),
         None => JsValue::null(),
     })
 }
 
 fn set_header_getter(
     obj: &JsObject,
-    headers: &crate::util::OrderedMap<String, String>,
+    headers: &crate::util::MultiValueMap,
     context: &mut Context,
 ) -> Result<()> {
     // A plain map for the captures: boa's GC traces std collections, and the lookup is by name.
@@ -926,29 +927,17 @@ fn create_request_ctx_object(context: &mut Context, request: &ScriptRequest) -> 
     obj.set(js_string!("pathParams"), path_params_obj, false, context)
         .map_err(|e| anyhow!("Failed to set ctx.request.pathParams: {e}"))?;
 
-    let query_obj = create_js_object(context);
-    for (k, v) in &request.query {
-        query_obj
-            .set(
-                js_string!(k.clone()),
-                JsValue::from(js_string!(v.clone())),
-                false,
-                context,
-            )
-            .map_err(|e| anyhow!("Failed to set ctx.request.query.{k}: {e}"))?;
-    }
+    // A repeated key or header is an array, a single one a string (issue #1629).
+    let query_obj = values_object(context, &request.query)
+        .map_err(|e| anyhow!("Failed to set ctx.request.query: {e}"))?;
     obj.set(js_string!("query"), query_obj, false, context)
         .map_err(|e| anyhow!("Failed to set ctx.request.query: {e}"))?;
 
     let headers_obj = create_js_object(context);
     for (k, v) in &request.headers {
+        let value = values_to_js(context, v);
         headers_obj
-            .set(
-                js_string!(k.to_ascii_lowercase()),
-                JsValue::from(js_string!(v.clone())),
-                false,
-                context,
-            )
+            .set(js_string!(k.to_ascii_lowercase()), value, false, context)
             .map_err(|e| anyhow!("Failed to set ctx.request.headers.{k}: {e}"))?;
     }
     obj.set(js_string!("headers"), headers_obj, false, context)
@@ -2545,10 +2534,12 @@ fn execute_predicate_generator_inject_in(
 pub struct MountebankRequest {
     pub method: String,
     pub path: String,
-    /// Request order, as Mountebank's `querystring.parse` (issue #1596).
-    pub query: crate::util::OrderedMap<String, String>,
-    /// Request order, as Mountebank's `headersMap.ofRaw` (issue #1606).
-    pub headers: crate::util::OrderedMap<String, String>,
+    /// Request order, as Mountebank's `querystring.parse` (issue #1596). A repeated key reaches
+    /// the script as an array, a single one as a string (issue #1629).
+    pub query: crate::util::MultiValueMap,
+    /// Request order, as Mountebank's `headersMap.ofRaw` (issue #1606), every value: a repeated
+    /// header is an array (issue #1629).
+    pub headers: crate::util::MultiValueMap,
     pub body: Option<String>,
     /// The request's body did not decode (issue #1584): the script sees no `body` key at all, as
     /// Mountebank's `request.body` is `undefined` then. When `false`, `body` is always a string,
@@ -2568,7 +2559,7 @@ pub struct MountebankRequest {
     /// without a non-empty urlencoded body for `form`.
     pub request_from: Option<String>,
     pub ip: Option<String>,
-    pub form: Option<crate::util::OrderedMap<String, String>>,
+    pub form: Option<crate::util::MultiValueMap>,
     /// Set only for the create-time dry run of a `predicateGenerators` inject (issue #1580), which
     /// runs it once over an empty `GET /`. Exposed as `request.isDryRun: true` then and absent
     /// otherwise, as in Mountebank, so a script can skip the dry run.
@@ -2689,6 +2680,29 @@ fn case_insensitive_headers(target: JsObject, context: &mut Context) -> JsResult
     Ok(proxy.into())
 }
 
+/// A field's values as a script sees them (issue #1629): one value is a string, several are an
+/// array, as Mountebank's `querystring.parse` and `headersMap.ofRaw` build them.
+fn values_to_js(context: &mut Context, values: &[String]) -> JsValue {
+    match values {
+        [one] => JsValue::from(js_string!(one.as_str())),
+        many => JsArray::from_iter(
+            many.iter().map(|v| JsValue::from(js_string!(v.as_str()))),
+            context,
+        )
+        .into(),
+    }
+}
+
+/// A plain object of [`values_to_js`], keys in the map's order.
+fn values_object(context: &mut Context, map: &crate::util::MultiValueMap) -> JsResult<JsObject> {
+    let obj = create_js_object(context);
+    for (k, v) in map {
+        let value = values_to_js(context, v);
+        obj.set(js_string!(k.as_str()), value, false, context)?;
+    }
+    Ok(obj)
+}
+
 fn create_mountebank_request_object(
     context: &mut Context,
     request: &MountebankRequest,
@@ -2713,33 +2727,14 @@ fn create_mountebank_request_object(
     )
     .map_err(|e| anyhow!("Failed to set path: {e}"))?;
 
-    // Set query
-    let query_obj = create_js_object(context);
-    for (k, v) in &request.query {
-        query_obj
-            .set(
-                js_string!(k.clone()),
-                JsValue::from(js_string!(v.clone())),
-                false,
-                context,
-            )
-            .map_err(|e| anyhow!("Failed to set query param: {e}"))?;
-    }
+    // A repeated key or header is an array, a single one a string (issue #1629).
+    let query_obj = values_object(context, &request.query)
+        .map_err(|e| anyhow!("Failed to set query param: {e}"))?;
     obj.set(js_string!("query"), query_obj, false, context)
         .map_err(|e| anyhow!("Failed to set query: {e}"))?;
 
-    // Set headers
-    let headers_obj = create_js_object(context);
-    for (k, v) in &request.headers {
-        headers_obj
-            .set(
-                js_string!(k.clone()),
-                JsValue::from(js_string!(v.clone())),
-                false,
-                context,
-            )
-            .map_err(|e| anyhow!("Failed to set header: {e}"))?;
-    }
+    let headers_obj = values_object(context, &request.headers)
+        .map_err(|e| anyhow!("Failed to set header: {e}"))?;
     let headers_obj = case_insensitive_headers(headers_obj, context)
         .map_err(|e| anyhow!("Failed to wrap headers: {e}"))?;
     obj.set(js_string!("headers"), headers_obj, false, context)
@@ -2794,17 +2789,8 @@ fn create_mountebank_request_object(
 
     // A plain object: only headers get the case-insensitive lookup, form keys are the client's own.
     if let Some(form) = &request.form {
-        let form_obj = create_js_object(context);
-        for (k, v) in form {
-            form_obj
-                .set(
-                    js_string!(k.clone()),
-                    JsValue::from(js_string!(v.clone())),
-                    false,
-                    context,
-                )
-                .map_err(|e| anyhow!("Failed to set form field: {e}"))?;
-        }
+        let form_obj =
+            values_object(context, form).map_err(|e| anyhow!("Failed to set form field: {e}"))?;
         obj.set(js_string!("form"), form_obj, false, context)
             .map_err(|e| anyhow!("Failed to set form: {e}"))?;
     }
@@ -3607,7 +3593,10 @@ function respond(ctx) {
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let mut headers = crate::util::OrderedMap::default();
-        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "content-type".to_string(),
+            vec!["application/json".to_string()],
+        );
 
         let request = ScriptRequest {
             mode: ResponseMode::Text,
@@ -3731,7 +3720,7 @@ function respond(ctx) {
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let mut headers = crate::util::OrderedMap::default();
-        headers.insert("x-flow-id".to_string(), "flow-123".to_string());
+        headers.insert("x-flow-id".to_string(), vec!["flow-123".to_string()]);
 
         let request = ScriptRequest {
             mode: ResponseMode::Text,
@@ -3780,7 +3769,7 @@ function respond(ctx) {
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let mut headers = crate::util::OrderedMap::default();
-        headers.insert("x-flow-id".to_string(), "flow-123".to_string());
+        headers.insert("x-flow-id".to_string(), vec!["flow-123".to_string()]);
 
         let request = ScriptRequest {
             mode: ResponseMode::Text,
@@ -3840,7 +3829,10 @@ function respond(ctx) {
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let mut headers = crate::util::OrderedMap::default();
-        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "content-type".to_string(),
+            vec!["application/json".to_string()],
+        );
 
         let request = ScriptRequest {
             mode: ResponseMode::Text,
@@ -3995,8 +3987,8 @@ function respond(ctx) {
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let mut query = crate::util::OrderedMap::default();
-        query.insert("name".to_string(), "Alice".to_string());
-        query.insert("page".to_string(), "42".to_string());
+        query.insert("name".to_string(), vec!["Alice".to_string()]);
+        query.insert("page".to_string(), vec!["42".to_string()]);
 
         let request = ScriptRequest {
             mode: ResponseMode::Text,
@@ -4138,7 +4130,7 @@ function respond(ctx) {
             ip: Some("127.0.0.1".to_string()),
             form: Some(crate::util::OrderedMap::from_iter([(
                 "a".to_string(),
-                "1".to_string(),
+                vec!["1".to_string()],
             )])),
             ..without
         };
@@ -5090,10 +5082,13 @@ function respond(ctx) {
     /// Issue #1368: a request whose headers the listener Title-Cased, as it does for every imposter.
     fn mb_req_with_headers() -> MountebankRequest {
         let mut request = mb_req("GET", "/h");
+        request.headers.insert(
+            "Content-Type".to_string(),
+            vec!["application/json".to_string()],
+        );
         request
             .headers
-            .insert("Content-Type".to_string(), "application/json".to_string());
-        request.headers.insert("X-Id".to_string(), "7".to_string());
+            .insert("X-Id".to_string(), vec!["7".to_string()]);
         request
     }
 
@@ -5886,7 +5881,7 @@ function respond(ctx) {
                 mode: ResponseMode::Text,
                 method: "POST".to_string(),
                 path: "/api/orders".to_string(),
-                headers: headers.into_iter().collect(),
+                headers: headers.into_iter().map(|(k, v)| (k, vec![v])).collect(),
                 body: json!(null),
                 query: Default::default(),
                 path_params: HashMap::new(),
@@ -6405,7 +6400,9 @@ function respond(ctx) {
             request
                 .path_params
                 .insert("id".to_string(), "42".to_string());
-            request.query.insert("page".to_string(), "2".to_string());
+            request
+                .query
+                .insert("page".to_string(), vec!["2".to_string()]);
             let script = r#"
                 function respond(ctx) {
                     return http(200, { id: ctx.request.pathParams.id, page: ctx.request.query.page });

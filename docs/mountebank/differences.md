@@ -202,14 +202,6 @@ make the body unparseable there, so every field in it reads as missing.
 
 In a query string or form body, Mountebank turns an invalid UTF-8 escape such as `%FF` into U+FFFD. Rift keeps the text as sent (`%FF`), so a predicate can still match it. Other `+`/`%` decoding is the same: `+` is a space and `%2B` is a plus.
 
-## Scripts and templates see a repeated key comma-joined
-
-Predicates match each value of a repeated query or form key, as Mountebank does (see
-[Repeated keys](predicates.md#repeated-keys)). An `inject` function, `decorate`, `shellTransform`'s
-`MB_REQUEST`, `_rift.script` and `${request.query.*}` template substitution still receive one string
-per key, the values comma-joined in order (`?q=1&q=2` is `"1,2"`), where Mountebank gives a script
-the array `["1", "2"]`.
-
 ## An array expectation against a single value
 
 An array expectation is not matched against a single string by its characters:

@@ -580,12 +580,27 @@ pub fn call_respond(
     dynamic_to_fault_decision(result, rule_id)
 }
 
-fn header_map_lowercased(headers: &crate::util::OrderedMap<String, String>) -> Map {
-    let mut m = Map::new();
-    for (k, v) in headers {
-        m.insert(k.to_ascii_lowercase().into(), Dynamic::from(v.clone()));
+/// A field's values as a Rhai script sees them (issue #1629): one value is a string, several are
+/// an array, as [`crate::util::values_as_json`] shows them to JavaScript.
+pub(crate) fn values_to_dynamic(values: &[String]) -> Dynamic {
+    match values {
+        [one] => Dynamic::from(one.clone()),
+        many => Dynamic::from_array(many.iter().cloned().map(Dynamic::from).collect()),
     }
-    m
+}
+
+/// A [`crate::util::MultiValueMap`] as a Rhai map of [`values_to_dynamic`].
+pub(crate) fn values_map_to_rhai(map: &crate::util::MultiValueMap) -> Map {
+    map.iter()
+        .map(|(k, v)| (k.as_str().into(), values_to_dynamic(v)))
+        .collect()
+}
+
+fn header_map_lowercased(headers: &crate::util::MultiValueMap) -> Map {
+    headers
+        .iter()
+        .map(|(k, v)| (k.to_ascii_lowercase().into(), values_to_dynamic(v)))
+        .collect()
 }
 
 /// Parse `raw` as JSON for `ctx.request.json` (issue #357 Item 1): valid JSON
@@ -608,11 +623,10 @@ fn build_request_ctx_map(request: &ScriptRequest) -> Map {
     }
     m.insert("pathParams".into(), Dynamic::from(path_params));
 
-    let mut query = Map::new();
-    for (k, v) in &request.query {
-        query.insert(k.clone().into(), Dynamic::from(v.clone()));
-    }
-    m.insert("query".into(), Dynamic::from(query));
+    m.insert(
+        "query".into(),
+        Dynamic::from(values_map_to_rhai(&request.query)),
+    );
 
     m.insert(
         "headers".into(),
@@ -937,7 +951,7 @@ mod tests {
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let mut headers = crate::util::OrderedMap::default();
-        headers.insert("x-flow-id".to_string(), "flow123".to_string());
+        headers.insert("x-flow-id".to_string(), vec!["flow123".to_string()]);
 
         let request = ScriptRequest {
             mode: ResponseMode::Text,
@@ -986,7 +1000,7 @@ mod tests {
 
         // Beta user - should inject
         let mut headers1 = crate::util::OrderedMap::default();
-        headers1.insert("x-user-id".to_string(), "beta-user-123".to_string());
+        headers1.insert("x-user-id".to_string(), vec!["beta-user-123".to_string()]);
 
         let request1 = ScriptRequest {
             mode: ResponseMode::Text,
@@ -1006,7 +1020,10 @@ mod tests {
 
         // Regular user - should NOT inject
         let mut headers2 = crate::util::OrderedMap::default();
-        headers2.insert("x-user-id".to_string(), "regular-user-456".to_string());
+        headers2.insert(
+            "x-user-id".to_string(),
+            vec!["regular-user-456".to_string()],
+        );
 
         let request2 = ScriptRequest {
             mode: ResponseMode::Text,
@@ -1095,9 +1112,12 @@ mod tests {
                 mode: ResponseMode::Text,
                 method: "POST".to_string(),
                 path: "/api/orders".to_string(),
-                headers: headers.into_iter().collect(),
+                headers: headers.into_iter().map(|(k, v)| (k, vec![v])).collect(),
                 body: serde_json::Value::Null,
-                query: crate::util::OrderedMap::from_iter([("page".to_string(), "2".to_string())]),
+                query: crate::util::OrderedMap::from_iter([(
+                    "page".to_string(),
+                    vec!["2".to_string()],
+                )]),
                 path_params: HashMap::from([("id".to_string(), "42".to_string())]),
                 raw_body: raw_body.map(|s| s.to_string()),
             }

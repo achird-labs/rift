@@ -22,10 +22,12 @@ pub struct RequestContext {
     pub path: String,
     /// Every value of each query key, in request order (issue #1553). `copy` and `lookup` read a
     /// repeated key's first value, as Mountebank's `getFrom` does; `decorate` and `shellTransform`
-    /// see it comma-joined (`docs/mountebank/behaviors.md`).
+    /// see an array (issue #1629, `docs/mountebank/behaviors.md`).
     pub query: crate::util::MultiValueMap,
-    /// One value per name, in the order the client sent them (issue #1606).
-    pub headers: crate::util::OrderedMap<String, String>,
+    /// Every value of each header, names in the order the client sent them (issue #1606). `copy`
+    /// and `lookup` read the first value; `decorate` and `shellTransform` see a repeated header as
+    /// an array (issue #1629).
+    pub headers: crate::util::MultiValueMap,
     pub body: Option<String>,
     /// The request's `gzip` / `br` body did not decode (issue #1584), so it has no body at all:
     /// `body` is `None`, `copy`/`lookup` find no `body` source, and `decorate`/`shellTransform` see
@@ -37,15 +39,18 @@ pub struct RequestContext {
     /// and `form` only for a non-empty urlencoded body.
     pub request_from: Option<String>,
     pub ip: Option<String>,
-    pub form: Option<crate::util::OrderedMap<String, String>>,
+    pub form: Option<crate::util::MultiValueMap>,
 }
 
 impl RequestContext {
-    /// The query as `decorate` and `shellTransform` see it: one string per key, a repeated key's
-    /// values comma-joined.
+    /// The first value of header `name`, matched ignoring ASCII case: what `copy` and `lookup`
+    /// read, as Mountebank's `getFrom` does for a repeated field.
     #[must_use]
-    pub fn query_joined(&self) -> crate::util::OrderedMap<String, String> {
-        crate::util::comma_joined(&self.query)
+    pub fn first_header(&self, name: &str) -> Option<&String> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .and_then(|(_, values)| values.first())
     }
 }
 
@@ -54,7 +59,7 @@ impl RequestContext {
     ///
     /// `headers` is the map `collect_request_headers` already built for this request — Title-Case
     /// names, every value the client sent, non-UTF-8 values already dropped with one warning. This
-    /// function only *projects* it to one value per name; it does not re-derive it from the raw
+    /// function only *copies* it, every value (issue #1629); it does not re-derive it from the raw
     /// `HeaderMap` (issue #1040). Deriving rather than re-collecting is what stops behaviors
     /// disagreeing with predicates, proxy forwarding, the journal and inject about what the client
     /// sent: before, this was a second pass with a worse rule, coercing an undecodable value to
@@ -85,14 +90,13 @@ impl RequestContext {
             .map(crate::util::parse_query_string)
             .unwrap_or_default();
 
-        // First value, not last: this is the rule predicates state
-        // (docs/mountebank/predicates.md), the rule `parse_form_data` applies to Content-Type
-        // (issue #1038), and the rule the inject path already applied to the very same map — so
-        // taking the last one here made one request answer two ways depending on which surface
-        // read it.
+        // Every value (issue #1629): scripts see a repeated header as an array, and `copy` /
+        // `lookup` take the first one ([`Self::first_header`]). A name with no values is dropped,
+        // never kept present-but-empty.
         let header_map = headers
             .iter()
-            .filter_map(|(name, values)| values.first().map(|first| (name.clone(), first.clone())))
+            .filter(|(_, values)| !values.is_empty())
+            .map(|(name, values)| (name.clone(), values.clone()))
             .collect();
 
         Self {
@@ -104,8 +108,7 @@ impl RequestContext {
             body_undefined: false,
             request_from: client_addr.map(|addr| addr.to_string()),
             ip: client_addr.map(|addr| addr.ip().to_string()),
-            form: crate::imposter::Imposter::request_form(headers, body)
-                .map(|form| crate::util::comma_joined(&form)),
+            form: crate::imposter::Imposter::request_form(headers, body),
         }
     }
 }
@@ -149,10 +152,6 @@ mod tests {
                 None,
             );
             assert_eq!(ctx.query.keys().collect::<Vec<_>>(), ["b", "a", "c"]);
-            assert_eq!(
-                ctx.query_joined().keys().collect::<Vec<_>>(),
-                ["b", "a", "c"]
-            );
             let form = ctx.form.expect("form");
             assert_eq!(form.keys().collect::<Vec<_>>(), ["z", "y", "x"]);
         }
@@ -231,12 +230,12 @@ mod tests {
         let ctx = RequestContext::from_request("GET", &uri, &headers, None, None);
 
         assert_eq!(
-            ctx.headers.get("Content-Type").map(String::as_str),
+            ctx.first_header("Content-Type").map(String::as_str),
             Some("application/json"),
             "header names reaching a behavior must be Title-Case"
         );
         assert_eq!(
-            ctx.headers.get("X-Custom-Header").map(String::as_str),
+            ctx.first_header("X-Custom-Header").map(String::as_str),
             Some("v")
         );
     }
@@ -272,7 +271,7 @@ mod tests {
             "a dropped header must be absent, not present as an empty string"
         );
         assert_eq!(
-            ctx.headers.get("X-Id").map(String::as_str),
+            ctx.first_header("X-Id").map(String::as_str),
             Some("a"),
             "the decodable header alongside it is unaffected"
         );
@@ -298,7 +297,7 @@ mod tests {
 
         let ctx = RequestContext::from_request("GET", &uri, &headers, None, None);
 
-        assert_eq!(ctx.headers.get("X-Id").map(String::as_str), Some("a"));
+        assert_eq!(ctx.first_header("X-Id").map(String::as_str), Some("a"));
     }
 
     // Issue #1040: `HashMap::insert` was last-wins, so a repeated header exposed its LAST value to
@@ -312,9 +311,14 @@ mod tests {
         let ctx = RequestContext::from_request("GET", &uri, &headers, None, None);
 
         assert_eq!(
-            ctx.headers.get("X-Id").map(String::as_str),
+            ctx.first_header("X-Id").map(String::as_str),
             Some("a"),
-            "first value, matching predicates and the inject path"
+            "first value, matching predicates and copy/lookup"
+        );
+        // Issue #1629: every value is kept, in order, for the scripts that see an array.
+        assert_eq!(
+            ctx.headers.get("X-Id").map(Vec::as_slice),
+            Some(["a".to_string(), "b".to_string(), "c".to_string()].as_slice())
         );
     }
 

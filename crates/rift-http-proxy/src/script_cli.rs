@@ -241,6 +241,10 @@ struct RequestFixture {
     body: serde_json::Value,
 }
 
+fn one_value_each(map: crate::util::OrderedMap<String, String>) -> crate::util::MultiValueMap {
+    map.into_iter().map(|(k, v)| (k, vec![v])).collect()
+}
+
 fn fixture_to_script_request(fixture: RequestFixture) -> crate::scripting::ScriptRequest {
     let raw_body = if fixture.body.is_null() {
         None
@@ -250,8 +254,9 @@ fn fixture_to_script_request(fixture: RequestFixture) -> crate::scripting::Scrip
     crate::scripting::ScriptRequest {
         method: fixture.method.unwrap_or_else(|| "GET".to_string()),
         path: fixture.path.unwrap_or_else(|| "/".to_string()),
-        headers: fixture.headers,
-        query: fixture.query,
+        // A fixture writes one string per name; a served request may carry several (#1629).
+        headers: one_value_each(fixture.headers),
+        query: one_value_each(fixture.query),
         path_params: fixture.path_params,
         body: fixture.body,
         raw_body,
@@ -987,6 +992,6 @@ mod tests {
         // arrives on the `ScriptRequest` the engines read.
         let fixture = parse_fixture(r#"{"path":"/r","headers":{"X-Trace":"a"}}"#).expect("valid");
         let request = fixture_to_script_request(fixture);
-        assert_eq!(request.headers.get("X-Trace"), Some(&"a".to_string()));
+        assert_eq!(request.headers.get("X-Trace"), Some(&vec!["a".to_string()]));
     }
 }

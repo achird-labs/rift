@@ -180,6 +180,69 @@ the detail and the replayable export are compared too (#1576). The default certi
 `responseResolver.js:86-87`; `xpath.js:15-16`, `:26-28`; `helpers.js:58-59`, `:122-127` (an array or
 object `ignore`).
 
+## Generated cases
+
+`tests/generative.rs` (issue #1549) generates cases instead of reading them. It draws random
+imposters and request/admin sequences, runs each on both engines through the same
+`driver::run_case` as a committed case, and shrinks any unexplained difference to a minimal case.
+Stubs and requests come from the model test's generators
+(`crates/rift-mock-core/tests/model/ops.rs`); `tests/generative/vocab.rs` keeps the part
+Mountebank can run.
+
+```bash
+cargo test -p rift-differential --test generative -- --nocapture             # the PR smoke
+RIFT_GEN_SEED=7 RIFT_GEN_SECONDS=600 cargo test -p rift-differential --test generative -- --nocapture
+```
+
+| Variable | Effect |
+|:---------|:-------|
+| `RIFT_GEN_SEED` | The seed (default `1549`, so every PR runs the same cases; the nightly uses the run id). Batch `n` of a timed run uses `seed + n`, and a failure names the batch seed that reproduces it |
+| `RIFT_GEN_CASES` | Cases per batch (default 32) |
+| `RIFT_GEN_SECONDS` | Run batches until this much time has passed, instead of one batch (the nightly sets 1200) |
+| `RIFT_GEN_MAX_STEPS_PER_SEC` | The pacing cap (default 150). Every step opens about 2.6 fresh connections (the client never pools, so a fault cannot poison the next request), and each leaves a `TIME_WAIT` socket; 150 steps/s stays under Linux's ~470 connections/s sustained ceiling |
+| `RIFT_GEN_OUT` | Where a failure is written. Default: `<target>/generative/` |
+
+Every PR runs one batch on the fixed seed inside the `differential` job (`cargo test -p
+rift-differential` runs every test target), with Mountebank unprofiled, so the coverage ratchet
+measures the committed cases only. The `generative` job of `.github/workflows/model-tests.yml`
+runs it nightly for 20 minutes.
+
+**Vocabulary.** Requests: `GET`/`POST` to `/a` or `/b`, `?q=1` or not, a body `x`/`y` on a `POST`.
+Stubs: `equals`, `deepEquals`, `contains`, `startsWith`, `matches`, `exists` and `not` over
+`method`, `path`, `query` and `body`; `is` responses with `repeat` 1–3, a `copy` from the path or
+query into the body and a `wait` of 0; `proxyOnce`/`proxyAlways` to an upstream imposter (4546)
+with a single-key `predicateGenerators`. Operations: a request, `POST`/`DELETE`/`PUT
+/imposters/4545/stubs/:i` (indices up to one past the end), `PUT /imposters/4545/stubs`, `PUT
+/imposters` (both body orders), delete-and-recreate, `DELETE .../savedProxyResponses` and `DELETE
+.../savedRequests`. Every admin operation is followed by `GET /imposters/4545`.
+
+**Exclusions.** Each one names its excuse in `vocab::EXCLUDED`, and a unit test checks that the
+cited allow-list id or doc quote still exists, so an exclusion cannot outlive its reason:
+
+| Not generated | Why |
+|:--------------|:----|
+| `predicateGenerators.matches` with more than one key | Rift's recorded predicate order is documented, but allow-listed only at the indices of `proxy: predicateGenerators with method and headers` |
+| `inject`, `decorate`, `shellTransform` | JavaScript and shell run differently by design (`docs/mountebank/differences.md`) |
+| scenarios, `_rift.conditional`, flow state, reload, stub move | Rift-only: Mountebank has nothing to compare them with, and the model test covers them |
+| the model's `X-Flow` header, a non-zero `wait` | noise, or time without coverage |
+
+**Allow-list.** Generated cases are named `generated: …`, so only the Rift-wide (`"case": "*"`)
+entries apply, and a generated run never fails because an entry went unused. No regex-wide entry is
+added for a generated location: one would quietly accept a real bug next to it. The vocabulary
+stays out of a shape instead, and says so in `EXCLUDED`.
+
+**A failure** is shrunk, then re-run three times. It is a *divergence* when every re-run fails at
+the same locations, otherwise *flaky*. The case file is written to `<seed>.json`, named
+`generated: <sig>`, where `<sig>` is the de-indexed, sorted locations hashed to 8 hex digits: the
+key the nightly de-duplicates on (`gen-sig:<sig>` in an open `agent-found` issue gets a comment
+instead of a new issue). An infrastructure error (port allocation, an unreadable imposter list, a
+failed cleanup, neither engine accepting a connection) stops the run without shrinking and is never
+reported as a divergence. `verdict.json` records which of the three it was.
+
+**Promoting a finding.** Once triaged, paste the case from `<seed>.json` into
+`cases/generated.json` (a case file like the others), with a `known-bug` allow-list entry naming it
+until the fix lands. The committed case then runs on every PR with no generator involved.
+
 ## Cases
 
 `cases/*.json`, one file per source:
@@ -193,6 +256,8 @@ object `ignore`).
   `deepEquals` on query), and one case per documented deviation the allow-list cites.
 - `coverage.json` — one case per Mountebank code path the rest did not reach (#1548), named
   `coverage: <mb file>:<line> <what>` after the line it first reaches in Mountebank 2.9.5.
+- `generated.json` — shrunk cases found by the generator (see [Generated cases](#generated-cases)),
+  named `generated: <sig>`, kept as regressions.
 
 A step is `{"do": "admin", "method", "path", "body"?}`, `{"do": "send", "port", "scheme"?, "method"?,
 "path"?, "headers"?: [[name, value]], "body"? | "bodyOfSize"?, "times"?}` (`"scheme": "https"`

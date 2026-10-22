@@ -75,6 +75,18 @@ record.
   accepted. A stored config replayed through `deserialize_replayed` still decodes. An id-less
   `proxy` stub whose stored bytes already carried these keys now serialises them, so its
   content-hash `stub_key` changes once on upgrade.
+- **BREAKING: scripts see a repeated query key, form key or header as an array**, as Mountebank
+  does (#1629). `inject`, predicate `inject`, `predicateGenerators` `inject`, `decorate` (JavaScript
+  and Rhai), `shellTransform`'s `MB_REQUEST` and `_rift.script` (`ctx.request.query`,
+  `ctx.request.headers`, `ctx.request.header(name)`) now get `["1", "2"]` for `?q=1&q=2`, where
+  they got the comma-joined string `"1,2"`; a repeated header was its first value only. A key or
+  header sent once is still a string. `${request.query.x}` templates still render `1,2`.
+  **Migration:** a script that split a repeated key on commas should accept both shapes, e.g.
+  `[].concat(request.query.q)` in JavaScript; Mountebank scripts need no change. **Embedders:**
+  `ScriptRequest`'s `headers` / `query`, `MountebankRequest`'s `query` / `headers` / `form` and
+  `RequestContext`'s `headers` / `form` are now `MultiValueMap` (every value, in order), and
+  `RequestContext::query_joined` is removed (`util::comma_joined(&ctx.query)` gives the old view);
+  `RequestContext::first_header` reads a header's first value.
 - **`GET /logs` returns recent log entries** (#1615), as Mountebank's does:
   `{"logs":[{"level","message","timestamp"}]}` with `startIndex`/`endIndex` sliced as JavaScript's
   `slice(startIndex, endIndex + 1)`. Entries come from a bounded in-memory ring (the most recent
@@ -604,6 +616,13 @@ record.
   tests against Mountebank (the baseline) and then Rift. Every Rift failure is classified in
   `conformance/mbtest/expected.json` as a bug with its issue, a documented difference or a harness
   limit, and a listed test that starts passing fails the run, so the list can only shrink.
+- **Generated cases against Mountebank** (#1549): `conformance/differential/tests/generative.rs`
+  draws random imposters and request/admin sequences from the model test's generators, runs each
+  on Mountebank and Rift, and shrinks any unexplained difference to a minimal case file ready for
+  `cases/generated.json`. Every pull request runs 32 cases on a fixed seed; a nightly job in
+  `model-tests.yml` runs 20 minutes on a fresh seed and files each new divergence once, keyed by a
+  signature of where it occurs. Against v0.22.0 it shrinks to a one-operation `PUT /imposters` case
+  within a second.
 
 ## [0.23.0] - 2026-10-16
 

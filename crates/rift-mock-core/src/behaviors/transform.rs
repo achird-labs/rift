@@ -96,7 +96,7 @@ pub const MAX_SHELL_COMMAND_LENGTH: usize = 2048;
 /// value (issue #1451).
 #[must_use]
 pub fn shell_request_json(request: &RequestContext) -> String {
-    use crate::util::JsKeyOrder;
+    use crate::util::{JsKeyOrder, map_values_as_json};
     use serde::Serialize;
 
     // A struct, not a `serde_json::Map`: that map is a `BTreeMap` here and would sort the keys,
@@ -109,28 +109,31 @@ pub fn shell_request_json(request: &RequestContext) -> String {
         request_from: Option<&'a str>,
         method: &'a str,
         path: &'a str,
-        query: JsKeyOrder<'a, String, foldhash::fast::RandomState>,
-        headers: JsKeyOrder<'a, String, foldhash::fast::RandomState>,
+        query: JsKeyOrder<'a, serde_json::Value, foldhash::fast::RandomState>,
+        headers: JsKeyOrder<'a, serde_json::Value, foldhash::fast::RandomState>,
         #[serde(skip_serializing_if = "Option::is_none")]
         body: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         ip: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        form: Option<JsKeyOrder<'a, String, foldhash::fast::RandomState>>,
+        form: Option<JsKeyOrder<'a, serde_json::Value, foldhash::fast::RandomState>>,
     }
 
-    let query = request.query_joined();
+    // A repeated key or header is an array, a single one a string (issue #1629).
+    let query = map_values_as_json(&request.query);
+    let headers = map_values_as_json(&request.headers);
+    let form = request.form.as_ref().map(map_values_as_json);
     let mb = MbRequest {
         request_from: request.request_from.as_deref(),
         method: &request.method,
         path: &request.path,
         query: JsKeyOrder(&query),
-        headers: JsKeyOrder(&request.headers),
+        headers: JsKeyOrder(&headers),
         // `""` for a request without a body, as Mountebank's `JSON.stringify(request)` (#1365), and
         // no key for a body that did not decode, whose `undefined` it drops (#1584).
         body: (!request.body_undefined).then(|| request.body.as_deref().unwrap_or("")),
         ip: request.ip.as_deref(),
-        form: request.form.as_ref().map(JsKeyOrder),
+        form: form.as_ref().map(JsKeyOrder),
     };
     serde_json::to_string(&mb).expect("strings and string-keyed string maps always serialize")
 }
@@ -321,17 +324,13 @@ pub fn apply_decorate(
         Dynamic::from(request.body.clone().unwrap_or_default()),
     );
 
-    let mut query_map = Map::new();
-    for (k, v) in request.query_joined() {
-        query_map.insert(k.into(), Dynamic::from(v));
-    }
-    req_map.insert("query".into(), Dynamic::from(query_map));
-
-    let mut headers_map = Map::new();
-    for (k, v) in &request.headers {
-        headers_map.insert(k.clone().into(), Dynamic::from(v.clone()));
-    }
-    req_map.insert("headers".into(), Dynamic::from(headers_map));
+    // A repeated key or header is an array, a single one a string (issue #1629).
+    let values_map = crate::scripting::values_map_to_rhai;
+    req_map.insert("query".into(), Dynamic::from(values_map(&request.query)));
+    req_map.insert(
+        "headers".into(),
+        Dynamic::from(values_map(&request.headers)),
+    );
 
     // Create response map for Rhai
     let mut resp_map = Map::new();
@@ -486,7 +485,7 @@ mod tests {
             body: Some("z=1&y=2".to_string()),
             request_from: Some("127.0.0.1:1".to_string()),
             ip: Some("127.0.0.1".to_string()),
-            form: Some(crate::util::comma_joined(&form)),
+            form: Some(form),
             ..Default::default()
         };
         assert_eq!(
@@ -503,7 +502,7 @@ mod tests {
             path: "/".to_string(),
             headers: [("Zulu", "1"), ("Alpha", "2"), ("Mike", "3"), ("Bravo", "4")]
                 .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| (k.to_string(), vec![v.to_string()]))
                 .collect(),
             ..Default::default()
         };
