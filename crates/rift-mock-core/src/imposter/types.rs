@@ -208,6 +208,15 @@ pub struct RecordedRequest {
     pub node: Option<String>,
 }
 
+/// The `timestamp` a recorded request is stamped with: `Date.prototype.toJSON()`'s shape, which
+/// is what Mountebank records (issue #1610). Always millisecond precision and a literal `Z`, so
+/// the width is fixed (`to_rfc3339` prints `+00:00` and a fraction of varying length). The field
+/// stays an opaque `String` so journals holding the older microsecond form still decode.
+#[must_use]
+pub(crate) fn journal_timestamp(now: chrono::DateTime<chrono::Utc>) -> String {
+    now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 impl RecordedRequest {
     /// The client IP an `ip` predicate matches against, recovered from `request_from`
     /// (`ip:port`). Falls back to a bare IP, which tests and embedders record. `None` when
@@ -6095,6 +6104,37 @@ mod tests {
             serde_json::from_value(json!({ "probability": 0.25, "type": "reset" })).unwrap();
         assert_eq!(object.kind(), "reset");
         assert_eq!(object.probability(), 0.25);
+    }
+
+    /// Issue #1610: Mountebank stamps `Date.toJSON()` (milliseconds, `Z`); the width is fixed even
+    /// on a whole second, which `to_rfc3339`'s variable-length fraction does not give.
+    #[test]
+    fn journal_timestamp_is_millisecond_precision_with_z() {
+        use chrono::TimeZone;
+        let frac = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 17, 10, 0, 0)
+            .unwrap()
+            + chrono::Duration::nanoseconds(123_456_789);
+        assert_eq!(journal_timestamp(frac), "2026-10-17T10:00:00.123Z");
+        let whole = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 17, 10, 0, 0)
+            .unwrap();
+        assert_eq!(journal_timestamp(whole), "2026-10-17T10:00:00.000Z");
+    }
+
+    /// Issue #1610: a journal entry written before the format change (microseconds, `+00:00`)
+    /// still decodes and re-serializes its timestamp unchanged.
+    #[test]
+    fn a_microsecond_offset_timestamp_still_round_trips() {
+        let old: RecordedRequest = serde_json::from_value(json!({
+            "requestFrom": "127.0.0.1:1234", "method": "GET", "path": "/x",
+            "query": {}, "headers": {},
+            "timestamp": "2026-10-17T10:00:00.123456+00:00",
+        }))
+        .expect("an old-format timestamp still deserializes");
+        assert_eq!(old.timestamp, "2026-10-17T10:00:00.123456+00:00");
+        let back = serde_json::to_value(&old).unwrap();
+        assert_eq!(back["timestamp"], "2026-10-17T10:00:00.123456+00:00");
     }
 
     /// Issue #364: recordings persist, so a journal written before these fields existed must still

@@ -1126,7 +1126,7 @@ async fn handle_request_inner(
             // undefined body (issue #1584).
             body: (!body_undefined).then(|| body_string.as_deref().unwrap_or_default().to_string()),
             mode: body_mode.clone(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: super::types::journal_timestamp(chrono::Utc::now()),
             // Filled in after the match, via `attach_match_outcome` below.
             match_outcome: None,
             // Filled in after the response exists, by `attach_response_outcome` in the caller.

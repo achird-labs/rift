@@ -59,6 +59,9 @@ record.
 
 ### Changed
 
+- **Recorded request `timestamp` now uses Mountebank's format**, millisecond precision with a `Z`
+  suffix (`2026-10-17T10:00:00.123Z`), instead of microseconds and `+00:00`. Older values are still
+  accepted wherever a journal is read back (#1610).
 - **With `--datadir`, recorded requests survive a restart**, as in Mountebank (#1608). An imposter
   with `recordRequests: true` keeps them in `<port>.requests.jsonl`, written behind about once a
   second and on a graceful stop, so a crash can lose the last ~2 seconds (Mountebank's write is
