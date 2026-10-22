@@ -90,17 +90,24 @@ fn rift_debug_from(val: Option<&str>) -> bool {
         .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
 }
 
-/// Percent-decode a query/form component, passing the raw text through unchanged if it is not
-/// valid percent-encoding.
+/// Decode a query/form component as `application/x-www-form-urlencoded`, as Node's
+/// `querystring.parse` (and so Mountebank) does: `+` is a space, `%2B` is a literal plus, and
+/// text that is not valid percent-encoding passes through unchanged (issue #1607).
 ///
-/// This is Rift's decode contract (issue #611): an undecodable sequence is the client's own text,
+/// The `+` is replaced *before* percent-decoding, so a decoded `%2B` is never turned into a space.
+/// Only query strings and form bodies use this; the path is never decoded.
+///
+/// An undecodable sequence is Rift's contract from issue #611: it is the client's own text,
 /// not an error to erase. Blanking it — the `unwrap_or_default()` this replaced — silently
 /// destroys text a predicate matches on, and on a key it collapses distinct parameters into a
 /// single `""` entry that then comma-joins unrelated values.
-pub fn decode_or_raw(value: &str) -> String {
-    urlencoding::decode(value)
+pub fn decode_form_component(value: &str) -> String {
+    let spaced = value.replace('+', " ");
+    urlencoding::decode(&spaced)
         .map(|decoded| decoded.into_owned())
-        .unwrap_or_else(|_| value.to_string())
+        // Domain-optional parse (#611): invalid percent-encoding is the client's own text, kept
+        // raw. `spaced`, not `value`: Mountebank still turns the `+` beside it into a space.
+        .unwrap_or(spaced)
 }
 
 /// A parsed query string or urlencoded form: every key with all of its values, in request order
@@ -112,7 +119,7 @@ pub type MultiValueMap = OrderedMap<String, Vec<String>>;
 /// (issue #1153 — templates used to parse with a different function and saw `?c=a&c=b` as `b`
 /// while every other surface saw `a,b`). The urlencoded form is parsed by the same function.
 ///
-/// URL-decodes keys and values with [`decode_or_raw`]. A bare parameter with no `=` (`?flag`) is a
+/// URL-decodes keys and values with [`decode_form_component`]. A bare parameter with no `=` (`?flag`) is a
 /// key with an empty value. A **repeated key keeps every value, in order** (issue #1553), as
 /// Mountebank's `querystring.parse` builds an array: `?color=red&color=green` gives
 /// `color => ["red", "green"]`. The predicate engine matches each value; the surfaces that still
@@ -125,9 +132,9 @@ pub fn parse_query_string(query: &str) -> MultiValueMap {
             Some((k, v)) => (k, v),
             None => (pair, ""),
         };
-        map.entry(decode_or_raw(key))
+        map.entry(decode_form_component(key))
             .or_default()
-            .push(decode_or_raw(value));
+            .push(decode_form_component(value));
     }
     map
 }
@@ -446,6 +453,27 @@ mod parse_query_string_tests {
 
         let undecodable = parse_query_string("%FF=v");
         assert_eq!(one(&undecodable, "%FF"), Some("v"));
+    }
+
+    // Issue #1607: `+` is a space in keys and values (Node's `querystring.parse`); `%2B` stays a
+    // plus because the `+` is replaced before percent-decoding; the spaced text survives an
+    // undecodable neighbour. `parse_form_data` calls this parser, and its test table in
+    // `imposter/core/matching.rs` repeats these rows so the two cannot drift.
+    #[test]
+    fn a_plus_is_a_space_in_keys_and_values() {
+        let cases = [
+            ("q=x+y%21", "q", "x y!"),
+            ("a+b=1", "a b", "1"),
+            ("q=1%2B1", "q", "1+1"),
+            ("q=1+1", "q", "1 1"),
+            ("q=%2B+%20", "q", "+  "),
+            ("r=a+%ZZ", "r", "a %ZZ"),
+            ("k=%FF", "k", "%FF"),
+        ];
+        for (query, key, expected) in cases {
+            let params = parse_query_string(query);
+            assert_eq!(one(&params, key), Some(expected), "query {query:?}");
+        }
     }
 
     // Issue #614: a bare parameter's key is decoded like a valued one.

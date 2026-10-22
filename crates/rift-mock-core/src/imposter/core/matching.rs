@@ -1061,6 +1061,33 @@ mod bounded_matching_tests {
         );
     }
 
+    // Issue #1607: a form body decodes `+` as a space, as Node's `querystring.parse` does. Same
+    // table as `parse_query_string_tests::a_plus_is_a_space_in_keys_and_values`.
+    #[test]
+    fn parse_form_data_decodes_a_plus_as_a_space() {
+        let headers = HashMap::from([(
+            "Content-Type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )]);
+        let cases = [
+            ("q=x+y%21", "q", "x y!"),
+            ("a+b=1", "a b", "1"),
+            ("q=1%2B1", "q", "1+1"),
+            ("q=1+1", "q", "1 1"),
+            ("q=%2B+%20", "q", "+  "),
+            ("r=a+%ZZ", "r", "a %ZZ"),
+            ("k=%FF", "k", "%FF"),
+        ];
+        for (body, key, expected) in cases {
+            let form = Imposter::parse_form_data(&headers, Some(body)).expect("form parsed");
+            assert_eq!(
+                form.get(key),
+                Some(&vec![expected.to_string()]),
+                "body {body:?}"
+            );
+        }
+    }
+
     // Issue #1026: `parse_form_data` is generic over `RequestHeaders` so the verify API can hand it
     // a recorded request's multi-value header map directly, instead of collapsing it last-wins
     // first. Both impls must behave identically for a well-formed request.

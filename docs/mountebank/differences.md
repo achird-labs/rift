@@ -198,6 +198,10 @@ Rift applies `except` to each value of a JSON body after parsing it. Mountebank 
 the raw body text before parsing, so a pattern that matches JSON punctuation (a quote, a brace) can
 make the body unparseable there, so every field in it reads as missing.
 
+## An undecodable percent escape stays as sent
+
+In a query string or form body, Mountebank turns an invalid UTF-8 escape such as `%FF` into U+FFFD. Rift keeps the text as sent (`%FF`), so a predicate can still match it. Other `+`/`%` decoding is the same: `+` is a space and `%2B` is a plus.
+
 ## Scripts and templates see a repeated key comma-joined
 
 Predicates match each value of a repeated query or form key, as Mountebank does (see
