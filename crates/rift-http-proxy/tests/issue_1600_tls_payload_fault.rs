@@ -55,20 +55,7 @@ async fn request_over_tls(port: u16) -> Outcome {
         .expect("write request");
     tls.flush().await.expect("flush request");
 
-    let mut plaintext = Vec::new();
-    let mut buf = [0u8; 4096];
-    let end = loop {
-        match tokio::time::timeout(Duration::from_secs(5), tls.read(&mut buf)).await {
-            Ok(Ok(0)) => break None,
-            Ok(Ok(n)) => plaintext.extend_from_slice(&buf[..n]),
-            Ok(Err(e)) => break Some(e),
-            Err(_) => panic!(
-                "the connection neither closed nor failed within 5 s, after {:?}",
-                String::from_utf8_lossy(&plaintext)
-            ),
-        }
-    };
-    Outcome { plaintext, end }
+    read_until_end(&mut tls).await
 }
 
 /// The stream must end as a dropped connection: EOF, or the unexpected EOF a missing
@@ -153,6 +140,80 @@ async fn an_empty_response_on_https_sends_nothing() {
         String::from_utf8_lossy(&outcome.plaintext)
     );
     assert_dropped_without_tls_error(&outcome, "EMPTY_RESPONSE");
+
+    let _ = manager.delete_imposter(port).await;
+}
+
+/// Read the decrypted stream until it ends; `None` for a clean EOF.
+async fn read_until_end<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Outcome {
+    let mut plaintext = Vec::new();
+    let mut buf = [0u8; 4096];
+    let end = loop {
+        match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
+            Ok(Ok(0)) => break None,
+            Ok(Ok(n)) => plaintext.extend_from_slice(&buf[..n]),
+            Ok(Err(e)) => break Some(e),
+            Err(_) => panic!(
+                "the connection neither closed nor failed within 5 s, after {:?}",
+                String::from_utf8_lossy(&plaintext)
+            ),
+        }
+    };
+    Outcome { plaintext, end }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn random_data_inside_a_connect_tunnel_arrives_inside_the_inner_tls() {
+    // A CONNECT through an https imposter re-accepts TLS inside the tunnel (issue #1595). The
+    // payload belongs to the inner request, so it must be encrypted by the inner TLS session; on
+    // the outer one alone, the client's inner TLS reads it as a non-record.
+    let (manager, port) = serve(serde_json::json!({ "fault": "RANDOM_DATA_THEN_CLOSE" })).await;
+
+    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config_trusting_anything()));
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let mut outer = connector
+        .connect(name.clone(), tcp)
+        .await
+        .expect("outer tls handshake");
+    outer
+        .write_all(b"CONNECT anything.invalid:443 HTTP/1.1\r\nHost: anything.invalid:443\r\n\r\n")
+        .await
+        .expect("write CONNECT");
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        let n = tokio::time::timeout(Duration::from_secs(5), outer.read(&mut byte))
+            .await
+            .expect("CONNECT response arrives")
+            .expect("read CONNECT response");
+        assert!(n > 0, "closed inside the CONNECT response");
+        head.push(byte[0]);
+    }
+    assert!(
+        head.starts_with(b"HTTP/1.1 200"),
+        "CONNECT opens a tunnel, got {:?}",
+        String::from_utf8_lossy(&head)
+    );
+
+    let mut inner = connector
+        .connect(name, outer)
+        .await
+        .expect("inner tls handshake");
+    inner
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .expect("write request");
+    inner.flush().await.expect("flush request");
+    let outcome = read_until_end(&mut inner).await;
+    assert_eq!(
+        outcome.plaintext, RANDOM_DATA,
+        "the garbage must be the inner TLS session's application data (stream ended with {:?})",
+        outcome.end
+    );
+    assert_dropped_without_tls_error(&outcome, "RANDOM_DATA_THEN_CLOSE in a tunnel");
 
     let _ = manager.delete_imposter(port).await;
 }

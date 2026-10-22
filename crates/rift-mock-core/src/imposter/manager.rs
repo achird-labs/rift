@@ -363,7 +363,9 @@ fn tunnel_established() -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
 ///
 /// The tunnel keeps the connection's [`FaultCell`]: `FaultIo` wraps only the client's TCP socket,
 /// which carries the tunnel, so a fault a tunnelled response arms breaks that socket, the one
-/// transport the client has. It also keeps `conn_shutdown_rx`, so a delete closes the tunnel too
+/// transport the client has. On HTTPS the re-accepted TLS stream gets its own `TlsPayloadFault`
+/// on the same cell, so a random-data or malformed-chunk payload is encrypted by the innermost
+/// session, the one the client reads the response from (issue #1600). It also keeps `conn_shutdown_rx`, so a delete closes the tunnel too
 /// (issues #207 and #596).
 #[allow(clippy::too_many_arguments)]
 async fn serve_imposter_connection<I>(
@@ -417,7 +419,9 @@ async fn serve_imposter_connection<I>(
                     result = handshake => match result {
                         Ok(Ok(tls)) => {
                             run_http1(
-                                tls,
+                                // The inner request's payload fault is encrypted by the inner
+                                // session, the one the client reads it from (issue #1600).
+                                TlsPayloadFault::new(tls, fault_cell.clone()),
                                 Arc::clone(&imposter),
                                 addr,
                                 fault_cell.clone(),
