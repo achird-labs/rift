@@ -99,8 +99,38 @@ pub struct SendStep {
     pub body: Option<Value>,
     #[serde(default, rename = "bodyOfSize")]
     pub body_of_size: Option<usize>,
+    /// Instead of `body`: these bytes, written as hex, for a body that is not text (a gzip
+    /// stream, issue #1584).
+    #[serde(default, rename = "bodyHex")]
+    pub body_hex: Option<HexBytes>,
     #[serde(default = "one")]
     pub times: u32,
+}
+
+/// Bytes written in a case as a hex string (`"1f8b08…"`). Refused at load when it is not hex.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HexBytes(pub Vec<u8>);
+
+impl<'de> Deserialize<'de> for HexBytes {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        let digit = |c: u8| {
+            (c as char)
+                .to_digit(16)
+                .and_then(|d| u8::try_from(d).ok())
+                .ok_or_else(|| serde::de::Error::custom(format!("bodyHex is not hex: {text:?}")))
+        };
+        if text.len() % 2 != 0 {
+            return Err(serde::de::Error::custom(format!(
+                "bodyHex has an odd number of digits: {text:?}"
+            )));
+        }
+        text.as_bytes()
+            .chunks(2)
+            .map(|pair| Ok(digit(pair[0])? << 4 | digit(pair[1])?))
+            .collect::<Result<_, _>>()
+            .map(Self)
+    }
 }
 
 impl SendStep {
@@ -113,6 +143,7 @@ impl SendStep {
             headers: self.headers.clone(),
             body: self.body.clone(),
             body_of_size: self.body_of_size,
+            body_hex: self.body_hex.clone(),
         }
     }
 }
@@ -129,6 +160,8 @@ pub struct Request {
     pub body: Option<Value>,
     /// Instead of `body`: that many bytes of `x` (a large-body case without a 100 KB literal).
     pub body_of_size: Option<usize>,
+    /// Instead of `body`: exactly these bytes.
+    pub body_hex: Option<HexBytes>,
 }
 
 fn one() -> u32 {
@@ -241,6 +274,7 @@ pub fn fixture_case(imposters_dir: &Path, fixture: &FixtureRef) -> Result<Case, 
             headers: request.headers,
             body: request.body,
             body_of_size: None,
+            body_hex: None,
             times: 1,
         }));
     }
@@ -327,6 +361,7 @@ fn verify_requests(file: &str, verify: &Value) -> Result<Vec<Request>, LoadError
                 headers: request.headers.into_iter().collect(),
                 body: request.body,
                 body_of_size: None,
+                body_hex: None,
             })
         })
         .collect()

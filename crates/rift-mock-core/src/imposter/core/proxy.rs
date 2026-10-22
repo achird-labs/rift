@@ -22,14 +22,17 @@ type ForwardedResponse = (
 );
 
 /// The request body as the handler already holds it (issue #1321). `raw` is what the client sent:
-/// it is forwarded and keyed on, and is a `Bytes` handle so forwarding it is a refcount bump.
+/// it is forwarded and keyed on, and is a `Bytes` handle so forwarding it is a refcount bump. A
+/// `gzip` / `br` body is forwarded still encoded (issue #1584).
 /// `text` is the form the journal and predicates use: the body as-is when it is UTF-8, its base64
-/// otherwise (issue #636). A generated `body` predicate must use `text`, because the matcher
-/// compares it against the next request's text form.
+/// otherwise (issue #636), after any `Content-Encoding` is decoded. It is `None` for a body that
+/// did not decode, which has no body to generate a predicate from (issue #1584). A generated
+/// `body` predicate must use `text`, because the matcher compares it against the next request's
+/// text form.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ProxyBody<'a> {
     pub raw: &'a bytes::Bytes,
-    pub text: &'a str,
+    pub text: Option<&'a str>,
 }
 
 /// A proxied response ready to serve: the upstream's, or a recorded one replayed.
@@ -829,6 +832,9 @@ impl Imposter {
                         // binary request body, issue #636); this path doesn't thread the mode
                         // flag through separately, so default to `Text`.
                         body: body.map(|b| b.to_string()),
+                        // A body that did not decode reaches a generator as a missing one (issue
+                        // #1584), so this script reads it as `""`.
+                        body_undefined: false,
                         mode: None,
                         // Mountebank's dry-run request has an empty `requestFrom`, no `ip` and an
                         // empty `form` (`baseHttpServer.js`).
@@ -1027,7 +1033,7 @@ impl Imposter {
                 method,
                 uri.path(),
                 headers,
-                body.map(|b| b.text),
+                body.and_then(|b| b.text),
                 uri.query(),
                 client_addr,
                 &self.script_file_access(),
@@ -1038,7 +1044,7 @@ impl Imposter {
         let method = method.to_string();
         let path = uri.path().to_string();
         let headers = headers.clone();
-        let body = body.map(|b| b.text.to_string());
+        let body = body.and_then(|b| b.text.map(str::to_string));
         let query = uri.query().map(str::to_string);
         let script_files = self.script_file_access();
         let timeout = std::time::Duration::from_millis(

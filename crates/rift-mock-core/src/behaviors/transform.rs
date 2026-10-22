@@ -104,8 +104,11 @@ pub fn shell_request_json(request: &RequestContext) -> serde_json::Value {
     request_json.insert("path".into(), request.path.as_str().into());
     request_json.insert("query".into(), serde_json::json!(request.query_joined()));
     request_json.insert("headers".into(), serde_json::json!(request.headers));
-    // `""` for a request without a body, as Mountebank's `JSON.stringify(request)` (#1365).
-    request_json.insert("body".into(), request.body.as_deref().unwrap_or("").into());
+    // `""` for a request without a body, as Mountebank's `JSON.stringify(request)` (#1365), and
+    // no key for a body that did not decode, whose `undefined` it drops (#1584).
+    if !request.body_undefined {
+        request_json.insert("body".into(), request.body.as_deref().unwrap_or("").into());
+    }
     if let Some(ip) = &request.ip {
         request_json.insert("ip".into(), ip.as_str().into());
     }
@@ -450,6 +453,21 @@ mod tests {
         )
         .expect("shell transform runs");
         assert_eq!(out["body"]["body"], serde_json::json!(""));
+    }
+
+    /// Issue #1584: a body that did not decode is Mountebank's `undefined`, which
+    /// `JSON.stringify(request)` drops, so `MB_REQUEST` has no `body` key.
+    #[test]
+    fn mb_request_has_no_body_key_when_the_body_did_not_decode() {
+        let request = RequestContext {
+            method: "POST".to_string(),
+            path: "/gz".to_string(),
+            body_undefined: true,
+            ..Default::default()
+        };
+        let json = shell_request_json(&request);
+        assert!(json.get("body").is_none(), "{json}");
+        assert_eq!(json["method"], serde_json::json!("POST"));
     }
 
     /// Issue #1589: the two appended arguments are the request and the response JSON, one word

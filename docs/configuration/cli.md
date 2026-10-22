@@ -521,6 +521,9 @@ predicates, scripts and the request journal all need the whole body. Two limits 
   refuses that configuration at startup, so raising `--max-body-size` past 1 GiB also needs a
   larger budget. `0` makes it unbounded.
 
+A request body sent with `Content-Encoding: gzip` or `br` is decoded before matching, and it is the
+decoded size that `--max-body-size` limits and the budget is charged for (issue #1584).
+
 A proxied upstream response is held to the same limits, but never waits for the budget, and a
 refusal there fails the proxy with `502` like any other upstream failure. The `413` and `503`
 responses close the connection, and over HTTP/1.1 Rift first reads and discards the rest of the

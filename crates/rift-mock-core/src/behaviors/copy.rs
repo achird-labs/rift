@@ -40,6 +40,9 @@ impl CopySource {
             CopySource::Simple(field) => match field.as_str() {
                 "path" => Some(request.path.clone()),
                 "method" => Some(request.method.clone()),
+                // A body that did not decode is Mountebank's `undefined` body: no source (issue
+                // #1584).
+                "body" if request.body_undefined => None,
                 // A request without a body has the body `""` in Mountebank (issue #1365), so a
                 // selector that matches nothing still runs against it.
                 "body" => Some(request.body.clone().unwrap_or_default()),
@@ -246,6 +249,22 @@ mod tests {
 
         let source = CopySource::Simple("body".to_string());
         assert_eq!(source.extract(&request), Some("test body".to_string()));
+    }
+
+    /// Issue #1584: a body that did not decode is no source at all, unlike a request without a
+    /// body, whose body is `""`.
+    #[test]
+    fn an_undefined_body_is_no_copy_source() {
+        let source = CopySource::Simple("body".to_string());
+        let undefined = RequestContext {
+            body_undefined: true,
+            ..Default::default()
+        };
+        assert_eq!(source.extract(&undefined), None);
+        assert_eq!(
+            source.extract(&RequestContext::default()),
+            Some(String::new())
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@
 mod behavior_pipeline;
 pub mod body_limits;
 mod conditional;
+mod content_encoding;
 mod core;
 mod datadir_file;
 pub mod events;

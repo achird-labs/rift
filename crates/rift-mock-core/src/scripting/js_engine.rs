@@ -2339,6 +2339,10 @@ pub struct MountebankRequest {
     pub query: std::collections::HashMap<String, String>,
     pub headers: std::collections::HashMap<String, String>,
     pub body: Option<String>,
+    /// The request's body did not decode (issue #1584): the script sees no `body` key at all, as
+    /// Mountebank's `request.body` is `undefined` then. When `false`, `body` is always a string,
+    /// `""` for a request without one.
+    pub body_undefined: bool,
     /// Whether `body` is UTF-8 text or a base64-encoded binary body (issue #636). Mirrors
     /// `ResponseMode`/`_mode` on the response side so an inject function can tell which it got.
     ///
@@ -2530,15 +2534,18 @@ fn create_mountebank_request_object(
     obj.set(js_string!("headers"), headers_obj, false, context)
         .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
 
-    // Always a string, as in Mountebank: `""` for a request without a body (issue #1365), never
-    // `undefined`. Users call JSON.parse(request.body) themselves if they want parsed JSON.
-    obj.set(
-        js_string!("body"),
-        JsValue::from(js_string!(request.body.as_deref().unwrap_or(""))),
-        false,
-        context,
-    )
-    .map_err(|e| anyhow!("Failed to set body: {e}"))?;
+    // A string, as in Mountebank: `""` for a request without a body (issue #1365). Absent only
+    // for a body that did not decode, which Mountebank leaves `undefined` (issue #1584). Users
+    // call JSON.parse(request.body) themselves if they want parsed JSON.
+    if !request.body_undefined {
+        obj.set(
+            js_string!("body"),
+            JsValue::from(js_string!(request.body.as_deref().unwrap_or(""))),
+            false,
+            context,
+        )
+        .map_err(|e| anyhow!("Failed to set body: {e}"))?;
+    }
 
     // Issue #636: `body` is base64 text for a binary request, not the raw bytes (JS strings
     // can't hold arbitrary bytes) — `isBinary` lets an inject function tell the two apart
@@ -4767,6 +4774,20 @@ function respond(ctx) {
         )
         .expect("decorate runs");
         assert_eq!(result.body, r#"string:"""#);
+    }
+
+    /// Issue #1584: a body that did not decode is Mountebank's `undefined` body, so the request
+    /// object has no `body` property.
+    #[test]
+    fn inject_sees_no_body_when_the_body_did_not_decode() {
+        let script = r#"function(config) { return { body: typeof config.request.body + ':' + ('body' in config.request) }; }"#;
+        let request = MountebankRequest {
+            body_undefined: true,
+            ..mb_req("POST", "/gz")
+        };
+        let resp = execute_mountebank_inject(script, &request, test_port(), None, &trusted_files())
+            .expect("inject runs");
+        assert_eq!(resp.body_text(), "undefined:false");
     }
 
     #[test]

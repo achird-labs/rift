@@ -264,12 +264,6 @@
       "note": "an object body is served with Content-Type: application/json, so the client parses it"
     },
     {
-      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should support predicate from gzipped request (issue #499)",
-      "class": "bug",
-      "issue": "#1584",
-      "note": "a valid gzip request body is not decoded, so no body predicate matches; the array predicates themselves match since #1579"
-    },
-    {
       "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should support adding single stub without restarting the imposter",
       "class": "bug",
       "issue": "#1598",
@@ -298,12 +292,6 @@
       "class": "documented",
       "doc": "docs/mountebank/differences.md#a-json-body-gets-content-type-applicationjson",
       "note": "an object body is served with Content-Type: application/json, so the client parses it"
-    },
-    {
-      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should support predicate from gzipped request (issue #499)",
-      "class": "bug",
-      "issue": "#1584",
-      "note": "a valid gzip request body is not decoded, so no body predicate matches; the array predicates themselves match since #1579"
     },
     {
       "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should support adding single stub without restarting the imposter",
@@ -393,15 +381,16 @@
     {
       "id": "cli/configFileTest.js::--configfile should not render through ejs when --noParse option provided",
       "class": "bug",
-      "issue": "TBD-pidfile-before-ready",
+      "issue": "#1657",
       "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters (~90 ms), and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
       "note": "ECONNREFUSED on 4545: the request arrived between the pidfile write and the imposter bind. Mountebank writes the pidfile last (bin/mb), as its readiness signal"
     },
     {
       "id": "cli/configFileTest.js::--configfile should evaluate gzipped requests (issue #477)",
       "class": "bug",
-      "issue": "#1584",
-      "note": "a valid gzip request body is not decoded, so the body predicate does not match (FAILED TO MATCH)"
+      "issue": "#1657",
+      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters (~90 ms), and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
+      "note": "ECONNREFUSED on 4542: the request arrived between the pidfile write and the imposter bind. Once bound, the gzip body matches (SUCCESS) since #1584"
     },
     {
       "id": "cli/datadirTest.js::--datadir should load previously saved imposters until they are deleted",
@@ -454,7 +443,7 @@
     {
       "id": "cli/hostTest.js::--host should work with --configfile",
       "class": "bug",
-      "issue": "TBD-pidfile-before-ready",
+      "issue": "#1657",
       "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
       "note": "times out on 4545: the request arrived between the pidfile write and the imposter bind (the server itself starts since #1575, and answers on the host's name once bound)"
     },
