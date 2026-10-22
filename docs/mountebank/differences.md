@@ -54,6 +54,14 @@ shows in two places that are not scripts: a header-name predicate with `caseSens
 `keyCaseSensitive: true`) compares against the Title-Cased name, and `savedRequests` record the
 Title-Cased name.
 
+## Response header names
+
+Over HTTP/1.1 Rift writes response header names Title-Case. Mountebank writes a configured name
+exactly as spelled and forwards a proxied origin's own spelling. So a stub's `lower-hdr` arrives as
+`Lower-Hdr`, and a proxied `X-Mixed-CASE` arrives as `X-Mixed-Case`. Header names are
+case-insensitive, so no conforming client is affected; hyper has no public API to write a name's
+original spelling. Over HTTP/2 the names are lower-case in both engines.
+
 ## Client address
 
 An imposter with no `host` listens dual-stack, as in Mountebank, so both engines report an IPv4
@@ -108,11 +116,27 @@ one outside the root leaves the tokens in place with a warning (#1617). See
 
 ## Promise jobs a hook leaves behind are dropped
 
-Mountebank runs every injection in one Node process, so a `.then` callback an `inject` queues runs
-after it returns, and globals are shared by every imposter. Rift drops the promise jobs a hook leaves
-queued when it returns (an `async` `decorate` still waits for its own), and shares globals only
-between scripts with the same `require()` access, so a script written over the admin API never runs
-code inside a `--configfile` imposter's hook (#1645).
+Mountebank runs every injection in one Node process, so a `.then` callback or a timer a script
+queues runs whenever it comes due, after the request was answered, and globals are shared by every
+imposter. Rift runs a hook's promise jobs and timers only while it waits for that hook's answer (an
+`inject` until it has one, an `async` `decorate` until its promise settles), within the script
+timeout, and drops what is left when the hook ends. It shares globals only between scripts with the
+same `require()` access, so a script written over the admin API never runs code inside a
+`--configfile` imposter's hook (#1645).
+
+## Scripts run in an ECMAScript sandbox, not Node
+
+Mountebank evaluates `inject`, `decorate` and `wait` functions inside its own Node process, so a
+script sees Node's whole global scope. Rift runs them in its own JavaScript engine, with standard
+JavaScript plus `console`, Promises (`async`/`await`) and the timers (`setTimeout`,
+`setInterval` and their `clear` functions); see
+[What a script can use](responses.md#what-a-script-can-use).
+
+There is no `process`, so no `process.env`: on a shared node (rift-cluster) the environment would
+hand every tenant's script the node's secrets. There is no `Buffer` and no Node core module
+(`require('http')`, `require('fs')`); `require` loads a CommonJS or JSON file only
+([above](#require-loads-files-only-from---scripts-dir)). A script that needs the network or the
+environment should be a `proxy`, a `shellTransform`, or an `inject` fed by state (#1593).
 
 ## `shellTransform` arguments
 

@@ -266,27 +266,65 @@ const JS_SCRIPT_STACK_SIZE_LIMIT: usize = 10 * 1024;
 /// that stands in for the `_rift.script` wall-clock budget (`bounded::DEFAULT_SCRIPT_TIMEOUT_MS`)
 /// for these sync call sites — every one of them must build its `Context` through this helper
 /// rather than `Context::default()`.
+///
+/// It carries the hooks' host globals too ([`install_host_globals`]; port 0, as no imposter is
+/// known), so a `wait` function may log or set a timer. Nothing runs its jobs: a timer it sets
+/// never fires, and a promise it returns is not awaited, as in Mountebank's `wait` (issue #1593).
 pub(crate) fn bounded_js_context() -> Context {
     let mut context = sealed_js_context();
     bound_js_context(&mut context);
+    if let Err(e) = install_host_globals(&mut context, 0, None) {
+        // Not reached: setting a property on a fresh global object cannot fail. A context
+        // without them is still bounded; a script using one throws a ReferenceError.
+        tracing::error!("could not set the script host globals: {e:#}");
+    }
     context
 }
 
 /// A [`ContextBuilder`](boa_engine::context::ContextBuilder) whose context loads no module. Boa's
 /// default loader resolves `import()` from the working directory, so a script of any imposter,
 /// whatever its `require()` access, could read any JS or JSON file under it (review of #1645).
-/// Every Boa context rift builds starts here.
-pub(crate) fn sealed_js_context_builder() -> boa_engine::context::ContextBuilder {
+/// Every Boa context rift builds starts here, and is finished by [`build_sealed_js_context`].
+fn sealed_js_context_builder() -> boa_engine::context::ContextBuilder {
     boa_engine::context::ContextBuilder::new()
         .module_loader(std::rc::Rc::new(boa_engine::module::IdleModuleLoader))
 }
 
-/// A context with Boa's defaults except the module loader: see [`sealed_js_context_builder`].
-pub(crate) fn sealed_js_context() -> Context {
-    sealed_js_context_builder()
+/// Build a sealed context, then remove `Atomics.waitAsync` from it (review of #1593). A waiter
+/// that call registers is linked into Boa's process-wide futex list, with its `SharedArrayBuffer`,
+/// and only a notify or its own timeout unlinks it. A hook's run drops both when it ends, so every
+/// such call would leak its buffer for the life of the process (256 MiB a request for
+/// `new SharedArrayBuffer(1 << 28)`). No Mountebank script needs it. `Atomics.wait` stays: a
+/// context built here cannot block (`[[CanBlock]]` is false), so it throws.
+fn build_sealed_js_context(builder: boa_engine::context::ContextBuilder) -> Context {
+    let mut context = builder
         .build()
         // As `Context::default()` does: building a context with the default realm cannot fail.
-        .expect("building a Boa context with the default realm cannot fail")
+        .expect("building a Boa context with the default realm cannot fail");
+    let removed = context
+        .global_object()
+        .get(js_string!("Atomics"), &mut context)
+        .ok()
+        .and_then(|atomics| atomics.as_object())
+        .map(|atomics| atomics.delete_property_or_throw(js_string!("waitAsync"), &mut context));
+    // Fail closed: a context that kept `waitAsync` must not run scripts. Not reached: Boa defines
+    // `Atomics` and its methods as configurable data properties of a fresh realm.
+    assert!(
+        matches!(removed, Some(Ok(_))),
+        "could not remove Atomics.waitAsync from a script context"
+    );
+    context
+}
+
+/// A context with Boa's defaults except the module loader and `Atomics.waitAsync`: see
+/// [`build_sealed_js_context`].
+pub(crate) fn sealed_js_context() -> Context {
+    build_sealed_js_context(sealed_js_context_builder())
+}
+
+/// [`sealed_js_context`] running its jobs on `jobs` (issue #1593).
+pub(crate) fn sealed_js_context_on(jobs: std::rc::Rc<super::js_runtime::MbJobExecutor>) -> Context {
+    build_sealed_js_context(sealed_js_context_builder().job_executor(jobs))
 }
 
 /// Apply the loop, recursion and stack limits every script context runs under (issue #327).
@@ -367,19 +405,14 @@ struct MbRealm {
     access: ScriptFileAccess,
     context: Context,
     scripts: MbScriptCache,
-    /// The context's job executor. Its stop signal, set, makes the next `run_jobs` drop every
-    /// queued job without running it.
-    jobs: std::rc::Rc<boa_engine::job::SimpleJobExecutor>,
+    /// The context's job executor: runs jobs only in a hook's bounded drain (issue #1593).
+    jobs: std::rc::Rc<super::js_runtime::MbJobExecutor>,
 }
 
 impl MbRealm {
     fn new(access: ScriptFileAccess) -> Self {
-        let executor = std::rc::Rc::new(boa_engine::job::SimpleJobExecutor::new());
-        let mut context = sealed_js_context_builder()
-            .job_executor(std::rc::Rc::clone(&executor))
-            .build()
-            // As `Context::default()` does: building a context with the default realm cannot fail.
-            .expect("building a Boa context with the default realm cannot fail");
+        let executor = std::rc::Rc::new(super::js_runtime::MbJobExecutor::new());
+        let mut context = sealed_js_context_on(std::rc::Rc::clone(&executor));
         bound_js_context(&mut context);
         Self {
             access,
@@ -389,24 +422,13 @@ impl MbRealm {
         }
     }
 
-    /// Drop every job an earlier run left queued, without running it (issue #1645). A hook
-    /// that queues a job and returns never drains it (only an `async` decorate runs jobs), so
-    /// without this the job would run inside some later run, with that run's objects in reach.
-    /// Discarded rather than drained: draining here would run code after its own run ended, and an
-    /// endless chain of jobs would hold the worker forever.
+    /// Drop every job an earlier run left queued, without running it (issue #1645): a promise
+    /// job, or a timer (issue #1593), that a run left behind when it returned. Without this it
+    /// would run inside some later run's drain, with that run's objects in reach. Discarded
+    /// rather than drained: draining here would run code after its own run ended. The executor
+    /// keeps no `FinalizationRegistry` cleanup, so nothing else is left to run.
     fn discard_jobs(&mut self) {
-        self.jobs
-            .get_cancellation_token()
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Err(e) = self.context.run_jobs() {
-            // With the stop signal set the executor clears its promise, async, timer and generic
-            // queues and returns before running anything, so this is not reached; if it were, a
-            // fresh realm is the closed outcome. Its `FinalizationRegistry` cleanup queue is not
-            // cleared: such a callback can run in a later run's job loop, but only an `async`
-            // decorate runs one, and only in this realm, so only code of the same access.
-            tracing::error!("MB realm could not discard its queued jobs ({e}); rebuilding it");
-            *self = Self::new(self.access.clone());
-        }
+        self.jobs.clear();
     }
 }
 
@@ -1664,6 +1686,48 @@ fn create_script_logger_object(
     Ok(obj.into())
 }
 
+/// The `console` a Mountebank-style script sees (issue #1593): `log`, `info`, `warn`, `error` and
+/// `debug`, routed through the same `tracing` sink as the injected `logger` (`log` at info). In
+/// Node `console` writes to the process's stdout; here nothing a script logs is ever printed
+/// there.
+fn create_console_object(
+    context: &mut Context,
+    port: u16,
+    stub_id: Option<String>,
+) -> JsResult<JsObject> {
+    let obj = create_js_object(context);
+    let captures: LoggerCaptures = (port, stub_id);
+    let methods: [(&str, LoggerMethodFn); 5] = [
+        ("log", logger_info),
+        ("info", logger_info),
+        ("warn", logger_warn),
+        ("error", logger_error),
+        ("debug", logger_debug),
+    ];
+    for (name, func) in methods {
+        let native_fn = NativeFunction::from_copy_closure_with_captures(func, captures.clone())
+            .to_js_function(context.realm());
+        obj.set(js_string!(name), native_fn, false, context)?;
+    }
+    Ok(obj)
+}
+
+/// Set the host globals every Mountebank-style hook runs with (issue #1593): `console`, and the
+/// timers of [`super::js_runtime::install_timers`]. Set afresh for every run, like the other
+/// globals the hooks contract on, so a script that overwrote one in the shared realm does not
+/// break a later run, and `console` is tagged with the running imposter's port and stub. There is
+/// deliberately no `process`, `Buffer` or Node core module: a script has no ambient authority
+/// (`docs/mountebank/differences.md`).
+fn install_host_globals(context: &mut Context, port: u16, stub_id: Option<&str>) -> Result<()> {
+    let console = create_console_object(context, port, stub_id.map(str::to_owned))
+        .map_err(|e| anyhow!("Failed to build console: {e}"))?;
+    context
+        .global_object()
+        .set(js_string!("console"), console, false, context)
+        .map_err(|e| anyhow!("Failed to set console: {e}"))?;
+    super::js_runtime::install_timers(context).map_err(|e| anyhow!("Failed to set timers: {e}"))
+}
+
 /// Convert JSON Value to JavaScript value
 fn json_to_js(context: &mut Context, value: &Value) -> Result<JsValue> {
     json_to_js_result(context, value).map_err(|e| anyhow!("Failed to convert JSON to JS: {e}"))
@@ -1836,9 +1900,10 @@ pub fn clear_imposter_state(port: u16) {
 /// (arg 2) and `imposterState` (arg 5) are the SAME object as `config.state` — the per-imposter
 /// state persisted across calls via `get_imposter_state`/`save_imposter_state`, shared with
 /// predicate injects and decorate for the same imposter port. `done` (arg 4, aliased as
-/// `config.callback`) is the async-style callback; if the function returns `undefined` its
-/// invocation is used instead (this engine is fully synchronous, so "waiting" for `done` just
-/// means checking whether it was called during the synchronous call).
+/// `config.callback`) is the async-style callback. As in Mountebank, the answer is the first of a
+/// returned value that is not `undefined` and a `done` call; `done` may come from a promise job or
+/// a timer, which run until there is an answer (a returned or passed promise is awaited), within
+/// the run's budget (issue #1593).
 ///
 /// Where response is: `{ statusCode: number, headers: object?, body: string }`
 ///
@@ -1881,15 +1946,19 @@ pub async fn execute_mountebank_inject_bounded(
     files: Arc<ScriptFileAccess>,
     timeout: std::time::Duration,
 ) -> Result<MountebankInjectResponse> {
+    // The budget starts at submission, as the caller's timeout does, so a job's drain ends no
+    // later than the caller stops waiting for it (issue #1593).
+    let budget = RunBudget::starting_now(timeout);
     let (tx, rx) = tokio::sync::oneshot::channel();
     submit_mb_job(Box::new(move |thread| {
-        let _ = tx.send(execute_mountebank_inject_in(
+        let _ = tx.send(execute_mountebank_inject_within(
             thread,
             &inject_fn,
             &request,
             imposter_port,
             stub_id.as_deref(),
             &files,
+            budget,
         ));
     }))?;
     match tokio::time::timeout(timeout, rx).await {
@@ -1909,6 +1978,54 @@ pub async fn execute_mountebank_inject_bounded(
     }
 }
 
+/// The wall-clock budget of one hook run (issues #476, #1593): the deadline its job drain must
+/// end by, and the timeout it reports when it does not finish in time.
+#[derive(Debug, Clone, Copy)]
+struct RunBudget {
+    deadline: std::time::Instant,
+    timeout_ms: u64,
+}
+
+impl RunBudget {
+    fn starting_now(timeout: std::time::Duration) -> Self {
+        Self {
+            deadline: std::time::Instant::now() + timeout,
+            timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+        }
+    }
+
+    /// The budget of a caller that sets no timeout of its own:
+    /// [`crate::scripting::DEFAULT_SCRIPT_TIMEOUT_MS`].
+    fn default_now() -> Self {
+        Self::starting_now(std::time::Duration::from_millis(
+            crate::scripting::DEFAULT_SCRIPT_TIMEOUT_MS,
+        ))
+    }
+
+    fn timed_out(self, hook: &'static str) -> crate::scripting::ScriptTimeoutError {
+        crate::scripting::ScriptTimeoutError {
+            hook,
+            timeout_ms: self.timeout_ms,
+        }
+    }
+}
+
+/// The settled state of a promise, or `None` when `value` is not one.
+fn promise_state(value: &JsValue) -> Option<boa_engine::builtins::promise::PromiseState> {
+    // Domain-optional: most hooks return a plain object or nothing, which is not a promise.
+    value
+        .as_object()
+        .and_then(|obj| boa_engine::object::builtins::JsPromise::from_object(obj.clone()).ok())
+        .map(|promise| promise.state())
+}
+
+fn is_pending_promise(value: &JsValue) -> bool {
+    matches!(
+        promise_state(value),
+        Some(boa_engine::builtins::promise::PromiseState::Pending)
+    )
+}
+
 fn execute_mountebank_inject_in(
     thread: &mut MbJsThread,
     inject_fn: &str,
@@ -1917,12 +2034,36 @@ fn execute_mountebank_inject_in(
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
 ) -> Result<MountebankInjectResponse> {
+    execute_mountebank_inject_within(
+        thread,
+        inject_fn,
+        request,
+        imposter_port,
+        stub_id,
+        files,
+        RunBudget::default_now(),
+    )
+}
+
+fn execute_mountebank_inject_within(
+    thread: &mut MbJsThread,
+    inject_fn: &str,
+    request: &MountebankRequest,
+    imposter_port: u16,
+    stub_id: Option<&str>,
+    files: &Arc<ScriptFileAccess>,
+    budget: RunBudget,
+) -> Result<MountebankInjectResponse> {
     let MbRealm {
-        context, scripts, ..
+        context,
+        scripts,
+        jobs,
+        ..
     } = thread.realm(files);
     // Mountebank gives every injection `require` (issue #1611); this run's is bound to its own
     // imposter, passed into the hook's scope (#1645), and dies with the guard.
     let (_run, require) = install_require(&mut *context, files);
+    install_host_globals(&mut *context, imposter_port, stub_id)?;
 
     // Create request object
     let request_obj = create_mountebank_request_object(&mut *context, request)?;
@@ -1991,31 +2132,87 @@ fn execute_mountebank_inject_in(
 
     // Wrap the inject function to call it with (config, injectState, logger, done, imposterState).
     // `config.callback` aliases `done` so scripts using either the positional callback or the
-    // config field convention both work. If the function returns undefined, use whatever `done`/
-    // `config.callback` was invoked with instead (synchronous stand-in for MB's async wait).
+    // config field convention both work. As in Mountebank, the answer is the first of: a value
+    // the function returned that is not `undefined`, or what `done` was first called with — now or
+    // later, from a promise job or a timer (issue #1593). The wrapper returns the outcome record
+    // the drain below watches.
     let wrapper_script = format!(
         r#"
         (function (require) {{
-        var __callbackResult = null;
-        var __done = function(r) {{ __callbackResult = r; }};
+        var __outcome = {{ called: false, value: null }};
+        var __done = function(r) {{
+            if (!__outcome.called) {{ __outcome.called = true; __outcome.value = r; }}
+        }};
         __config.callback = __done;
         var __injectFn = {inject_fn};
         var __directResult = __injectFn(__config, __injectState, __logger, __done, __imposterState);
-        if (__directResult === undefined) {{
-            __directResult = __callbackResult;
+        if (__directResult !== undefined) {{
+            __done(__directResult);
         }}
-        return __directResult;
+        return __outcome;
         }})
         "#
     );
 
-    // Execute the script
-    let result = call_mb_wrapper(context, scripts, &wrapper_script, require).map_err(|e| {
+    let failed = |e: boa_engine::JsError, context: &mut Context| {
         anyhow::Error::new(InjectionFailure {
             detail: format!("Failed to execute inject function: {e}"),
-            data: thrown_message(&e, &mut *context),
+            data: thrown_message(&e, context),
         })
-    })?;
+    };
+    let outcome = call_mb_wrapper(context, scripts, &wrapper_script, require)
+        .map_err(|e| failed(e, &mut *context))?;
+    let outcome = outcome
+        .as_object()
+        .ok_or_else(|| anyhow!("the inject wrapper did not return its outcome"))?;
+    let read = |name: &str, context: &mut Context| {
+        outcome
+            .get(js_string!(name), context)
+            .map_err(|e| anyhow!("Failed to read the inject outcome: {e}"))
+    };
+
+    // Run the jobs the script queued until it has an answer that is not a pending promise: a
+    // returned or called-back promise is awaited, as Mountebank's `done(promise)` adopts it.
+    // Bounded by this run's deadline (issue #476); a script whose jobs end without an answer is
+    // left with none, which `parse_mountebank_response` refuses below.
+    let drained = jobs
+        .drain(&mut *context, budget.deadline, |context| {
+            // The outcome is the wrapper's own object, but the inject source is pasted into the
+            // wrapper's scope, so a script can reach `__outcome` and give it a getter. That runs
+            // only this run's code, in its own realm; a getter that throws reads as no answer.
+            let called = outcome
+                .get(js_string!("called"), context)
+                .is_ok_and(|v| v.to_boolean());
+            called
+                && !outcome
+                    .get(js_string!("value"), context)
+                    .is_ok_and(|v| is_pending_promise(&v))
+        })
+        .map_err(|e| failed(e, &mut *context))?;
+    if drained == super::js_runtime::Drained::Deadline {
+        return Err(budget.timed_out("inject").into());
+    }
+    let mut result = read("value", &mut *context)?;
+    match promise_state(&result) {
+        None => {}
+        Some(boa_engine::builtins::promise::PromiseState::Fulfilled(value)) => result = value,
+        Some(boa_engine::builtins::promise::PromiseState::Rejected(reason)) => {
+            let thrown = boa_engine::JsError::from_opaque(reason.clone());
+            return Err(anyhow::Error::new(InjectionFailure {
+                detail: format!(
+                    "the inject function's promise was rejected: {}",
+                    reason.display()
+                ),
+                data: thrown_message(&thrown, &mut *context),
+            }));
+        }
+        Some(boa_engine::builtins::promise::PromiseState::Pending) => {
+            return Err(anyhow::Error::new(InjectionFailure {
+                detail: "the inject function's promise never settled".to_string(),
+                data: None,
+            }));
+        }
+    }
 
     // Save updated state back (config.state/injectState/imposterState all alias the same object).
     let updated_state = global
@@ -2117,6 +2314,11 @@ fn execute_predicate_inject_in(
         context, scripts, ..
     } = thread.realm(files);
     let (_run, require) = install_require(&mut *context, files);
+    // Mountebank does not wait for a predicate: its timers and promise jobs are queued and never
+    // run here (issue #1593).
+    if let Err(e) = install_host_globals(&mut *context, imposter_port, None) {
+        return Err(PredicateInjectionError::internal(format!("{e:#}")).into());
+    }
 
     let request_obj = match create_mountebank_request_object(&mut *context, request) {
         Ok(obj) => obj,
@@ -2270,6 +2472,8 @@ fn execute_predicate_generator_inject_in(
         context, scripts, ..
     } = thread.realm(files);
     let (_run, require) = install_require(&mut *context, files);
+    install_host_globals(&mut *context, 0, None)
+        .map_err(|e| PredicateGeneratorError::Script(format!("{e:#}")))?;
 
     let request_obj = create_mountebank_request_object(&mut *context, request).map_err(|e| {
         PredicateGeneratorError::Script(format!("failed to build request object: {e}"))
@@ -2952,6 +3156,35 @@ pub fn execute_mountebank_decorate(
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
 ) -> Result<crate::behaviors::Decorated> {
+    execute_mountebank_decorate_within(
+        decorate_fn,
+        request,
+        response_body,
+        response_status,
+        response_headers,
+        imposter_port,
+        stub_id,
+        files,
+        std::time::Duration::from_millis(crate::scripting::DEFAULT_SCRIPT_TIMEOUT_MS),
+    )
+}
+
+/// [`execute_mountebank_decorate`] with the caller's script timeout (issue #1593): an `async`
+/// decorate's jobs and timers run until its promise settles, or until `timeout` from now, when
+/// the run fails with a [`crate::scripting::ScriptTimeoutError`].
+#[allow(clippy::too_many_arguments)]
+pub fn execute_mountebank_decorate_within(
+    decorate_fn: &str,
+    request: &MountebankRequest,
+    response_body: &str,
+    response_status: &crate::behaviors::ResponseStatus,
+    response_headers: &std::collections::HashMap<String, String>,
+    imposter_port: u16,
+    stub_id: Option<&str>,
+    files: &Arc<ScriptFileAccess>,
+    timeout: std::time::Duration,
+) -> Result<crate::behaviors::Decorated> {
+    let budget = RunBudget::starting_now(timeout);
     let decorate_fn = decorate_fn.to_string();
     let request = request.clone();
     let response_body = response_body.to_string();
@@ -2960,7 +3193,7 @@ pub fn execute_mountebank_decorate(
     let stub_id = stub_id.map(str::to_string);
     let files = Arc::clone(files);
     with_mb_js_thread(move |thread| {
-        execute_mountebank_decorate_in(
+        execute_mountebank_decorate_within_budget(
             thread,
             &decorate_fn,
             &request,
@@ -2970,10 +3203,13 @@ pub fn execute_mountebank_decorate(
             imposter_port,
             stub_id.as_deref(),
             &files,
+            budget,
         )
     })?
 }
 
+/// [`execute_mountebank_decorate_within_budget`] on a given worker state, with the default budget.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn execute_mountebank_decorate_in(
     thread: &mut MbJsThread,
@@ -2986,9 +3222,40 @@ fn execute_mountebank_decorate_in(
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
 ) -> Result<crate::behaviors::Decorated> {
+    execute_mountebank_decorate_within_budget(
+        thread,
+        decorate_fn,
+        request,
+        response_body,
+        response_status,
+        response_headers,
+        imposter_port,
+        stub_id,
+        files,
+        RunBudget::default_now(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_mountebank_decorate_within_budget(
+    thread: &mut MbJsThread,
+    decorate_fn: &str,
+    request: &MountebankRequest,
+    response_body: &str,
+    response_status: &crate::behaviors::ResponseStatus,
+    response_headers: &std::collections::HashMap<String, String>,
+    imposter_port: u16,
+    stub_id: Option<&str>,
+    files: &Arc<ScriptFileAccess>,
+    budget: RunBudget,
+) -> Result<crate::behaviors::Decorated> {
     let MbRealm {
-        context, scripts, ..
+        context,
+        scripts,
+        jobs,
+        ..
     } = thread.realm(files);
+    install_host_globals(&mut *context, imposter_port, stub_id)?;
 
     let request_obj = create_mountebank_request_object(&mut *context, request)?;
 
@@ -3100,7 +3367,7 @@ fn execute_mountebank_decorate_in(
     );
     let returned = call_mb_wrapper(context, scripts, &wrapper_script, require)
         .map_err(|e| anyhow!("Failed to execute decorate function: {e}"))?;
-    let returned = settle_promise(returned, &mut *context)?;
+    let returned = settle_promise(returned, &mut *context, jobs, budget)?;
 
     // Persist any mutation the decorate made to the shared, per-port state.
     if let Ok(Value::Object(map)) = js_to_json(&mut *context, &state_obj) {
@@ -3150,20 +3417,28 @@ fn execute_mountebank_decorate_in(
     })
 }
 
-/// The value an `async` decorate's promise settles to, after running the queued jobs; any other
-/// value as it is.
-fn settle_promise(value: JsValue, context: &mut Context) -> Result<JsValue> {
-    // Domain-optional: most decorates return nothing or a plain object, which is not a promise.
-    let Some(promise) = value
-        .as_object()
-        .and_then(|obj| boa_engine::object::builtins::JsPromise::from_object(obj.clone()).ok())
-    else {
+/// The value an `async` decorate's promise settles to, after running the queued jobs and timers
+/// within `budget` (issue #1593); any other value as it is, with no job run, as Mountebank does
+/// not wait for a decorate that returns no promise.
+fn settle_promise(
+    value: JsValue,
+    context: &mut Context,
+    jobs: &super::js_runtime::MbJobExecutor,
+    budget: RunBudget,
+) -> Result<JsValue> {
+    if promise_state(&value).is_none() {
+        return Ok(value);
+    }
+    let drained = jobs
+        .drain(context, budget.deadline, |_| !is_pending_promise(&value))
+        .map_err(|e| anyhow!("Failed to run the decorate's promise jobs: {e}"))?;
+    if drained == super::js_runtime::Drained::Deadline {
+        return Err(budget.timed_out("decorate").into());
+    }
+    let Some(state) = promise_state(&value) else {
         return Ok(value);
     };
-    context
-        .run_jobs()
-        .map_err(|e| anyhow!("Failed to run the decorate's promise jobs: {e}"))?;
-    match promise.state() {
+    match state {
         boa_engine::builtins::promise::PromiseState::Fulfilled(value) => Ok(value),
         boa_engine::builtins::promise::PromiseState::Rejected(reason) => Err(anyhow!(
             "the decorate function's promise was rejected: {}",
@@ -6156,6 +6431,417 @@ function respond(ctx) {
                 leaked <= 1,
                 "registry leaked {leaked} entries across 25 runs; per-run reset is broken"
             );
+        }
+    }
+
+    // =========================================================================================
+    // Issue #1593: scripts get `console`, Promise jobs and timers, within the run's deadline.
+    // =========================================================================================
+
+    fn inject(script: &str) -> Result<MountebankInjectResponse> {
+        execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/1593"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+    }
+
+    #[test]
+    fn an_async_inject_serves_its_body() {
+        let resp = inject("async config => ({ body: 'asyncret' })").expect("async inject");
+        assert_eq!(resp.body_text(), "asyncret");
+    }
+
+    #[test]
+    fn an_async_inject_awaits_a_timer() {
+        let resp = inject(
+            "async config => { await new Promise(r => setTimeout(r, 5)); \
+             return { body: 'awaited' }; }",
+        )
+        .expect("async inject");
+        assert_eq!(resp.body_text(), "awaited");
+    }
+
+    #[test]
+    fn a_callback_from_a_promise_job_is_honoured() {
+        let resp = inject(
+            "(config, state, logger, callback) => { \
+               Promise.resolve('p').then(v => callback({ body: v })); }",
+        )
+        .expect("then-callback inject");
+        assert_eq!(resp.body_text(), "p");
+    }
+
+    #[test]
+    fn a_callback_from_a_timer_is_honoured_after_its_delay() {
+        let started = std::time::Instant::now();
+        let resp = inject(
+            "(config, state, logger, callback) => { \
+               setTimeout(() => callback({ body: 'late' }), 20); }",
+        )
+        .expect("timer-callback inject");
+        assert_eq!(resp.body_text(), "late");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(20),
+            "answered before its timer was due: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_rejected_inject_promise_is_an_inject_error() {
+        let err = inject("async config => { throw new Error('nope'); }")
+            .expect_err("a rejected promise is an error");
+        let failure = err
+            .downcast_ref::<InjectionFailure>()
+            .unwrap_or_else(|| panic!("an InjectionFailure, got: {err:#}"));
+        assert_eq!(failure.data.as_deref(), Some("nope"));
+    }
+
+    #[test]
+    fn clear_timeout_cancels_a_timer() {
+        let resp = inject(
+            "(config, state, logger, callback) => { \
+               const t = setTimeout(() => callback({ body: 'first' }), 5); \
+               clearTimeout(t); \
+               setTimeout(() => callback({ body: 'second' }), 10); }",
+        )
+        .expect("inject");
+        assert_eq!(resp.body_text(), "second");
+    }
+
+    #[test]
+    fn the_first_answer_wins() {
+        // Mountebank resolves one promise: a callback before the return keeps its value.
+        let resp = inject(
+            "(config, state, logger, callback) => { \
+               callback({ body: 'called' }); return { body: 'returned' }; }",
+        )
+        .expect("inject");
+        assert_eq!(resp.body_text(), "called");
+    }
+
+    #[test]
+    fn timers_that_never_call_back_leave_no_answer() {
+        let err = inject("(config, state, logger, callback) => { setTimeout(() => {}, 1); }")
+            .expect_err("no answer");
+        assert!(err.to_string().contains("must return an object"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn an_inject_timer_past_the_deadline_is_the_timeout_error() {
+        let started = std::time::Instant::now();
+        let err = execute_mountebank_inject_bounded(
+            "(config, state, logger, callback) => { \
+               setTimeout(() => callback({ body: 'never' }), 10000); }"
+                .to_string(),
+            mb_req("GET", "/1593"),
+            test_port(),
+            None,
+            trusted_files(),
+            std::time::Duration::from_millis(200),
+        )
+        .await
+        .expect_err("a timer past the deadline");
+        assert_eq!(
+            err.downcast_ref::<crate::scripting::ScriptTimeoutError>(),
+            Some(&crate::scripting::ScriptTimeoutError {
+                hook: "inject",
+                timeout_ms: 200
+            }),
+            "{err:#}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn an_endless_promise_chain_ends_at_the_deadline() {
+        let err = execute_mountebank_inject_bounded(
+            "async config => { async function f() { await 0; return f(); } return f(); }"
+                .to_string(),
+            mb_req("GET", "/1593"),
+            test_port(),
+            None,
+            trusted_files(),
+            std::time::Duration::from_millis(200),
+        )
+        .await
+        .expect_err("an endless chain never answers");
+        assert!(
+            err.downcast_ref::<crate::scripting::ScriptTimeoutError>()
+                .is_some(),
+            "{err:#}"
+        );
+    }
+
+    // The worker itself gives up when the next timer is due after the deadline: it does not
+    // sleep through it, so the pool thread is free again at once.
+    #[test]
+    fn a_worker_does_not_wait_for_a_timer_past_its_deadline() {
+        let mut thread = MbJsThread::new();
+        let started = std::time::Instant::now();
+        let err = execute_mountebank_inject_within(
+            &mut thread,
+            "(config, state, logger, callback) => { setTimeout(() => callback({}), 10000); }",
+            &mb_req("GET", "/1593"),
+            test_port(),
+            None,
+            &trusted_files(),
+            RunBudget::starting_now(std::time::Duration::from_millis(100)),
+        )
+        .expect_err("past the deadline");
+        assert!(
+            err.downcast_ref::<crate::scripting::ScriptTimeoutError>()
+                .is_some(),
+            "{err:#}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn console_logs_under_rift_script() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber {
+            events: Arc::clone(&events),
+        };
+        let port = test_port();
+        let result = tracing::subscriber::with_default(subscriber, || {
+            execute_mountebank_inject(
+                "() => { console.log('x-1593', { a: 1 }); console.warn('w-1593'); \
+                   console.error('e-1593'); console.info('i-1593'); console.debug('d-1593'); \
+                   return { body: 'logged' }; }",
+                &mb_req("GET", "/log"),
+                port,
+                Some("stub-1593"),
+                &trusted_files(),
+            )
+        });
+        assert_eq!(
+            result.expect("console must not throw").body_text(),
+            "logged"
+        );
+        let logs = events.lock().unwrap();
+        for message in ["x-1593 {\"a\":1}", "w-1593", "e-1593", "i-1593", "d-1593"] {
+            assert!(
+                logs.iter().any(|l| l.contains("target=rift::script")
+                    && l.contains(message)
+                    && l.contains(&port.to_string())
+                    && l.contains("stub-1593")),
+                "no rift::script event for {message}: {logs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scripts_get_no_node_process_globals() {
+        let resp = inject(
+            "() => ({ body: [typeof process, typeof Buffer, typeof require, typeof console, \
+               typeof setTimeout, typeof clearTimeout, typeof setInterval, \
+               typeof clearInterval].join(',') })",
+        )
+        .expect("inject");
+        // `require` is the hook's own (issue #1611); there is no `process` or `Buffer`.
+        assert_eq!(
+            resp.body_text(),
+            "undefined,undefined,function,object,function,function,function,function"
+        );
+    }
+
+    #[test]
+    fn a_decorate_gets_console_and_timers() {
+        let decorated = execute_mountebank_decorate(
+            "async config => { console.log('deco-1593'); \
+               await new Promise(r => setTimeout(r, 5)); config.response.body = 'after-timer'; }",
+            &config_req(),
+            "orig",
+            &crate::behaviors::ResponseStatus::Code(200),
+            &HashMap::new(),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("decorate");
+        assert_eq!(decorated.body, "after-timer");
+    }
+
+    #[test]
+    fn a_decorate_timer_past_its_deadline_is_the_timeout_error() {
+        let started = std::time::Instant::now();
+        let err = execute_mountebank_decorate_within(
+            "async config => { await new Promise(r => setTimeout(r, 10000)); }",
+            &config_req(),
+            "orig",
+            &crate::behaviors::ResponseStatus::Code(200),
+            &HashMap::new(),
+            test_port(),
+            None,
+            &trusted_files(),
+            std::time::Duration::from_millis(100),
+        )
+        .expect_err("past the deadline");
+        assert_eq!(
+            err.downcast_ref::<crate::scripting::ScriptTimeoutError>(),
+            Some(&crate::scripting::ScriptTimeoutError {
+                hook: "decorate",
+                timeout_ms: 100
+            }),
+            "{err:#}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    // A decorate that returns no promise is not waited for, as in Mountebank: its timer never
+    // runs, and the response is what the function left.
+    #[test]
+    fn a_sync_decorate_is_not_waited_for() {
+        let decorated = execute_mountebank_decorate(
+            "config => { setTimeout(() => { config.response.body = 'late'; }, 1); \
+               config.response.body = 'now'; }",
+            &config_req(),
+            "orig",
+            &crate::behaviors::ResponseStatus::Code(200),
+            &HashMap::new(),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("decorate");
+        assert_eq!(decorated.body, "now");
+    }
+
+    #[test]
+    fn a_predicate_inject_gets_console_and_timers() {
+        let matched = execute_predicate_inject(
+            "config => { console.log('pred-1593'); setTimeout(() => {}, 1); return true; }",
+            &mb_req("GET", "/p"),
+            test_port(),
+            &trusted_files(),
+        )
+        .expect("predicate inject");
+        assert!(matched);
+    }
+
+    // Issue #1645 for timers: a timer a run leaves pending is discarded before the realm's next
+    // run, so it never fires in a later run, whichever imposter that run belongs to.
+    #[test]
+    fn a_leftover_timer_never_fires_in_a_later_run() {
+        let mut thread = MbJsThread::new();
+        let refused = Arc::new(ScriptFileAccess::Refused);
+        execute_mountebank_inject_in(
+            &mut thread,
+            "config => { setTimeout(() => { globalThis.__timer1593 = 'fired'; }, 0); \
+             return { body: 'queued' }; }",
+            &mb_req("GET", "/a"),
+            test_port(),
+            None,
+            &refused,
+        )
+        .expect("queue");
+        let read = execute_mountebank_inject_in(
+            &mut thread,
+            "(config, state, logger, callback) => { \
+               setTimeout(() => callback({ body: String(globalThis.__timer1593) }), 5); }",
+            &mb_req("GET", "/b"),
+            test_port(),
+            None,
+            &refused,
+        )
+        .expect("read");
+        assert_eq!(read.body_text(), "undefined");
+    }
+
+    // Issue #1645 for timers: a confined imposter's timer that would `require` a file outside
+    // its root never runs in a trusted imposter's run on the same worker, even one that waits on
+    // timers of its own.
+    #[test]
+    fn a_pending_timer_never_runs_under_another_imposters_require() {
+        let tree = scripts_tree();
+        let mut thread = MbJsThread::new();
+        let confined = Arc::new(ScriptFileAccess::Confined(tree.root.clone()));
+        let trusted = Arc::new(ScriptFileAccess::Trusted {
+            base: tree.root.clone(),
+        });
+        let plant = format!(
+            "config => {{ setTimeout(() => {{ \
+               try {{ globalThis.__x1593 = String(require({:?})); }} \
+               catch (e) {{ globalThis.__x1593 = 'ERR:' + String(e); }} }}, 0); \
+             return {{ body: 'planted' }}; }}",
+            tree.outside.join("mod.js").to_str().unwrap()
+        );
+        execute_mountebank_inject_in(
+            &mut thread,
+            &plant,
+            &mb_req("GET", "/a"),
+            test_port(),
+            None,
+            &confined,
+        )
+        .expect("plant");
+        let decorated = execute_mountebank_decorate_in(
+            &mut thread,
+            "async config => { await new Promise(r => setTimeout(r, 5)); \
+               config.response.body = String(globalThis.__x1593); }",
+            &config_req(),
+            "orig",
+            &crate::behaviors::ResponseStatus::Code(200),
+            &HashMap::new(),
+            test_port(),
+            None,
+            &trusted,
+        )
+        .expect("trusted async decorate");
+        assert_eq!(decorated.body, "undefined");
+        let read = execute_mountebank_inject_in(
+            &mut thread,
+            "(config, state, logger, callback) => { \
+               setTimeout(() => callback({ body: String(globalThis.__x1593) }), 5); }",
+            &mb_req("GET", "/b"),
+            test_port(),
+            None,
+            &confined,
+        )
+        .expect("read");
+        let body = read.body.expect("a body");
+        assert!(!body.contains("CANARY_1611"), "{body}");
+        assert_eq!(body, "undefined");
+    }
+
+    // Review of #1593: no script context has `Atomics.waitAsync`, whose waiter would leak its
+    // buffer in Boa's process-wide futex list once the run drops it. `Atomics.wait` stays, and
+    // throws, as no context may block.
+    #[test]
+    fn no_script_context_has_atomics_wait_async() {
+        let probe = "[typeof Atomics.waitAsync, typeof Atomics.wait, (() => { \
+            try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1); return 'ran'; } \
+            catch (e) { return 'threw'; } })()].join(',')";
+        let expected = "undefined,function,threw";
+        let resp = inject(&format!("() => ({{ body: {probe} }})")).expect("inject");
+        assert_eq!(resp.body_text(), expected, "an MB pool realm");
+        let decorated = execute_mountebank_decorate(
+            &format!("config => {{ config.response.body = {probe}; }}"),
+            &config_req(),
+            "orig",
+            &crate::behaviors::ResponseStatus::Code(200),
+            &HashMap::new(),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("decorate");
+        assert_eq!(decorated.body, expected, "a decorate realm");
+        for (name, mut context) in [
+            ("sealed", sealed_js_context()),
+            ("bounded", bounded_js_context()),
+        ] {
+            let value = context
+                .eval(Source::from_bytes(probe.as_bytes()))
+                .expect("probe")
+                .to_string(&mut context)
+                .expect("string")
+                .to_std_string_escaped();
+            assert_eq!(value, expected, "the {name} context");
         }
     }
 }

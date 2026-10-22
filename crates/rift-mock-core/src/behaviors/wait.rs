@@ -524,6 +524,23 @@ mod tests {
         assert_eq!(wait.get_duration_ms().expect("a usable wait"), 42);
     }
 
+    // Issue #1593: a wait function has `console` and the timers, as every script does. Mountebank
+    // does not await a promise a wait function returns, so neither does Rift: it is no delay
+    // (issue #1588), and its timer never runs.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn a_wait_function_has_console_and_timers_but_is_not_awaited() {
+        let logged =
+            WaitBehavior::Function("() => { console.log('w-1593'); return 7; }".to_string());
+        assert_eq!(logged.get_duration_ms().expect("a usable wait"), 7);
+        let timed =
+            WaitBehavior::Function("() => { setTimeout(() => {}, 1); return 9; }".to_string());
+        assert_eq!(timed.get_duration_ms().expect("a usable wait"), 9);
+        let promised =
+            WaitBehavior::Function("() => new Promise(r => setTimeout(() => r(5), 1))".to_string());
+        assert_eq!(promised.get_duration_ms().expect("a usable wait"), 0);
+    }
+
     // A negative return value must not become an enormous u64 delay (underflow) or a negative
     // sleep; it clamps to 0.
     #[test]

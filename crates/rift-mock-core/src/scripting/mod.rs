@@ -33,6 +33,8 @@ pub use script_pool::{CompiledScript, ScriptPool, ScriptPoolConfig};
 
 #[cfg(feature = "javascript")]
 mod js_engine;
+#[cfg(feature = "javascript")]
+mod js_runtime;
 /// Exposed so other modules (e.g. `behaviors::wait`) that run a standalone JS snippet outside the
 /// MB inject/predicate/decorate hooks still get the same interpreter-level guards (issue #355
 /// Items 3/6) rather than an unbounded `Context::default()`.
@@ -41,9 +43,9 @@ pub(crate) use js_engine::bounded_js_context;
 #[cfg(feature = "javascript")]
 pub use js_engine::{
     InjectionFailure, JsEngine, MountebankRequest, PredicateInjectionError, clear_imposter_state,
-    compile_js_to_bytecode, execute_mountebank_decorate, execute_mountebank_inject,
-    execute_mountebank_inject_bounded, execute_predicate_generator_inject,
-    execute_predicate_inject,
+    compile_js_to_bytecode, execute_mountebank_decorate, execute_mountebank_decorate_within,
+    execute_mountebank_inject, execute_mountebank_inject_bounded,
+    execute_predicate_generator_inject, execute_predicate_inject,
 };
 #[cfg(feature = "javascript")]
 #[allow(unused_imports)]

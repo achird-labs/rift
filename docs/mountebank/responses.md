@@ -765,6 +765,48 @@ function(request, state, logger) {
 }
 ```
 
+### Asynchronous injection
+
+The answer is the first of two things, as in Mountebank: a value the function returns that is not
+`undefined`, or what it passes to its callback (the fourth argument, also `config.callback`). The
+callback may be called later, from a `.then` or a timer. A returned promise, such as an `async`
+function's, is awaited, and a rejected one fails the request like a throw:
+
+```javascript
+async config => {
+  await new Promise(resolve => setTimeout(resolve, 20));
+  return { statusCode: 200, body: 'after 20ms' };
+}
+```
+
+```javascript
+(config, state, logger, callback) => {
+  setTimeout(() => callback({ body: 'late' }), 20);
+}
+```
+
+Waiting is bounded by the imposter's script timeout (`_rift.scriptEngine.timeoutMs`, 5 seconds by
+default): an inject that has not answered by then, or whose next timer is due after it, fails with
+the script timeout (`504`). A function that returns `undefined` and whose callback is never called
+once its jobs and timers have run fails with `Inject function must return an object`; Mountebank
+never answers that request.
+
+### What a script can use
+
+`inject`, predicate `inject`, `decorate` and `wait` functions run standard JavaScript in Rift's
+script engine, not in Node:
+
+- `console.log`, `info`, `warn`, `error` and `debug` write to Rift's log at target `rift::script`,
+  as `logger` does (`log` at `info`), never to standard output.
+- Promises, `async` and `await`.
+- `setTimeout`, `clearTimeout`, `setInterval` and `clearInterval`, with Node's delay rule (a delay
+  that is not a number from 1 to 2^31 - 1 is 1 ms). A timer runs only while the script's answer is
+  awaited, as above, or an `async` decorate's promise is.
+- `require`, for a CommonJS or JSON file only ([differences](differences.md#require-loads-files-only-from---scripts-dir)).
+
+There is no `process` (so no `process.env`), no `Buffer` and no Node core module such as `http` or
+`fs`; see [differences](differences.md#scripts-run-in-an-ecmascript-sandbox-not-node).
+
 ---
 
 ## Response Templates

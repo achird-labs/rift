@@ -51,6 +51,11 @@ record.
 
 ### Changed
 
+- **HTTP/1.1 response header names are Title-Case** (#1597): imposter and front-door responses
+  carry `Content-Type`, `X-Rift-Imposter` and the like, where they were lower case. A stub's own
+  spelling is not reproduced (`lower-hdr` is sent as `Lower-Hdr`); HTTP/2 stays lower-case. See
+  [Response header names](docs/mountebank/differences.md#response-header-names).
+
 - **A `proxy` stub no longer follows upstream redirects** (#1594). It relays the `30x` and records it, as Mountebank does: the caller gets the redirect and its `Location` untouched, the redirect target is never contacted, and a `proxyOnce` recording holds the redirect rather than the target's answer. Anyone who relied on Rift following the redirect needs a second proxy stub for the `Location` target.
 
 - **A throwing `inject` answers `500`, as in Mountebank** (#1581). A response or predicate `inject`
@@ -237,6 +242,19 @@ record.
   from request to request; they now match Mountebank. As in a JS object, integer-like keys (`?2=y`)
   come first, ascending. `MB_REQUEST`'s own keys are in Mountebank's order too, where they were
   sorted.
+- **An `async` inject is awaited, and a callback from a promise or a timer is honoured** (#1593).
+  An `async` inject served an empty `200` with no error, because the script engine never ran its
+  promise jobs; `Promise.resolve().then(() => callback(...))` and `setTimeout(() => callback(...))`
+  answered `400`. A hook's promise jobs and timers now run while its answer is awaited, within the
+  imposter's script timeout: past it, the request gets the script timeout. A rejected inject
+  promise fails like a throw. As in Mountebank, the first answer wins: a callback called before
+  the function returns a value keeps its value (the return value used to win).
+- **Scripts have `console` and timers** (#1593): `console.log`/`info`/`warn`/`error`/`debug` threw
+  `console is not defined`; they now log at target `rift::script`, as `logger` does.
+  `setTimeout`, `clearTimeout`, `setInterval` and `clearInterval` exist in `inject`, predicate
+  `inject`, `decorate` and `wait`. An `async` decorate waits for its timers. There is still no
+  `process`, `Buffer` or Node core module, by decision; see
+  `docs/mountebank/differences.md#scripts-run-in-an-ecmascript-sandbox-not-node`.
 
 - **`rift-lint` agrees with the engine and Mountebank on behaviors** (#1587), following #1582.
   `E035` now flags a `null` `repeat` on the response or in an object-form block, as well as `0`. A

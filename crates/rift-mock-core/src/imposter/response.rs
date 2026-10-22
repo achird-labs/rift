@@ -532,7 +532,9 @@ pub fn create_stub_from_proxy_response(
 /// injects for the same imposter (issue #355 Item 0) — decorate reads and writes the same
 /// persisted state rather than a throwaway object. `stub_id` tags the script logger's tracing
 /// events with the owning stub, when known (issue #355 AC1). `files` is what the imposter's
-/// scripts may `require()` (issue #1611).
+/// scripts may `require()` (issue #1611). It runs within the default script timeout; the
+/// serving path, [`apply_decorate_bounded`], passes the imposter's.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn apply_js_or_rhai_decorate(
     script: &str,
@@ -544,10 +546,37 @@ pub fn apply_js_or_rhai_decorate(
     stub_id: Option<&str>,
     files: &std::sync::Arc<crate::imposter::ScriptFileAccess>,
 ) -> Result<Decorated, DecorateError> {
-    // Only the JS engine call sites below consume `imposter_port`/`stub_id`/`files`; without the
-    // feature the parameters would otherwise be unused.
+    apply_js_or_rhai_decorate_within(
+        script,
+        request,
+        body,
+        status,
+        headers,
+        imposter_port,
+        stub_id,
+        files,
+        std::time::Duration::from_millis(crate::scripting::DEFAULT_SCRIPT_TIMEOUT_MS),
+    )
+}
+
+/// [`apply_js_or_rhai_decorate`] with the imposter's script timeout, which bounds how long a
+/// JavaScript `async` decorate's jobs and timers may run (issue #1593).
+#[allow(clippy::too_many_arguments)]
+fn apply_js_or_rhai_decorate_within(
+    script: &str,
+    request: &RequestContext,
+    body: &str,
+    status: &ResponseStatus,
+    headers: &HashMap<String, String>,
+    imposter_port: u16,
+    stub_id: Option<&str>,
+    files: &std::sync::Arc<crate::imposter::ScriptFileAccess>,
+    timeout: std::time::Duration,
+) -> Result<Decorated, DecorateError> {
+    // Only the JS engine call sites below consume `imposter_port`/`stub_id`/`files`/`timeout`;
+    // without the feature the parameters would otherwise be unused.
     #[cfg(not(feature = "javascript"))]
-    let _ = (imposter_port, stub_id, files);
+    let _ = (imposter_port, stub_id, files, timeout);
 
     if !is_javascript_decorate(script) {
         return decorate_rhai(script, request, body, status, headers);
@@ -581,7 +610,7 @@ pub fn apply_js_or_rhai_decorate(
         } else {
             std::borrow::Cow::Owned(format!("function(config) {{ {script} }}"))
         };
-        crate::scripting::execute_mountebank_decorate(
+        crate::scripting::execute_mountebank_decorate_within(
             &wrapped_script,
             &mb_request,
             body,
@@ -590,8 +619,15 @@ pub fn apply_js_or_rhai_decorate(
             imposter_port,
             stub_id,
             files,
+            timeout,
         )
-        .map_err(|e| DecorateError::JavaScript(e.to_string()))
+        .map_err(
+            |e| match e.downcast_ref::<crate::scripting::ScriptTimeoutError>() {
+                // Its jobs could not finish by the deadline: the same answer as the caller's timeout.
+                Some(t) => DecorateError::Timeout(t.timeout_ms),
+                None => DecorateError::JavaScript(e.to_string()),
+            },
+        )
     }
 
     // No JS engine compiled in (`--no-default-features`): fall back to textual rewrites so
@@ -669,7 +705,7 @@ pub async fn apply_decorate_bounded(
     // has no RAII guard, so a panic skips its `clear_current_flow_store`, and `declared_functions_js`
     // never clears at all. A stale `Arc<dyn FlowStore>` can outlive its job on a pool thread.)
     let handle = tokio::task::spawn_blocking(move || {
-        apply_js_or_rhai_decorate(
+        apply_js_or_rhai_decorate_within(
             &script,
             &request,
             &body,
@@ -678,6 +714,7 @@ pub async fn apply_decorate_bounded(
             imposter_port,
             stub_id.as_deref(),
             &files,
+            timeout,
         )
     });
     match tokio::time::timeout(timeout, handle).await {
@@ -1420,6 +1457,29 @@ mod tests {
             start.elapsed() < std::time::Duration::from_secs(3),
             "must return near the configured deadline, not after the loop cap"
         );
+    }
+
+    // Issue #1593: an `async` decorate waiting on a timer due after the imposter's script timeout
+    // is the decorate timeout, not a script error.
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn mb_decorate_bounded_timer_past_the_deadline_times_out() {
+        let res = apply_decorate_bounded(
+            "async config => { await new Promise(r => setTimeout(r, 10000)); }".to_string(),
+            decorate_req(),
+            "orig".to_string(),
+            ResponseStatus::Code(200),
+            std::collections::HashMap::new(),
+            test_port(),
+            None,
+            trusted_files(),
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+        match res {
+            Err(DecorateError::Timeout(ms)) => assert_eq!(ms, 100),
+            other => panic!("expected DecorateError::Timeout, got {other:?}"),
+        }
     }
 }
 
