@@ -33,7 +33,7 @@ fn script_config(
 
 fn req(attempt_tag: &str) -> ScriptRequest {
     let mut headers = rift_mock_core::util::OrderedMap::default();
-    headers.insert("x-flow-id".to_string(), attempt_tag.to_string());
+    headers.insert("x-flow-id".to_string(), vec![attempt_tag.to_string()]);
     ScriptRequest {
         method: "GET".to_string(),
         path: "/retry".to_string(),

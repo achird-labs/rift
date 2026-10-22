@@ -16,6 +16,7 @@ pub use bounded::{
 };
 
 pub use rhai_engine::RhaiEngine;
+pub(crate) use rhai_engine::values_map_to_rhai;
 
 /// A Rhai engine with file modules turned off (issue #1611): an `import` statement resolves
 /// nothing, on every door. Rhai's default resolver loads any `.rhai` file on the host; `import`
@@ -221,7 +222,8 @@ impl ScriptCtxExtras {
                 .headers
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("x-flow-id"))
-                .map(|(_, v)| v.clone())
+                // A repeated `x-flow-id` names its flow by the first value, as predicates read it.
+                .and_then(|(_, v)| v.first().cloned())
                 .unwrap_or_default()
         });
         ScriptCtxInput::new(request, flow_id)
@@ -401,11 +403,13 @@ impl ScriptEngine {
 pub struct ScriptRequest {
     pub method: String,
     pub path: String,
-    /// In the order the client sent them (issue #1606).
-    pub headers: crate::util::OrderedMap<String, String>,
+    /// In the order the client sent them (issue #1606), every value: a script sees a repeated
+    /// header as an array, a single one as a string (issue #1629).
+    pub headers: crate::util::MultiValueMap,
     pub body: Value,
-    /// Query parameters parsed from the URL, in request order (issue #1596)
-    pub query: crate::util::OrderedMap<String, String>,
+    /// Query parameters parsed from the URL, in request order (issue #1596), every value of a
+    /// repeated key (issue #1629).
+    pub query: crate::util::MultiValueMap,
     /// Path parameters extracted from route patterns (e.g., /users/:id)
     pub path_params: HashMap<String, String>,
     /// The raw request body text, exactly as received (issue #357 Item 1: `ctx.request.body` is
@@ -924,8 +928,14 @@ mod tests {
     #[test]
     fn test_script_request_with_headers() {
         let mut headers = crate::util::OrderedMap::default();
-        headers.insert("Content-Type".to_string(), "application/json".to_string());
-        headers.insert("Authorization".to_string(), "Bearer token".to_string());
+        headers.insert(
+            "Content-Type".to_string(),
+            vec!["application/json".to_string()],
+        );
+        headers.insert(
+            "Authorization".to_string(),
+            vec!["Bearer token".to_string()],
+        );
 
         let request = ScriptRequest {
             mode: ResponseMode::Text,
@@ -940,15 +950,15 @@ mod tests {
         assert_eq!(request.headers.len(), 2);
         assert_eq!(
             request.headers.get("Content-Type"),
-            Some(&"application/json".to_string())
+            Some(&vec!["application/json".to_string()])
         );
     }
 
     #[test]
     fn test_script_request_with_query_params() {
         let mut query = crate::util::OrderedMap::default();
-        query.insert("page".to_string(), "1".to_string());
-        query.insert("limit".to_string(), "10".to_string());
+        query.insert("page".to_string(), vec!["1".to_string()]);
+        query.insert("limit".to_string(), vec!["10".to_string()]);
 
         let request = ScriptRequest {
             mode: ResponseMode::Text,
@@ -960,8 +970,8 @@ mod tests {
             query,
             path_params: HashMap::new(),
         };
-        assert_eq!(request.query.get("page"), Some(&"1".to_string()));
-        assert_eq!(request.query.get("limit"), Some(&"10".to_string()));
+        assert_eq!(request.query.get("page"), Some(&vec!["1".to_string()]));
+        assert_eq!(request.query.get("limit"), Some(&vec!["10".to_string()]));
     }
 
     #[test]

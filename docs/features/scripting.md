@@ -107,8 +107,8 @@ JavaScript uses the standard Mountebank `inject` response format for compatibili
 ```javascript
 config.request.method      // "GET", "POST", etc.
 config.request.path        // "/api/users/123"
-config.request.query       // { page: "1", limit: "10" }
-config.request.headers     // { "Content-Type": "application/json" }; any spelling finds it, e.g. ["content-type"]
+config.request.query       // { page: "1", limit: "10" }; a repeated key is an array: { q: ["1", "2"] }
+config.request.headers     // { "Content-Type": "application/json" }; any spelling finds it, e.g. ["content-type"]; a repeated header is an array
 config.request.body        // Request body (string or parsed object)
 config.request.isDryRun    // true only in a predicateGenerators inject's create-time dry run
 ```
@@ -183,6 +183,7 @@ ctx.request.path          // String: "/api/users"
 ctx.request.headers       // Map with lowercased keys: access via ctx.request.headers["header-name"]
 ctx.request.header(name)  // case-insensitive getter, e.g. ctx.request.header("X-Name")
 ctx.request.query         // Map: access via ctx.request.query["param"]
+                          // a repeated header or query key is an array, one sent once a string
 ctx.request.pathParams    // Map: access via ctx.request.pathParams["name"] (populated from the stub's routePattern)
 ctx.request.body          // Raw request body (string)
 ctx.request.json          // Body lazily parsed as JSON (unit if not JSON)
@@ -429,8 +430,8 @@ accept only `respond`.
 ctx.request.method        // "GET", "POST", etc.
 ctx.request.path          // "/api/users/123"
 ctx.request.pathParams    // map: populated from the stub's routePattern
-ctx.request.query         // map of query-string parameters
-ctx.request.headers       // map with LOWERCASED keys — always, regardless of wire casing
+ctx.request.query         // map of query-string parameters; a repeated key is an array
+ctx.request.headers       // map with LOWERCASED keys — always, regardless of wire casing; a repeated header is an array
 ctx.request.header(name)  // case-insensitive getter, e.g. ctx.request.header("X-Flow-Id")
 ctx.request.body          // the raw request body, as a string
 ctx.request.json          // the body lazily parsed as JSON; unit/nil/null if it isn't JSON

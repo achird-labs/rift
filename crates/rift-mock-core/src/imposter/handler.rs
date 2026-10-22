@@ -1482,17 +1482,10 @@ async fn handle_request_inner(
             let mb_request = MountebankRequest {
                 method: method.clone(),
                 path: path.clone(),
-                // `MountebankRequest`'s fields are the fixed std-hasher scripting boundary (out of
-                // scope for #704), so the `FastMap`-backed maps are copied across here. A script
-                // sees a repeated key comma-joined (`docs/mountebank/responses.md`).
-                query: crate::util::comma_joined(&parse_query_string(&query_str)),
-                // `MountebankRequest.headers` is the fixed single-value scripting boundary (out
-                // of scope for #704/#1025), so a repeated header exposes only its first value to
-                // an inject function.
-                headers: request_headers
-                    .iter()
-                    .filter_map(|(k, v)| v.first().map(|first| (k.clone(), first.clone())))
-                    .collect(),
+                // A repeated key or header reaches the script as an array (issue #1629).
+                query: parse_query_string(&query_str),
+                // Owned boundary: the inject job is submitted to a `'static` worker closure.
+                headers: request_headers.clone(),
                 // Owned boundary (issue #561): the inject job is submitted to a `'static` worker
                 // closure, so `body_string`'s borrow can't cross it.
                 body: body_string.as_deref().map(str::to_string),
@@ -1500,8 +1493,7 @@ async fn handle_request_inner(
                 mode: Some(body_mode.clone()),
                 request_from: Some(client_addr.to_string()),
                 ip: Some(client_addr.ip().to_string()),
-                form: Imposter::request_form(&request_headers, body_string.as_deref())
-                    .map(|form| crate::util::comma_joined(&form)),
+                form: Imposter::request_form(&request_headers, body_string.as_deref()),
                 is_dry_run: false,
             };
 
@@ -1665,14 +1657,12 @@ async fn handle_request_inner(
                 mode: body_mode.clone(),
                 method: method.clone(),
                 path: path.clone(),
-                // Single-valued (issue #1025): a repeated header exposes only its first value to
-                // a script, matching the other scripting boundaries (inject, predicateGenerators).
+                // Every value (issue #1629): a script sees a repeated header as an array, as every
+                // other scripting boundary (inject, decorate, predicateGenerators) does.
                 headers: request_headers
                     .iter()
-                    .filter_map(|(k, v)| {
-                        v.first()
-                            .map(|first| (k.to_ascii_lowercase(), first.clone()))
-                    })
+                    .filter(|(_, v)| !v.is_empty())
+                    .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
                     .collect(),
                 // Domain-optional parse: a request body may legitimately not be JSON, and the
                 // script contract exposes that as `null` rather than an error (issue #611).
@@ -1680,10 +1670,8 @@ async fn handle_request_inner(
                     .as_deref()
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or(serde_json::Value::Null),
-                // `ScriptRequest`'s fields are the fixed std-hasher scripting boundary (out of
-                // scope for #704), so the `FastMap`-backed maps are copied across here, a repeated
-                // key comma-joined.
-                query: crate::util::comma_joined(&parse_query_string(&query_str)),
+                // A repeated key reaches the script as an array (issue #1629).
+                query: parse_query_string(&query_str),
                 // Issue #433: populate path params from the matched stub's route pattern, if any.
                 path_params: stub_state
                     .stub

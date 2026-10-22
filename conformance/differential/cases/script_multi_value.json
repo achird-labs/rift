@@ -1,0 +1,263 @@
+{
+  "source": "issue #1629 (Mountebank httpRequest.js: query and form are querystring.parse results and headers headersMap.ofRaw, so a repeated key or header is an array and a single one a string). The body is not JSON, so the harness compares it byte for byte. Scripts read lower-case header names: the harness client sends them lower-cased, Mountebank keeps that spelling, and Rift's lookup is case-insensitive.",
+  "cases": [
+    {
+      "name": "script multi-value: an inject sees a repeated header, query key or form key as an array",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "function (config) { var r = config.request; return { statusCode: 200, body: 'I ' + JSON.stringify([r.headers['x-a'], r.headers['x-b'], r.query.q, r.query.one, r.form || null]) }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?q=1&one=x&q=2",
+          "headers": [
+            [
+              "X-A",
+              "1"
+            ],
+            [
+              "X-B",
+              "solo"
+            ],
+            [
+              "X-A",
+              "2"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?q=1&one=x",
+          "headers": [
+            [
+              "X-A",
+              "1"
+            ],
+            [
+              "X-B",
+              "solo"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?q=1&q=2&q=3",
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ],
+            [
+              "X-A",
+              "1"
+            ],
+            [
+              "X-A",
+              "2"
+            ]
+          ],
+          "body": "f=1&g=solo&f=2"
+        }
+      ]
+    },
+    {
+      "name": "script multi-value: a decorate sees a repeated header, query key or form key as an array",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "orig"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "function (request, response) { var r = request; response.body = 'D ' + JSON.stringify([r.headers['x-a'], r.headers['x-b'], r.query.q, r.query.one, r.form || null]); }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?q=1&one=x&q=2",
+          "headers": [
+            [
+              "X-A",
+              "1"
+            ],
+            [
+              "X-B",
+              "solo"
+            ],
+            [
+              "X-A",
+              "2"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?q=1&one=x",
+          "headers": [
+            [
+              "X-A",
+              "1"
+            ],
+            [
+              "X-B",
+              "solo"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?q=1&q=2&q=3",
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ],
+            [
+              "X-A",
+              "1"
+            ],
+            [
+              "X-A",
+              "2"
+            ]
+          ],
+          "body": "f=1&g=solo&f=2"
+        }
+      ]
+    },
+    {
+      "name": "script multi-value: a predicate inject sees a repeated header and query key as an array",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "inject": "function (config) { var r = config.request; return Array.isArray(r.headers['x-a']) && Array.isArray(r.query.q) && typeof r.headers['x-b'] === 'string'; }"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "arrays"
+                    }
+                  }
+                ]
+              },
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "strings"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?q=1&one=x&q=2",
+          "headers": [
+            [
+              "X-A",
+              "1"
+            ],
+            [
+              "X-B",
+              "solo"
+            ],
+            [
+              "X-A",
+              "2"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?q=1&one=x",
+          "headers": [
+            [
+              "X-A",
+              "1"
+            ],
+            [
+              "X-B",
+              "solo"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x?q=1&q=2&q=3",
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ],
+            [
+              "X-A",
+              "1"
+            ],
+            [
+              "X-A",
+              "2"
+            ]
+          ],
+          "body": "f=1&g=solo&f=2"
+        }
+      ]
+    }
+  ]
+}

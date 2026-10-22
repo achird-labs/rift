@@ -59,6 +59,18 @@ record.
 
 ### Changed
 
+- **BREAKING: scripts see a repeated query key, form key or header as an array**, as Mountebank
+  does (#1629). `inject`, predicate `inject`, `predicateGenerators` `inject`, `decorate` (JavaScript
+  and Rhai), `shellTransform`'s `MB_REQUEST` and `_rift.script` (`ctx.request.query`,
+  `ctx.request.headers`, `ctx.request.header(name)`) now get `["1", "2"]` for `?q=1&q=2`, where
+  they got the comma-joined string `"1,2"`; a repeated header was its first value only. A key or
+  header sent once is still a string. `${request.query.x}` templates still render `1,2`.
+  **Migration:** a script that split a repeated key on commas should accept both shapes, e.g.
+  `[].concat(request.query.q)` in JavaScript; Mountebank scripts need no change. **Embedders:**
+  `ScriptRequest`'s `headers` / `query`, `MountebankRequest`'s `query` / `headers` / `form` and
+  `RequestContext`'s `headers` / `form` are now `MultiValueMap` (every value, in order), and
+  `RequestContext::query_joined` is removed (`util::comma_joined(&ctx.query)` gives the old view);
+  `RequestContext::first_header` reads a header's first value.
 - **`GET /logs` returns recent log entries** (#1615), as Mountebank's does:
   `{"logs":[{"level","message","timestamp"}]}` with `startIndex`/`endIndex` sliced as JavaScript's
   `slice(startIndex, endIndex + 1)`. Entries come from a bounded in-memory ring (the most recent

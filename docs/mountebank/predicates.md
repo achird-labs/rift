@@ -49,12 +49,12 @@ Two consequences worth knowing:
 - **`not` sees every value.** `{"not": {"equals": {"headers": {"X-Test": "first"}}}}` does **not**
   match the request above. Before Rift evaluated every value, `first` was shadowed by `second` and
   the negation succeeded.
-- **Single-valued contexts take the first value.** `inject` functions, `_rift.script`,
-  `predicateGenerators`, the debug endpoint, the `copy` / `lookup` / `decorate` / `shellTransform`
-  behaviors and `${request.headers.*}` template substitution all receive one value per header
-  name — the first one sent. `copy` and `lookup` from a repeated query key also take its first
-  value, as Mountebank's do; scripts and templates see a repeated query or form key comma-joined
-  (see [Differences](differences.md#scripts-and-templates-see-a-repeated-key-comma-joined)).
+- **Scripts see every value; single-valued contexts take the first.** `inject` functions,
+  `decorate`, `shellTransform`'s `MB_REQUEST`, `_rift.script` and `predicateGenerators` `inject`
+  see a repeated header, query key or form key as an array, as Mountebank's do, and one sent once
+  as a string. The debug endpoint, the `copy` / `lookup` behaviors and `${request.headers.*}`
+  template substitution receive the first value; `${request.query.*}` renders a repeated key
+  comma-joined.
 
 Only a value that is **not valid UTF-8** is affected — the check is UTF-8 validity, not ASCII
 (#1048). A header carrying non-ASCII UTF-8, such as `X-User-Name: José` or

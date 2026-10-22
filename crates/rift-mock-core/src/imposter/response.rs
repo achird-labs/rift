@@ -586,7 +586,7 @@ fn apply_js_or_rhai_decorate_within(
         let mb_request = crate::scripting::MountebankRequest {
             method: request.method.clone(),
             path: request.path.clone(),
-            query: request.query_joined(),
+            query: request.query.clone(),
             headers: request.headers.clone(),
             body: request.body.clone(),
             body_undefined: request.body_undefined,

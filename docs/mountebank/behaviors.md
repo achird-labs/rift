@@ -273,10 +273,9 @@ to JSON. `response.headers` holds one string per header name.
 `ip` (its address) and `form` (the parsed body, present only for a non-empty
 `application/x-www-form-urlencoded` body). On the default bind address an IPv4 client is
 `127.0.0.1` in Rift and `::ffff:127.0.0.1` in Mountebank — see
-[Client address](differences.md#client-address). A query or form key the client repeated is one
-comma-joined string (`"1,2"`), where Mountebank gives an array
-([differences](differences.md#scripts-and-templates-see-a-repeated-key-comma-joined)); the same holds
-in `MB_REQUEST`. Predicates match each value of such a key. `query` and `form` list their keys in
+[Client address](differences.md#client-address). A query key, form key or header the client
+repeated is an array (`?q=1&q=2` gives `["1", "2"]`), as in Mountebank; one sent once is a string.
+The same holds in `MB_REQUEST`. Predicates match each value of such a key. `query` and `form` list their keys in
 the order the client sent them, as Mountebank does.
 
 ### Basic Transformation
