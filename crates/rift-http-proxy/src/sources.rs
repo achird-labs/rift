@@ -385,8 +385,16 @@ impl ImposterSource for HttpSource {
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned);
             let body = Self::read_capped(response, &r.uri).await?;
-            let loaded = config_loader::parse_remote_document(&body, &r.uri)
-                .with_context(|| format!("imposter source {}", r.uri))?;
+            // On the blocking pool, under one derivation budget (issue #1609): the document's
+            // `proxy` client keys are decrypted while it is admitted, and a body can carry many.
+            let uri = r.uri.clone();
+            let loaded = tokio::task::spawn_blocking(move || {
+                let _budget = rift_mock_core::proxy::client_identity::AdmissionBudget::enter();
+                config_loader::parse_remote_document(&body, &uri)
+            })
+            .await
+            .with_context(|| format!("imposter source {}: the parse task did not finish", r.uri))?
+            .with_context(|| format!("imposter source {}", r.uri))?;
 
             if let Some(etag) = &etag {
                 self.cache

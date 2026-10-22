@@ -120,6 +120,9 @@ p12 = "0.6.3"
 # `DERWriter`) must be the exact ones p12 0.6.3 (its last release) exposes, and it requires ^0.5.
 yasna = "0.5"
 ring = "0.17"
+# Issue #1609: decrypts a `proxy` client identity's `ENCRYPTED PRIVATE KEY` (PKCS#8 PBES2, what
+# OpenSSL 3 writes by default) with its `passphrase`. Pure Rust (RustCrypto); ring cannot do it.
+pkcs8 = { version = "0.11", features = ["encryption", "pem"] }
 # Lock-free concurrent HashMap for the predicate regex cache (issue #715): reads on the imposter
 # matching hot path proceed without contending a lock.
 papaya = "0.2.4"

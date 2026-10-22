@@ -1,0 +1,16 @@
+{
+  "protocol": "http",
+  "name": "proxy options \u00b7 key-cert-unpaired",
+  "stubs": [
+    {
+      "responses": [
+        {
+          "proxy": {
+            "to": "http://localhost:1",
+            "cert": "-----BEGIN CERTIFICATE-----\nMIIBrzCCAVagAwIBAgIUE+ZNRk+tYP/ff2wpgpEC7J4aWtUwCgYIKoZIzj0EAwIw\nHjEcMBoGA1UEAwwTUmlmdCB0ZXN0IGNsaWVudCBDQTAgFw0yNjEwMjIwNTMyMzNa\nGA8yMTI2MDkyODA1MzIzM1owHDEaMBgGA1UEAwwRcmlmdC1wcm94eS1jbGllbnQw\nWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAS/vXDy8FLKMowNU9E7PSlevJP4SUR1\nuWqFl4C+sXlnqOjjwP+wIvPOGLO2W9730jbqPiJ0iq2E4odZ2k2SaF7po3IwcDAJ\nBgNVHRMEAjAAMA4GA1UdDwEB/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDAjAd\nBgNVHQ4EFgQU/mt9WYBpack/9HO6/1uMDkC/tacwHwYDVR0jBBgwFoAURPupQE8a\nf2bK74ccaYcIAsWjgkYwCgYIKoZIzj0EAwIDRwAwRAIgRt9RhsxVA/2Lnz+tq0Iu\nt+GuKgeljU1kVQ5x89TXQAgCIANDQIKqG0EgsjxlCF//wDWeDVx+VYba1IldXhHp\nK84c\n-----END CERTIFICATE-----\n"
+          }
+        }
+      ]
+    }
+  ]
+}

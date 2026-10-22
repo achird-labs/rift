@@ -908,7 +908,8 @@ pub fn admission_check_stub(stub: &Stub) -> Result<(), String> {
             StubResponse::Proxy { proxy, .. } => {
                 refuse_unknown_proxy_mode(Some(proxy), Admission::Checked)?;
                 refuse_unreadable_generators(Some(proxy), Admission::Checked)?;
-                refuse_proxy_to_path(Some(proxy), Admission::Checked)
+                refuse_proxy_to_path(Some(proxy), Admission::Checked)?;
+                refuse_bad_proxy_identity(Some(proxy), Admission::Checked)
             }
             _ => Ok(()),
         }
@@ -1135,7 +1136,11 @@ pub enum StubResponse {
     /// Built only through [`StubResponse::new_proxy`], which keeps `behaviors_parsed` in step with
     /// `behaviors`.
     Proxy {
-        proxy: ProxyResponse,
+        /// Boxed (issue #1609), for the reason `ignored_rift` is: `ProxyResponse` was this enum's
+        /// largest payload, so its size was charged to every response, and the client identity
+        /// (`cert`/`key`/`passphrase`) would have grown it again. Proxy responses are rare; the
+        /// deref sits in front of an upstream round trip.
+        proxy: Box<ProxyResponse>,
         /// A `_rift` block written on this response. No `_rift` feature applies to a `proxy` response, so
         /// it is kept only to be reported (`config_key_ignored`, issue #1152) and to round-trip.
         ///
@@ -1235,7 +1240,7 @@ impl StubResponse {
         let behaviors = behaviors.and_then(compile_behaviors);
         let behaviors_parsed = parse_behaviors(behaviors.as_ref());
         StubResponse::Proxy {
-            proxy,
+            proxy: Box::new(proxy),
             ignored_rift,
             behaviors,
             behaviors_parsed,
@@ -2063,6 +2068,7 @@ impl TryFrom<StubResponseRaw> for StubResponse {
             refuse_unknown_proxy_mode(raw.proxy.as_ref(), admission())?;
             refuse_unreadable_generators(raw.proxy.as_ref(), admission())?;
             refuse_proxy_to_path(raw.proxy.as_ref(), admission())?;
+            refuse_bad_proxy_identity(raw.proxy.as_ref(), admission())?;
         }
         // Last, so a response that also fails a check `admission_check_stub` re-runs is refused
         // with that check's message, the one `admission_check` names for it.
@@ -2139,7 +2145,7 @@ impl From<StubResponse> for StubResponseOut {
                 ..
             } => (
                 StubResponseOut {
-                    proxy: Some(proxy),
+                    proxy: Some(*proxy),
                     rift: ignored_rift.map(|rift| *rift),
                     ..StubResponseOut::default()
                 },
@@ -2626,7 +2632,8 @@ pub struct PathRewrite {
     pub to: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+// `Debug` is written out below: `key` and `passphrase` are secrets and must not reach a log.
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyResponse {
@@ -2672,9 +2679,55 @@ pub struct ProxyResponse {
     /// Path rewrite configuration for transforming the request path before proxying
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_rewrite: Option<PathRewrite>,
+    /// PEM client certificate (leaf first) presented to an upstream that requests one (issue
+    /// #1609, Mountebank-compatible). Paired with `key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<String>,
+    /// PEM private key for `cert`: unencrypted PKCS#8, PKCS#1 or SEC1, or an encrypted PKCS#8
+    /// `ENCRYPTED PRIVATE KEY` decrypted with `passphrase` (issue #1609, Mountebank-compatible).
+    /// Printed back by `GET /imposters`, as Mountebank prints it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Passphrase for an encrypted `key` (issue #1609, Mountebank-compatible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `key` and `passphrase` are operator secrets (issue #1609): shown only as present or not.
+        let redacted = |secret: &Option<String>| secret.as_ref().map(|_| "<redacted>");
+        f.debug_struct("ProxyResponse")
+            .field("to", &self.to)
+            .field("mode", &self.mode)
+            .field("predicate_generators", &self.predicate_generators)
+            .field("add_wait_behavior", &self.add_wait_behavior)
+            .field("inject_headers", &self.inject_headers)
+            .field("add_decorate_behavior", &self.add_decorate_behavior)
+            .field("path_rewrite", &self.path_rewrite)
+            .field("cert", &self.cert.as_ref().map(|_| "<pem>"))
+            .field("key", &redacted(&self.key))
+            .field("passphrase", &redacted(&self.passphrase))
+            .finish()
+    }
 }
 
 impl ProxyResponse {
+    /// The client identity this proxy presents (issue #1609): `(cert, key, passphrase)`, or `None`
+    /// when it presents none. An empty `cert` or `key` is absent, as it is to Node, which
+    /// Mountebank hands them to; a `passphrase` without a key is unused there too.
+    #[must_use]
+    pub fn client_identity_pem(&self) -> Option<(&str, &str, Option<&str>)> {
+        fn present(text: Option<&String>) -> Option<&str> {
+            text.map(String::as_str).filter(|text| !text.is_empty())
+        }
+        Some((
+            present(self.cert.as_ref())?,
+            present(self.key.as_ref())?,
+            present(self.passphrase.as_ref()),
+        ))
+    }
+
     /// The recording mode (issue #1314): see [`crate::recording::ProxyMode::parse`]. The string
     /// field is kept as written, so `GET /imposters` echoes it and stored configs are unchanged.
     pub fn mode(&self) -> Result<crate::recording::ProxyMode, String> {
@@ -2732,6 +2785,44 @@ fn refuse_unknown_proxy_mode(
         return Ok(());
     }
     proxy.map_or(Ok(()), |proxy| proxy.mode().map(|_| ()))
+}
+
+/// Refuse a `proxy` client identity (`cert`/`key`/`passphrase`, issue #1609) the engine could
+/// never present, at a config door only. Mountebank admits any of these and then answers every
+/// proxied request 500; Rift refuses them at creation instead (a documented difference). Every
+/// engine before this one admitted and stored these keys (it dropped them), so this is never a
+/// decode refusal: a replayed config with a bad identity still decodes, and its requests 502.
+///
+/// A `passphrase` on a key that is not encrypted is admitted with a warning: Node ignores it.
+fn refuse_bad_proxy_identity(
+    proxy: Option<&ProxyResponse>,
+    admission: Admission,
+) -> Result<(), String> {
+    if admission == Admission::Skipped {
+        return Ok(());
+    }
+    let Some(proxy) = proxy else {
+        return Ok(());
+    };
+    let present = |text: &Option<String>| text.as_deref().is_some_and(|text| !text.is_empty());
+    match (present(&proxy.cert), present(&proxy.key)) {
+        (false, false) => return Ok(()),
+        (true, false) => return Err("proxy.cert is given without proxy.key".to_string()),
+        (false, true) => return Err("proxy.key is given without proxy.cert".to_string()),
+        (true, true) => {}
+    }
+    let Some((cert, key, passphrase)) = proxy.client_identity_pem() else {
+        return Ok(());
+    };
+    // Charged to the door's `AdmissionBudget`, when it entered one (issue #1609).
+    let passphrase_ignored = crate::proxy::client_identity::admit(cert, key, passphrase)?;
+    if passphrase_ignored {
+        tracing::warn!(
+            to = %proxy.to,
+            "proxy.passphrase is set but proxy.key is not encrypted; the passphrase is unused"
+        );
+    }
+    Ok(())
 }
 
 /// Refuse an `http(s)` `proxy.to` with a path, or a `to` that is not a URL, at a config door only
@@ -4541,6 +4632,208 @@ mod tests {
         assert_eq!(decoded.mode.as_deref(), Some("binary"));
         let printed = serde_json::to_value(&decoded).expect("serialize");
         assert!(printed.get("mode").is_none(), "never printed: {printed}");
+    }
+
+    // ===== Issue #1609: a proxy's client identity =====
+
+    const IDENTITY_CERT: &str = include_str!("../proxy/testdata/client-identity/client.crt");
+    const IDENTITY_KEY: &str = include_str!("../proxy/testdata/client-identity/client.key");
+    const IDENTITY_KEY_PBES2: &str =
+        include_str!("../proxy/testdata/client-identity/client.pbes2.key");
+    const OTHER_KEY: &str = include_str!("../proxy/testdata/client-identity/client-rsa.key");
+
+    fn proxy_stub(identity: &serde_json::Value) -> String {
+        let mut proxy = serde_json::json!({"to": "https://localhost:1"});
+        for (k, v) in identity.as_object().expect("object") {
+            proxy[k] = v.clone();
+        }
+        serde_json::json!({"responses": [{"proxy": proxy}]}).to_string()
+    }
+
+    fn the_proxy(stub: &Stub) -> &ProxyResponse {
+        match &stub.responses[0] {
+            StubResponse::Proxy { proxy, .. } => proxy,
+            other => panic!("not a proxy: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_proxy_identity_round_trips_as_mountebank_prints_it() {
+        let stub: Stub = serde_json::from_str(&proxy_stub(&serde_json::json!({
+            "cert": IDENTITY_CERT, "key": IDENTITY_KEY_PBES2, "passphrase": "rift-test",
+        })))
+        .expect("admitted");
+        let printed = serde_json::to_value(&stub).expect("serialize");
+        let proxy = &printed["responses"][0]["proxy"];
+        assert_eq!(proxy["cert"], IDENTITY_CERT);
+        assert_eq!(proxy["key"], IDENTITY_KEY_PBES2);
+        assert_eq!(proxy["passphrase"], "rift-test");
+        // And it is not printed when absent.
+        let plain: Stub = serde_json::from_str(&proxy_stub(&serde_json::json!({}))).expect("ok");
+        let printed = serde_json::to_value(&plain).expect("serialize");
+        let proxy = printed["responses"][0]["proxy"]
+            .as_object()
+            .expect("object");
+        assert!(
+            !proxy.contains_key("cert") && !proxy.contains_key("key"),
+            "{proxy:?}"
+        );
+    }
+
+    #[test]
+    fn a_bad_proxy_identity_is_an_admission_refusal_not_a_decode_one() {
+        for (identity, refusal) in [
+            (
+                serde_json::json!({"cert": IDENTITY_CERT}),
+                "proxy.cert is given without proxy.key",
+            ),
+            (
+                serde_json::json!({"key": IDENTITY_KEY}),
+                "proxy.key is given without proxy.cert",
+            ),
+            (
+                serde_json::json!({"cert": IDENTITY_CERT, "key": OTHER_KEY}),
+                "does not pair with proxy.cert",
+            ),
+            (
+                serde_json::json!({"cert": IDENTITY_CERT, "key": IDENTITY_KEY_PBES2}),
+                "no proxy.passphrase",
+            ),
+            (
+                serde_json::json!({
+                    "cert": IDENTITY_CERT, "key": IDENTITY_KEY_PBES2, "passphrase": "nope",
+                }),
+                "does not decrypt",
+            ),
+        ] {
+            let json = proxy_stub(&identity);
+            let door = serde_json::from_str::<Stub>(&json)
+                .expect_err("the door refuses")
+                .to_string();
+            assert!(door.contains(refusal), "{identity}: {door}");
+            assert!(!door.contains("nope"), "the passphrase leaked: {door}");
+
+            let mut deserializer = serde_json::Deserializer::from_str(&json);
+            let replayed: Stub =
+                deserialize_replayed(&mut deserializer).expect("a replay still decodes it");
+            let checked = admission_check_stub(&replayed).expect_err("admission_check refuses");
+            assert!(checked.contains(refusal), "{identity}: {checked}");
+        }
+    }
+
+    #[test]
+    fn a_costly_encrypted_key_is_refused_fast_at_admission() {
+        // The key states its own KDF cost; a door must refuse it before deriving anything.
+        use crate::proxy::client_identity::tests::{pbkdf2_key, scrypt_key};
+        for key in [scrypt_key(40, 8, 1), pbkdf2_key(4_000_000_000)] {
+            let json = proxy_stub(&serde_json::json!({
+                "cert": IDENTITY_CERT, "key": key, "passphrase": "x",
+            }));
+            let started = std::time::Instant::now();
+            let door = serde_json::from_str::<Stub>(&json)
+                .expect_err("refused")
+                .to_string();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "took {:?}: {door}",
+                started.elapsed()
+            );
+            assert!(door.contains("too costly"), "{door}");
+        }
+    }
+
+    fn many_proxy_stubs(keys: &[String]) -> String {
+        let stubs: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                serde_json::json!({"responses": [{"proxy": {
+                    "to": "https://localhost:1",
+                    "cert": IDENTITY_CERT, "key": key, "passphrase": "rift-test",
+                }}]})
+            })
+            .collect();
+        serde_json::json!({"protocol": "http", "stubs": stubs}).to_string()
+    }
+
+    #[test]
+    fn a_document_repeating_one_identity_derives_it_once() {
+        use crate::proxy::client_identity::{ADMISSION_DERIVATIONS, AdmissionBudget};
+        let document = many_proxy_stubs(&vec![IDENTITY_KEY_PBES2.to_string(); 100]);
+        let before = ADMISSION_DERIVATIONS.with(std::cell::Cell::get);
+        let config: Result<ImposterConfig, _> = {
+            let _budget = AdmissionBudget::enter();
+            serde_json::from_str(&document)
+        };
+        config.expect("admitted");
+        assert_eq!(ADMISSION_DERIVATIONS.with(std::cell::Cell::get) - before, 1);
+    }
+
+    #[test]
+    fn a_document_is_held_to_one_derivation_budget() {
+        use crate::proxy::client_identity::AdmissionBudget;
+        use crate::proxy::client_identity::tests::encrypted_key;
+        use pkcs8::pkcs5::pbes2::Pbkdf2Prf;
+        // Distinct real keys at 2048 iterations each; a budget of 5000 admits two of them.
+        let keys: Vec<String> = (1..=100)
+            .map(|salt| encrypted_key(2048, salt, Pbkdf2Prf::HmacWithSha256))
+            .collect();
+        let err = {
+            let _budget = AdmissionBudget::enter_with_budget(5000);
+            serde_json::from_str::<ImposterConfig>(&many_proxy_stubs(&keys))
+                .expect_err("refused")
+                .to_string()
+        };
+        assert!(
+            err.contains("more key derivation than one request may"),
+            "{err}"
+        );
+        // Two keys fit, so a two-stub document is admitted under the same budget.
+        let _budget = AdmissionBudget::enter_with_budget(5000);
+        serde_json::from_str::<ImposterConfig>(&many_proxy_stubs(&keys[..2])).expect("admitted");
+    }
+
+    #[test]
+    fn the_standard_budget_admits_many_openssl_default_keys() {
+        use crate::proxy::client_identity::{AdmissionBudget, MAX_ADMISSION_KDF_UNITS};
+        // 2048-iteration keys (OpenSSL's default): hundreds fit in one request.
+        const _: () = assert!(MAX_ADMISSION_KDF_UNITS / 2048 > 900);
+        let _budget = AdmissionBudget::enter();
+        serde_json::from_str::<ImposterConfig>(&many_proxy_stubs(&vec![
+            IDENTITY_KEY_PBES2
+                .to_string();
+            3
+        ]))
+        .expect("admitted");
+    }
+
+    #[test]
+    fn a_passphrase_alone_or_empty_strings_present_no_identity() {
+        for identity in [
+            serde_json::json!({"passphrase": "x"}),
+            serde_json::json!({"cert": "", "key": ""}),
+        ] {
+            let stub: Stub = serde_json::from_str(&proxy_stub(&identity)).expect("admitted");
+            assert!(
+                the_proxy(&stub).client_identity_pem().is_none(),
+                "{identity}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_debug_never_prints_the_key_or_passphrase() {
+        let stub: Stub = serde_json::from_str(&proxy_stub(&serde_json::json!({
+            "cert": IDENTITY_CERT, "key": IDENTITY_KEY_PBES2, "passphrase": "rift-test",
+        })))
+        .expect("admitted");
+        let shown = format!("{stub:?}");
+        let body_line = IDENTITY_KEY_PBES2.lines().nth(1).expect("a body line");
+        assert!(!shown.contains(body_line), "the key leaked: {shown}");
+        assert!(
+            !shown.contains("rift-test"),
+            "the passphrase leaked: {shown}"
+        );
+        assert!(shown.contains("<redacted>"), "{shown}");
     }
 
     // ===== Issue #1314: one parse for a proxy's `mode` =====

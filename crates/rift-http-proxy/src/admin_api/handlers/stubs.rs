@@ -59,11 +59,9 @@ pub async fn handle_add(
         Err(e) => return e.into_response(),
     };
 
-    let mut add_req: AddStubRequest = match serde_json::from_slice(&body) {
+    let mut add_req: AddStubRequest = match super::decode_config_body(body.bytes().clone()).await {
         Ok(r) => r,
-        Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"));
-        }
+        Err(e) => return e.into_response("Invalid stub JSON"),
     };
 
     // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
@@ -170,12 +168,11 @@ pub async fn handle_replace_all(
         Err(e) => return e.into_response(),
     };
 
-    let mut replace_req: ReplaceStubsRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stubs JSON: {e}"));
-        }
-    };
+    let mut replace_req: ReplaceStubsRequest =
+        match super::decode_config_body(body.bytes().clone()).await {
+            Ok(r) => r,
+            Err(e) => return e.into_response("Invalid stubs JSON"),
+        };
 
     // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
     if let Some(rejection) =
@@ -357,11 +354,9 @@ pub async fn handle_replace(
         Err(e) => return e.into_response(),
     };
 
-    let mut stub: Stub = match serde_json::from_slice(&body) {
+    let mut stub: Stub = match super::decode_config_body(body.bytes().clone()).await {
         Ok(s) => s,
-        Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"));
-        }
+        Err(e) => return e.into_response("Invalid stub JSON"),
     };
 
     // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
@@ -457,11 +452,9 @@ pub async fn handle_replace_by_id(
         Ok(b) => b,
         Err(e) => return e.into_response(),
     };
-    let mut stub: Stub = match serde_json::from_slice(&body) {
+    let mut stub: Stub = match super::decode_config_body(body.bytes().clone()).await {
         Ok(s) => s,
-        Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"));
-        }
+        Err(e) => return e.into_response("Invalid stub JSON"),
     };
     // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
     if let Some(rejection) =

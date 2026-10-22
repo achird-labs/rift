@@ -198,14 +198,9 @@ pub async fn handle_create(
         Err(e) => return e.into_response(),
     };
 
-    let mut config: ImposterConfig = match serde_json::from_slice(&body) {
+    let mut config: ImposterConfig = match super::decode_config_body(body.bytes().clone()).await {
         Ok(c) => c,
-        Err(e) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("Invalid imposter JSON: {e}"),
-            );
-        }
+        Err(e) => return e.into_response("Invalid imposter JSON"),
     };
 
     if let Some(rejection) = reject_if_injection_disallowed(&config, allow_injection) {
@@ -393,7 +388,8 @@ pub async fn handle_replace_all(
         Err(e) => return e.into_response(),
     };
     replace_all_from_bytes(
-        &body,
+        // A refcount; `body`, and its body-budget reservation, stays alive across the call.
+        body.bytes().clone(),
         base_url,
         manager,
         allow_injection,
@@ -444,7 +440,7 @@ fn restart_kept_imposters(manager: &ImposterManager, ports: &[u16], report: &mut
 /// Parse, validate, and apply a `PUT /imposters` batch. Split out from `handle_replace_all` so
 /// the path is unit-testable without a `Request<Incoming>` (same seam as `verify_response`).
 async fn replace_all_from_bytes(
-    body: &[u8],
+    body: Bytes,
     base_url: &str,
     manager: Arc<ImposterManager>,
     allow_injection: bool,
@@ -456,11 +452,9 @@ async fn replace_all_from_bytes(
         imposters: Vec<ImposterConfig>,
     }
 
-    let mut batch: BatchRequest = match serde_json::from_slice(body) {
+    let mut batch: BatchRequest = match super::decode_config_body(body.clone()).await {
         Ok(b) => b,
-        Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid batch JSON: {e}"));
-        }
+        Err(e) => return e.into_response("Invalid batch JSON"),
     };
 
     // Reject the whole batch (before making any changes) if any imposter carries a script
@@ -2592,7 +2586,7 @@ mod replace_all_tests {
         ]})
         .to_string();
         let resp = replace_all_from_bytes(
-            body.as_bytes(),
+            Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
             false,
@@ -2640,7 +2634,7 @@ mod replace_all_tests {
         let body =
             serde_json::json!({"imposters": [{"protocol": "http", "stubs": []}]}).to_string();
         let resp = replace_all_from_bytes(
-            body.as_bytes(),
+            Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
             false,
@@ -2697,7 +2691,7 @@ mod replace_all_tests {
         ]})
         .to_string();
         let resp = replace_all_from_bytes(
-            body.as_bytes(),
+            Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
             false,
@@ -2803,7 +2797,7 @@ mod replace_all_tests {
         let body = serde_json::json!({"imposters": [at(port_a, "a"), at(port_b, "b2"), imp("c")]})
             .to_string();
         let resp = replace_all_from_bytes(
-            body.as_bytes(),
+            Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
             false,
@@ -2850,7 +2844,7 @@ mod replace_all_tests {
         ]})
         .to_string();
         let resp = replace_all_from_bytes(
-            body.as_bytes(),
+            Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
             false,
@@ -2910,7 +2904,7 @@ mod replace_all_tests {
         let (imposter_port, body) = unchanged_with_one_request(&manager).await;
 
         let resp = replace_all_from_bytes(
-            body.as_bytes(),
+            Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
             false,
@@ -2934,7 +2928,7 @@ mod replace_all_tests {
         let (imposter_port, body) = unchanged_with_one_request(&manager).await;
 
         let resp = replace_all_from_bytes(
-            body.as_bytes(),
+            Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
             false,
@@ -2979,7 +2973,7 @@ mod replace_all_tests {
         ]})
         .to_string();
         let resp = replace_all_from_bytes(
-            body.as_bytes(),
+            Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
             false,

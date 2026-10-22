@@ -451,9 +451,22 @@ pub fn stop_server_within(
         }
     }
 
-    // Remove PID file (success path, and the ESRCH stale-pidfile path). Already gone is success:
-    // since issue #1155 a server removes its own PID file on the way out, so it usually gets there
-    // before we do, and a bare `remove_file(..)?` would turn a clean stop into a spurious failure.
+    // Remove PID file (success path, and the ESRCH stale-pidfile path) — but only while it still
+    // names the process this stop acted on. A `restart` waiting on the same process writes its own
+    // PID the moment that process is gone, and removing the file then would leave the new server
+    // running with nothing able to stop it (the mbTest CLI suite's leaked server). Already gone is
+    // success: since issue #1155 a server removes its own PID file on the way out, so it usually
+    // gets there before we do, and a bare `remove_file(..)?` would turn a clean stop into a
+    // spurious failure.
+    match std::fs::read_to_string(pidfile) {
+        Ok(contents) if contents.trim() == pid_str.trim() => {}
+        Ok(_) => {
+            info!("PID file {pidfile:?} now names another process; leaving it in place");
+            return Ok(());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    }
     match std::fs::remove_file(pidfile) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

@@ -2165,6 +2165,9 @@ async fn build_admin_plane_inner(
             rift_mock_core::imposter::build_upstream_client(&outbound_tls)
                 .context("applying the outbound TLS options")?,
         );
+        // The policy itself, for `proxy` stubs presenting a client certificate (issue #1609): each
+        // identity is a client of its own, built on first use under the same trust.
+        handle.manager.set_outbound_tls(outbound_tls.clone());
         // The intercept listener's WebSocket relay is the other thing that dials a real origin, so
         // it trusts exactly what a `proxy` stub trusts (issue #1149). Divergent per-client trust is
         // what #974 was filed to remove. Only affects listeners started after this point: origin TLS

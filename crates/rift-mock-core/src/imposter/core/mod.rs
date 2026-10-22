@@ -86,9 +86,22 @@ pub(crate) fn resolve_upstream_client(
 pub fn build_upstream_client(
     policy: &crate::proxy::OutboundTls,
 ) -> anyhow::Result<Arc<reqwest::Client>> {
+    build_upstream_client_presenting(policy, None)
+}
+
+/// [`build_upstream_client`], presenting `identity` to an upstream that asks for a client
+/// certificate (issue #1609). The same timeout, redirect and pooling settings, so the two clients
+/// cannot drift apart.
+///
+/// # Errors
+/// As [`build_upstream_client`].
+pub(crate) fn build_upstream_client_presenting(
+    policy: &crate::proxy::OutboundTls,
+    identity: Option<&crate::proxy::ClientIdentity>,
+) -> anyhow::Result<Arc<reqwest::Client>> {
     Ok(Arc::new(
         policy
-            .reqwest_builder()?
+            .reqwest_builder_with_identity(identity)?
             .timeout(PROXY_HTTP_CLIENT_TIMEOUT)
             // Relay a 30x as Mountebank does (issue #1594); following it would also record the
             // redirect target's answer under the origin's predicates.
@@ -513,6 +526,10 @@ pub struct Imposter {
     /// still less when the operator supplied a working `--upstream-ca-file` that the manager is
     /// about to inject over the top of it.
     pub(crate) upstream_client: Option<Arc<reqwest::Client>>,
+    /// Clients for `proxy` stubs that present a client certificate (issue #1609), one per distinct
+    /// identity, with the trust policy they are built under. The manager shares one across its
+    /// imposters; a standalone imposter has its own, on the default policy.
+    pub(crate) identity_clients: Arc<IdentityClients>,
     /// The body limits and in-flight budget this imposter's requests and proxied responses draw on
     /// (issue #1439). The manager injects its shared guard; a standalone imposter has its own.
     pub(crate) body_guard: Arc<super::body_limits::BodyGuard>,
@@ -688,6 +705,7 @@ impl Imposter {
             // Each request claims with its own proxy response's mode (issue #1387).
             proxy_store: Arc::new(LocalProxyStore::new(ProxyMode::ProxyOnce)),
             upstream_client: None,
+            identity_clients: Arc::default(),
             body_guard: Arc::default(),
             event_bus: None,
             no_match_interceptor: None,
@@ -1182,6 +1200,9 @@ pub(crate) use matching::ScenarioStampingStore;
 mod stub_index;
 use stub_index::StubSnapshot;
 mod proxy;
+// Clients presenting a `proxy` stub's client certificate (issue #1609).
+mod identity_clients;
+pub(crate) use identity_clients::IdentityClients;
 pub use proxy::{GeneratorDryRun, dry_run_predicate_generators};
 pub(crate) use proxy::{ProxiedResponse, ProxyBody, ProxyOutcome, unread_generator_keys};
 mod recording;

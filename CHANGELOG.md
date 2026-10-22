@@ -13,6 +13,16 @@ record.
 
 ### Added
 
+- **A `proxy` response presents a client certificate to an upstream that requires mutual TLS**
+  (#1609): `cert`, `key` and `passphrase` on `proxy`, as Mountebank's proxy takes them. The key may
+  be unencrypted PKCS#8, PKCS#1 or SEC1, or encrypted PKCS#8 decrypted with `passphrase`; an X.509
+  v1 certificate is accepted; an encrypted key whose parameters ask for more than 64 MiB of scrypt
+  or 1,000,000 PBKDF2 iterations is refused before it is derived, and one admin request may ask
+  for 2,000,000 in all across its distinct keys. Upstream verification is unchanged (`--upstream-ca-file`,
+  `--upstream-tls-skip-verify`). As in Mountebank, `GET /imposters` and the `--datadir` file show
+  the three keys as posted, so protect the admin API and datadir; they are never logged. Embedders
+  set the trust policy these clients are built under with `ImposterManager::with_outbound_tls` /
+  `set_outbound_tls` (beside `with_upstream_client`); without it they use the default policy.
 - **`--configfile` EJS accepts Mountebank's `<%- include('f') -%>`, `stringify(filename, 'f', data)`,
   `inject(...)`, and nested includes and stringifies** (#1604), so mbTest's `imposters.ejs`,
   `templates`, `nestedStringify` and `dataStringify` config trees load as they do in Mountebank.
@@ -59,6 +69,12 @@ record.
 
 ### Changed
 
+- **`proxy.cert`/`key`/`passphrase` are no longer dropped** (#1609). A config that carried them
+  now presents them, and one with an invalid pair (half a pair, a wrong passphrase, a key that does
+  not match, a legacy `Proc-Type` encrypted key) is refused at creation with `400` where it was
+  accepted. A stored config replayed through `deserialize_replayed` still decodes. An id-less
+  `proxy` stub whose stored bytes already carried these keys now serialises them, so its
+  content-hash `stub_key` changes once on upgrade.
 - **BREAKING: scripts see a repeated query key, form key or header as an array**, as Mountebank
   does (#1629). `inject`, predicate `inject`, `predicateGenerators` `inject`, `decorate` (JavaScript
   and Rhai), `shellTransform`'s `MB_REQUEST` and `_rift.script` (`ctx.request.query`,
@@ -296,6 +312,12 @@ record.
 
 ### Fixed
 
+- **`rift stop` no longer deletes a PID file another server has taken over.** When a `stop` and a
+  `restart` waited on the same server, the `restart` wrote its own PID as soon as that server
+  exited and the `stop` then removed the file, leaving the new server running with nothing able to
+  stop it. mbTest's CLI suite hit this intermittently (a leaked server held its fixed ports for the
+  rest of the run). The `stop` now removes the file only while it still names the process it
+  stopped.
 - **An installed `AdminAuthorizer` now receives the `x-api-key` value as `AuthzRequest.credential` when `Authorization` is absent**, the same credential the admin gate accepted (#1623). Previously such a request reached the hook as `credential: None`, indistinguishable from anonymous; an embedder treating `None` as anonymous will now see `Some(token)` for those requests. `Authorization` still wins when both are sent. Embedders fronting the admin API themselves can call `rift_http_proxy::admin_api::authz::credential`.
 - **`+` in a query string or form body is a space, as in Mountebank** (#1607). `?q=x+y` and a form
   body `q=x+y` now give `"x y"` to predicates, recorded requests, templates and scripts. A predicate

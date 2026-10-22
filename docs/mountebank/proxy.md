@@ -564,10 +564,48 @@ rift --upstream-tls-skip-verify      # or RIFT_UPSTREAM_TLS_SKIP_VERIFY=true
 Accepts any certificate and logs a warning. Prefer `--upstream-ca-file`: a recording proxy with
 verification disabled will faithfully record MITM'd traffic.
 
-> `key`, `cert`, `passphrase` and `ciphers` on a `proxy` response are accepted for Mountebank
-> compatibility and **are not honoured** — they are dropped on load and do not appear when the
-> imposter is read back. Rift cannot present a client certificate to an upstream, and its outbound
-> trust is process-wide, configured by the two flags above.
+### Client Certificate for an mTLS Upstream
+
+A `proxy` response can present a client certificate to an upstream that requires one (mutual TLS),
+with the same three keys Mountebank's proxy takes (the PEMs are elided):
+
+<!-- rift-lint: skip -->
+```json
+{
+  "proxy": {
+    "to": "https://api.internal:8443",
+    "cert": "-----BEGIN CERTIFICATE-----\n...",
+    "key": "-----BEGIN ENCRYPTED PRIVATE KEY-----\n...",
+    "passphrase": "the key's passphrase"
+  }
+}
+```
+
+- `cert` is the PEM client certificate, leaf first, optionally followed by its intermediates. An
+  X.509 v1 certificate is accepted.
+- `key` is its PEM private key: unencrypted PKCS#8 (`PRIVATE KEY`), PKCS#1 (`RSA PRIVATE KEY`) or
+  SEC1 (`EC PRIVATE KEY`), or encrypted PKCS#8 (`ENCRYPTED PRIVATE KEY`, what OpenSSL 3 writes),
+  decrypted with `passphrase`. OpenSSL's legacy encryption (`Proc-Type: 4,ENCRYPTED`) is refused;
+  convert it with `openssl pkcs8 -topk8 -in key.pem -out key-p8.pem`.
+  An encrypted key whose own parameters ask for more than 1,000,000 PBKDF2 iterations (counted
+  per output block, so HMAC-SHA1 with AES-256 counts twice) or 64 MiB of scrypt memory is refused
+  before anything is derived; OpenSSL 3 writes 2048 iterations and 16 MiB. One admin request may
+  ask for 2,000,000 iterations' worth in all, across its distinct keys (a key repeated across its
+  stubs counts once).
+- The pair is checked when the imposter is created: half a pair, a PEM with no certificate or key, a
+  wrong passphrase or a key that does not match the certificate is a `400`. Mountebank accepts any
+  of these and fails every proxied request instead
+  (see [the difference](differences.md#proxy-client-certificates)).
+- Presenting a certificate changes nothing about trust: the upstream's certificate is still verified
+  against the OS trust store plus `--upstream-ca-file`, or not at all under
+  `--upstream-tls-skip-verify`, exactly as for a `proxy` without one.
+- `ciphers` and `secureProtocol` (OpenSSL cipher-list and method names) are not modelled and are
+  dropped; rustls' default suites and TLS 1.2/1.3 are used.
+
+> **The private key is stored and printed back.** As Mountebank does, `GET /imposters`,
+> `?replayable=true` and the `--datadir` file show `cert`, `key` and `passphrase` as posted, the same
+> way an https imposter's own `key` is shown. Protect the admin API (`--api-key`, or bind it to
+> loopback) and the datadir accordingly. Rift never writes the key or passphrase to its logs.
 
 ### CONNECT
 

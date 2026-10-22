@@ -630,6 +630,9 @@ pub struct ImposterManager {
     /// policy — a consuming builder cannot reach it by then. Imposters read this at creation, so a
     /// store before the first `create_imposter` is what every caller needs.
     upstream_client: ArcSwapOption<reqwest::Client>,
+    /// Clients for `proxy` stubs presenting a client certificate (issue #1609), and the trust
+    /// policy they are built under, shared by every imposter this manager creates.
+    identity_clients: Arc<super::core::IdentityClients>,
     /// Body limits and the in-flight budget every imposter, proxy read and admin body shares (issue
     /// #1439). An `ArcSwap` for the same reason as `upstream_client`: the C-ABI sets it after the
     /// manager exists. Imposters take the guard current at their creation.
@@ -702,6 +705,7 @@ impl ImposterManager {
             journal_max_bytes: std::sync::atomic::AtomicUsize::new(0),
             proxy_store: None,
             upstream_client: ArcSwapOption::empty(),
+            identity_clients: Arc::default(),
             body_guard: ArcSwap::from_pointee(super::body_limits::BodyGuard::default()),
             no_match_interceptor: None,
             exchange_inspector_provider: None,
@@ -1035,6 +1039,27 @@ impl ImposterManager {
             );
         }
         self.upstream_client.store(Some(client));
+    }
+
+    /// The outbound trust policy a `proxy` stub that presents a client certificate (`cert`/`key`,
+    /// issue #1609) is built under. Builder form of [`Self::set_outbound_tls`].
+    #[must_use]
+    pub fn with_outbound_tls(self, policy: crate::proxy::OutboundTls) -> Self {
+        self.set_outbound_tls(policy);
+        self
+    }
+
+    /// Set the outbound trust policy for `proxy` stubs that present a client certificate (issue
+    /// #1609).
+    ///
+    /// Each distinct identity needs a client of its own, built on first use, so the manager needs
+    /// the policy itself and not only the built client [`Self::set_upstream_client`] takes. Set
+    /// both, from the same [`OutboundTls`](crate::proxy::OutboundTls): an embedder that injects
+    /// only a client gets the default policy (the OS trust store) for client-certificate proxies,
+    /// with a warning when the first one is built. Applies to every imposter of this manager,
+    /// including those already created; clients built under an earlier policy are dropped.
+    pub fn set_outbound_tls(&self, policy: crate::proxy::OutboundTls) {
+        self.identity_clients.set_policy(policy);
     }
 
     /// Set the body limits and in-flight memory budget (issue #1439). Builder form of
@@ -1464,6 +1489,7 @@ impl ImposterManager {
         if let Some(client) = self.upstream_client.load_full() {
             imposter.upstream_client = Some(client);
         }
+        imposter.identity_clients = Arc::clone(&self.identity_clients);
 
         // One budget across every imposter, the proxy reads and the admin API (issue #1439).
         imposter.body_guard = self.body_guard.load_full();

@@ -1113,7 +1113,16 @@ impl Imposter {
         // `spawn_blocking` `'static` closure below.
         SH: BuildHasher + Clone + Send + 'static,
     {
-        let client = super::resolve_upstream_client(self.upstream_client.as_ref())?;
+        // A proxy with a client identity dials through a client presenting it (issue #1609); every
+        // other proxy shares the imposter's one client, as before.
+        let client = match proxy_config.client_identity_pem() {
+            Some((cert, key, passphrase)) => {
+                self.identity_clients
+                    .client_for(cert, key, passphrase, self.upstream_client.is_some())
+                    .await?
+            }
+            None => super::resolve_upstream_client(self.upstream_client.as_ref())?,
+        };
         let client = &*client;
 
         info!(

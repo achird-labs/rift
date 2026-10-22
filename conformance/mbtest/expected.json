@@ -254,7 +254,7 @@
       "id": "api/https/httpsCertificateTest.js::https imposter should support proxying to origin server requiring mutual auth",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#proxy-upstream-certificates-are-verified",
-      "note": "the proxy verifies the origin's certificate (#1577, documented) and cannot present `proxy.key`/`cert` to a mutualAuth origin (tls.md); Mountebank's origin never requests one"
+      "note": "Rift verifies the origin's self-signed certificate (#1577, documented); the proxy presents `proxy.key`/`cert` to the mutualAuth origin since #1609, which Mountebank's origin never requests"
     },
     {
       "id": "api/impostersControllerTest.js::POST /imposters should return 400 on invalid input",

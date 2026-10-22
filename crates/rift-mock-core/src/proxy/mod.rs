@@ -8,6 +8,7 @@
 //!
 //! - `tls` - TLS acceptor construction and session resumption
 //! - `outbound_tls` - the shared trust policy for connections Rift initiates (#974)
+//! - `client_identity` - a `proxy` stub's client certificate for an mTLS upstream (#1609)
 //! - `intercept_ca` - the TLS-MITM certificate authority and per-SNI resolver
 //! - `truststore` - PKCS#12 / JKS export of that CA
 //! - `network` - listener utilities (SO_REUSEPORT) and accept-error classification
@@ -16,6 +17,7 @@
 pub(crate) mod network;
 pub(crate) mod tls;
 
+pub mod client_identity;
 pub mod intercept_ca;
 pub mod outbound_tls;
 pub mod preface;
@@ -27,6 +29,8 @@ pub mod truststore;
 pub use tls::{TLS_SESSION_CACHE_SIZE, alpn_protocols, configure_session_resumption};
 // One outbound-TLS trust policy for every client Rift initiates a connection with (issue #974).
 pub use outbound_tls::OutboundTls;
+// The client certificate a `proxy` stub presents to an mTLS upstream (issue #1609).
+pub use client_identity::ClientIdentity;
 // HTTP connection-builder tuning, shared with the metrics/admin accept loops in rift-http-proxy
 // (issue #716) — `network` itself stays `pub(crate)`, only this type is exposed.
 pub use network::{DEFAULT_HTTP_MAX_BUF, HttpTuning};
