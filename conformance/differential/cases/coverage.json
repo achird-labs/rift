@@ -3094,6 +3094,382 @@
       ]
     },
     {
+      "name": "coverage: httpRequest.js:52 a gzip/br request body is decoded, and one that does not decode is undefined (#1584)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/e",
+                      "body": ""
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "matched-empty"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/x"
+                    }
+                  },
+                  {
+                    "exists": {
+                      "body": true
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "has-body"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/inject"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "inject": "function (config) { return { body: typeof config.request.body + ':' + ('body' in config.request) }; }"
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/decorate"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "x"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "function (config) { config.response.body = typeof config.request.body; }"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/copy"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "v=${v}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": "body",
+                          "into": "${v}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "plain text"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "eq-plain"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "body": false
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "no-body"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": ""
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "empty-body"
+                    }
+                  }
+                ]
+              },
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "fallthrough"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/r0",
+          "headers": [
+            [
+              "Content-Encoding",
+              "gzip"
+            ]
+          ],
+          "body": "plain text"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/r1",
+          "headers": [
+            [
+              "Content-Encoding",
+              "br"
+            ]
+          ],
+          "body": "plain text"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/r2",
+          "headers": [
+            [
+              "Content-Encoding",
+              "gzip"
+            ]
+          ],
+          "bodyHex": "1f8b08000000000000132bc849cccc532849ad280100b80f0b440a000000"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/r3",
+          "headers": [
+            [
+              "Content-Encoding",
+              "br"
+            ]
+          ],
+          "bodyHex": "8b0480706c61696e207465787403"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/r4",
+          "headers": [
+            [
+              "Content-Encoding",
+              "GZIP"
+            ]
+          ],
+          "body": "plain text"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/r5",
+          "headers": [
+            [
+              "Content-Encoding",
+              "gzip, br"
+            ]
+          ],
+          "body": "plain text"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/r6",
+          "headers": [
+            [
+              "Content-Encoding",
+              "deflate"
+            ]
+          ],
+          "body": "plain text"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/r7",
+          "headers": [
+            [
+              "Content-Encoding",
+              "gzip"
+            ]
+          ]
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/r8",
+          "body": "plain text"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/e",
+          "headers": [
+            [
+              "Content-Encoding",
+              "gzip"
+            ]
+          ],
+          "body": "plain text"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/x",
+          "headers": [
+            [
+              "Content-Encoding",
+              "gzip"
+            ]
+          ],
+          "body": "plain text"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/inject",
+          "headers": [
+            [
+              "Content-Encoding",
+              "gzip"
+            ]
+          ],
+          "body": "plain text"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/decorate",
+          "headers": [
+            [
+              "Content-Encoding",
+              "gzip"
+            ]
+          ],
+          "body": "plain text"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/copy",
+          "headers": [
+            [
+              "Content-Encoding",
+              "gzip"
+            ]
+          ],
+          "body": "plain text"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/decorate",
+          "headers": [
+            [
+              "Content-Encoding",
+              "gzip"
+            ]
+          ],
+          "bodyHex": "1f8b08000000000000132bc849cccc532849ad280100b80f0b440a000000"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/copy",
+          "headers": [
+            [
+              "Content-Encoding",
+              "gzip"
+            ]
+          ],
+          "bodyHex": "1f8b08000000000000132bc849cccc532849ad280100b80f0b440a000000"
+        }
+      ]
+    },
+    {
       "name": "coverage: xpath.js:36 an xpath selector that cannot be evaluated fails the request with 500 (#1585)",
       "steps": [
         {

@@ -715,6 +715,9 @@ where
                     // the mode flag through separately, so default to `Text` — the script still
                     // sees the correct (base64) string, it just can't ask `isBinary`.
                     body: body.map(|b| b.to_string()),
+                    // The matcher sees a body that did not decode as a missing one (issue #1584)
+                    // and does not carry the difference here, so this script reads it as `""`.
+                    body_undefined: false,
                     mode: None,
                     request_from: request_from.map(str::to_string),
                     ip: client_ip.map(str::to_string),

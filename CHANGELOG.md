@@ -56,6 +56,15 @@ record.
   checked, `proxyTransparent` included. `rift-mock-core` exports the check as
   `imposter::dry_run_predicate_generators` for embedders' own write doors, and
   `PredicateGeneratorError` gains a `Threw` variant carrying the thrown message.
+- **gzip and brotli request bodies are decoded, as in Mountebank** (#1584). A request with
+  `Content-Encoding: gzip` or `br` (exactly those values) is matched and recorded on its decoded
+  body. One that does not decode has no body, which predicates, scripts and the journal see as
+  missing: `exists: {body: false}` matches, an `inject` or `decorate` sees `request.body` as
+  `undefined`, `MB_REQUEST` has no `body`, and the recorded request has no `body` key. A
+  compressed body that decodes is now recorded as its text instead of base64, including what
+  `proxyAlways` and `predicateGenerators` capture.
+  The decoded size counts against `--max-body-size` and `--body-memory-budget`, so a small body
+  that inflates past the ceiling is a `413`. A proxy still forwards the encoded bytes.
 
 - **https imposters print `ca`, `mutualAuth`, `rejectUnauthorized` and `ciphers` in every view,
   `?replayable=true` included** (#1576), as Mountebank does: `ca` is `null` when unset, a

@@ -147,6 +147,9 @@ pub(crate) struct BehaviorRun<'a, SH> {
     pub uri: &'a hyper::Uri,
     pub request_headers: &'a HashMap<String, Vec<String>, SH>,
     pub request_body: Option<&'a str>,
+    /// The body did not decode (issue #1584): `request_body` is `None`, and the behaviors see no
+    /// body rather than an empty one.
+    pub request_body_undefined: bool,
     /// The client's socket, for `requestFrom` / `ip` in `decorate` and `MB_REQUEST` (issue #1451).
     /// `None` only for a caller with no socket.
     pub client_addr: Option<std::net::SocketAddr>,
@@ -225,8 +228,9 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
         // 100+ lines away, and getting it wrong would hand one an empty-but-valid context —
         // wrong output, no error. Here a consumer that forgets to ask simply cannot exist.
         let request_context: OnceCell<RequestContext> = OnceCell::new();
-        let build_request_context = || {
-            RequestContext::from_request(
+        let build_request_context = || RequestContext {
+            body_undefined: self.request_body_undefined,
+            ..RequestContext::from_request(
                 self.method,
                 self.uri,
                 self.request_headers,
@@ -587,6 +591,7 @@ mod tests {
             uri: &uri,
             request_headers: &request_headers,
             request_body: None,
+            request_body_undefined: false,
             client_addr: None,
             script_state_key: 4545,
             script_files: std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
@@ -616,6 +621,7 @@ mod tests {
             uri: &uri,
             request_headers: &request_headers,
             request_body: None,
+            request_body_undefined: false,
             client_addr: None,
             script_state_key: 4545,
             script_files: std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),

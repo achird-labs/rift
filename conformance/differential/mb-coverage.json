@@ -29,7 +29,7 @@
     "src/models/http/baseHttpServer.js": {"lines": [179, 207], "branches": [41, 44], "functions": [4, 4]},
     "src/models/http/headersMap.js": {"lines": [87, 87], "branches": [17, 18], "functions": [9, 9]},
     "src/models/http/httpProxy.js": {"lines": [210, 230], "branches": [41, 53], "functions": [11, 11]},
-    "src/models/http/httpRequest.js": {"lines": [72, 82], "branches": [15, 17], "functions": [3, 3]},
+    "src/models/http/httpRequest.js": {"lines": [82, 82], "branches": [21, 21], "functions": [3, 3]},
     "src/models/http/httpServer.js": {"lines": [18, 18], "branches": [2, 2], "functions": [1, 1]},
     "src/models/https/httpsServer.js": {"lines": [42, 42], "branches": [9, 9], "functions": [2, 2]},
     "src/models/imposter.js": {"lines": [207, 243], "branches": [35, 39], "functions": [13, 15]},

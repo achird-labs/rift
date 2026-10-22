@@ -409,9 +409,10 @@ fn imposter_request(map: &PortMap, port: u16, request: &Request) -> Outgoing {
             .iter()
             .map(|(name, value)| (name.clone(), map.forward_str(value)))
             .collect(),
-        body: match request.body_of_size {
-            Some(size) => Some(vec![b'x'; size]),
-            None => request.body.as_ref().map(|body| encode_body(map, body)),
+        body: match (request.body_of_size, &request.body_hex) {
+            (Some(size), _) => Some(vec![b'x'; size]),
+            (None, Some(bytes)) => Some(bytes.0.clone()),
+            (None, None) => request.body.as_ref().map(|body| encode_body(map, body)),
         },
     }
 }

@@ -71,6 +71,11 @@ reqwest.workspace = true
 # Utils
 bytes.workspace = true
 base64 = "0.23"
+# Request bodies sent with `Content-Encoding: gzip` or `br` are decoded before matching, as
+# Mountebank's httpRequest does (issue #1584). Both are pure Rust: flate2 on its default
+# miniz_oxide backend (already in the tree through the png stack), and the brotli decoder alone.
+flate2 = "1.1"
+brotli-decompressor = "5.0"
 chrono.workspace = true
 regex = "1.11"
 # The multi-pattern engine behind `regex` (issue #709). Already in the tree transitively via

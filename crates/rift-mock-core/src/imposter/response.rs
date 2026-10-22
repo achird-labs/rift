@@ -561,6 +561,7 @@ pub fn apply_js_or_rhai_decorate(
             query: request.query_joined(),
             headers: request.headers.clone(),
             body: request.body.clone(),
+            body_undefined: request.body_undefined,
             // `RequestContext` doesn't track binary/text, so the classification is genuinely
             // unknown here — say so rather than asserting `Text` over a possibly-base64 body
             // (issue #636). `isBinary` is then absent for decorate scripts, not falsely false.

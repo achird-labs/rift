@@ -49,11 +49,44 @@ use std::time::{Duration, Instant};
 use tracing::{debug, trace, warn};
 
 use super::body_limits::{BodyReadError, CollectedBody};
+use super::content_encoding::{Coding, Decoded};
 
-/// Pair the request's bytes with their string form for the proxy (issue #1321). Both are `Some`
-/// together by construction in `handle_request_inner`.
+/// Pair the request's bytes with their string form for the proxy (issue #1321). `raw` is what the
+/// client sent, still encoded; `text` is the decoded form, or `None` for a body that did not decode
+/// (issue #1584), whose bytes are forwarded all the same.
 fn proxy_body<'a>(raw: Option<&'a Bytes>, text: Option<&'a str>) -> Option<ProxyBody<'a>> {
-    raw.zip(text).map(|(raw, text)| ProxyBody { raw, text })
+    raw.map(|raw| ProxyBody { raw, text })
+}
+
+/// Decode a `gzip` / `br` request body into the imposter's body budget, off the async worker:
+/// inflating up to the ceiling is CPU work proportional to the decoded size (issue #1584). `Err` is
+/// only the blocking task dying.
+async fn decode_request_body(
+    imposter: &Imposter,
+    coding: Coding,
+    raw: Bytes,
+) -> Result<Result<Decoded, BodyReadError>, tokio::task::JoinError> {
+    let out = match imposter.body_guard.start(None).await {
+        Ok(out) => out,
+        Err(e) => return Ok(Err(e)),
+    };
+    tokio::task::spawn_blocking(move || super::content_encoding::decode(coding, &raw, out)).await
+}
+
+/// The `500` for a decode task that died (a panic in the decoder): a server fault, not the client's.
+fn decode_failed_response(e: &tokio::task::JoinError) -> Response<Full<Bytes>> {
+    tracing::error!("request body decoding task failed: {e}");
+    build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [
+            ("x-rift-imposter", "true"),
+            ("content-type", "application/json"),
+        ],
+        crate::response::error_body(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Request body decoding failed",
+        ),
+    )
 }
 
 /// The `413` and `503` doors for a body the limits refuse (issue #1439). Both close the
@@ -1016,7 +1049,29 @@ async fn handle_request_inner(
         }
         Err(e) => return Ok(body_refused_response(&e)),
     };
-    let body_bytes = Some(_body_reservation.bytes().clone()).filter(|bytes| !bytes.is_empty());
+    // What the client sent, as sent: the proxy forwards these bytes, still encoded (issue #1584).
+    let wire_bytes = Some(_body_reservation.bytes().clone()).filter(|bytes| !bytes.is_empty());
+    // A `gzip` / `br` body is decoded before anything reads it, as Mountebank decodes it (issue
+    // #1584). The decoded bytes hold their own share of the body budget, alongside the raw body's,
+    // until the response is built. A body that does not decode is `body_undefined`: no text, and
+    // every consumer below sees the body as missing rather than empty.
+    let (_decoded_reservation, body_undefined) = match Coding::of(&raw_headers) {
+        None => (None, false),
+        Some(coding) => {
+            match decode_request_body(&imposter, coding, _body_reservation.bytes().clone()).await {
+                Ok(Ok(Decoded::Body(decoded))) => (Some(decoded), false),
+                Ok(Ok(Decoded::Undefined)) => (None, true),
+                Ok(Err(e)) => return Ok(body_refused_response(&e)),
+                Err(e) => return Ok(decode_failed_response(&e)),
+            }
+        }
+    };
+    let body_bytes = match &_decoded_reservation {
+        Some(decoded) => Some(decoded.bytes().clone()),
+        None if body_undefined => None,
+        None => wire_bytes.clone(),
+    }
+    .filter(|bytes| !bytes.is_empty());
     // Borrow the body as UTF-8 without forcing an allocation for the common valid-UTF-8 case
     // (issue #561): valid UTF-8 stays `Cow::Borrowed`, so only genuinely invalid UTF-8 pays a
     // copy here. `body_bytes` stays alive for the rest of the function so this borrow remains
@@ -1065,8 +1120,10 @@ async fn handle_request_inner(
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             // A request without a body is recorded as `""`, as Mountebank records it (issue
-            // #1365). Still an `Option`, so journals written before decode unchanged.
-            body: Some(body_string.as_deref().unwrap_or_default().to_string()),
+            // #1365). Still an `Option`, so journals written before decode unchanged. A body that
+            // did not decode has no `body` key at all, as `JSON.stringify` drops Mountebank's
+            // undefined body (issue #1584).
+            body: (!body_undefined).then(|| body_string.as_deref().unwrap_or_default().to_string()),
             mode: body_mode.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             // Filled in after the match, via `attach_match_outcome` below.
@@ -1340,6 +1397,7 @@ async fn handle_request_inner(
                     uri: &uri,
                     request_headers: &request_headers,
                     request_body: body_string.as_deref(),
+                    request_body_undefined: body_undefined,
                     client_addr: Some(client_addr),
                     script_state_key: imposter.script_state_key(),
                     script_files: imposter.script_file_access(),
@@ -1360,7 +1418,7 @@ async fn handle_request_inner(
                     method_str,
                     &uri,
                     &request_headers,
-                    proxy_body(body_bytes.as_ref(), body_string.as_deref()),
+                    proxy_body(wire_bytes.as_ref(), body_string.as_deref()),
                     run.as_ref(),
                     Some(stub_state.slot),
                     client_addr,
@@ -1437,6 +1495,7 @@ async fn handle_request_inner(
                 // Owned boundary (issue #561): the inject job is submitted to a `'static` worker
                 // closure, so `body_string`'s borrow can't cross it.
                 body: body_string.as_deref().map(str::to_string),
+                body_undefined,
                 mode: Some(body_mode.clone()),
                 request_from: Some(client_addr.to_string()),
                 ip: Some(client_addr.ip().to_string()),
@@ -1483,6 +1542,7 @@ async fn handle_request_inner(
                             uri: &uri,
                             request_headers: &request_headers,
                             request_body: body_string.as_deref(),
+                            request_body_undefined: body_undefined,
                             client_addr: Some(client_addr),
                             script_state_key: imposter.script_state_key(),
                             script_files: imposter.script_file_access(),
@@ -2125,6 +2185,7 @@ async fn handle_request_inner(
                         uri: &uri,
                         request_headers: &request_headers,
                         request_body: body_string.as_deref(),
+                        request_body_undefined: body_undefined,
                         client_addr: Some(client_addr),
                         script_state_key: imposter.script_state_key(),
                         script_files: imposter.script_file_access(),
@@ -2308,7 +2369,7 @@ async fn handle_request_inner(
                 method_str,
                 &uri,
                 &request_headers,
-                proxy_body(body_bytes.as_ref(), body_string.as_deref()),
+                proxy_body(wire_bytes.as_ref(), body_string.as_deref()),
                 None,
                 None,
                 client_addr,
