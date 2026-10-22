@@ -299,9 +299,9 @@ fn request_field(req: &RecordedRequest, key: &str) -> Option<Value> {
 
 /// A query or form as the journal prints it (issue #1553): one value is a string, several an
 /// array.
-fn shown<SH>(map: &std::collections::HashMap<String, Vec<String>, SH>) -> Value {
+fn shown<'a>(map: impl IntoIterator<Item = (&'a String, &'a Vec<String>)>) -> Value {
     Value::Object(
-        map.iter()
+        map.into_iter()
             .map(|(k, v)| (k.clone(), crate::util::values_as_json(v)))
             .collect(),
     )
@@ -342,7 +342,7 @@ mod tests {
             request_from: "127.0.0.1:5000".to_string(),
             method: method.to_string(),
             path: path.to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: hs,
             body: body.map(str::to_string),
             timestamp: "2026-01-01T00:00:00Z".to_string(),

@@ -517,7 +517,7 @@ mod tests {
             MountebankRequest {
                 method: "GET".to_string(),
                 path: path.to_string(),
-                query: HashMap::new(),
+                query: Default::default(),
                 headers: HashMap::new(),
                 body: None,
                 mode: Some(ResponseMode::Text),

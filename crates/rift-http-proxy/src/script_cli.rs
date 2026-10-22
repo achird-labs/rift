@@ -235,7 +235,7 @@ struct RequestFixture {
     /// the double-header-line half of #1050.
     #[serde(deserialize_with = "rift_types::wire::single_value_headers::deserialize")]
     headers: HashMap<String, String>,
-    query: HashMap<String, String>,
+    query: crate::util::OrderedMap<String, String>,
     path_params: HashMap<String, String>,
     body: serde_json::Value,
 }

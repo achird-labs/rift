@@ -91,31 +91,48 @@ pub enum ShellTransformError {
 /// two JSON arguments are dropped and the command runs alone.
 pub const MAX_SHELL_COMMAND_LENGTH: usize = 2048;
 
-/// `MB_REQUEST` for a `shellTransform`: Mountebank's `httpRequest.transform` keys. Each of
+/// `MB_REQUEST` for a `shellTransform`, as JSON text: Mountebank's `httpRequest.transform` keys. Each of
 /// `requestFrom`, `ip` and `form` is absent when `None`, as `JSON.stringify` omits an undefined
 /// value (issue #1451).
 #[must_use]
-pub fn shell_request_json(request: &RequestContext) -> serde_json::Value {
-    let mut request_json = serde_json::Map::new();
-    if let Some(request_from) = &request.request_from {
-        request_json.insert("requestFrom".into(), request_from.as_str().into());
+pub fn shell_request_json(request: &RequestContext) -> String {
+    use crate::util::JsKeyOrder;
+    use serde::Serialize;
+
+    // A struct, not a `serde_json::Map`: that map is a `BTreeMap` here and would sort the keys,
+    // where Mountebank's `JSON.stringify` lists them in the order `httpRequest.transform` built
+    // them, and `query` / `form` in the client's order (issue #1596).
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct MbRequest<'a> {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_from: Option<&'a str>,
+        method: &'a str,
+        path: &'a str,
+        query: JsKeyOrder<'a, String, foldhash::fast::RandomState>,
+        headers: &'a HashMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        body: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ip: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        form: Option<JsKeyOrder<'a, String, foldhash::fast::RandomState>>,
     }
-    request_json.insert("method".into(), request.method.as_str().into());
-    request_json.insert("path".into(), request.path.as_str().into());
-    request_json.insert("query".into(), serde_json::json!(request.query_joined()));
-    request_json.insert("headers".into(), serde_json::json!(request.headers));
-    // `""` for a request without a body, as Mountebank's `JSON.stringify(request)` (#1365), and
-    // no key for a body that did not decode, whose `undefined` it drops (#1584).
-    if !request.body_undefined {
-        request_json.insert("body".into(), request.body.as_deref().unwrap_or("").into());
-    }
-    if let Some(ip) = &request.ip {
-        request_json.insert("ip".into(), ip.as_str().into());
-    }
-    if let Some(form) = &request.form {
-        request_json.insert("form".into(), serde_json::json!(form));
-    }
-    serde_json::Value::Object(request_json)
+
+    let query = request.query_joined();
+    let mb = MbRequest {
+        request_from: request.request_from.as_deref(),
+        method: &request.method,
+        path: &request.path,
+        query: JsKeyOrder(&query),
+        headers: &request.headers,
+        // `""` for a request without a body, as Mountebank's `JSON.stringify(request)` (#1365), and
+        // no key for a body that did not decode, whose `undefined` it drops (#1584).
+        body: (!request.body_undefined).then(|| request.body.as_deref().unwrap_or("")),
+        ip: request.ip.as_deref(),
+        form: request.form.as_ref().map(JsKeyOrder),
+    };
+    serde_json::to_string(&mb).expect("strings and string-keyed string maps always serialize")
 }
 
 /// One JSON text as one shell word: single-quoted, an embedded `'` written `'\''`. Mountebank does
@@ -158,7 +175,7 @@ pub fn apply_shell_transform(
 ) -> Result<serde_json::Value, ShellTransformError> {
     use std::process::Command;
 
-    let request_json = shell_request_json(request).to_string();
+    let request_json = shell_request_json(request);
     let response_json = response.to_string();
     let full_command = shell_command_line(command, &request_json, &response_json);
 
@@ -455,6 +472,29 @@ mod tests {
         assert_eq!(out["body"]["body"], serde_json::json!(""));
     }
 
+    /// Issue #1596: `MB_REQUEST` lists its keys as Mountebank's `JSON.stringify(request)` does, and
+    /// `query` / `form` in the client's order. A `serde_json::Map` here sorted all three.
+    #[test]
+    fn mb_request_keeps_mountebank_key_order() {
+        let query = crate::util::parse_query_string("b=1&10=x&2=y&a=3");
+        let form = crate::util::parse_query_string("z=1&y=2");
+        let request = RequestContext {
+            method: "POST".to_string(),
+            path: "/p".to_string(),
+            query,
+            headers: HashMap::new(),
+            body: Some("z=1&y=2".to_string()),
+            request_from: Some("127.0.0.1:1".to_string()),
+            ip: Some("127.0.0.1".to_string()),
+            form: Some(crate::util::comma_joined(&form)),
+            ..Default::default()
+        };
+        assert_eq!(
+            shell_request_json(&request),
+            r#"{"requestFrom":"127.0.0.1:1","method":"POST","path":"/p","query":{"2":"y","10":"x","b":"1","a":"3"},"headers":{},"body":"z=1&y=2","ip":"127.0.0.1","form":{"z":"1","y":"2"}}"#
+        );
+    }
+
     /// Issue #1584: a body that did not decode is Mountebank's `undefined`, which
     /// `JSON.stringify(request)` drops, so `MB_REQUEST` has no `body` key.
     #[test]
@@ -465,7 +505,8 @@ mod tests {
             body_undefined: true,
             ..Default::default()
         };
-        let json = shell_request_json(&request);
+        let json: serde_json::Value =
+            serde_json::from_str(&shell_request_json(&request)).expect("json");
         assert!(json.get("body").is_none(), "{json}");
         assert_eq!(json["method"], serde_json::json!("POST"));
     }
@@ -490,7 +531,9 @@ mod tests {
         )
         .expect("runs");
         let body = &out["body"];
-        assert_eq!(body[0], shell_request_json(&request));
+        let expected: serde_json::Value =
+            serde_json::from_str(&shell_request_json(&request)).expect("json");
+        assert_eq!(body[0], expected);
         assert_eq!(body[1], resp);
         assert_eq!(body[2], "2", "exactly two arguments");
     }
@@ -586,7 +629,7 @@ mod tests {
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/test".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             ..Default::default()
@@ -618,7 +661,7 @@ mod tests {
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/test".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             ..Default::default()
@@ -649,7 +692,7 @@ mod tests {
         let request = RequestContext {
             method: "POST".to_string(),
             path: "/users".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: Some(r#"{"name": "Alice"}"#.to_string()),
             ..Default::default()
@@ -680,7 +723,7 @@ mod tests {
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/test".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             ..Default::default()
@@ -710,7 +753,7 @@ mod tests {
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/test".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             ..Default::default()

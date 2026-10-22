@@ -20,6 +20,7 @@ workspace = true
 # dep costs nothing. None of these hashes leaves the process, so none needs cross-process
 # stability — see `util`'s module docs for the seeding rules each one relies on.
 foldhash = "0.2"
+indexmap = { workspace = true }
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 # TaskTracker for bounded connection-drain on imposter teardown (issue #596)

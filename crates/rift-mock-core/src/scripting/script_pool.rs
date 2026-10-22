@@ -685,7 +685,7 @@ mod tests {
             path: "/test".to_string(),
             headers: HashMap::new(),
             body: serde_json::json!(null),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
         let flow_store =
@@ -787,7 +787,7 @@ mod tests {
             path: "/test".to_string(),
             headers: HashMap::new(),
             body: serde_json::json!(null),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
         let flow_store =
@@ -861,7 +861,7 @@ mod tests {
             path: "/test".to_string(),
             headers: HashMap::new(),
             body: serde_json::json!(null),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
         let flow_store: Arc<dyn crate::extensions::flow_state::FlowStore> = Arc::new(NoOpFlowStore);
@@ -929,7 +929,7 @@ mod tests {
             path: "/test".to_string(),
             headers: HashMap::new(),
             body: serde_json::json!(null),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 

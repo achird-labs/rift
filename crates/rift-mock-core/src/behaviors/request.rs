@@ -25,7 +25,7 @@ pub struct RequestContext {
     /// Every value of each query key, in request order (issue #1553). `copy` and `lookup` read a
     /// repeated key's first value, as Mountebank's `getFrom` does; `decorate` and `shellTransform`
     /// see it comma-joined (`docs/mountebank/behaviors.md`).
-    pub query: HashMap<String, Vec<String>>,
+    pub query: crate::util::MultiValueMap,
     pub headers: HashMap<String, String>,
     pub body: Option<String>,
     /// The request's `gzip` / `br` body did not decode (issue #1584), so it has no body at all:
@@ -38,18 +38,15 @@ pub struct RequestContext {
     /// and `form` only for a non-empty urlencoded body.
     pub request_from: Option<String>,
     pub ip: Option<String>,
-    pub form: Option<HashMap<String, String>>,
+    pub form: Option<crate::util::OrderedMap<String, String>>,
 }
 
 impl RequestContext {
     /// The query as `decorate` and `shellTransform` see it: one string per key, a repeated key's
     /// values comma-joined.
     #[must_use]
-    pub fn query_joined(&self) -> HashMap<String, String> {
-        self.query
-            .iter()
-            .map(|(k, v)| (k.clone(), v.join(",")))
-            .collect()
+    pub fn query_joined(&self) -> crate::util::OrderedMap<String, String> {
+        crate::util::comma_joined(&self.query)
     }
 }
 
@@ -82,13 +79,11 @@ impl RequestContext {
         body: Option<&str>,
         client_addr: Option<std::net::SocketAddr>,
     ) -> Self {
-        // The shared parser (issue #1153) — this used to be an inline third copy of it. Collecting
-        // into the std map re-hashes it, which #704 otherwise avoids; accepted here because it runs
-        // only for a stub with behaviors on a map of a few entries, and removing it means changing
-        // the public `query` field's type.
-        let query_map: HashMap<String, Vec<String>> = uri
+        // The shared parser (issue #1153) — this used to be an inline third copy of it. It keeps
+        // request order (issue #1596), which `decorate` and `shellTransform` can show.
+        let query_map = uri
             .query()
-            .map(|q| crate::util::parse_query_string(q).into_iter().collect())
+            .map(crate::util::parse_query_string)
             .unwrap_or_default();
 
         // First value, not last: this is the rule predicates state
@@ -135,6 +130,32 @@ mod tests {
             Some("%FF"),
             "an undecodable value must pass through raw, not become an empty string"
         );
+    }
+
+    // Issue #1596: `decorate` and `shellTransform` see the client's key order, request after request.
+    #[test]
+    fn from_request_keeps_query_and_form_in_request_order() {
+        let uri: hyper::Uri = "/p?b=1&a=2&c=3&a=4".parse().unwrap();
+        let form_headers = HashMap::from([(
+            "Content-Type".to_string(),
+            vec!["application/x-www-form-urlencoded".to_string()],
+        )]);
+        for _ in 0..20 {
+            let ctx = RequestContext::from_request(
+                "POST",
+                &uri,
+                &form_headers,
+                Some("z=1&y=2&x=3"),
+                None,
+            );
+            assert_eq!(ctx.query.keys().collect::<Vec<_>>(), ["b", "a", "c"]);
+            assert_eq!(
+                ctx.query_joined().keys().collect::<Vec<_>>(),
+                ["b", "a", "c"]
+            );
+            let form = ctx.form.expect("form");
+            assert_eq!(form.keys().collect::<Vec<_>>(), ["z", "y", "x"]);
+        }
     }
 
     #[test]

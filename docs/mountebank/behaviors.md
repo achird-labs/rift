@@ -276,7 +276,8 @@ to JSON. `response.headers` holds one string per header name.
 [Client address](differences.md#client-address). A query or form key the client repeated is one
 comma-joined string (`"1,2"`), where Mountebank gives an array
 ([differences](differences.md#scripts-and-templates-see-a-repeated-key-comma-joined)); the same holds
-in `MB_REQUEST`. Predicates match each value of such a key.
+in `MB_REQUEST`. Predicates match each value of such a key. `query` and `form` list their keys in
+the order the client sent them, as Mountebank does.
 
 ### Basic Transformation
 

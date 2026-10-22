@@ -77,10 +77,11 @@ pub struct RecordedRequest {
     pub request_from: Option<String>,
     pub method: String,
     pub path: String,
+    /// A repeated key is recorded as an array (#1553), so values are kept as JSON.
     #[serde(default)]
-    pub query: HashMap<String, String>,
+    pub query: HashMap<String, serde_json::Value>,
     #[serde(default)]
-    pub headers: HashMap<String, String>,
+    pub headers: HashMap<String, serde_json::Value>,
     pub body: Option<String>,
     pub timestamp: Option<String>,
 }
