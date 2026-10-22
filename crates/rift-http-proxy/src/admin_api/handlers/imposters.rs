@@ -198,7 +198,7 @@ pub async fn handle_create(
         Err(e) => return e.into_response(),
     };
 
-    let mut config: ImposterConfig = match serde_json::from_slice(&body) {
+    let mut config: ImposterConfig = match super::decode_config_body(&body) {
         Ok(c) => c,
         Err(e) => {
             return error_response(
@@ -443,7 +443,7 @@ async fn replace_all_from_bytes(
         imposters: Vec<ImposterConfig>,
     }
 
-    let mut batch: BatchRequest = match serde_json::from_slice(body) {
+    let mut batch: BatchRequest = match super::decode_config_body(body) {
         Ok(b) => b,
         Err(e) => {
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid batch JSON: {e}"));

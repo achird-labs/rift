@@ -2814,9 +2814,9 @@ fn refuse_bad_proxy_identity(
     let Some((cert, key, passphrase)) = proxy.client_identity_pem() else {
         return Ok(());
     };
-    let identity = crate::proxy::ClientIdentity::from_pem(cert, key, passphrase)
-        .map_err(|e| format!("{e:#}"))?;
-    if identity.passphrase_ignored() {
+    // Charged to the door's `AdmissionBudget`, when it entered one (issue #1609).
+    let passphrase_ignored = crate::proxy::client_identity::admit(cert, key, passphrase)?;
+    if passphrase_ignored {
         tracing::warn!(
             to = %proxy.to,
             "proxy.passphrase is set but proxy.key is not encrypted; the passphrase is unused"
@@ -4739,6 +4739,70 @@ mod tests {
             );
             assert!(door.contains("too costly"), "{door}");
         }
+    }
+
+    fn many_proxy_stubs(keys: &[String]) -> String {
+        let stubs: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                serde_json::json!({"responses": [{"proxy": {
+                    "to": "https://localhost:1",
+                    "cert": IDENTITY_CERT, "key": key, "passphrase": "rift-test",
+                }}]})
+            })
+            .collect();
+        serde_json::json!({"protocol": "http", "stubs": stubs}).to_string()
+    }
+
+    #[test]
+    fn a_document_repeating_one_identity_derives_it_once() {
+        use crate::proxy::client_identity::{ADMISSION_DERIVATIONS, AdmissionBudget};
+        let document = many_proxy_stubs(&vec![IDENTITY_KEY_PBES2.to_string(); 100]);
+        let before = ADMISSION_DERIVATIONS.with(std::cell::Cell::get);
+        let config: Result<ImposterConfig, _> = {
+            let _budget = AdmissionBudget::enter();
+            serde_json::from_str(&document)
+        };
+        config.expect("admitted");
+        assert_eq!(ADMISSION_DERIVATIONS.with(std::cell::Cell::get) - before, 1);
+    }
+
+    #[test]
+    fn a_document_is_held_to_one_derivation_budget() {
+        use crate::proxy::client_identity::AdmissionBudget;
+        use crate::proxy::client_identity::tests::encrypted_key;
+        use pkcs8::pkcs5::pbes2::Pbkdf2Prf;
+        // Distinct real keys at 2048 iterations each; a budget of 5000 admits two of them.
+        let keys: Vec<String> = (1..=100)
+            .map(|salt| encrypted_key(2048, salt, Pbkdf2Prf::HmacWithSha256))
+            .collect();
+        let err = {
+            let _budget = AdmissionBudget::enter_with_budget(5000);
+            serde_json::from_str::<ImposterConfig>(&many_proxy_stubs(&keys))
+                .expect_err("refused")
+                .to_string()
+        };
+        assert!(
+            err.contains("more key derivation than one request may"),
+            "{err}"
+        );
+        // Two keys fit, so a two-stub document is admitted under the same budget.
+        let _budget = AdmissionBudget::enter_with_budget(5000);
+        serde_json::from_str::<ImposterConfig>(&many_proxy_stubs(&keys[..2])).expect("admitted");
+    }
+
+    #[test]
+    fn the_standard_budget_admits_many_openssl_default_keys() {
+        use crate::proxy::client_identity::{AdmissionBudget, MAX_ADMISSION_KDF_UNITS};
+        // 2048-iteration keys (OpenSSL's default): hundreds fit in one request.
+        const _: () = assert!(MAX_ADMISSION_KDF_UNITS / 2048 > 900);
+        let _budget = AdmissionBudget::enter();
+        serde_json::from_str::<ImposterConfig>(&many_proxy_stubs(&vec![
+            IDENTITY_KEY_PBES2
+                .to_string();
+            3
+        ]))
+        .expect("admitted");
     }
 
     #[test]

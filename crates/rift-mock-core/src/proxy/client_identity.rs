@@ -51,7 +51,9 @@ impl ClientIdentity {
     pub fn from_pem(cert: &str, key: &str, passphrase: Option<&str>) -> anyhow::Result<Self> {
         let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert.as_bytes())
             .collect::<Result<_, _>>()
-            .map_err(|e| anyhow!("proxy.cert is not a readable PEM certificate: {e}"))?;
+            // A fixed text: the decoder's error can quote the line it choked on, and a combined
+            // cert-and-key PEM would put key material in that line.
+            .map_err(|_| anyhow!("proxy.cert is not a readable PEM certificate"))?;
         if certs.is_empty() {
             bail!(
                 "proxy.cert contains no certificate: expected a -----BEGIN CERTIFICATE----- block"
@@ -106,7 +108,7 @@ fn decode_key(
         let encrypted = pkcs8::EncryptedPrivateKeyInfoRef::try_from(document.as_bytes())
             .map_err(|_| anyhow!("proxy.key is not a readable encrypted PKCS#8 key"))?;
         // Before deriving anything: the key names its own KDF cost, and pkcs5 runs whatever it says.
-        refuse_costly_kdf(&encrypted.encryption_algorithm)?;
+        kdf_units(&encrypted.encryption_algorithm)?;
         // A wrong passphrase surfaces here: the padding check or the inner decode fails.
         let decrypted = encrypted.decrypt(passphrase).map_err(|_| {
             anyhow!("proxy.passphrase does not decrypt proxy.key (wrong passphrase?)")
@@ -126,51 +128,238 @@ fn decode_key(
     Ok((key, passphrase.is_some()))
 }
 
+/// Most work one key derivation may take, in units of one PBKDF2 iteration over one output block
+/// (one scrypt `N · r · p` step counts as one; the two cost about the same per unit).
+///
+/// 1,000,000: OpenSSL 3 writes PBKDF2-HMAC-SHA256 at 2048 iterations (2,048 units) and scrypt at
+/// N = 2^14, r = 8, p = 1 (131,072 units); OWASP's 2023 guidance for PBKDF2-HMAC-SHA256 is
+/// 600,000. A key needs deriving once, at creation, and again when its client is first built.
+pub(crate) const MAX_KDF_UNITS: u64 = 1_000_000;
+
 /// Most memory one scrypt derivation may take, as `128 · N · r · p` bytes: 64 MiB, the order of
-/// OpenSSL's own `maxmem` default. OpenSSL 3 writes N = 2^14, r = 8, p = 1 (16 MiB).
+/// OpenSSL's own `maxmem` default (OpenSSL 3 writes 16 MiB). Within [`MAX_KDF_UNITS`] by itself.
 const MAX_SCRYPT_BYTES: u128 = 64 * 1024 * 1024;
 
-/// Most PBKDF2 iterations one derivation may run. RFC 8018 calls 10,000,000 appropriate "for
-/// especially critical keys"; OpenSSL 3 writes 2048.
-const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
+/// The derivation work `key` asks for, in [`MAX_KDF_UNITS`] units: 0 for a key that is not
+/// encrypted (or not readable, which [`ClientIdentity::from_pem`] then refuses on its own).
+///
+/// # Errors
+/// As [`ClientIdentity::from_pem`] refuses the key's encryption parameters.
+pub(crate) fn derivation_units(key: &str) -> anyhow::Result<u64> {
+    let Some(block) = encrypted_block(key) else {
+        return Ok(0);
+    };
+    let Ok((_, document)) = pkcs8::Document::from_pem(block) else {
+        return Ok(0);
+    };
+    let Ok(encrypted) = pkcs8::EncryptedPrivateKeyInfoRef::try_from(document.as_bytes()) else {
+        return Ok(0);
+    };
+    kdf_units(&encrypted.encryption_algorithm)
+}
 
-/// Refuse a PBES2 key whose KDF parameters would cost more than the caps above, or that pkcs5 could
-/// not run safely (a scrypt `N` that is not a power of two at least 2: pkcs5 computes `log2(N)` with
-/// an expression that underflows at 0). The key states its own cost, and the derivation runs before
-/// any passphrase check, so without this a posted key could abort the process (scrypt's buffer is
-/// `128 · N · r` bytes) or pin a thread for minutes. Fixed text: nothing of the key is quoted.
-fn refuse_costly_kdf(scheme: &pkcs8::pkcs5::EncryptionScheme) -> anyhow::Result<()> {
-    use pkcs8::pkcs5::pbes2::Kdf;
+/// The work a PBES2 key's KDF asks for, refusing one over [`MAX_KDF_UNITS`] or [`MAX_SCRYPT_BYTES`],
+/// or one pkcs5 could not run safely (a scrypt `N` that is not a power of two at least 2: pkcs5
+/// computes `log2(N)` with an expression that underflows at 0). The key states its own cost, and
+/// the derivation runs before any passphrase check, so without this a posted key could abort the
+/// process (scrypt's buffer is `128 · N · r` bytes) or pin a thread for minutes.
+///
+/// PBKDF2 runs its iterations once per output block, so a 32-byte AES-256 key under HMAC-SHA1
+/// (20-byte blocks) costs twice its iteration count. Fixed texts: nothing of the key is quoted.
+fn kdf_units(scheme: &pkcs8::pkcs5::EncryptionScheme) -> anyhow::Result<u64> {
+    use pkcs8::pkcs5::pbes2::{Kdf, Pbkdf2Prf};
     let too_costly = || {
         anyhow!(
-            "proxy.key's encryption is too costly to derive (scrypt over 64 MiB or PBKDF2 over              10,000,000 iterations); re-encrypt it with `openssl pkcs8 -topk8`, which writes the              OpenSSL defaults"
+            "proxy.key's encryption is too costly to derive (over 1,000,000 PBKDF2 iterations, \
+             or scrypt over 64 MiB); re-encrypt it with `openssl pkcs8 -topk8`, which writes the \
+             OpenSSL defaults"
         )
     };
     let Some(params) = scheme.pbes2() else {
         bail!(
-            "proxy.key is encrypted with PBES1, which Rift does not read; re-encrypt it with                `openssl pkcs8 -topk8`"
+            "proxy.key is encrypted with PBES1, which Rift does not read; re-encrypt it with \
+             `openssl pkcs8 -topk8`"
         );
     };
-    match &params.kdf {
-        Kdf::Pbkdf2(pbkdf2) if pbkdf2.iteration_count <= MAX_PBKDF2_ITERATIONS => Ok(()),
-        Kdf::Pbkdf2(_) => Err(too_costly()),
+    let units = match &params.kdf {
+        Kdf::Pbkdf2(pbkdf2) => {
+            let block_len: u64 = match pbkdf2.prf {
+                Pbkdf2Prf::HmacWithSha1 => 20,
+                Pbkdf2Prf::HmacWithSha224 => 28,
+                Pbkdf2Prf::HmacWithSha256 => 32,
+                Pbkdf2Prf::HmacWithSha384 => 48,
+                Pbkdf2Prf::HmacWithSha512 => 64,
+                // Non-exhaustive: a PRF this check does not know is one it cannot bound.
+                _ => bail!("proxy.key is encrypted with a PBKDF2 hash Rift does not read"),
+            };
+            // Saturating, not swallowing: a size past u64 can only over-count, which refuses.
+            let key_len = u64::try_from(params.encryption.key_size()).unwrap_or(u64::MAX);
+            u64::from(pbkdf2.iteration_count).saturating_mul(key_len.div_ceil(block_len))
+        }
         Kdf::Scrypt(scrypt) => {
             let n = scrypt.cost_parameter;
             if n < 2 || !n.is_power_of_two() {
                 bail!("proxy.key's scrypt cost N must be a power of two of at least 2");
             }
-            let bytes = 128
-                * u128::from(n)
-                * u128::from(scrypt.block_size)
-                * u128::from(scrypt.parallelization);
-            if bytes > MAX_SCRYPT_BYTES {
+            let steps =
+                u128::from(n) * u128::from(scrypt.block_size) * u128::from(scrypt.parallelization);
+            if 128 * steps > MAX_SCRYPT_BYTES {
                 return Err(too_costly());
             }
-            Ok(())
+            // Bounded by the memory cap above, so this always fits; saturating if it did not.
+            u64::try_from(steps).unwrap_or(u64::MAX)
         }
         // `Kdf` is non-exhaustive: a KDF this check does not know is one it cannot bound.
         _ => bail!("proxy.key is encrypted with a key-derivation function Rift does not read"),
+    };
+    if units > MAX_KDF_UNITS {
+        return Err(too_costly());
     }
+    Ok(units)
+}
+
+/// Most derivation work one admission scope may spend across every distinct `proxy` client
+/// identity it admits: two keys at [`MAX_KDF_UNITS`], or fifteen at OpenSSL's scrypt default.
+pub const MAX_ADMISSION_KDF_UNITS: u64 = 2_000_000;
+
+/// The derivation work an admission scope has spent, and what it decided for each identity it has
+/// already checked, so a document repeating one identity across many stubs derives it once.
+struct AdmissionScope {
+    budget: u64,
+    spent: u64,
+    decided: std::collections::HashMap<IdentityKey, Result<bool, String>>,
+}
+
+thread_local! {
+    static ADMISSION_SCOPE: std::cell::RefCell<Option<AdmissionScope>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Bounds the key derivation one config document may ask for (issue #1609): while it is alive,
+/// every `proxy` client identity admitted on this thread draws on one budget of
+/// [`MAX_ADMISSION_KDF_UNITS`], and an identity repeated in the document is checked once.
+///
+/// A door enters one around the synchronous decode of one request's body and drops it before any
+/// `.await` (it is thread-local). Without one, each identity is still held to [`MAX_KDF_UNITS`],
+/// but a document with many distinct encrypted keys could spend that many times over. Nested
+/// scopes share the outermost one.
+#[must_use = "the scope ends when this guard is dropped"]
+pub struct AdmissionBudget {
+    owner: bool,
+    // Thread-local state: the guard must be dropped on the thread that created it.
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl AdmissionBudget {
+    /// Enter a scope with the standard budget.
+    pub fn enter() -> Self {
+        Self::with_budget(MAX_ADMISSION_KDF_UNITS)
+    }
+
+    fn with_budget(budget: u64) -> Self {
+        let owner = ADMISSION_SCOPE.with(|scope| {
+            let mut scope = scope.borrow_mut();
+            if scope.is_some() {
+                return false;
+            }
+            *scope = Some(AdmissionScope {
+                budget,
+                spent: 0,
+                decided: std::collections::HashMap::new(),
+            });
+            true
+        });
+        Self {
+            owner,
+            _not_send: std::marker::PhantomData,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enter_with_budget(budget: u64) -> Self {
+        Self::with_budget(budget)
+    }
+}
+
+impl Drop for AdmissionBudget {
+    fn drop(&mut self) {
+        if self.owner {
+            ADMISSION_SCOPE.with(|scope| scope.borrow_mut().take());
+        }
+    }
+}
+
+/// Admit one identity at a config door: [`ClientIdentity::from_pem`], charged to the current
+/// [`AdmissionBudget`] when there is one. Returns whether a supplied passphrase went unused.
+///
+/// # Errors
+/// What `from_pem` refuses, or the scope's budget would be exceeded. Fixed or key-free texts.
+pub(crate) fn admit(cert: &str, key: &str, passphrase: Option<&str>) -> Result<bool, String> {
+    let id = identity_key(cert, key, passphrase);
+    let charged = ADMISSION_SCOPE.with(|scope| -> Option<Result<bool, String>> {
+        let mut scope = scope.borrow_mut();
+        let scope = scope.as_mut()?;
+        if let Some(decided) = scope.decided.get(&id) {
+            return Some(decided.clone());
+        }
+        let units = match derivation_units(key) {
+            Ok(units) => units,
+            Err(e) => return Some(Err(format!("{e:#}"))),
+        };
+        if scope.spent.saturating_add(units) > scope.budget {
+            return Some(Err(
+                "the proxy client keys in this request ask for more key derivation than one \
+                 request may (2,000,000 PBKDF2 iterations in all); post them in separate requests \
+                 or re-encrypt them with `openssl pkcs8 -topk8`"
+                    .to_string(),
+            ));
+        }
+        scope.spent += units;
+        None
+    });
+    if let Some(decided) = charged {
+        return decided;
+    }
+    #[cfg(test)]
+    ADMISSION_DERIVATIONS.with(|n| n.set(n.get() + 1));
+    // Outside the borrow: deriving takes a while, and nothing else on this thread runs meanwhile.
+    let decided = ClientIdentity::from_pem(cert, key, passphrase)
+        .map(|identity| identity.passphrase_ignored())
+        .map_err(|e| format!("{e:#}"));
+    ADMISSION_SCOPE.with(|scope| {
+        if let Some(scope) = scope.borrow_mut().as_mut() {
+            scope.decided.insert(id, decided.clone());
+        }
+    });
+    decided
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Identities `admit` decoded on this thread, for the memo tests.
+    pub(crate) static ADMISSION_DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A `proxy` client identity's cache key: SHA-256 over the three strings, never the strings.
+pub(crate) type IdentityKey = [u8; 32];
+
+/// [`IdentityKey`] for `cert`/`key`/`passphrase`: each part length-prefixed so no two triples share
+/// an encoding, and the passphrase's absence distinct from an empty one.
+pub(crate) fn identity_key(cert: &str, key: &str, passphrase: Option<&str>) -> IdentityKey {
+    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+    for part in [Some(cert), Some(key), passphrase] {
+        match part {
+            Some(text) => {
+                digest.update(&[1]);
+                digest.update(&text.len().to_be_bytes());
+                digest.update(text.as_bytes());
+            }
+            None => digest.update(&[0]),
+        }
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(digest.finish().as_ref());
+    out
 }
 
 /// The `ENCRYPTED PRIVATE KEY` block in `pem`, delimiters included, without any text around it.
@@ -401,6 +590,120 @@ pub(crate) mod tests {
         let msg = refusal(CERT, &broken, None);
         assert!(!msg.contains(body), "the key leaked: {msg}");
         assert!(msg.contains("proxy.key"), "{msg}");
+    }
+
+    /// [`KEY`], really encrypted under PBKDF2 with `prf` and `iterations`; `salt` makes it a
+    /// distinct identity.
+    pub(crate) fn encrypted_key(
+        iterations: u32,
+        salt: u8,
+        prf: pkcs8::pkcs5::pbes2::Pbkdf2Prf,
+    ) -> String {
+        use pkcs8::der::EncodePem;
+        use pkcs8::pkcs5::pbes2;
+        let params = pbes2::Parameters {
+            kdf: pbes2::Kdf::Pbkdf2(pbes2::Pbkdf2Params {
+                salt: pbes2::Salt::new([salt; 16]).expect("salt"),
+                iteration_count: iterations,
+                key_length: None,
+                prf,
+            }),
+            encryption: pbes2::EncryptionScheme::Aes256Cbc { iv: [3; 16] },
+        };
+        let (_, plain) = pkcs8::Document::from_pem(KEY).expect("the fixture key");
+        let ciphertext = params
+            .encrypt(PASSPHRASE, plain.as_bytes())
+            .expect("encrypt");
+        pkcs8::EncryptedPrivateKeyInfoOwned {
+            encryption_algorithm: pkcs8::pkcs5::EncryptionScheme::Pbes2(params),
+            encrypted_data: pkcs8::der::asn1::OctetString::new(ciphertext).expect("octets"),
+        }
+        .to_pem(pkcs8::LineEnding::LF)
+        .expect("pem")
+    }
+
+    #[test]
+    fn a_really_encrypted_key_loads() {
+        let key = encrypted_key(2048, 1, pkcs8::pkcs5::pbes2::Pbkdf2Prf::HmacWithSha256);
+        ClientIdentity::from_pem(CERT, &key, Some(PASSPHRASE)).expect("loads");
+    }
+
+    #[test]
+    fn pbkdf2_cost_counts_every_output_block() {
+        use pkcs8::pkcs5::pbes2::Pbkdf2Prf;
+        // AES-256 needs 32 bytes: one SHA-256 block, two SHA-1 blocks.
+        let sha256 = encrypted_key(600_000, 1, Pbkdf2Prf::HmacWithSha256);
+        assert_eq!(derivation_units(&sha256).expect("within the cap"), 600_000);
+        let sha1 = pbkdf2_key_with(600_000, Pbkdf2Prf::HmacWithSha1);
+        let msg = format!(
+            "{:#}",
+            derivation_units(&sha1).expect_err("1,200,000 units")
+        );
+        assert!(msg.contains("too costly"), "{msg}");
+    }
+
+    fn pbkdf2_key_with(iterations: u32, prf: pkcs8::pkcs5::pbes2::Pbkdf2Prf) -> String {
+        key_with_kdf(pkcs8::pkcs5::pbes2::Kdf::Pbkdf2(
+            pkcs8::pkcs5::pbes2::Pbkdf2Params {
+                salt: pkcs8::pkcs5::pbes2::Salt::new([1u8; 16]).expect("salt"),
+                iteration_count: iterations,
+                key_length: None,
+                prf,
+            },
+        ))
+    }
+
+    #[test]
+    fn the_per_key_cap_is_a_million_iterations() {
+        assert!(derivation_units(&pbkdf2_key(1_000_000)).is_ok());
+        let msg = format!(
+            "{:#}",
+            derivation_units(&pbkdf2_key(1_000_001)).expect_err("over")
+        );
+        assert!(msg.contains("too costly"), "{msg}");
+    }
+
+    #[test]
+    fn errors_are_single_spaced() {
+        // A line continuation without its `\\` leaves a run of spaces inside the message.
+        for msg in [
+            refusal(CERT, &pbkdf2_key(4_000_000_000), Some(PASSPHRASE)),
+            format!(
+                "{:#}",
+                ClientIdentity::from_pem(CERT, &key_with_pbes1(), Some(PASSPHRASE))
+                    .expect_err("PBES1")
+            ),
+        ] {
+            assert!(!msg.contains("  "), "{msg:?}");
+        }
+    }
+
+    fn key_with_pbes1() -> String {
+        use pkcs8::der::EncodePem;
+        pkcs8::EncryptedPrivateKeyInfoOwned {
+            encryption_algorithm: pkcs8::pkcs5::EncryptionScheme::Pbes1(
+                pkcs8::pkcs5::pbes1::Algorithm {
+                    encryption: pkcs8::pkcs5::pbes1::EncryptionScheme::PbeWithSha1AndDesCbc,
+                    parameters: pkcs8::pkcs5::pbes1::Parameters {
+                        salt: [1; 8],
+                        iteration_count: 2048,
+                    },
+                },
+            ),
+            encrypted_data: pkcs8::der::asn1::OctetString::new(vec![0u8; 16]).expect("octets"),
+        }
+        .to_pem(pkcs8::LineEnding::LF)
+        .expect("pem")
+    }
+
+    #[test]
+    fn a_malformed_cert_never_echoes_its_bytes() {
+        // A cert PEM with the key run into a header: the decoder's error quotes that line.
+        let body = KEY.lines().nth(1).expect("a body line");
+        let combined =
+            format!("{CERT}-----BEGIN PRIVATE KEY-----{body}\n-----END PRIVATE KEY-----\n");
+        let msg = refusal(&combined, KEY, None);
+        assert!(!msg.contains(body), "the key leaked: {msg}");
     }
 
     #[test]

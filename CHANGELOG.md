@@ -17,7 +17,8 @@ record.
   (#1609): `cert`, `key` and `passphrase` on `proxy`, as Mountebank's proxy takes them. The key may
   be unencrypted PKCS#8, PKCS#1 or SEC1, or encrypted PKCS#8 decrypted with `passphrase`; an X.509
   v1 certificate is accepted; an encrypted key whose parameters ask for more than 64 MiB of scrypt
-  or 10,000,000 PBKDF2 iterations is refused before it is derived. Upstream verification is unchanged (`--upstream-ca-file`,
+  or 1,000,000 PBKDF2 iterations is refused before it is derived, and one admin request may ask
+  for 2,000,000 in all across its distinct keys. Upstream verification is unchanged (`--upstream-ca-file`,
   `--upstream-tls-skip-verify`). As in Mountebank, `GET /imposters` and the `--datadir` file show
   the three keys as posted, so protect the admin API and datadir; they are never logged. Embedders
   set the trust policy these clients are built under with `ImposterManager::with_outbound_tls` /

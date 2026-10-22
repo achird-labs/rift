@@ -12,11 +12,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
+use tokio::sync::watch;
 use tracing::warn;
 
+use crate::proxy::client_identity::{IdentityKey, identity_key};
 use crate::proxy::{ClientIdentity, OutboundTls};
 
 /// Distinct identities held before the cache is emptied. Far above what a real config carries (one
@@ -25,8 +27,6 @@ pub(crate) const MAX_IDENTITY_CLIENTS: usize = 64;
 
 /// How many times a build is retried when the trust policy changes while it runs.
 const POLICY_RACE_RETRIES: usize = 3;
-
-type IdentityKey = [u8; 32];
 
 /// One trust policy as it was set. Each cached client is tagged with the `Arc` it was built under,
 /// so a client built under a policy that has since been replaced is never served or stored, even
@@ -37,6 +37,19 @@ struct PolicyState {
     policy: Option<OutboundTls>,
 }
 
+/// How one derivation ended, as every request waiting on it sees it.
+#[derive(Clone)]
+enum Outcome {
+    Client(Arc<reqwest::Client>),
+    /// The identity does not decode: cached, since no policy changes that.
+    Refused(Arc<str>),
+    /// The policy could not be realised (e.g. no trust anchors): not cached, the next request
+    /// retries, as the plain client's default does.
+    Failed(Arc<str>),
+    /// Built under a policy replaced meanwhile: not stored; the waiters build again.
+    Stale,
+}
+
 #[derive(Default)]
 struct Entries {
     clients: HashMap<IdentityKey, (Arc<PolicyState>, Arc<reqwest::Client>)>,
@@ -44,6 +57,9 @@ struct Entries {
     /// does not depend on the policy, so a replayed config's bad identity is decoded once, not on
     /// every request it answers.
     refused: HashMap<IdentityKey, Arc<str>>,
+    /// The one derivation running per identity, which every request for it waits on. Removed, in
+    /// the same critical section that caches its outcome, by the derivation itself.
+    inflight: HashMap<IdentityKey, watch::Receiver<Option<Outcome>>>,
 }
 
 /// The per-identity clients, and the trust policy they are built under.
@@ -53,6 +69,9 @@ pub(crate) struct IdentityClients {
     entries: Mutex<Entries>,
     /// Set once the "client injected without its policy" warning has been logged.
     warned_unset_policy: AtomicBool,
+    /// Derivations started, for the single-flight tests.
+    #[cfg(test)]
+    derivations: std::sync::atomic::AtomicUsize,
 }
 
 impl std::fmt::Debug for IdentityClients {
@@ -62,18 +81,26 @@ impl std::fmt::Debug for IdentityClients {
             .field("policy", &self.policy.load().policy)
             .field("clients", &entries.clients.len())
             .field("refused", &entries.refused.len())
+            .field("inflight", &entries.inflight.len())
             .finish_non_exhaustive()
     }
 }
 
-/// What the blocking build produced.
-enum Built {
-    Client(Arc<reqwest::Client>),
-    /// The identity does not decode: cached, since no policy changes that.
-    Refused(Arc<str>),
-    /// The policy could not be realised (e.g. no trust anchors): not cached, the next request
-    /// retries, as the plain client's default does.
-    Failed(anyhow::Error),
+/// Removes an identity's in-flight entry if its derivation ends without recording an outcome (a
+/// panic, or a runtime dropping the blocking task unrun), so later requests start a new one
+/// instead of waiting on a sender that is gone.
+struct InflightGuard {
+    clients: Arc<IdentityClients>,
+    id: IdentityKey,
+    armed: std::cell::Cell<bool>,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        if self.armed.get() {
+            self.clients.entries.lock().inflight.remove(&self.id);
+        }
+    }
 }
 
 impl IdentityClients {
@@ -88,9 +115,11 @@ impl IdentityClients {
 
     /// The client presenting `cert`/`key`/`passphrase`, built on first use.
     ///
-    /// The decode and the build run on the blocking pool: decrypting a key derives it (capped, see
-    /// [`ClientIdentity::from_pem`]) and realising a policy reads the OS trust store, neither of
-    /// which belongs on an async worker.
+    /// One derivation runs per identity however many requests need it, on the blocking pool:
+    /// decrypting a key derives it (capped, see [`ClientIdentity::from_pem`]) and realising a policy
+    /// reads the OS trust store, neither of which belongs on an async worker. The derivation is
+    /// detached and records its own outcome, so a request that is abandoned while it runs does not
+    /// waste it, and a client that opens and abandons requests in a loop starts no more than one.
     ///
     /// `plain_client_injected` says whether the embedder injected a plain upstream client: if it
     /// did but never set the policy, the identity client cannot know that client's trust, uses the
@@ -100,7 +129,7 @@ impl IdentityClients {
     /// The identity does not decode (only a replayed config can carry one that does not: the doors
     /// refuse it), or the trust policy cannot be realised. Neither message carries the key.
     pub(crate) async fn client_for(
-        &self,
+        self: &Arc<Self>,
         cert: &str,
         key: &str,
         passphrase: Option<&str>,
@@ -109,8 +138,8 @@ impl IdentityClients {
         let id = identity_key(cert, key, passphrase);
         for _ in 0..POLICY_RACE_RETRIES {
             let state = self.policy.load_full();
-            {
-                let entries = self.entries.lock();
+            let mut outcome = {
+                let mut entries = self.entries.lock();
                 if let Some(reason) = entries.refused.get(&id) {
                     return Err(anyhow!("{reason}"));
                 }
@@ -119,46 +148,31 @@ impl IdentityClients {
                 {
                     return Ok(Arc::clone(client));
                 }
-            }
-            if state.policy.is_none()
-                && plain_client_injected
-                && !self.warned_unset_policy.swap(true, Ordering::Relaxed)
-            {
-                warn!(
-                    "a proxy stub presents a client certificate, but only an upstream client was \
-                     injected, not its trust policy (ImposterManager::with_outbound_tls); the \
-                     client-certificate connection uses the default trust policy"
-                );
-            }
-            // Owned copies: the blocking task outlives this borrow. A miss only, never per request.
-            let (task_cert, task_key) = (cert.to_owned(), key.to_owned());
-            let task_passphrase = passphrase.map(str::to_owned);
-            let task_state = Arc::clone(&state);
-            let built = tokio::task::spawn_blocking(move || {
-                build(
-                    &task_cert,
-                    &task_key,
-                    task_passphrase.as_deref(),
-                    &task_state,
-                )
-            })
-            .await
-            .context("the client-certificate build task did not finish")?;
-            match built {
-                Built::Failed(e) => return Err(e),
-                Built::Refused(reason) => {
-                    let mut entries = self.entries.lock();
-                    if entries.refused.len() >= MAX_IDENTITY_CLIENTS {
-                        entries.refused.clear();
+                match entries.inflight.get(&id) {
+                    Some(running) => running.clone(),
+                    None => {
+                        let running =
+                            self.start(id, &state, cert, key, passphrase, plain_client_injected);
+                        entries.inflight.insert(id, running.clone());
+                        running
                     }
-                    entries.refused.insert(id, Arc::clone(&reason));
+                }
+            };
+            let outcome = outcome
+                .wait_for(Option::is_some)
+                .await
+                .ok()
+                .and_then(|outcome| outcome.clone());
+            match outcome {
+                Some(Outcome::Client(client)) => return Ok(client),
+                Some(Outcome::Refused(reason) | Outcome::Failed(reason)) => {
                     return Err(anyhow!("{reason}"));
                 }
-                Built::Client(client) => {
-                    if let Some(client) = self.store(id, &state, client) {
-                        return Ok(client);
-                    }
-                    // The policy changed while this client was built: build again under the new one.
+                Some(Outcome::Stale) => {}
+                None => {
+                    return Err(anyhow!(
+                        "the client-certificate build for this proxy did not finish"
+                    ));
                 }
             }
         }
@@ -167,33 +181,90 @@ impl IdentityClients {
         ))
     }
 
+    /// Start the derivation for `id` under `state`, detached. Called with the entries lock held,
+    /// so no second derivation for `id` can start before this one is registered.
+    fn start(
+        self: &Arc<Self>,
+        id: IdentityKey,
+        state: &Arc<PolicyState>,
+        cert: &str,
+        key: &str,
+        passphrase: Option<&str>,
+        plain_client_injected: bool,
+    ) -> watch::Receiver<Option<Outcome>> {
+        if state.policy.is_none()
+            && plain_client_injected
+            && !self.warned_unset_policy.swap(true, Ordering::Relaxed)
+        {
+            warn!(
+                "a proxy stub presents a client certificate, but only an upstream client was \
+                 injected, not its trust policy (ImposterManager::with_outbound_tls); the \
+                 client-certificate connection uses the default trust policy"
+            );
+        }
+        #[cfg(test)]
+        self.derivations.fetch_add(1, Ordering::Relaxed);
+        let (sender, running) = watch::channel(None);
+        // Owned copies: the derivation outlives this request. Once per derivation, not per request.
+        let (cert, key) = (cert.to_owned(), key.to_owned());
+        let passphrase = passphrase.map(str::to_owned);
+        let state = Arc::clone(state);
+        let guard = InflightGuard {
+            clients: Arc::clone(self),
+            id,
+            armed: std::cell::Cell::new(true),
+        };
+        // Detached: dropping the JoinHandle does not cancel a blocking task.
+        drop(tokio::task::spawn_blocking(move || {
+            let built = build(&cert, &key, passphrase.as_deref(), &state);
+            let outcome = guard.clients.finish(id, &state, built);
+            guard.armed.set(false);
+            // No receiver left is fine: the outcome is already recorded.
+            sender.send_replace(Some(outcome));
+        }));
+        running
+    }
+
+    /// Record a derivation's outcome and end its in-flight entry, in one critical section.
+    fn finish(&self, id: IdentityKey, state: &Arc<PolicyState>, built: Outcome) -> Outcome {
+        let mut entries = self.entries.lock();
+        entries.inflight.remove(&id);
+        match built {
+            Outcome::Refused(reason) => {
+                if entries.refused.len() >= MAX_IDENTITY_CLIENTS {
+                    entries.refused.clear();
+                }
+                entries.refused.insert(id, Arc::clone(&reason));
+                Outcome::Refused(reason)
+            }
+            Outcome::Client(client) => match self.store(&mut entries, id, state, client) {
+                Some(client) => Outcome::Client(client),
+                None => Outcome::Stale,
+            },
+            other => other,
+        }
+    }
+
     /// Cache `client`, built under `state`, unless the policy has changed since: then `None`, and
     /// nothing is stored. Checked under the entries lock, which `set_policy` takes after swapping
     /// the policy, so a stale client can neither be stored after the swap nor survive its clear.
     fn store(
         &self,
+        entries: &mut Entries,
         id: IdentityKey,
         state: &Arc<PolicyState>,
         client: Arc<reqwest::Client>,
     ) -> Option<Arc<reqwest::Client>> {
-        let mut entries = self.entries.lock();
         if !Arc::ptr_eq(&self.policy.load(), state) {
             return None;
         }
         if entries.clients.len() >= MAX_IDENTITY_CLIENTS && !entries.clients.contains_key(&id) {
             entries.clients.clear();
         }
-        // A racing request may have built the same client under the same policy; keep the first.
-        let entry = entries
+        entries
             .clients
-            .entry(id)
-            .and_modify(|entry| {
-                if !Arc::ptr_eq(&entry.0, state) {
-                    *entry = (Arc::clone(state), Arc::clone(&client));
-                }
-            })
-            .or_insert_with(|| (Arc::clone(state), Arc::clone(&client)));
-        Some(Arc::clone(&entry.1))
+            .insert(id, (Arc::clone(state), Arc::clone(&client)));
+        Some(client)
     }
 
     #[cfg(test)]
@@ -203,10 +274,10 @@ impl IdentityClients {
 }
 
 /// Decode the identity and build its client under `state`'s policy. Blocking.
-fn build(cert: &str, key: &str, passphrase: Option<&str>, state: &PolicyState) -> Built {
+fn build(cert: &str, key: &str, passphrase: Option<&str>, state: &PolicyState) -> Outcome {
     let identity = match ClientIdentity::from_pem(cert, key, passphrase) {
         Ok(identity) => identity,
-        Err(e) => return Built::Refused(format!("{e:#}").into()),
+        Err(e) => return Outcome::Refused(format!("{e:#}").into()),
     };
     let default_policy;
     let policy = match &state.policy {
@@ -217,28 +288,9 @@ fn build(cert: &str, key: &str, passphrase: Option<&str>, state: &PolicyState) -
         }
     };
     match super::build_upstream_client_presenting(policy, Some(&identity)) {
-        Ok(client) => Built::Client(client),
-        Err(e) => Built::Failed(e),
+        Ok(client) => Outcome::Client(client),
+        Err(e) => Outcome::Failed(format!("{e:#}").into()),
     }
-}
-
-/// SHA-256 over the three strings, each length-prefixed so no two triples share an encoding, and
-/// the passphrase's absence distinct from an empty one.
-fn identity_key(cert: &str, key: &str, passphrase: Option<&str>) -> IdentityKey {
-    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-    for part in [Some(cert), Some(key), passphrase] {
-        match part {
-            Some(text) => {
-                digest.update(&[1]);
-                digest.update(&text.len().to_be_bytes());
-                digest.update(text.as_bytes());
-            }
-            None => digest.update(&[0]),
-        }
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(digest.finish().as_ref());
-    out
 }
 
 #[cfg(test)]
@@ -263,7 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_identity_is_one_client() {
-        let clients = IdentityClients::default();
+        let clients = Arc::new(IdentityClients::default());
         clients.set_policy(skip_verify());
         let (cert, key) = identity();
         let a = clients
@@ -280,7 +332,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_cache_is_bounded() {
-        let clients = IdentityClients::default();
+        let clients = Arc::new(IdentityClients::default());
         clients.set_policy(skip_verify());
         let (cert, key) = identity();
         // Distinct keys by passphrase: an unencrypted key ignores it, but it is part of the key.
@@ -300,7 +352,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_new_policy_drops_the_clients_built_under_the_old_one() {
-        let clients = IdentityClients::default();
+        let clients = Arc::new(IdentityClients::default());
         clients.set_policy(skip_verify());
         let (cert, key) = identity();
         clients
@@ -313,7 +365,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_identity_that_does_not_decode_is_refused_once_and_remembered() {
-        let clients = IdentityClients::default();
+        let clients = Arc::new(IdentityClients::default());
         clients.set_policy(skip_verify());
         for _ in 0..2 {
             let err = clients
@@ -329,7 +381,7 @@ mod tests {
     #[tokio::test]
     async fn a_costly_key_is_refused_fast_on_the_request_path() {
         // A replayed config skips admission, so the request path must cap the KDF itself.
-        let clients = IdentityClients::default();
+        let clients = Arc::new(IdentityClients::default());
         clients.set_policy(skip_verify());
         let (cert, _) = identity();
         for key in [
@@ -355,22 +407,26 @@ mod tests {
     #[tokio::test]
     async fn a_client_built_under_a_replaced_policy_is_not_stored() {
         // The race `store` closes: the policy is replaced while a client is being built.
-        let clients = IdentityClients::default();
+        let clients = Arc::new(IdentityClients::default());
         clients.set_policy(skip_verify());
         let built_under = clients.policy.load_full();
         let client =
             crate::imposter::core::build_upstream_client(&skip_verify()).expect("a client");
         clients.set_policy(skip_verify());
+        let mut entries = clients.entries.lock();
         assert!(
-            clients.store([9; 32], &built_under, client).is_none(),
+            clients
+                .store(&mut entries, [9; 32], &built_under, client)
+                .is_none(),
             "a stale client must not be cached"
         );
+        drop(entries);
         assert_eq!(clients.len(), 0);
     }
 
     #[tokio::test]
     async fn a_client_from_an_old_policy_is_never_served() {
-        let clients = IdentityClients::default();
+        let clients = Arc::new(IdentityClients::default());
         clients.set_policy(skip_verify());
         let (cert, key) = identity();
         let old = clients
@@ -393,6 +449,61 @@ mod tests {
             !Arc::ptr_eq(&old, &new),
             "the old policy's client was served"
         );
+    }
+
+    const CERT: &str = include_str!("../../proxy/testdata/client-identity/client.crt");
+    const PBES2_KEY: &str = include_str!("../../proxy/testdata/client-identity/client.pbes2.key");
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_misses_on_one_identity_derive_it_once() {
+        let clients = Arc::new(IdentityClients::default());
+        clients.set_policy(skip_verify());
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..16 {
+            let clients = Arc::clone(&clients);
+            requests.spawn(async move {
+                clients
+                    .client_for(CERT, PBES2_KEY, Some("rift-test"), false)
+                    .await
+            });
+        }
+        let mut served = Vec::new();
+        while let Some(result) = requests.join_next().await {
+            served.push(result.expect("joined").expect("built"));
+        }
+        assert_eq!(clients.derivations.load(Ordering::Relaxed), 1);
+        assert!(served.iter().all(|c| Arc::ptr_eq(c, &served[0])));
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_request_still_caches_its_derivation() {
+        let clients = Arc::new(IdentityClients::default());
+        clients.set_policy(skip_verify());
+        {
+            let request = clients.client_for(CERT, PBES2_KEY, Some("rift-test"), false);
+            tokio::pin!(request);
+            // One poll starts the derivation; then the request is dropped, as a closed connection
+            // drops its handler.
+            std::future::poll_fn(|cx| {
+                let _ = request.as_mut().poll(cx);
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while clients.len() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the derivation was lost"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        clients
+            .client_for(CERT, PBES2_KEY, Some("rift-test"), false)
+            .await
+            .expect("cached");
+        assert_eq!(clients.derivations.load(Ordering::Relaxed), 1);
+        assert!(clients.entries.lock().inflight.is_empty());
     }
 
     #[test]
