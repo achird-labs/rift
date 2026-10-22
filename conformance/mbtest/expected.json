@@ -185,12 +185,6 @@
       "note": "an unreachable proxy upstream answers 502 (proxy.md); #1569 item 3 tracks the decision"
     },
     {
-      "id": "api/http/httpProxyStubTest.js::http proxy stubs should handle the connect method",
-      "class": "bug",
-      "issue": "#1595",
-      "note": "a CONNECT request through an https imposter's proxy answers 400; Mountebank tunnels it (Mountebank #600)"
-    },
-    {
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should match entire object graphs",
       "class": "bug",
       "issue": "#1596",
