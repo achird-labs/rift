@@ -120,8 +120,9 @@ A document fetched over the network is not written by someone who already has ac
 machine running Rift, so two things a local `--configfile` may do are refused for `https:`
 sources:
 
-- **`<% include 'path' %>` and `<%- stringify('path') %>`** — both read a local file. Refused with
-  an error naming the tag.
+- **`include`, `stringify` and `inject`, in every spelling** (`<% include 'path' %>`,
+  `<%- include('path') %>`, `<%- stringify(filename, 'path') %>`, ...) — each reads a local file.
+  Refused with an error naming the tag.
 - **`_rift.script` `file:` references** — refused, as they are for admin-API-created imposters
   without `--scripts-dir`.
 - **`require()` outside `--scripts-dir`** — a script in a fetched imposter loads modules only from

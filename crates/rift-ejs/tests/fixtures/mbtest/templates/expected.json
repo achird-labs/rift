@@ -1,0 +1,47 @@
+{
+  "imposters": [
+    {
+      "port": 5555,
+      "protocol": "http",
+      "name": "origin",
+      "stubs": [
+        {
+          "responses": [
+            {
+              "inject": "(request, state, logger) => {\n    logger.info('origin called');\n    state.requests = state.requests || 0;\n    state.requests += 1;\n    return {\n      headers: {\n        'Content-Type': 'application/json'\n      },\n      body: JSON.stringify({ count: state.requests })\n    };\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "port": 4546,
+      "protocol": "http",
+      "name": "proxy",
+      "stubs": [
+        {
+          "responses": [
+            {
+              "inject": "(request, state) => {\n    const count = state.requests ? Object.keys(state.requests).length : 0;\n\n    return {\n        body: `There have been ${count} proxied calls`\n    };\n}"
+            }
+          ],
+          "predicates": [
+            {
+              "equals": {
+                "method": "GET",
+                "path": "/counter"
+              }
+            }
+          ]
+        },
+        {
+          "responses": [
+            {
+              "inject": "(request, state, logger, callback) => {\n    const cacheKey = request.method + ' ' + request.path;\n\n    if (typeof state.requests === 'undefined') {\n        state.requests = {};\n    }\n\n    if (state.requests[cacheKey]) {\n        logger.info('Using previous response');\n        callback(state.requests[cacheKey]);\n    }\n\n    const http = require('http'),\n        options = {\n            method: request.method,\n            hostname: 'localhost',\n            port: 5555,\n            path: request.path,\n            headers: request.headers\n        },\n        httpRequest = http.request(options, response => {\n            let body = '';\n            response.setEncoding('utf8');\n            response.on('data', (chunk) => {\n                body += chunk;\n            });\n            response.on('end', () => {\n                const stubResponse = {\n                        statusCode: response.statusCode,\n                        headers: response.headers,\n                        body\n                    };\n                logger.info('Successfully proxied: ' + JSON.stringify(stubResponse));\n                state.requests[cacheKey] = stubResponse;\n                callback(stubResponse);\n            });\n        });\n    httpRequest.end();\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

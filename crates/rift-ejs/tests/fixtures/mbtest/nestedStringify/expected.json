@@ -1,0 +1,17 @@
+{
+  "imposters": [
+    {
+      "protocol": "http",
+      "port": 4542,
+      "stubs": [
+        {
+          "responses": [
+            {
+              "inject": "(request, state, logger) => {\n  return {\n    headers: {\n      'Content-Type': 'application/json'\n    },\n    body: '{\\n   \\\"success\\\": true\\n}'\n  };\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

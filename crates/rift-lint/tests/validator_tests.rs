@@ -2372,6 +2372,18 @@ fn an_included_file_is_linted_as_part_of_the_document() {
     assert!(!has_code(&r, "E001"), "{:?}", codes(&r));
 }
 
+// Issue #1604: mbTest's `imposters.ejs` uses `<%- include('f') -%>` and
+// `stringify(filename, 'f')`, which the shared renderer now evaluates, so the linter renders it as
+// the engine does instead of reporting the tags (E049). The fixture tree is rift-ejs's copy.
+#[test]
+fn mbtest_imposters_ejs_renders_without_an_ejs_error() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../rift-ejs/tests/fixtures/mbtest/imposters/imposters.ejs");
+    let r = lint_file(&path, &opts());
+    assert!(!has_code(&r, "E049"), "{:?}", r.issues);
+    assert!(!has_code(&r, "E001"), "{:?}", r.issues);
+}
+
 // Includes and substitutions move lines and columns, so a finding that names one says it counts in
 // the rendered text rather than pointing at the wrong place in the file.
 #[test]

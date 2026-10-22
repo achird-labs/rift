@@ -980,10 +980,12 @@ mod tests {
         assert_eq!(with_var.unwrap()[0].port, Some(8080));
     }
 
-    /// Issue #1092: the tag the TLS docs used before. It matches neither `include` nor `stringify`;
-    /// it used to be stripped, leaving the key silently empty, and is now refused (issue #1095).
+    /// Issue #1092: the tag the TLS docs used before. It used to be stripped, leaving the key
+    /// silently empty, then refused (issue #1095). It is EJS's include function, which Mountebank
+    /// evaluates, so it now inlines the file as it is (issue #1604) — unescaped, so a multi-line
+    /// key breaks the JSON string, as it does in Mountebank. `stringify` is the form for a key.
     #[test]
-    fn a_call_style_include_tag_is_refused_not_stripped() {
+    fn a_call_style_include_inlines_the_file_unescaped() {
         let dir = tempfile::tempdir().unwrap();
         write(
             dir.path(),
@@ -992,12 +994,9 @@ mod tests {
         );
         let path = dir.path().join("cfg.json");
         let content = r#"{"key": "<%- include('server.key') %>"}"#;
-        let err = preprocess_ejs(content, &path, EjsFileAccess::Allowed)
-            .expect_err("an unsupported tag must fail the load")
-            .to_string();
-        assert!(
-            err.contains("`<%- include('server.key') %>`") && err.contains("cfg.json:1"),
-            "the error must name the tag and where it is: {err}"
+        assert_eq!(
+            preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap(),
+            "{\"key\": \"-----BEGIN KEY-----\nabc\n-----END KEY-----\n\"}"
         );
         let content = r#"{"key": "<%- stringify('server.key') %>"}"#;
         assert_eq!(
@@ -1101,9 +1100,12 @@ mod tests {
         assert_eq!(
             err,
             "unsupported EJS tag `<%= port || 4545 %>` at dir/imposters.json:3, so the file was \
-             not loaded. Only `<%= process.env.VAR %>`, `<%= process.env.VAR || 'default' %>`, \
-             `<% include 'file' %>` and `<%- stringify('file') %>` are evaluated. If the tag is \
-             meant literally, load the file with --no-parse (a --configfile or file: source)."
+             not loaded. Only `<%= process.env.VAR %>` and `<%- process.env.VAR %>` (each with an \
+             optional `|| 'default'`), `<% include file %>`, `<%- include('file') %>`, \
+             `<%- stringify(filename, 'file') %>` (with an optional data object, or as \
+             `stringify('file')` or `inject(...)`) and, in a stringified file, `<%- data.key %>` \
+             are evaluated. If the tag is meant literally, load the file with --no-parse (a \
+             --configfile or file: source)."
         );
     }
 
@@ -1204,14 +1206,18 @@ mod tests {
         );
     }
 
-    /// An env var's value is content: a `<%` in it is neither refused nor substituted again.
+    /// An env var's value is content: a `<%` in it is neither refused nor substituted again. The
+    /// raw `<%-` inserts it as it is; `<%=` HTML-escapes it, as EJS does (issue #1604).
     #[test]
     fn a_tag_inside_an_env_value_is_left_as_content() {
         unsafe { std::env::set_var("RIFT_TEST_1095_ENV", "<%= not a tag %>") };
-        let content = r#"{"b": "<%= process.env.RIFT_TEST_1095_ENV %>"}"#;
-        let result = preprocess_ejs(content, &PathBuf::from("c.json"), EjsFileAccess::Allowed);
+        let raw = r#"{"b": "<%- process.env.RIFT_TEST_1095_ENV %>"}"#;
+        let escaped = r#"{"b": "<%= process.env.RIFT_TEST_1095_ENV %>"}"#;
+        let raw = preprocess_ejs(raw, &PathBuf::from("c.json"), EjsFileAccess::Allowed);
+        let escaped = preprocess_ejs(escaped, &PathBuf::from("c.json"), EjsFileAccess::Allowed);
         unsafe { std::env::remove_var("RIFT_TEST_1095_ENV") };
-        assert_eq!(result.unwrap(), r#"{"b": "<%= not a tag %>"}"#);
+        assert_eq!(raw.unwrap(), r#"{"b": "<%= not a tag %>"}"#);
+        assert_eq!(escaped.unwrap(), r#"{"b": "&lt;%= not a tag %&gt;"}"#);
     }
 
     /// A stringified file is rendered before it is escaped, as Mountebank's formatter does: its env
@@ -1256,25 +1262,21 @@ mod tests {
         );
     }
 
+    /// Stringifies nest, as Mountebank's do (issue #1604; refused before it): the inner file is
+    /// escaped once into the outer one, and the outer one once more into the document.
     #[test]
-    fn a_stringify_inside_a_stringified_file_is_refused_with_a_reason() {
+    fn a_stringify_inside_a_stringified_file_is_rendered() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("inner.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("inner.txt"), "\"x\"").unwrap();
         std::fs::write(
             dir.path().join("outer.txt"),
-            "<%- stringify('inner.txt') %>",
+            "'<%- stringify('inner.txt') %>'",
         )
         .unwrap();
         let content = r#"{"a": "<%- stringify('outer.txt') %>"}"#;
-        let err = preprocess_ejs(content, &dir.path().join("c.json"), EjsFileAccess::Allowed)
-            .expect_err("nested stringify is not evaluated")
-            .to_string();
-        assert!(
-            err.starts_with(
-                "unsupported EJS tag `<%- stringify('inner.txt') %>` at outer.txt:1, stringified at "
-            ) && err.contains("(a stringify inside a stringified file is not evaluated)"),
-            "{err}"
-        );
+        let rendered = preprocess_ejs(content, &dir.path().join("c.json"), EjsFileAccess::Allowed)
+            .expect("nested stringify is evaluated");
+        assert_eq!(rendered, r#"{"a": "'\\\"x\\\"'"}"#);
     }
 
     /// Included text is templated like the document itself, so an unsupported tag there is refused
@@ -1344,23 +1346,16 @@ mod tests {
         );
     }
 
+    /// Includes nest, as EJS's do (issue #1604; refused before it).
     #[test]
-    fn a_nested_include_is_refused_with_a_reason() {
+    fn a_nested_include_is_rendered() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("common.json"), "{}").unwrap();
         std::fs::write(dir.path().join("part.json"), "<% include 'common.json' %>").unwrap();
         let content = "[<% include 'part.json' %>,\n<% include 'common.json' %>]";
-        let err = preprocess_ejs(content, &dir.path().join("c.json"), EjsFileAccess::Allowed)
-            .expect_err("a nested include is not evaluated")
-            .to_string();
-        assert!(
-            err.starts_with(
-                "unsupported EJS tag `<% include 'common.json' %>` at part.json:1, included at "
-            ) && err.contains(
-                "c.json:1 (an include inside an included or stringified file is not evaluated),"
-            ),
-            "{err}"
-        );
+        let rendered = preprocess_ejs(content, &dir.path().join("c.json"), EjsFileAccess::Allowed)
+            .expect("a nested include is evaluated");
+        assert_eq!(rendered, "[{},\n{}]");
     }
 
     #[test]
@@ -1416,9 +1411,9 @@ mod tests {
         assert_eq!(
             err,
             "unsupported EJS tag `<% x %>` at https://host/imposters.json:1, so the document was \
-             not loaded. Only `<%= process.env.VAR %>` and `<%= process.env.VAR || 'default' %>` \
-             are evaluated in a fetched document, and it is always preprocessed: remove the tag \
-             at the source."
+             not loaded. Only `<%= process.env.VAR %>` and `<%- process.env.VAR %>` (each with an \
+             optional `|| 'default'`) are evaluated in a fetched document, and it is always \
+             preprocessed: remove the tag at the source."
         );
     }
 

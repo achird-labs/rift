@@ -1,0 +1,38 @@
+{
+  "imposters": [
+    {
+      "protocol": "http",
+      "port": 4542,
+      "stubs": [
+        {
+          "responses": [
+            {
+              "is": {
+                "headers": {
+                  "Content-Type": "application/json"
+                },
+                "body": "{\n    \"success\": true,\n    \"injectedValue\": \"1111\"\n}"
+              }
+            },
+            {
+              "is": {
+                "headers": {
+                  "Content-Type": "application/json"
+                },
+                "body": "{\n    \"success\": true,\n    \"injectedValue\": \"2222\"\n}"
+              }
+            },
+            {
+              "is": {
+                "headers": {
+                  "Content-Type": "application/json"
+                },
+                "body": "{\n    \"success\": true,\n    \"injectedValue\": \"3333\"\n}"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
