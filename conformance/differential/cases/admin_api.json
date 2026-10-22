@@ -615,6 +615,123 @@
       ]
     },
     {
+      "name": "admin_api: Get imposters with removeProxies alone is the full view (#1614)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              },
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:9999"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters?removeProxies=true"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Get imposters with replayable=TRUE is case-insensitive (#1614)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              },
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:9999"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters?replayable=TRUE"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Get imposters with a look-alike flag name is ignored (#1614)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              },
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:9999"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters?notreplayable=true"
+        }
+      ]
+    },
+    {
       "name": "admin_api: Get single imposter with both query params",
       "steps": [
         {

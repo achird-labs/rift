@@ -70,6 +70,12 @@ record.
 - **Recorded request `timestamp` now uses Mountebank's format**, millisecond precision with a `Z`
   suffix (`2026-10-17T10:00:00.123Z`), instead of microseconds and `+00:00`. Older values are still
   accepted wherever a journal is read back (#1610).
+- **Replayable exports, `DELETE /imposters`, the C-ABI export and `--datadir` files no longer
+  print `"recordMatches": false`** (#1613). A default is not printed, and Mountebank never prints
+  the key; `recordMatches: true` still prints so an export re-posts unchanged, and
+  `recordRequests` stays always printed, as in Mountebank. Old bytes carrying the key still decode.
+  rift-cluster bootstrap document digests change once on the vendor bump.
+
 - **With `--datadir`, recorded requests survive a restart**, as in Mountebank (#1608). An imposter
   with `recordRequests: true` keeps them in `<port>.requests.jsonl`, written behind about once a
   second and on a graceful stop, so a crash can lose the last ~2 seconds (Mountebank's write is
@@ -354,6 +360,10 @@ record.
   and now fails. A body that is not XML still never runs the selector. Embedders:
   `ExtractionMethod::extract`/`matches`, `LookupKey::extract`, `extract_xpath`,
   `extract_xpath_with_ns` and `apply_copy_behaviors` now return `Result<_, XPathSelectorError>`.
+- **`GET /imposters?removeProxies=true` without `replayable` returns the full imposters, proxies
+  removed** (#1614), as Mountebank does (`list: !(replayable || removeProxies)`), instead of the
+  summary. The flag parsing the issue describes (exact names, case-insensitive `true`) landed with
+  #1591; #1614 pins it for every route.
 - **`DELETE /imposters` and `DELETE /imposters/:id` honour `replayable` and `removeProxies`** (#1591),
   with Mountebank's defaults: `DELETE /imposters` answers the replayable export unless
   `replayable=false`, `DELETE /imposters/:id` answers the detail unless `replayable=true`. The

@@ -322,6 +322,19 @@ fn imposters_value(
             .map(|i| replayable_value(i, params.remove_proxies))
             .collect::<Result<Vec<_>, _>>();
         render(configs.map(|v| serde_json::json!({ "imposters": v })))
+    } else if params.remove_proxies {
+        // `removeProxies` without `replayable` is the full imposters with proxies stripped, the
+        // projection `GET /imposters/:port` serves: Mountebank lists only when neither flag is set
+        // (`list: !(replayable || removeProxies)`, issue #1614).
+        let details = imposters
+            .iter()
+            .filter_map(|i| {
+                i.config
+                    .port
+                    .map(|port| imposter_detail(i, port, base_url, true))
+            })
+            .collect::<Vec<_>>();
+        render(serde_json::to_value(details).map(|v| serde_json::json!({ "imposters": v })))
     } else if params.list {
         // Mountebank-compatible abbreviated listing: port, protocol, name, numberOfRequests, _links
         let entries: Vec<ImposterListEntry> = imposters
@@ -3289,6 +3302,27 @@ mod https_view_tests {
             serde_json::json!({"protocol": "https", "ciphers": "ecdhe-rsa-aes128-gcm-sha256"}),
         );
         assert_eq!(json["ciphers"], "ECDHE-RSA-AES128-GCM-SHA256");
+    }
+
+    // #1613: a default `recordMatches` is not printed in a replayable view; `recordRequests` is.
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn replayable_views_do_not_print_a_default_record_matches() {
+        let manager = Arc::new(ImposterManager::new());
+        let port = manager
+            .create_imposter(config(serde_json::json!({"protocol": "http", "stubs": []})))
+            .await
+            .expect("create");
+        let one =
+            body_json(handle_get(port, Some("replayable=true"), BASE, Arc::clone(&manager)).await)
+                .await;
+        let list =
+            body_json(handle_list(Arc::clone(&manager), Some("replayable=true"), BASE).await).await;
+        let listed = list["imposters"][0].clone();
+        for view in [one, listed] {
+            assert!(view.get("recordMatches").is_none(), "{view}");
+            assert_eq!(view["recordRequests"], false, "{view}");
+        }
     }
 
     #[serial_test::serial(auto_assigned_port)]
