@@ -51,6 +51,8 @@ record.
 
 ### Changed
 
+- **A `proxy` stub no longer follows upstream redirects** (#1594). It relays the `30x` and records it, as Mountebank does: the caller gets the redirect and its `Location` untouched, the redirect target is never contacted, and a `proxyOnce` recording holds the redirect rather than the target's answer. Anyone who relied on Rift following the redirect needs a second proxy stub for the `Location` target.
+
 - **A throwing `inject` answers `500`, as in Mountebank** (#1581). A response or predicate `inject`
   that throws at request time used to answer `400`. It now answers `500` and carries Mountebank's
   `data`, the thrown error's message. The `--allowInjection` refusal is still `400`.
