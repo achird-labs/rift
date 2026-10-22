@@ -854,7 +854,7 @@ impl Imposter {
                         }),
                         ip: (!dry_run).then(|| client_addr.ip().to_string()),
                         form: if dry_run {
-                            Some(HashMap::new())
+                            Some(crate::util::OrderedMap::default())
                         } else {
                             crate::imposter::Imposter::request_form(headers, body)
                                 .map(|form| crate::util::comma_joined(&form))

@@ -305,6 +305,13 @@ the document stays readable (see [Predicates](predicates.md#xpath-predicates)). 
 - Rift lowercases ASCII letters only, as every case-insensitive comparison in Rift does; Mountebank
   lowercases any letter.
 
+## Case-insensitive JSONPath
+
+A JSONPath predicate whose keys are not case sensitive matches key names, and (unless it is
+`matches` or `caseSensitive: true`) string values, without regard to case, as Mountebank's
+lowercasing of the body and the selector does (see [Predicates](predicates.md#jsonpath-predicates)).
+Rift lowercases ASCII letters only, as for XPath; Mountebank also folds `É` and every other letter.
+
 ## An XPath selector that returns a string
 
 An XPath selector that evaluates to a string, such as `string(//a)`, works in Rift's predicates and `copy`. Mountebank fails the request with a `500` `TypeError` (`result.map is not a function`): its XPath code handles node sets only.
@@ -337,7 +344,8 @@ Rift applies `keyCaseSensitive` whenever it is set, on every operator; Mounteban
   `caseSensitive: true, keyCaseSensitive: false` compares keys exactly there and relaxes them in Rift.
 - With a `jsonpath` selector that has an upper-case letter, `keyCaseSensitive: true` still matches in
   Rift; in Mountebank it never matches (the selector keeps its case while the body's keys are
-  lowercased).
+  lowercased). The mirror image holds too: with `keyCaseSensitive: true` and a lower-case selector
+  (`$..title`), Mountebank still matches a `Title` key, because it lowercases the body; Rift does not.
 
 Header names are compared against the Title-Cased names the listener stores (`X-Tenant`), because
 Rift cannot see the spelling the client sent (see [Request header names](#request-header-names)).
@@ -426,11 +434,12 @@ the same imposter.
 
 Every https view prints the keys Mountebank prints: `mutualAuth`, `rejectUnauthorized` and `ca`
 (`null` when unset, otherwise as posted, so a one-element array stays an array), and `ciphers`
-upper-cased when set. That includes the create answer, the detail and `?replayable=true`. Three
+upper-cased when set. That includes the create answer, the detail and `?replayable=true`. Four
 things differ:
 
 - The default certificate is not printed. When an https imposter has no `key` and `cert`, Mountebank prints its bundled public certificate and key. Rift's fallback is the operator's `--default-tls-cert`/`--default-tls-key`, a secret that would leak through the admin API and every `rift save`, or a certificate generated for that imposter, which an export would turn into stored config. An export without `key` and `cert` re-imports to the same fallback.
 - `ciphers` is stored and printed but not applied. Mountebank hands it to OpenSSL as a cipher list; Rift's TLS listener uses rustls' default suites, and the imposter reports the key in `_rift.warnings`.
+- A client certificate validated against `ca` (`rejectUnauthorized: true`) must be X.509 v3. Mountebank (OpenSSL) also validates a v1 client certificate; Rift's chain validation is webpki's, which refuses a v1 end-entity, and Rift does not replace it with its own path validation. A v1 certificate is accepted as the imposter's own `cert`, and under `mutualAuth` alone a client may present one.
 - Client-auth settings that cannot take effect are refused where Mountebank accepts them: `ca` or `rejectUnauthorized` without `mutualAuth: true`, `ca` without `rejectUnauthorized`, and the other combinations listed under [TLS](../features/tls.md#mutual-tls-mtls). So a Mountebank export carrying `ca` with `mutualAuth: false` does not import into Rift.
 
 ## An inherited `--host` is not stored with the imposter

@@ -20,8 +20,12 @@ pub(crate) use rift_types::wire::{multi_value_headers, single_value_headers};
 /// case-sensitive — `?Q=1&q=2` is two parameters — so nothing is merged. Decoding accepts either
 /// shape for any key, so journals and exports written before the array form still read.
 pub(crate) mod multi_value_query {
+    use indexmap::IndexMap;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::HashMap;
+
+    // The default (SipHash) hasher: the journal is long-lived and keyed by request input, which the
+    // HashDoS policy in `util::fastmap` reserves SipHash for.
+    pub type Query = IndexMap<String, Vec<String>>;
 
     #[derive(Serialize)]
     #[serde(untagged)]
@@ -30,18 +34,18 @@ pub(crate) mod multi_value_query {
         Many(&'a [String]),
     }
 
-    pub fn serialize<S: Serializer>(
-        query: &HashMap<String, Vec<String>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.collect_map(query.iter().filter_map(|(key, values)| {
-            let shown = match values.as_slice() {
-                [] => return None,
-                [one] => Shown::One(one),
-                many => Shown::Many(many),
-            };
-            Some((key, shown))
-        }))
+    pub fn serialize<S: Serializer>(query: &Query, serializer: S) -> Result<S::Ok, S::Error> {
+        // Request order, array-index keys first, as a JS object lists them (issue #1596).
+        serializer.collect_map(crate::util::js_key_order(query).into_iter().filter_map(
+            |(key, values)| {
+                let shown = match values.as_slice() {
+                    [] => return None,
+                    [one] => Shown::One(one),
+                    many => Shown::Many(many),
+                };
+                Some((key, shown))
+            },
+        ))
     }
 
     #[derive(Deserialize)]
@@ -51,10 +55,8 @@ pub(crate) mod multi_value_query {
         Many(Vec<String>),
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<HashMap<String, Vec<String>>, D::Error> {
-        let raw = HashMap::<String, OneOrMany>::deserialize(deserializer)?;
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Query, D::Error> {
+        let raw = IndexMap::<String, OneOrMany>::deserialize(deserializer)?;
         Ok(raw
             .into_iter()
             .map(|(key, value)| {
@@ -80,7 +82,7 @@ pub struct RecordedRequest {
     /// is a string and a repeated key an array, as Mountebank prints `requests[].query`; a journal
     /// written when Rift comma-joined a repeated key still decodes, its value as one string.
     #[serde(with = "multi_value_query")]
-    pub query: HashMap<String, Vec<String>>,
+    pub query: multi_value_query::Query,
     #[serde(default, with = "multi_value_headers")]
     pub headers: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -788,8 +790,27 @@ fn validate_predicate(predicate: &Predicate) -> Result<(), String> {
     use crate::behaviors::{validate_jsonpath_selector, validate_xpath_selector};
 
     match &predicate.parameters.selector {
-        Some(PredicateSelector::JsonPath { selector }) => validate_jsonpath_selector(selector)
-            .map_err(|e| format!("predicate `jsonpath` selector `{selector}` is invalid: {e}"))?,
+        Some(PredicateSelector::JsonPath { selector }) => {
+            validate_jsonpath_selector(selector).map_err(|e| {
+                format!("predicate `jsonpath` selector `{selector}` is invalid: {e}")
+            })?;
+            // Unless keys are case sensitive the matcher runs the lowercased selector (issue
+            // #1601). As for XPath, one that compiles only as written is warned about, not refused.
+            let case_sensitive = predicate.parameters.case_sensitive.unwrap_or(false);
+            let folds = !predicate
+                .parameters
+                .key_case_sensitive
+                .unwrap_or(case_sensitive);
+            if folds
+                && let Some(e) =
+                    validate_jsonpath_selector(&crate::behaviors::fold_selector(selector)).err()
+            {
+                tracing::warn!(
+                    "predicate `jsonpath` selector `{selector}` does not compile once lowercased \
+                     for a key-case-insensitive match ({e}); it selects nothing"
+                );
+            }
+        }
         Some(PredicateSelector::XPath { selector, .. }) => {
             validate_xpath_selector(selector)
                 .map_err(|e| format!("predicate `xpath` selector `{selector}` is invalid: {e}"))?;
@@ -800,7 +821,7 @@ fn validate_predicate(predicate: &Predicate) -> Result<(), String> {
                 && crate::imposter::predicates::folds_xpath_names(&predicate.operation);
             if folds
                 && let Some(e) =
-                    validate_xpath_selector(&crate::behaviors::fold_xpath_selector(selector)).err()
+                    validate_xpath_selector(&crate::behaviors::fold_selector(selector)).err()
             {
                 tracing::warn!(
                     "predicate `xpath` selector `{selector}` does not compile once lowercased for \
@@ -5942,7 +5963,7 @@ mod tests {
             request_from: "127.0.0.1:1234".to_string(),
             method: "GET".to_string(),
             path: "/x".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             mode: ResponseMode::Text,
@@ -5988,7 +6009,7 @@ mod tests {
             request_from: "127.0.0.1:1234".to_string(),
             method: "POST".to_string(),
             path: "/x".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: Some("hello".to_string()),
             mode: ResponseMode::Text,
@@ -6015,7 +6036,7 @@ mod tests {
             request_from: "127.0.0.1:1234".to_string(),
             method: "POST".to_string(),
             path: "/x".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: Some("//4A".to_string()), // base64 of [0xFF, 0xFE, 0x00]
             mode: ResponseMode::Binary,
@@ -6041,7 +6062,7 @@ mod tests {
             request_from: "127.0.0.1:1234".to_string(),
             method: "POST".to_string(),
             path: "/x".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: Some("hello".to_string()),
             mode: ResponseMode::Text,
@@ -6830,5 +6851,58 @@ mod caller_address_error_tests {
                 .is_caller_address_error()
         );
         assert!(!ImposterError::PortInUse(8080).is_caller_address_error());
+    }
+}
+
+#[cfg(test)]
+mod recorded_query_order_tests {
+    use super::RecordedRequest;
+    use serde_json::json;
+
+    fn recorded(query: &str) -> RecordedRequest {
+        let mut req: RecordedRequest = serde_json::from_value(json!({
+            "requestFrom": "127.0.0.1:1", "method": "GET", "path": "/",
+            "query": {}, "headers": {}, "timestamp": "t"
+        }))
+        .expect("recorded request");
+        req.query = crate::util::parse_query_string(query).into_iter().collect();
+        req
+    }
+
+    fn query_text(req: &RecordedRequest) -> String {
+        let text = serde_json::to_string(req).expect("serializes");
+        let start = text.find("\"query\":").expect("query") + "\"query\":".len();
+        let end = text[start..].find("},").expect("end") + start + 1;
+        text[start..end].to_string()
+    }
+
+    // Issue #1596: the journal lists a query in request order, repeated key at its first position.
+    #[test]
+    fn the_journal_keeps_request_order() {
+        assert_eq!(
+            query_text(&recorded("b=1&a=2&c=3&a=5")),
+            r#"{"b":"1","a":["2","5"],"c":"3"}"#
+        );
+    }
+
+    // Issue #1596: array-index keys first, ascending, as Mountebank's `JSON.stringify` prints them.
+    #[test]
+    fn the_journal_lists_integer_keys_first_as_a_js_object_does() {
+        assert_eq!(
+            query_text(&recorded("b=1&10=x&2=y&a=3")),
+            r#"{"2":"y","10":"x","b":"1","a":"3"}"#
+        );
+    }
+
+    // The wire shape is unchanged, so a journal written in any key order still decodes.
+    #[test]
+    fn a_journal_in_any_key_order_decodes() {
+        let req: RecordedRequest = serde_json::from_value(json!({
+            "requestFrom": "x", "method": "GET", "path": "/", "headers": {}, "timestamp": "t",
+            "query": {"z": "1", "a": ["2", "3"]}
+        }))
+        .expect("decodes");
+        assert_eq!(req.query["a"], ["2", "3"]);
+        assert_eq!(req.query["z"], ["1"]);
     }
 }

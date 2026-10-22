@@ -297,6 +297,14 @@ A leading `$` is optional. A selector that does not start with `$` is treated as
 `user.name` is normalized to `$.user.name`, and `[0]` to `$[0]`. This applies wherever a `jsonpath`
 selector is used — predicates and the `copy` behavior's `jsonpath` extraction alike.
 
+A predicate's selector matches key names without regard to case, as in Mountebank: `$..TITLE`
+selects `{"title": …}` and `$.book.title` selects `{"Book": {"Title": …}}`. When two keys differ
+only in case, the later one wins. With `caseSensitive` false (the default) the selector's string
+literals are folded too, so `$[?(@.n=='A')]` finds `"n": "a"` as well as `"n": "A"` — except
+under `matches`, which sees the values as written. `keyCaseSensitive: true`, or `caseSensitive:
+true` without `keyCaseSensitive: false`, keeps key names exact. The `copy` and `lookup` behaviors and proxy `predicateGenerators` select
+from the body as written, as Mountebank does.
+
 ### Mountebank (jsonpath-plus) shorthands
 
 Mountebank evaluates JSONPath with the jsonpath-plus library, which accepts two spellings the

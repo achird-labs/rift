@@ -4898,7 +4898,7 @@ mod tests {
             request_from: "127.0.0.1".to_string(),
             method: "GET".to_string(),
             path: path.to_string(),
-            query: std::collections::HashMap::new(),
+            query: Default::default(),
             headers: std::collections::HashMap::new(),
             body: None,
             timestamp: "2026-01-01T00:00:00Z".to_string(),

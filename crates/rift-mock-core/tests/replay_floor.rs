@@ -256,15 +256,17 @@ const LEDGER: &[(&str, &str, usize)] = &[
         "impl Deserialize",
         0,
     ),
+    // #1601: `FoldJson` (one Visitor, three `?`) parses a *request body* into the folded
+    // JSONPath view at serve time. It never decodes a config, so it cannot refuse stored bytes.
     (
         "crates/rift-mock-core/src/behaviors/extraction.rs",
         "impl Visitor",
-        0,
+        1,
     ),
     (
         "crates/rift-mock-core/src/behaviors/extraction.rs",
         "decode fn `?`",
-        0,
+        3,
     ),
     (
         "crates/rift-mock-core/src/behaviors/extraction.rs",

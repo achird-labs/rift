@@ -242,10 +242,23 @@ record.
   malformed-chunk fault (`MALFORMED_RESPONSE_CHUNK`) had the same defect. A reset and an empty
   response still act on the socket.
 
+- **Scripts and recorded requests see query and form keys in the order the client sent them**
+  (#1596): `JSON.stringify(request.query)` in an inject, `MB_REQUEST` for a `shellTransform`, and
+  `requests[].query` in `GET /imposters/:port` used to list keys in an arbitrary order that changed
+  from request to request; they now match Mountebank. As in a JS object, integer-like keys (`?2=y`)
+  come first, ascending. `MB_REQUEST`'s own keys are in Mountebank's order too, where they were
+  sorted.
 - **An imposter answers `CONNECT` with a tunnel back into itself** (#1595), as Mountebank does,
   instead of forwarding the CONNECT to its proxy origin. A client using an `http` or `https` imposter
   as its proxy now reaches the imposter's stubs. The CONNECT target is never contacted, and the
   CONNECT itself is not matched, recorded or counted.
+- **A JSONPath predicate matches key names case-insensitively by default** (#1601), as Mountebank
+  does: `$..TITLE` finds `title` and `$.book.title` finds `Book.Title`, for every operator. Unless
+  `keyCaseSensitive` (which defaults to `caseSensitive`) is true, the selector is lowercased and selects from a view
+  of the body whose keys (and, except under `matches`, string values) are lowercased; of two keys
+  that differ only in case, the later wins. Behaviour change: a `matches` predicate whose filter
+  literal has upper case (`$[?(@.n=='A')]`) no longer selects an upper-case value, as in
+  Mountebank, and `exists: false` on a differently cased key no longer holds.
 
 - **An `async` inject is awaited, and a callback from a promise or a timer is honoured** (#1593).
   An `async` inject served an empty `200` with no error, because the script engine never ran its
@@ -260,6 +273,14 @@ record.
   `inject`, `decorate` and `wait`. An `async` decorate waits for its timers. There is still no
   `process`, `Buffer` or Node core module, by decision; see
   `docs/mountebank/differences.md#scripts-run-in-an-ecmascript-sandbox-not-node`.
+- **X.509 v1 certificates** (#1599). An https imposter accepts a v1 `cert` with its `key`, as
+  Mountebank does (its own default certificate and mbTest's fixtures are v1, and `openssl x509
+  -req` still emits v1); creation used to answer `400 ... (cert/key mismatch?):
+  UnsupportedCertVersion`. The key is still checked against the certificate, and the error now
+  says "mismatch" only when the key really does not match. Under bare `mutualAuth` a client may
+  present a v1 certificate; its handshake signature is still verified against the certificate's
+  key. Under `rejectUnauthorized` a client certificate must still be v3 (see
+  [Differences](docs/mountebank/differences.md#an-https-imposters-tls-keys)).
 
 - **`rift-lint` agrees with the engine and Mountebank on behaviors** (#1587), following #1582.
   `E035` now flags a `null` `repeat` on the response or in an object-form block, as well as `0`. A

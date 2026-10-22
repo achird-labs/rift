@@ -861,7 +861,7 @@ mod tests {
             path: "/test".to_string(),
             headers: HashMap::new(),
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 
@@ -901,7 +901,7 @@ mod tests {
             path: "/api/test".to_string(),
             headers: HashMap::new(),
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 
@@ -946,7 +946,7 @@ mod tests {
             path: "/test".to_string(),
             headers: headers.clone(),
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 
@@ -995,7 +995,7 @@ mod tests {
             path: "/test".to_string(),
             headers: headers1,
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 
@@ -1015,7 +1015,7 @@ mod tests {
             path: "/test".to_string(),
             headers: headers2,
             body: json!({}),
-            query: HashMap::new(),
+            query: Default::default(),
             path_params: HashMap::new(),
         };
 
@@ -1054,7 +1054,7 @@ mod tests {
                 path: "/cache-test".to_string(),
                 headers: HashMap::new(),
                 body: json!({}),
-                query: HashMap::new(),
+                query: Default::default(),
                 path_params: HashMap::new(),
             };
 
@@ -1097,7 +1097,7 @@ mod tests {
                 path: "/api/orders".to_string(),
                 headers,
                 body: serde_json::Value::Null,
-                query: HashMap::from([("page".to_string(), "2".to_string())]),
+                query: crate::util::OrderedMap::from_iter([("page".to_string(), "2".to_string())]),
                 path_params: HashMap::from([("id".to_string(), "42".to_string())]),
                 raw_body: raw_body.map(|s| s.to_string()),
             }

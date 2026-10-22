@@ -1109,8 +1109,8 @@ async fn handle_request_inner(
             method: method.clone(),
             path: path.clone(),
             // `RecordedRequest.query` is the fixed std-hasher journal/serde boundary (out of scope
-            // for #704); `parse_query_string` returns `FastMap`, so convert at this edge. Every
-            // value of a repeated key is kept, as Mountebank records it (issue #1553).
+            // for #704); the parsed map is re-hashed at this edge, keeping request order (issue
+            // #1596). Every value of a repeated key is kept, as Mountebank records it (#1553).
             query: parse_query_string(&query_str).into_iter().collect(),
             // `RecordedRequest.headers` is the fixed std-hasher journal/serde boundary (out of
             // scope for #704) — the request-scoped `FastMap` is converted here, at the one place

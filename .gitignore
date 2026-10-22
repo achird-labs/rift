@@ -147,6 +147,9 @@ secrets.yaml
 !conformance/rift-fixtures/**/*.key
 !conformance/rift-fixtures/**/*.crt
 !crates/rift-http-proxy/tests/it/configs/certs/*.pem
+# Exception: issue #1599's X.509 v1 test certificates and keys (LibreSSL-generated, test-only).
+!crates/rift-http-proxy/tests/fixtures/x509-v1/*
+!crates/rift-mock-core/src/proxy/testdata/x509-v1/*
 
 # Temporary files
 *.tmp

@@ -46,7 +46,7 @@ pub struct RequestData {
     /// Query parameters parsed from the URL, by the same parser predicates use (issue #1153), a
     /// repeated key's values comma-joined in order (`docs/mountebank/responses.md`; predicates
     /// match each value, issue #1553). Request-scoped — `FastMap` (issue #704).
-    pub query: FastMap<String, String>,
+    pub query: crate::util::OrderedMap<String, String>,
     /// Request headers (keys lowercased). Request-scoped — `FastMap` (issue #704).
     pub headers: FastMap<String, String>,
     /// Path parameters extracted from route patterns (e.g., /users/:id). Request-scoped —

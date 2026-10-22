@@ -33,6 +33,8 @@ pub(crate) mod counters {
         static JSONPATH_COMPILE: Cell<usize> = const { Cell::new(0) };
         /// Bumped once each time a request body is parsed as JSON by [`super::LazyJson`].
         static JSON_PARSE: Cell<usize> = const { Cell::new(0) };
+        /// Bumped once each time [`super::LazyJson`] builds one of its case-folded views.
+        static JSON_FOLD: Cell<usize> = const { Cell::new(0) };
     }
 
     pub(crate) fn bump_json_parse() {
@@ -40,6 +42,12 @@ pub(crate) mod counters {
     }
     pub(crate) fn json_parses() -> usize {
         JSON_PARSE.with(Cell::get)
+    }
+    pub(crate) fn bump_json_fold() {
+        JSON_FOLD.with(|c| c.set(c.get() + 1));
+    }
+    pub(crate) fn json_folds() -> usize {
+        JSON_FOLD.with(Cell::get)
     }
 
     pub(crate) fn bump_dom_parse() {
@@ -57,6 +65,7 @@ pub(crate) mod counters {
         XPATH_COMPILE.with(|c| c.set(0));
         JSONPATH_COMPILE.with(|c| c.set(0));
         JSON_PARSE.with(|c| c.set(0));
+        JSON_FOLD.with(|c| c.set(0));
     }
     pub(crate) fn dom_parses() -> usize {
         DOM_PARSE.with(Cell::get)
@@ -1145,9 +1154,10 @@ fn fold_xml_names(xml: &str) -> Cow<'_, str> {
     out.finish()
 }
 
-/// A case-insensitive XPath selector as Mountebank folds it: wholly lowercased, string literals
-/// included, to compare against the folded document of [`fold_xml_names`].
-pub(crate) fn fold_xpath_selector(selector: &str) -> Cow<'_, str> {
+/// A case-insensitive XPath or JSONPath selector as Mountebank folds it: wholly lowercased, string
+/// literals included, to run against the folded document of [`fold_xml_names`] or a folded view of
+/// [`LazyJson`] (issues #1478, #1601).
+pub(crate) fn fold_selector(selector: &str) -> Cow<'_, str> {
     if selector.bytes().any(|b| b.is_ascii_uppercase()) {
         Cow::Owned(selector.to_ascii_lowercase())
     } else {
@@ -1605,6 +1615,23 @@ impl<'a> LazyXmlDom<'a> {
 pub(crate) struct LazyJson<'a> {
     body: Option<&'a str>,
     parsed: OnceCell<Option<serde_json::Value>>,
+    /// The views a case-insensitive JSONPath predicate selects from (issue #1601), built on first
+    /// use and then shared the same way: every object key lowercased, and that plus every string
+    /// value lowercased.
+    keys_folded: OnceCell<Option<serde_json::Value>>,
+    all_folded: OnceCell<Option<serde_json::Value>>,
+}
+
+/// Which view of the body a JSONPath predicate selects from (issue #1601), as
+/// [`crate::imposter::predicates::jsonpath_view`] picks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonView {
+    /// The body as written.
+    Raw,
+    /// Every object key ASCII-lowercased.
+    KeysFolded,
+    /// Every object key and every string value ASCII-lowercased.
+    AllFolded,
 }
 
 impl<'a> LazyJson<'a> {
@@ -1612,7 +1639,31 @@ impl<'a> LazyJson<'a> {
         Self {
             body,
             parsed: OnceCell::new(),
+            keys_folded: OnceCell::new(),
+            all_folded: OnceCell::new(),
         }
+    }
+
+    /// Whether there is a body to parse, as opposed to [`Self::absent`].
+    pub(crate) fn has_body(&self) -> bool {
+        self.body.is_some()
+    }
+
+    /// The body seen through `view`, building that view on its first use only. `None` when the
+    /// body is not JSON, as for [`Self::get`].
+    pub(crate) fn view(&self, view: JsonView) -> Option<&serde_json::Value> {
+        let (cell, fold_values) = match view {
+            JsonView::Raw => return self.get(),
+            JsonView::KeysFolded => (&self.keys_folded, false),
+            JsonView::AllFolded => (&self.all_folded, true),
+        };
+        cell.get_or_init(|| {
+            let body = self.body?;
+            #[cfg(test)]
+            counters::bump_json_fold();
+            parse_json_folding(body, fold_values)
+        })
+        .as_ref()
     }
 
     /// No body to parse: what a predicate with a selector compares against instead of the raw body.
@@ -1633,9 +1684,170 @@ impl<'a> LazyJson<'a> {
     }
 }
 
+/// `body` parsed as JSON with every object key ASCII-lowercased, and every string value too when
+/// `fold_values` is set: what Mountebank's case-insensitive JSONPath predicate selects from after it
+/// lowercases the body text and then the keys of its parse (issue #1601). `None` when the body is
+/// not JSON, exactly when [`LazyJson::get`] is `None`.
+///
+/// It folds while parsing rather than walking a parsed `Value`: `serde_json`'s map is sorted (no
+/// `preserve_order`), so `{"a":"2","A":"1"}` would fold in the wrong order. Folding as the keys
+/// arrive keeps document order, so the later of two keys that fold alike wins, as in `JSON.parse`.
+/// It also never lowercases the text itself, which would make `TRUE` a JSON literal.
+fn parse_json_folding(body: &str, fold_values: bool) -> Option<serde_json::Value> {
+    let mut deserializer = serde_json::Deserializer::from_str(body);
+    let value =
+        serde::de::DeserializeSeed::deserialize(FoldJson { fold_values }, &mut deserializer)
+            .ok()?;
+    // Domain-optional parse: not JSON (including trailing text) is `None`, as for `LazyJson::get`.
+    deserializer.end().ok()?;
+    Some(value)
+}
+
+/// Builds a `serde_json::Value` as its own `Deserialize` does, folding keys (and string values when
+/// `fold_values` is set) as they are read. Nesting is bounded by `serde_json`'s recursion limit.
+#[derive(Clone, Copy)]
+struct FoldJson {
+    fold_values: bool,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for FoldJson {
+    type Value = serde_json::Value;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for FoldJson {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Bool(v))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Number(v.into()))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Number(v.into()))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+        // As `serde_json::Value`'s own visitor: a float with no JSON form is `null`.
+        Ok(serde_json::Number::from_f64(v)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        self.visit_string(v.to_owned())
+    }
+
+    fn visit_string<E: serde::de::Error>(self, mut v: String) -> Result<Self::Value, E> {
+        if self.fold_values {
+            v.make_ascii_lowercase();
+        }
+        Ok(serde_json::Value::String(v))
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(item) = seq.next_element_seed(self)? {
+            items.push(item);
+        }
+        Ok(serde_json::Value::Array(items))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut object = serde_json::Map::new();
+        while let Some(mut key) = map.next_key::<String>()? {
+            key.make_ascii_lowercase();
+            let value = map.next_value_seed(self)?;
+            // A later key that folds alike replaces the earlier one, as `JSON.parse` does.
+            object.insert(key, value);
+        }
+        Ok(serde_json::Value::Object(object))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_folded_lowercases_nested_keys_and_keeps_values() {
+        let lazy = LazyJson::new(Some(
+            r#"{"Book":{"Title":"Dune","Tags":[{"K":"V"}],"N":1.5,"T":TRUE_}}"#,
+        ));
+        assert_eq!(
+            lazy.view(JsonView::KeysFolded),
+            None,
+            "not JSON stays not JSON"
+        );
+        let lazy = LazyJson::new(Some(
+            r#"{"Book":{"Title":"Dune","Tags":[{"K":"V"}],"N":1.5,"T":"TRUE","Z":null}}"#,
+        ));
+        assert_eq!(
+            lazy.view(JsonView::KeysFolded),
+            Some(
+                &serde_json::json!({"book": {"title": "Dune", "tags": [{"k": "V"}], "n": 1.5, "t": "TRUE", "z": null}})
+            )
+        );
+    }
+
+    #[test]
+    fn all_folded_lowercases_keys_and_string_values() {
+        let lazy = LazyJson::new(Some(
+            r#"{"Book":{"Title":"Dune","Tags":["A",{"K":"V"}],"N":-2}}"#,
+        ));
+        assert_eq!(
+            lazy.view(JsonView::AllFolded),
+            Some(
+                &serde_json::json!({"book": {"title": "dune", "tags": ["a", {"k": "v"}], "n": -2}})
+            )
+        );
+    }
+
+    #[test]
+    fn a_folded_view_keeps_the_later_of_two_keys_that_fold_alike() {
+        let lazy = LazyJson::new(Some(r#"{"a":"2","A":"1"}"#));
+        assert_eq!(
+            lazy.view(JsonView::KeysFolded),
+            Some(&serde_json::json!({"a": "1"}))
+        );
+        let lazy = LazyJson::new(Some(r#"{"A":"1","a":"2"}"#));
+        assert_eq!(
+            lazy.view(JsonView::AllFolded),
+            Some(&serde_json::json!({"a": "2"}))
+        );
+    }
+
+    #[test]
+    fn a_folded_view_of_lower_case_keys_is_the_plain_parse() {
+        for body in [
+            r#"{"a":[1,-2,3.5e10,18446744073709551615,0.1],"b":{"c":null,"d":true}}"#,
+            "[]",
+            "\"x\"",
+            "12345678901234567890123",
+            " 1 ",
+        ] {
+            let lazy = LazyJson::new(Some(body));
+            assert_eq!(lazy.view(JsonView::KeysFolded), lazy.get(), "{body}");
+        }
+        assert_eq!(LazyJson::new(Some("{} x")).view(JsonView::KeysFolded), None);
+        assert_eq!(LazyJson::absent().view(JsonView::AllFolded), None);
+    }
 
     #[test]
     fn lazy_json_parses_only_on_first_use() {
@@ -1647,6 +1859,22 @@ mod tests {
         assert_eq!(counters::json_parses(), 1, "parsed once");
         assert_eq!(LazyJson::new(Some("not json")).get(), None);
         assert_eq!(LazyJson::absent().get(), None);
+
+        // Each folded view is built once, and only when asked for (issue #1601).
+        counters::reset();
+        let lazy = LazyJson::new(Some(r#"{"A":"B"}"#));
+        assert_eq!(
+            lazy.view(JsonView::Raw),
+            Some(&serde_json::json!({"A": "B"}))
+        );
+        assert_eq!(counters::json_folds(), 0, "the raw view folds nothing");
+        assert!(lazy.view(JsonView::KeysFolded).is_some());
+        assert!(lazy.view(JsonView::KeysFolded).is_some());
+        assert_eq!(counters::json_folds(), 1, "keys folded once");
+        assert!(lazy.view(JsonView::AllFolded).is_some());
+        assert!(lazy.view(JsonView::AllFolded).is_some());
+        assert_eq!(counters::json_folds(), 2, "values folded once");
+        assert_eq!(counters::json_parses(), 1, "the raw parse is not repeated");
     }
 
     #[test]
@@ -2813,10 +3041,10 @@ mod tests {
         #[test]
         fn a_case_insensitive_selector_folds_literals_too() {
             assert_eq!(
-                fold_xpath_selector("//X:B[@Id='Q' or text()=\"Mixed\"]/COUNT"),
+                fold_selector("//X:B[@Id='Q' or text()=\"Mixed\"]/COUNT"),
                 "//x:b[@id='q' or text()=\"mixed\"]/count"
             );
-            assert!(matches!(fold_xpath_selector("//a"), Cow::Borrowed(_)));
+            assert!(matches!(fold_selector("//a"), Cow::Borrowed(_)));
         }
 
         #[test]
@@ -2824,7 +3052,7 @@ mod tests {
             for selector in ["//DIV", "//a/MOD", "//AND/OR", "//a[@DIV]"] {
                 assert_eq!(validate_xpath_selector(selector), Ok(()), "{selector}");
                 assert_eq!(
-                    validate_xpath_selector(&fold_xpath_selector(selector)),
+                    validate_xpath_selector(&fold_selector(selector)),
                     Ok(()),
                     "{selector}"
                 );

@@ -179,13 +179,6 @@
       "note": "an unreachable proxy upstream answers 502 (proxy.md); #1569 item 3 tracks the decision"
     },
     {
-      "id": "api/http/httpProxyStubTest.js::http proxy stubs should match entire object graphs",
-      "class": "bug",
-      "issue": "#1596",
-      "note": "request.query in a script lists keys in an arbitrary order, not the client's",
-      "flaky": "the key order is arbitrary per request, so the test passes when it happens to match"
-    },
-    {
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should persist behaviors from origin server",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#a-proxy-without-generators-records-into-a-store-not-a-stub",
@@ -270,22 +263,10 @@
       "note": "a stub added with POST /imposters/:id/stubs prints its generated `id`; stubs created with the imposter print none, nor does Mountebank"
     },
     {
-      "id": "api/https/httpsCertificateTest.js::https imposter should support sending key/cert pair during imposter creation",
-      "class": "bug",
-      "issue": "#1599",
-      "note": "mbTest's fixture certificate is X.509 v1 (and expired); rustls refuses it (UnsupportedCertVersion)"
-    },
-    {
-      "id": "api/https/httpsCertificateTest.js::https imposter should work with mutual auth",
-      "class": "bug",
-      "issue": "#1599",
-      "note": "the client presents the X.509 v1 fixture certificate, which rustls refuses (alert certificate unknown)"
-    },
-    {
       "id": "api/https/httpsCertificateTest.js::https imposter should support proxying to origin server requiring mutual auth",
-      "class": "bug",
-      "issue": "#1599",
-      "note": "the proxy presents the X.509 v1 fixture certificate to a mutualAuth origin"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#proxy-upstream-certificates-are-verified",
+      "note": "the proxy verifies the origin's certificate (#1577, documented) and cannot present `proxy.key`/`cert` to a mutualAuth origin (tls.md); Mountebank's origin never requests one"
     },
     {
       "id": "api/impostersControllerTest.js::POST /imposters should return 400 on invalid input",
@@ -519,12 +500,6 @@
       "note": "the proxy's https origin has a self-signed certificate; Rift verifies it and answers 502"
     },
     {
-      "id": "docs:/docs/api/jsonpath#jsonpath",
-      "class": "bug",
-      "issue": "#1601",
-      "note": "with caseSensitive false, a jsonpath selector's key names are not folded ($..TITLE does not select title)"
-    },
-    {
       "id": "docs:/docs/api/overview#home",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#the-admin-api-serves-json-only",
@@ -535,13 +510,6 @@
       "class": "bug",
       "issue": "#1602",
       "note": "recorded requests carry no `ip`; the extra journal fields (status, latencyMs, matchOutcome) and Vary are documented"
-    },
-    {
-      "id": "api/http/httpProxyStubTest.js::http proxy stubs should match sub-objects",
-      "class": "bug",
-      "issue": "#1596",
-      "note": "request.query in a script lists keys in an arbitrary order, not the client's",
-      "flaky": "the key order is arbitrary per request, so the test passes when it happens to match"
     },
     {
       "id": "api/http/httpBehaviorsTest.js::http imposter POST /imposters with stubs should support lookup from CSV file keyed by regex",

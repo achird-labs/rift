@@ -4,7 +4,7 @@
 //! Also supports requestFrom, ip, and form fields.
 
 use crate::behaviors::{
-    LazyJson, LazyXmlDom, Selection, fold_xpath_selector, jsonpath_selection, xpath_selection,
+    JsonView, LazyJson, LazyXmlDom, Selection, fold_selector, jsonpath_selection, xpath_selection,
 };
 use crate::imposter::types::{Predicate, PredicateOperation, PredicateSelector};
 use crate::util::MultiValueMap;
@@ -65,6 +65,20 @@ impl<SH: BuildHasher> RequestHeaders for HashMap<String, Vec<String>, SH> {
     fn len(&self) -> usize {
         // Counted the same way `entries()` yields, or `deepEquals` — which compares this against
         // the expected object's name count — would see a name that no other operator can observe.
+        self.values().filter(|v| !v.is_empty()).count()
+    }
+}
+
+/// A parsed query or form (issue #1596): the same shape as the header map above, kept in request
+/// order.
+impl<SH: BuildHasher> RequestHeaders for indexmap::IndexMap<String, Vec<String>, SH> {
+    fn entries(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+    }
+
+    fn len(&self) -> usize {
         self.values().filter(|v| !v.is_empty()).count()
     }
 }
@@ -440,15 +454,28 @@ where
     // caches. A selector that does not compile is refused at load (#1220), so the empty-string
     // fallback only covers a body that is not JSON/XML, which Mountebank also reads as `""`.
     let selection = match &predicate.parameters.selector {
-        Some(PredicateSelector::JsonPath { selector }) => Some(
-            match body_json.get() {
-                Some(json) => jsonpath_selection(json, selector),
-                None => serde_json::from_str::<serde_json::Value>(body_str)
-                    .ok()
-                    .and_then(|json| jsonpath_selection(&json, selector)),
-            }
-            .unwrap_or(Selection::One(String::new())),
-        ),
+        Some(PredicateSelector::JsonPath { selector }) => {
+            let own_json;
+            let json = if body_json.has_body() {
+                body_json
+            } else {
+                own_json = LazyJson::new(Some(body_str));
+                &own_json
+            };
+            // Mountebank lowercases the selector and the body's key names unless keys are case
+            // sensitive, and the string values too for a case-insensitive predicate other than
+            // `matches` (issue #1601, see `jsonpath_view`).
+            let view = jsonpath_view(key_case_sensitive, case_sensitive, &predicate.operation);
+            let selector = match view {
+                JsonView::Raw => std::borrow::Cow::Borrowed(selector.as_str()),
+                JsonView::KeysFolded | JsonView::AllFolded => fold_selector(selector),
+            };
+            Some(
+                json.view(view)
+                    .and_then(|json| jsonpath_selection(json, &selector))
+                    .unwrap_or(Selection::One(String::new())),
+            )
+        }
         Some(PredicateSelector::XPath {
             selector,
             namespaces,
@@ -478,11 +505,7 @@ where
                 });
                 dom.folded_document()
                     .map(|document| {
-                        xpath_selection(
-                            &document,
-                            &fold_xpath_selector(selector),
-                            namespaces.as_ref(),
-                        )
+                        xpath_selection(&document, &fold_selector(selector), namespaces.as_ref())
                     })
                     .transpose()?
             } else {
@@ -763,6 +786,25 @@ pub(crate) fn folds_xpath_names(operation: &PredicateOperation) -> bool {
             | PredicateOperation::EndsWith(_)
             | PredicateOperation::Exists(_)
     )
+}
+
+/// Which view of the body a JSONPath predicate selects from, with the selector lowercased for any
+/// folded view (issue #1601). Mountebank lowercases the selector and the body's key names unless
+/// keys are case sensitive; a case-insensitive predicate lowercases the string values too (so a
+/// filter literal finds either case), except under `matches`, which sees the values as written.
+/// Unlike XPath's [`folds_xpath_names`], `matches` still folds key names.
+pub(crate) fn jsonpath_view(
+    key_case_sensitive: bool,
+    case_sensitive: bool,
+    operation: &PredicateOperation,
+) -> JsonView {
+    if key_case_sensitive {
+        JsonView::Raw
+    } else if !case_sensitive && folds_xpath_names(operation) {
+        JsonView::AllFolded
+    } else {
+        JsonView::KeysFolded
+    }
 }
 
 /// The operators that compare request fields, as opposed to `not`/`and`/`or`/`inject`.
@@ -4126,6 +4168,136 @@ mod tests {
             let sensitive =
                 json!({ "equals": { "path": "/a" }, "except": "X", "caseSensitive": true });
             assert!(!holds_on(sensitive, "/ax", ""));
+        }
+    }
+
+    // A case-insensitive JSONPath predicate selects from a key-folded view of the body with a
+    // lowercased selector, as Mountebank lowercases both (issue #1601). Every row was checked
+    // against Mountebank 2.9.5.
+    mod jsonpath_key_case {
+        use super::*;
+
+        fn holds(predicate: serde_json::Value, body: &str) -> bool {
+            let predicate: Predicate = serde_json::from_value(predicate).expect("predicate json");
+            predicate_matches(
+                &predicate,
+                "POST",
+                "/x",
+                None,
+                &empty_headers(),
+                Some(body),
+                None,
+                None,
+                None,
+                0,
+            )
+            .expect("evaluates")
+        }
+
+        fn jp(op: &str, expected: serde_json::Value, selector: &str) -> serde_json::Value {
+            json!({ op: { "body": expected }, "jsonpath": { "selector": selector } })
+        }
+
+        #[test]
+        fn an_upper_case_selector_finds_a_lower_case_key() {
+            let body = r#"{"books":[{"title":"Catcher in the Rye"}]}"#;
+            assert!(holds(
+                jp("equals", json!("Catcher in the Rye"), "$..TITLE"),
+                body
+            ));
+        }
+
+        #[test]
+        fn a_lower_case_selector_finds_an_upper_case_key() {
+            let body = r#"{"Book":{"Title":"Dune"}}"#;
+            assert!(holds(jp("equals", json!("Dune"), "$..title"), body));
+            assert!(holds(jp("equals", json!("Dune"), "$.book.title"), body));
+        }
+
+        #[test]
+        fn every_operator_folds_key_names() {
+            let body = r#"{"title":"abc"}"#;
+            let sel = "$..TITLE";
+            assert!(holds(jp("equals", json!("ABC"), sel), body));
+            assert!(holds(jp("deepEquals", json!("abc"), sel), body));
+            assert!(holds(jp("contains", json!("B"), sel), body));
+            assert!(holds(jp("startsWith", json!("A"), sel), body));
+            assert!(holds(jp("endsWith", json!("C"), sel), body));
+            assert!(holds(jp("exists", json!(true), sel), body));
+            assert!(!holds(jp("exists", json!(false), sel), body));
+            assert!(holds(jp("matches", json!("^ab"), sel), body));
+            assert!(holds(jp("endsWith", json!("C"), "$['TITLE']"), body));
+        }
+
+        #[test]
+        fn exists_false_no_longer_holds_for_a_differently_cased_key() {
+            assert!(!holds(
+                jp("exists", json!(false), "$..MISSING"),
+                r#"{"missing":"x"}"#
+            ));
+        }
+
+        #[test]
+        fn matches_folds_keys_but_keeps_values_as_written() {
+            assert!(holds(
+                jp("matches", json!("^ab"), "$..title"),
+                r#"{"Title":"ABC"}"#
+            ));
+        }
+
+        #[test]
+        fn deep_equals_compares_an_object_with_folded_keys() {
+            assert!(holds(
+                jp("deepEquals", json!({ "b": "1" }), "$.A"),
+                r#"{"a":{"B":"1"}}"#
+            ));
+        }
+
+        #[test]
+        fn a_filter_literal_is_folded_with_the_values() {
+            let sel = "$[?(@.n=='A')].v";
+            assert!(holds(
+                jp("equals", json!("1"), sel),
+                r#"[{"n":"a","v":"1"}]"#
+            ));
+            // `matches` keeps values as written, so the folded literal `'a'` no longer finds `"A"`.
+            assert!(!holds(
+                jp("matches", json!("1"), sel),
+                r#"[{"n":"A","v":"1"}]"#
+            ));
+        }
+
+        #[test]
+        fn the_later_of_two_keys_that_fold_alike_wins() {
+            assert!(holds(
+                jp("equals", json!("1"), "$.a"),
+                r#"{"a":"2","A":"1"}"#
+            ));
+            assert!(!holds(
+                jp("equals", json!("2"), "$.a"),
+                r#"{"a":"2","A":"1"}"#
+            ));
+        }
+
+        #[test]
+        fn case_sensitive_keeps_key_names_exact() {
+            let strict = |sel: &str| {
+                json!({ "equals": { "body": "x" }, "caseSensitive": true,
+                        "jsonpath": { "selector": sel } })
+            };
+            assert!(!holds(strict("$..TITLE"), r#"{"title":"x"}"#));
+            assert!(holds(strict("$..Title"), r#"{"Title":"x"}"#));
+        }
+
+        /// `keyCaseSensitive` keeps Rift's reading (issue #1367): key names compare as written.
+        #[test]
+        fn key_case_sensitive_keeps_key_names_exact() {
+            let keyed = |sel: &str| {
+                json!({ "equals": { "body": "x" }, "keyCaseSensitive": true,
+                        "jsonpath": { "selector": sel } })
+            };
+            assert!(holds(keyed("$..Title"), r#"{"Title":"x"}"#));
+            assert!(!holds(keyed("$..title"), r#"{"Title":"x"}"#));
         }
     }
 }

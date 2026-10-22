@@ -163,7 +163,7 @@ mod tests {
             request_from: "127.0.0.1".to_string(),
             method: "GET".to_string(),
             path: "/".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers,
             body: None,
             timestamp: "2026-01-01T00:00:00Z".to_string(),

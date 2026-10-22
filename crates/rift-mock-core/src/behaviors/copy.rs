@@ -81,14 +81,18 @@ impl CopySource {
 }
 
 /// The value under `name`, matched ASCII-case-insensitively as Mountebank's `getKeyIgnoringCase`
-/// does. An exact key wins so the result does not depend on `HashMap` order when both spellings
-/// exist.
-fn ignoring_case<'a, V>(map: &'a HashMap<String, V>, name: &str) -> Option<&'a V> {
-    map.get(name).or_else(|| {
-        map.iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v)
-    })
+/// does. An exact key wins so the result does not depend on map order when both spellings exist.
+/// Takes any map's entries, so the insertion-ordered query and form (issue #1596) and the headers
+/// share it.
+fn ignoring_case<'a, V: 'a>(
+    map: impl IntoIterator<Item = (&'a String, &'a V)> + Clone,
+    name: &str,
+) -> Option<&'a V> {
+    map.clone()
+        .into_iter()
+        .find(|(k, _)| k.as_str() == name)
+        .or_else(|| map.into_iter().find(|(k, _)| k.eq_ignore_ascii_case(name)))
+        .map(|(_, v)| v)
 }
 
 /// Apply copy behaviors to response body. Treats `body` and `headers` as authored text; the
@@ -263,12 +267,18 @@ mod tests {
         RequestContext {
             method: "POST".into(),
             path: "/Pth".into(),
-            query: HashMap::from([("q".into(), vec!["qv".into(), "second".into()])]),
+            query: crate::util::OrderedMap::from_iter([(
+                "q".into(),
+                vec!["qv".into(), "second".into()],
+            )]),
             headers: HashMap::from([("X-Test".into(), "hv".into())]),
             body: Some("b".into()),
             ip: Some("::ffff:127.0.0.1".into()),
             request_from: Some("::ffff:127.0.0.1:55333".into()),
-            form: Some(HashMap::from([("f".into(), "fv".into())])),
+            form: Some(crate::util::OrderedMap::from_iter([(
+                "f".into(),
+                "fv".into(),
+            )])),
             ..Default::default()
         }
     }
@@ -343,7 +353,7 @@ mod tests {
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/users/123".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: Some("test body".to_string()),
             ..Default::default()
@@ -377,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_copy_source_nested() {
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("name".to_string(), vec!["Alice".to_string()]);
 
         let mut headers = HashMap::new();
@@ -408,7 +418,7 @@ mod tests {
 
     #[test]
     fn test_apply_copy_behaviors() {
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("name".to_string(), vec!["Alice".to_string()]);
 
         let request = RequestContext {
@@ -455,7 +465,7 @@ mod tests {
     /// byte a header value cannot hold. Repair it rather than letting it 500 the stub.
     #[test]
     fn copy_repairs_a_header_value_it_rewrote_from_request_data() {
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("q".to_string(), vec!["one\rtwo".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
@@ -499,7 +509,7 @@ mod tests {
         let request = RequestContext {
             method: "POST".to_string(),
             path: "/x".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: Some("one\r\ntwo".to_string()),
             ..Default::default()
@@ -546,7 +556,7 @@ mod tests {
     /// N copies of it per request would be N times the log volume for one defect.
     #[test]
     fn every_repaired_value_of_a_multi_value_header_names_the_same_stub() {
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("q".to_string(), vec!["one\rtwo".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
@@ -610,7 +620,7 @@ mod tests {
     /// mangled header with no way back to which behavior produced it.
     #[test]
     fn copy_repair_warning_names_the_stub() {
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("q".to_string(), vec!["one\rtwo".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
@@ -667,7 +677,7 @@ mod tests {
     /// the token survives, so the response still fails loudly (issue #1067).
     #[test]
     fn copy_repairs_the_substituted_text_but_not_a_literal_control_char_beside_it() {
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("q".to_string(), vec!["one\rtwo".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
@@ -708,7 +718,7 @@ mod tests {
     /// to surface as a 500. Only a value that actually contained the token is touched.
     #[test]
     fn copy_leaves_a_header_value_without_the_token_untouched() {
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
@@ -752,7 +762,7 @@ mod tests {
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             ..Default::default()
@@ -785,7 +795,7 @@ mod tests {
 
     #[test]
     fn copy_preserves_multi_value_headers_and_substitutes_each() {
-        let mut query = HashMap::new();
+        let mut query = crate::util::OrderedMap::default();
         query.insert("q".to_string(), vec!["hi".to_string()]);
         let request = RequestContext {
             method: "GET".to_string(),
@@ -832,7 +842,7 @@ mod tests {
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/x".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             ..Default::default()
@@ -889,7 +899,7 @@ mod tests {
         RequestContext {
             method: "POST".to_string(),
             path: "/abc".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: Some(body.to_string()),
             ..Default::default()
@@ -973,7 +983,7 @@ mod tests {
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/".to_string(),
-            query: HashMap::new(),
+            query: Default::default(),
             headers: HashMap::new(),
             body: None,
             ..Default::default()
