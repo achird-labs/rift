@@ -38,7 +38,7 @@
     "src/models/inMemoryImpostersRepository.js": {"lines": [403, 418], "branches": [59, 63], "functions": [31, 34]},
     "src/models/jsonpath.js": {"lines": [42, 44], "branches": [9, 10], "functions": [1, 1]},
     "src/models/predicates.js": {"lines": [433, 438], "branches": [144, 146], "functions": [34, 34]},
-    "src/models/responseResolver.js": {"lines": [349, 398], "branches": [98, 104], "functions": [21, 22]},
+    "src/models/responseResolver.js": {"lines": [358, 398], "branches": [99, 104], "functions": [21, 22]},
     "src/models/xpath.js": {"lines": [95, 105], "branches": [22, 25], "functions": [6, 6]},
     "src/util/combinators.js": {"lines": [68, 68], "branches": [8, 8], "functions": [4, 5]},
     "src/util/date.js": {"lines": [41, 51], "branches": [5, 11], "functions": [3, 3]},
