@@ -1036,3 +1036,45 @@ fn apply_rcfile_defaults_starts_without_a_missing_rcfile() {
         .expect("a missing rcfile is a warning");
     assert_eq!(parsed.port, cli(&[]).port, "nothing was applied");
 }
+
+// A `stop` must not delete a PID file that, by the time its target exits, names another server.
+// mbTest's CLI suite runs `restart` and `stop` against one server at once (a failed test skips its
+// own `stop`, the next `restart` and the hook's `stop` both wait on it): the `restart` writes its own
+// PID the moment the old server is gone, and the `stop` then removed that file, leaving the new
+// server running with no PID file — nothing could stop it, and every later test that needed its
+// ports failed (`404` from a stale imposter where the suite expected its own `mb`).
+#[cfg(unix)]
+#[test]
+fn stop_server_keeps_a_pidfile_rewritten_by_another_server() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pidfile = dir.path().join("test.pid");
+    // A server that takes a moment to leave on SIGTERM, as a draining Rift does.
+    let mut child = std::process::Command::new("sh")
+        .args([
+            "-c",
+            "trap 'sleep 0.4; exit 0' TERM; while :; do sleep 0.05; done",
+        ])
+        .spawn()
+        .expect("spawn the stand-in server");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::fs::write(&pidfile, child.id().to_string()).expect("write pidfile");
+
+    let stopper = {
+        let pidfile = pidfile.clone();
+        std::thread::spawn(move || bootstrap::stop_server(&pidfile))
+    };
+    // While the stop waits, a restarted server takes the PID file over.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    std::fs::write(&pidfile, "424242").expect("the successor writes its pid");
+
+    stopper
+        .join()
+        .expect("join")
+        .expect("the stop itself succeeds");
+    let _ = child.wait();
+    assert_eq!(
+        std::fs::read_to_string(&pidfile).ok().as_deref(),
+        Some("424242"),
+        "the successor's PID file must survive the stop of its predecessor"
+    );
+}
