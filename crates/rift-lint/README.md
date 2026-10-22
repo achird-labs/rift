@@ -137,15 +137,16 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | E052 | An unknown proxy `mode` the engine refuses |
 | E056 | A response with more than one of `is`, `proxy`, `inject` and `fault`, which the engine refuses |
 | E058 | A `matches` predicate or `jsonpath`/`xpath` selector in a `"mode": "binary"` imposter, which the engine refuses |
+| E059 | A `behaviors` array element with more than one behavior type, which the engine refuses (formerly `W018`) |
+| E060 | A `behaviors` array element with no behavior in it (`Unrecognized behavior`), which the engine refuses |
 
 ### Warnings
 
 | Code | Description |
 |------|-------------|
 | W001 | Privileged port |
-| W004-W016 | Potential issues (`W002` retired, folded into `E006`; `W003` retired, now `E056`), including lossy number literals (W012), unset EJS env vars (W013) and state used without `_rift.flowState` (W014) |
+| W004-W016 | Potential issues (`W002` retired, folded into `E006`; `W003` retired, now `E056`; `W018` retired, now `E059`), including lossy number literals (W012), unset EJS env vars (W013) and state used without `_rift.flowState` (W014) |
 | W017 | A key the engine accepts but ignores (`_rift.metrics`, `_rift.proxy`, `recordMatches: true`, ...) |
-| W018 | A `behaviors` array element that sets several behaviors, which run in a fixed order |
 | W019 | `_rift.conditional` that can never answer 304 (script-only response, or a `method` predicate excluding GET and HEAD) |
 | W020 | A proxy `predicateGenerators` key the engine does not read (a typo such as `matchs`) |
 | W021 | A proxy `predicateGenerators` `jsonpath`, `xpath` or `ignore` the engine cannot use |

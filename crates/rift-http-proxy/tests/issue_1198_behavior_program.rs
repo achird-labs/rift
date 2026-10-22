@@ -194,7 +194,7 @@ async fn a_failed_step_continues_leniently_and_stops_strictly() {
 
 /// An element that sets several behaviors is refused at a door, as Mountebank refuses it (#1582);
 /// one an older engine stored replays split into its steps in Rift's canonical order, which
-/// `issue_1267_replay_decode.rs` pins. rift-lint's W018 still only warns about it until #1587.
+/// `issue_1267_replay_decode.rs` pins. rift-lint reports it as E059 (#1587).
 #[tokio::test]
 async fn a_multi_key_element_is_refused() {
     let admin = Admin::start(true).await;

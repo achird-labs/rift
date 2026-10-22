@@ -378,8 +378,11 @@ fn check_conditional_never_fires(file: &Path, imposter: &Value, result: &mut Lin
     }
 }
 
-/// E035: the engine reads `repeat` as a `u32` and refuses the file for anything else (#1162); `0`
-/// is admitted there and served once, and flagged here as never what the author meant.
+/// E035: `repeat` must be an integer greater than 0, and the engine reads it as a `u32` (#1162).
+/// On the response and in an object-form block a config door refuses `0` and `null`, as Mountebank
+/// does (#1582, issue #1587), so a `null` is checked here. In an array element beside a behavior
+/// the engine admits both (a `null` clears `repeat`, a `0` is served once), so the array arm passes
+/// only a non-null one and its `0` is flagged as never what the author meant.
 fn check_repeat(file: &Path, repeat: &Value, location: &str, result: &mut LintResult) {
     let valid = repeat
         .as_u64()
@@ -1787,8 +1790,10 @@ pub(crate) const STEP_BEHAVIORS: [&str; 5] =
 ///
 /// Every key is checked independently by [`validate_behavior`], so the array is validated one
 /// element at a time with only the keys that element contributes, and a finding names the element
-/// it came from. W018 flags an element that sets several steps: the engine runs them in its
-/// canonical order, not the order they were written in.
+/// it came from. Each element holds one behavior, as Mountebank's `behaviorsValidator.js` requires
+/// and a config door enforces since #1582 (issue #1587): E059 flags one with several behavior keys
+/// (formerly the warning W018), and E060 one with no behavior key but some other key, a
+/// `{"repeat": n}` element included. Neither applies to the object form.
 ///
 /// E048 (issue #1101) reports the shapes outside that model: a non-object `_behaviors` or a scalar
 /// `behaviors`, which the engine refuses, and a non-object, non-null array element, which it skips.
@@ -1801,8 +1806,9 @@ fn validate_response_behaviors(
 ) {
     let present = |key: &str| response.get(key).filter(|v| !v.is_null());
 
-    // Mountebank's canonical top-level `repeat` (issue #1188), held to the rule the block's is.
-    if let Some(repeat) = present("repeat") {
+    // Mountebank's canonical top-level `repeat` (issue #1188), held to the rule the block's is. A
+    // `null` is refused too (issue #1587).
+    if let Some(repeat) = response.get("repeat") {
         check_repeat(file, repeat, &format!("{location}.repeat"), result);
     }
 
@@ -1902,33 +1908,73 @@ fn validate_response_behaviors(
                     continue;
                 };
                 // Cloned: `validate_behavior` reads a behaviors object, and this one is assembled.
+                // A `null` `repeat` here clears it, which the engine admits (issue #1587).
                 let won: serde_json::Map<String, Value> = obj
                     .iter()
-                    .filter(|(key, _)| contributes(key, idx))
+                    .filter(|(key, value)| {
+                        contributes(key, idx) && !(*key == "repeat" && value.is_null())
+                    })
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect();
-                let steps = obj
-                    .iter()
-                    .filter(|(key, value)| {
-                        STEP_BEHAVIORS.contains(&key.as_str()) && !value.is_null()
-                    })
+                // A `null` behavior counts, as it does in Mountebank's `Object.keys(config)`.
+                let behaviors = obj
+                    .keys()
+                    .filter(|key| STEP_BEHAVIORS.contains(&key.as_str()))
                     .count();
-                if steps > 1 {
+                if behaviors == 0
+                    && let Some(first) = obj.keys().next()
+                {
+                    // The engine names the first key, as here: the map is ordered the same way.
                     result.add_issue(
-                        LintIssue::warning(
-                            "W018",
+                        LintIssue::error(
+                            "E060",
                             format!(
-                                "`behaviors[{idx}]` sets {steps} behaviors in one element; Rift runs \
-                                 them in a fixed order (wait, lookup, copy, shellTransform, \
-                                 decorate), not the order written, which Mountebank uses"
+                                "`behaviors[{idx}]` holds no behavior; the engine refuses it, as \
+                                 Mountebank does: Unrecognized behavior: \"{first}\""
                             ),
                             file.to_path_buf(),
                         )
                         .with_location(format!("{location}.behaviors[{idx}]"))
                         .with_suggestion(
-                            "Put each behavior in its own element, in the order it should run",
+                            "Spell the behavior correctly; put `repeat` on the response, \
+                             e.g. {\"is\": {...}, \"repeat\": 2}",
                         ),
                     );
+                    // Nothing in it is read as a behavior, so there is nothing else to check.
+                    continue;
+                }
+                if behaviors > 1 {
+                    result.add_issue(
+                        LintIssue::error(
+                            "E059",
+                            format!(
+                                "`behaviors[{idx}]` has {behaviors} behavior keys in one element; \
+                                 the engine refuses it, as Mountebank does: Each behavior object must \
+                                 have only one behavior type"
+                            ),
+                            file.to_path_buf(),
+                        )
+                        .with_location(format!("{location}.behaviors[{idx}]"))
+                        .with_suggestion(
+                            "Put each behavior in its own element, in the order it should run, or \
+                             use the `_behaviors` object form",
+                        ),
+                    );
+                }
+                // A `from` of the wrong size is refused as written (issue #1587), so one in a step
+                // a later `null` removed, never validated below, is still reported.
+                for key in ["copy", "lookup"] {
+                    if !contributes(key, idx)
+                        && let Some(value) = obj.get(key)
+                    {
+                        report_from_key_counts(
+                            file,
+                            key,
+                            value,
+                            &format!("{location}.behaviors[{idx}].{key}"),
+                            result,
+                        );
+                    }
                 }
                 // An element whose `wait` a later `null` removed is never validated below, but the
                 // engine still refuses an inverted range there (issue #1148).
@@ -2607,7 +2653,8 @@ pub fn validate_behavior(
         }
     }
 
-    if let Some(repeat) = present("repeat") {
+    // Unlike the behaviors, a `null` `repeat` is not absent: the engine refuses it (issue #1587).
+    if let Some(repeat) = obj.get("repeat") {
         check_repeat(file, repeat, &format!("{location}.repeat"), result);
     }
 
@@ -2949,6 +2996,43 @@ fn copy_source_is_well_formed(from: &Value) -> bool {
             .is_some_and(|o| o.values().all(Value::is_string))
 }
 
+/// Mountebank's `singleKeyOnly` rule, which the engine applies since #1582 (issue #1587): a `from`
+/// written as an object names exactly one request field. A field name is not an object.
+fn names_one_field(from: &Value) -> bool {
+    from.as_object().is_none_or(|names| names.len() == 1)
+}
+
+/// The engine's message for a `copy.from` object without exactly one key.
+const COPY_FROM_ONE_KEY: &str = "copy behavior \"from\" field must have exactly one key";
+
+/// The engine's message for a lookup `key.from` object without exactly one key.
+const LOOKUP_FROM_ONE_KEY: &str = "lookup behavior \"key.from\" field must have exactly one key";
+
+/// E051 for the `from` key count alone, in a `copy` or `lookup` (`key`) value that is otherwise not
+/// validated: one a later `null` removes from the program, which the engine still judges as written.
+fn report_from_key_counts(
+    file: &Path,
+    key: &str,
+    value: &Value,
+    location: &str,
+    result: &mut LintResult,
+) {
+    for (item, item_location) in one_or_many(value, location) {
+        let (from, message, at) = if key == "copy" {
+            (item.get("from"), COPY_FROM_ONE_KEY, item_location)
+        } else {
+            (
+                item.get("key").and_then(|k| k.get("from")),
+                LOOKUP_FROM_ONE_KEY,
+                format!("{item_location}.key"),
+            )
+        };
+        if from.is_some_and(|from| !names_one_field(from)) {
+            report_malformed_behavior(file, &at, message, result);
+        }
+    }
+}
+
 /// Validate copy behavior. E029/E030 report a missing `from`/`into`; E051 everything else the
 /// engine's `CopyBehavior` refuses (issue #1162).
 fn validate_copy_behavior(file: &Path, copy: &Value, location: &str, result: &mut LintResult) {
@@ -2986,6 +3070,9 @@ fn validate_copy_behavior(file: &Path, copy: &Value, location: &str, result: &mu
                 "Copy `from` must be a field name or an object of names",
                 result,
             ),
+            Some(from) if !names_one_field(from) => {
+                report_malformed_behavior(file, &item_location, COPY_FROM_ONE_KEY, result);
+            }
             Some(_) => {}
         }
         match obj.get("into") {
@@ -3077,14 +3164,11 @@ fn validate_lookup_behavior(file: &Path, lookup: &Value, location: &str, result:
                         (Some(from), _) if !copy_source_is_well_formed(from) => {
                             Some("Lookup `key.from` must be a field name or an object of names")
                         }
+                        (Some(from), _) if !names_one_field(from) => Some(LOOKUP_FROM_ONE_KEY),
                         (_, None) => Some("Lookup behavior key missing 'using' field"),
-                        (_, Some(using)) => extraction_problem(using).or_else(|| {
-                            // The engine reads `index` as a match position (issue #1240), so
-                            // anything but a non-negative integer is refused at create.
-                            k.get("index")
-                                .filter(|index| !index.is_u64() && !index.is_null())
-                                .map(|_| "Lookup `key.index` must be a non-negative integer")
-                        }),
+                        // Any `index` is accepted since #1582 and read as Mountebank reads it, so
+                        // it is not checked (issue #1587; it was refused from #1240).
+                        (_, Some(using)) => extraction_problem(using),
                     },
                 };
                 if let Some(message) = problem {

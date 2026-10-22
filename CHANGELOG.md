@@ -78,7 +78,7 @@ record.
   release (a response with two types or none, #1551) no longer skips a datadir file either. A `lookup` `key.index` that is not a non-negative integer is accepted, written back
   as written, and read as Mountebank reads it: `"1"` picks match 1, and `-1` or `1.5` finds no
   row. A key that is not a behavior is written back inside the element before it, so a saved file
-  loads again. `rift-lint` still disagrees on some of these until #1587.
+  loads again. `rift-lint` reports each of these the same way (#1587).
 - **https imposters print `ca`, `mutualAuth`, `rejectUnauthorized` and `ciphers` in every view,
   `?replayable=true` included** (#1576), as Mountebank does: `ca` is `null` when unset, a
   one-element `ca` array prints (and is stored) as an array instead of a bare string, and `ciphers`
@@ -221,6 +221,14 @@ record.
   reports it as `E057`.
 
 ### Fixed
+
+- **`rift-lint` agrees with the engine and Mountebank on behaviors** (#1587), following #1582.
+  `E035` now flags a `null` `repeat` on the response or in an object-form block, as well as `0`. A
+  `behaviors` element with two behavior types is the error `E059` (formerly the warning `W018`,
+  which wrongly said Mountebank allows it), and one with no behavior in it, such as
+  `{"repeat": 2}`, is the new error `E060` (`Unrecognized behavior`). A `copy.from` or lookup
+  `key.from` object without exactly one key is `E051`. A lookup `key.index` that is not a
+  non-negative integer is no longer `E051`: the engine accepts it. `W018` is retired.
 
 - **`copy`/`lookup` from a missing field, and tokens in header names** (#1583). A regex `copy` or
   `lookup` whose request field is absent now reads the text `undefined`, as Mountebank does (`.*`
