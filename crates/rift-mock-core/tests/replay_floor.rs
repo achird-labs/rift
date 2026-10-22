@@ -299,7 +299,7 @@ const LEDGER: &[(&str, &str, usize)] = &[
     (
         "crates/rift-mock-core/src/behaviors/lookup.rs",
         "flatten",
-        3,
+        1,
     ),
     (
         "crates/rift-mock-core/src/behaviors/lookup.rs",

@@ -10,7 +10,7 @@ use super::response::{apply_decorate_bounded, body_text};
 use super::types::{IsResponse, StatusValue};
 use crate::behaviors::{
     BehaviorProgram, BehaviorStep, CsvCache, Decorated, RequestContext, ResponseStatus,
-    ShellTransformError, Spliced, SplicedHeaders, WaitScriptError, apply_copy_spliced,
+    ShellTransformError, Spliced, SplicedHeaders, SplicedName, WaitScriptError, apply_copy_spliced,
     apply_lookup_spliced, apply_shell_transform,
 };
 use crate::util::build_response_with_headers;
@@ -63,7 +63,7 @@ impl ServedParts {
                 .iter()
                 .map(|(k, values)| {
                     (
-                        k.clone(),
+                        k.as_str().into(),
                         values
                             .iter()
                             .map(|v| Spliced::authored(v.clone()))
@@ -175,7 +175,7 @@ fn headers_json(headers: &SplicedHeaders) -> serde_json::Value {
                 [line] => line.as_str().into(),
                 lines => lines.iter().map(Spliced::as_str).collect(),
             };
-            (name.clone(), value)
+            (name.to_string(), value)
         })
         .collect::<serde_json::Map<_, _>>()
         .into()
@@ -297,10 +297,10 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     // the collapse is not silent (e.g. WWW-Authenticate is also corrupted by
                     // comma-folding).
                     let is_set_cookie = |k: &str| k.eq_ignore_ascii_case("set-cookie");
-                    let folded: Vec<&String> = headers
+                    let folded: Vec<&str> = headers
                         .iter()
                         .filter(|(k, v)| v.len() > 1 && !is_set_cookie(k))
-                        .map(|(k, _)| k)
+                        .map(|(k, _)| k.as_str())
                         .collect();
                     if !folded.is_empty() {
                         warn!(
@@ -310,7 +310,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                         );
                     }
 
-                    let set_cookie: Vec<(String, Vec<Spliced>)> = headers
+                    let set_cookie: Vec<(SplicedName, Vec<Spliced>)> = headers
                         .iter()
                         .filter(|(k, _)| is_set_cookie(k))
                         .map(|(k, v)| (k.clone(), v.clone()))
@@ -320,7 +320,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                         .filter(|(k, _)| !is_set_cookie(k))
                         .map(|(k, v)| {
                             let lines: Vec<&str> = v.iter().map(Spliced::as_str).collect();
-                            (k.clone(), lines.join(", "))
+                            (k.to_string(), lines.join(", "))
                         })
                         .collect();
                     match apply_decorate_bounded(
@@ -386,7 +386,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                             let script_set_cookie = single.keys().any(|k| is_set_cookie(k));
                             headers = single
                                 .into_iter()
-                                .map(|(k, v)| (k, vec![Spliced::authored(v)]))
+                                .map(|(k, v)| (k.into(), vec![Spliced::authored(v)]))
                                 .collect();
                             if !script_set_cookie {
                                 headers.extend(set_cookie);
@@ -431,12 +431,12 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                             }
                             degraded = true;
                             headers.insert(
-                                "x-rift-decorate-error".to_string(),
+                                "x-rift-decorate-error".into(),
                                 vec![Spliced::authored("true".to_string())],
                             );
                             if timed_out {
                                 headers.insert(
-                                    SCRIPT_TIMEOUT_HEADER.to_string(),
+                                    SCRIPT_TIMEOUT_HEADER.into(),
                                     vec![Spliced::authored("true".to_string())],
                                 );
                             }
@@ -515,7 +515,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                             }
                             degraded = true;
                             headers.insert(
-                                "x-rift-shelltransform-error".to_string(),
+                                "x-rift-shelltransform-error".into(),
                                 vec![Spliced::authored("true".to_string())],
                             );
                         }

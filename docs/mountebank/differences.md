@@ -128,14 +128,12 @@ A command that fails, or prints anything other than JSON, is a `500` in Mounteba
 response as it was before the command, with `x-rift-shelltransform-error: true`, and answers `500`
 only under `strictBehaviors`, as for `decorate`.
 
-## `copy` from an absent source
+## `copy` or `lookup` from a whole `query` or `headers` object
 
-A `copy` whose source is absent (a query parameter or header the request does not carry) leaves its
-token in place. A request without a body is not an absent source: its body is `""`, as in
-Mountebank. So does Mountebank, unless the regex matches the text `undefined`: Mountebank runs
-the regex against JavaScript's `undefined` coerced to a string, so `.*` copies the literal word
-`undefined` into the response. Rift does not reproduce that coercion — see
-[Behaviors](behaviors.md#copy).
+A `copy` or `lookup` whose `from` is the string `"query"` or `"headers"` (the whole object, not one
+key of it) extracts nothing in Rift, so its token is left in place. Mountebank reads the object as
+the text `[object Object]`, or fails the request with a `500` `TypeError` for `query`. A missing
+field is read as `undefined` in both, as Mountebank does — see [Behaviors](behaviors.md#copy).
 
 ## `copy` indexed tokens
 

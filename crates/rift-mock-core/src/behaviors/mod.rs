@@ -50,7 +50,7 @@ pub use lookup::{
 };
 pub use request::{RequestContext, header_to_title_case};
 pub use sequencer::{LocalSequencer, ResponseSequencer, SequenceKey};
-pub(crate) use spliced::{Spliced, SplicedHeaders, authored_headers, plain_headers};
+pub(crate) use spliced::{Spliced, SplicedHeaders, SplicedName, authored_headers, plain_headers};
 pub use transform::{
     DecorateError, Decorated, MAX_SHELL_COMMAND_LENGTH, ResponseStatus, ReturnedOmits,
     ShellTransformError, apply_decorate, apply_shell_transform, is_javascript_decorate,

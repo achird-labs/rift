@@ -182,7 +182,10 @@ async fn transform_upstream<SH: BuildHasher>(
         .headers
         .into_iter()
         .filter(|(k, _)| !k.eq_ignore_ascii_case("content-length"))
-        .flat_map(|(k, values)| values.into_iter().map(move |v| (k.clone(), v.into_text())))
+        .flat_map(|(k, values)| {
+            let k = k.into_text();
+            values.into_iter().map(move |v| (k.clone(), v.into_text()))
+        })
         .collect();
     let body = if binary {
         match crate::imposter::handler::decode_binary_body(parts.body.into_text(), run.strict) {

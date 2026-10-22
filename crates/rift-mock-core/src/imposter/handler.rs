@@ -236,6 +236,34 @@ fn build_failure_response(e: &hyper::http::Error, log_context: &str) -> Response
     )
 }
 
+/// The first of `names` that is not a valid header name (issue #1583): a `copy` or `lookup`
+/// token whose source had no value stays in the name, as authored.
+fn invalid_header_name<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    names
+        .into_iter()
+        .find(|name| hyper::header::HeaderName::from_bytes(name.as_bytes()).is_err())
+}
+
+/// The 500 for a response header name hyper refuses (issue #1583) — Mountebank answers 500
+/// `ERR_INVALID_HTTP_TOKEN` for it. The same door as [`build_failure_response`], but the message
+/// names the header, so the author can see which token was left in it. Truncated, because a name
+/// can hold request text a `copy` inserted.
+fn invalid_header_name_response(name: &str) -> Response<Full<Bytes>> {
+    let message = format!(
+        "Response build error: invalid header name {:?}",
+        super::response::truncate_with_ellipsis(name, 256)
+    );
+    warn!("stub response build failed: {message}");
+    build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [
+            ("x-rift-imposter", "true"),
+            ("content-type", "application/json"),
+        ],
+        crate::response::error_body(StatusCode::INTERNAL_SERVER_ERROR, &message),
+    )
+}
+
 /// Whether a requested response behavior that fails should serve a 500 rather than its fallback
 /// (issue #375): per imposter (`strictBehaviors`) or process-wide (`RIFT_STRICT_BEHAVIORS`).
 ///
@@ -796,7 +824,7 @@ fn render_template_parts(
                 Err(e) => return TemplateRender::Failed(e),
             }
         }
-        rendered_headers.insert(name, rendered_values);
+        rendered_headers.insert(name.into(), rendered_values);
     }
 
     TemplateRender::Rendered {
@@ -1452,7 +1480,7 @@ async fn handle_request_inner(
                     let mut response = Response::builder().status(served);
                     for (k, values) in &parts.headers {
                         for v in values {
-                            response = response.header(k, v.as_str());
+                            response = response.header(k.as_str(), v.as_str());
                         }
                     }
 
@@ -1462,10 +1490,13 @@ async fn handle_request_inner(
                     return Ok(response
                         .body(Full::new(Bytes::from(parts.body.into_text())))
                         .unwrap_or_else(|e| {
-                            build_failure_response(
-                                &e,
-                                "inject response build failed (bad injected header?)",
-                            )
+                            match invalid_header_name(parts.headers.keys().map(|k| k.as_str())) {
+                                Some(name) => invalid_header_name_response(name),
+                                None => build_failure_response(
+                                    &e,
+                                    "inject response build failed (bad injected header?)",
+                                ),
+                            }
                         }));
                 }
                 Err(e) => {
@@ -2216,7 +2247,12 @@ async fn handle_request_inner(
             }
 
             return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|e| {
-                build_failure_response(&e, "stub response build failed (bad stub header?)")
+                match invalid_header_name(headers.keys().map(String::as_str)) {
+                    Some(name) => invalid_header_name_response(name),
+                    None => {
+                        build_failure_response(&e, "stub response build failed (bad stub header?)")
+                    }
+                }
             }));
         }
     }
