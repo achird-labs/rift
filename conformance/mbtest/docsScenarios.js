@@ -44,9 +44,10 @@ const stepFailure = 'failed; below is the actual result',
         // docs/mountebank/differences.md#http-framing: Rift frames a body with Content-Length where
         // Mountebank chunks it.
         /^(content-length|transfer-encoding):/i,
-        // Mountebank's default `Connection: close`, which Rift does not send, is a bug the API
-        // phase reports on its own (expected.json, #1592); dropping it here
-        // keeps it from hiding every docs scenario behind one finding.
+        // docs/mountebank/differences.md#connections-stay-open: Mountebank's default
+        // `Connection: close` is not sent by Rift; the API phase reports it on its own
+        // (expected.json), and dropping it here keeps it from hiding every docs scenario
+        // behind one finding.
         /^connection:/i
     ],
     normalise = text => {

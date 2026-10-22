@@ -448,6 +448,20 @@ it the same way.
 
 `--ip-whitelist` remains not enforced (#879).
 
+## Connections stay open
+
+Mountebank adds `Connection: close` to every imposter response that does not set a `Connection`
+header (`is`, `inject`, `proxy` and the default response when no stub matches), and Node then closes
+the socket. Rift sends no `Connection` header and keeps HTTP/1.1 connections alive, so a client
+reusing one connection is served again on it. This is deliberate: closing after every response cost
+about 5.5x throughput for keep-alive clients in Rift's own measurement, and every published
+benchmark measures the keep-alive behaviour.
+
+To get Mountebank's behaviour, set `"Connection": "close"` in the imposter's `defaultResponse`
+headers (it applies to every response that does not set its own) or in a single stub's response
+headers. Rift honours it: it sends the header and closes the connection. A response that sets
+`"Connection": "keep-alive"` stays open in both.
+
 ## HTTP framing
 
 Rift frames a response body with `Content-Length` where Mountebank sends it chunked

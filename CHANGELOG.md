@@ -428,6 +428,10 @@ record.
 
 ### Documentation
 
+- **Imposter connections stay open** (#1592): Mountebank adds `Connection: close` to imposter
+  responses that do not set it; Rift keeps the connection alive. `docs/mountebank/differences.md`
+  explains how to opt in with `Connection: close` in `defaultResponse.headers` or a stub's headers.
+
 - **Proxy upstream certificate verification is listed as a Mountebank difference** (#1577):
   Mountebank never verifies a `proxy` upstream's certificate, Rift does; `--upstream-tls-skip-verify`
   gives Mountebank's behaviour. `--upstream-ca-file` cannot help for an upstream using Mountebank's
