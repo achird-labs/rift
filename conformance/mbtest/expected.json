@@ -101,18 +101,6 @@
   ],
   "expected": [
     {
-      "id": "api/http/httpImposterTest.js::http imposter DELETE /imposters/:id supports returning a replayable body with proxies removed",
-      "class": "documented",
-      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
-      "note": "`recordMatches` is a Rift-only replayable key (api/index.md)"
-    },
-    {
-      "id": "api/http/httpImposterTest.js::https imposter DELETE /imposters/:id supports returning a replayable body with proxies removed",
-      "class": "documented",
-      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
-      "note": "`recordMatches` is a Rift-only replayable key (api/index.md)"
-    },
-    {
       "id": "api/http/httpInjectionTest.js::http imposter POST /imposters with injections should allow synchronous javascript injection for responses (old interface)",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#connections-stay-open",
@@ -188,7 +176,7 @@
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should support retrieving replayable JSON with proxies removed for later playback",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
-      "note": "recordedFrom and recordMatches are Rift-only replayable keys, the recorded headers carry Rift's markers and Content-Length framing (#marker-headers-on-served-responses, #http-framing); the recorded `Connection: close` is #connections-stay-open"
+      "note": "recordedFrom is a Rift-only replayable key, the recorded headers carry Rift's markers and Content-Length framing (#marker-headers-on-served-responses, #http-framing); the recorded `Connection: close` is #connections-stay-open"
     },
     {
       "id": "api/http/httpProxyStubTest.js::http proxy stubs should persist decorated proxy responses and only run decorator once",
@@ -279,12 +267,6 @@
       "class": "documented",
       "doc": "docs/mountebank/differences.md#error-envelopes",
       "note": "code/type and message wording differ, no `source`"
-    },
-    {
-      "id": "api/impostersControllerTest.js::DELETE /imposters deletes all imposters and returns replayable body",
-      "class": "documented",
-      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
-      "note": "Rift-only config keys (recordMatches) print with ?replayable=true (api/index.md)"
     },
     {
       "id": "api/impostersControllerTest.js::DELETE /imposters supports returning a non-replayable body with proxies removed",
@@ -384,12 +366,6 @@
       "note": "times out on 4545: the request arrived between the pidfile write and the imposter bind (the server itself starts since #1575, and answers on the host's name once bound)"
     },
     {
-      "id": "cli/hostTest.js::--host should work with mb save",
-      "class": "documented",
-      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
-      "note": "Rift-only config keys (recordMatches) print in the saved file (api/index.md); the server starts on a DNS-name --host since #1575"
-    },
-    {
       "id": "cli/hostTest.js::--host should work with mb replay",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#command-line",
@@ -465,7 +441,7 @@
       "id": "docs:/docs/api/proxies#proxyAlways",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#the-admin-api-serves-json-only",
-      "note": "no Vary: Accept; recordedFrom/recordMatches and the recorded markers and framing are documented too"
+      "note": "no Vary: Accept; recordedFrom and the recorded markers and framing are documented too"
     },
     {
       "id": "docs:/docs/api/proxies#waitBehavior",

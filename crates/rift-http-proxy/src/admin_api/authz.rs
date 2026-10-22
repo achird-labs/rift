@@ -32,6 +32,27 @@ use rift_mock_core::extensions::authz::actions;
 /// [`AdminAuthorizer`]: rift_mock_core::extensions::authz::AdminAuthorizer
 pub const SCOPE_HEADER: &str = "x-rift-scope";
 
+/// The admin credential a request presented: `Authorization` (raw, no scheme) or, when that header
+/// is absent, `x-api-key` (Mountebank's `--apikey` spelling, issue #1565).
+///
+/// One function serves both the built-in `--api-key` gate and the [`AdminAuthorizer`] hook
+/// (issue #1623), so the credential the hook sees is by construction the one that was checked.
+/// `Authorization`, when present, decides alone: an empty or non-ASCII one yields `None`/`""` and
+/// does not fall through to `x-api-key`, which would let a wrong `Authorization` authenticate on
+/// the other header. An embedder that fronts the admin API itself should call this rather than
+/// copy the header lookup.
+///
+/// The value is a secret: never log it.
+///
+/// [`AdminAuthorizer`]: rift_mock_core::extensions::authz::AdminAuthorizer
+#[must_use]
+pub fn credential(headers: &hyper::HeaderMap) -> Option<&str> {
+    headers
+        .get(hyper::header::AUTHORIZATION)
+        .or_else(|| headers.get("x-api-key"))
+        .and_then(|v| v.to_str().ok())
+}
+
 /// A route as the authorizer needs to see it: what is being attempted, and against what.
 ///
 /// Owns its param strings because they are borrowed slices of a path that the caller may not keep

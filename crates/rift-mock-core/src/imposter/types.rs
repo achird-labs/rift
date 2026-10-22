@@ -3165,8 +3165,9 @@ pub struct ImposterConfig {
         skip_serializing_if = "is_default_enabled"
     )]
     pub enabled: bool,
-    /// Record which stub matched each request (Mountebank compatible)
-    #[serde(default)]
+    /// Accepted with no effect (`docs/mountebank/imposters.md`). Printed only when `true`: it is a
+    /// Rift-only key that round-trips, and Mountebank never prints it (#1613).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub record_matches: bool,
     #[serde(default)]
     pub stubs: Vec<Stub>,
@@ -5893,6 +5894,39 @@ mod tests {
             assert_eq!(written.get("allowCORS"), Some(&json!(true)), "{spelling}");
             assert_eq!(written.get("allowCors"), None, "{spelling}");
         }
+    }
+
+    /// #1613: Mountebank never prints `recordMatches`, and the house rule is that a default is not
+    /// printed. Absent and `false` print no key; `true` (a Rift-only key that round-trips) prints;
+    /// `recordRequests`, which Mountebank always prints, stays.
+    #[test]
+    fn record_matches_prints_only_when_true() {
+        for input in [
+            json!({"protocol": "http"}),
+            json!({"protocol": "http", "recordMatches": false}),
+        ] {
+            let config: ImposterConfig = serde_json::from_value(input).expect("imposter parses");
+            let written = serde_json::to_value(&config).expect("imposter serialises");
+            assert_eq!(written.get("recordMatches"), None, "{written}");
+            assert_eq!(
+                written.get("recordRequests"),
+                Some(&json!(false)),
+                "{written}"
+            );
+            let again: ImposterConfig = serde_json::from_value(written).expect("re-parses");
+            assert!(!again.record_matches);
+        }
+        let config: ImposterConfig =
+            serde_json::from_value(json!({"protocol": "http", "recordMatches": true}))
+                .expect("imposter parses");
+        let written = serde_json::to_value(&config).expect("imposter serialises");
+        assert_eq!(
+            written.get("recordMatches"),
+            Some(&json!(true)),
+            "{written}"
+        );
+        let again: ImposterConfig = serde_json::from_value(written).expect("re-parses");
+        assert!(again.record_matches);
     }
 
     fn allow_cors_of(value: &serde_json::Value) -> ImposterConfig {

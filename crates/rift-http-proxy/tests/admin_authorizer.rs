@@ -249,6 +249,70 @@ async fn the_credential_is_passed_through_verbatim() {
     assert_eq!(seen.credential.as_deref(), Some("Bearer  weird.token"));
 }
 
+// Issue #1623: the hook sees the credential the admin gate accepted (#1565), not `Authorization`
+// alone, so an `x-api-key` request is not mistaken for an anonymous one.
+#[tokio::test]
+async fn an_x_api_key_credential_reaches_the_hook() {
+    let spy = SpyAuthorizer::new(AuthzDecision::allow());
+    let base = start_admin(Some("KEY"), Some(spy.clone())).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/imposters"))
+        .header("x-api-key", "KEY")
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 200);
+
+    let seen = spy.calls().into_iter().next().expect("hook was consulted");
+    assert_eq!(seen.credential.as_deref(), Some("KEY"));
+}
+
+#[tokio::test]
+async fn authorization_wins_over_x_api_key_at_the_hook() {
+    let spy = SpyAuthorizer::new(AuthzDecision::allow());
+    let base = start_admin(Some("A"), Some(spy.clone())).await;
+    let client = reqwest::Client::new();
+
+    // Both present, Authorization right: the hook sees Authorization, never the other header.
+    let resp = client
+        .get(format!("{base}/imposters"))
+        .header("authorization", "A")
+        .header("x-api-key", "B")
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 200);
+    let calls = spy.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].credential.as_deref(), Some("A"));
+
+    // Both present, Authorization wrong: 401 at the gate (x-api-key does not rescue it) and the
+    // hook is not consulted.
+    let resp = client
+        .get(format!("{base}/imposters"))
+        .header("authorization", "wrong")
+        .header("x-api-key", "A")
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 401);
+    assert_eq!(spy.calls().len(), 1, "hook must not run for a 401");
+}
+
+#[tokio::test]
+async fn no_credential_header_reaches_the_hook_as_none() {
+    let spy = SpyAuthorizer::new(AuthzDecision::allow());
+    let base = start_admin(None, Some(spy.clone())).await;
+
+    reqwest::get(format!("{base}/imposters"))
+        .await
+        .expect("request");
+
+    let seen = spy.calls().into_iter().next().expect("hook was consulted");
+    assert_eq!(seen.credential, None);
+}
+
 #[tokio::test]
 async fn gateway_traffic_is_not_authorized() {
     // `/__rift/` is data-plane imposter traffic. It skips the admin api key for the same reason,

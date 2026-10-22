@@ -1831,8 +1831,7 @@
       "type": "string"
     },
     "recordMatches": {
-      "default": false,
-      "description": "Record which stub matched each request (Mountebank compatible)",
+      "description": "Accepted with no effect (`docs/mountebank/imposters.md`). Printed only when `true`: it is a\nRift-only key that round-trips, and Mountebank never prints it (#1613).",
       "type": "boolean"
     },
     "recordRequests": {
