@@ -163,29 +163,45 @@ impl Default for TlsDefaults {
 /// both the ALPN offer (over TLS) and the hyper builder used below, so the two can never disagree
 /// even though the underlying predicate (`Imposter::uses_tcp_faults`) can change between any two
 /// connections without this function or the acceptor being rebuilt.
+///
+/// When `tunnels` is set, an HTTP/1 `CONNECT` is answered `200` without reaching the stubs and
+/// the connection is handed back as the returned [`hyper::upgrade::OnUpgrade`], for
+/// [`serve_imposter_connection`] to serve as a tunnel (issue #1595). `None` means the connection is
+/// over, including when it ended on the shutdown signal.
 #[allow(clippy::too_many_arguments)]
 async fn run_http1<I>(
     io: I,
     imposter: Arc<Imposter>,
     addr: std::net::SocketAddr,
     fault_cell: FaultCell,
-    mut conn_shutdown_rx: broadcast::Receiver<()>,
+    conn_shutdown_rx: &mut broadcast::Receiver<()>,
     port: u16,
     decorator: Option<Arc<dyn ResponseDecorator>>,
     http_tuning: crate::proxy::network::HttpTuning,
     http1_only: bool,
-) where
+    tunnels: bool,
+) -> Option<hyper::upgrade::OnUpgrade>
+where
     // Tokio-side, not `hyper::rt`'s: the `auto` branch below must sniff the H2 preface on the raw
     // stream before `TokioIo::new` wraps it (issue #1030), so this takes the stream one layer
     // earlier than it used to and does its own `TokioIo::new` per branch.
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let service = service_fn(move |req| {
+    // Where a CONNECT leaves the connection's upgrade for the caller (issue #1595). Written at most
+    // once: hyper reads no further request on a connection after a `200` to a CONNECT.
+    let tunnel: Arc<parking_lot::Mutex<Option<hyper::upgrade::OnUpgrade>>> = Arc::default();
+    let tunnel_slot = Arc::clone(&tunnel);
+    let service = service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
         let imposter = Arc::clone(&imposter);
         let fault_cell = fault_cell.clone();
         let decorator = decorator.clone();
+        let tunnel_slot = Arc::clone(&tunnel_slot);
         async move {
             let version = req.version();
+            if tunnels && opens_tunnel(&req) {
+                *tunnel_slot.lock() = Some(hyper::upgrade::on(&mut req));
+                return Ok(tunnel_established());
+            }
             let response =
                 handle_imposter_request_decorated(req, imposter, addr, port, decorator).await?;
             if let Some(kind) = response.extensions().get::<TcpFaultKind>().copied() {
@@ -202,11 +218,13 @@ async fn run_http1<I>(
         ($conn:expr) => {{
             let conn = $conn;
             tokio::pin!(conn);
+            // `true` when the connection ended on the shutdown signal.
             tokio::select! {
                 res = conn.as_mut() => {
                     if let Err(e) = res {
                         debug!("Connection error on port {}: {}", port, e);
                     }
+                    false
                 }
                 _ = conn_shutdown_rx.recv() => {
                     // Stop accepting new requests on this connection and close it once any in-flight
@@ -215,6 +233,7 @@ async fn run_http1<I>(
                     if let Err(e) = conn.as_mut().await {
                         debug!("Connection error on port {} during shutdown: {}", port, e);
                     }
+                    true
                 }
             }
         }};
@@ -230,7 +249,16 @@ async fn run_http1<I>(
             .timer(hyper_util::rt::TokioTimer::new())
             .header_read_timeout(http_tuning.header_read_timeout)
             .max_buf_size(http_tuning.max_buf_size);
-        drive_conn!(builder.serve_connection(TokioIo::new(io), service));
+        let shut_down = drive_conn!(
+            builder
+                .serve_connection(TokioIo::new(io), service)
+                .with_upgrades()
+        );
+        // A tunnel opened as the imposter was going away is not served (its CONNECT was answered,
+        // but the shutdown this connection consumed would never reach the tunnel).
+        if shut_down {
+            return None;
+        }
     } else {
         // Bound the HTTP/1-vs-HTTP/2 detection window itself (issue #1030): `auto::Builder`
         // sniffs the preface before either protocol's `Connection` — and its
@@ -253,10 +281,10 @@ async fn run_http1<I>(
                     // unbounded log-volume lever for a hostile client (issue #718's rule).
                     crate::extensions::metrics::record_preface_failure("imposter", &e);
                     debug!("preface detection on port {}: {}", port, e);
-                    return;
+                    return None;
                 }
             },
-            _ = conn_shutdown_rx.recv() => return,
+            _ = conn_shutdown_rx.recv() => return None,
         };
         let mut builder =
             hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
@@ -284,7 +312,146 @@ async fn run_http1<I>(
             .timer(hyper_util::rt::TokioTimer::new())
             .keep_alive_interval(http_tuning.header_read_timeout)
             .keep_alive_timeout(http_tuning.header_read_timeout);
-        drive_conn!(builder.serve_connection(TokioIo::new(sniffed), service));
+        let shut_down =
+            drive_conn!(builder.serve_connection_with_upgrades(TokioIo::new(sniffed), service));
+        if shut_down {
+            return None;
+        }
+    }
+    tunnel.lock().take()
+}
+
+/// How many CONNECT tunnels may nest inside one client connection (issue #1595). Each level adds
+/// a layer every read and write of the connection passes through (and a TLS session over an
+/// HTTPS imposter), so an unbounded chain of CONNECTs inside tunnels would let one client grow a
+/// connection's memory and call depth without limit. Real clients open one. A CONNECT past the
+/// limit takes the ordinary request path, as an HTTP/2 CONNECT does.
+const MAX_TUNNEL_DEPTH: usize = 8;
+
+/// Whether `req` opens a CONNECT tunnel (issue #1595): an HTTP/1 `CONNECT`. Mountebank has no
+/// HTTP/2, so an h2 CONNECT keeps the ordinary request path.
+fn opens_tunnel<B>(req: &hyper::Request<B>) -> bool {
+    req.method() == hyper::Method::CONNECT
+        && matches!(
+            req.version(),
+            hyper::Version::HTTP_10 | hyper::Version::HTTP_11
+        )
+}
+
+/// The answer to a tunnelling CONNECT: a bare `200`, as Mountebank's `200 Connection
+/// established`. It is not matched, recorded, counted or decorated; only the requests sent
+/// through the tunnel are.
+fn tunnel_established() -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
+    hyper::Response::new(http_body_util::Full::new(bytes::Bytes::new()))
+}
+
+/// Serve one accepted imposter connection, and any CONNECT tunnel it opens (issue #1595).
+///
+/// Mountebank answers `CONNECT host:port` by ignoring the target and piping the client into a new
+/// connection to its own port, so the client's inner request reaches the same imposter's stubs.
+/// This does the same in process: the upgraded stream is served by the same imposter, with the
+/// imposter's own TLS acceptor when it is HTTPS. Not dialling the port back keeps the tunnel on
+/// this connection's `RIFT_MAX_CONNECTIONS` permit and its `--local-only` admission, and reaches
+/// nothing but this imposter: the CONNECT target is never contacted, so no imposter is an open
+/// forward proxy (that is the intercept listener's job).
+///
+/// The tunnel keeps the connection's [`FaultCell`]: `FaultIo` wraps only the client's TCP socket,
+/// which carries the tunnel, so a fault a tunnelled response arms breaks that socket, the one
+/// transport the client has. It also keeps `conn_shutdown_rx`, so a delete closes the tunnel too
+/// (issues #207 and #596).
+#[allow(clippy::too_many_arguments)]
+async fn serve_imposter_connection<I>(
+    io: I,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    imposter: Arc<Imposter>,
+    addr: std::net::SocketAddr,
+    fault_cell: FaultCell,
+    mut conn_shutdown_rx: broadcast::Receiver<()>,
+    port: u16,
+    decorator: Option<Arc<dyn ResponseDecorator>>,
+    http_tuning: crate::proxy::network::HttpTuning,
+    http1_only: bool,
+) where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let mut pending = run_http1(
+        io,
+        Arc::clone(&imposter),
+        addr,
+        fault_cell.clone(),
+        &mut conn_shutdown_rx,
+        port,
+        decorator.clone(),
+        http_tuning,
+        http1_only,
+        true,
+    )
+    .await;
+    let mut depth = 0;
+    while let Some(on_upgrade) = pending.take() {
+        depth += 1;
+        // Resolved by the time `run_http1` returns: hyper hands the stream over as the connection
+        // ends. An error means the connection failed before the handover.
+        let upgraded = match on_upgrade.await {
+            Ok(upgraded) => TokioIo::new(upgraded),
+            Err(e) => {
+                debug!("CONNECT tunnel on port {port} did not open: {e}");
+                return;
+            }
+        };
+        let tunnels = depth < MAX_TUNNEL_DEPTH;
+        pending = match &tls_acceptor {
+            // The client's inner handshake gets the imposter's certificate, as it would from
+            // Mountebank's loopback; same 10 s bound as the accept loop's handshake, and raced
+            // against shutdown so a delete never waits on it.
+            Some(acceptor) => {
+                let handshake =
+                    tokio::time::timeout(Duration::from_secs(10), acceptor.accept(upgraded));
+                tokio::select! {
+                    result = handshake => match result {
+                        Ok(Ok(tls)) => {
+                            run_http1(
+                                tls,
+                                Arc::clone(&imposter),
+                                addr,
+                                fault_cell.clone(),
+                                &mut conn_shutdown_rx,
+                                port,
+                                decorator.clone(),
+                                http_tuning,
+                                http1_only,
+                                tunnels,
+                            )
+                            .await
+                        }
+                        Ok(Err(e)) => {
+                            debug!("TLS handshake in a CONNECT tunnel failed on port {port}: {e}");
+                            None
+                        }
+                        Err(_) => {
+                            debug!("TLS handshake in a CONNECT tunnel timed out on port {port}");
+                            None
+                        }
+                    },
+                    _ = conn_shutdown_rx.recv() => None,
+                }
+            }
+            None => {
+                run_http1(
+                    upgraded,
+                    Arc::clone(&imposter),
+                    addr,
+                    fault_cell.clone(),
+                    &mut conn_shutdown_rx,
+                    port,
+                    decorator.clone(),
+                    http_tuning,
+                    http1_only,
+                    tunnels,
+                )
+                .await
+            }
+        };
     }
 }
 
@@ -1675,8 +1842,9 @@ impl ImposterManager {
                                     .await
                                     {
                                         Ok(Ok(tls)) => {
-                                            run_http1(
+                                            serve_imposter_connection(
                                                 tls,
+                                                Some(acceptor),
                                                 imposter,
                                                 addr,
                                                 fault_cell,
@@ -1696,8 +1864,9 @@ impl ImposterManager {
                                         }
                                     },
                                     None => {
-                                        run_http1(
+                                        serve_imposter_connection(
                                             faulted,
+                                            None,
                                             imposter,
                                             addr,
                                             fault_cell,
@@ -4216,6 +4385,61 @@ mod tests {
         // per-stream RST_STREAM, and the client's connection task ends cleanly.
         let ended = tokio::time::timeout(std::time::Duration::from_secs(1), conn).await;
         assert!(ended.is_ok(), "the h2 connection is closed, not left open");
+    }
+
+    // Issue #1595: only an HTTP/1 CONNECT opens a tunnel back into the imposter (Mountebank has no
+    // h2). An h2 CONNECT keeps the ordinary request path: it is matched and counted, and the
+    // connection goes on serving.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_h2_connect_takes_the_ordinary_request_path() {
+        use http_body_util::Empty;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+
+        let manager = ImposterManager::new();
+        let port = manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "protocol": "http",
+                    "stubs": [{"responses": [{"is": {"statusCode": 404}}]}]
+                }))
+                .expect("config"),
+            )
+            .await
+            .expect("create");
+        let imposter = manager.get_imposter(port).expect("imposter");
+
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        let (mut sender, conn) =
+            hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
+                .await
+                .expect("h2 handshake");
+        tokio::spawn(conn);
+        let connect = hyper::Request::connect("anything.invalid:443")
+            .body(Empty::<bytes::Bytes>::new())
+            .expect("request");
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            sender.send_request(connect),
+        )
+        .await
+        .expect("the h2 CONNECT is answered")
+        .expect("h2 CONNECT response");
+        assert_eq!(answer.status(), 404, "answered by the stub, not tunnelled");
+        assert_eq!(imposter.get_request_count(), 1, "the h2 CONNECT is counted");
+
+        let get = hyper::Request::get(format!("http://127.0.0.1:{port}/"))
+            .body(Empty::<bytes::Bytes>::new())
+            .expect("request");
+        let answer =
+            tokio::time::timeout(std::time::Duration::from_secs(5), sender.send_request(get))
+                .await
+                .expect("the connection still serves")
+                .expect("h2 GET response");
+        assert_eq!(answer.status(), 404);
+        assert_eq!(imposter.get_request_count(), 2);
+        manager.delete_all().await;
     }
 
     // Issue #1616: a same-port re-create after a delete that cut off a wait serves the new

@@ -231,6 +231,10 @@ record.
 
 ### Fixed
 
+- **An imposter answers `CONNECT` with a tunnel back into itself** (#1595), as Mountebank does,
+  instead of forwarding the CONNECT to its proxy origin. A client using an `http` or `https` imposter
+  as its proxy now reaches the imposter's stubs. The CONNECT target is never contacted, and the
+  CONNECT itself is not matched, recorded or counted.
 - **`rift-lint` agrees with the engine and Mountebank on behaviors** (#1587), following #1582.
   `E035` now flags a `null` `repeat` on the response or in an object-form block, as well as `0`. A
   `behaviors` element with two behavior types is the error `E059` (formerly the warning `W018`,
