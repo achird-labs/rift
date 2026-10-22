@@ -138,6 +138,7 @@ impl IdentityClients {
         let id = identity_key(cert, key, passphrase);
         for _ in 0..POLICY_RACE_RETRIES {
             let state = self.policy.load_full();
+            let mut derivation = None;
             let mut outcome = {
                 let mut entries = self.entries.lock();
                 if let Some(reason) = entries.refused.get(&id) {
@@ -151,13 +152,21 @@ impl IdentityClients {
                 match entries.inflight.get(&id) {
                     Some(running) => running.clone(),
                     None => {
-                        let running =
-                            self.start(id, &state, cert, key, passphrase, plain_client_injected);
+                        let (running, derive) =
+                            self.prepare(id, &state, cert, key, passphrase, plain_client_injected);
                         entries.inflight.insert(id, running.clone());
+                        derivation = Some(derive);
                         running
                     }
                 }
             };
+            // Spawned with the lock released, and only once the entry is registered: tokio drops
+            // the closure on this thread when its blocking pool is shutting down, and the guard
+            // inside it then takes the (non-reentrant) lock to remove that entry.
+            if let Some(derive) = derivation {
+                // Detached: dropping the JoinHandle does not cancel a blocking task.
+                drop(tokio::task::spawn_blocking(derive));
+            }
             let outcome = outcome
                 .wait_for(Option::is_some)
                 .await
@@ -181,9 +190,10 @@ impl IdentityClients {
         ))
     }
 
-    /// Start the derivation for `id` under `state`, detached. Called with the entries lock held,
-    /// so no second derivation for `id` can start before this one is registered.
-    fn start(
+    /// The derivation for `id` under `state`, ready to spawn, and the receiver its waiters watch.
+    /// Called with the entries lock held, so no second derivation for `id` is prepared before this
+    /// one is registered; spawned by the caller after the lock is released.
+    fn prepare(
         self: &Arc<Self>,
         id: IdentityKey,
         state: &Arc<PolicyState>,
@@ -191,7 +201,10 @@ impl IdentityClients {
         key: &str,
         passphrase: Option<&str>,
         plain_client_injected: bool,
-    ) -> watch::Receiver<Option<Outcome>> {
+    ) -> (
+        watch::Receiver<Option<Outcome>>,
+        impl FnOnce() + Send + 'static,
+    ) {
         if state.policy.is_none()
             && plain_client_injected
             && !self.warned_unset_policy.swap(true, Ordering::Relaxed)
@@ -214,15 +227,14 @@ impl IdentityClients {
             id,
             armed: std::cell::Cell::new(true),
         };
-        // Detached: dropping the JoinHandle does not cancel a blocking task.
-        drop(tokio::task::spawn_blocking(move || {
+        let derive = move || {
             let built = build(&cert, &key, passphrase.as_deref(), &state);
             let outcome = guard.clients.finish(id, &state, built);
             guard.armed.set(false);
             // No receiver left is fine: the outcome is already recorded.
             sender.send_replace(Some(outcome));
-        }));
-        running
+        };
+        (running, derive)
     }
 
     /// Record a derivation's outcome and end its in-flight entry, in one critical section.
@@ -504,6 +516,35 @@ mod tests {
             .expect("cached");
         assert_eq!(clients.derivations.load(Ordering::Relaxed), 1);
         assert!(clients.entries.lock().inflight.is_empty());
+    }
+
+    #[test]
+    fn a_runtime_shutting_down_fails_the_request_instead_of_hanging() {
+        // tokio drops a blocking closure on the calling thread once its pool is shut down; the
+        // guard inside then removes the in-flight entry, which must not need a lock still held.
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime");
+            let handle = runtime.handle().clone();
+            runtime.shutdown_background();
+            let _context = handle.enter();
+            let clients = Arc::new(IdentityClients::default());
+            clients.set_policy(skip_verify());
+            let request = clients.client_for(CERT, PBES2_KEY, Some("rift-test"), false);
+            let mut request = std::pin::pin!(request);
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            let polled = request.as_mut().poll(&mut cx);
+            let failed = matches!(polled, std::task::Poll::Ready(Err(_)));
+            let cleared = clients.entries.lock().inflight.is_empty();
+            let _ = done.send((failed, cleared));
+        });
+        let (failed, cleared) = finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("client_for hung on a shut-down runtime");
+        assert!(failed, "the request must fail, not wait forever");
+        assert!(cleared, "no in-flight entry may be left behind");
     }
 
     #[test]

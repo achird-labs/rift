@@ -1900,3 +1900,40 @@ async fn a_yaml_named_file_holding_json_loads_as_json() {
     );
     server.shutdown().await;
 }
+
+// ===== Issue #1609: a remote document's proxy client keys share one derivation budget =====
+
+#[tokio::test]
+async fn http_source_holds_a_document_to_one_key_derivation_budget() {
+    // Three distinct keys at the per-key cap (1,000,000 PBKDF2 iterations, OpenSSL-made): two fit
+    // the per-request budget of 2,000,000, the third does not.
+    let cert = include_str!("fixtures/client-identity/client.crt");
+    let keys = [
+        include_str!("fixtures/client-identity/client.pbes2-1m-1.key"),
+        include_str!("fixtures/client-identity/client.pbes2-1m-2.key"),
+        include_str!("fixtures/client-identity/client.pbes2-1m-3.key"),
+    ];
+    let stubs: Vec<_> = keys
+        .iter()
+        .map(|key| {
+            serde_json::json!({"responses": [{"proxy": {
+                "to": "https://localhost:1", "cert": cert, "key": key, "passphrase": "rift-test",
+            }}]})
+        })
+        .collect();
+    let body = serde_json::json!({"imposters": [{"protocol": "http", "stubs": stubs}]});
+    let origin = Origin::start(Reply::Etagged {
+        body: body.to_string(),
+        etag: "\"k\"".to_string(),
+    });
+    let err = HttpSource::new()
+        .unwrap()
+        .fetch(&SourceRef::new(origin.uri()))
+        .await
+        .expect_err("a document past the derivation budget must be refused");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("more key derivation than one request may"),
+        "{msg}"
+    );
+}
