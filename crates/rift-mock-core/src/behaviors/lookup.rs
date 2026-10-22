@@ -594,7 +594,7 @@ impl CsvParser<'_> {
 /// serve path uses [`apply_lookup_spliced`] so text an earlier pass inserted is not re-scanned.
 pub fn apply_lookup_behaviors(
     body: &str,
-    headers: &mut HashMap<String, Vec<String>>,
+    headers: &mut crate::imposter::Headers,
     behaviors: &[LookupBehavior],
     request: &RequestContext,
     csv_cache: &CsvCache,
@@ -708,7 +708,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query,
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -736,7 +736,7 @@ mod tests {
             into: "${row}".to_string(),
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert("X-Echo".to_string(), vec!["n=${row}[name]".to_string()]);
 
         apply_lookup_behaviors(
@@ -770,7 +770,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query,
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -798,7 +798,7 @@ mod tests {
             into: "${row}".to_string(),
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert("X-Echo".to_string(), vec!["n=${row}[name]".to_string()]);
 
         // See the note in `copy.rs`'s sibling test for why this is `captured_logs` and not
@@ -845,7 +845,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query,
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -873,7 +873,7 @@ mod tests {
             into: "${row}".to_string(),
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert(
             "X-Echo".to_string(),
             vec!["bad\nvalue=${row}[name]".to_string()],
@@ -911,7 +911,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query,
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -939,7 +939,7 @@ mod tests {
             into: "${row}".to_string(),
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert("X-Literal".to_string(), vec!["bad\nvalue".to_string()]);
 
         apply_lookup_behaviors(
@@ -971,7 +971,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query,
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -999,7 +999,7 @@ mod tests {
             into: "${row}".to_string(),
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert(
             "Set-Cookie".to_string(),
             vec!["a=1".to_string(), "n=${row}[name]".to_string()],
@@ -1114,13 +1114,13 @@ mod tests {
             method: "GET".to_string(),
             path: path.to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: body.map(str::to_string),
             ..Default::default()
         };
         let served = apply_lookup_behaviors(
             "${row}[name]",
-            &mut HashMap::new(),
+            &mut crate::imposter::Headers::new(),
             &[behavior],
             &request,
             &CsvCache::default(),
@@ -1637,11 +1637,11 @@ mod tests {
             method: "GET".to_string(),
             path: "/ab-cd".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert("X-Row".to_string(), vec![template.to_string()]);
         let served = apply_lookup_behaviors(
             template,
@@ -1653,7 +1653,7 @@ mod tests {
             FIXTURE_STUB,
         );
         let _ = std::fs::remove_file(&csv);
-        (served, headers.remove("X-Row").expect("header kept"))
+        (served, headers.shift_remove("X-Row").expect("header kept"))
     }
 
     /// Issue #1402: Mountebank's `replaceObjectValuesIn` replaces `${row}["col"]`,
@@ -1729,7 +1729,7 @@ mod tests {
             ..Default::default()
         };
         let mut body = Spliced::authored("${v}|${row}[name]".to_string());
-        let mut headers = authored_headers(HashMap::from([(
+        let mut headers = authored_headers(crate::imposter::Headers::from([(
             "X-${v}".to_string(),
             vec!["1".to_string()],
         )]));
@@ -1760,7 +1760,7 @@ mod tests {
         );
         assert_eq!(
             plain_headers(headers),
-            HashMap::from([("X-${row}[name]".to_string(), vec!["1".to_string()])])
+            crate::imposter::Headers::from([("X-${row}[name]".to_string(), vec!["1".to_string()])])
         );
     }
 }

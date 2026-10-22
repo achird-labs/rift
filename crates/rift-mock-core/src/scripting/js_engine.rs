@@ -630,7 +630,7 @@ pub(crate) fn declared_functions_js(script: &str) -> Result<Vec<String>> {
         mode: ResponseMode::Text,
         method: "GET".to_string(),
         path: "/".to_string(),
-        headers: std::collections::HashMap::new(),
+        headers: crate::util::OrderedMap::default(),
         body: Value::Null,
         query: crate::util::OrderedMap::default(),
         path_params: std::collections::HashMap::new(),
@@ -880,10 +880,15 @@ fn header_getter(
 
 fn set_header_getter(
     obj: &JsObject,
-    headers: &std::collections::HashMap<String, String>,
+    headers: &crate::util::OrderedMap<String, String>,
     context: &mut Context,
 ) -> Result<()> {
-    let native_fn = NativeFunction::from_copy_closure_with_captures(header_getter, headers.clone())
+    // A plain map for the captures: boa's GC traces std collections, and the lookup is by name.
+    let captures: HeaderGetterCaptures = headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let native_fn = NativeFunction::from_copy_closure_with_captures(header_getter, captures)
         .to_js_function(context.realm());
     obj.set(js_string!("header"), native_fn, false, context)
         .map(|_| ())
@@ -1840,7 +1845,7 @@ fn js_to_json(context: &mut Context, value: &JsValue) -> JsResult<Value> {
 #[derive(Debug, Clone)]
 pub struct MountebankInjectResponse {
     pub status_code: Option<u16>,
-    pub headers: Option<std::collections::HashMap<String, String>>,
+    pub headers: Option<crate::util::OrderedMap<String, String>>,
     pub body: Option<String>,
 }
 
@@ -2542,7 +2547,8 @@ pub struct MountebankRequest {
     pub path: String,
     /// Request order, as Mountebank's `querystring.parse` (issue #1596).
     pub query: crate::util::OrderedMap<String, String>,
-    pub headers: std::collections::HashMap<String, String>,
+    /// Request order, as Mountebank's `headersMap.ofRaw` (issue #1606).
+    pub headers: crate::util::OrderedMap<String, String>,
     pub body: Option<String>,
     /// The request's body did not decode (issue #1584): the script sees no `body` key at all, as
     /// Mountebank's `request.body` is `undefined` then. When `false`, `body` is always a string,
@@ -2830,7 +2836,7 @@ fn parse_mountebank_response(
         && let Some(headers_obj) = headers_val.as_object()
         && let Ok(keys) = headers_obj.own_property_keys(context)
     {
-        let mut map = std::collections::HashMap::new();
+        let mut map = crate::util::OrderedMap::default();
         for key in keys {
             let key_str = match &key {
                 PropertyKey::String(s) => s.to_std_string_escaped(),
@@ -3151,7 +3157,7 @@ pub fn execute_mountebank_decorate(
     request: &MountebankRequest,
     response_body: &str,
     response_status: &crate::behaviors::ResponseStatus,
-    response_headers: &std::collections::HashMap<String, String>,
+    response_headers: &crate::util::OrderedMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
@@ -3178,7 +3184,7 @@ pub fn execute_mountebank_decorate_within(
     request: &MountebankRequest,
     response_body: &str,
     response_status: &crate::behaviors::ResponseStatus,
-    response_headers: &std::collections::HashMap<String, String>,
+    response_headers: &crate::util::OrderedMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
@@ -3217,7 +3223,7 @@ fn execute_mountebank_decorate_in(
     request: &MountebankRequest,
     response_body: &str,
     response_status: &crate::behaviors::ResponseStatus,
-    response_headers: &std::collections::HashMap<String, String>,
+    response_headers: &crate::util::OrderedMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
@@ -3243,7 +3249,7 @@ fn execute_mountebank_decorate_within_budget(
     request: &MountebankRequest,
     response_body: &str,
     response_status: &crate::behaviors::ResponseStatus,
-    response_headers: &std::collections::HashMap<String, String>,
+    response_headers: &crate::util::OrderedMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
@@ -3482,7 +3488,7 @@ fn returned_response(obj: &JsObject, context: &mut Context) -> Result<crate::beh
 fn headers_from_js(
     obj: &JsObject,
     context: &mut Context,
-) -> Result<Option<std::collections::HashMap<String, String>>> {
+) -> Result<Option<crate::util::OrderedMap<String, String>>> {
     let value = obj
         .get(js_string!("headers"), context)
         .map_err(|e| anyhow!("Failed to read headers: {e}"))?;
@@ -3492,7 +3498,7 @@ fn headers_from_js(
     let keys = headers_obj
         .own_property_keys(context)
         .map_err(|e| anyhow!("Failed to list headers: {e}"))?;
-    let mut headers = std::collections::HashMap::new();
+    let mut headers = crate::util::OrderedMap::default();
     for key in keys {
         let name = match &key {
             PropertyKey::String(s) => s.to_std_string_escaped(),
@@ -3600,7 +3606,7 @@ function respond(ctx) {
         let engine = JsEngine::new(script, "test-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
-        let mut headers = HashMap::new();
+        let mut headers = crate::util::OrderedMap::default();
         headers.insert("content-type".to_string(), "application/json".to_string());
 
         let request = ScriptRequest {
@@ -3636,7 +3642,7 @@ function respond(ctx) {
             raw_body: None,
             method: "GET".to_string(),
             path: "/".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: json!({}),
             query: Default::default(),
             path_params: HashMap::new(),
@@ -3659,7 +3665,7 @@ function respond(ctx) {
             raw_body: None,
             method: "GET".to_string(),
             path: "/".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: json!({}),
             query: Default::default(),
             path_params: HashMap::new(),
@@ -3691,7 +3697,7 @@ function respond(ctx) {
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: json!({}),
             query: Default::default(),
             path_params: HashMap::new(),
@@ -3724,7 +3730,7 @@ function respond(ctx) {
         let engine = JsEngine::new(script, "test-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
-        let mut headers = HashMap::new();
+        let mut headers = crate::util::OrderedMap::default();
         headers.insert("x-flow-id".to_string(), "flow-123".to_string());
 
         let request = ScriptRequest {
@@ -3773,7 +3779,7 @@ function respond(ctx) {
         let engine = JsEngine::new(script, "test-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
-        let mut headers = HashMap::new();
+        let mut headers = crate::util::OrderedMap::default();
         headers.insert("x-flow-id".to_string(), "flow-123".to_string());
 
         let request = ScriptRequest {
@@ -3833,7 +3839,7 @@ function respond(ctx) {
 
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
-        let mut headers = HashMap::new();
+        let mut headers = crate::util::OrderedMap::default();
         headers.insert("content-type".to_string(), "application/json".to_string());
 
         let request = ScriptRequest {
@@ -3886,7 +3892,7 @@ function respond(ctx) {
             raw_body: None,
             method: "POST".to_string(),
             path: "/api/test".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: json!({
                 "nested": {
                     "value": 200,
@@ -3914,7 +3920,7 @@ function respond(ctx) {
             raw_body: None,
             method: "POST".to_string(),
             path: "/api/test".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: json!({
                 "nested": {
                     "value": 50,
@@ -3948,7 +3954,7 @@ function respond(ctx) {
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: json!({}),
             query: Default::default(),
             path_params: HashMap::new(),
@@ -3997,7 +4003,7 @@ function respond(ctx) {
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: json!({}),
             query,
             path_params: HashMap::new(),
@@ -4040,7 +4046,7 @@ function respond(ctx) {
             raw_body: None,
             method: "POST".to_string(),
             path: "/users/123/update".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: json!({}),
             query: Default::default(),
             path_params,
@@ -4072,11 +4078,11 @@ function respond(ctx) {
             method: "GET".to_string(),
             path: "/test".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
-        let headers = HashMap::new();
+        let headers = crate::util::OrderedMap::default();
 
         // Script that uses logger as 3rd argument — must not throw ReferenceError
         let script = r#"function(request, response, logger) { logger.info("decorating"); response.body = "logged"; }"#;
@@ -4111,7 +4117,7 @@ function respond(ctx) {
                 request,
                 "orig",
                 &crate::behaviors::ResponseStatus::Code(200),
-                &HashMap::new(),
+                &crate::util::OrderedMap::default(),
                 test_port(),
                 None,
                 &trusted_files(),
@@ -4148,7 +4154,7 @@ function respond(ctx) {
             method: "GET".to_string(),
             path: "/api/users".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -4182,7 +4188,7 @@ function respond(ctx) {
             method: "GET".to_string(),
             path: "/api/users".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -4215,11 +4221,11 @@ function respond(ctx) {
             method: "GET".to_string(),
             path: "/test".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
-        let headers = HashMap::new();
+        let headers = crate::util::OrderedMap::default();
 
         // Script that uses state as 4th argument — must not throw ReferenceError
         let script = r#"function(request, response, logger, state) { state.count = 1; response.body = "state ok"; }"#;
@@ -4248,7 +4254,7 @@ function respond(ctx) {
             method: "POST".to_string(),
             path: "/req".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: Some("REQ-BODY".to_string()),
             ..Default::default()
         }
@@ -4281,7 +4287,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -4304,7 +4310,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -4322,7 +4328,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -4372,7 +4378,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -4396,7 +4402,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -4603,7 +4609,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &confined,
@@ -4678,7 +4684,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted,
@@ -4776,7 +4782,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &confined,
@@ -4829,7 +4835,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &refused,
@@ -4899,7 +4905,7 @@ function respond(ctx) {
                     &config_req(),
                     "orig",
                     &crate::behaviors::ResponseStatus::Code(200),
-                    &HashMap::new(),
+                    &crate::util::OrderedMap::default(),
                     test_port(),
                     None,
                     &files,
@@ -4945,7 +4951,7 @@ function respond(ctx) {
             method: method.to_string(),
             path: path.to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         }
@@ -5046,7 +5052,7 @@ function respond(ctx) {
             &mb_req("GET", "/nobody"),
             "original",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -5200,7 +5206,7 @@ function respond(ctx) {
             &mb_req_with_headers(),
             "original",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -5397,7 +5403,7 @@ function respond(ctx) {
             &mb_req("GET", "/dec-a"),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -5414,7 +5420,7 @@ function respond(ctx) {
             &mb_req("GET", "/dec-legacy"),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -5431,7 +5437,7 @@ function respond(ctx) {
             &mb_req("GET", "/dec-flat"),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -5451,7 +5457,7 @@ function respond(ctx) {
             &mb_req("GET", "/dec-shim"),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -5471,7 +5477,7 @@ function respond(ctx) {
             &mb_req("GET", "/dec-hybrid"),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -5880,7 +5886,7 @@ function respond(ctx) {
                 mode: ResponseMode::Text,
                 method: "POST".to_string(),
                 path: "/api/orders".to_string(),
-                headers,
+                headers: headers.into_iter().collect(),
                 body: json!(null),
                 query: Default::default(),
                 path_params: HashMap::new(),
@@ -6657,7 +6663,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -6674,7 +6680,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -6702,7 +6708,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),
@@ -6786,7 +6792,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted,
@@ -6824,7 +6830,7 @@ function respond(ctx) {
             &config_req(),
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
-            &HashMap::new(),
+            &crate::util::OrderedMap::default(),
             test_port(),
             None,
             &trusted_files(),

@@ -152,10 +152,9 @@ pub(crate) fn request_matches(
 mod tests {
     use super::*;
     use crate::imposter::ResponseMode;
-    use std::collections::HashMap;
 
     fn req_with_header(name: &str, value: &str) -> RecordedRequest {
-        let mut headers = HashMap::new();
+        let mut headers = rift_mock_core::imposter::Headers::new();
         headers.insert(name.to_string(), vec![value.to_string()]);
         RecordedRequest {
             body_omitted: false,

@@ -401,7 +401,8 @@ impl ScriptEngine {
 pub struct ScriptRequest {
     pub method: String,
     pub path: String,
-    pub headers: HashMap<String, String>,
+    /// In the order the client sent them (issue #1606).
+    pub headers: crate::util::OrderedMap<String, String>,
     pub body: Value,
     /// Query parameters parsed from the URL, in request order (issue #1596)
     pub query: crate::util::OrderedMap<String, String>,
@@ -911,7 +912,7 @@ mod tests {
             raw_body: None,
             method: "POST".to_string(),
             path: "/api/users".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: serde_json::json!({"name": "test"}),
             query: Default::default(),
             path_params: HashMap::new(),
@@ -922,7 +923,7 @@ mod tests {
 
     #[test]
     fn test_script_request_with_headers() {
-        let mut headers = HashMap::new();
+        let mut headers = crate::util::OrderedMap::default();
         headers.insert("Content-Type".to_string(), "application/json".to_string());
         headers.insert("Authorization".to_string(), "Bearer token".to_string());
 
@@ -954,7 +955,7 @@ mod tests {
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/items".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: serde_json::json!(null),
             query,
             path_params: HashMap::new(),
@@ -974,7 +975,7 @@ mod tests {
             raw_body: None,
             method: "PUT".to_string(),
             path: "/api/users/123/edit".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: serde_json::json!({"name": "updated"}),
             query: Default::default(),
             path_params,
@@ -989,7 +990,7 @@ mod tests {
             raw_body: None,
             method: "DELETE".to_string(),
             path: "/api/items/456".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: serde_json::json!(null),
             query: Default::default(),
             path_params: HashMap::new(),
@@ -1006,7 +1007,7 @@ mod tests {
             raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: serde_json::json!(null),
             query: Default::default(),
             path_params: HashMap::new(),
@@ -1140,7 +1141,7 @@ mod tests {
             raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: serde_json::json!(null),
             query: Default::default(),
             path_params: HashMap::new(),

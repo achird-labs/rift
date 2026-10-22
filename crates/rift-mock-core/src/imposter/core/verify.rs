@@ -301,7 +301,6 @@ mod tests {
     use crate::imposter::ResponseMode;
     use crate::imposter::types::ImposterConfig;
     use serde_json::json;
-    use std::collections::HashMap;
 
     fn imposter(flow_id_source: Option<&str>) -> Imposter {
         let mut cfg = json!({ "port": 0, "protocol": "http", "recordRequests": true, "stubs": [] });
@@ -318,7 +317,7 @@ mod tests {
         headers: &[(&str, &str)],
         body: Option<&str>,
     ) -> RecordedRequest {
-        let mut hs: HashMap<String, Vec<String>> = HashMap::new();
+        let mut hs: crate::imposter::Headers = crate::imposter::Headers::new();
         for (k, v) in headers {
             hs.entry((*k).to_string())
                 .or_default()

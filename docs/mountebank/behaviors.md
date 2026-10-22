@@ -400,7 +400,8 @@ such as `Set-Cookie`. `MB_RESPONSE.body` is the body as text. After a command in
 printed a JSON body (a number, an object), the next command receives that value unchanged, so
 `body += 1` on a number adds, as in Mountebank.
 
-`MB_REQUEST.headers` holds one string per header name: a header the client sent more than once
+`MB_REQUEST.headers` lists the headers in the order the client sent them, as Mountebank does, and
+holds one string per header name: a header the client sent more than once
 contributes its **first** value, and a header whose value was not valid UTF-8 is absent from the
 object entirely rather than present as `""` (#1040). That is the same view `copy`, `lookup`,
 `decorate` and `${request.headers.*}` read, and the same one predicates match on — see

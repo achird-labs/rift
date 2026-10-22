@@ -144,7 +144,7 @@ fn parse_document(content: &str, base: &ScriptBaseDir) -> anyhow::Result<LoadedC
         // Single imposter, or a `{ "imposters": [...] }` wrapper (Mountebank format).
         let value: serde_json::Value = serde_json::from_str(content)?;
         match value.get("imposters") {
-            Some(imposters) => {
+            Some(_) => {
                 // Only the wrapper carries siblings, so this is the one shape with somewhere to
                 // declare an intercept listener (issue #655). `InterceptStartOptions` is
                 // `deny_unknown_fields`, so a typo here is a startup error rather than a config
@@ -182,7 +182,14 @@ fn parse_document(content: &str, base: &ScriptBaseDir) -> anyhow::Result<LoadedC
                         .validate()
                         .map_err(|e| anyhow::anyhow!("invalid `routes` block: {e}"))?;
                 }
-                serde_json::from_value(imposters.clone())?
+                // Decoded from the text, not from the parsed `Value`, which has sorted every
+                // object's keys, so each stub would serve its headers in name order instead of
+                // the order written, as Mountebank serves them (issue #1606).
+                #[derive(serde::Deserialize)]
+                struct Wrapper {
+                    imposters: Vec<ImposterConfig>,
+                }
+                serde_json::from_str::<Wrapper>(content)?.imposters
             }
             // A single-imposter document has no `imposters` key, so it has no wrapper to carry a
             // listener declaration — and `ImposterConfig` ignores unknown fields, so an `intercept`
@@ -199,7 +206,8 @@ fn parse_document(content: &str, base: &ScriptBaseDir) -> anyhow::Result<LoadedC
                  wrapper form, but this document has no `imposters` key, so the block would be ignored. \
                  Wrap the imposter in `\"imposters\": [ ... ]` (use `[]` if the file declares none)."
             ),
-            None => vec![serde_json::from_value(value)?],
+            // From the text, for the same reason as the wrapper above (issue #1606).
+            None => vec![serde_json::from_str(content)?],
         }
     } else if trimmed.starts_with('[') {
         serde_json::from_str(content)?
@@ -1477,6 +1485,27 @@ mod tests {
         let loaded =
             parse_document(&doc(false), &ScriptBaseDir::Unconfigured).expect("false loads");
         assert!(loaded.intercept.is_some());
+    }
+
+    /// Issue #1606: every JSON shape keeps a stub's headers in the order written, as Mountebank's
+    /// `--configfile` does. The wrapper and single-object forms used to decode through a parsed
+    /// `Value`, which sorts every object's keys.
+    #[test]
+    fn a_config_file_keeps_header_order_in_every_shape() {
+        let imposter = r#"{"protocol": "http", "stubs": [{"responses": [{"is":
+            {"headers": {"Zeta": "1", "Alpha": "2", "Mid": "3"}}}]}]}"#;
+        for doc in [
+            format!(r#"{{"imposters": [{imposter}]}}"#),
+            imposter.to_string(),
+            format!("[{imposter}]"),
+        ] {
+            let loaded = parse_document(&doc, &ScriptBaseDir::Unconfigured).expect("loads");
+            let printed = serde_json::to_string(&loaded.imposters[0].stubs[0]).expect("prints");
+            assert!(
+                printed.contains(r#""headers":{"Zeta":"1","Alpha":"2","Mid":"3"}"#),
+                "{doc}: {printed}"
+            );
+        }
     }
 
     // ===== Issue #1279: a parse failure after `stringify` names the tag and the quoting rule =====

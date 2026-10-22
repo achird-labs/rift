@@ -103,7 +103,7 @@ fn ignoring_case<'a, V: 'a>(
 /// An XPath `using` that fails when it runs (issue #1585): Mountebank fails the request.
 pub fn apply_copy_behaviors(
     body: &str,
-    headers: &mut HashMap<String, Vec<String>>,
+    headers: &mut crate::imposter::Headers,
     behaviors: &[CopyBehavior],
     request: &RequestContext,
     stub: crate::imposter::headers::StubRef<'_>,
@@ -271,7 +271,7 @@ mod tests {
                 "q".into(),
                 vec!["qv".into(), "second".into()],
             )]),
-            headers: HashMap::from([("X-Test".into(), "hv".into())]),
+            headers: crate::util::OrderedMap::from_iter([("X-Test".into(), "hv".into())]),
             body: Some("b".into()),
             ip: Some("::ffff:127.0.0.1".into()),
             request_from: Some("::ffff:127.0.0.1:55333".into()),
@@ -354,7 +354,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/users/123".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: Some("test body".to_string()),
             ..Default::default()
         };
@@ -390,7 +390,7 @@ mod tests {
         let mut query = crate::util::OrderedMap::default();
         query.insert("name".to_string(), vec!["Alice".to_string()]);
 
-        let mut headers = HashMap::new();
+        let mut headers = crate::util::OrderedMap::default();
         headers.insert("content-type".to_string(), "application/json".to_string());
 
         let request = RequestContext {
@@ -425,7 +425,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/users/123".to_string(),
             query,
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -454,7 +454,7 @@ mod tests {
         ];
 
         let body = r#"{"userId": "${PATH}", "greeting": "Hello, ${NAME}!"}"#;
-        let mut headers = HashMap::new();
+        let mut headers = crate::imposter::Headers::new();
 
         let result = apply_copy_behaviors(body, &mut headers, &behaviors, &request, FIXTURE_STUB)
             .expect("copies");
@@ -471,7 +471,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query,
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -489,7 +489,7 @@ mod tests {
             },
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert("X-Echo".to_string(), vec!["v=${q}".to_string()]);
 
         apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB).expect("copies");
@@ -510,7 +510,7 @@ mod tests {
             method: "POST".to_string(),
             path: "/x".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: Some("one\r\ntwo".to_string()),
             ..Default::default()
         };
@@ -524,7 +524,7 @@ mod tests {
             },
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert("X-Plain".to_string(), vec!["no token here".to_string()]);
 
         // `captured_logs`, not `traced_test`: see `copy_repair_warning_names_the_stub`. Under
@@ -562,7 +562,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query,
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -580,7 +580,7 @@ mod tests {
             },
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert(
             "Set-Cookie".to_string(),
             vec!["a=${q}".to_string(), "b=${q}".to_string()],
@@ -626,7 +626,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query,
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -644,7 +644,7 @@ mod tests {
             },
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert("X-Echo".to_string(), vec!["v=${q}".to_string()]);
 
         // `crate::test_support::captured_logs`, not `tracing_test::traced_test`: that macro
@@ -683,7 +683,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query,
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -701,7 +701,7 @@ mod tests {
             },
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert("X-Echo".to_string(), vec!["bad\nvalue=${q}".to_string()]);
 
         apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB).expect("copies");
@@ -724,7 +724,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query,
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -742,7 +742,7 @@ mod tests {
             },
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert("X-Literal".to_string(), vec!["bad\nvalue".to_string()]);
 
         apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB).expect("copies");
@@ -763,7 +763,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -781,7 +781,7 @@ mod tests {
             },
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert("X-Echo".to_string(), vec!["bad\nvalue=${q}".to_string()]);
 
         apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB).expect("copies");
@@ -801,7 +801,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query,
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -819,7 +819,7 @@ mod tests {
             },
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert(
             "Set-Cookie".to_string(),
             vec!["a=1".to_string(), "b=${q}".to_string()],
@@ -843,7 +843,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -861,7 +861,7 @@ mod tests {
             },
         }];
 
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert(
             "Set-Cookie".to_string(),
             vec!["a=1".to_string(), "b=${q}".to_string()],
@@ -888,11 +888,11 @@ mod tests {
             "using": extraction,
         }))
         .expect("the copy parses");
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert("X-C".to_string(), vec!["<$C>".to_string()]);
         let served = apply_copy_behaviors(body, &mut headers, &[behavior], request, FIXTURE_STUB)
             .expect("copies");
-        (served, headers.remove("X-C").expect("header kept"))
+        (served, headers.shift_remove("X-C").expect("header kept"))
     }
 
     fn request_with_body(body: &str) -> RequestContext {
@@ -900,7 +900,7 @@ mod tests {
             method: "POST".to_string(),
             path: "/abc".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: Some(body.to_string()),
             ..Default::default()
         }
@@ -984,7 +984,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -1008,7 +1008,7 @@ mod tests {
         .expect("the copies parse");
         let served = apply_copy_behaviors(
             "$A/$B",
-            &mut HashMap::new(),
+            &mut crate::imposter::Headers::new(),
             &behaviors,
             &request_with_body(""),
             FIXTURE_STUB,
@@ -1100,7 +1100,7 @@ mod tests {
             "from": "body", "into": "$C", "using": regex(r"(\w+)-(\w+)")
         }))
         .expect("the copy parses");
-        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        let mut headers: crate::imposter::Headers = crate::imposter::Headers::new();
         headers.insert(
             "Set-Cookie".to_string(),
             vec![
@@ -1149,7 +1149,7 @@ mod tests {
         request.query.insert("i".to_string(), vec!["2".to_string()]);
         let served = apply_copy_behaviors(
             "$C[${I}]",
-            &mut HashMap::new(),
+            &mut crate::imposter::Headers::new(),
             &behaviors,
             &request,
             FIXTURE_STUB,
@@ -1164,7 +1164,7 @@ mod tests {
         let body = Spliced::authored(
             "$C[0] $C[12] $C[01] $C[] $C[x] $C[3 $D[4] $C[18446744073709551616]".to_string(),
         );
-        let headers = authored_headers(HashMap::from([(
+        let headers = authored_headers(crate::imposter::Headers::from([(
             "X-C".to_string(),
             vec!["$C[7]".to_string()],
         )]));
@@ -1208,17 +1208,14 @@ mod tests {
     }
 
     /// Copies the path's first segment into `${v}` over `headers`, returning them.
-    fn copy_path_into_headers(
-        path: &str,
-        headers: &[(&str, &str)],
-    ) -> HashMap<String, Vec<String>> {
+    fn copy_path_into_headers(path: &str, headers: &[(&str, &str)]) -> crate::imposter::Headers {
         let behavior: CopyBehavior = serde_json::from_value(serde_json::json!({
             "from": "path", "into": "${v}", "using": regex(r"[^/]+")
         }))
         .expect("the copy parses");
         let mut request = request_with_body("");
         request.path = path.to_string();
-        let mut map: HashMap<String, Vec<String>> = headers
+        let mut map: crate::imposter::Headers = headers
             .iter()
             .map(|(k, v)| ((*k).to_string(), vec![(*v).to_string()]))
             .collect();
@@ -1233,7 +1230,7 @@ mod tests {
         let headers = copy_path_into_headers("/p", &[("X-${v}", "1")]);
         assert_eq!(
             headers,
-            HashMap::from([("X-p".to_string(), vec!["1".to_string()])])
+            crate::imposter::Headers::from([("X-p".to_string(), vec!["1".to_string()])])
         );
     }
 
@@ -1242,7 +1239,7 @@ mod tests {
         let headers = copy_path_into_headers("/p", &[("X-${v}", "v=${v}")]);
         assert_eq!(
             headers,
-            HashMap::from([("X-p".to_string(), vec!["v=p".to_string()])])
+            crate::imposter::Headers::from([("X-p".to_string(), vec!["v=p".to_string()])])
         );
     }
 
@@ -1253,7 +1250,7 @@ mod tests {
         let headers = copy_path_into_headers("/p", &[("X-${v}", "renamed"), ("x-P", "authored")]);
         assert_eq!(
             headers,
-            HashMap::from([("X-p".to_string(), vec!["renamed".to_string()])])
+            crate::imposter::Headers::from([("X-p".to_string(), vec!["renamed".to_string()])])
         );
     }
 
@@ -1264,7 +1261,8 @@ mod tests {
             "from": "path", "into": "${v}", "using": regex(r"\d+")
         }))
         .expect("the copy parses");
-        let mut headers = HashMap::from([("X-${v}".to_string(), vec!["1".to_string()])]);
+        let mut headers =
+            crate::imposter::Headers::from([("X-${v}".to_string(), vec!["1".to_string()])]);
         apply_copy_behaviors(
             "",
             &mut headers,
@@ -1275,7 +1273,7 @@ mod tests {
         .expect("copies");
         assert_eq!(
             headers,
-            HashMap::from([("X-${v}".to_string(), vec!["1".to_string()])])
+            crate::imposter::Headers::from([("X-${v}".to_string(), vec!["1".to_string()])])
         );
     }
 
@@ -1288,12 +1286,13 @@ mod tests {
         .expect("the copy parses");
         let mut request = request_with_body("");
         request.path = "/ab-cd".to_string();
-        let mut headers = HashMap::from([("X-$C[2]".to_string(), vec!["1".to_string()])]);
+        let mut headers =
+            crate::imposter::Headers::from([("X-$C[2]".to_string(), vec!["1".to_string()])]);
         apply_copy_behaviors("", &mut headers, &[behavior], &request, FIXTURE_STUB)
             .expect("copies");
         assert_eq!(
             headers,
-            HashMap::from([("X-cd".to_string(), vec!["1".to_string()])])
+            crate::imposter::Headers::from([("X-cd".to_string(), vec!["1".to_string()])])
         );
     }
 }

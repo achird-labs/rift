@@ -65,6 +65,13 @@ record.
   synchronous). A restart restores them under `--journal-max-bytes`; `numberOfRequests` still starts
   at 0, as Mountebank's does. `DELETE …/savedRequests` and deleting the imposter remove the file.
   Older datadirs, which have no such file, load as before.
+- **Header maps are insertion-ordered for embedders** (#1606): `IsResponse.headers`,
+  `IsResponse::new` and `RecordedRequest.headers` take `rift_mock_core::imposter::Headers`
+  (`indexmap::IndexMap<String, Vec<String>>`) instead of a `HashMap`, `ProxyResponse.inject_headers`
+  is a `Box<SingleHeaders>` (an `IndexMap<String, String>`, boxed to keep every stub response's
+  size), and
+  `rift_types::wire::{multi_value_headers, single_value_headers}` are generic over the map they
+  build. The JSON shape is unchanged, and journals and stored configs decode as before.
 
 - **A `--datadir` restart resumes each stub's response cycle where it stopped**, as Mountebank does
   (#1603). The positions are saved beside the imposter in `<port>.cursors`, written behind every
@@ -267,6 +274,12 @@ record.
 - **Recorded requests carry `ip`, and `form` for a form body** (#1602), as Mountebank's do. Both are
   derived when the request is printed (`GET /imposters/:port`, `savedRequests`, the SSE stream, the
   FFI journal), so nothing is stored and the journal's byte budget is unchanged.
+- **Header order is kept** (#1606): scripts, `MB_REQUEST` and `requests[].headers` list request
+  headers in the order the client sent them, a repeated name at its first position, and responses
+  send headers in the order the stub (or a decorate or inject) wrote them, as Mountebank does. A
+  stub prints its headers back in document order, and a proxy records the origin's order. Both
+  used to be arbitrary, and the request side changed on every request.
+
 - **`RANDOM_DATA_THEN_CLOSE` on an https imposter sends its garbage inside TLS** (#1600), as
   Mountebank does: the client completes the handshake and fails to parse the decrypted bytes as
   HTTP. Rift wrote them on the socket beneath TLS, so the client saw a TLS record error. The

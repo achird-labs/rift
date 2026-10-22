@@ -11,6 +11,19 @@ use std::collections::HashMap;
 // `#[serde(with = "multi_value_headers")]` attribute path in this file resolves unchanged.
 pub(crate) use rift_types::wire::{multi_value_headers, single_value_headers};
 
+/// A header object, in the order it was written or received (issue #1606). Mountebank keeps that
+/// order — a request's `headers` in the order the client sent them, a response's in the order the
+/// stub (or a decorate/inject) wrote them — and a script can `Object.keys` it, so a hash map's
+/// arbitrary, per-map order is visible. One entry per case-folded name (see
+/// [`multi_value_headers`]); a repeated name holds every value at its first position. The default
+/// (SipHash) hasher: journals and stub configs are long-lived and keyed by input, which the HashDoS
+/// policy in `util::fastmap` reserves SipHash for.
+pub type Headers = indexmap::IndexMap<String, Vec<String>>;
+
+/// A header object with one value per name (`proxy.injectHeaders`, `_rift.fault.error.headers`,
+/// the debug endpoint), in the order it was written (issue #1606).
+pub type SingleHeaders = indexmap::IndexMap<String, String>;
+
 // ============================================================================
 // Recorded Request Types
 // ============================================================================
@@ -75,6 +88,36 @@ pub(crate) mod multi_value_query {
     }
 }
 
+/// A recorded request's headers in request order, array-index names first, as a JS object lists
+/// them (issues #1596, #1606); a single value is a string and several an array.
+fn serialize_recorded_headers<S: serde::Serializer>(
+    headers: &Headers,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    #[serde(untagged)]
+    enum Shown<'a> {
+        One(&'a str),
+        Many(&'a [String]),
+    }
+    serializer.collect_map(crate::util::js_key_order(headers).into_iter().filter_map(
+        |(name, values)| {
+            let shown = match values.as_slice() {
+                [] => return None, // a name with no values was never a header line; omit it
+                [one] => Shown::One(one),
+                many => Shown::Many(many),
+            };
+            Some((name, shown))
+        },
+    ))
+}
+
+fn boxed_single_value_headers<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Box<SingleHeaders>, D::Error> {
+    single_value_headers::deserialize(d).map(Box::new)
+}
+
 /// Recorded request for imposter
 ///
 /// `Serialize` is hand-written (issue #1602): Mountebank prints `ip` on every recorded request and
@@ -92,8 +135,14 @@ pub struct RecordedRequest {
     /// written when Rift comma-joined a repeated key still decodes, its value as one string.
     #[serde(with = "multi_value_query")]
     pub query: multi_value_query::Query,
-    #[serde(default, with = "multi_value_headers")]
-    pub headers: HashMap<String, Vec<String>>,
+    /// Every header in the order the client sent it (issue #1606), as Mountebank's
+    /// `headersMap.ofRaw` records `requests[].headers`.
+    #[serde(
+        default,
+        deserialize_with = "multi_value_headers::deserialize",
+        serialize_with = "serialize_recorded_headers"
+    )]
+    pub headers: Headers,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     /// The body was larger than the journal's whole byte budget, so the request was recorded
@@ -375,7 +424,7 @@ pub struct DebugRequest {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
-    pub headers: HashMap<String, String>,
+    pub headers: SingleHeaders,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
 }
@@ -420,7 +469,7 @@ pub struct DebugResponsePreview {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_code: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub headers: Option<HashMap<String, String>>,
+    pub headers: Option<SingleHeaders>,
     /// Truncated body preview (first 500 chars)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_preview: Option<String>,
@@ -1333,7 +1382,7 @@ pub(crate) struct StubResponseRaw {
         schemars(with = "rift_types::schema::MultiValueHeaders")
     )]
     #[cfg_attr(feature = "schema", schemars(default = "schema_default_headers"))]
-    pub headers: Option<HashMap<String, Vec<String>>>,
+    pub headers: Option<Headers>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
     #[serde(rename = "_mode", default, deserialize_with = "present_mode")]
@@ -1453,9 +1502,7 @@ fn optional_status_value<'de, D: serde::Deserializer<'de>>(
     }
 }
 
-fn present_headers<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Option<HashMap<String, Vec<String>>>, D::Error> {
+fn present_headers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Headers>, D::Error> {
     multi_value_headers::deserialize(d).map(Some)
 }
 
@@ -1471,8 +1518,8 @@ fn schema_default_status_code() -> Option<StatusValue> {
 }
 
 #[cfg(feature = "schema")]
-fn schema_default_headers() -> Option<HashMap<String, Vec<String>>> {
-    Some(HashMap::new())
+fn schema_default_headers() -> Option<Headers> {
+    Some(Headers::new())
 }
 
 #[cfg(feature = "schema")]
@@ -1502,7 +1549,7 @@ pub(crate) struct IsResponseRaw {
         schemars(with = "rift_types::schema::MultiValueHeaders")
     )]
     #[cfg_attr(feature = "schema", schemars(default = "schema_default_headers"))]
-    pub headers: Option<HashMap<String, Vec<String>>>,
+    pub headers: Option<Headers>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
     /// Response mode: "text" (default) or "binary" (body is base64-encoded)
@@ -1547,7 +1594,7 @@ pub(crate) struct IsResponseOut {
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_present_headers"
     )]
-    pub headers: Option<HashMap<String, Vec<String>>>,
+    pub headers: Option<Headers>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
     /// Response mode: "text" (default) or "binary" (body is base64-encoded)
@@ -1582,7 +1629,7 @@ fn present_value<'de, D: serde::Deserializer<'de>>(
 
 fn serialize_present_headers<H, S>(headers: &Option<H>, serializer: S) -> Result<S::Ok, S::Error>
 where
-    H: std::borrow::Borrow<HashMap<String, Vec<String>>>,
+    H: std::borrow::Borrow<Headers>,
     S: serde::Serializer,
 {
     match headers {
@@ -2317,7 +2364,7 @@ pub struct IsResponse {
         feature = "schema",
         schemars(with = "rift_types::schema::MultiValueHeaders")
     )]
-    pub headers: HashMap<String, Vec<String>>,
+    pub headers: Headers,
     pub body: Option<serde_json::Value>,
     /// Response mode: "text" (default) or "binary" (body is base64-encoded)
     #[serde(rename = "_mode", default)]
@@ -2355,7 +2402,7 @@ struct DefaultResponseOut<'a> {
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_present_headers"
     )]
-    headers: Option<&'a HashMap<String, Vec<String>>>,
+    headers: Option<&'a Headers>,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<&'a serde_json::Value>,
     #[serde(rename = "_mode", skip_serializing_if = "Option::is_none")]
@@ -2406,7 +2453,7 @@ struct DefaultResponseRaw {
         schemars(with = "rift_types::schema::MultiValueHeaders")
     )]
     #[cfg_attr(feature = "schema", schemars(default = "schema_default_headers"))]
-    headers: Option<HashMap<String, Vec<String>>>,
+    headers: Option<Headers>,
     body: Option<serde_json::Value>,
     /// Response mode: "text" (default) or "binary" (body is base64-encoded)
     // `skip_serializing_if` is inert for a decode-only type; schemars reads it as "no default".
@@ -2437,7 +2484,7 @@ impl Default for IsResponse {
     fn default() -> Self {
         IsResponse::new(
             default_status_code(),
-            HashMap::new(),
+            Headers::new(),
             None,
             ResponseMode::Text,
         )
@@ -2449,7 +2496,7 @@ impl IsResponse {
     #[must_use]
     pub fn new(
         status_code: u16,
-        headers: HashMap<String, Vec<String>>,
+        headers: Headers,
         body: Option<serde_json::Value>,
         mode: ResponseMode,
     ) -> Self {
@@ -2475,7 +2522,7 @@ impl IsResponse {
     /// recorded as omitted.
     pub(crate) fn decoded(
         status: Option<StatusValue>,
-        headers: Option<HashMap<String, Vec<String>>>,
+        headers: Option<Headers>,
         body: Option<serde_json::Value>,
         mode: Option<ResponseMode>,
     ) -> Self {
@@ -2595,10 +2642,13 @@ pub struct ProxyResponse {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub add_wait_behavior: bool,
+    // Boxed (issue #1606): the insertion-ordered map is 72 bytes, and `ProxyResponse` is the
+    // largest `StubResponse` variant, whose size every stub response pays (#1206, #1209). A plain
+    // comment, so the published schema's description is unchanged.
     #[serde(
         default,
-        deserialize_with = "single_value_headers::deserialize",
-        skip_serializing_if = "HashMap::is_empty"
+        deserialize_with = "boxed_single_value_headers",
+        skip_serializing_if = "SingleHeaders::is_empty"
     )]
     #[cfg_attr(
         feature = "schema",
@@ -2607,7 +2657,7 @@ pub struct ProxyResponse {
             extend("default" = {})
         )
     )]
-    pub inject_headers: HashMap<String, String>,
+    pub inject_headers: Box<SingleHeaders>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add_decorate_behavior: Option<String>,
     /// Path rewrite configuration for transforming the request path before proxying
@@ -3594,14 +3644,14 @@ pub struct RiftErrorFault {
     /// Custom headers for error response
     #[serde(
         default,
-        skip_serializing_if = "HashMap::is_empty",
+        skip_serializing_if = "SingleHeaders::is_empty",
         deserialize_with = "single_value_headers::deserialize"
     )]
     #[cfg_attr(
         feature = "schema",
         schemars(with = "rift_types::schema::SingleValueHeaders")
     )]
-    pub headers: HashMap<String, String>,
+    pub headers: SingleHeaders,
 }
 
 fn default_error_status() -> u16 {
@@ -4225,7 +4275,7 @@ mod tests {
     fn a_response_built_in_code_is_complete() {
         let recorded = super::IsResponse::new(
             200,
-            std::collections::HashMap::new(),
+            crate::imposter::Headers::new(),
             None,
             super::ResponseMode::Text,
         );
@@ -4264,7 +4314,7 @@ mod tests {
         let recorded = super::StubResponse::new_is(
             super::IsResponse::new(
                 200,
-                std::collections::HashMap::new(),
+                crate::imposter::Headers::new(),
                 None,
                 super::ResponseMode::Text,
             ),
@@ -4607,7 +4657,12 @@ mod tests {
     #[tracing_test::traced_test]
     fn unparseable_behaviors_are_dropped_loudly() {
         let resp = StubResponse::new_is(
-            IsResponse::new(200, HashMap::new(), None, ResponseMode::default()),
+            IsResponse::new(
+                200,
+                crate::imposter::Headers::new(),
+                None,
+                ResponseMode::default(),
+            ),
             Some(json!({ "wait": { "bogus": true } })),
             None,
         );
@@ -4737,7 +4792,12 @@ mod tests {
     #[tracing_test::traced_test]
     fn new_is_never_parses_a_non_object_block_positionally() {
         let resp = StubResponse::new_is(
-            IsResponse::new(200, HashMap::new(), None, ResponseMode::default()),
+            IsResponse::new(
+                200,
+                crate::imposter::Headers::new(),
+                None,
+                ResponseMode::default(),
+            ),
             Some(json!([null, null, null, null, "echo pwned"])),
             None,
         );
@@ -5397,7 +5457,7 @@ mod tests {
 
     #[test]
     fn multi_value_headers_serialize_single_as_string_many_as_array() {
-        let mut headers = HashMap::new();
+        let mut headers = crate::imposter::Headers::new();
         headers.insert("X-One".to_string(), vec!["v".to_string()]);
         headers.insert(
             "Set-Cookie".to_string(),
@@ -6067,7 +6127,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/x".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::imposter::Headers::new(),
             body: None,
             mode: ResponseMode::Text,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
@@ -6113,7 +6173,7 @@ mod tests {
             method: "POST".to_string(),
             path: "/x".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::imposter::Headers::new(),
             body: Some("hello".to_string()),
             mode: ResponseMode::Text,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
@@ -6140,7 +6200,7 @@ mod tests {
             method: "POST".to_string(),
             path: "/x".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::imposter::Headers::new(),
             body: Some("//4A".to_string()), // base64 of [0xFF, 0xFE, 0x00]
             mode: ResponseMode::Binary,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
@@ -6166,7 +6226,7 @@ mod tests {
             method: "POST".to_string(),
             path: "/x".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::imposter::Headers::new(),
             body: Some("hello".to_string()),
             mode: ResponseMode::Text,
             timestamp: "2026-01-01T00:00:00Z".to_string(),

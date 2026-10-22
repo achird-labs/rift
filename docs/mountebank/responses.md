@@ -26,6 +26,9 @@ Return a fixed response:
 }
 ```
 
+Headers go out in the order the stub writes them, as in Mountebank; a header a `decorate` or an
+`inject` adds goes after them, and a proxy records the origin's order.
+
 ### proxy (Forward Request)
 
 Forward requests to a real server and optionally record responses:
@@ -722,7 +725,7 @@ Available properties in injection function:
 request.method    // "GET", "POST", etc.
 request.path      // "/api/users/123"
 request.query     // { page: "1" } - keys in the order the client sent them, as in Mountebank
-request.headers   // { "Content-Type": "application/json" } - one value per name, the first sent, names Title-Cased; a lookup in any case finds the header ([why](differences.md#request-header-names))
+request.headers   // { "Content-Type": "application/json" } - in the order the client sent them, one value per name, the first sent, names Title-Cased; a lookup in any case finds the header ([why](differences.md#request-header-names))
 request.body      // Request body as a string; call JSON.parse yourself for JSON. `""` when the request has no body, as in Mountebank
 request.requestFrom // "127.0.0.1:53124" - the client's address:port
 request.ip        // "127.0.0.1" - the client's address

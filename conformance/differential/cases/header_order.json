@@ -1,0 +1,75 @@
+{
+  "source": "issue #1606 (Mountebank httpRequest.js:18: headersMap.ofRaw(request.rawHeaders) keeps the client's header order, a repeated name at its first position). Only the x- names are compared, lower-cased since Rift Title-Cases request names (docs/mountebank/differences.md), so the client's own headers do not matter; and only names, since a repeated header's value is an array in Mountebank and its first value in Rift's single-value script view. The body is not JSON, so the harness compares it byte for byte.",
+  "cases": [
+    {
+      "name": "header order: an inject sees request headers in the order the client sent them",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "function (config) { var names = Object.keys(config.request.headers).map(function (k) { return k.toLowerCase(); }); return { statusCode: 200, body: 'H ' + JSON.stringify(names.filter(function (k) { return k.indexOf('x-') === 0; })) }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "headers": [
+            [
+              "X-Zulu",
+              "1"
+            ],
+            [
+              "X-Alpha",
+              "2"
+            ],
+            [
+              "X-Mike",
+              "3"
+            ],
+            [
+              "X-Bravo",
+              "4"
+            ],
+            [
+              "X-Yankee",
+              "5"
+            ]
+          ],
+          "times": 5
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/x",
+          "headers": [
+            [
+              "X-B",
+              "1"
+            ],
+            [
+              "X-A",
+              "2"
+            ],
+            [
+              "X-B",
+              "3"
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}
