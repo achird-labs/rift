@@ -27,50 +27,68 @@ pub struct CopyBehavior {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum CopySource {
-    /// Simple field: "path", "body", "method"
+    /// Request field: "path", "method", "body", "ip" or "requestFrom". The name is matched
+    /// case-insensitively, as Mountebank does.
     Simple(String),
-    /// Nested field: {"query": "name"} or {"headers": "Content-Type"}
+    /// Nested field: {"query": "name"}, {"headers": "Content-Type"} or {"form": "name"}. The
+    /// container key is exact; the name inside it is matched case-insensitively.
     Nested(HashMap<String, String>),
 }
 
 impl CopySource {
-    /// Extract value from request data
+    /// Extract value from request data, matching Mountebank's `getFrom` (issue #1590): a string
+    /// `from` names a request field, case-insensitively; a nested `from` names its container
+    /// (`query`, `headers`, `form`) exactly and the entry inside it case-insensitively.
     pub fn extract(&self, request: &RequestContext) -> Option<String> {
         match self {
-            CopySource::Simple(field) => match field.as_str() {
-                "path" => Some(request.path.clone()),
-                "method" => Some(request.method.clone()),
-                // A body that did not decode is Mountebank's `undefined` body: no source (issue
-                // #1584).
-                "body" if request.body_undefined => None,
-                // A request without a body has the body `""` in Mountebank (issue #1365), so a
-                // selector that matches nothing still runs against it.
-                "body" => Some(request.body.clone().unwrap_or_default()),
-                _ => None,
-            },
+            CopySource::Simple(field) => {
+                let field = field.to_ascii_lowercase();
+                match field.as_str() {
+                    "requestfrom" => request.request_from.clone(),
+                    "path" => Some(request.path.clone()),
+                    "method" => Some(request.method.clone()),
+                    // A body that did not decode is Mountebank's `undefined` body: no source
+                    // (issue #1584).
+                    "body" if request.body_undefined => None,
+                    // A request without a body has the body `""` in Mountebank (issue #1365), so
+                    // a selector that matches nothing still runs against it.
+                    "body" => Some(request.body.clone().unwrap_or_default()),
+                    "ip" => request.ip.clone(),
+                    // `query`, `headers` and `form` as whole objects are `[object Object]` in
+                    // Mountebank; not modelled.
+                    _ => None,
+                }
+            }
             CopySource::Nested(map) => {
-                if let Some(param_name) = map.get("query") {
+                if let Some(name) = map.get("query") {
                     // A repeated key gives its first value, as Mountebank's `getFrom` does for a
                     // multi-valued request field (issue #1553).
+                    ignoring_case(&request.query, name).and_then(|v| v.first().cloned())
+                } else if let Some(name) = map.get("headers") {
+                    ignoring_case(&request.headers, name).cloned()
+                } else if let Some(name) = map.get("form") {
                     request
-                        .query
-                        .get(param_name)
-                        .and_then(|v| v.first())
+                        .form
+                        .as_ref()
+                        .and_then(|form| ignoring_case(form, name))
                         .cloned()
-                } else if let Some(header_name) = map.get("headers") {
-                    // Case-insensitive header lookup since HTTP headers are case-insensitive
-                    let lower_name = header_name.to_lowercase();
-                    request
-                        .headers
-                        .iter()
-                        .find(|(k, _)| k.to_lowercase() == lower_name)
-                        .map(|(_, v)| v.clone())
                 } else {
                     None
                 }
             }
         }
     }
+}
+
+/// The value under `name`, matched ASCII-case-insensitively as Mountebank's `getKeyIgnoringCase`
+/// does. An exact key wins so the result does not depend on `HashMap` order when both spellings
+/// exist.
+fn ignoring_case<'a, V>(map: &'a HashMap<String, V>, name: &str) -> Option<&'a V> {
+    map.get(name).or_else(|| {
+        map.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v)
+    })
 }
 
 /// Apply copy behaviors to response body. Treats `body` and `headers` as authored text; the
@@ -238,6 +256,82 @@ mod tests {
             index: 0,
             id: None,
         };
+
+    /// Issue #1590: Mountebank's `getFrom` reads a string `from` and a nested inner name
+    /// case-insensitively, exact on the container key, and reaches `ip`/`requestFrom`/`form`.
+    fn ctx_1590() -> RequestContext {
+        RequestContext {
+            method: "POST".into(),
+            path: "/Pth".into(),
+            query: HashMap::from([("q".into(), vec!["qv".into(), "second".into()])]),
+            headers: HashMap::from([("X-Test".into(), "hv".into())]),
+            body: Some("b".into()),
+            ip: Some("::ffff:127.0.0.1".into()),
+            request_from: Some("::ffff:127.0.0.1:55333".into()),
+            form: Some(HashMap::from([("f".into(), "fv".into())])),
+            ..Default::default()
+        }
+    }
+
+    fn nested(container: &str, name: &str) -> CopySource {
+        CopySource::Nested(HashMap::from([(container.into(), name.into())]))
+    }
+
+    #[test]
+    fn a_simple_from_matches_the_field_name_case_insensitively() {
+        let r = ctx_1590();
+        for (from, want) in [
+            ("BODY", "b"),
+            ("Path", "/Pth"),
+            ("METHOD", "POST"),
+            ("ip", "::ffff:127.0.0.1"),
+            ("IP", "::ffff:127.0.0.1"),
+            ("requestFrom", "::ffff:127.0.0.1:55333"),
+            ("REQUESTFROM", "::ffff:127.0.0.1:55333"),
+        ] {
+            assert_eq!(
+                CopySource::Simple(from.into()).extract(&r).as_deref(),
+                Some(want),
+                "from {from}"
+            );
+        }
+        assert_eq!(CopySource::Simple("nope".into()).extract(&r), None);
+    }
+
+    #[test]
+    fn a_nested_from_matches_the_inner_name_case_insensitively_and_the_container_exactly() {
+        let r = ctx_1590();
+        assert_eq!(nested("query", "Q").extract(&r).as_deref(), Some("qv"));
+        assert_eq!(
+            nested("headers", "X-TEST").extract(&r).as_deref(),
+            Some("hv")
+        );
+        assert_eq!(nested("form", "f").extract(&r).as_deref(), Some("fv"));
+        assert_eq!(nested("form", "F").extract(&r).as_deref(), Some("fv"));
+        assert_eq!(nested("QUERY", "q").extract(&r), None);
+        assert_eq!(nested("Headers", "x-test").extract(&r), None);
+        assert_eq!(nested("form", "missing").extract(&r), None);
+    }
+
+    #[test]
+    fn a_form_or_ip_source_without_a_client_is_none() {
+        let r = RequestContext::default();
+        assert_eq!(nested("form", "f").extract(&r), None);
+        assert_eq!(CopySource::Simple("ip".into()).extract(&r), None);
+    }
+
+    #[test]
+    fn a_lookup_key_from_reads_the_field_name_case_insensitively() {
+        let key = super::super::lookup::LookupKey {
+            from: CopySource::Simple("PATH".into()),
+            extraction: ExtractionMethod::Regex {
+                selector: "^/(.+)$".into(),
+                options: None,
+            },
+            index: None,
+        };
+        assert_eq!(key.extract(&ctx_1590()).as_deref(), Some("Pth"));
+    }
 
     #[test]
     fn test_copy_source_simple() {

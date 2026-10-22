@@ -252,6 +252,10 @@ record.
   export `DELETE /imposters` prints now drops `_proxyResponseTime`, as `GET` does. Flag values are
   case-insensitive on every imposter route (`?replayable=TRUE`), and a name only matches whole
   (`notreplayable=true` no longer sets `replayable`).
+- **`copy`/`lookup` `from` matches names case-insensitively and reaches `ip`, `requestFrom` and
+  `form`** (#1590), as Mountebank's `getFrom` does: `"BODY"`, `"Path"` and `{"query": "Q"}` now
+  resolve, and `"ip"`, `"requestFrom"` and `{"form": "<name>"}` copy instead of leaving the token.
+  The object's own key (`query`, `headers`, `form`) stays exact.
 
 - **`copy`/`lookup` from a missing field, and tokens in header names** (#1583). A regex `copy` or
   `lookup` whose request field is absent now reads the text `undefined`, as Mountebank does (`.*`
