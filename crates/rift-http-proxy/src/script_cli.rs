@@ -233,8 +233,9 @@ struct RequestFixture {
     /// spelling one name twice makes `request.header('x-trace')` return a different value between
     /// runs — the #1039 shape. This never reaches the wire, so only the nondeterminism applies, not
     /// the double-header-line half of #1050.
+    /// In the order the fixture writes them (issue #1606), as a served request keeps the client's.
     #[serde(deserialize_with = "rift_types::wire::single_value_headers::deserialize")]
-    headers: HashMap<String, String>,
+    headers: crate::util::OrderedMap<String, String>,
     query: crate::util::OrderedMap<String, String>,
     path_params: HashMap<String, String>,
     body: serde_json::Value,

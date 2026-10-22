@@ -11,7 +11,6 @@ use crate::imposter::predicates::RequestHeaders;
 #[cfg(test)]
 use crate::imposter::predicates::stub_matches_inner;
 use crate::imposter::types::{MAX_TRIED_STUBS, MatchOutcome, TriedStub, TriedWhy};
-use crate::util::FastMap;
 
 /// The accumulating form of [`MatchOutcome`]'s `tried`/`triedOmitted`, built during the stub scan.
 ///
@@ -71,7 +70,7 @@ impl Imposter {
         // wrapper still accepts a `HeaderMap` and converts once, via the shared collector (issue
         // #1025) — the hot path (`handler.rs`) passes an already-built header map to
         // `find_matching_stub_with_client` directly.
-        let headers_map: FastMap<String, Vec<String>> =
+        let headers_map: crate::util::OrderedMap<String, Vec<String>> =
             crate::imposter::headers::collect_request_headers(
                 headers,
                 crate::behaviors::header_to_title_case,
@@ -452,7 +451,7 @@ impl Imposter {
     }
 
     /// Resolve the correlation `flow_id` for an already-recorded request (multi-value headers).
-    pub fn resolve_flow_id_recorded(&self, headers: &HashMap<String, Vec<String>>) -> String {
+    pub fn resolve_flow_id_recorded(&self, headers: &crate::imposter::Headers) -> String {
         Self::flow_id_for(
             &self.flow_id_source(),
             headers,
@@ -1093,8 +1092,8 @@ mod bounded_matching_tests {
     // first. Both impls must behave identically for a well-formed request.
     #[test]
     fn parse_form_data_accepts_the_multi_value_header_shape() {
-        fn header(name: &str, values: &[&str]) -> HashMap<String, Vec<String>> {
-            HashMap::from([(
+        fn header(name: &str, values: &[&str]) -> crate::imposter::Headers {
+            crate::imposter::Headers::from([(
                 name.to_string(),
                 values.iter().map(|v| (*v).to_string()).collect(),
             )])

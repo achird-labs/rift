@@ -617,7 +617,7 @@ mod tests {
     use std::collections::HashMap;
 
     /// The shape `collect_request_headers` hands `RequestData::new` (issue #1040).
-    fn hdrs(pairs: &[(&str, &[&str])]) -> crate::util::FastMap<String, Vec<String>> {
+    fn hdrs(pairs: &[(&str, &[&str])]) -> crate::util::OrderedMap<String, Vec<String>> {
         pairs
             .iter()
             .map(|(k, vs)| {

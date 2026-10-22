@@ -49,6 +49,19 @@ impl<SH: BuildHasher> RequestHeaders for HashMap<String, String, SH> {
     }
 }
 
+/// The imposter hot path's shape in request order (issue #1606), as the behaviors' and scripts'
+/// one-value view holds it.
+impl<SH: BuildHasher> RequestHeaders for indexmap::IndexMap<String, String, SH> {
+    fn entries(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.iter()
+            .map(|(k, v)| (k.as_str(), std::slice::from_ref(v)))
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
 /// The intercept proxy's shape (issue #994): every value a repeated header carried, in the order
 /// the client sent them.
 impl<SH: BuildHasher> RequestHeaders for HashMap<String, Vec<String>, SH> {

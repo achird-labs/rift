@@ -17,7 +17,6 @@ use hyper::{Response, StatusCode};
 
 use super::reconcile::Fnv1a;
 use super::types::{ConditionalGet, LastModified};
-use crate::util::FastMap;
 
 const IMF_FIXDATE: &str = "%a, %d %b %Y %H:%M:%S GMT";
 
@@ -148,7 +147,10 @@ pub(crate) struct Validators {
 impl Validators {
     /// Whether the request's preconditions say the client already holds this representation. An
     /// `If-None-Match` decides alone; `If-Modified-Since` is read only without one (RFC 7232 §6).
-    pub(crate) fn not_modified(&self, request_headers: &FastMap<String, Vec<String>>) -> bool {
+    pub(crate) fn not_modified(
+        &self,
+        request_headers: &crate::util::OrderedMap<String, Vec<String>>,
+    ) -> bool {
         let mut if_none_match = header_values(request_headers, "if-none-match").peekable();
         if if_none_match.peek().is_some() {
             return if_none_match.any(|list| self.none_match_hits(list));
@@ -215,7 +217,7 @@ impl Validators {
 
 /// Every value of the header `name`, whatever casing the request map keeps its names in.
 fn header_values<'a>(
-    headers: &'a FastMap<String, Vec<String>>,
+    headers: &'a crate::util::OrderedMap<String, Vec<String>>,
     name: &'a str,
 ) -> impl Iterator<Item = &'a str> {
     headers
@@ -245,8 +247,8 @@ mod tests {
 
     const HELLO: &str = "\"fnv1a64-a430d84680aabd0b\"";
 
-    fn request(pairs: &[(&str, &str)]) -> FastMap<String, Vec<String>> {
-        let mut headers: FastMap<String, Vec<String>> = FastMap::default();
+    fn request(pairs: &[(&str, &str)]) -> crate::util::OrderedMap<String, Vec<String>> {
+        let mut headers: crate::util::OrderedMap<String, Vec<String>> = Default::default();
         for (name, value) in pairs {
             headers
                 .entry((*name).to_owned())

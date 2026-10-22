@@ -165,7 +165,7 @@ impl Imposter {
     ) -> anyhow::Result<
         Option<(
             u16,
-            HashMap<String, Vec<String>>,
+            crate::imposter::Headers,
             String,
             Option<std::sync::Arc<crate::behaviors::BehaviorProgram>>,
             Option<RiftResponseExtension>,

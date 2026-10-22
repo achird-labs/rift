@@ -9,7 +9,6 @@
 //! header from a `String`, `Bytes::from(String)`) is measured alongside to show the win.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::collections::HashMap;
 use std::hint::black_box;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -51,7 +50,7 @@ fn count_allocs(iters: usize, mut f: impl FnMut()) -> usize {
 }
 
 fn is_response(n_headers: usize) -> (IsResponse, Arc<str>) {
-    let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+    let mut headers = rift_mock_core::imposter::Headers::new();
     for i in 0..n_headers {
         headers.insert(format!("X-Header-{i}"), vec![format!("value-{i}")]);
     }

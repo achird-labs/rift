@@ -13,7 +13,6 @@
 //! with a `copy` into `${COL}` and a `lookup` into `${R}`: the delimiters are the author's.
 
 use regex::{Captures, Regex};
-use std::collections::HashMap;
 use std::ops::Range;
 
 /// Response text plus the byte ranges the engine substituted into it.
@@ -28,8 +27,10 @@ pub(crate) struct Spliced {
 
 /// Headers with provenance, one entry per header name and one element per header line. Names
 /// carry provenance too (issue #1583): `copy` and `lookup` replace tokens in them, as Mountebank's
-/// `globalObjectReplace` does in every key of the response.
-pub(crate) type SplicedHeaders = HashMap<SplicedName, Vec<Spliced>>;
+/// `globalObjectReplace` does in every key of the response. Kept in the stub's order (issue
+/// #1606): the response builder writes the headers in this map's order, as Mountebank writes the
+/// response object's keys in property order.
+pub(crate) type SplicedHeaders = crate::util::OrderedMap<SplicedName, Vec<Spliced>>;
 
 /// A response header name and the bytes the engine substituted into it (issue #1583).
 ///
@@ -128,8 +129,9 @@ pub(crate) fn replace_response_token(
         .values()
         .flatten()
         .any(|v| v.contains_authored(token));
-    // Sorted, so which of two names renamed alike wins does not depend on hash order.
-    let mut renamed: Vec<SplicedName> = headers
+    // In the map's order, which is the stub's (issue #1606), as `globalObjectReplace` walks
+    // `Object.keys`: of two names renamed alike, the later one wins.
+    let renamed: Vec<SplicedName> = headers
         .keys()
         .filter(|name| name.0.contains_authored(token))
         .cloned()
@@ -151,10 +153,10 @@ pub(crate) fn replace_response_token(
     // renamed header replaces any header already of its name, case-insensitively — Mountebank's
     // `obj[newKey] = obj[key]` followed by Node's case-insensitive `setHeader` — and a name this
     // pass produced is not visited again.
-    renamed.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     for old in renamed {
-        // Gone when an earlier rename in this pass replaced it.
-        let Some(values) = headers.remove(old.as_str()) else {
+        // Gone when an earlier rename in this pass replaced it. `shift_remove` keeps the other
+        // headers in place; the renamed one is appended, as `obj[newKey] = …; delete obj[key]` is.
+        let Some(values) = headers.shift_remove(old.as_str()) else {
             continue;
         };
         let mut name = old.0;
@@ -331,7 +333,7 @@ fn push_merged(ranges: &mut Vec<Range<usize>>, next: Range<usize>) {
 }
 
 /// Every header name and value as authored text.
-pub(crate) fn authored_headers(headers: HashMap<String, Vec<String>>) -> SplicedHeaders {
+pub(crate) fn authored_headers(headers: crate::imposter::Headers) -> SplicedHeaders {
     headers
         .into_iter()
         .map(|(k, values)| {
@@ -344,7 +346,7 @@ pub(crate) fn authored_headers(headers: HashMap<String, Vec<String>>) -> Spliced
 }
 
 /// Drop provenance: the header map the response builder takes.
-pub(crate) fn plain_headers(headers: SplicedHeaders) -> HashMap<String, Vec<String>> {
+pub(crate) fn plain_headers(headers: SplicedHeaders) -> crate::imposter::Headers {
     headers
         .into_iter()
         .map(|(k, values)| {

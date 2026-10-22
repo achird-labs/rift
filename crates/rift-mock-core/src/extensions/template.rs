@@ -71,7 +71,7 @@ impl RequestData {
         method: &str,
         path: &str,
         query_string: Option<&str>,
-        headers: &std::collections::HashMap<String, Vec<String>, SH>,
+        headers: &indexmap::IndexMap<String, Vec<String>, SH>,
         body: Option<&str>,
     ) -> Self {
         let query = comma_joined(&parse_query_string(query_string.unwrap_or("")));
@@ -285,7 +285,7 @@ mod tests {
 
     /// The shape `collect_request_headers` hands `RequestData::new` (issue #1040): Title-Case
     /// names, every value the client sent.
-    fn hdrs(pairs: &[(&str, &[&str])]) -> FastMap<String, Vec<String>> {
+    fn hdrs(pairs: &[(&str, &[&str])]) -> crate::util::OrderedMap<String, Vec<String>> {
         pairs
             .iter()
             .map(|(k, vs)| {
@@ -328,8 +328,7 @@ mod tests {
     // values comma-joined in order, while predicates match each value (issue #1553).
     #[test]
     fn a_repeated_query_key_renders_comma_joined() {
-        let headers: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
+        let headers: crate::imposter::Headers = crate::imposter::Headers::new();
         let data = RequestData::new("GET", "/p", Some("color=red&color=green"), &headers, None);
         assert_eq!(
             process_template("${request.query.color}", &data),

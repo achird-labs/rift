@@ -7,7 +7,6 @@
 //! produce the same `Response` (proven byte-identical by the `prepared_response_tests` differential
 //! test); this measures how much per-request work the fast path removes.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -21,7 +20,7 @@ use std::hint::black_box;
 /// A representative static JSON stub: a handful of headers and a small object body — the dominant
 /// mock workload.
 fn fixture() -> (IsResponse, Arc<str>) {
-    let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+    let mut headers = rift_mock_core::imposter::Headers::new();
     headers.insert("X-Trace-Id".to_string(), vec!["abc-123".to_string()]);
     headers.insert("Cache-Control".to_string(), vec!["no-store".to_string()]);
     let body = serde_json::json!({"id": 42, "name": "resource", "items": [1, 2, 3]});

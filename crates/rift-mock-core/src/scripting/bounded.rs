@@ -503,7 +503,6 @@ mod tests {
     mod mb_inject {
         use super::*;
         use crate::scripting::{MountebankRequest, execute_mountebank_inject_bounded};
-        use std::collections::HashMap;
         use std::sync::atomic::AtomicU32;
 
         // Fresh port per test so parallel tests never share `IMPOSTER_STATE`; range disjoint
@@ -518,7 +517,7 @@ mod tests {
                 method: "GET".to_string(),
                 path: path.to_string(),
                 query: Default::default(),
-                headers: HashMap::new(),
+                headers: crate::util::OrderedMap::default(),
                 body: None,
                 mode: Some(ResponseMode::Text),
                 ..Default::default()

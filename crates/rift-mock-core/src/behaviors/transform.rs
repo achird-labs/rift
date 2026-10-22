@@ -1,7 +1,6 @@
 //! Shell transform and decorate behaviors.
 
 use super::request::RequestContext;
-use std::collections::HashMap;
 
 /// A response's `statusCode` as a behavior script sees and leaves it (issue #1558): a number, or a
 /// string, which Mountebank keeps as written until it writes the response. A `statusCode` written
@@ -47,8 +46,9 @@ pub enum DecorateError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decorated {
     pub status_code: ResponseStatus,
-    /// Exactly the script's headers, so a header it deleted is gone.
-    pub headers: HashMap<String, String>,
+    /// Exactly the script's headers, in the order it left them (issue #1606), so a header it
+    /// deleted is gone and one it added comes last.
+    pub headers: crate::util::OrderedMap<String, String>,
     pub body: String,
     /// `Some` when the function returned an object, which replaces the response as in Mountebank
     /// (`behaviors.js:246-249`). It names the fields that object leaves out; they hold the built-in
@@ -110,7 +110,7 @@ pub fn shell_request_json(request: &RequestContext) -> String {
         method: &'a str,
         path: &'a str,
         query: JsKeyOrder<'a, String, foldhash::fast::RandomState>,
-        headers: &'a HashMap<String, String>,
+        headers: JsKeyOrder<'a, String, foldhash::fast::RandomState>,
         #[serde(skip_serializing_if = "Option::is_none")]
         body: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,7 +125,7 @@ pub fn shell_request_json(request: &RequestContext) -> String {
         method: &request.method,
         path: &request.path,
         query: JsKeyOrder(&query),
-        headers: &request.headers,
+        headers: JsKeyOrder(&request.headers),
         // `""` for a request without a body, as Mountebank's `JSON.stringify(request)` (#1365), and
         // no key for a body that did not decode, whose `undefined` it drops (#1584).
         body: (!request.body_undefined).then(|| request.body.as_deref().unwrap_or("")),
@@ -305,7 +305,7 @@ pub fn apply_decorate(
     request: &RequestContext,
     response_body: &str,
     response_status: &ResponseStatus,
-    response_headers: &mut HashMap<String, String>,
+    response_headers: &mut crate::util::OrderedMap<String, String>,
 ) -> Result<(String, ResponseStatus), DecorateError> {
     use rhai::{Dynamic, Map, Scope};
 
@@ -482,7 +482,7 @@ mod tests {
             method: "POST".to_string(),
             path: "/p".to_string(),
             query,
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: Some("z=1&y=2".to_string()),
             request_from: Some("127.0.0.1:1".to_string()),
             ip: Some("127.0.0.1".to_string()),
@@ -492,6 +492,24 @@ mod tests {
         assert_eq!(
             shell_request_json(&request),
             r#"{"requestFrom":"127.0.0.1:1","method":"POST","path":"/p","query":{"2":"y","10":"x","b":"1","a":"3"},"headers":{},"body":"z=1&y=2","ip":"127.0.0.1","form":{"z":"1","y":"2"}}"#
+        );
+    }
+
+    /// Issue #1606: `MB_REQUEST.headers` lists the headers in the order the client sent them.
+    #[test]
+    fn mb_request_keeps_header_order() {
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            headers: [("Zulu", "1"), ("Alpha", "2"), ("Mike", "3"), ("Bravo", "4")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            shell_request_json(&request),
+            r#"{"method":"GET","path":"/","query":{},"headers":{"Zulu":"1","Alpha":"2","Mike":"3","Bravo":"4"},"body":""}"#
         );
     }
 
@@ -630,12 +648,12 @@ mod tests {
             method: "GET".to_string(),
             path: "/test".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
 
-        let mut headers = HashMap::new();
+        let mut headers = crate::util::OrderedMap::default();
         headers.insert("content-type".to_string(), "application/json".to_string());
 
         // Script that modifies the response body
@@ -662,12 +680,12 @@ mod tests {
             method: "GET".to_string(),
             path: "/test".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
 
-        let mut headers = HashMap::new();
+        let mut headers = crate::util::OrderedMap::default();
 
         // Script that modifies the response status
         let script = r#"
@@ -693,12 +711,12 @@ mod tests {
             method: "POST".to_string(),
             path: "/users".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: Some(r#"{"name": "Alice"}"#.to_string()),
             ..Default::default()
         };
 
-        let mut headers = HashMap::new();
+        let mut headers = crate::util::OrderedMap::default();
 
         // Script that uses request data in response
         let script = r#"
@@ -724,12 +742,12 @@ mod tests {
             method: "GET".to_string(),
             path: "/test".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
 
-        let mut headers = HashMap::new();
+        let mut headers = crate::util::OrderedMap::default();
         headers.insert("content-type".to_string(), "text/plain".to_string());
 
         // Script that modifies response headers
@@ -754,12 +772,12 @@ mod tests {
             method: "GET".to_string(),
             path: "/test".to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
 
-        let mut headers = HashMap::new();
+        let mut headers = crate::util::OrderedMap::default();
 
         // Invalid script with syntax error
         let script = "this is not valid rhai {{{";

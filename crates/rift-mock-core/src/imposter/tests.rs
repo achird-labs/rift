@@ -51,7 +51,7 @@ fn test_predicate_matching() {
         responses: vec![StubResponse::new_is(
             IsResponse {
                 status_code: 200,
-                headers: HashMap::new(),
+                headers: crate::imposter::Headers::new(),
                 body: Some(serde_json::json!({"message": "hello"})),
                 ..Default::default()
             },
@@ -158,7 +158,7 @@ fn test_execute_stub() {
         responses: vec![StubResponse::new_is(
             IsResponse {
                 status_code: 201,
-                headers: HashMap::new(),
+                headers: crate::imposter::Headers::new(),
                 body: Some(serde_json::json!({"created": true})),
                 ..Default::default()
             },
@@ -2763,7 +2763,7 @@ fn test_collect_request_headers_title_case() {
 
     // `header_map_to_hashmap` was deleted (issue #1025): the shared collector now builds the
     // Title-Case view `find_matching_stub` uses.
-    let result: HashMap<String, Vec<String>> = crate::imposter::headers::collect_request_headers(
+    let result: crate::imposter::Headers = crate::imposter::headers::collect_request_headers(
         &headers,
         crate::behaviors::header_to_title_case,
     );

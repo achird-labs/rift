@@ -63,14 +63,19 @@ pub mod multi_value_headers {
     use serde::Deserialize;
     use serde::de::{Deserializer, MapAccess, Visitor};
     use serde::ser::{SerializeMap, Serializer};
-    use std::collections::HashMap;
     use std::fmt;
 
-    pub fn serialize<S: Serializer>(
-        headers: &HashMap<String, Vec<String>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(headers.len()))?;
+    /// Writes the entries in the map's own iteration order (issue #1606): an insertion-ordered map
+    /// prints its headers as they were written or received, as Mountebank does. Generic over the
+    /// map so the order is the caller's choice, not this module's.
+    pub fn serialize<'a, M, S>(headers: &'a M, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        &'a M: IntoIterator<Item = (&'a String, &'a Vec<String>)>,
+        S: Serializer,
+    {
+        // The exact entry count, empty entries excluded: `&M` is `Copy`, so it iterates twice.
+        let len = headers.into_iter().filter(|(_, v)| !v.is_empty()).count();
+        let mut map = serializer.serialize_map(Some(len))?;
         for (key, values) in headers {
             match values.as_slice() {
                 [] => continue, // a key with no values would emit no header line; omit it
@@ -126,10 +131,10 @@ pub mod multi_value_headers {
         }
     }
 
-    struct FoldingVisitor;
+    struct FoldingVisitor<Out>(std::marker::PhantomData<Out>);
 
-    impl<'de> Visitor<'de> for FoldingVisitor {
-        type Value = HashMap<String, Vec<String>>;
+    impl<'de, Out: FromIterator<(String, Vec<String>)>> Visitor<'de> for FoldingVisitor<Out> {
+        type Value = Out;
 
         fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.write_str("a map of header names to a scalar or an array of scalars")
@@ -164,12 +169,16 @@ pub mod multi_value_headers {
         }
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<HashMap<String, Vec<String>>, D::Error> {
+    /// Generic over the map built (issue #1606): the fold collects in the order the deserializer
+    /// presents, so an insertion-ordered map keeps that order, a case-variant fold included.
+    pub fn deserialize<'de, D, M>(deserializer: D) -> Result<M, D::Error>
+    where
+        D: Deserializer<'de>,
+        M: FromIterator<(String, Vec<String>)>,
+    {
         // The linear scan is O(k²) in the number of distinct names. Header maps are small and this
         // runs on config load / the admin API, never on the request path.
-        deserializer.deserialize_map(FoldingVisitor)
+        deserializer.deserialize_map(FoldingVisitor(std::marker::PhantomData))
     }
 }
 
@@ -204,13 +213,12 @@ pub mod multi_value_headers {
 /// side effect of this one.
 pub mod single_value_headers {
     use serde::de::{Deserializer, Error, MapAccess, Visitor};
-    use std::collections::HashMap;
     use std::fmt;
 
-    struct OneEachVisitor;
+    struct OneEachVisitor<Out>(std::marker::PhantomData<Out>);
 
-    impl<'de> Visitor<'de> for OneEachVisitor {
-        type Value = HashMap<String, String>;
+    impl<'de, Out: FromIterator<(String, String)>> Visitor<'de> for OneEachVisitor<Out> {
+        type Value = Out;
 
         fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.write_str("a map of header names to single string values, each name given once")
@@ -237,10 +245,13 @@ pub mod single_value_headers {
         }
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<HashMap<String, String>, D::Error> {
-        deserializer.deserialize_map(OneEachVisitor)
+    /// Generic over the map built (issue #1606), which is filled in document order.
+    pub fn deserialize<'de, D, M>(deserializer: D) -> Result<M, D::Error>
+    where
+        D: Deserializer<'de>,
+        M: FromIterator<(String, String)>,
+    {
+        deserializer.deserialize_map(OneEachVisitor(std::marker::PhantomData))
     }
 }
 

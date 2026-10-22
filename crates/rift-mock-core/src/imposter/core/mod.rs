@@ -2065,7 +2065,7 @@ mod tests {
                 &generators,
                 "GET",
                 "/API/Users",
-                &HashMap::new(),
+                &crate::imposter::Headers::new(),
                 None,
                 None,
             )
@@ -2085,7 +2085,14 @@ mod tests {
         let imposter = make_test_imposter();
         let generators = vec![json!({ "matches": { "path": true }, "caseSensitive": true })];
         let predicates = imposter
-            .generate_predicates_from_request(&generators, "GET", "/A", &HashMap::new(), None, None)
+            .generate_predicates_from_request(
+                &generators,
+                "GET",
+                "/A",
+                &crate::imposter::Headers::new(),
+                None,
+                None,
+            )
             .expect("predicate generation succeeds");
 
         assert_eq!(
@@ -2106,7 +2113,7 @@ mod tests {
                 &generators,
                 "POST",
                 "/test",
-                &HashMap::new(),
+                &crate::imposter::Headers::new(),
                 None,
                 None,
             )
@@ -2127,7 +2134,7 @@ mod tests {
                 &generators,
                 "GET",
                 "/orders/123",
-                &HashMap::new(),
+                &crate::imposter::Headers::new(),
                 None,
                 None,
             )
@@ -2148,7 +2155,7 @@ mod tests {
                 &generators,
                 "POST",
                 "/test",
-                &HashMap::new(),
+                &crate::imposter::Headers::new(),
                 Some("token=abc123"),
                 None,
             )
@@ -2171,7 +2178,7 @@ mod tests {
                 &generators,
                 "GET",
                 "/users/123",
-                &HashMap::new(),
+                &crate::imposter::Headers::new(),
                 None,
                 None,
             )
@@ -2207,7 +2214,7 @@ mod tests {
                 &generators,
                 "GET",
                 "/search",
-                &HashMap::new(),
+                &crate::imposter::Headers::new(),
                 None,
                 Some("q=hello&page=1"),
             )
@@ -2236,7 +2243,7 @@ mod tests {
         }"#;
 
         let generators = vec![json!({ "inject": inject_fn })];
-        let headers = HashMap::new();
+        let headers = crate::imposter::Headers::new();
 
         let predicates = imposter
             .generate_predicates_from_request(
@@ -2270,7 +2277,7 @@ mod tests {
             json!({ "matches": { "method": true } }),
             json!({ "inject": inject_fn }),
         ];
-        let headers = HashMap::new();
+        let headers = crate::imposter::Headers::new();
 
         let predicates = imposter
             .generate_predicates_from_request(&generators, "POST", "/orders", &headers, None, None)
@@ -2287,7 +2294,7 @@ mod tests {
     #[test]
     fn generator_inject_failure_is_distinguishable_from_empty() {
         let imposter = make_test_imposter();
-        let headers = HashMap::new();
+        let headers = crate::imposter::Headers::new();
 
         // A throwing inject → Err, NOT an empty predicate list.
         let throwing = r#"function(config, logger, predicates) { throw new Error("boom"); }"#;
@@ -2335,7 +2342,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/".to_string(),
             query: Default::default(),
-            headers: std::collections::HashMap::new(),
+            headers: crate::imposter::Headers::new(),
             body: None,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             match_outcome: None,
@@ -2375,7 +2382,7 @@ mod tests {
         let imposter = Imposter::new(config).expect("test imposter");
 
         let req = |space: &str| {
-            let mut headers = std::collections::HashMap::new();
+            let mut headers = crate::imposter::Headers::new();
             headers.insert("X-Mock-Space".to_string(), vec![space.to_string()]);
             RecordedRequest {
                 body_omitted: false,
@@ -2431,7 +2438,7 @@ mod tests {
         let imposter = make_test_imposter();
 
         let generators = vec![json!({ "inject": "not a function" })];
-        let headers = HashMap::new();
+        let headers = crate::imposter::Headers::new();
 
         let err = imposter
             .generate_predicates_from_request(&generators, "GET", "/test", &headers, None, None)

@@ -18,7 +18,6 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
 use std::cell::OnceCell;
-use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::time::Duration;
 use tracing::warn;
@@ -145,7 +144,7 @@ pub(crate) struct BehaviorRun<'a, SH> {
     pub behaviors: &'a BehaviorProgram,
     pub method: &'a str,
     pub uri: &'a hyper::Uri,
-    pub request_headers: &'a HashMap<String, Vec<String>, SH>,
+    pub request_headers: &'a indexmap::IndexMap<String, Vec<String>, SH>,
     pub request_body: Option<&'a str>,
     /// The body did not decode (issue #1584): `request_body` is `None`, and the behaviors see no
     /// body rather than an empty one.
@@ -323,7 +322,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                         .filter(|(k, _)| is_set_cookie(k))
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
-                    let single: HashMap<String, String> = headers
+                    let single: crate::util::OrderedMap<String, String> = headers
                         .iter()
                         .filter(|(k, _)| !is_set_cookie(k))
                         .map(|(k, v)| {
@@ -564,7 +563,7 @@ mod tests {
         ServedParts {
             status: 201,
             status_text: None,
-            headers: crate::behaviors::authored_headers(HashMap::from([(
+            headers: crate::behaviors::authored_headers(crate::imposter::Headers::from([(
                 "set-cookie".to_string(),
                 vec!["a=1".to_string(), "b=2".to_string()],
             )])),
@@ -583,7 +582,7 @@ mod tests {
     ) -> BehaviorOutcome {
         let behaviors = behaviors(block);
         let uri: hyper::Uri = "/users/42?x=1".parse().expect("fixture uri");
-        let request_headers: HashMap<String, Vec<String>> = HashMap::new();
+        let request_headers: crate::imposter::Headers = crate::imposter::Headers::new();
         let csv_cache = CsvCache::new();
         BehaviorRun {
             behaviors: &behaviors,
@@ -613,7 +612,7 @@ mod tests {
     ) -> BehaviorOutcome {
         let behaviors = behaviors(block);
         let uri: hyper::Uri = "/".parse().expect("fixture uri");
-        let request_headers: HashMap<String, Vec<String>> = HashMap::new();
+        let request_headers: crate::imposter::Headers = crate::imposter::Headers::new();
         let csv_cache = CsvCache::new();
         BehaviorRun {
             behaviors: &behaviors,

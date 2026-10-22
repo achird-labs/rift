@@ -983,8 +983,16 @@ fn is_length_limit_error(err: &(dyn std::error::Error + 'static)) -> bool {
 /// thin wrapper over the collector both listeners share (issue #1025). Hyper's `HeaderName` is
 /// always lowercase, so `str::to_string` is the identity name function here and matcher lookups
 /// stay case-insensitive for free (the imposter listener's Title-Case shape is the other caller).
+///
+/// The collector keeps the client's order (issue #1606); the rule matcher only looks names up, so
+/// it is handed the plain map it takes.
 fn collect_request_headers(headers: &hyper::HeaderMap) -> HashMap<String, Vec<String>> {
-    rift_mock_core::imposter::headers::collect_request_headers(headers, str::to_string)
+    rift_mock_core::imposter::headers::collect_request_headers::<std::hash::RandomState>(
+        headers,
+        str::to_string,
+    )
+    .into_iter()
+    .collect()
 }
 
 /// The `413` for an over-cap body: bodyless like the other refusals, but it closes the connection,
