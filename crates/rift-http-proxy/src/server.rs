@@ -807,6 +807,7 @@ pub struct ServerBuilder {
     reported_admin_port: Option<u16>,
     /// `Some(v)` overrides the CLI's `--host` in `GET /config`; the inner `None` reports no host.
     reported_host: Option<Option<String>>,
+    log_ring: Option<crate::admin_api::LogRing>,
 }
 
 impl ServerBuilder {
@@ -821,7 +822,17 @@ impl ServerBuilder {
             admin_authorizer: None,
             reported_admin_port: None,
             reported_host: None,
+            log_ring: None,
         }
+    }
+
+    /// Serve `GET /logs` from `ring` (issue #1615). The caller also installs the ring as a
+    /// `tracing` layer; the `rift` binary does both unless `--nologfile`. Without one the route
+    /// answers Mountebank's `No logfile` sentinel.
+    #[must_use]
+    pub fn log_ring(mut self, ring: crate::admin_api::LogRing) -> Self {
+        self.log_ring = Some(ring);
+        self
     }
 
     /// Register an additional [`ImposterSource`] scheme (U-12).
@@ -905,6 +916,7 @@ impl ServerBuilder {
         let admin_authorizer = self.admin_authorizer;
         let reported_admin_port = self.reported_admin_port;
         let reported_host = self.reported_host.unwrap_or_else(|| cli.host.clone());
+        let log_ring = self.log_ring;
         // Refuse a blank `--api-key` before anything binds (issue #844). Same reasoning as the
         // front-door check below, with a security edge: a blank key enables the auth gate and then
         // authenticates every request, so the admin plane must never reach the accept loop in that
@@ -1243,6 +1255,9 @@ impl ServerBuilder {
             .with_exposure_checked();
         if let Some(port) = reported_admin_port {
             server = server.with_reported_admin_port(port);
+        }
+        if let Some(ring) = log_ring {
+            server = server.with_log_ring(ring);
         }
         if let Some(authorizer) = admin_authorizer {
             server = server.with_admin_authorizer(authorizer);

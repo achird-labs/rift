@@ -723,28 +723,6 @@
     "reason": "GET /config describes the engine that answers it"
   },
   {
-    "case": "admin_api: Get server logs",
-    "kind": "documented",
-    "doc": "docs/api/index.md",
-    "quote": "Rift writes its logs through `tracing` (stderr), not to an in-memory buffer, so this always returns an empty list",
-    "reason": "Rift's /logs is always empty",
-    "id": "logs-empty/plain#0",
-    "location": "step[0].admin.body/logs/0",
-    "mountebank": "{\"level\":\"error\",\"message\":\"No logfile\"}",
-    "rift": "(absent)"
-  },
-  {
-    "case": "admin_api: Get logs with pagination",
-    "kind": "documented",
-    "doc": "docs/api/index.md",
-    "quote": "Rift writes its logs through `tracing` (stderr), not to an in-memory buffer, so this always returns an empty list",
-    "reason": "Rift's /logs is always empty",
-    "id": "logs-empty/pagination#0",
-    "location": "step[0].admin.body/logs/0",
-    "mountebank": "{\"level\":\"error\",\"message\":\"No logfile\"}",
-    "rift": "(absent)"
-  },
-  {
     "case": "complex_scenarios: Port conflict handling",
     "kind": "documented",
     "doc": "docs/mountebank/differences.md",

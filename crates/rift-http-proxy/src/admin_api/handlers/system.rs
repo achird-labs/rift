@@ -86,6 +86,10 @@ pub struct ConfigSnapshot {
     /// `--debug` as supplied (issue #1569) — the flag, not "is debug logging on" (an explicit
     /// `RUST_LOG` can override the level it sets).
     pub debug: bool,
+    /// The buffer `GET /logs` serves (issue #1615); `None` when this server was given none
+    /// (`--nologfile`, or an embedder that installed no ring), which answers Mountebank's
+    /// `No logfile` sentinel.
+    pub log_ring: Option<crate::admin_api::log_ring::LogRing>,
 }
 
 /// GET /config - Mountebank-compatible config endpoint
@@ -133,40 +137,38 @@ pub fn handle_config(allow_injection: bool, snapshot: ConfigSnapshot) -> Respons
     json_response(StatusCode::OK, &config)
 }
 
-/// GET /logs - Mountebank-compatible logs endpoint
-pub fn handle_logs(query: Option<&str>) -> Response<Full<Bytes>> {
-    let mut start_index = 0;
-    let mut end_index = 100;
-
-    if let Some(q) = query {
-        for param in q.split('&') {
-            if let Some((key, value)) = param.split_once('=') {
-                match key {
-                    "startIndex" => {
-                        if let Ok(v) = value.parse::<usize>() {
-                            start_index = v;
-                        }
-                    }
-                    "endIndex" => {
-                        if let Ok(v) = value.parse::<usize>() {
-                            end_index = v;
-                        }
-                    }
-                    _ => {}
-                }
-            }
+/// GET /logs - Mountebank-compatible logs endpoint (issue #1615)
+///
+/// `{"logs": [{level, message, timestamp}, ...]}`, sliced as Mountebank slices its log array:
+/// `slice(startIndex, endIndex + 1)`, so `endIndex` is inclusive and indices are absolute since
+/// start (see [`LogRing::slice`]). Without a ring it answers Mountebank's `--nologfile` sentinel.
+/// Entries are serialized as JSON, so a CR/LF in a message is escaped, never a line break.
+pub fn handle_logs(
+    query: Option<&str>,
+    ring: Option<&crate::admin_api::log_ring::LogRing>,
+) -> Response<Full<Bytes>> {
+    let logs = match ring {
+        Some(ring) => {
+            let start = query_value(query, "startIndex");
+            let end = query_value(query, "endIndex");
+            serde_json::json!({ "logs": ring.slice(start.as_deref(), end.as_deref()) })
         }
-    }
-
-    let logs = serde_json::json!({
-        "logs": [],
-        "_links": {
-            "self": {
-                "href": format!("/logs?startIndex={}&endIndex={}", start_index, end_index)
-            }
-        }
-    });
+        None => serde_json::json!({ "logs": [{"level": "error", "message": "No logfile"}] }),
+    };
     json_response(StatusCode::OK, &logs)
+}
+
+/// The first value of the exact query key `key`, percent-decoded (an undecodable value passes
+/// through raw, the repo's convention for query values; issue #611).
+fn query_value(query: Option<&str>, key: &str) -> Option<String> {
+    query?.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key).then(|| {
+            urlencoding::decode(v)
+                .map(|d| d.into_owned())
+                .unwrap_or_else(|_| v.to_string())
+        })
+    })
 }
 
 /// True when a reload's configs carry a scripting surface that `--allowInjection` has not
@@ -585,6 +587,7 @@ mod tests {
                 host: None,
                 mock: false,
                 debug: false,
+                log_ring: None,
             },
         );
         assert_eq!(resp.status(), StatusCode::OK);
@@ -603,6 +606,7 @@ mod tests {
                 host: None,
                 mock: false,
                 debug: false,
+                log_ring: None,
             },
         );
         let bytes = tokio::runtime::Runtime::new()
@@ -644,6 +648,7 @@ mod tests {
                     host: None,
                     mock,
                     debug,
+                    log_ring: None,
                 },
             );
             let bytes = tokio::runtime::Runtime::new()
@@ -675,6 +680,7 @@ mod tests {
                     host: None,
                     mock: false,
                     debug: false,
+                    log_ring: None,
                 },
             );
             let bytes = tokio::runtime::Runtime::new()
@@ -877,13 +883,13 @@ mod tests {
 
     #[test]
     fn test_handle_logs_no_query() {
-        let resp = handle_logs(None);
+        let resp = handle_logs(None, None);
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[test]
     fn test_handle_logs_with_pagination() {
-        let resp = handle_logs(Some("startIndex=10&endIndex=50"));
+        let resp = handle_logs(Some("startIndex=10&endIndex=50"), None);
         assert_eq!(resp.status(), StatusCode::OK);
     }
 

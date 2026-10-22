@@ -1009,15 +1009,30 @@ and so on.
 
 ### GET /logs
 
-Mountebank-compatible stub. Rift writes its logs through `tracing` (stderr), not to an in-memory
-buffer, so this always returns an empty list:
+Returns the most recent log entries, in Mountebank's shape:
 
 ```json
-{ "logs": [], "_links": { "self": { "href": "/logs?startIndex=0&endIndex=100" } } }
+{ "logs": [ { "level": "info", "message": "Created imposter on port 4545", "timestamp": "2026-10-17T17:43:52.652Z" } ] }
 ```
 
-**Query Parameters:** `startIndex` (default `0`) and `endIndex` (default `100`) are parsed and only
-echoed in `_links.self`.
+- `level` is `error`, `warn`, `info` or `debug` (`trace` events are reported as `debug`). Only
+  events that pass `--loglevel` / `RUST_LOG` are recorded, so `--loglevel warn` hides `info`.
+- `timestamp` is UTC with milliseconds and a `Z`.
+- `message` is the event's text followed by ` key=value` for its fields, with no colour codes. CR
+  and LF are JSON-escaped like any other character.
+- **Query parameters:** `startIndex` (default `0`) and `endIndex` (default: the last entry) slice
+  the log as JavaScript's `slice(startIndex, endIndex + 1)` does, so `endIndex` is inclusive, a
+  negative value counts from the end, and a value that is not a number reads as `0` (`startIndex`)
+  or selects nothing (`endIndex`). Indices count every entry since the process started, so
+  `?startIndex=<previous count>` returns only what is new, even after older entries were evicted.
+- **Bounded.** The buffer keeps the most recent 10,000 entries and at most 4 MiB, evicting the
+  oldest first; a message longer than 4 KiB is cut and ends in `…`.
+- Output written by scripts (`logger.*`, target `rift::script`) is not recorded, since it often
+  echoes request data.
+- With `--nologfile`, or on a server built without a log buffer (an embedded one), the answer is
+  Mountebank's: `{"logs":[{"level":"error","message":"No logfile"}]}`.
+- Like the other admin routes it requires the `--api-key` when one is set, and it is the
+  `system.read` action for an `AdminAuthorizer`.
 
 ---
 

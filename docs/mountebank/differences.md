@@ -257,6 +257,20 @@ with `Retry-After` when the bodies buffered at once would exceed `--body-memory-
 1 GiB), where Mountebank would run out of heap. Below those limits the two serve the same bodies.
 See [Body size limits](../configuration/cli.md#body-size-limits).
 
+## `GET /logs` is a bounded ring
+
+Mountebank's `/logs` re-reads its whole JSON logfile on every request, and that file never rotates
+(its `maxsize: '20m'` is a string, so winston's size check never fires): a long-lived `mb` costs
+memory proportional to everything it ever logged. Rift keeps the most recent 10,000 entries (4 MiB
+at most) in memory and serves those; `startIndex`/`endIndex` count from process start, as
+Mountebank's do, so entries evicted from the front are simply absent.
+
+The envelope, levels, timestamp format, ordering, index semantics and the `No logfile` answer for
+`--nologfile` match. The message text is Rift's own, Rift does not log each request at `info`, and
+script `logger.*` output is not recorded. `Accept: text/html` gets JSON, since Rift does not serve
+Mountebank's HTML log viewer. The `--log` file is plain text, where Mountebank's default log file
+is JSON lines.
+
 ## Recorded requests are bounded by bytes
 
 Mountebank's request journal grows without limit. Rift keeps each imposter's recorded requests

@@ -753,7 +753,7 @@ static ENGINE_SEQ: AtomicUsize = AtomicUsize::new(0);
 /// Names each [`Harness::scratch_file`].
 static SCRATCH_SEQ: AtomicUsize = AtomicUsize::new(0);
 
-/// Spawn `rift --port 0 --nologfile --metrics-port 0 --allow-injection --scripts-dir <corpus root>
+/// Spawn `rift --port 0 --metrics-port 0 --allow-injection --scripts-dir <corpus root>
 /// <args>` (plus `--front-door 0` when asked) in the corpus root, output to a fresh log file, and
 /// return the child and that log. `--scripts-dir` is what lets an admin-API `lookup` read the
 /// corpus's `data/` CSVs (rift#1617); a relative path resolves from it as it did from the cwd.
@@ -782,7 +782,9 @@ fn spawn_engine(config: &Config, opts: &SpawnOptions) -> Result<(Child, PathBuf)
     })?;
     let binary = config.build_dir.join("rift");
     let mut command = Command::new(&binary);
-    command.args(["--port", "0", "--nologfile", "--metrics-port", "0"]);
+    // No `--nologfile`: it would turn `GET /logs` into the `No logfile` sentinel, and the
+    // `21-admin-rest` feature asserts real entries (issue #1615).
+    command.args(["--port", "0", "--metrics-port", "0"]);
     command.arg("--scripts-dir").arg(&config.corpus_root);
     if !opts.no_injection {
         command.arg("--allow-injection");

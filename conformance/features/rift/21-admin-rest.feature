@@ -18,11 +18,20 @@ Feature: Admin REST long tail — system routes, listing views, delete-all, tear
     Then the response status is 200
     And the response JSON at "status" is the string "ok"
 
-  Scenario: GET /logs is always empty and echoes its default window
+  # #1615: Mountebank's shape — `{logs:[{level,message,timestamp}]}`, no `_links`. The engine logs
+  # its startup at info, so entry 0 exists; `endIndex` is inclusive and indices are absolute.
+  Scenario: GET /logs returns log entries in Mountebank's shape
     When the client sends admin "GET" "/logs" with payload "-"
     Then the response status is 200
-    And the response JSON at "logs" is an empty array
-    And the response JSON at "_links.self.href" is the string "/logs?startIndex=0&endIndex=100"
+    And the response JSON at "logs.0.level" is a non-empty string
+    And the response JSON at "logs.0.message" is a non-empty string
+    And the response JSON at "logs.0.timestamp" is a non-empty string
+    And the response JSON at "_links" is absent
+
+  Scenario: GET /logs slices as JavaScript's slice(startIndex, endIndex + 1)
+    When the client sends admin "GET" "/logs?startIndex=0&endIndex=0" with payload "-"
+    Then the response status is 200
+    And the response JSON at "logs" has 1 elements
 
   # ── imposter listing views ───────────────────────────────────────────────────────────────────
   # #713: the list is in ascending port order regardless of creation order. The shared engine may
