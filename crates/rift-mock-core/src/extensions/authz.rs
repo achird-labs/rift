@@ -32,7 +32,12 @@ use std::sync::Arc;
 /// `tracing::debug!("{req:?}")`. Same rule the CA key material follows in `intercept_control`.
 #[derive(Clone, Copy)]
 pub struct AuthzRequest<'a> {
-    /// The `Authorization` header value, verbatim — `None` when the header is absent.
+    /// The admin credential, verbatim: the `Authorization` header value or, when that header is
+    /// absent, the `x-api-key` value (Mountebank's `--apikey` spelling). `Authorization` wins when
+    /// both are sent. `None` when neither is present (or the winning header is not visible ASCII).
+    ///
+    /// This is the value the built-in `--api-key` gate checked. A raw token in `x-api-key` has no
+    /// scheme prefix, exactly as a `--api-key` sent in `Authorization` has none.
     ///
     /// Passed through untouched: upstream neither parses nor validates the scheme, because an
     /// embedder's credential format (bearer JWT, mTLS-derived, opaque session) is not upstream's

@@ -508,6 +508,11 @@ call without an observer. See
 The built-in `--api-key` gate yields *access*, not an identity: every caller that presents the key
 is equivalent. `AdminAuthorizer` lets an embedder decide per request, with the route already parsed.
 
+`AuthzRequest.credential` is the credential the built-in gate checked: the `Authorization` header
+value verbatim or, when that header is absent, the `x-api-key` value (Mountebank's `--apikey`
+spelling; `Authorization` wins when both are sent). A raw token in `x-api-key` carries no scheme
+prefix. Treat it as a secret and never log it.
+
 ```rust
 use rift_mock_core::extensions::authz::{
     AdminAuthorizer, AuthzDecision, AuthzRequest, actions,
@@ -592,7 +597,7 @@ calls the hook for you. If instead you **terminate some admin routes yourself** 
 you have no parsed route to authorize against — so call the same classifier upstream does:
 
 ```rust
-use rift_http_proxy::admin_api::authz::{SCOPE_HEADER, classify};
+use rift_http_proxy::admin_api::authz::{SCOPE_HEADER, classify, credential};
 use rift_mock_core::extensions::authz::AuthzRequest;
 
 // `None` = not an authorizable admin route: the data plane (`/__rift/...`), or a path that
@@ -604,7 +609,7 @@ if let Some(target) = classify(req.method(), req.uri().path()) {
         .map(|(name, value)| (*name, value.as_str()))
         .collect();
     let decision = my_authorizer.authorize(AuthzRequest {
-        credential: req.headers().get("authorization").and_then(|v| v.to_str().ok()),
+        credential: credential(req.headers()),
         action: target.action,
         port: target.port,
         space: target.space.as_deref(),
@@ -620,7 +625,8 @@ normalise — saw a different route from the one dispatched, so `PUT /imposters/
 mutated a scenario the classifier had never seen. Under `/imposters` that is now unrepresentable,
 because `classify` calls the router's own parser and matches its route enum exhaustively — which is
 exactly the property a hand-written copy gives up. `SCOPE_HEADER` likewise spares you a copied
-header literal.
+header literal, and `credential` spares you a copied credential lookup: it picks `Authorization`,
+else `x-api-key`, by the same rule as the built-in gate.
 
 The same applies to validating a request body you terminate. If you answer
 `POST /imposters/:port/spaces/:flowId/stubs` yourself, apply
