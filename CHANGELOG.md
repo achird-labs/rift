@@ -66,6 +66,19 @@ record.
   The decoded size counts against `--max-body-size` and `--body-memory-budget`, so a small body
   that inflates past the ceiling is a `413`. A proxy still forwards the encoded bytes.
 
+- **Behaviors are validated as Mountebank validates them** (#1582). `repeat: 0` or `null`, a
+  `{"repeat": n}` or unknown-only `behaviors` element, an element with two behavior types, and a
+  `copy`/`lookup` `from` object without exactly one key are now refused with `400`, in Mountebank's
+  words, at every config door (`POST`/`PUT /imposters`, the stub routes, `--configfile`, the FFI). A
+  pre-0.18.0 saved file with a `{"repeat": n}` element no longer loads through one, as it does not in
+  Mountebank: move it to the response's `repeat`. Every #1582 rule is door-only, so stored configs
+  are unaffected: a `--datadir` (startup and `POST /admin/reload`) is now decoded the way an embedder
+  replays one, `deserialize_replayed` and then `admission_check`, and loads every shape an older
+  release wrote. It is still held to every admission check; a door-only refusal from an earlier
+  release (a response with two types or none, #1551) no longer skips a datadir file either. A `lookup` `key.index` that is not a non-negative integer is accepted, written back
+  as written, and read as Mountebank reads it: `"1"` picks match 1, and `-1` or `1.5` finds no
+  row. A key that is not a behavior is written back inside the element before it, so a saved file
+  loads again. `rift-lint` still disagrees on some of these until #1587.
 - **https imposters print `ca`, `mutualAuth`, `rejectUnauthorized` and `ciphers` in every view,
   `?replayable=true` included** (#1576), as Mountebank does: `ca` is `null` when unset, a
   one-element `ca` array prints (and is stored) as an array instead of a bare string, and `ciphers`

@@ -329,6 +329,9 @@
       ],
       "type": "object"
     },
+    "LookupIndex": {
+      "description": "A lookup `key.index`, any JSON value, kept as written (issue #1582). Mountebank has no rule for\nit and reads `keyValues[key.index || 0]`, so `0`, `\"\"` and `false` are the first match, a\nnon-negative integer or a numeric string such as `\"1\"` picks that match, and anything else\nfinds no row."
+    },
     "LookupKey": {
       "additionalProperties": false,
       "description": "Key extraction configuration for lookup",
@@ -338,13 +341,15 @@
           "description": "Request field to extract key from"
         },
         "index": {
-          "description": "Which of the selector's matches keys the row, as in Mountebank (issue #1240): for a regex,\n`0` is the whole match and `n` the `n`th capture group; for JSONPath/XPath, the `n`th\nselected value. Absent keeps Rift's default, the first capture group (or the whole match\nwhen the pattern has none) and the first selected value.",
-          "format": "uint",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LookupIndex"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which of the selector's matches keys the row, as in Mountebank (issue #1240): for a regex,\n`0` is the whole match and `n` the `n`th capture group; for JSONPath/XPath, the `n`th\nselected value. Absent (or `null`) keeps Rift's default, the first capture group (or the\nwhole match when the pattern has none) and the first selected value. Any JSON value is\nadmitted and read as Mountebank reads it (issue #1582); see [`LookupIndex`]."
         },
         "using": {
           "$ref": "#/$defs/ExtractionMethod",
@@ -1592,7 +1597,7 @@
         },
         "repeat": {
           "default": null,
-          "description": "Mountebank's canonical `repeat` (issue #1188): it lifts `_behaviors.repeat` to the response,\nso this is the form `mb save` writes. Merged into the behaviors block at parse, where it\nwins over a `repeat` inside the block, as it does in Mountebank. `null` is absent.",
+          "description": "Mountebank's canonical `repeat` (issue #1188): it lifts `_behaviors.repeat` to the response,\nso this is the form `mb save` writes. Merged into the behaviors block at parse, where it\nwins over a `repeat` inside the block, as it does in Mountebank. Must be greater than 0: a\nconfig door refuses `0` and `null`, as Mountebank does (issue #1582).",
           "format": "uint32",
           "maximum": 4294967295,
           "minimum": 0,

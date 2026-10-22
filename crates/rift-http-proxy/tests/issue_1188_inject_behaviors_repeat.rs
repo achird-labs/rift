@@ -433,22 +433,49 @@ async fn a_malformed_block_repeat_is_refused_under_a_valid_top_level_one() {
     );
 }
 
+/// Issue #1582: Mountebank refuses a `null` `repeat` (`typeof null` is `object`), so a door does
+/// too, whatever the block says. An older engine read it as absent, and a replayed config still does.
 #[tokio::test]
-async fn a_null_top_level_repeat_is_absent() {
-    let (client, admin, manager) = start_admin().await;
-    let port = port_of(
-        &created(
+async fn a_null_top_level_repeat_is_refused() {
+    let (client, admin, _manager) = start_admin().await;
+    let response = create(
+        &client,
+        &admin,
+        &json!({"protocol": "http", "stubs": [{"responses": [
+            {"is": {"body": "a"}, "repeat": null, "_behaviors": {"repeat": 2}},
+            {"is": {"body": "b"}}
+        ]}]}),
+    )
+    .await;
+    assert_eq!(response.status().as_u16(), 400);
+    let text = response.text().await.expect("body");
+    assert!(
+        text.contains("field must be an integer greater than 0"),
+        "{text}"
+    );
+}
+
+/// Issue #1582: `0` joins the refused values, in Mountebank's words; it used to be served as `1`.
+#[tokio::test]
+async fn a_zero_top_level_repeat_is_refused() {
+    let (client, admin, _manager) = start_admin().await;
+    for response in [
+        json!({"is": {"body": "a"}, "repeat": 0}),
+        json!({"is": {"body": "a"}, "_behaviors": {"repeat": 0}}),
+    ] {
+        let reply = create(
             &client,
             &admin,
-            &json!({"protocol": "http", "stubs": [{"responses": [
-                {"is": {"body": "a"}, "repeat": null, "_behaviors": {"repeat": 2}},
-                {"is": {"body": "b"}}
-            ]}]}),
+            &json!({"protocol": "http", "stubs": [{"responses": [response.clone()]}]}),
         )
-        .await,
-    );
-    assert_eq!(bodies(port, 3).await, vec!["a", "a", "b"]);
-    let _ = manager.delete_imposter(port).await;
+        .await;
+        assert_eq!(reply.status().as_u16(), 400, "{response}");
+        let text = reply.text().await.expect("body");
+        assert!(
+            text.contains("field must be an integer greater than 0"),
+            "{response}: {text}"
+        );
+    }
 }
 
 // ---- what is still reported as ignored ----------------------------------------------------------

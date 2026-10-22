@@ -487,6 +487,14 @@ The directory is keyed by port, so each file is held to that:
 - It must be **named after that port**. `4545.json` must declare `"port": 4545`; a file named
   anything else is refused with the name it should have.
 
+A datadir file was written by a Rift engine, possibly an older one, so it is read the way a store
+replays what it holds. It is held to the admission checks (a predicate or behavior selector that
+does not compile, a stub with no responses), but not to the door-only rules, which judge a shape as
+written and were added for shapes older releases admitted and wrote. A pre-0.18.0
+`{"repeat": n}` behaviors element, a `repeat: null`, or a behaviors element holding only an unknown
+key all still load from a datadir, though `POST /imposters` and `--configfile` refuse them, as
+Mountebank does. Mountebank does not validate its datadir on load at all.
+
 At startup a file that breaks these rules — or that cannot be parsed, needs `--allow-injection`
 without it, or fails to create — is **skipped**: the server still starts, and one `ERROR` line lists
 every skipped file with its reason. `POST /admin/reload` is stricter: one bad file refuses the whole

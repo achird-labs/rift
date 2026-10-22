@@ -3468,5 +3468,27 @@
     "reason": "Rift proxies ?a=9, Mountebank replays it",
     "mountebank": "1",
     "rift": "2"
+  },
+  {
+    "id": "behavior-errors-first-only-into",
+    "case": "coverage: behaviorsValidator.js:167 behavior validation (#1582)",
+    "location": "step[9].admin.body/errors/1",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "where Mountebank lists every one (a `copy` missing `from`, `into` and `using` is three errors",
+    "reason": "Rift names the first behavior validation error; Mountebank lists every one",
+    "mountebank": "{\"code\":\"bad data\",\"message\":\"copy behavior \\\"into\\\" field required\",\"source\":{\"copy\":{}}}",
+    "rift": "(absent)"
+  },
+  {
+    "id": "behavior-errors-first-only-using",
+    "case": "coverage: behaviorsValidator.js:167 behavior validation (#1582)",
+    "location": "step[9].admin.body/errors/2",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "where Mountebank lists every one (a `copy` missing `from`, `into` and `using` is three errors",
+    "reason": "Rift names the first behavior validation error; Mountebank lists every one",
+    "mountebank": "{\"code\":\"bad data\",\"message\":\"copy behavior \\\"using\\\" field required\",\"source\":{\"copy\":{}}}",
+    "rift": "(absent)"
   }
 ]

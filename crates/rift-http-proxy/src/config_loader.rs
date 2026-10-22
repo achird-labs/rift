@@ -2,7 +2,9 @@
 //! by startup and the `POST /admin/reload` hot-reload endpoint (issue #197). Parsing is pure (no
 //! running state is touched), so a parse error is returned rather than applied.
 
-use crate::imposter::{ImposterConfig, ScriptBaseDir, resolve_scripts};
+use crate::imposter::{
+    ImposterConfig, ScriptBaseDir, admission_check, deserialize_replayed, resolve_scripts,
+};
 use crate::intercept_control::InterceptStartOptions;
 use anyhow::Context;
 use std::path::{Path, PathBuf};
@@ -257,8 +259,7 @@ fn load_dir(dir: &Path) -> anyhow::Result<Vec<ImposterConfig>> {
             // find it among the others (issue #1122).
             let in_file = || format!("datadir file {}", path.display());
             let content = std::fs::read_to_string(&path).with_context(in_file)?;
-            let mut config: ImposterConfig =
-                serde_json::from_str(&content).with_context(in_file)?;
+            let mut config = decode_stored(&content).with_context(in_file)?;
             if let Some(problem) = datadir_file_problem(&path, &config) {
                 return Err(anyhow::anyhow!(problem)).with_context(in_file);
             }
@@ -267,6 +268,21 @@ fn load_dir(dir: &Path) -> anyhow::Result<Vec<ImposterConfig>> {
         }
     }
     Ok(configs)
+}
+
+/// Decode a datadir file the way a store replays what it holds (issue #1582): a file there was
+/// written by some Rift engine, possibly an older one, so it decodes with
+/// [`deserialize_replayed`] and then passes [`admission_check`], which together refuse what every
+/// door has refused since the replay floor and nothing a door began refusing later. A door-only
+/// refusal added since (a `{"repeat": n}` behaviors element that Rift itself wrote before v0.18.0,
+/// or a `repeat: null`) would otherwise make an upgrade fail to load the imposter it stored.
+/// Mountebank does not validate its datadir on load at all.
+pub(crate) fn decode_stored(content: &str) -> anyhow::Result<ImposterConfig> {
+    let mut deserializer = serde_json::Deserializer::from_str(content);
+    let config: ImposterConfig = deserialize_replayed(&mut deserializer)?;
+    deserializer.end()?;
+    admission_check(&config).map_err(anyhow::Error::msg)?;
+    Ok(config)
 }
 
 /// Pre-process EJS tokens in a config file before JSON/YAML parsing: the tag subset and every

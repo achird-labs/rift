@@ -143,7 +143,6 @@ a divergence (to be fixed in Rift and then covered here), or nobody has written 
 | `predicates.js:21-24`, `:238-241`, `:269-271` | Array semantics of `deepEquals`/`equals`: order-independent arrays of objects, an expected array as a subset of the actual one, an object over an array of objects |
 | `predicates.js:58-59`, `:338-339` | An imposter with `"mode": "binary"` refuses `matches`, `jsonpath` and `xpath` at creation in Mountebank; Rift creates it |
 | `predicates.js:384-389`, `responseResolver.js:69-77` | A predicate or response `inject` that throws: Mountebank answers `500`, Rift `400` |
-| `dryRunValidator.js:188-192`; `behaviorsValidator.js:98-99`, `:167-173` | `repeat: 0`, a `copy.from` with two keys, an unknown behavior and a behavior object with two types: Mountebank refuses each at creation, Rift accepts it |
 | `behaviors.js:275-276`, `:364-369` | `copy` from a missing field, and into a header name or body key |
 | `baseHttpServer.js:47-50` | A CORS preflight (`Access-Control-Request-Headers` set): Mountebank echoes the request's values and serves the stub's body |
 | `baseHttpServer.js:64-65` | A stub's own `Content-Length` header: Mountebank recomputes it from the body |

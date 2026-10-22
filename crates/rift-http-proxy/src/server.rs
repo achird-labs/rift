@@ -2412,7 +2412,8 @@ fn read_and_parse_datadir(
                     continue;
                 }
             };
-            match serde_json::from_str::<ImposterConfig>(&content) {
+            // Decoded as a store replays it, the same rule a reload applies (issue #1582).
+            match crate::config_loader::decode_stored(&content) {
                 Ok(mut config) => {
                     if let Some(reason) = crate::config_loader::datadir_file_problem(&path, &config)
                     {
@@ -3010,6 +3011,40 @@ mod tests {
             "{}",
             skipped[0].reason
         );
+    }
+
+    // Issue #1582: the behaviors shapes a door has refused since #1582 were admitted, and written,
+    // by older engines (a `{"repeat": n}` element before v0.18.0, an element holding only an unknown
+    // key before #1582), so a datadir file holding one loads at startup instead of being skipped.
+    #[test]
+    fn datadir_startup_loads_the_behaviors_shapes_older_engines_stored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let responses = [
+            serde_json::json!({"is": {}, "behaviors": [{"wait": 1}, {"repeat": 2}]}),
+            serde_json::json!({"is": {}, "behaviors": [{"wait": 1}, {"nosuch": 1}]}),
+            serde_json::json!({"is": {}, "behaviors": [{"wait": 1, "decorate": "function () {}"}]}),
+            serde_json::json!({"is": {}, "repeat": null}),
+            serde_json::json!({"is": {}, "_behaviors": {"wait": 1, "repeat": null}}),
+            serde_json::json!({"is": {}, "repeat": 0}),
+            serde_json::json!({"is": {}, "behaviors": [{"copy": {
+                "from": {"query": "q", "headers": "x"}, "into": "${T}",
+                "using": {"method": "regex", "selector": ".+"}}}]}),
+        ];
+        for (port, response) in (4601_u16..).zip(&responses) {
+            write_json(
+                &dir.path().join(format!("{port}.json")),
+                serde_json::json!({"port": port, "protocol": "http",
+                                   "stubs": [{"responses": [response]}]}),
+            );
+        }
+
+        let base = ScriptBaseDir::DatadirRelative(dir.path().to_path_buf());
+        let (parsed, skipped) =
+            read_and_parse_datadir(dir.path(), &base).expect("read_and_parse must not abort");
+
+        let reasons: Vec<&str> = skipped.iter().map(|s| s.reason.as_str()).collect();
+        assert!(reasons.is_empty(), "{reasons:?}");
+        assert_eq!(parsed.len(), responses.len());
     }
 
     // Issue #1372: a stub without responses is refused at admission, so at startup its file is

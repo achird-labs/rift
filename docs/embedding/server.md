@@ -210,6 +210,14 @@ place, a top-level `repeat` next to a behaviors block. A door checks the block f
 refused by a door but passes `admission_check`, and when the top-level `repeat` is itself malformed,
 both refuse but `admission_check` names the `repeat` first.
 
+Some refusals are door-only, so a door refuses them and `admission_check` passes on what a replayed
+decode makes of them: a response with two types or none, and every behaviors rule #1582 added. A
+`behaviors` element with two behavior types or none is stored split into one step per key, and a
+`null` `repeat` as absent, so the decoded value no longer holds them. A `0` `repeat` and a
+`copy.from` or lookup `key.from` without exactly one key it could see, and does not check: releases
+up to 0.23.0 stored them, and a store replays what it holds. Rift's own `--datadir` loads this way
+too, with `deserialize_replayed` and then `admission_check`.
+
 **The replay floor.** The floor is the first release that ships `deserialize_replayed`. A config an
 engine at or after the floor admitted through any door decodes with `deserialize_replayed` on every
 later engine, to the same value, and passes `admission_check` unless a check was added after it was
