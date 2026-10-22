@@ -6,7 +6,7 @@
     "src/cli/**": "The mb command line, not the HTTP contract; mbTest's cli suite exercises it (#1547)",
     "src/controllers/feedController.js": "The Atom feed of mb's release notes, a UI page with no Rift counterpart",
     "src/controllers/homeController.js": "mb's HTML home and docs pages, which Rift does not serve",
-    "src/controllers/logsController.js": "mb's own log viewer, which Rift does not serve",
+    "src/controllers/logsController.js": "GET /logs is served (a bounded ring, #1615); mb's HTML log viewer (Accept: text/html) is not",
     "src/models/filesystemBackedImpostersRepository.js": "--datadir persistence: the harness starts both engines without it (a second engine-pair configuration is a follow-up)",
     "src/models/http/index.js": "Entry point for running http as an out-of-process --protofile plugin, which Rift does not implement",
     "src/models/https/index.js": "Entry point for running https as an out-of-process --protofile plugin, which Rift does not implement",

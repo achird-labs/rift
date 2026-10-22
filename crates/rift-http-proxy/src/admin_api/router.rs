@@ -474,7 +474,9 @@ async fn route_by_path(
         (&Method::GET, "/config") => {
             return system::handle_config(allow_injection, config_snapshot);
         }
-        (&Method::GET, "/logs") => return system::handle_logs(query),
+        (&Method::GET, "/logs") => {
+            return system::handle_logs(query, config_snapshot.log_ring.as_ref());
+        }
         (&Method::POST, "/admin/reload") => {
             return system::handle_reload(
                 manager,
