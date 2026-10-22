@@ -1,5 +1,5 @@
 //! Issue #440: a Mountebank predicate `inject` function that THROWS must FAIL LOUD — a
-//! Mountebank-shaped 400 error (`{"errors":[{"code":"invalid predicate injection", ...}]}`), not
+//! Mountebank-shaped 500 error (`{"errors":[{"code":"invalid predicate injection", ...}]}`), not
 //! a silent fall-through to "didn't match" (which would let a later stub, or the imposter's
 //! default response, wrongly serve the request). Mountebank's own `InjectionError` fails the
 //! request on this rather than treating the predicate as non-matching — mirrors the
@@ -9,11 +9,11 @@
 use rift_http_proxy::imposter::ImposterManager;
 use std::time::Duration;
 
-// A throwing predicate inject returns HTTP 400 with the Mountebank error body shape, and never
+// A throwing predicate inject returns HTTP 500 (issue #1581) with the Mountebank error body shape, and never
 // falls through to a later stub — proven here by a catch-all fallback stub that must NOT be
 // reached.
 #[tokio::test]
-async fn throwing_predicate_inject_returns_mountebank_400_not_fallthrough() {
+async fn throwing_predicate_inject_returns_mountebank_500_not_fallthrough() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
         "protocol": "http", "stubs": [
@@ -45,9 +45,9 @@ async fn throwing_predicate_inject_returns_mountebank_400_not_fallthrough() {
 
     assert_eq!(
         resp.status(),
-        400,
-        "a throwing predicate inject must fail the request with 400 (Mountebank error parity), \
-         not fall through to another stub or a bare 500"
+        500,
+        "a throwing predicate inject must fail the request with 500 (Mountebank error parity), \
+         not fall through to another stub"
     );
     assert!(
         resp.headers().contains_key("x-rift-imposter"),
@@ -62,6 +62,10 @@ async fn throwing_predicate_inject_returns_mountebank_400_not_fallthrough() {
     assert_eq!(
         body["errors"][0]["code"], "invalid predicate injection",
         "error code must be 'invalid predicate injection', got: {body}"
+    );
+    assert_eq!(
+        body["errors"][0]["data"], "boom-predicate",
+        "data is the thrown error's message (issue #1581), got: {body}"
     );
     assert!(
         body["errors"][0]["message"]

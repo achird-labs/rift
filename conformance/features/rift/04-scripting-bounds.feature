@@ -93,21 +93,21 @@ Feature: Scripting engines and runaway bounds
   # rift 0.13.0 (rift#500) made the non-timeout script *error* contracts stable and distinct from the
   # timeout ones above: a throwing (not slow) script fails fast, tagged x-rift-inject-error /
   # x-rift-decorate-error but WITHOUT x-rift-script-timeout. A response-inject that throws returns
-  # 400 with the mountebank "invalid injection" error body.
-  Scenario: a broken response-inject fails with 400 invalid injection
+  # 500 (rift#1581) with the mountebank "invalid injection" error body.
+  Scenario: a broken response-inject fails with 500 invalid injection
     Given a fresh imposter from fixture "scripting/inject-response-error"
     When the client sends "GET" "/inject-response"
-    Then the response status is 400
+    Then the response status is 500
     And the response header "x-rift-inject-error" is "true"
     And the response has no header "x-rift-script-timeout"
     And the response body contains "invalid injection"
 
-  # A predicate-inject that throws fails matching with 400 "invalid predicate injection" — same
+  # A predicate-inject that throws fails matching with 500 "invalid predicate injection" — same
   # x-rift-inject-error marker, distinguishing an error from the 504 predicate-injection timeout.
-  Scenario: a broken predicate-inject fails with 400 invalid predicate injection
+  Scenario: a broken predicate-inject fails with 500 invalid predicate injection
     Given a fresh imposter from fixture "scripting/inject-predicate-error"
     When the client sends "GET" "/anything"
-    Then the response status is 400
+    Then the response status is 500
     And the response header "x-rift-inject-error" is "true"
     And the response has no header "x-rift-script-timeout"
     And the response body contains "invalid predicate injection"

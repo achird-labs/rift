@@ -25,7 +25,7 @@ Feature: Behaviors and repeat on inject, proxy and fault responses (rift#1184)
   Scenario: an inject function that throws runs no behavior
     Given a fresh imposter from fixture "behaviors-response-types/inject"
     When the client sends "GET" "/throws"
-    Then the response status is 400
+    Then the response status is 500
     And the response header "x-rift-inject-error" is "true"
     And the response has no header "X-Decorated"
 
