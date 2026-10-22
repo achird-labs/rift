@@ -55,6 +55,12 @@ impl RuleCycler {
         self.0.store(join(resp_idx, 0), Ordering::SeqCst);
     }
 
+    /// Point the cursor at `(resp_idx, repeat_idx)`, as a restored `--datadir` cursor names it
+    /// (issue #1603).
+    pub fn set_position(&self, resp_idx: u32, repeat_idx: u32) {
+        self.0.store(join(resp_idx, repeat_idx), Ordering::SeqCst);
+    }
+
     pub fn reset(&self) {
         self.0.store(0, Ordering::SeqCst);
     }

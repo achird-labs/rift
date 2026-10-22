@@ -188,6 +188,31 @@ impl FaultCell {
     fn take(&self) -> Option<TcpFaultKind> {
         self.0.fault.lock().take()
     }
+
+    /// Take the armed fault only if it is a payload kind (random data, malformed chunk), leaving a
+    /// reset or empty close armed for the raw-socket [`FaultIo`] beneath TLS (issue #1600).
+    ///
+    /// Returns the kind with the bytes it writes.
+    pub(crate) fn take_payload(&self) -> Option<(TcpFaultKind, &'static [u8])> {
+        let mut slot = self.0.fault.lock();
+        let armed = (*slot).and_then(|kind| payload(kind).map(|bytes| (kind, bytes)));
+        if armed.is_some() {
+            *slot = None;
+        }
+        armed
+    }
+}
+
+/// The bytes a payload fault writes before closing, or `None` for a fault that writes nothing
+/// (reset, empty close). One table, so http and https send the same bytes (issue #1600).
+fn payload(kind: TcpFaultKind) -> Option<&'static [u8]> {
+    match kind {
+        TcpFaultKind::Reset | TcpFaultKind::Empty => None,
+        TcpFaultKind::RandomData => Some(b"\x00\xff\xfe\xfd\x13\x37\xde\xad\xbe\xef"),
+        TcpFaultKind::MalformedChunk => Some(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nZZZZZ not a valid chunk size\r\n",
+        ),
+    }
 }
 
 /// Response extension: the listener should close this connection with a lingering close
@@ -350,22 +375,22 @@ impl FaultIo {
             // SO_LINGER(0): dropping the socket now emits RST rather than a graceful FIN.
             TcpFaultKind::Reset => {
                 if let Err(e) = self.inner.set_zero_linger() {
-                    debug!("rift fault reset: set_zero_linger failed, degraded to graceful close: {e}");
+                    debug!(
+                        "rift fault reset: set_zero_linger failed, degraded to graceful close: {e}"
+                    );
                 }
             }
-            // Nothing written; the abort closes the connection with no response bytes.
-            TcpFaultKind::Empty => {}
-            // Best-effort raw write, then a graceful close delivers the bytes before EOF.
-            TcpFaultKind::RandomData => {
-                if let Err(e) = self.inner.try_write(b"\x00\xff\xfe\xfd\x13\x37\xde\xad\xbe\xef") {
-                    debug!("rift fault random-data: write failed, degraded to empty close: {e}");
-                }
-            }
-            TcpFaultKind::MalformedChunk => {
-                if let Err(e) = self.inner.try_write(
-                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nZZZZZ not a valid chunk size\r\n",
-                ) {
-                    debug!("rift fault malformed-chunk: write failed, degraded to empty close: {e}");
+            // An empty close writes nothing; a payload kind is a best-effort raw write, then a
+            // graceful close delivers the bytes before EOF. On an https imposter a payload kind never
+            // gets here: `TlsPayloadFault` above the TLS layer takes it first (issue #1600).
+            TcpFaultKind::Empty | TcpFaultKind::RandomData | TcpFaultKind::MalformedChunk => {
+                if let Some(bytes) = payload(kind)
+                    && let Err(e) = self.inner.try_write(bytes)
+                {
+                    debug!(
+                        "rift fault {}: write failed, degraded to empty close: {e}",
+                        kind.canonical_name()
+                    );
                 }
             }
         }
@@ -420,6 +445,175 @@ impl AsyncWrite for FaultIo {
                 Linger::Done => return Poll::Ready(Ok(())),
             }
         }
+    }
+}
+
+/// The payload faults' layer above TLS (issue #1600): on an https imposter, random data and a
+/// malformed chunk are written *through* the TLS stream, so the client completes the handshake,
+/// decrypts the bytes and fails to parse HTTP — as with Mountebank, which writes them on the
+/// `TLSSocket`. Written beneath TLS, they reached the client as a non-record and it reported a TLS
+/// error instead.
+///
+/// Reset and empty close stay beneath TLS, in the raw-socket [`FaultIo`] that shares this
+/// [`FaultCell`]: a reset needs the socket's `SO_LINGER`, and [`FaultCell::take_payload`] leaves
+/// those kinds armed for it. So on a write the order is: hyper, then this layer (takes a payload
+/// kind or passes through), then rustls, then `FaultIo` (takes reset/empty or passes through),
+/// then the socket.
+///
+/// After writing the payload it flushes, so rustls emits the records, and returns the
+/// [`InjectedFault`] error hyper aborts on. It sends no `close_notify`, as Mountebank's
+/// `socket.destroy()` sends none: once tripped, flush and shutdown fail with the same error rather
+/// than reaching the TLS stream's shutdown.
+#[derive(Debug)]
+pub(crate) struct TlsPayloadFault<S> {
+    inner: S,
+    fault: FaultCell,
+    trip: Option<Trip>,
+}
+
+/// Where a taken payload fault has got to.
+#[derive(Debug)]
+enum Trip {
+    /// The payload bytes not yet accepted by the TLS stream.
+    Writing {
+        kind: TcpFaultKind,
+        rest: &'static [u8],
+    },
+    /// All bytes accepted; flushing so rustls writes the records to the socket.
+    Flushing(TcpFaultKind),
+    /// The payload is out (or its write failed): every further call aborts.
+    Tripped(TcpFaultKind),
+}
+
+impl Trip {
+    /// Drive the payload out, then yield the abort error. A write or flush error degrades the
+    /// fault to an empty close: the connection still aborts, so it is logged, not returned.
+    fn poll<S: AsyncWrite + Unpin>(
+        &mut self,
+        inner: &mut S,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Error> {
+        loop {
+            match self {
+                Self::Writing { kind, rest } => {
+                    let (kind, bytes) = (*kind, *rest);
+                    match ready!(Pin::new(&mut *inner).poll_write(cx, bytes)) {
+                        Ok(0) => {
+                            debug!(
+                                "rift fault {}: TLS write accepted no bytes, degraded to empty close",
+                                kind.canonical_name()
+                            );
+                            *self = Self::Tripped(kind);
+                        }
+                        Ok(n) if n >= bytes.len() => *self = Self::Flushing(kind),
+                        Ok(n) => *rest = &bytes[n..],
+                        Err(e) => {
+                            debug!(
+                                "rift fault {}: TLS write failed, degraded to empty close: {e}",
+                                kind.canonical_name()
+                            );
+                            *self = Self::Tripped(kind);
+                        }
+                    }
+                }
+                Self::Flushing(kind) => {
+                    let kind = *kind;
+                    if let Err(e) = ready!(Pin::new(&mut *inner).poll_flush(cx)) {
+                        debug!(
+                            "rift fault {}: TLS flush failed, payload may be cut short: {e}",
+                            kind.canonical_name()
+                        );
+                    }
+                    *self = Self::Tripped(kind);
+                }
+                Self::Tripped(kind) => return Poll::Ready(io::Error::other(InjectedFault(*kind))),
+            }
+        }
+    }
+}
+
+impl<S> TlsPayloadFault<S> {
+    /// Wrap the TLS stream of a connection whose raw socket is in a [`FaultIo`] sharing `fault`.
+    pub(crate) fn new(inner: S, fault: FaultCell) -> Self {
+        Self {
+            inner,
+            fault,
+            trip: None,
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> TlsPayloadFault<S> {
+    /// On a write: take an armed payload fault, if any, and drive it. `None` means pass through.
+    fn poll_fault_on_write(&mut self, cx: &mut Context<'_>) -> Option<Poll<io::Error>> {
+        if self.trip.is_none() {
+            let (kind, rest) = self.fault.take_payload()?;
+            self.trip = Some(Trip::Writing { kind, rest });
+        }
+        self.poll_trip(cx)
+    }
+
+    /// Drive a payload fault already taken; `None` when there is none.
+    fn poll_trip(&mut self, cx: &mut Context<'_>) -> Option<Poll<io::Error>> {
+        let trip = self.trip.as_mut()?;
+        Some(trip.poll(&mut self.inner, cx))
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for TlsPayloadFault<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for TlsPayloadFault<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = &mut *self;
+        if let Some(poll) = this.poll_fault_on_write(cx) {
+            return poll.map(Err);
+        }
+        Pin::new(&mut this.inner).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = &mut *self;
+        if let Some(poll) = this.poll_fault_on_write(cx) {
+            return poll.map(Err);
+        }
+        Pin::new(&mut this.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = &mut *self;
+        if let Some(poll) = this.poll_trip(cx) {
+            return poll.map(Err);
+        }
+        Pin::new(&mut this.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = &mut *self;
+        // Tripped: no `close_notify` (see the type's docs); the abort drops the connection.
+        if let Some(poll) = this.poll_trip(cx) {
+            return poll.map(Err);
+        }
+        Pin::new(&mut this.inner).poll_shutdown(cx)
     }
 }
 
@@ -617,6 +811,75 @@ mod tests {
         cell.arm(TcpFaultKind::RandomData);
         assert_eq!(other.take(), Some(TcpFaultKind::RandomData));
         assert_eq!(cell.take(), None);
+    }
+
+    /// Issue #1600: the layer above TLS takes only the payload kinds; a reset or empty close stays
+    /// armed for the raw-socket `FaultIo` beneath TLS.
+    #[test]
+    fn take_payload_takes_only_the_payload_kinds() {
+        let cell = FaultCell::new();
+        assert_eq!(cell.take_payload(), None, "nothing armed");
+        for kind in [TcpFaultKind::Reset, TcpFaultKind::Empty] {
+            cell.arm(kind);
+            assert_eq!(cell.take_payload(), None, "{kind:?} is not a payload");
+            assert_eq!(cell.take(), Some(kind), "{kind:?} stays armed for FaultIo");
+        }
+        for kind in [TcpFaultKind::RandomData, TcpFaultKind::MalformedChunk] {
+            cell.arm(kind);
+            let (taken, bytes) = cell.take_payload().expect("a payload kind is taken");
+            assert_eq!(taken, kind);
+            assert_eq!(Some(bytes), payload(kind));
+            assert!(!bytes.is_empty());
+            assert_eq!(cell.take(), None, "{kind:?} fires once");
+        }
+    }
+
+    /// The layer writes the payload through the inner stream, flushes, then aborts with the
+    /// injected-fault error; later flush and shutdown abort too, so no `close_notify` follows.
+    #[tokio::test]
+    async fn tls_payload_fault_writes_the_payload_then_aborts() {
+        use tokio::io::AsyncWriteExt;
+        let cell = FaultCell::new();
+        let (inner, mut peer) = tokio::io::duplex(4);
+        let mut io = TlsPayloadFault::new(inner, cell.clone());
+
+        io.write_all(b"ok")
+            .await
+            .expect("unarmed writes pass through");
+        cell.arm(TcpFaultKind::RandomData);
+        let reader = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut got = Vec::new();
+            peer.read_to_end(&mut got).await.expect("read");
+            got
+        });
+        // The duplex buffer is smaller than the payload, so the write is driven across several
+        // polls.
+        let err = io
+            .write(b"response")
+            .await
+            .expect_err("an armed write aborts");
+        assert!(is_injected_fault(&err), "{err}");
+        assert!(is_injected_fault(&io.flush().await.expect_err("tripped")));
+        assert!(is_injected_fault(
+            &io.shutdown().await.expect_err("tripped")
+        ));
+        drop(io);
+        let mut expected = b"ok".to_vec();
+        expected.extend_from_slice(payload(TcpFaultKind::RandomData).expect("a payload kind"));
+        assert_eq!(reader.await.expect("task"), expected);
+    }
+
+    /// A reset armed on the cell passes straight through the layer, for `FaultIo` to take.
+    #[tokio::test]
+    async fn tls_payload_fault_passes_a_reset_through() {
+        use tokio::io::AsyncWriteExt;
+        let cell = FaultCell::new();
+        let (inner, _peer) = tokio::io::duplex(64);
+        let mut io = TlsPayloadFault::new(inner, cell.clone());
+        cell.arm(TcpFaultKind::Reset);
+        assert_eq!(io.write(b"response").await.expect("passes through"), 8);
+        assert_eq!(cell.take(), Some(TcpFaultKind::Reset));
     }
 
     async fn connected_pair() -> (TcpStream, TcpStream) {

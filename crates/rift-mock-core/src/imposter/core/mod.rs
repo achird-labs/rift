@@ -533,6 +533,9 @@ pub struct Imposter {
     pub(crate) journal: Arc<dyn crate::imposter::journal::RequestJournal>,
     /// Whether imposter is enabled
     pub enabled: AtomicBool,
+    /// Whether a response cycle may have moved since the manager last wrote `{port}.cursors` (issue
+    /// #1603): set by every served response and every stub edit, taken by the flusher.
+    cursors_dirty: AtomicBool,
     /// `true` = [`Persistence::Datadir`](crate::imposter::Persistence) (issue #1122). Atomic
     /// because an apply can move a running, `Arc`-shared imposter from one store to the other.
     persist_to_datadir: AtomicBool,
@@ -688,6 +691,7 @@ impl Imposter {
             journal: journal
                 .unwrap_or_else(|| Arc::new(crate::imposter::journal::LocalJournal::default())),
             enabled: AtomicBool::new(enabled),
+            cursors_dirty: AtomicBool::new(false),
             persist_to_datadir: AtomicBool::new(true),
             created_at: chrono::Utc::now(),
             shutdown_tx: None,
@@ -811,6 +815,8 @@ impl Imposter {
             // O(n) recompute is deferred to the next `stub_warnings()` read — so high-frequency
             // mutations (e.g. proxy recording) don't pay analysis cost on every recorded stub.
             self.stub_warnings.store(None);
+            // An edit can restart, move or drop a cycle; the next cursor flush writes what it left.
+            self.mark_cursors_dirty();
             (result, before, after)
         };
         self.forget_orphaned_claims(before.stubs(), after.stubs());
@@ -1159,6 +1165,8 @@ impl Imposter {
 }
 
 mod bitset;
+mod cursors;
+pub(crate) use cursors::CursorFile;
 mod lifecycle;
 mod matching;
 pub(crate) use matching::ScenarioStampingStore;

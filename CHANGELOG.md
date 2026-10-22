@@ -51,6 +51,12 @@ record.
 
 ### Changed
 
+- **A `--datadir` restart resumes each stub's response cycle where it stopped**, as Mountebank does
+  (#1603). The positions are saved beside the imposter in `<port>.cursors`, written behind every
+  second and on a graceful stop, so a crash can lose up to a second of advances. Deleting the
+  imposter deletes the file; a file that cannot be read is ignored with a `WARN` and the cycles start
+  over. Older datadirs, which have no such file, load as before.
+
 - **HTTP/1.1 response header names are Title-Case** (#1597): imposter and front-door responses
   carry `Content-Type`, `X-Rift-Imposter` and the like, where they were lower case. A stub's own
   spelling is not reproduced (`lower-hdr` is sent as `Lower-Hdr`); HTTP/2 stays lower-case. See
@@ -239,6 +245,11 @@ record.
 - **Recorded requests carry `ip`, and `form` for a form body** (#1602), as Mountebank's do. Both are
   derived when the request is printed (`GET /imposters/:port`, `savedRequests`, the SSE stream, the
   FFI journal), so nothing is stored and the journal's byte budget is unchanged.
+- **`RANDOM_DATA_THEN_CLOSE` on an https imposter sends its garbage inside TLS** (#1600), as
+  Mountebank does: the client completes the handshake and fails to parse the decrypted bytes as
+  HTTP. Rift wrote them on the socket beneath TLS, so the client saw a TLS record error. The
+  malformed-chunk fault (`MALFORMED_RESPONSE_CHUNK`) had the same defect. A reset and an empty
+  response still act on the socket.
 
 - **Scripts and recorded requests see query and form keys in the order the client sent them**
   (#1596): `JSON.stringify(request.query)` in an inject, `MB_REQUEST` for a `shellTransform`, and

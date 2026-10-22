@@ -218,7 +218,7 @@ pub(crate) fn stub_keys(stubs: &[Stub]) -> Vec<String> {
 
 /// Keys from each stub's `(id, content hash)`, so a caller holding cached hashes (live
 /// [`StubState`]s) never re-serializes a stub.
-fn keys_from<'a>(stubs: impl Iterator<Item = (Option<&'a str>, u64)>) -> Vec<String> {
+pub(crate) fn keys_from<'a>(stubs: impl Iterator<Item = (Option<&'a str>, u64)>) -> Vec<String> {
     let mut seen: HashMap<u64, usize> = HashMap::new();
     stubs
         .map(|(id, hash)| match id {
