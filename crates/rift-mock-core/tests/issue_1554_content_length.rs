@@ -400,7 +400,7 @@ async fn a_keep_alive_connection_survives_two_responses() {
         "two whole responses: {text:?}"
     );
     assert!(text.ends_with("\r\n\r\nhello"), "{text:?}");
-    assert_eq!(text.matches("content-length: 5\r\n").count(), 2, "{text:?}");
+    assert_eq!(text.matches("Content-Length: 5\r\n").count(), 2, "{text:?}");
 }
 
 /// HTTP/2 through hyper's own client, which enforces `content-length` against the DATA it reads.

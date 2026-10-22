@@ -54,6 +54,14 @@ shows in two places that are not scripts: a header-name predicate with `caseSens
 `keyCaseSensitive: true`) compares against the Title-Cased name, and `savedRequests` record the
 Title-Cased name.
 
+## Response header names
+
+Over HTTP/1.1 Rift writes response header names Title-Case. Mountebank writes a configured name
+exactly as spelled and forwards a proxied origin's own spelling. So a stub's `lower-hdr` arrives as
+`Lower-Hdr`, and a proxied `X-Mixed-CASE` arrives as `X-Mixed-Case`. Header names are
+case-insensitive, so no conforming client is affected; hyper has no public API to write a name's
+original spelling. Over HTTP/2 the names are lower-case in both engines.
+
 ## Client address
 
 An imposter with no `host` listens dual-stack, as in Mountebank, so both engines report an IPv4

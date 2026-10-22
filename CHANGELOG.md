@@ -51,6 +51,11 @@ record.
 
 ### Changed
 
+- **HTTP/1.1 response header names are Title-Case** (#1597): imposter and front-door responses
+  carry `Content-Type`, `X-Rift-Imposter` and the like, where they were lower case. A stub's own
+  spelling is not reproduced (`lower-hdr` is sent as `Lower-Hdr`); HTTP/2 stays lower-case. See
+  [Response header names](docs/mountebank/differences.md#response-header-names).
+
 - **A `proxy` stub no longer follows upstream redirects** (#1594). It relays the `30x` and records it, as Mountebank does: the caller gets the redirect and its `Location` untouched, the redirect target is never contacted, and a `proxyOnce` recording holds the redirect rather than the target's answer. Anyone who relied on Rift following the redirect needs a second proxy stub for the `Location` target.
 
 - **A throwing `inject` answers `500`, as in Mountebank** (#1581). A response or predicate `inject`
