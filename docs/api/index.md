@@ -283,7 +283,7 @@ Get imposter details.
       "method": "GET",
       "path": "/test",
       "headers": {...},
-      "timestamp": "2024-01-15T10:30:00.123456+00:00"
+      "timestamp": "2024-01-15T10:30:00.123Z"
     }
   ],
   "stubs": [...],
@@ -551,7 +551,7 @@ clustered embedder's journal sets it; single-node Rift never does.
       "Host": "localhost:4545",
       "User-Agent": "curl/7.88.0"
     },
-    "timestamp": "2024-01-15T10:30:00.123456+00:00",
+    "timestamp": "2024-01-15T10:30:00.123Z",
     "status": 404,
     "latencyMs": 0,
     "matchOutcome": {
