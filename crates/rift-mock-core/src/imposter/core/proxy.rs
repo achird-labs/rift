@@ -155,7 +155,7 @@ async fn transform_upstream<SH: BuildHasher>(
             )
         }
     };
-    let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+    let mut grouped: crate::imposter::Headers = crate::imposter::Headers::new();
     for (k, v) in headers {
         grouped.entry(k).or_default().push(v);
     }
@@ -325,7 +325,7 @@ const TEST_PEER: std::net::SocketAddr =
 struct GeneratorRequest<'a, SH> {
     method: &'a str,
     path: &'a str,
-    headers: &'a HashMap<String, Vec<String>, SH>,
+    headers: &'a indexmap::IndexMap<String, Vec<String>, SH>,
     body: Option<&'a str>,
     query: Option<&'a str>,
     /// The client's socket, as the matcher reads `requestFrom` and `ip` from it (issue #1446).
@@ -686,7 +686,7 @@ pub async fn dry_run_predicate_generators(
                 &generators,
                 "GET",
                 "/",
-                &HashMap::<String, Vec<String>>::new(),
+                &crate::imposter::Headers::new(),
                 Some(""),
                 None,
                 DRY_RUN_PEER,
@@ -739,7 +739,7 @@ impl Imposter {
         generators: &[serde_json::Value],
         method: &str,
         path: &str,
-        headers: &HashMap<String, Vec<String>, SH>,
+        headers: &indexmap::IndexMap<String, Vec<String>, SH>,
         body: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
@@ -765,7 +765,7 @@ impl Imposter {
         generators: &[serde_json::Value],
         method: &str,
         path: &str,
-        headers: &HashMap<String, Vec<String>, SH>,
+        headers: &indexmap::IndexMap<String, Vec<String>, SH>,
         body: Option<&str>,
         query: Option<&str>,
         client_addr: std::net::SocketAddr,
@@ -793,7 +793,7 @@ impl Imposter {
         generators: &[serde_json::Value],
         method: &str,
         path: &str,
-        headers: &HashMap<String, Vec<String>, SH>,
+        headers: &indexmap::IndexMap<String, Vec<String>, SH>,
         body: Option<&str>,
         query: Option<&str>,
         client_addr: std::net::SocketAddr,
@@ -1026,7 +1026,7 @@ impl Imposter {
         proxy_config: &ProxyResponse,
         method: &str,
         uri: &hyper::Uri,
-        headers: &HashMap<String, Vec<String>, SH>,
+        headers: &indexmap::IndexMap<String, Vec<String>, SH>,
         body: Option<ProxyBody<'_>>,
         client_addr: std::net::SocketAddr,
     ) -> Result<GeneratedPredicates, (&'static str, String)>
@@ -1104,7 +1104,7 @@ impl Imposter {
         target: UpstreamTarget,
         method: &str,
         uri: &hyper::Uri,
-        headers: &HashMap<String, Vec<String>, SH>,
+        headers: &indexmap::IndexMap<String, Vec<String>, SH>,
         body: Option<ProxyBody<'_>>,
         behaviors: Option<&BehaviorRun<'_, SH>>,
         answering: Option<u64>,
@@ -1291,7 +1291,7 @@ impl Imposter {
             }
 
             // Add inject headers
-            for (key, value) in &proxy_config.inject_headers {
+            for (key, value) in proxy_config.inject_headers.iter() {
                 request = request.header(key, value);
             }
 
@@ -1650,7 +1650,7 @@ mod predicate_generator_selector_tests {
         query: Option<&str>,
         headers: &[(&str, &str)],
     ) -> Vec<serde_json::Value> {
-        let headers: HashMap<String, Vec<String>> = headers
+        let headers: crate::imposter::Headers = headers
             .iter()
             .map(|(k, v)| ((*k).to_string(), vec![(*v).to_string()]))
             .collect();
@@ -1853,7 +1853,7 @@ mod predicate_generator_shape_tests {
         query: Option<&str>,
         headers: &[(&str, &str)],
     ) -> Vec<serde_json::Value> {
-        let headers: HashMap<String, Vec<String>> = headers
+        let headers: crate::imposter::Headers = headers
             .iter()
             .map(|(k, v)| ((*k).to_string(), vec![(*v).to_string()]))
             .collect();
@@ -1879,7 +1879,7 @@ mod predicate_generator_shape_tests {
             &generators,
             "POST",
             "/orders",
-            &HashMap::<String, Vec<String>>::new(),
+            &crate::imposter::Headers::new(),
             None,
             None,
             TEST_PEER,
@@ -2255,7 +2255,7 @@ mod predicate_generator_shape_tests {
         )
         .expect("test imposter");
         let record = |path: &str, body: &str| {
-            let headers: HashMap<String, Vec<String>> = HashMap::new();
+            let headers: crate::imposter::Headers = crate::imposter::Headers::new();
             let predicates = Imposter::generate_predicates_impl(
                 &[json!({ "matches": { "method": true, "path": true } })],
                 "GET",

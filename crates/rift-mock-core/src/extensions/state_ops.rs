@@ -238,7 +238,7 @@ mod tests {
             "GET",
             "/orders",
             Some("id=7&item=apple"),
-            &crate::util::FastMap::<String, Vec<String>>::default(),
+            &crate::imposter::Headers::new(),
             None,
         )
     }

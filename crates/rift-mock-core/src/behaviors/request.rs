@@ -1,7 +1,5 @@
 //! Request context for behavior processing.
 
-use std::collections::HashMap;
-
 /// Convert a header name to title case (e.g., "content-type" -> "Content-Type").
 ///
 /// This is used for Mountebank compatibility, which expects title-cased header names.
@@ -26,7 +24,8 @@ pub struct RequestContext {
     /// repeated key's first value, as Mountebank's `getFrom` does; `decorate` and `shellTransform`
     /// see it comma-joined (`docs/mountebank/behaviors.md`).
     pub query: crate::util::MultiValueMap,
-    pub headers: HashMap<String, String>,
+    /// One value per name, in the order the client sent them (issue #1606).
+    pub headers: crate::util::OrderedMap<String, String>,
     pub body: Option<String>,
     /// The request's `gzip` / `br` body did not decode (issue #1584), so it has no body at all:
     /// `body` is `None`, `copy`/`lookup` find no `body` source, and `decorate`/`shellTransform` see
@@ -75,7 +74,7 @@ impl RequestContext {
     pub fn from_request<SH: std::hash::BuildHasher>(
         method: &str,
         uri: &hyper::Uri,
-        headers: &HashMap<String, Vec<String>, SH>,
+        headers: &indexmap::IndexMap<String, Vec<String>, SH>,
         body: Option<&str>,
         client_addr: Option<std::net::SocketAddr>,
     ) -> Self {
@@ -121,7 +120,8 @@ mod tests {
     #[test]
     fn from_request_passes_through_an_undecodable_query_value() {
         let uri: hyper::Uri = "/p?k=%FF".parse().unwrap();
-        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
+        let ctx =
+            RequestContext::from_request("GET", &uri, &crate::imposter::Headers::new(), None, None);
         assert_eq!(
             ctx.query
                 .get("k")
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn from_request_keeps_query_and_form_in_request_order() {
         let uri: hyper::Uri = "/p?b=1&a=2&c=3&a=4".parse().unwrap();
-        let form_headers = HashMap::from([(
+        let form_headers = crate::imposter::Headers::from([(
             "Content-Type".to_string(),
             vec!["application/x-www-form-urlencoded".to_string()],
         )]);
@@ -161,7 +161,8 @@ mod tests {
     #[test]
     fn from_request_still_decodes_a_valid_query_value() {
         let uri: hyper::Uri = "/p?k=hello%20world".parse().unwrap();
-        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
+        let ctx =
+            RequestContext::from_request("GET", &uri, &crate::imposter::Headers::new(), None, None);
         assert_eq!(
             ctx.query
                 .get("k")
@@ -176,7 +177,8 @@ mod tests {
     #[test]
     fn from_request_decodes_an_encoded_query_key() {
         let uri: hyper::Uri = "/p?a%20b=1".parse().unwrap();
-        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
+        let ctx =
+            RequestContext::from_request("GET", &uri, &crate::imposter::Headers::new(), None, None);
         assert_eq!(
             ctx.query
                 .get("a b")
@@ -190,7 +192,8 @@ mod tests {
     #[test]
     fn from_request_passes_through_an_undecodable_query_key() {
         let uri: hyper::Uri = "/p?%FF=v".parse().unwrap();
-        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
+        let ctx =
+            RequestContext::from_request("GET", &uri, &crate::imposter::Headers::new(), None, None);
         assert_eq!(
             ctx.query
                 .get("%FF")
@@ -202,7 +205,7 @@ mod tests {
     }
 
     /// The collector's output shape: Title-Case names, every value the client sent, in order.
-    fn collected(pairs: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
+    fn collected(pairs: &[(&str, &[&str])]) -> crate::imposter::Headers {
         pairs
             .iter()
             .map(|(k, vs)| {
@@ -258,7 +261,7 @@ mod tests {
             hyper::header::HeaderName::from_static("x-id"),
             hyper::header::HeaderValue::from_static("a"),
         );
-        let headers: HashMap<String, Vec<String>> =
+        let headers: crate::imposter::Headers =
             crate::imposter::headers::collect_request_headers(&raw, header_to_title_case);
         let uri: hyper::Uri = "/p".parse().unwrap();
 
@@ -289,7 +292,7 @@ mod tests {
             hyper::header::HeaderName::from_static("x-id"),
             hyper::header::HeaderValue::from_static("b"),
         );
-        let headers: HashMap<String, Vec<String>> =
+        let headers: crate::imposter::Headers =
             crate::imposter::headers::collect_request_headers(&raw, header_to_title_case);
         let uri: hyper::Uri = "/p".parse().unwrap();
 
@@ -320,8 +323,8 @@ mod tests {
     // is the exact confusion #1040 removes.
     #[test]
     fn from_request_treats_a_name_with_no_values_as_absent() {
-        let headers: HashMap<String, Vec<String>> =
-            HashMap::from([("X-Empty".to_string(), Vec::new())]);
+        let headers: crate::imposter::Headers =
+            crate::imposter::Headers::from([("X-Empty".to_string(), Vec::new())]);
         let uri: hyper::Uri = "/p".parse().unwrap();
 
         let ctx = RequestContext::from_request("GET", &uri, &headers, None, None);
@@ -332,7 +335,8 @@ mod tests {
     #[test]
     fn from_request_with_no_headers_yields_an_empty_map() {
         let uri: hyper::Uri = "/p".parse().unwrap();
-        let ctx = RequestContext::from_request("GET", &uri, &HashMap::new(), None, None);
+        let ctx =
+            RequestContext::from_request("GET", &uri, &crate::imposter::Headers::new(), None, None);
         assert!(ctx.headers.is_empty());
     }
 }

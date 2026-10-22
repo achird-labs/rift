@@ -42,13 +42,13 @@ mod tests;
 #[allow(unused_imports)]
 pub use types::{
     AllowCors, ConditionalGet, ConditionalValidators, DebugImposter, DebugMatchResult,
-    DebugRequest, DebugResponse, DebugResponsePreview, DebugStubInfo, ImposterConfig,
+    DebugRequest, DebugResponse, DebugResponsePreview, DebugStubInfo, Headers, ImposterConfig,
     ImposterError, IsResponse, LastModified, MAX_TRIED_STUBS, MatchOutcome, PathRewrite, PemList,
     Predicate, PredicateOperation, PredicateParameters, PredicateSelector, ProxyResponse,
     RecordedRequest, ResponseMode, RiftConfig, RiftConnectionPoolConfig, RiftErrorFault,
     RiftFaultConfig, RiftFlowStateConfig, RiftLatencyFault, RiftMetricsConfig, RiftProxyConfig,
     RiftResponseExtension, RiftScriptConfig, RiftScriptEngineConfig, RiftTcpFault,
-    RiftUpstreamConfig, Stub, StubResponse, TriedStub, TriedWhy, admission_check,
+    RiftUpstreamConfig, SingleHeaders, Stub, StubResponse, TriedStub, TriedWhy, admission_check,
     admission_check_stub, deserialize_replayed,
 };
 

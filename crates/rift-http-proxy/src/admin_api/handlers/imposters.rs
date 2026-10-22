@@ -1600,10 +1600,9 @@ mod requests_filter_tests {
     use super::*;
     use crate::imposter::ResponseMode;
     use http_body_util::BodyExt;
-    use std::collections::HashMap;
 
     fn rec(space: &str, tenant: Option<&str>) -> RecordedRequest {
-        let mut headers = HashMap::new();
+        let mut headers = rift_mock_core::imposter::Headers::new();
         headers.insert("X-Mock-Space".to_string(), vec![space.to_string()]);
         if let Some(t) = tenant {
             headers.insert("X-Tenant".to_string(), vec![t.to_string()]);
@@ -2391,7 +2390,6 @@ mod verify_tests {
     use super::*;
     use crate::imposter::ResponseMode;
     use http_body_util::BodyExt;
-    use std::collections::HashMap;
 
     fn rec(method: &str, path: &str) -> RecordedRequest {
         RecordedRequest {
@@ -2401,7 +2399,7 @@ mod verify_tests {
             method: method.to_string(),
             path: path.to_string(),
             query: Default::default(),
-            headers: HashMap::new(),
+            headers: rift_mock_core::imposter::Headers::new(),
             body: None,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             match_outcome: None,
@@ -2878,7 +2876,7 @@ mod replace_all_tests {
                 method: "GET".to_string(),
                 path: "/seen".to_string(),
                 query: Default::default(),
-                headers: std::collections::HashMap::new(),
+                headers: rift_mock_core::imposter::Headers::new(),
                 body: None,
                 timestamp: "2026-01-01T00:00:00Z".to_string(),
                 match_outcome: None,

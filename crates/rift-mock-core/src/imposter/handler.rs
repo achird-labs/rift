@@ -39,9 +39,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 
-use crate::util::FastMap;
 use rand::RngExt;
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -844,7 +842,7 @@ fn render_template_parts(
     request_data: &RequestData,
     flow_id: &str,
     body: String,
-    headers: HashMap<String, Vec<String>>,
+    headers: crate::imposter::Headers,
     debug: bool,
     stub: super::headers::StubRef<'_>,
 ) -> TemplateRender {
@@ -865,7 +863,8 @@ fn render_template_parts(
         Err(e) => return TemplateRender::Failed(e),
     };
 
-    let mut rendered_headers = SplicedHeaders::with_capacity(headers.len());
+    let mut rendered_headers =
+        SplicedHeaders::with_capacity_and_hasher(headers.len(), Default::default());
     for (name, values) in headers {
         let mut rendered_values = Vec::with_capacity(values.len());
         for v in values {
@@ -918,7 +917,7 @@ async fn render_templated_response(
     request_data: RequestData,
     flow_id: String,
     body: String,
-    headers: HashMap<String, Vec<String>>,
+    headers: crate::imposter::Headers,
     debug: bool,
     stub: super::headers::StubRef<'_>,
 ) -> anyhow::Result<TemplateRender> {
@@ -1025,14 +1024,15 @@ async fn handle_request_inner(
     let method = parts.method.to_string();
     let uri = parts.uri;
     let raw_headers = parts.headers;
-    // Request-scoped, built from a single request and dropped at response — a `FastMap` (issue
-    // #704); see `crate::util::fastmap` for the HashDoS policy. One multi-value collector shared
+    // Request-scoped, built from a single request and dropped at response — a foldhash map (issue
+    // #704); see `crate::util::fastmap` for the HashDoS policy. Insertion-ordered (issue #1606):
+    // the journal, scripts and `MB_REQUEST` list the headers in the order the client sent them. One multi-value collector shared
     // with the intercept listener (issue #1025) now serves matching, proxy forwarding, flow id,
     // debug, inject and scripts, the recorded request below, AND — since issue #1040 — the
     // behaviors' request context and template substitution. Those last two used to make their own
     // second pass over the raw `HeaderMap` with a worse rule, so one request could answer
     // differently depending on which surface asked.
-    let request_headers: FastMap<String, Vec<String>> =
+    let request_headers: crate::util::OrderedMap<String, Vec<String>> =
         crate::imposter::headers::collect_request_headers(&raw_headers, header_to_title_case);
     let path = uri.path().to_string();
     let query_str = uri.query().unwrap_or("").to_string();
@@ -1113,8 +1113,9 @@ async fn handle_request_inner(
             // #1596). Every value of a repeated key is kept, as Mountebank records it (#1553).
             query: parse_query_string(&query_str).into_iter().collect(),
             // `RecordedRequest.headers` is the fixed std-hasher journal/serde boundary (out of
-            // scope for #704) — the request-scoped `FastMap` is converted here, at the one place
-            // recording is actually enabled, rather than built twice (issue #1025).
+            // scope for #704) — the request-scoped map is converted here, at the one place
+            // recording is actually enabled, rather than built twice (issue #1025). Both keep the
+            // client's order (issue #1606).
             headers: request_headers
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
@@ -1125,7 +1126,7 @@ async fn handle_request_inner(
             // undefined body (issue #1584).
             body: (!body_undefined).then(|| body_string.as_deref().unwrap_or_default().to_string()),
             mode: body_mode.clone(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: super::types::journal_timestamp(chrono::Utc::now()),
             // Filled in after the match, via `attach_match_outcome` below.
             match_outcome: None,
             // Filled in after the response exists, by `attach_response_outcome` in the caller.
@@ -2438,7 +2439,7 @@ fn handle_debug_request(
     query_str: &str,
     // Private helper, single call site (the debug-mode `spawn_blocking` job below), which always
     // passes the request-scoped `FastMap` header view (issue #704, #1025).
-    headers_clone: &FastMap<String, Vec<String>>,
+    headers_clone: &crate::util::OrderedMap<String, Vec<String>>,
     body_string: &Option<String>,
     client_addr: SocketAddr,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
@@ -3792,7 +3793,6 @@ mod templated_offload_tests {
     use crate::imposter::types::ImposterConfig;
     use parking_lot::Mutex;
     use serde_json::{Value, json};
-    use std::collections::HashMap;
 
     /// Fixture identity for tests that only care about the render itself, not which stub
     /// triggered it.
@@ -3909,7 +3909,7 @@ mod templated_offload_tests {
         RequestData::new("GET", "/x", None, &headers(&[]), None)
     }
 
-    fn headers(pairs: &[(&str, &str)]) -> HashMap<String, Vec<String>> {
+    fn headers(pairs: &[(&str, &str)]) -> crate::imposter::Headers {
         pairs
             .iter()
             .map(|(k, v)| ((*k).to_string(), vec![(*v).to_string()]))
@@ -3919,7 +3919,7 @@ mod templated_offload_tests {
     async fn render(
         imp: &Arc<Imposter>,
         body: &str,
-        hdrs: HashMap<String, Vec<String>>,
+        hdrs: crate::imposter::Headers,
         debug: bool,
     ) -> anyhow::Result<TemplateRender> {
         render_templated_response(
@@ -3934,7 +3934,7 @@ mod templated_offload_tests {
         .await
     }
 
-    fn rendered(outcome: TemplateRender) -> (String, HashMap<String, Vec<String>>) {
+    fn rendered(outcome: TemplateRender) -> (String, crate::imposter::Headers) {
         match outcome {
             TemplateRender::Rendered { body, headers } => {
                 (body.into_text(), crate::behaviors::plain_headers(headers))
@@ -4080,7 +4080,7 @@ mod templated_offload_tests {
                 request(),
                 "flow-1".to_string(),
                 "n={{ state.hits }}".to_string(),
-                HashMap::new(),
+                crate::imposter::Headers::new(),
                 false,
                 FIXTURE_STUB,
             )
@@ -4102,9 +4102,14 @@ mod templated_offload_tests {
         let caller = std::thread::current().id();
 
         let (body, _) = rendered(
-            render(&imp, "hits={{ state.hits }}", HashMap::new(), false)
-                .await
-                .expect("no transport failure"),
+            render(
+                &imp,
+                "hits={{ state.hits }}",
+                crate::imposter::Headers::new(),
+                false,
+            )
+            .await
+            .expect("no transport failure"),
         );
 
         assert_eq!(body, "hits=7");
@@ -4125,9 +4130,14 @@ mod templated_offload_tests {
         let caller = std::thread::current().id();
 
         let (body, _) = rendered(
-            render(&imp, "hits={{ state.hits }}", HashMap::new(), false)
-                .await
-                .expect("no transport failure"),
+            render(
+                &imp,
+                "hits={{ state.hits }}",
+                crate::imposter::Headers::new(),
+                false,
+            )
+            .await
+            .expect("no transport failure"),
         );
 
         assert_eq!(body, "hits=7");
@@ -4186,9 +4196,14 @@ mod templated_offload_tests {
         let store = Arc::new(ThreadProbeStore::new(true));
         let imp = imposter_with(store, None);
 
-        let outcome = render(&imp, "{{ nope.nothing }}", HashMap::new(), true)
-            .await
-            .expect("a bad token must not surface as a transport failure");
+        let outcome = render(
+            &imp,
+            "{{ nope.nothing }}",
+            crate::imposter::Headers::new(),
+            true,
+        )
+        .await
+        .expect("a bad token must not surface as a transport failure");
 
         assert!(
             matches!(outcome, TemplateRender::Failed(_)),
@@ -4223,9 +4238,14 @@ mod templated_offload_tests {
     async fn a_panicking_blocking_store_surfaces_as_a_transport_failure() {
         let imp = imposter_with(Arc::new(ThreadProbeStore::panicking()), None);
 
-        let err = render(&imp, "{{ state.hits }}", HashMap::new(), false)
-            .await
-            .expect_err("a panicked blocking task must surface as Err");
+        let err = render(
+            &imp,
+            "{{ state.hits }}",
+            crate::imposter::Headers::new(),
+            false,
+        )
+        .await
+        .expect_err("a panicked blocking task must surface as Err");
 
         assert!(
             err.to_string().contains("flow-store task panicked"),
@@ -4263,7 +4283,7 @@ mod templated_offload_tests {
         let imp = imposter_with(Arc::new(ThreadProbeStore::new(true)), None);
 
         let (body, hdrs) = rendered(
-            render(&imp, "", HashMap::new(), false)
+            render(&imp, "", crate::imposter::Headers::new(), false)
                 .await
                 .expect("no transport failure"),
         );
@@ -4279,9 +4299,14 @@ mod templated_offload_tests {
         let imp = imposter_with(Arc::new(ThreadProbeStore::new(true)), None);
 
         let (body, _) = rendered(
-            render(&imp, "[{{ previousValue }}]", HashMap::new(), false)
-                .await
-                .expect("no transport failure"),
+            render(
+                &imp,
+                "[{{ previousValue }}]",
+                crate::imposter::Headers::new(),
+                false,
+            )
+            .await
+            .expect("no transport failure"),
         );
 
         assert_eq!(body, "[]");

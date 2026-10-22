@@ -580,7 +580,7 @@ pub fn call_respond(
     dynamic_to_fault_decision(result, rule_id)
 }
 
-fn header_map_lowercased(headers: &std::collections::HashMap<String, String>) -> Map {
+fn header_map_lowercased(headers: &crate::util::OrderedMap<String, String>) -> Map {
     let mut m = Map::new();
     for (k, v) in headers {
         m.insert(k.to_ascii_lowercase().into(), Dynamic::from(v.clone()));
@@ -822,7 +822,7 @@ mod tests {
             .expect_err("the runtime engine must not load a module");
         assert!(!err.to_string().contains("CANARY_RHAI_1611"), "{err}");
 
-        let mut headers = HashMap::new();
+        let mut headers = crate::util::OrderedMap::default();
         let decorate = format!(
             "import {:?} as m; response.body = m::X;",
             module.to_str().unwrap()
@@ -859,7 +859,7 @@ mod tests {
             raw_body: None,
             method: "POST".to_string(),
             path: "/test".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: json!({}),
             query: Default::default(),
             path_params: HashMap::new(),
@@ -899,7 +899,7 @@ mod tests {
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
-            headers: HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: json!({}),
             query: Default::default(),
             path_params: HashMap::new(),
@@ -936,7 +936,7 @@ mod tests {
         let engine = RhaiEngine::new(script, "retry-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
-        let mut headers = HashMap::new();
+        let mut headers = crate::util::OrderedMap::default();
         headers.insert("x-flow-id".to_string(), "flow123".to_string());
 
         let request = ScriptRequest {
@@ -985,7 +985,7 @@ mod tests {
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         // Beta user - should inject
-        let mut headers1 = HashMap::new();
+        let mut headers1 = crate::util::OrderedMap::default();
         headers1.insert("x-user-id".to_string(), "beta-user-123".to_string());
 
         let request1 = ScriptRequest {
@@ -1005,7 +1005,7 @@ mod tests {
         assert!(matches!(decision1, FaultDecision::Latency { .. }));
 
         // Regular user - should NOT inject
-        let mut headers2 = HashMap::new();
+        let mut headers2 = crate::util::OrderedMap::default();
         headers2.insert("x-user-id".to_string(), "regular-user-456".to_string());
 
         let request2 = ScriptRequest {
@@ -1052,7 +1052,7 @@ mod tests {
                 raw_body: None,
                 method: "GET".to_string(),
                 path: "/cache-test".to_string(),
-                headers: HashMap::new(),
+                headers: crate::util::OrderedMap::default(),
                 body: json!({}),
                 query: Default::default(),
                 path_params: HashMap::new(),
@@ -1095,7 +1095,7 @@ mod tests {
                 mode: ResponseMode::Text,
                 method: "POST".to_string(),
                 path: "/api/orders".to_string(),
-                headers,
+                headers: headers.into_iter().collect(),
                 body: serde_json::Value::Null,
                 query: crate::util::OrderedMap::from_iter([("page".to_string(), "2".to_string())]),
                 path_params: HashMap::from([("id".to_string(), "42".to_string())]),

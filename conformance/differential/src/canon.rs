@@ -173,6 +173,14 @@ fn recorded_request(value: &Value) -> Value {
             out.insert((*key).to_string(), field.clone());
         }
     }
+    // The value is the clock, so only its shape is comparable (issue #1610): every digit becomes `9`.
+    if let Some(Value::String(stamp)) = map.get("timestamp") {
+        let shape: String = stamp
+            .chars()
+            .map(|c| if c.is_ascii_digit() { '9' } else { c })
+            .collect();
+        out.insert("timestamp".to_string(), Value::String(shape));
+    }
     if let Some(Value::Object(headers)) = map.get("headers") {
         out.insert(
             "headers".to_string(),
@@ -266,7 +274,8 @@ mod tests {
             imposter(&stored, &BTreeSet::new()),
             json!({"protocol": "http", "requests": [{
                 "method": "GET", "path": "/a", "query": {"q": "1"}, "body": "",
-                "headers": {"x-custom": "Value", "host": "h"}, "ip": "127.0.0.1"
+                "headers": {"x-custom": "Value", "host": "h"}, "ip": "127.0.0.1",
+                "timestamp": "9999-99-99T99:99:99Z"
             }]})
         );
     }

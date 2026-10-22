@@ -52,8 +52,12 @@ const MARKERS: &[(&str, &str)] = &[
     ("untagged", r"\buntagged\b"),
     ("tag attr", r#"\btag = ""#),
     ("flatten", r"\bflatten\b"),
-    ("impl Deserialize", r"impl<'de> [\w:]*Deserialize<'de> for"),
-    ("impl Visitor", r"impl<'de> [\w:]*Visitor<'de> for"),
+    // `impl<'de, …>` too: a visitor generic over what it builds (#1606) is still a visitor.
+    (
+        "impl Deserialize",
+        r"impl<'de\b.*?> [\w:]*Deserialize<'de> for",
+    ),
+    ("impl Visitor", r"impl<'de\b.*?> [\w:]*Visitor<'de> for"),
 ];
 
 /// Functions whose body runs while a config decodes: `TryFrom` conversions, `deserialize_with`
@@ -111,7 +115,11 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // which accept any string: same count, fewer refusals.
         // #1582 `present_value` on the response's `repeat`, so a door can tell a written `null`
         // from an absent one: decodes any JSON value as before, one more attribute, no refusal.
-        19,
+        // #1606 `RecordedRequest.headers` names `multi_value_headers::deserialize` through
+        // `deserialize_with` instead of `with` (its serializer is now the JS-order one), and
+        // `boxed_single_value_headers` wraps the decoder `inject_headers` already used: one more
+        // attribute, the same decoders, no refusal.
+        20,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",
@@ -124,7 +132,8 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // #1553 `multi_value_query` (a recorded request's `query`, not stub config): `Shown` is
         // serialize-only, and `OneOrMany` widens the decode from a string to a string or an array,
         // so every journal an older engine wrote still reads. No refusal.
-        9,
+        // #1606 `serialize_recorded_headers`' `Shown` is serialize-only. No refusal.
+        10,
     ),
     ("crates/rift-mock-core/src/imposter/types.rs", "tag attr", 1),
     ("crates/rift-mock-core/src/imposter/types.rs", "flatten", 2),

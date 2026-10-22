@@ -1,7 +1,7 @@
 //! Header plumbing shared across the crate: the one request-header collector both listeners use
 //! (issue #1025), the response-header collector, and the outbound header-value repair (issue #359 B3).
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::hash::BuildHasher;
 
 /// Flatten a request's headers into the `name -> [values]` map the imposter listener, the
@@ -15,6 +15,12 @@ use std::hash::BuildHasher;
 /// empty string, so `exists`/`equals ""` cannot be tricked into reporting a header the client
 /// never actually sent readably (issue #1025).
 ///
+/// The map keeps the order the client sent the headers (issue #1606), a repeated name at its first
+/// position — exactly Mountebank's `headersMap.ofRaw`, which the journal, scripts and
+/// `MB_REQUEST` all show. That relies on `hyper::HeaderMap` iterating in insertion order, which
+/// hyper's HTTP/1 parser fills in wire order: true of `http` 1.x, though its docs call the order
+/// arbitrary, so a canary test below pins it.
+///
 /// `name` maps a header's wire name to the key stored in the map: Title-Case for the imposter
 /// listener (Mountebank's `keyCaseSensitive` contract, issue #87), the identity function for the
 /// intercept listener, which keeps hyper's already-lowercase names.
@@ -22,11 +28,11 @@ use std::hash::BuildHasher;
 pub fn collect_request_headers<SH: BuildHasher + Default>(
     headers: &hyper::HeaderMap,
     name: impl Fn(&str) -> String,
-) -> HashMap<String, Vec<String>, SH> {
+) -> IndexMap<String, Vec<String>, SH> {
     // `keys_len` counts distinct names; `len()` counts values, which over-allocates for a request
     // carrying any repeated header.
-    let mut out: HashMap<String, Vec<String>, SH> =
-        HashMap::with_capacity_and_hasher(headers.keys_len(), SH::default());
+    let mut out: IndexMap<String, Vec<String>, SH> =
+        IndexMap::with_capacity_and_hasher(headers.keys_len(), SH::default());
     let mut dropped: Vec<String> = Vec::new();
     for (header_name, value) in headers {
         // `str::from_utf8`, deliberately NOT `HeaderValue::to_str` (issue #1048). `to_str` accepts
@@ -206,11 +212,45 @@ pub(crate) fn sanitize_header_value(value: &str, stub: StubRef<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::FastMap;
     use hyper::header::HeaderValue;
 
     fn title_case(name: &str) -> String {
         crate::behaviors::header_to_title_case(name)
+    }
+
+    /// Issue #1606, and the canary for an `http` upgrade: the collected map lists names in the
+    /// order they were appended, a repeated name at its first position with every value, which is
+    /// Mountebank's `headersMap.ofRaw`. `http::HeaderMap` documents its iteration order as
+    /// arbitrary; it is insertion order in fact, and hyper's HTTP/1 parser appends in wire order.
+    /// Should a release change that, this fails instead of the journal and scripts quietly going
+    /// back to a hash order.
+    #[test]
+    fn collector_keeps_the_order_names_were_sent() {
+        let mut headers = hyper::HeaderMap::new();
+        for (name, value) in [
+            ("zulu", "1"),
+            ("alpha", "2"),
+            ("mike", "3"),
+            ("alpha", "4"),
+            ("bravo", "5"),
+        ] {
+            headers.append(name, HeaderValue::from_static(value));
+        }
+        let collected: crate::util::OrderedMap<String, Vec<String>> =
+            collect_request_headers(&headers, title_case);
+        let entries: Vec<(&str, Vec<&str>)> = collected
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.iter().map(String::as_str).collect()))
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                ("Zulu", vec!["1"]),
+                ("Alpha", vec!["2", "4"]),
+                ("Mike", vec!["3"]),
+                ("Bravo", vec!["5"]),
+            ]
+        );
     }
 
     #[test]
@@ -224,7 +264,8 @@ mod tests {
         headers.append("x-test", HeaderValue::from_static("second"));
         headers.insert("content-type", HeaderValue::from_static("application/json"));
 
-        let collected: FastMap<String, Vec<String>> = collect_request_headers(&headers, title_case);
+        let collected: crate::util::OrderedMap<String, Vec<String>> =
+            collect_request_headers(&headers, title_case);
 
         assert_eq!(
             collected.get("X-Test").map(Vec::as_slice),
@@ -257,7 +298,8 @@ mod tests {
             HeaderValue::from_bytes("José".as_bytes()).unwrap(),
         );
 
-        let collected: FastMap<String, Vec<String>> = collect_request_headers(&headers, title_case);
+        let collected: crate::util::OrderedMap<String, Vec<String>> =
+            collect_request_headers(&headers, title_case);
 
         assert_eq!(
             collected.get("Content-Disposition").map(Vec::as_slice),
@@ -294,7 +336,8 @@ mod tests {
         headers.append("x-bin", bad.clone());
         headers.append("x-bin", bad);
 
-        let collected: FastMap<String, Vec<String>> = collect_request_headers(&headers, title_case);
+        let collected: crate::util::OrderedMap<String, Vec<String>> =
+            collect_request_headers(&headers, title_case);
         assert!(!collected.contains_key("X-Bin"));
 
         logs_assert(|lines: &[&str]| {
@@ -327,7 +370,8 @@ mod tests {
         headers.append("x-mixed", HeaderValue::from_static("readable"));
         headers.append("x-mixed", non_utf8);
 
-        let collected: FastMap<String, Vec<String>> = collect_request_headers(&headers, title_case);
+        let collected: crate::util::OrderedMap<String, Vec<String>> =
+            collect_request_headers(&headers, title_case);
 
         assert!(
             !collected.contains_key("X-Bin"),
@@ -361,10 +405,11 @@ mod tests {
         let mut headers = hyper::HeaderMap::new();
         headers.insert("x-my-header", HeaderValue::from_static("v"));
 
-        let titled: FastMap<String, Vec<String>> = collect_request_headers(&headers, title_case);
+        let titled: crate::util::OrderedMap<String, Vec<String>> =
+            collect_request_headers(&headers, title_case);
         assert!(titled.contains_key("X-My-Header"), "imposter shape");
 
-        let identity: FastMap<String, Vec<String>> =
+        let identity: crate::util::OrderedMap<String, Vec<String>> =
             collect_request_headers(&headers, str::to_string);
         assert!(identity.contains_key("x-my-header"), "intercept shape");
     }
@@ -386,7 +431,8 @@ mod tests {
         let mut headers = hyper::HeaderMap::new();
         headers.append("x-flow", HeaderValue::from_static("tenant-a"));
         headers.append("x-flow", HeaderValue::from_static("tenant-b"));
-        let collected: FastMap<String, Vec<String>> = collect_request_headers(&headers, title_case);
+        let collected: crate::util::OrderedMap<String, Vec<String>> =
+            collect_request_headers(&headers, title_case);
 
         assert_eq!(
             imposter.resolve_flow_id(&collected),
@@ -398,7 +444,7 @@ mod tests {
     #[test]
     #[tracing_test::traced_test]
     fn collector_returns_an_empty_map_for_a_request_with_no_headers() {
-        let collected: FastMap<String, Vec<String>> =
+        let collected: crate::util::OrderedMap<String, Vec<String>> =
             collect_request_headers(&hyper::HeaderMap::new(), title_case);
         assert!(collected.is_empty());
         assert!(
@@ -422,8 +468,7 @@ mod tests {
             HeaderValue::from_bytes(&[0xFF, 0xFE]).expect("a legal but non-UTF-8 header value"),
         );
 
-        let collected: std::collections::HashMap<String, Vec<String>> =
-            collect_request_headers(&headers, str::to_string);
+        let collected: crate::imposter::Headers = collect_request_headers(&headers, str::to_string);
 
         assert_eq!(
             collected.get("x-repeat").map(Vec::as_slice),

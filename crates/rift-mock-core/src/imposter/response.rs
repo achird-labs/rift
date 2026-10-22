@@ -20,7 +20,6 @@ use crate::behaviors::is_js_function_decorate;
 #[cfg(not(feature = "javascript"))]
 use crate::behaviors::{is_js_config_decorate, rewrite_js_config_to_rhai};
 use crate::imposter::Predicate;
-use std::collections::HashMap;
 
 /// Truncate a string with ellipsis if it exceeds the maximum byte length.
 ///
@@ -125,7 +124,7 @@ pub fn create_response_preview(response: &StubResponse) -> DebugResponsePreview 
 /// injected only when no Content-Type exists in *any* casing — a case-sensitive check emits a
 /// duplicate for a header like `CONTENT-TYPE` (issue #723). Shared by the execute path and
 /// `PreparedResponse::try_build` so the two serve paths cannot drift.
-fn has_content_type(headers: &HashMap<String, Vec<String>>) -> bool {
+fn has_content_type(headers: &crate::imposter::Headers) -> bool {
     headers
         .keys()
         .any(|k| k.eq_ignore_ascii_case("content-type"))
@@ -160,7 +159,7 @@ pub(super) fn complete_from_default(
     is: &IsResponse,
     default: &IsResponse,
     status: &mut u16,
-    headers: &mut HashMap<String, Vec<String>>,
+    headers: &mut crate::imposter::Headers,
     body: &mut String,
     mode: &mut ResponseMode,
 ) {
@@ -169,7 +168,7 @@ pub(super) fn complete_from_default(
     if is.omitted.headers {
         // Omitted headers are empty, so the only header here is the `Content-Type` that this
         // response's own non-string body earned; it is kept unless the default sets one.
-        let earned = headers.remove("Content-Type");
+        let earned = headers.shift_remove("Content-Type");
         *headers = merged.headers.clone();
         if let Some(values) = earned
             && !has_content_type(headers)
@@ -190,7 +189,7 @@ pub fn execute_stub_response_with_rift(
     response: &StubResponse,
 ) -> Option<(
     u16,
-    HashMap<String, Vec<String>>,
+    crate::imposter::Headers,
     String,
     Option<std::sync::Arc<crate::behaviors::BehaviorProgram>>,
     Option<&RiftResponseExtension>,
@@ -243,7 +242,7 @@ pub fn execute_stub_response_with_rift(
         }
         StubResponse::Fault { fault, .. } => Some((
             0,
-            HashMap::new(),
+            crate::imposter::Headers::new(),
             fault.clone(),
             None,
             None,
@@ -264,7 +263,7 @@ pub fn execute_stub_response_with_rift(
 /// template scanning. It is built (`Some`) only when *nothing* about the response depends on the
 /// request; anything request-dependent stores `None` and serves through the existing slow path
 /// unchanged. This is a derived, serving-only artifact — the Mountebank-shaped
-/// `HashMap<String, Vec<String>>` on `IsResponse` stays the source of truth for admin-API JSON.
+/// `crate::imposter::Headers` on `IsResponse` stays the source of truth for admin-API JSON.
 #[derive(Debug)]
 pub struct PreparedResponse {
     status: hyper::StatusCode,
@@ -382,7 +381,7 @@ impl PreparedResponse {
     pub(crate) fn serve_request(
         &self,
         method: &str,
-        request_headers: &crate::util::FastMap<String, Vec<String>>,
+        request_headers: &crate::util::OrderedMap<String, Vec<String>>,
         // Only read for a conditional response (issue #1307 makes it more than a field read).
         loaded_at: impl FnOnce() -> chrono::DateTime<chrono::Utc>,
     ) -> Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, hyper::http::Error> {
@@ -456,8 +455,8 @@ pub fn create_stub_from_proxy_response(
     // upstream's wire spelling is lost; Title-Case is what Mountebank records from a typical HTTP/1
     // upstream. A name holding an upper-case letter can only come from a proxy behavior and is
     // kept as written. Spellings that differ only in case share one entry, values in input order.
-    let response_headers: HashMap<String, Vec<String>> = {
-        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    let response_headers: crate::imposter::Headers = {
+        let mut map: crate::imposter::Headers = crate::imposter::Headers::new();
         for (k, v) in headers {
             if crate::util::is_hop_by_hop_header(k) {
                 continue;
@@ -541,7 +540,7 @@ pub fn apply_js_or_rhai_decorate(
     request: &RequestContext,
     body: &str,
     status: &ResponseStatus,
-    headers: &HashMap<String, String>,
+    headers: &crate::util::OrderedMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
     files: &std::sync::Arc<crate::imposter::ScriptFileAccess>,
@@ -567,7 +566,7 @@ fn apply_js_or_rhai_decorate_within(
     request: &RequestContext,
     body: &str,
     status: &ResponseStatus,
-    headers: &HashMap<String, String>,
+    headers: &crate::util::OrderedMap<String, String>,
     imposter_port: u16,
     stub_id: Option<&str>,
     files: &std::sync::Arc<crate::imposter::ScriptFileAccess>,
@@ -664,7 +663,7 @@ fn decorate_rhai(
     request: &RequestContext,
     body: &str,
     status: &ResponseStatus,
-    headers: &HashMap<String, String>,
+    headers: &crate::util::OrderedMap<String, String>,
 ) -> Result<Decorated, DecorateError> {
     let mut headers = headers.clone();
     let (body, status_code) = apply_decorate(script, request, body, status, &mut headers)?;
@@ -689,7 +688,7 @@ pub async fn apply_decorate_bounded(
     request: RequestContext,
     body: String,
     status: ResponseStatus,
-    headers: HashMap<String, String>,
+    headers: crate::util::OrderedMap<String, String>,
     imposter_port: u16,
     stub_id: Option<String>,
     files: std::sync::Arc<crate::imposter::ScriptFileAccess>,
@@ -753,7 +752,7 @@ mod tests {
             method: "GET".to_string(),
             path: "/orders".to_string(),
             query: Default::default(),
-            headers: std::collections::HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: Some("REQ-BODY".to_string()),
             ..Default::default()
         }
@@ -761,7 +760,7 @@ mod tests {
 
     #[test]
     fn decorate_js_config_sets_body() {
-        let headers = std::collections::HashMap::new();
+        let headers = crate::util::OrderedMap::default();
         let Decorated {
             body,
             status_code: status,
@@ -783,7 +782,7 @@ mod tests {
 
     #[test]
     fn decorate_js_config_reads_request_body() {
-        let headers = std::collections::HashMap::new();
+        let headers = crate::util::OrderedMap::default();
         let Decorated { body, .. } = apply_js_or_rhai_decorate(
             "config => { config.response.body = config.request.body; }",
             &decorate_req(),
@@ -817,7 +816,7 @@ mod tests {
             "config => {{ const s = require('{}'); s(config); }}",
             module.display()
         );
-        let headers = std::collections::HashMap::new();
+        let headers = crate::util::OrderedMap::default();
         let result = apply_js_or_rhai_decorate(
             &script,
             &decorate_req(),
@@ -842,12 +841,12 @@ mod tests {
     #[cfg(feature = "javascript")]
     #[test]
     fn decorate_js_config_real_json_parse_and_mutation_runs_through_boa() {
-        let headers = std::collections::HashMap::new();
+        let headers = crate::util::OrderedMap::default();
         let request = RequestContext {
             method: "POST".to_string(),
             path: "/orders".to_string(),
             query: Default::default(),
-            headers: std::collections::HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: Some(r#"{"order": {"id": 42, "items": ["a", "b"]}}"#.to_string()),
             ..Default::default()
         };
@@ -881,12 +880,12 @@ mod tests {
     #[cfg(feature = "javascript")]
     #[test]
     fn decorate_bare_body_with_inner_arrow_runs_through_boa() {
-        let headers = std::collections::HashMap::new();
+        let headers = crate::util::OrderedMap::default();
         let request = RequestContext {
             method: "GET".to_string(),
             path: "/orders".to_string(),
             query: Default::default(),
-            headers: std::collections::HashMap::new(),
+            headers: crate::util::OrderedMap::default(),
             body: None,
             ..Default::default()
         };
@@ -911,7 +910,7 @@ mod tests {
 
     #[test]
     fn decorate_js_config_sets_status() {
-        let headers = std::collections::HashMap::new();
+        let headers = crate::util::OrderedMap::default();
         let Decorated {
             status_code: status,
             ..
@@ -933,7 +932,7 @@ mod tests {
     fn decorate_js_config_function_wrapper_executes() {
         // `function(config) { ... }` must take the config-rewrite route, NOT the `function`→JS-engine
         // route (it uses the config model, not (request, response)). Locks the detection ordering.
-        let headers = std::collections::HashMap::new();
+        let headers = crate::util::OrderedMap::default();
         let Decorated { body, .. } = apply_js_or_rhai_decorate(
             "function(config) { config.response.body = 'fn'; }",
             &decorate_req(),
@@ -952,7 +951,7 @@ mod tests {
     fn decorate_js_config_no_wrapper_executes() {
         // A bare body (no arrow/function wrapper) is detected via `config.response.` and rewritten
         // in place (no brace stripping).
-        let headers = std::collections::HashMap::new();
+        let headers = crate::util::OrderedMap::default();
         let Decorated { body, .. } = apply_js_or_rhai_decorate(
             "config.response.body = 'bare';",
             &decorate_req(),
@@ -969,7 +968,7 @@ mod tests {
 
     #[test]
     fn decorate_plain_rhai_still_works() {
-        let headers = std::collections::HashMap::new();
+        let headers = crate::util::OrderedMap::default();
         let Decorated { body, .. } = apply_js_or_rhai_decorate(
             "response.body = request.path;",
             &decorate_req(),
@@ -990,8 +989,12 @@ mod tests {
     fn decorate_1567(
         script: &str,
         status: u16,
-    ) -> (String, ResponseStatus, HashMap<String, String>) {
-        let headers = HashMap::from([("X-Orig".to_string(), "1".to_string())]);
+    ) -> (
+        String,
+        ResponseStatus,
+        crate::util::OrderedMap<String, String>,
+    ) {
+        let headers = crate::util::OrderedMap::from_iter([("X-Orig".to_string(), "1".to_string())]);
         let Decorated {
             body,
             status_code: status,
@@ -1061,7 +1064,7 @@ mod tests {
         assert_eq!((body.as_str(), status), ("b", ResponseStatus::Code(200)));
         assert_eq!(
             headers,
-            HashMap::from([("X-New".to_string(), "n".to_string())])
+            crate::util::OrderedMap::from_iter([("X-New".to_string(), "n".to_string())])
         );
     }
 
@@ -1121,7 +1124,7 @@ mod tests {
         }
     }
 
-    fn recorded_headers(headers: &[(&str, &str)]) -> HashMap<String, Vec<String>> {
+    fn recorded_headers(headers: &[(&str, &str)]) -> crate::imposter::Headers {
         let headers: Vec<(String, String)> = headers
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -1418,7 +1421,7 @@ mod tests {
             decorate_req(),
             "orig".to_string(),
             ResponseStatus::Code(200),
-            std::collections::HashMap::new(),
+            crate::util::OrderedMap::default(),
             test_port(),
             None,
             trusted_files(),
@@ -1442,7 +1445,7 @@ mod tests {
             decorate_req(),
             "orig".to_string(),
             ResponseStatus::Code(200),
-            std::collections::HashMap::new(),
+            crate::util::OrderedMap::default(),
             test_port(),
             None,
             trusted_files(),
@@ -1469,7 +1472,7 @@ mod tests {
             decorate_req(),
             "orig".to_string(),
             ResponseStatus::Code(200),
-            std::collections::HashMap::new(),
+            crate::util::OrderedMap::default(),
             test_port(),
             None,
             trusted_files(),
@@ -1491,14 +1494,13 @@ mod prepared_response_tests {
     use super::*;
     use crate::imposter::types::{IsResponse, ResponseMode, StubResponse};
     use serde_json::json;
-    use std::collections::HashMap;
 
     fn is_response(
         status: u16,
         headers: &[(&str, &str)],
         body: Option<serde_json::Value>,
     ) -> IsResponse {
-        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut map: crate::imposter::Headers = crate::imposter::Headers::new();
         for (k, v) in headers {
             map.entry((*k).to_string())
                 .or_default()

@@ -5394,7 +5394,7 @@ mod tests {
             method: "GET".to_string(),
             path: path.to_string(),
             query: Default::default(),
-            headers: std::collections::HashMap::new(),
+            headers: crate::imposter::Headers::new(),
             body: None,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             match_outcome: None,
