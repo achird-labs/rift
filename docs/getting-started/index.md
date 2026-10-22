@@ -261,8 +261,8 @@ docker run -p 2525:2525 -p 4545:4545 -v $(pwd)/imposters.json:/imposters.json \
 rift --configfile imposters.json
 ```
 
-Mountebank's EJS tags (`<% include %>`, `<%- stringify() %>`, `<%= process.env.X %>`) work in the
-file; any other `<% %>` tag is refused, so pass `--no-parse` if a file holds a literal `<%`. YAML is
+Mountebank's EJS tags (`<% include %>`, `<%- include() %>`, `<%- stringify() %>`, `<%- inject() %>`,
+`<%= process.env.X %>`) work in the file; any other `<% %>` tag is refused, so pass `--no-parse` if a file holds a literal `<%`. YAML is
 accepted too — see [Configuration](../configuration/index.md#document-shapes-and-formats).
 
 Example `imposters.json`:

@@ -33,7 +33,7 @@
     },
     {
       "glob": "cli/configFileTest.js::--configfile should support complex configuration with --configfile in multiple files",
-      "reason": "the config file's imposters include an smtp imposter, which Rift refuses, so the file cannot load",
+      "reason": "sends mail to the config file's smtp imposter; Rift skips that imposter and loads the rest",
       "doc": "docs/getting-started/migration.md#tcpsmtp-protocol-imposters"
     },
     {
@@ -295,27 +295,29 @@
     {
       "id": "cli/configFileTest.js::--configfile should support legacy ejs 2.x include syntax in configuration files",
       "class": "bug",
-      "issue": "#1604",
-      "note": "Rift's EJS renderer does not accept Mountebank's include forms (now runs since #1559 fixed the stop cascade)",
-      "flaky": "fails on macOS, passes on GitHub's Linux runner; the platform-dependent cause is to be found under #1604"
+      "issue": "#1657",
+      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
+      "note": "ECONNREFUSED on 4547: the request arrived between the pidfile write and the imposter bind. The config file loads since #1604; started by hand, 4547 and 4548 serve `origin` and `proxy`. This race is the macOS-only failure #1559 saw"
     },
     {
       "id": "cli/configFileTest.js::--configfile should evaluate stringify function in templates when loading configuration files",
-      "class": "bug",
-      "issue": "#1604",
-      "note": "the file uses EJS 3's `<%- include('file') -%>`, which Rift refuses, so the server does not start"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#scripts-run-in-an-ecmascript-sandbox-not-node",
+      "note": "the config file loads since #1604, but proxy.ejs's inject calls `require('http')`: scripts have no Node core modules (#1593). The first request can also land before the bind (#1657)"
     },
     {
       "id": "cli/configFileTest.js::--configfile should evaluate nested stringify functions when loading configuration files",
       "class": "bug",
-      "issue": "#1604",
-      "note": "the file uses EJS 3's `<%- include('file') -%>`, which Rift refuses, so the server does not start"
+      "issue": "#1657",
+      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
+      "note": "ECONNREFUSED on 4542: the request arrived between the pidfile write and the imposter bind. The config file loads since #1604; started by hand, 4542 serves `{\"success\": true}`"
     },
     {
       "id": "cli/configFileTest.js::--configfile should evaluate stringify functions with injected data when loading configuration files",
       "class": "bug",
-      "issue": "#1604",
-      "note": "the file uses EJS 3's `<%- include('file') -%>`, which Rift refuses, so the server does not start"
+      "issue": "#1657",
+      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
+      "note": "ECONNREFUSED on 4542: the request arrived between the pidfile write and the imposter bind. The config file loads since #1604; started by hand, 4542 serves injectedValue 1111, 2222, 3333"
     },
     {
       "id": "cli/configFileTest.js::--configfile should not render through ejs when --noParse option provided",
@@ -334,8 +336,9 @@
     {
       "id": "cli/datadirTest.js::--datadir should allow configfile to overwrite imposters loaded from datadir",
       "class": "bug",
-      "issue": "#1604",
-      "note": "imposters.ejs uses EJS 3's `<%- include('file') -%>`, which Rift refuses, so the configfile does not load"
+      "issue": "#1657",
+      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
+      "note": "ECONNREFUSED on 4545: the request arrived between the pidfile write and the imposter bind. The config file loads since #1604; by hand, --datadir plus --configfile serves the config file's `Order 123`"
     },
     {
       "id": "cli/datadirTest.js::--datadir should not delete files outside of imposter directories when deleting imposter",
@@ -408,14 +411,16 @@
     {
       "id": "cli/saveTest.js::mb save should allow saving replayable format",
       "class": "bug",
-      "issue": "#1604",
-      "note": "imposters.ejs uses `<%- include('file') -%>`, which Rift refuses"
+      "issue": "#1657",
+      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
+      "note": "ECONNREFUSED on 4545: the request arrived between the pidfile write and the imposter bind. The config file loads since #1604; the save itself deep-equals the replayable export (#1604 triage probe). mbTest's ENOENT on mb.json follows from the refused request"
     },
     {
       "id": "cli/saveTest.js::mb save should allow saving to a different config file",
       "class": "bug",
-      "issue": "#1604",
-      "note": "imposters.ejs uses `<%- include('file') -%>`, which Rift refuses"
+      "issue": "#1657",
+      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
+      "note": "ECONNREFUSED on 2526: the request arrived between the pidfile write and the imposter bind. The config file loads since #1604; the save itself deep-equals the replayable export (#1604 triage probe)"
     },
     {
       "id": "cli/securityTest.js::security mb without --allowInjection should return a 400 if endOfResponseResolver is used",

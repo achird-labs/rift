@@ -13,6 +13,14 @@ record.
 
 ### Added
 
+- **`--configfile` EJS accepts Mountebank's `<%- include('f') -%>`, `stringify(filename, 'f', data)`,
+  `inject(...)`, and nested includes and stringifies** (#1604), so mbTest's `imposters.ejs`,
+  `templates`, `nestedStringify` and `dataStringify` config trees load as they do in Mountebank.
+  Includes resolve against the including file and stringifies against the root config file, as
+  Mountebank's EJS 2.7.4 renderer resolves them; `-%>` drops the following line break; a data
+  argument's values are read in the stringified file as `<%- data.key %>`. A file that renders
+  itself, or nesting deeper than 16 files, is an error naming the chain instead of a crash.
+  `stringify('f', {...})`, which crashes Mountebank, is refused with the working form.
 - **Mountebank's short flags** (#1586): `-p`, `-d`, `-i`, `-l`, `-m`, `-w` and `-o` are accepted as
   `--port`, `--debug`, `--allow-injection`, `--local-only`, `--mock`, `--ip-whitelist` and
   `--origin`, before or after a subcommand, and `save -r` is `save --remove-proxies`. These follow
@@ -64,6 +72,9 @@ record.
   imposter deletes the file; a file that cannot be read is ignored with a `WARN` and the cycles start
   over. Older datadirs, which have no such file, load as before.
 
+- **`<%= process.env.X %>` HTML-escapes its value** (#1604), as Mountebank's EJS does (`&` becomes
+  `&amp;`, and so on for `< > " '`); use `<%- process.env.X %>` for the raw value. Includes and
+  stringifies inside included or stringified files are now rendered instead of refused.
 - **HTTP/1.1 response header names are Title-Case** (#1597): imposter and front-door responses
   carry `Content-Type`, `X-Rift-Imposter` and the like, where they were lower case. A stub's own
   spelling is not reproduced (`lower-hdr` is sent as `Lower-Hdr`); HTTP/2 stays lower-case. See

@@ -493,10 +493,11 @@ environment. `--datadir` files are not preprocessed.
 }
 ```
 
-Only two expression forms are evaluated: `<%= process.env.VAR %>` and
-`<%= process.env.VAR || 'default' %>`, with the default in quotes. The value is pasted in as text,
-so leave the tag outside the JSON quotes for a number such as `port`; inside quotes it becomes a
-string, which the engine refuses for a port. There are no template variables.
+The environment is read with `<%= process.env.VAR %>` or `<%= process.env.VAR || 'default' %>`, with
+the default in quotes; `<%=` HTML-escapes the value as EJS does, and `<%- process.env.VAR %>` inserts
+it raw. The value is pasted in as text, so leave the tag outside the JSON quotes for a number such as
+`port`; inside quotes it becomes a string, which the engine refuses for a port. The only template
+variable is `data`, in a file stringified with a data argument (below).
 
 A variable that is unset renders empty when the tag has no default, and one whose value is not
 valid Unicode renders the default or empty. Either way the engine logs a warning naming the variable
@@ -506,18 +507,21 @@ valid Unicode is reported either way.
 
 Any other tag fails the load with an error naming the tag and its line: another `<%= … %>`
 expression, a `<% … %>` statement other than `include`, a `<%- … %>` output tag other than
-`stringify`, a `<%# … %>` comment, or a `<%` with no closing `%>`. An included file is checked the
-same way, but may not include another file. A stringified file may not include or stringify another
-file either. A Mountebank template that relies on them has to be rewritten, not loaded
+`include`, `stringify`, `inject` or `data.key`, a `<%# … %>` comment, or a `<%` with no closing
+`%>`. Included and stringified files are checked the same way, and may include and stringify
+further files. A Mountebank template that relies on other JavaScript has to be rewritten, not loaded
 with parts of it missing. If a `<%` is meant literally, for example in a response body that serves
 an EJS page, load the file with `--no-parse`. A document fetched from an `https:` source is always
 preprocessed, so it cannot carry a literal `<%`.
 
-`<% include 'path' %>` inlines another file, and `<%- stringify('path') %>` inlines a file's contents,
-trimmed and escaped for use inside a JSON string — so the tag goes inside quotes, as in Mountebank:
-`"body": "<%- stringify('datafile.json') %>"` (see
-[Configuration](../configuration/index.md#document-shapes-and-formats) for what an unquoted tag reports). A
-stringified file is rendered first, so `process.env` tags in it are substituted. `--no-parse` turns preprocessing off; see the
+`<% include 'path' %>` or `<%- include('path') -%>` inlines another file, and
+`<%- stringify(filename, 'path') %>` (or `stringify('path')`, or `inject(...)`) inlines a file's
+contents, trimmed and escaped for use inside a JSON string — so the tag goes inside quotes, as in
+Mountebank: `"body": "<%- stringify(filename, 'datafile.json') %>"`. A third argument,
+`stringify(filename, 'body.ejs', {testValue: '1111'})`, sets `data.testValue` in that file. See
+[Configuration](../configuration/index.md#document-shapes-and-formats) for every form, the path
+rules, and what an unquoted tag reports. A stringified file is rendered first, so `process.env` tags
+in it are substituted. `--no-parse` turns preprocessing off; see the
 [CLI reference](../configuration/cli.md). `rift-lint` renders a templated file the same
 way before it checks it; see [Linting](../features/linting.md#templated-files).
 

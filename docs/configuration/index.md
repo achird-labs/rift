@@ -74,11 +74,29 @@ So a YAML config file is always a sequence at the root, even for one imposter. O
 somewhere to put an `intercept` or `routes` block; declaring one in a single-imposter JSON document
 is a startup error naming the fix rather than a block that silently does nothing.
 
-Before parsing, a `--configfile` document is run through the EJS subset Mountebank config files use:
-`<% include 'file' %>`, `<%- stringify('file') %>` (paths relative to the document) and
-`<%= process.env.VAR %>` / `<%= process.env.VAR || 'default' %>`. Any other `<% %>` tag is refused
-with an error rather than stripped; pass `--no-parse` for a document that holds a literal `<%`. A
-referenced variable that is unset renders empty and logs a warning naming it. See
+Before parsing, a `--configfile` document is run through the EJS subset Mountebank config files use.
+Mountebank renders the file with EJS 2.7.4; Rift evaluates these forms of it, with `'` or `"` quotes:
+
+| Tag | Result |
+|:----|:-------|
+| `<% include file %>`, `<%- include('file') %>` | The file, itself rendered, so includes nest. The path is relative to the file the tag is in; `.ejs` is appended to a path with no extension. |
+| `<%- stringify('file') %>`, `<%- stringify(filename, 'file') %>` | The file, rendered, trimmed and escaped for the inside of a JSON string (below). The path is relative to the **root** config file, however deep the tag is, as in Mountebank; an absolute path is read as written. Stringifies nest. |
+| `<%- stringify(filename, 'file', {key: 'value'}) %>` | The same, with `data.key` set in that file: `<%- data.key %>` inserts the value, `<%= data.key %>` HTML-escapes it, and a missing key renders empty. Values are quoted strings, plain numbers, `true` or `false`. |
+| `<%- inject(...) %>` | Mountebank's older name for `stringify`, in each form above. |
+| `<%= process.env.VAR %>`, `<%= process.env.VAR \|\| 'default' %>` | The variable's value, or the default, **HTML-escaped** as EJS's `<%=` escapes it (`&` becomes `&amp;`, and so on for `< > " '`). |
+| `<%- process.env.VAR %>`, `<%- process.env.VAR \|\| 'default' %>` | The value as it is. Use it for a value that may hold `&`, `<`, `>` or quotes. |
+
+A tag closed with `-%>` drops the line break right after it, as in EJS. An include in a stringified
+file resolves against the root config file's directory, because Mountebank renders a stringified
+file with the root as its EJS `filename`. A file that includes or stringifies one that is already
+being rendered (itself, or a file that led to it) is an error naming the chain of files, and so is
+nesting deeper than 16 files; Mountebank would run out of stack instead.
+
+Any other `<% %>` tag is refused with an error rather than stripped, including `<%=` around an
+include or stringify (EJS would HTML-escape the file) and `stringify('file', {...})`, which
+Mountebank's own renderer fails on (write `stringify(filename, 'file', {...})`); pass `--no-parse`
+for a document that holds a literal `<%`. A referenced variable that is unset renders empty and logs
+a warning naming it. See
 [CLI Reference → Imposter Sources](cli.md#imposter-sources) for what a
 document fetched over `https:` may not do, and
 [Data directory](cli.md#data-directory---datadir) for the stricter

@@ -1,55 +1,96 @@
 //! The EJS template subset Rift's config loader evaluates, shared by the engine and `rift-lint`
 //! (issue #1108) so both read a templated config the same way.
 //!
-//! The four supported tags and every refusal are documented on [`render`]. This crate has no rift
+//! Mountebank renders a `--configfile` with EJS 2.7.4 (through `@mbtest/mountebank-formatters`),
+//! which evaluates arbitrary JavaScript. Rift has no JavaScript engine here: it evaluates the closed
+//! set of tag forms Mountebank's tests and docs use (issues #1095, #1604) and refuses any other tag,
+//! naming it. The forms and every refusal are documented on [`render`]. This crate has no rift
 //! dependencies, which is what lets `rift-lint` use it: `rift-http-proxy` dev-depends on `rift-lint`.
 
 use regex::Regex;
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 // Fixed EJS tag patterns (issue #560): compile once at first use rather than on every
 // `render` call — that runs per config file at startup, on every `POST /admin/reload`, and
 // from the script CLI. All are compile-time-constant patterns, so a compile failure is a
-// programming error caught immediately by tests, not a data-dependent runtime error.
+// programming error caught immediately by tests, not a data-dependent runtime error. Each one is
+// matched against a tag's body: the text between the opening `<%`/`<%-`/`<%=` and the closing
+// `%>`/`-%>`, trimmed.
 
-/// `<% include 'path' %>` — quoted or bare path.
-static EJS_INCLUDE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<%\s*include\s+['"]?([^'">\s]+)['"]?\s*%>"#)
-        .expect("EJS include pattern is a valid constant regex")
+/// EJS 2's legacy include directive, `include path` (quoted or bare), in a `<%` or `<%-` tag.
+static LEGACY_INCLUDE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^include\s+(\S+)$").expect("EJS legacy include pattern is a valid constant regex")
 });
 
-/// `<%- stringify('relative/path') %>` (issue #355 Item 7).
-static EJS_STRINGIFY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<%-\s*stringify\(\s*['"]([^'"]+)['"]\s*\)\s*%>"#)
-        .expect("EJS stringify pattern is a valid constant regex")
+/// The include function, `include('path')`, with one quoted path.
+static INCLUDE_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^include\s*\(\s*(?:'([^'\\]*)'|"([^"\\]*)")\s*\)$"#)
+        .expect("EJS include call pattern is a valid constant regex")
 });
 
-/// `<%= expr %>` expression tag.
-static EJS_EXPR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<%=\s*(.*?)\s*%>").expect("EJS expression pattern is a valid constant regex")
+/// Anything that starts like an include, to explain why one is refused.
+static INCLUDE_ANY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^include\b").expect("EJS include prefix pattern is a valid constant regex")
 });
 
-/// The only supported expression body: `process.env.VAR` with an optional `|| 'default'`.
-static EJS_ENV_VAR_RE: LazyLock<Regex> = LazyLock::new(|| {
+/// Mountebank's `stringify(...)` and its older name `inject(...)`; the arguments are parsed by
+/// [`STRINGIFY_ARGS_RE`].
+static STRINGIFY_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)^(stringify|inject)\s*\((.*)\)$")
+        .expect("EJS stringify call pattern is a valid constant regex")
+});
+
+/// `'file'`, `filename, 'file'` or `filename, 'file', <data>`.
+static STRINGIFY_ARGS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)^\s*(filename\s*,\s*)?(?:'([^'\\]*)'|"([^"\\]*)")\s*(?:,(.*))?$"#)
+        .expect("EJS stringify arguments pattern is a valid constant regex")
+});
+
+/// `process.env.VAR` with an optional `|| 'default'`.
+static ENV_VAR_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"^process\.env\.([A-Za-z_][A-Za-z0-9_]*)(?:\s*\|\|\s*['"]([^'"]*)['"]\s*)?$"#)
         .expect("EJS env-var pattern is a valid constant regex")
 });
 
+/// `data.key`, inside a file stringified with a data argument.
+static DATA_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^data\.([A-Za-z_$][A-Za-z0-9_$]*)$")
+        .expect("EJS data pattern is a valid constant regex")
+});
+
+/// A tag naming a function or directive that reads a local file, in any spelling: what a fetched
+/// document is refused for before anything is resolved.
+static FILE_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(include|stringify|inject)\b")
+        .expect("EJS file-tag pattern is a valid constant regex")
+});
+
+/// The first quoted string in a tag, as the file a refused tag names.
+static QUOTED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"'([^']*)'|"([^"]*)""#).expect("EJS quoted pattern is a valid constant regex")
+});
+
+/// How many files deep includes and stringifies may nest. EJS has no limit of its own: a file that
+/// renders itself overflows Mountebank's stack and crashes it. Rift refuses instead.
+const MAX_NESTING: usize = 16;
+
 /// Whether EJS tags that read the local filesystem are honoured.
 ///
 /// `--configfile` documents are authored by someone who already has filesystem access, so
-/// `<% include %>` / `<%- stringify %>` are resolved verbatim — the same rationale that makes
-/// rift-mock-core's `ScriptBaseDir::ConfigRelative` unrestricted. A document fetched over the network (U-12's
-/// `https:` source) has no such author, so those two tags are refused rather than resolved:
-/// honouring them would let whoever serves the document read arbitrary local files. `<%=
-/// process.env.X %>` still substitutes in both — env is deployment config the operator chose to
-/// expose to their own process.
+/// includes and stringifies are resolved verbatim, as Mountebank resolves them — the same rationale
+/// that makes rift-mock-core's `ScriptBaseDir::ConfigRelative` unrestricted. A document fetched over
+/// the network (U-12's `https:` source) has no such author, so every tag that reads a file is
+/// refused rather than resolved: honouring one would let whoever serves the document read arbitrary
+/// local files. `process.env.X` still substitutes in both — env is deployment config the operator
+/// chose to expose to their own process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileAccess {
-    /// Local document: `include` and `stringify` resolve against the document's directory.
+    /// Local document: `include`, `stringify` and `inject` read the files they name.
     Allowed,
-    /// Remote document: `include` and `stringify` are a load error naming the tag.
+    /// Remote document: `include`, `stringify` and `inject`, in every spelling, are a load error
+    /// naming the tag.
     Denied,
 }
 
@@ -57,15 +98,16 @@ pub enum FileAccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rendered {
     pub text: String,
-    /// Each `<%= process.env.VAR %>` whose variable could not be substituted: unset with no default,
+    /// Each `process.env.VAR` tag whose variable could not be substituted: unset with no default,
     /// or set to a value that is not valid Unicode.
     pub unset_env: Vec<UnsetEnv>,
-    /// Where each `<%- stringify %>` substitution landed in `text`, so a parse error positioned in
-    /// the rendered text can be traced back to the tag that produced it (issue #1279).
+    /// Where each stringify substitution landed in `text`, so a parse error positioned in the
+    /// rendered text can be traced back to the tag that produced it (issue #1279). A stringify
+    /// inside a stringified file has no span: its text is escaped again before it lands.
     pub stringified: Vec<StringifiedSpan>,
 }
 
-/// One `<%- stringify('file') %>` substitution in [`Rendered::text`].
+/// One stringify substitution in [`Rendered::text`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StringifiedSpan {
     /// The escaped file contents within the rendered text.
@@ -165,7 +207,7 @@ pub enum EjsError {
     /// A tag the loader does not evaluate (issue #1095).
     #[error("{0}")]
     UnsupportedTag(String),
-    /// An `include` or `stringify` in a document fetched from somewhere other than local disk.
+    /// An include or stringify in a document fetched from somewhere other than local disk.
     #[error("{0}")]
     LocalFileRefused(String),
     #[error("EJS include file '{file}' not found ({}): {io}", path.display())]
@@ -185,6 +227,10 @@ pub enum EjsError {
         file: String,
         json: serde_json::Error,
     },
+    /// An include or stringify of a file that is already being rendered, which would never finish,
+    /// or one nested deeper than 16 files (issue #1604). The message names the chain of files.
+    #[error("{0}")]
+    Recursion(String),
 }
 
 /// True when `content` holds anything that looks like a tag, so [`render`] would change or refuse it.
@@ -193,24 +239,44 @@ pub fn has_tags(content: &str) -> bool {
     content.contains("<%")
 }
 
-/// Pre-process EJS tokens in a config file before JSON/YAML parsing.
+/// Pre-process EJS tags in a config file before JSON/YAML parsing, as Mountebank's `--configfile`
+/// renderer (EJS 2.7.4) would.
 ///
-/// Handles the patterns emitted by Mountebank and compatible tooling:
-/// - `<% include 'path' %>` — inline the referenced file (relative to the config file)
-/// - `<%- stringify('path') %>` — inline a file's rendered contents, escaped for a JSON string
-/// - `<%= process.env.VAR %>` — substitute with the env var value (empty string if unset)
-/// - `<%= process.env.VAR || 'default' %>` — substitute with env var or the literal default
+/// Evaluated, with `'` or `"` quotes and any whitespace inside the tag:
+/// - `<% include file %>` (EJS 2's directive, path bare or quoted), `<%- include('file') %>` — the
+///   named file, itself rendered, so includes nest. The path resolves against the directory of the
+///   file the tag is in, and `.ejs` is appended to a path with no extension, as EJS does. In a
+///   stringified file it resolves against the root document's directory, because Mountebank renders
+///   a stringified file with the root as its EJS `filename`.
+/// - `<%- stringify('file') %>`, `<%- stringify(filename, 'file') %>` and
+///   `<%- stringify(filename, 'file', {key: 'value'}) %>`, and `inject(...)` for each — the named
+///   file, rendered (so stringifies and includes nest), trimmed, and escaped for the inside of a JSON
+///   string. A relative path always resolves against the root document's directory, at any depth,
+///   as Mountebank's `stringify` does; an absolute one is read as written. The third argument is a flat object of
+///   quoted strings, plain numbers, `true` and `false`; the stringified file reads it as `data`.
+/// - `<%- data.key %>` / `<%= data.key %>` in a file stringified with data — the value, raw or
+///   HTML-escaped. A key the object does not have renders empty, as EJS renders `undefined`.
+/// - `<%= process.env.VAR %>` / `<%- process.env.VAR %>`, each with an optional `|| 'default'` —
+///   the variable's value, or the default. `<%=` HTML-escapes it (`& < > " '`) exactly as EJS's
+///   `escapeXML`; `<%-` inserts it raw.
 ///
-/// Any other tag — another `<%= expr %>`, a `<% statement %>`, `<%- expr %>`, `<%# comment %>`, a
-/// `<%` with no closing `%>` — fails the load, naming the tag and where it is (issue #1095).
-/// Stripping it would load a config that silently differs from the file.
+/// Closing a tag with `-%>` drops one line break right after it, as EJS does.
 ///
-/// Includes are expanded first, so an included file is templated like the document. Every other
-/// tag is then substituted by its own span in one pass, so text a substitution inserts — an env
-/// var's value, a stringified file — is never scanned again as if it were template.
+/// Any other tag — another expression, a `<% statement %>`, `<%# comment %>`, `<%%`, `<%=` around an
+/// include or stringify (which would HTML-escape the file), a `<%` with no closing `%>` — fails the
+/// load, naming the tag and where it is (issue #1095). Stripping it would load a config that
+/// silently differs from the file. So does `stringify('file', {...})`, which crashes Mountebank.
 ///
-/// A `<%= process.env.VAR %>` whose variable is unset renders empty, as Mountebank's does; each one
-/// is listed in [`Rendered::unset_env`] so a caller can say so. One with a `|| 'default'` is not. A
+/// Each tag is substituted by its own span, so text a substitution inserts — an env var's value, a
+/// data value, a stringified file — is never scanned again as if it were template. An included file
+/// is rendered as template where it is included.
+///
+/// A file that includes or stringifies a file already being rendered (itself, or one that led to
+/// it) would never finish, and nesting is capped at 16 files: both are an error naming the chain,
+/// where Mountebank would overflow its stack.
+///
+/// A `process.env.VAR` whose variable is unset renders empty, as Mountebank's does; each one is
+/// listed in [`Rendered::unset_env`] so a caller can say so. One with a `|| 'default'` is not. A
 /// variable set to a value that is not valid Unicode is listed either way, because the value the
 /// author set is ignored.
 ///
@@ -233,296 +299,692 @@ pub fn render(
     // Fail closed before any resolution: a remote document that names a local file is refused
     // outright, naming the tag.
     if file_access == FileAccess::Denied {
-        for (re, tag) in [
-            (&*EJS_INCLUDE_RE, "<% include ... %>"),
-            (&*EJS_STRINGIFY_RE, "<%- stringify(...) %>"),
-        ] {
-            if let Some(cap) = re.captures(content) {
-                return Err(EjsError::LocalFileRefused(format!(
-                    "`{tag}` reads a local file and is not honoured in a document fetched from \
-                     {} — it names '{}'. Only local `--configfile` documents may include local \
-                     files; use `--configfile` if the template must, or inline the content at \
-                     the source.",
-                    config_path.display(),
-                    &cap[1],
-                )));
-            }
-        }
+        refuse_local_file_tags(content, config_path)?;
     }
 
-    let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
-    let expanded = expand_includes(content, config_dir)?;
-    let locate = |offset: usize| expanded.locate(offset, content, config_path);
-    let mut unset_env = Vec::new();
-    let mut stringified = Vec::new();
-    let text = render_tags(
-        &expanded.text,
-        TagScope::Document,
-        config_dir,
+    // A path with no parent (`""`, `/`) has nothing to resolve against but the working directory.
+    let root_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut renderer = Renderer {
+        root: config_path,
+        root_dir,
         file_access,
-        &locate,
-        &mut unset_env,
-        &mut stringified,
-    )?;
+        unset_env: Vec::new(),
+    };
+    let chain = [Link {
+        key: lexical_normalize(config_path),
+        shown: config_path.display().to_string(),
+    }];
+    let locate =
+        |offset: usize| format!("at {}:{}", config_path.display(), line_of(content, offset));
+    let frame = Frame {
+        text: content,
+        include_base: config_path,
+        data: None,
+        chain: &chain,
+        locate: &locate,
+    };
+    let mut text = String::with_capacity(content.len());
+    let mut stringified = Vec::new();
+    renderer.render_frame(&frame, &mut text, Some(&mut stringified))?;
     Ok(Rendered {
         text,
-        unset_env,
+        unset_env: renderer.unset_env,
         stringified,
     })
 }
 
-/// A document with its `<% include %>` tags replaced by the files they name.
-#[derive(Debug)]
-struct ExpandedDocument {
-    text: String,
-    includes: Vec<IncludedSpan>,
+/// Refuse the first tag in a fetched document that reads a local file, in any spelling.
+fn refuse_local_file_tags(content: &str, config_path: &Path) -> Result<(), EjsError> {
+    let mut from = 0;
+    while let Some(found) = content[from..].find("<%") {
+        let offset = from + found;
+        // An unterminated tag runs to the end of the document: still scanned, so it fails closed.
+        let close = content[offset + 2..].find("%>");
+        let end = close.map_or(content.len(), |close| offset + 2 + close + 2);
+        let tag = &content[offset..end];
+        if let Some(keyword) = FILE_TAG_RE.captures(tag).and_then(|cap| cap.get(1)) {
+            let label = match keyword.as_str() {
+                "include" => "<% include ... %>",
+                "stringify" => "<%- stringify(...) %>",
+                _ => "<%- inject(...) %>",
+            };
+            let named = QUOTED_RE
+                .captures(tag)
+                .and_then(|cap| cap.get(1).or_else(|| cap.get(2)))
+                .map(|m| m.as_str())
+                .or_else(|| close.and_then(|_| legacy_include(parse_tag(tag).body)))
+                .unwrap_or(tag);
+            return Err(EjsError::LocalFileRefused(format!(
+                "`{label}` reads a local file and is not honoured in a document fetched from {} — \
+                 it names '{named}'. Only local `--configfile` documents may include local files; \
+                 use `--configfile` if the template must, or inline the content at the source.",
+                config_path.display(),
+            )));
+        }
+        from = end;
+    }
+    Ok(())
 }
 
-/// Where one included file landed in [`ExpandedDocument::text`].
-#[derive(Debug)]
-struct IncludedSpan {
-    /// The included file's bytes within the expanded text.
-    range: std::ops::Range<usize>,
-    /// The include tag's position and length in the original document.
-    tag_offset: usize,
-    tag_len: usize,
-    /// The path as the tag wrote it.
-    file: String,
+/// The values of a stringify's data argument, each already in the form JavaScript's `String(v)`
+/// gives it, which is what both `<%-` and `<%=` print.
+type Data = BTreeMap<String, String>;
+
+/// One file in the chain of includes and stringifies being rendered, outermost first.
+#[derive(Debug, Clone)]
+struct Link {
+    /// The resolved path, lexically normalised, to recognise a file already in the chain.
+    key: PathBuf,
+    /// The path as the tag wrote it (the root's as given), for the error naming the chain.
+    shown: String,
 }
 
-impl ExpandedDocument {
-    /// Describe `offset` in the expanded text as a place a reader can open: a line of the original
-    /// document, or a line of the included file together with the line that included it.
-    fn locate(&self, offset: usize, original: &str, config_path: &Path) -> String {
-        let mut inserted = 0;
-        let mut removed = 0;
-        for span in &self.includes {
-            if span.range.contains(&offset) {
-                let local = &self.text[span.range.clone()];
-                return format!(
-                    "at {}:{}, included at {}:{}",
-                    span.file,
-                    line_of(local, offset - span.range.start),
-                    config_path.display(),
-                    line_of(original, span.tag_offset)
-                );
+/// One template being rendered: the root document, an included file or a stringified one.
+struct Frame<'f> {
+    text: &'f str,
+    /// The file whose directory an include in `text` resolves against: EJS's `filename` option.
+    include_base: &'f Path,
+    /// What `data` is in this file; `None` where it is undefined.
+    data: Option<&'f Data>,
+    /// The files being rendered, this one last.
+    chain: &'f [Link],
+    /// Turns an offset in `text` into the place named in an error, e.g. `at b.json:3, included at
+    /// imposters.ejs:2`.
+    locate: &'f dyn Fn(usize) -> String,
+}
+
+struct Renderer<'r> {
+    /// The root document, which every stringify resolves against.
+    root: &'r Path,
+    root_dir: &'r Path,
+    file_access: FileAccess,
+    unset_env: Vec<UnsetEnv>,
+}
+
+impl Renderer<'_> {
+    /// Render `frame` onto `out`. `spans` is `Some` when `out` is the final text (the document and
+    /// files included into it), so stringify substitutions there are recorded by position.
+    fn render_frame(
+        &mut self,
+        frame: &Frame<'_>,
+        out: &mut String,
+        mut spans: Option<&mut Vec<StringifiedSpan>>,
+    ) -> Result<(), EjsError> {
+        let text = frame.text;
+        let mut from = 0;
+        while let Some(found) = text[from..].find("<%") {
+            let offset = from + found;
+            out.push_str(&text[from..offset]);
+            let Some(close) = text[offset + 2..].find("%>") else {
+                return Err(self.unsupported(&text[offset..], false, "", &(frame.locate)(offset)));
+            };
+            let end = offset + 2 + close + 2;
+            let written = &text[offset..end];
+            let tag = parse_tag(written);
+            let action = classify(&tag)
+                .map_err(|note| self.unsupported(written, true, note, &(frame.locate)(offset)))?;
+            match action {
+                Action::Env {
+                    name,
+                    default,
+                    escape,
+                } => {
+                    let value = env_value(name, default);
+                    if let Some(reason) = value.problem {
+                        self.unset_env.push(UnsetEnv {
+                            name: name.to_string(),
+                            place: (frame.locate)(offset),
+                            reason,
+                        });
+                    }
+                    push_value(out, &value.value, escape);
+                }
+                Action::DataValue { key, escape } => {
+                    let Some(data) = frame.data else {
+                        return Err(self.unsupported(
+                            written,
+                            true,
+                            NOTE_NO_DATA,
+                            &(frame.locate)(offset),
+                        ));
+                    };
+                    // A key the object lacks is `undefined`, which EJS prints as empty through
+                    // both tags (Domain-optional: absence is a value of the template language).
+                    push_value(out, data.get(key).map_or("", String::as_str), escape);
+                }
+                Action::Include(file) => {
+                    let place = (frame.locate)(offset);
+                    let path = resolve_include(file, frame.include_base);
+                    let chain = enter(frame.chain, &path, file, &place)?;
+                    let contents =
+                        std::fs::read_to_string(&path).map_err(|io| EjsError::Include {
+                            file: file.to_string(),
+                            path: path.clone(),
+                            io,
+                        })?;
+                    // EJS strips a byte-order mark from a file it includes.
+                    let contents = contents.strip_prefix('\u{FEFF}').unwrap_or(&contents);
+                    let locate = |at: usize| {
+                        format!("at {file}:{}, included {place}", line_of(contents, at))
+                    };
+                    let included = Frame {
+                        text: contents,
+                        include_base: &path,
+                        data: frame.data,
+                        chain: &chain,
+                        locate: &locate,
+                    };
+                    self.render_frame(&included, out, spans.as_deref_mut())?;
+                }
+                Action::Stringify { file, data } => {
+                    let place = (frame.locate)(offset);
+                    // An absolute path is read as written, as Rift has always read it (the TLS and
+                    // Kubernetes guides stringify `/certs/...`). Mountebank's `path.join` would read
+                    // it under the root's directory instead.
+                    let path = self.root_dir.join(file);
+                    let chain = enter(frame.chain, &path, file, &place)?;
+                    let contents =
+                        std::fs::read_to_string(&path).map_err(|io| EjsError::Stringify {
+                            file: file.to_string(),
+                            path: path.clone(),
+                            io,
+                        })?;
+                    let locate = |at: usize| {
+                        format!("at {file}:{}, stringified {place}", line_of(&contents, at))
+                    };
+                    let stringified = Frame {
+                        text: &contents,
+                        include_base: self.root,
+                        data: data.as_ref(),
+                        chain: &chain,
+                        locate: &locate,
+                    };
+                    let mut rendered = String::new();
+                    self.render_frame(&stringified, &mut rendered, None)?;
+                    let start = out.len();
+                    out.push_str(&json_string_inner(&rendered, file)?);
+                    if let Some(spans) = spans.as_deref_mut() {
+                        spans.push(StringifiedSpan {
+                            range: start..out.len(),
+                            tag: written.to_string(),
+                            place,
+                            quoted: text[..offset].ends_with('"') && text[end..].starts_with('"'),
+                        });
+                    }
+                }
             }
-            if span.range.end <= offset {
-                inserted += span.range.len();
-                removed += span.tag_len;
+            from = end;
+            if tag.trim_line_break {
+                from += leading_line_break_len(&text[from..]);
             }
         }
-        let original_offset = offset + removed - inserted;
-        format!(
-            "at {}:{}",
-            config_path.display(),
-            line_of(original, original_offset)
+        out.push_str(&text[from..]);
+        Ok(())
+    }
+
+    fn unsupported(&self, text: &str, terminated: bool, note: &str, place: &str) -> EjsError {
+        EjsError::UnsupportedTag(
+            UnsupportedTag {
+                text,
+                terminated,
+                note,
+            }
+            .message(place, self.file_access),
         )
     }
+}
+
+/// The chain with `path` appended, or the error when `path` is already in it or the chain is too
+/// deep. `written` is the path as the tag wrote it, and `place` where the tag is.
+fn enter(chain: &[Link], path: &Path, written: &str, place: &str) -> Result<Vec<Link>, EjsError> {
+    let key = lexical_normalize(path);
+    let already = chain.iter().any(|link| link.key == key);
+    let mut next = chain.to_vec();
+    next.push(Link {
+        key,
+        shown: written.to_string(),
+    });
+    let shown = || {
+        next.iter()
+            .map(|link| link.shown.as_str())
+            .collect::<Vec<_>>()
+            .join(" → ")
+    };
+    if already {
+        return Err(EjsError::Recursion(format!(
+            "EJS file '{written}' {place} is already being rendered, so rendering it again would \
+             never finish: {}",
+            shown()
+        )));
+    }
+    // The root document is not nested.
+    if next.len() - 1 > MAX_NESTING {
+        return Err(EjsError::Recursion(format!(
+            "EJS includes and stringifies nest deeper than {MAX_NESTING} files {place}: {}",
+            shown()
+        )));
+    }
+    Ok(next)
+}
+
+/// `path` with `.` and `name/..` components folded away, without touching the filesystem: the same
+/// file reached as `a.json` and `./a.json` is one link in the chain. A cycle spelled through a
+/// symlink is not recognised, and is stopped by the depth limit instead.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) =>
+            {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Where an include of `file` from the template `base` reads, by EJS 2.7.4's `getIncludePath`: an
+/// absolute path as written, otherwise relative to `base`'s directory; either way with `.ejs`
+/// appended when the path has no extension.
+fn resolve_include(file: &str, base: &Path) -> PathBuf {
+    let written = Path::new(file);
+    let mut path = if written.is_absolute() || file.starts_with('/') {
+        written.to_path_buf()
+    } else {
+        // A path with no parent (`""`, `/`) has nothing to resolve against but the working
+        // directory.
+        base.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(written)
+    };
+    if written.extension().is_none() {
+        path.as_mut_os_string().push(".ejs");
+    }
+    path
+}
+
+/// `rendered`, trimmed as Mountebank's `stringify` trims it (JavaScript's `String.prototype.trim`),
+/// JSON-encoded without the surrounding quotes. The template supplies the quotes (`"inject":
+/// "<%- stringify('inject.js') %>"`), so only the escaped inner content is returned — Mountebank's
+/// contract too (issue #355 Item 7, #1279).
+fn json_string_inner(rendered: &str, file: &str) -> Result<String, EjsError> {
+    // JavaScript's whitespace: Unicode's White_Space without NEL, plus the byte-order mark.
+    let trimmed =
+        rendered.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{FEFF}');
+    let json_quoted = serde_json::to_string(trimmed).map_err(|json| EjsError::Encode {
+        file: file.to_string(),
+        json,
+    })?;
+    // `to_string` of a `str` always yields a quoted JSON string.
+    Ok(json_quoted[1..json_quoted.len() - 1].to_string())
 }
 
 fn line_of(text: &str, offset: usize) -> usize {
     text[..offset].matches('\n').count() + 1
 }
 
-fn expand_includes(content: &str, config_dir: &Path) -> Result<ExpandedDocument, EjsError> {
-    let mut text = String::with_capacity(content.len());
-    let mut includes = Vec::new();
-    let mut last = 0;
-    for cap in EJS_INCLUDE_RE.captures_iter(content) {
-        let (Some(full), Some(include_path)) = (cap.get(0), cap.get(1)) else {
-            continue;
-        };
-        text.push_str(&content[last..full.start()]);
-        let abs_path = config_dir.join(include_path.as_str());
-        let included = std::fs::read_to_string(&abs_path).map_err(|io| EjsError::Include {
-            file: include_path.as_str().to_string(),
-            path: abs_path.clone(),
-            io,
-        })?;
-        let start = text.len();
-        text.push_str(&included);
-        includes.push(IncludedSpan {
-            range: start..text.len(),
-            tag_offset: full.start(),
-            tag_len: full.len(),
-            file: include_path.as_str().to_string(),
-        });
-        last = full.end();
+/// The length of the one line break (`\r\n`, `\n` or `\r`) EJS drops after a `-%>`, if `rest`
+/// starts with one.
+fn leading_line_break_len(rest: &str) -> usize {
+    if rest.starts_with("\r\n") {
+        2
+    } else if rest.starts_with(['\n', '\r']) {
+        1
+    } else {
+        0
     }
-    text.push_str(&content[last..]);
-    Ok(ExpandedDocument { text, includes })
 }
 
-/// What template text is being rendered, which decides the tags it may hold.
+/// How a tag opens, which decides what its body may be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TagScope {
-    /// The document, includes already expanded.
-    Document,
-    /// A file a `<%- stringify %>` tag inlines. It is rendered like the document before it is
-    /// escaped (Mountebank's formatter does the same), but it may not include or stringify again.
-    Stringified,
+enum Opening {
+    /// `<%`: a statement. Only EJS 2's `include` directive is evaluated.
+    Scriptlet,
+    /// `<%-`: an expression, inserted raw.
+    Raw,
+    /// `<%=`: an expression, HTML-escaped.
+    Escaped,
+    /// `<%#`, `<%_`, `<%%`: never evaluated.
+    Other,
 }
 
-/// Substitute every tag in `text` by its own span, refusing the first one that is not evaluated.
-/// `locate` turns an offset in `text` into the place named in an error.
-fn render_tags(
-    text: &str,
-    scope: TagScope,
-    config_dir: &Path,
-    file_access: FileAccess,
-    locate: &dyn Fn(usize) -> String,
-    unset_env: &mut Vec<UnsetEnv>,
-    stringified_spans: &mut Vec<StringifiedSpan>,
-) -> Result<String, EjsError> {
-    let mut out = String::with_capacity(text.len());
-    let mut from = 0;
-    while let Some(found) = text[from..].find("<%") {
-        let offset = from + found;
-        out.push_str(&text[from..offset]);
-        let Some(close) = text[offset + 2..].find("%>") else {
-            let tag = UnsupportedTag {
-                text: &text[offset..],
-                terminated: false,
-                note: "",
-            };
-            return Err(EjsError::UnsupportedTag(
-                tag.message(&locate(offset), file_access),
-            ));
-        };
-        let end = offset + 2 + close + 2;
-        let tag = &text[offset..end];
+/// A terminated tag, split into its parts.
+#[derive(Debug)]
+struct ParsedTag<'t> {
+    opening: Opening,
+    /// The text between the opening and closing delimiters, trimmed.
+    body: &'t str,
+    /// Whether it closes with `-%>`.
+    trim_line_break: bool,
+}
 
-        if let Some(expression) = env_expression(tag) {
-            if let Some((name, reason)) = expression.problem {
-                unset_env.push(UnsetEnv {
-                    name: name.to_string(),
-                    place: locate(offset),
-                    reason,
-                });
-            }
-            out.push_str(&expression.value);
-        } else if let Some(rel_path) = whole_tag_capture(&EJS_STRINGIFY_RE, tag)
-            && scope == TagScope::Document
-        {
-            let start = out.len();
-            out.push_str(&stringified(
-                rel_path,
-                config_dir,
-                file_access,
-                &|inner| format!("{}, stringified {}", inner, locate(offset)),
-                unset_env,
-            )?);
-            stringified_spans.push(StringifiedSpan {
-                range: start..out.len(),
-                tag: tag.to_string(),
-                place: locate(offset),
-                quoted: text[..offset].ends_with('"') && text[end..].starts_with('"'),
-            });
-        } else {
-            let note = if whole_tag_capture(&EJS_INCLUDE_RE, tag).is_some() {
-                " (an include inside an included or stringified file is not evaluated)"
-            } else if whole_tag_capture(&EJS_STRINGIFY_RE, tag).is_some() {
-                " (a stringify inside a stringified file is not evaluated)"
-            } else {
-                ""
-            };
-            let tag = UnsupportedTag {
-                text: tag,
-                terminated: true,
-                note,
-            };
-            return Err(EjsError::UnsupportedTag(
-                tag.message(&locate(offset), file_access),
-            ));
+/// Split `tag`, which runs from `<%` through `%>`.
+fn parse_tag(tag: &str) -> ParsedTag<'_> {
+    let inner = &tag[2..tag.len() - 2];
+    let (opening, inner) = match inner.as_bytes().first() {
+        Some(b'=') => (Opening::Escaped, &inner[1..]),
+        Some(b'-') => (Opening::Raw, &inner[1..]),
+        Some(b'#' | b'_' | b'%') => (Opening::Other, inner),
+        _ => (Opening::Scriptlet, inner),
+    };
+    let (body, trim_line_break) = match inner.strip_suffix('-') {
+        Some(body) => (body, true),
+        None => (inner, false),
+    };
+    ParsedTag {
+        opening,
+        body: body.trim(),
+        trim_line_break,
+    }
+}
+
+/// What an evaluated tag does.
+#[derive(Debug)]
+enum Action<'t> {
+    Include(&'t str),
+    Stringify {
+        file: &'t str,
+        data: Option<Data>,
+    },
+    Env {
+        name: &'t str,
+        default: Option<&'t str>,
+        escape: bool,
+    },
+    DataValue {
+        key: &'t str,
+        escape: bool,
+    },
+}
+
+const NOTE_ESCAPED_FILE: &str =
+    " (`<%=` would HTML-escape the file's text, which EJS does too; write `<%-`)";
+const NOTE_INCLUDE_ARGS: &str =
+    " (an include takes one quoted path; an include with a data argument is not evaluated)";
+const NOTE_STRINGIFY_ARGS: &str = " (stringify takes `'file'`, `filename, 'file'` or \
+                                   `filename, 'file', {...}`)";
+const NOTE_TWO_ARG_OBJECT: &str = " (Mountebank's renderer fails on this form too: with two \
+                                   arguments the object is taken as the file name; write \
+                                   `stringify(filename, 'file', {...})`)";
+const NOTE_DATA: &str = " (a data argument is evaluated only as a flat object of quoted strings, \
+                         plain numbers, `true` and `false`)";
+const NOTE_NO_DATA: &str = " (`data` is only set inside a file stringified with a data argument, \
+                            as `stringify(filename, 'file', {...})`)";
+
+/// What `tag` does, or the note explaining its refusal (empty when there is nothing to add).
+fn classify<'t>(tag: &ParsedTag<'t>) -> Result<Action<'t>, &'static str> {
+    let body = tag.body;
+    let escape = match tag.opening {
+        Opening::Other => return Err(""),
+        Opening::Scriptlet => return legacy_include(body).map(Action::Include).ok_or(""),
+        Opening::Escaped => true,
+        Opening::Raw => false,
+    };
+    if let Some(cap) = ENV_VAR_RE.captures(body)
+        && let Some(name) = cap.get(1)
+    {
+        return Ok(Action::Env {
+            name: name.as_str(),
+            default: cap.get(2).map(|m| m.as_str()),
+            escape,
+        });
+    }
+    if let Some(key) = DATA_RE.captures(body).and_then(|cap| cap.get(1)) {
+        return Ok(Action::DataValue {
+            key: key.as_str(),
+            escape,
+        });
+    }
+    if INCLUDE_ANY_RE.is_match(body) {
+        if escape {
+            return Err(NOTE_ESCAPED_FILE);
         }
-        from = end;
+        return INCLUDE_CALL_RE
+            .captures(body)
+            .and_then(|cap| cap.get(1).or_else(|| cap.get(2)))
+            .map(|m| m.as_str())
+            .or_else(|| legacy_include(body))
+            .map(Action::Include)
+            .ok_or(NOTE_INCLUDE_ARGS);
     }
-    out.push_str(&text[from..]);
-    Ok(out)
-}
-
-/// The file `rel_path` names, rendered and escaped for use inside a JSON string (issue #355 Item
-/// 7), trimmed of surrounding whitespace as Mountebank's is. The template supplies the surrounding
-/// quotes (`"inject": "<%- stringify('inject.js') %>"`), so only the escaped inner content is
-/// returned — Mountebank's contract too. `outer` wraps a place in the file with where the
-/// stringify tag is.
-fn stringified(
-    rel_path: &str,
-    config_dir: &Path,
-    file_access: FileAccess,
-    outer: &dyn Fn(String) -> String,
-    unset_env: &mut Vec<UnsetEnv>,
-) -> Result<String, EjsError> {
-    let abs_path = config_dir.join(rel_path);
-    let contents = std::fs::read_to_string(&abs_path).map_err(|io| EjsError::Stringify {
-        file: rel_path.to_string(),
-        path: abs_path.clone(),
-        io,
-    })?;
-    let locate = |offset: usize| outer(format!("at {rel_path}:{}", line_of(&contents, offset)));
-    // A stringified file never evaluates a stringify of its own, so it records no spans.
-    let rendered = render_tags(
-        &contents,
-        TagScope::Stringified,
-        config_dir,
-        file_access,
-        &locate,
-        unset_env,
-        &mut Vec::new(),
-    )?;
-    // Trimmed as Mountebank's `stringify` does (issue #1279), so a file's trailing newline is not
-    // served as part of a verbatim string body.
-    let json_quoted = serde_json::to_string(rendered.trim()).map_err(|json| EjsError::Encode {
-        file: rel_path.to_string(),
-        json,
-    })?;
-    // `to_string` of a `String` always yields a quoted JSON string.
-    Ok(json_quoted[1..json_quoted.len() - 1].to_string())
-}
-
-/// `re`'s first capture group when `re` matches the whole of `tag`, not just part of it.
-fn whole_tag_capture<'t>(re: &Regex, tag: &'t str) -> Option<&'t str> {
-    let cap = re.captures(tag)?;
-    let whole = cap.get(0)?;
-    if whole.range() != (0..tag.len()) {
-        return None;
+    if let Some(args) = STRINGIFY_CALL_RE.captures(body).and_then(|cap| cap.get(2)) {
+        if escape {
+            return Err(NOTE_ESCAPED_FILE);
+        }
+        return stringify_action(args.as_str());
     }
-    cap.get(1).map(|m| m.as_str())
+    Err("")
 }
 
-/// A rendered `<%= process.env.VAR %>` tag.
-struct EnvExpression<'t> {
+/// The path of an EJS 2 `include path` directive, its quotes (if any) removed.
+fn legacy_include(body: &str) -> Option<&str> {
+    let path = LEGACY_INCLUDE_RE.captures(body)?.get(1)?.as_str();
+    Some(
+        ['\'', '"']
+            .iter()
+            .find_map(|q| path.strip_prefix(*q).and_then(|p| p.strip_suffix(*q)))
+            .unwrap_or(path),
+    )
+}
+
+fn stringify_action(args: &str) -> Result<Action<'_>, &'static str> {
+    let cap = STRINGIFY_ARGS_RE
+        .captures(args)
+        .ok_or(NOTE_STRINGIFY_ARGS)?;
+    let file = cap
+        .get(2)
+        .or_else(|| cap.get(3))
+        .ok_or(NOTE_STRINGIFY_ARGS)?
+        .as_str();
+    let Some(rest) = cap.get(4) else {
+        return Ok(Action::Stringify { file, data: None });
+    };
+    if cap.get(1).is_none() {
+        // `stringify('file', x)`: Mountebank reads `x` as the file name.
+        return Err(if rest.as_str().trim_start().starts_with('{') {
+            NOTE_TWO_ARG_OBJECT
+        } else {
+            NOTE_STRINGIFY_ARGS
+        });
+    }
+    let data = parse_data(rest.as_str()).ok_or(NOTE_DATA)?;
+    Ok(Action::Stringify {
+        file,
+        data: Some(data),
+    })
+}
+
+/// A flat JavaScript object literal: `{key: 'string', "k": 12, k2: true}`, keys bare or quoted, a
+/// trailing comma allowed. `None` for anything else.
+fn parse_data(src: &str) -> Option<Data> {
+    let mut p = Literal {
+        rest: src.trim_start(),
+    };
+    p.expect('{')?;
+    let mut data = Data::new();
+    loop {
+        p.skip_ws();
+        if p.expect('}').is_some() {
+            break;
+        }
+        let key = p.key()?;
+        p.skip_ws();
+        p.expect(':')?;
+        p.skip_ws();
+        let value = p.value()?;
+        // A repeated key keeps its last value, as in JavaScript.
+        data.insert(key, value);
+        p.skip_ws();
+        if p.expect(',').is_none() {
+            p.expect('}')?;
+            break;
+        }
+    }
+    p.skip_ws();
+    p.rest.is_empty().then_some(data)
+}
+
+/// A cursor over a JavaScript literal.
+struct Literal<'s> {
+    rest: &'s str,
+}
+
+impl<'s> Literal<'s> {
+    fn skip_ws(&mut self) {
+        self.rest = self.rest.trim_start();
+    }
+
+    fn expect(&mut self, c: char) -> Option<()> {
+        self.rest = self.rest.strip_prefix(c)?;
+        Some(())
+    }
+
+    fn identifier(&mut self) -> Option<&'s str> {
+        let end = self
+            .rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+            .unwrap_or(self.rest.len());
+        let (ident, rest) = self.rest.split_at(end);
+        if ident.is_empty() || ident.starts_with(|c: char| c.is_ascii_digit()) {
+            return None;
+        }
+        self.rest = rest;
+        Some(ident)
+    }
+
+    fn key(&mut self) -> Option<String> {
+        if self.rest.starts_with(['\'', '"']) {
+            self.string()
+        } else {
+            self.identifier().map(str::to_string)
+        }
+    }
+
+    /// A value as JavaScript's `String(value)` prints it.
+    fn value(&mut self) -> Option<String> {
+        if self.rest.starts_with(['\'', '"']) {
+            return self.string();
+        }
+        if self
+            .rest
+            .starts_with(|c: char| c == '-' || c.is_ascii_digit())
+        {
+            return self.number();
+        }
+        let word = self.identifier()?;
+        matches!(word, "true" | "false").then(|| word.to_string())
+    }
+
+    /// A quoted string with the common escapes; any other escape, or a line break, is `None`.
+    fn string(&mut self) -> Option<String> {
+        let quote = self.rest.chars().next()?;
+        let mut out = String::new();
+        let mut chars = self.rest[1..].char_indices();
+        while let Some((i, c)) = chars.next() {
+            match c {
+                c if c == quote => {
+                    self.rest = &self.rest[1 + i + 1..];
+                    return Some(out);
+                }
+                '\\' => out.push(match chars.next()?.1 {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    'b' => '\u{8}',
+                    'f' => '\u{c}',
+                    'v' => '\u{b}',
+                    e @ ('\\' | '\'' | '"') => e,
+                    _ => return None,
+                }),
+                '\n' | '\r' => return None,
+                c => out.push(c),
+            }
+        }
+        None
+    }
+
+    /// A plain decimal number (`12`, `-0.5`), printed as JavaScript prints it. Exponents, and
+    /// magnitudes JavaScript would print with one, are `None`.
+    fn number(&mut self) -> Option<String> {
+        static NUMBER_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?")
+                .expect("EJS data number pattern is a valid constant regex")
+        });
+        let literal = NUMBER_RE.find(self.rest)?.as_str();
+        let after = &self.rest[literal.len()..];
+        if after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '.' || c == '_') {
+            return None;
+        }
+        let value: f64 = literal.parse().ok()?;
+        let magnitude = value.abs();
+        if magnitude >= 1e21 || (magnitude != 0.0 && magnitude < 1e-6) {
+            return None;
+        }
+        self.rest = after;
+        // Rust prints the shortest round-tripping decimal, as JavaScript does in this range; only
+        // negative zero differs (`String(-0)` is `0`).
+        Some(if value == 0.0 {
+            "0".to_string()
+        } else {
+            value.to_string()
+        })
+    }
+}
+
+/// Append `value`, HTML-escaped when the tag is `<%=`.
+fn push_value(out: &mut String, value: &str, escape: bool) {
+    if escape {
+        out.push_str(&escape_xml(value));
+    } else {
+        out.push_str(value);
+    }
+}
+
+/// EJS 2.7.4's `escapeXML`: `& < > " '` as `&amp; &lt; &gt; &#34; &#39;`.
+fn escape_xml(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&#34;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A `process.env.VAR` tag's value.
+struct EnvValue {
     value: String,
-    /// The variable and why it could not be substituted, when it could not.
-    problem: Option<(&'t str, EnvProblem)>,
+    /// Why the variable could not be substituted, when it could not.
+    problem: Option<EnvProblem>,
 }
 
-/// The value of a `<%= process.env.VAR %>` / `<%= process.env.VAR || 'default' %>` tag, or `None`
-/// when `tag` is not one.
-fn env_expression(tag: &str) -> Option<EnvExpression<'_>> {
-    let body = whole_tag_capture(&EJS_EXPR_RE, tag)?.trim();
-    let env_cap = EJS_ENV_VAR_RE.captures(body)?;
-    let var_name = env_cap.get(1)?.as_str();
-    let default = env_cap.get(2).map(|m| m.as_str());
-    Some(match (std::env::var(var_name), default) {
-        (Ok(value), _) => EnvExpression {
+fn env_value(name: &str, default: Option<&str>) -> EnvValue {
+    match (std::env::var(name), default) {
+        (Ok(value), _) => EnvValue {
             value,
             problem: None,
         },
-        (Err(std::env::VarError::NotPresent), Some(default)) => EnvExpression {
+        (Err(std::env::VarError::NotPresent), Some(default)) => EnvValue {
             value: default.to_string(),
             problem: None,
         },
-        (Err(std::env::VarError::NotPresent), None) => EnvExpression {
+        (Err(std::env::VarError::NotPresent), None) => EnvValue {
             value: String::new(),
-            problem: Some((var_name, EnvProblem::Unset)),
+            problem: Some(EnvProblem::Unset),
         },
-        (Err(std::env::VarError::NotUnicode(_)), default) => EnvExpression {
+        (Err(std::env::VarError::NotUnicode(_)), default) => EnvValue {
             value: default.unwrap_or_default().to_string(),
-            problem: Some((var_name, EnvProblem::NotUnicode)),
+            problem: Some(EnvProblem::NotUnicode),
         },
-    })
+    }
 }
 
 /// An EJS tag the preprocessor found and does not evaluate.
@@ -532,13 +994,13 @@ struct UnsupportedTag<'a> {
     text: &'a str,
     terminated: bool,
     /// Why a tag that looks supported is not, where that applies.
-    note: &'static str,
+    note: &'a str,
 }
 
 impl UnsupportedTag<'_> {
     const MAX_SHOWN_CHARS: usize = 80;
 
-    /// The load error, with the tag found `place` (from [`ExpandedDocument::locate`]).
+    /// The load error, with the tag found `place`.
     fn message(&self, place: &str, file_access: FileAccess) -> String {
         let shown: String = if self.text.chars().count() > Self::MAX_SHOWN_CHARS {
             let head: String = self.text.chars().take(Self::MAX_SHOWN_CHARS - 1).collect();
@@ -555,16 +1017,18 @@ impl UnsupportedTag<'_> {
         match file_access {
             FileAccess::Allowed => format!(
                 "unsupported EJS tag `{shown}`{unterminated} {place}{note}, so the file was not \
-                 loaded. Only `<%= process.env.VAR %>`, `<%= process.env.VAR || 'default' %>`, \
-                 `<% include 'file' %>` and `<%- stringify('file') %>` are evaluated. If the tag \
-                 is meant literally, load the file with --no-parse (a --configfile or file: \
-                 source)."
+                 loaded. Only `<%= process.env.VAR %>` and `<%- process.env.VAR %>` (each with an \
+                 optional `|| 'default'`), `<% include file %>`, `<%- include('file') %>`, \
+                 `<%- stringify(filename, 'file') %>` (with an optional data object, or as \
+                 `stringify('file')` or `inject(...)`) and, in a stringified file, \
+                 `<%- data.key %>` are evaluated. If the tag is meant literally, load the file \
+                 with --no-parse (a --configfile or file: source)."
             ),
             FileAccess::Denied => format!(
                 "unsupported EJS tag `{shown}`{unterminated} {place}{note}, so the document was not \
-                 loaded. Only `<%= process.env.VAR %>` and `<%= process.env.VAR || 'default' %>` are \
-                 evaluated in a fetched document, and it is always preprocessed: remove the tag at \
-                 the source."
+                 loaded. Only `<%= process.env.VAR %>` and `<%- process.env.VAR %>` (each with an \
+                 optional `|| 'default'`) are evaluated in a fetched document, and it is always \
+                 preprocessed: remove the tag at the source."
             ),
         }
     }
@@ -576,44 +1040,96 @@ mod tests {
 
     #[test]
     fn ejs_statics_match_their_tags() {
-        assert_eq!(
-            EJS_INCLUDE_RE
-                .captures(r#"<% include 'a/b.json' %>"#)
-                .unwrap()[1]
-                .to_string(),
-            "a/b.json"
-        );
-        assert_eq!(
-            EJS_INCLUDE_RE.captures("<% include bare.json %>").unwrap()[1].to_string(),
-            "bare.json"
-        );
+        assert_eq!(legacy_include("include 'a/b.json'"), Some("a/b.json"));
+        assert_eq!(legacy_include("include bare.json"), Some("bare.json"));
+        assert_eq!(legacy_include("include('x')"), None);
 
-        assert_eq!(
-            EJS_STRINGIFY_RE
-                .captures(r#"<%- stringify('inject.js') %>"#)
-                .unwrap()[1]
-                .to_string(),
-            "inject.js"
-        );
+        let call = INCLUDE_CALL_RE.captures(r#"include( "a.json" )"#).unwrap();
+        assert_eq!(&call[2], "a.json");
 
-        assert_eq!(
-            EJS_EXPR_RE.captures("<%= process.env.HOST %>").unwrap()[1].to_string(),
-            "process.env.HOST"
-        );
-
-        let env_cap = EJS_ENV_VAR_RE
-            .captures("process.env.PORT || '4545'")
+        let stringify = STRINGIFY_CALL_RE
+            .captures("inject(filename, 'f.js')")
             .unwrap();
+        assert_eq!(&stringify[1], "inject");
+        let args = STRINGIFY_ARGS_RE.captures(&stringify[2]).unwrap();
+        assert!(args.get(1).is_some(), "the filename argument");
+        assert_eq!(&args[2], "f.js");
+        assert!(args.get(4).is_none());
+
+        let env_cap = ENV_VAR_RE.captures("process.env.PORT || '4545'").unwrap();
         assert_eq!(env_cap[1].to_string(), "PORT");
         assert_eq!(env_cap[2].to_string(), "4545");
         assert!(
-            EJS_ENV_VAR_RE
+            ENV_VAR_RE
                 .captures("process.env.HOST")
                 .unwrap()
                 .get(2)
                 .is_none()
         );
-        assert!(EJS_ENV_VAR_RE.captures("someOtherExpr()").is_none());
+        assert!(ENV_VAR_RE.captures("someOtherExpr()").is_none());
+
+        assert_eq!(&DATA_RE.captures("data.testValue").unwrap()[1], "testValue");
+    }
+
+    #[test]
+    fn tags_split_into_opening_body_and_trim() {
+        let tag = parse_tag("<%- include('a') -%>");
+        assert_eq!(tag.opening, Opening::Raw);
+        assert_eq!(tag.body, "include('a')");
+        assert!(tag.trim_line_break);
+        let tag = parse_tag("<%=\n process.env.X\n%>");
+        assert_eq!(tag.opening, Opening::Escaped);
+        assert_eq!(tag.body, "process.env.X");
+        assert!(!tag.trim_line_break);
+        assert_eq!(parse_tag("<%# c %>").opening, Opening::Other);
+        assert_eq!(parse_tag("<%% x %>").opening, Opening::Other);
+        assert_eq!(parse_tag("<% include f %>").opening, Opening::Scriptlet);
+        assert!(
+            !parse_tag("<%-%>").trim_line_break,
+            "the dash is the opening's"
+        );
+    }
+
+    #[test]
+    fn data_literals_parse_as_javascript_prints_them() {
+        let data =
+            parse_data("{a: 'x', \"b\": 12, 'c': -0.50, d: true, e: false, f: -0,}").unwrap();
+        let get = |k: &str| data.get(k).map(String::as_str);
+        assert_eq!(get("a"), Some("x"));
+        assert_eq!(get("b"), Some("12"));
+        assert_eq!(get("c"), Some("-0.5"));
+        assert_eq!(get("d"), Some("true"));
+        assert_eq!(get("e"), Some("false"));
+        assert_eq!(get("f"), Some("0"));
+        assert_eq!(parse_data("{}").unwrap().len(), 0);
+        for bad in [
+            "",
+            "{",
+            "{a}",
+            "{a: }",
+            "{1a: 1}",
+            "{a: 1} x",
+            "{a: 01}",
+            "{a: 1.}",
+            "{a: null}",
+        ] {
+            assert!(parse_data(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn escape_xml_matches_ejs() {
+        assert_eq!(escape_xml("a&b<c>\"d'e"), "a&amp;b&lt;c&gt;&#34;d&#39;e");
+        assert_eq!(escape_xml("plain"), "plain");
+    }
+
+    #[test]
+    fn lexical_normalize_folds_dot_components() {
+        assert_eq!(
+            lexical_normalize(Path::new("/a/./b/../c.json")),
+            Path::new("/a/c.json")
+        );
+        assert_eq!(lexical_normalize(Path::new("../x")), Path::new("../x"));
     }
 
     const UNSET: &str = "RIFT_EJS_TEST_1108_NEVER_SET";
