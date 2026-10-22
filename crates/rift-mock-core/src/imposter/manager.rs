@@ -248,6 +248,9 @@ where
             // serve_connection otherwise) — always paired with it below.
             .timer(hyper_util::rt::TokioTimer::new())
             .header_read_timeout(http_tuning.header_read_timeout)
+            // #1597: HTTP/1 response names go out Title-Case (hyper cannot write a stub's own spelling).
+            // HTTP/2 names stay lower-case.
+            .title_case_headers(true)
             .max_buf_size(http_tuning.max_buf_size);
         let shut_down = drive_conn!(
             builder
@@ -292,6 +295,9 @@ where
             .http1()
             .timer(hyper_util::rt::TokioTimer::new())
             .header_read_timeout(http_tuning.header_read_timeout)
+            // #1597: HTTP/1 response names go out Title-Case (hyper cannot write a stub's own spelling).
+            // HTTP/2 names stay lower-case.
+            .title_case_headers(true)
             .max_buf_size(http_tuning.max_buf_size);
         // Issue #1044: the h2 leg needs its own bound. `header_read_timeout` covers HTTP/1 and
         // the preface sniff covers the detection window (#1030), but neither reaches an h2
