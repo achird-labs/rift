@@ -395,7 +395,7 @@ pub fn tls_server_config_from_pem(
 /// no parse of it; only the check does. This keeps the check, reading the certificate's public key
 /// with x509-parser instead, and then builds the same [`rustls::sign::SingleCertAndKey`]
 /// `with_single_cert` builds.
-fn certified_key(
+pub(crate) fn certified_key(
     certs: Vec<CertificateDer<'static>>,
     key: rustls::pki_types::PrivateKeyDer<'static>,
     provider: &rustls::crypto::CryptoProvider,

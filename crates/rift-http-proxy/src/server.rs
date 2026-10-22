@@ -1043,7 +1043,10 @@ impl ServerBuilder {
                     .with_body_limits(body_limits)
                     .with_journal_max_bytes(journal_max_bytes);
                 if let Some(client) = &upstream_client {
-                    built = built.with_upstream_client(Arc::clone(client));
+                    // The policy too, for `proxy` stubs presenting a client certificate (#1609).
+                    built = built
+                        .with_upstream_client(Arc::clone(client))
+                        .with_outbound_tls(outbound_tls.clone());
                 }
                 Arc::new(built)
             }

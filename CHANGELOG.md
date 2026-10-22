@@ -13,6 +13,14 @@ record.
 
 ### Added
 
+- **A `proxy` response presents a client certificate to an upstream that requires mutual TLS**
+  (#1609): `cert`, `key` and `passphrase` on `proxy`, as Mountebank's proxy takes them. The key may
+  be unencrypted PKCS#8, PKCS#1 or SEC1, or encrypted PKCS#8 decrypted with `passphrase`; an X.509
+  v1 certificate is accepted. Upstream verification is unchanged (`--upstream-ca-file`,
+  `--upstream-tls-skip-verify`). As in Mountebank, `GET /imposters` and the `--datadir` file show
+  the three keys as posted, so protect the admin API and datadir; they are never logged. Embedders
+  set the trust policy these clients are built under with `ImposterManager::with_outbound_tls` /
+  `set_outbound_tls` (beside `with_upstream_client`); without it they use the default policy.
 - **`--configfile` EJS accepts Mountebank's `<%- include('f') -%>`, `stringify(filename, 'f', data)`,
   `inject(...)`, and nested includes and stringifies** (#1604), so mbTest's `imposters.ejs`,
   `templates`, `nestedStringify` and `dataStringify` config trees load as they do in Mountebank.
@@ -59,6 +67,12 @@ record.
 
 ### Changed
 
+- **`proxy.cert`/`key`/`passphrase` are no longer dropped** (#1609). A config that carried them
+  now presents them, and one with an invalid pair (half a pair, a wrong passphrase, a key that does
+  not match, a legacy `Proc-Type` encrypted key) is refused at creation with `400` where it was
+  accepted. A stored config replayed through `deserialize_replayed` still decodes. An id-less
+  `proxy` stub whose stored bytes already carried these keys now serialises them, so its
+  content-hash `stub_key` changes once on upgrade.
 - **With `--datadir`, recorded requests survive a restart**, as in Mountebank (#1608). An imposter
   with `recordRequests: true` keeps them in `<port>.requests.jsonl`, written behind about once a
   second and on a graceful stop, so a crash can lose the last ~2 seconds (Mountebank's write is

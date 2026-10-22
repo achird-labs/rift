@@ -174,17 +174,27 @@ Feature: Proxy record/replay — proxyOnce, proxyTransparent, proxyAlways chains
     Then the response body is "up"
     And the upstream imposter has recorded 2 requests
 
-  # The proxy TLS client fields are accepted and dropped on load: they do not read back.
-  Scenario: the proxy key/cert/passphrase/ciphers fields are accepted and not read back
+  # The proxy's client identity (#1609): `key`/`cert`/`passphrase` are presented to an upstream
+  # that asks for a client certificate, and read back as posted, as Mountebank prints them.
+  # `ciphers` (an OpenSSL cipher list) is not modelled and is dropped.
+  Scenario: the proxy key/cert/passphrase fields read back and ciphers is dropped
     Given an upstream imposter from fixture "proxy/options/upstream"
     And a fresh imposter from fixture "proxy/options/key-cert" proxying to the upstream
     When the client sends admin "GET" "/imposters/{port}?replayable=true" with payload "-"
     Then the response status is 200
     And the response JSON at "stubs.0.responses.0.proxy.to" is present
-    And the response JSON at "stubs.0.responses.0.proxy.key" is absent
-    And the response JSON at "stubs.0.responses.0.proxy.cert" is absent
-    And the response JSON at "stubs.0.responses.0.proxy.passphrase" is absent
+    And the response JSON at "stubs.0.responses.0.proxy.key" is present
+    And the response JSON at "stubs.0.responses.0.proxy.cert" is present
+    And the response JSON at "stubs.0.responses.0.proxy.passphrase" is the string "rift-test"
     And the response JSON at "stubs.0.responses.0.proxy.ciphers" is absent
+
+  # Rift-only (documented in docs/mountebank/differences.md#proxy-client-certificates): Mountebank
+  # admits half an identity and answers every proxied request 500; Rift refuses it at creation.
+  Scenario: a proxy cert without its key is refused at creation
+    When the client posts the imposter fixture "proxy/options/key-cert-unpaired"
+    Then the response status is 400
+    And the error envelope type is "bad data"
+    And the error envelope message contains "proxy.cert is given without proxy.key"
 
   # ── predicateGenerators: jsonpath / xpath / ignore (#1327, #1333) ──────────────────────────────
   # Rift-only (documented in docs/mountebank/proxy.md): Mountebank copies `jsonpath`/`xpath` onto

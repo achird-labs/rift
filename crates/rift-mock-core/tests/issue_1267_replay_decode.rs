@@ -53,6 +53,15 @@ const BAD_PROXY_TO_PATH: &str = r#"{ "responses": [{ "proxy": { "to": "http://h/
 /// A `proxy.to` that is not a URL (#1550), likewise admitted and stored before.
 const BAD_PROXY_TO_URL: &str = r#"{ "responses": [{ "proxy": { "to": "not a url" } }] }"#;
 
+/// A `proxy.cert` without `proxy.key` (#1609): every engine before it admitted the keys (and
+/// dropped them), so it is an admission check, never a decode refusal.
+const BAD_PROXY_IDENTITY_HALF: &str =
+    r#"{ "responses": [{ "proxy": { "to": "https://h", "cert": "x" } }] }"#;
+
+/// A `proxy.cert` that holds no certificate (#1609), likewise admitted and stored before.
+const BAD_PROXY_IDENTITY_PEM: &str =
+    r#"{ "responses": [{ "proxy": { "to": "https://h", "cert": "x", "key": "y" } }] }"#;
+
 /// A stub with no responses (issue #1372): engines up to v0.21.0 admitted it on every door and
 /// served the imposter's `defaultResponse`, so it is an admission check, never a decode refusal.
 const NO_RESPONSES: &str = r#"{ "predicates": [] }"#;
@@ -199,6 +208,11 @@ fn each_admission_refusal_is_skipped_on_replay_and_reported_by_admission_check()
         ),
         (BAD_PROXY_TO_PATH, "proxy.to must not contain a path '/x'"),
         (BAD_PROXY_TO_URL, "proxy.to is not a valid URL: not a url"),
+        (
+            BAD_PROXY_IDENTITY_HALF,
+            "proxy.cert is given without proxy.key",
+        ),
+        (BAD_PROXY_IDENTITY_PEM, "proxy.cert contains no certificate"),
         (NO_RESPONSES, "'responses' must be a non-empty array"),
         (EMPTY_RESPONSES, "'responses' must be a non-empty array"),
     ];

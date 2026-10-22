@@ -588,9 +588,23 @@
           "default": false,
           "type": "boolean"
         },
+        "cert": {
+          "description": "PEM client certificate (leaf first) presented to an upstream that requests one (issue\n#1609, Mountebank-compatible). Paired with `key`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "injectHeaders": {
           "$ref": "#/$defs/SingleValueHeaders",
           "default": {}
+        },
+        "key": {
+          "description": "PEM private key for `cert`: unencrypted PKCS#8, PKCS#1 or SEC1, or an encrypted PKCS#8\n`ENCRYPTED PRIVATE KEY` decrypted with `passphrase` (issue #1609, Mountebank-compatible).\nPrinted back by `GET /imposters`, as Mountebank prints it.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "mode": {
           "default": "",
@@ -602,6 +616,13 @@
             ""
           ],
           "type": "string"
+        },
+        "passphrase": {
+          "description": "Passphrase for an encrypted `key` (issue #1609, Mountebank-compatible).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "pathRewrite": {
           "anyOf": [

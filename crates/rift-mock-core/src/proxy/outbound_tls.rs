@@ -18,6 +18,7 @@ use anyhow::Context;
 use rustls::RootCertStore;
 use tracing::warn;
 
+use super::client_identity::ClientIdentity;
 use super::tls::NoVerifier;
 
 /// Trust policy for outbound TLS. `Default` means "the OS trust store, verification on", which is
@@ -57,6 +58,32 @@ impl OutboundTls {
     /// Never panics: this replaces a `.expect` that aborted the process on a TLS/DNS
     /// misconfiguration (the same fix #543 made for the reverse-proxy client, itself since removed).
     pub fn client_config(&self) -> anyhow::Result<rustls::ClientConfig> {
+        self.client_config_with_identity(None)
+    }
+
+    /// [`Self::client_config`], presenting `identity` to a server that asks for a client
+    /// certificate (issue #1609). Trust is decided exactly as without one: an identity never
+    /// relaxes verification of the upstream.
+    ///
+    /// The identity is served through a resolver rather than `with_client_auth_cert`, whose
+    /// consistency check parses the certificate with webpki and so refuses X.509 v1 (issue #1599);
+    /// [`ClientIdentity::from_pem`] has already checked that the key matches.
+    ///
+    /// # Errors
+    /// Whatever [`Self::client_config`] returns.
+    pub fn client_config_with_identity(
+        &self,
+        identity: Option<&ClientIdentity>,
+    ) -> anyhow::Result<rustls::ClientConfig> {
+        let finish = |builder: rustls::ConfigBuilder<
+            rustls::ClientConfig,
+            rustls::client::WantsClientCert,
+        >| match identity {
+            Some(identity) => builder.with_client_cert_resolver(Arc::new(
+                rustls::sign::SingleCertAndKey::from(identity.certified_key()),
+            )),
+            None => builder.with_no_client_auth(),
+        };
         // An explicit provider rather than the process default: `install_default()` is called by
         // the binary's `main`, but a unit test or an embedder constructing an `Imposter` directly
         // has never called it, and `ClientConfig::builder()` panics when no default is installed.
@@ -81,10 +108,11 @@ impl OutboundTls {
             }
             // `ca_pem` is deliberately not parsed here: nothing is verified against it, so
             // reporting a malformed anchor would be noise about a value with no effect.
-            return Ok(builder
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoVerifier::new(&provider)))
-                .with_no_client_auth());
+            return Ok(finish(
+                builder
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(NoVerifier::new(&provider))),
+            ));
         }
 
         let mut roots = RootCertStore::empty();
@@ -125,7 +153,7 @@ impl OutboundTls {
             );
         }
 
-        Ok(builder.with_root_certificates(roots).with_no_client_auth())
+        Ok(finish(builder.with_root_certificates(roots)))
     }
 
     /// Whether the operator actually asked for anything beyond the default.
@@ -149,7 +177,18 @@ impl OutboundTls {
     /// # Errors
     /// Whatever [`Self::client_config`] returns.
     pub fn reqwest_client_config(&self) -> anyhow::Result<rustls::ClientConfig> {
-        let mut config = self.client_config()?;
+        self.reqwest_client_config_with_identity(None)
+    }
+
+    /// [`Self::reqwest_client_config`] presenting `identity` (issue #1609).
+    ///
+    /// # Errors
+    /// Whatever [`Self::client_config`] returns.
+    pub fn reqwest_client_config_with_identity(
+        &self,
+        identity: Option<&ClientIdentity>,
+    ) -> anyhow::Result<rustls::ClientConfig> {
+        let mut config = self.client_config_with_identity(identity)?;
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         Ok(config)
     }
@@ -159,7 +198,19 @@ impl OutboundTls {
     /// # Errors
     /// Whatever [`Self::client_config`] returns.
     pub fn reqwest_builder(&self) -> anyhow::Result<reqwest::ClientBuilder> {
-        Ok(reqwest::Client::builder().use_preconfigured_tls(self.reqwest_client_config()?))
+        self.reqwest_builder_with_identity(None)
+    }
+
+    /// A reqwest builder carrying this policy and presenting `identity` (issue #1609).
+    ///
+    /// # Errors
+    /// Whatever [`Self::client_config`] returns.
+    pub fn reqwest_builder_with_identity(
+        &self,
+        identity: Option<&ClientIdentity>,
+    ) -> anyhow::Result<reqwest::ClientBuilder> {
+        Ok(reqwest::Client::builder()
+            .use_preconfigured_tls(self.reqwest_client_config_with_identity(identity)?))
     }
 }
 

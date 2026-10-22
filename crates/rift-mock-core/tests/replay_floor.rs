@@ -154,7 +154,10 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // door-only (Admission::Checked only, not re-run by admission_check_stub, so a store that
         // replays, `--datadir` included, loads what older engines wrote; fixtures in
         // issue_1267_replay_decode.rs).
-        28,
+        // #1609 `refuse_bad_proxy_identity`: an admission check (Admission::Checked only, re-run
+        // in admission_check_stub, fixtures in issue_1267_replay_decode.rs); its call and its
+        // decode of the identity.
+        30,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",
@@ -173,7 +176,9 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // (see above). The lookup
         // `key.index` decode widens from `usize` to any value: one fewer refusal, which the
         // derive makes and this census does not count.
-        30,
+        // #1609 `refuse_bad_proxy_identity`, half an identity (`cert` without `key` or the
+        // reverse): an admission check (see above).
+        32,
     ),
     ("crates/rift-types/src/wire.rs", "::custom", 4),
     ("crates/rift-types/src/wire.rs", "serde error helper", 0),

@@ -371,7 +371,15 @@ Mountebank never verifies the certificate of a `proxy` upstream: `httpProxy.js:1
 
 To get Mountebank's behaviour, start Rift with `--upstream-tls-skip-verify` (or `RIFT_UPSTREAM_TLS_SKIP_VERIFY=true`). To keep verifying against a private CA, use `--upstream-ca-file <pem>`. `--upstream-ca-file` cannot help when the upstream is a Mountebank https imposter on its default certificate: that certificate is X.509 v1 (`CN=mountebank`, no SAN), which Rift's TLS library refuses even as a trust anchor (`UnsupportedCertVersion` in the server log), so for that upstream `--upstream-tls-skip-verify` is the only route. See [TLS](../features/tls.md#trusting-a-private-ca).
 
-`cert`, `key`, `passphrase`, `ciphers` and `secureProtocol` on a `proxy` response are dropped, and Rift cannot present a client certificate to an upstream.
+## Proxy client certificates
+
+A `proxy` response's `cert`, `key` and `passphrase` are presented to an upstream that asks for a client certificate, as in Mountebank (see [TLS](../features/tls.md#client-certificate-for-an-mtls-upstream)). Three differences:
+
+- **Checked at creation.** Half a pair, a PEM with no certificate or key, a wrong `passphrase` or a key that does not match the certificate is refused with `400` when the imposter is created. Mountebank accepts the imposter and answers every proxied request `500`.
+- **Legacy encrypted keys are refused.** A key in OpenSSL's legacy encrypted form (`Proc-Type: 4,ENCRYPTED`) is refused with the command that converts it to encrypted PKCS#8 (`openssl pkcs8 -topk8 -in key.pem -out key-p8.pem`). Mountebank reads it.
+- **`ciphers` and `secureProtocol` are dropped.** They are OpenSSL cipher-list and method names with no rustls equivalent.
+
+The upstream's certificate is verified as above whether or not one is presented.
 
 ## A proxy without generators records into a store, not a stub
 
