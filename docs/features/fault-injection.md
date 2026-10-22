@@ -255,8 +255,10 @@ always-firing fault. The bare form is exactly equivalent to the object form with
 and each form round-trips unchanged through `GET /imposters` (a string stays a string, an object
 stays an object).
 
-These are real transport-level events applied beneath TLS, so HTTPS imposters get a genuine socket
-fault too. Because a connection-level fault aborts the whole socket, an imposter that uses any TCP
+These are real transport-level events, so HTTPS imposters get them too. A reset and an empty
+response act on the socket beneath TLS. Random data and a malformed chunk are sent inside TLS: an
+HTTPS client completes the handshake, decrypts the bytes and then fails to parse HTTP, as with
+Mountebank. Because a connection-level fault aborts the whole socket, an imposter that uses any TCP
 fault is **advertised and served** over HTTP/1 only (HTTP/2 multiplexing is incompatible with
 mid-stream connection aborts). On HTTPS that means the TLS handshake offers only `http/1.1`, so an
 h2-capable client is never led to commit to a protocol the imposter will not speak.

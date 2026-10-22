@@ -5,7 +5,7 @@
 
 use super::core::Imposter;
 use super::datadir_file;
-use super::fault_io::{FaultCell, FaultIo, TcpFaultKind};
+use super::fault_io::{FaultCell, FaultIo, TcpFaultKind, TlsPayloadFault};
 use super::handler::handle_imposter_request_decorated;
 use super::reconcile::{
     ApplyReport, DeleteAllReport, DesiredImposter, EventContext, ImposterEvent,
@@ -363,7 +363,9 @@ fn tunnel_established() -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
 ///
 /// The tunnel keeps the connection's [`FaultCell`]: `FaultIo` wraps only the client's TCP socket,
 /// which carries the tunnel, so a fault a tunnelled response arms breaks that socket, the one
-/// transport the client has. It also keeps `conn_shutdown_rx`, so a delete closes the tunnel too
+/// transport the client has. On HTTPS the re-accepted TLS stream gets its own `TlsPayloadFault`
+/// on the same cell, so a random-data or malformed-chunk payload is encrypted by the innermost
+/// session, the one the client reads the response from (issue #1600). It also keeps `conn_shutdown_rx`, so a delete closes the tunnel too
 /// (issues #207 and #596).
 #[allow(clippy::too_many_arguments)]
 async fn serve_imposter_connection<I>(
@@ -417,7 +419,9 @@ async fn serve_imposter_connection<I>(
                     result = handshake => match result {
                         Ok(Ok(tls)) => {
                             run_http1(
-                                tls,
+                                // The inner request's payload fault is encrypted by the inner
+                                // session, the one the client reads it from (issue #1600).
+                                TlsPayloadFault::new(tls, fault_cell.clone()),
                                 Arc::clone(&imposter),
                                 addr,
                                 fault_cell.clone(),
@@ -1836,7 +1840,10 @@ impl ImposterManager {
                                 // armed by the handler, applied by FaultIo on the response write.
                                 let fault_cell = FaultCell::new();
                                 // FaultIo sits beneath TLS so #239 connection faults still break
-                                // an HTTPS connection.
+                                // an HTTPS connection: a reset needs the raw socket. The payload
+                                // faults (random data, malformed chunk) are written above TLS by
+                                // `TlsPayloadFault` instead, sharing this cell, so the client
+                                // decrypts them as Mountebank's (issue #1600).
                                 let faulted = FaultIo::new(stream, fault_cell.clone());
                                 match tls_acceptor {
                                     // Bound the TLS handshake so a stalled/half-open client
@@ -1849,7 +1856,7 @@ impl ImposterManager {
                                     {
                                         Ok(Ok(tls)) => {
                                             serve_imposter_connection(
-                                                tls,
+                                                TlsPayloadFault::new(tls, fault_cell.clone()),
                                                 Some(acceptor),
                                                 imposter,
                                                 addr,

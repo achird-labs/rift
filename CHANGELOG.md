@@ -236,6 +236,12 @@ record.
 
 ### Fixed
 
+- **`RANDOM_DATA_THEN_CLOSE` on an https imposter sends its garbage inside TLS** (#1600), as
+  Mountebank does: the client completes the handshake and fails to parse the decrypted bytes as
+  HTTP. Rift wrote them on the socket beneath TLS, so the client saw a TLS record error. The
+  malformed-chunk fault (`MALFORMED_RESPONSE_CHUNK`) had the same defect. A reset and an empty
+  response still act on the socket.
+
 - **Scripts and recorded requests see query and form keys in the order the client sent them**
   (#1596): `JSON.stringify(request.query)` in an inject, `MB_REQUEST` for a `shellTransform`, and
   `requests[].query` in `GET /imposters/:port` used to list keys in an arbitrary order that changed
