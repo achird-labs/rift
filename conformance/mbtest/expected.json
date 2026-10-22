@@ -120,15 +120,15 @@
     },
     {
       "id": "api/http/httpImposterTest.js::http imposter DELETE /imposters/:id supports returning a replayable body with proxies removed",
-      "class": "bug",
-      "issue": "#1591",
-      "note": "DELETE /imposters/:id ignores ?replayable and ?removeProxies"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
+      "note": "`recordMatches` is a Rift-only replayable key (api/index.md)"
     },
     {
       "id": "api/http/httpImposterTest.js::https imposter DELETE /imposters/:id supports returning a replayable body with proxies removed",
-      "class": "bug",
-      "issue": "#1591",
-      "note": "DELETE /imposters/:id ignores ?replayable and ?removeProxies"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
+      "note": "`recordMatches` is a Rift-only replayable key (api/index.md)"
     },
     {
       "id": "api/http/httpInjectionTest.js::http imposter POST /imposters with injections should allow synchronous javascript injection for responses (old interface)",
@@ -349,9 +349,9 @@
     },
     {
       "id": "api/impostersControllerTest.js::DELETE /imposters supports returning a non-replayable body with proxies removed",
-      "class": "bug",
-      "issue": "#1591",
-      "note": "DELETE /imposters ignores ?replayable=false and ?removeProxies"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#elsewhere-in-these-docs",
+      "note": "the detail carries Rift's `enabled` and `_rift.warnings` (api/index.md)"
     },
     {
       "id": "cli/configFileTest.js::--configfile should support legacy ejs 2.x include syntax in configuration files",

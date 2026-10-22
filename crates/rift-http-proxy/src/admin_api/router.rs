@@ -501,7 +501,7 @@ async fn route_by_path(
                 imposters::handle_replace_all(req, base_url, manager, allow_injection, scripts_dir)
                     .await
             }
-            Method::DELETE => imposters::handle_delete_all(manager, base_url).await,
+            Method::DELETE => imposters::handle_delete_all(manager, query, base_url).await,
             _ => not_found(),
         };
     }
@@ -610,7 +610,7 @@ async fn route_imposter(
             imposters::handle_get(port, query, base_url, manager).await
         }
         (&Method::DELETE, ImposterRoute::Root) => {
-            imposters::handle_delete(port, base_url, manager).await
+            imposters::handle_delete(port, query, base_url, manager).await
         }
 
         // /imposters/:port/stubs

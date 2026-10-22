@@ -159,10 +159,16 @@ pub struct ReplaceStubsRequest {
     pub stubs: Vec<Stub>,
 }
 
-/// Query parameters for imposter endpoints
+/// Query parameters for imposter endpoints.
+///
+/// Names match exactly and values case-insensitively, as Mountebank reads them (issue #1591).
+/// `replayable` is tri-state because the routes disagree on the default: read it through
+/// [`Self::replayable`] (absent means off: the GET routes and `DELETE /imposters/:id`) or
+/// [`Self::replayable_unless_false`] (absent means on: `DELETE /imposters`).
 #[derive(Debug, Default)]
 pub struct ImposterQueryParams {
-    pub replayable: bool,
+    /// `Some(b)` only for a value that is `true` or `false` in any case; anything else is absent.
+    pub replayable: Option<bool>,
     pub remove_proxies: bool,
     pub list: bool,
 }
@@ -171,12 +177,33 @@ impl ImposterQueryParams {
     /// Parse query parameters from query string
     pub fn parse(query: Option<&str>) -> Self {
         let mut params = Self::default();
-        if let Some(q) = query {
-            params.replayable = q.contains("replayable=true");
-            params.remove_proxies = q.contains("removeProxies=true");
-            params.list = q.contains("list=true");
+        for (name, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+            let flag = if value.eq_ignore_ascii_case("true") {
+                Some(true)
+            } else if value.eq_ignore_ascii_case("false") {
+                Some(false)
+            } else {
+                None
+            };
+            match name.as_ref() {
+                "replayable" => params.replayable = flag,
+                "removeProxies" => params.remove_proxies = flag == Some(true),
+                "list" => params.list = flag == Some(true),
+                _ => {}
+            }
         }
         params
+    }
+
+    /// Off unless the caller said `true` (Mountebank's `isFlagSet`).
+    pub fn replayable(&self) -> bool {
+        self.replayable == Some(true)
+    }
+
+    /// On by default, off only for an explicit `false` (Mountebank's `isFlagFalse`, used by
+    /// `DELETE /imposters`).
+    pub fn replayable_unless_false(&self) -> bool {
+        self.replayable != Some(false)
     }
 }
 
@@ -648,28 +675,71 @@ mod tests {
     #[test]
     fn test_imposter_query_params_parse() {
         let params = ImposterQueryParams::parse(Some("replayable=true&removeProxies=true"));
-        assert!(params.replayable);
+        assert_eq!(params.replayable, Some(true));
         assert!(params.remove_proxies);
         assert!(!params.list);
 
         let params = ImposterQueryParams::parse(Some("replayable=false"));
-        assert!(!params.replayable);
+        assert_eq!(params.replayable, Some(false));
         assert!(!params.remove_proxies);
         assert!(!params.list);
 
         let params = ImposterQueryParams::parse(None);
-        assert!(!params.replayable);
+        assert_eq!(params.replayable, None);
         assert!(!params.remove_proxies);
         assert!(!params.list);
 
         let params = ImposterQueryParams::parse(Some("list=true"));
-        assert!(!params.replayable);
+        assert_eq!(params.replayable, None);
         assert!(!params.remove_proxies);
         assert!(params.list);
 
         let params = ImposterQueryParams::parse(Some("list=true&replayable=true"));
-        assert!(params.replayable);
+        assert_eq!(params.replayable, Some(true));
         assert!(params.list);
+    }
+
+    /// Issue #1591: names match exactly, values case-insensitively, as Mountebank's
+    /// `isFlagSet` / `isFlagFalse` read them.
+    #[test]
+    fn query_flag_values_are_case_insensitive_and_names_exact() {
+        let p = ImposterQueryParams::parse(Some("replayable=TRUE&removeProxies=True&list=TRUE"));
+        assert_eq!(p.replayable, Some(true));
+        assert!(p.remove_proxies && p.list);
+
+        let p = ImposterQueryParams::parse(Some("replayable=FALSE"));
+        assert_eq!(p.replayable, Some(false));
+
+        // A different name, or a substring of one, is not the flag.
+        let p = ImposterQueryParams::parse(Some("Replayable=true&notreplayable=true"));
+        assert_eq!(p.replayable, None);
+        let p = ImposterQueryParams::parse(Some("xremoveProxies=true&removeProxies2=true"));
+        assert!(!p.remove_proxies);
+
+        // An empty or unrecognised value is absent.
+        assert_eq!(
+            ImposterQueryParams::parse(Some("replayable=")).replayable,
+            None
+        );
+        assert_eq!(
+            ImposterQueryParams::parse(Some("replayable=1")).replayable,
+            None
+        );
+        assert_eq!(
+            ImposterQueryParams::parse(Some("replayable")).replayable,
+            None
+        );
+    }
+
+    #[test]
+    fn query_flag_defaults_differ_between_get_and_delete_all() {
+        let absent = ImposterQueryParams::parse(None);
+        assert!(!absent.replayable());
+        assert!(absent.replayable_unless_false());
+        let off = ImposterQueryParams::parse(Some("replayable=false"));
+        assert!(!off.replayable_unless_false());
+        let on = ImposterQueryParams::parse(Some("replayable=true"));
+        assert!(on.replayable() && on.replayable_unless_false());
     }
 
     #[test]
