@@ -393,7 +393,7 @@ impl ImposterSource for HttpSource {
                 config_loader::parse_remote_document(&body, &uri)
             })
             .await
-            .context("the imposter source parse task did not finish")?
+            .with_context(|| format!("imposter source {}: the parse task did not finish", r.uri))?
             .with_context(|| format!("imposter source {}", r.uri))?;
 
             if let Some(etag) = &etag {
