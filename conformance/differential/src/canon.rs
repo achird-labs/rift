@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 const IMPOSTER_DROP: &[&str] = &["_links", "stubCount", "enabled", "_rift"];
 const STUB_DROP: &[&str] = &["_links", "enabled", "_rift"];
 const RESPONSE_DROP: &[&str] = &["_rift"];
-const RECORDED_KEEP: &[&str] = &["method", "path", "query", "body", "headers", "form"];
+const RECORDED_KEEP: &[&str] = &["method", "path", "query", "body", "headers", "form", "ip"];
 
 /// The indices of the stubs a proxy recorded: Rift marks them with `recordedFrom`, Mountebank's
 /// plain form with `_proxyResponseTime` on the recorded `is`.
@@ -266,7 +266,7 @@ mod tests {
             imposter(&stored, &BTreeSet::new()),
             json!({"protocol": "http", "requests": [{
                 "method": "GET", "path": "/a", "query": {"q": "1"}, "body": "",
-                "headers": {"x-custom": "Value", "host": "h"}
+                "headers": {"x-custom": "Value", "host": "h"}, "ip": "127.0.0.1"
             }]})
         );
     }

@@ -34,7 +34,11 @@ pub(crate) mod multi_value_query {
         Many(&'a [String]),
     }
 
-    pub fn serialize<S: Serializer>(query: &Query, serializer: S) -> Result<S::Ok, S::Error> {
+    // Generic over the hasher: `form` (issue #1602) prints through here from a `MultiValueMap`.
+    pub fn serialize<S: Serializer, H>(
+        query: &IndexMap<String, Vec<String>, H>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
         // Request order, array-index keys first, as a JS object lists them (issue #1596).
         serializer.collect_map(crate::util::js_key_order(query).into_iter().filter_map(
             |(key, values)| {
@@ -72,7 +76,12 @@ pub(crate) mod multi_value_query {
 }
 
 /// Recorded request for imposter
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Serialize` is hand-written (issue #1602): Mountebank prints `ip` on every recorded request and
+/// `form` on a urlencoded one, and both are functions of fields held here, so they are derived
+/// when the entry is written out rather than stored (no journal byte cost, no stored-format
+/// change). `Deserialize` ignores an incoming `ip`/`form` for the same reason.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordedRequest {
     pub request_from: String,
@@ -148,6 +157,100 @@ pub struct RecordedRequest {
     /// reading the journal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+}
+
+impl RecordedRequest {
+    /// The client IP an `ip` predicate matches against, recovered from `request_from`
+    /// (`ip:port`). Falls back to a bare IP, which tests and embedders record. `None` when
+    /// `request_from` is neither: "no client info", so `ip` is omitted rather than invented.
+    #[must_use]
+    pub fn client_ip(&self) -> Option<String> {
+        self.request_from
+            .parse::<std::net::SocketAddr>()
+            .map(|addr| addr.ip())
+            .or_else(|_| self.request_from.parse::<std::net::IpAddr>())
+            .ok()
+            .map(|ip| ip.to_string())
+    }
+
+    /// `request.form` as Mountebank prints it; never for a binary or body-less entry.
+    fn form(&self) -> Option<crate::util::MultiValueMap> {
+        if self.body_omitted || !is_text_mode(&self.mode) {
+            return None;
+        }
+        crate::imposter::Imposter::request_form(&self.headers, self.body.as_deref())
+    }
+}
+
+/// Borrowed wire shape of [`RecordedRequest`]: every stored field plus the derived `ip`/`form`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordedRequestWire<'a> {
+    request_from: &'a str,
+    method: &'a str,
+    path: &'a str,
+    #[serde(with = "multi_value_query")]
+    query: &'a multi_value_query::Query,
+    #[serde(with = "multi_value_headers")]
+    headers: &'a HashMap<String, Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", with = "form_wire")]
+    form: Option<crate::util::MultiValueMap>,
+    #[serde(rename = "_bodyOmitted", skip_serializing_if = "std::ops::Not::not")]
+    body_omitted: bool,
+    #[serde(rename = "_mode", skip_serializing_if = "is_text_mode")]
+    mode: &'a ResponseMode,
+    timestamp: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    match_outcome: Option<&'a MatchOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node: Option<&'a str>,
+}
+
+/// `form` prints like `query`: a key sent once is a string, a repeated key an array.
+mod form_wire {
+    use serde::Serializer;
+
+    #[allow(clippy::ref_option)] // serde's `with` passes `&Option<T>`
+    pub fn serialize<S: Serializer>(
+        form: &Option<crate::util::MultiValueMap>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match form {
+            Some(map) => super::multi_value_query::serialize(map, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+impl Serialize for RecordedRequest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        RecordedRequestWire {
+            request_from: &self.request_from,
+            method: &self.method,
+            path: &self.path,
+            query: &self.query,
+            headers: &self.headers,
+            body: self.body.as_deref(),
+            ip: self.client_ip(),
+            form: self.form(),
+            body_omitted: self.body_omitted,
+            mode: &self.mode,
+            timestamp: &self.timestamp,
+            match_outcome: self.match_outcome.as_ref(),
+            status: self.status,
+            latency_ms: self.latency_ms,
+            node: self.node.as_deref(),
+        }
+        .serialize(serializer)
+    }
 }
 
 /// Cap on the candidates named in [`MatchOutcome::tried`]; the rest are counted in
@@ -6052,7 +6155,7 @@ mod tests {
     }
 
     // An entry with no recorded match outcome must serialize byte-identically to the shape that
-    // predates `matchOutcome` — no key at all. Asserted as exact bytes rather than key-by-key,
+    // predates `matchOutcome` — no key at all (`ip` is the derived #1602 field). Asserted as exact bytes rather than key-by-key,
     // because the wire compatibility claim is about the whole document, and field order is part
     // of what consumers (and golden fixtures) see.
     #[test]
@@ -6074,7 +6177,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&req).expect("serializes"),
-            r#"{"requestFrom":"127.0.0.1:1234","method":"POST","path":"/x","query":{},"headers":{},"body":"hello","timestamp":"2026-01-01T00:00:00Z"}"#
+            r#"{"requestFrom":"127.0.0.1:1234","method":"POST","path":"/x","query":{},"headers":{},"body":"hello","ip":"127.0.0.1","timestamp":"2026-01-01T00:00:00Z"}"#
         );
     }
 
@@ -6904,5 +7007,114 @@ mod recorded_query_order_tests {
         .expect("decodes");
         assert_eq!(req.query["a"], ["2", "3"]);
         assert_eq!(req.query["z"], ["1"]);
+    }
+}
+
+/// Issue #1602: `ip` and `form` are derived when a recorded request is printed, as Mountebank's
+/// `httpRequest.js` records them, and never stored.
+#[cfg(test)]
+mod recorded_request_ip_form_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn printed(from: &str, content_type: Option<&str>, body: Option<&str>) -> Value {
+        let mut doc = json!({
+            "requestFrom": from, "method": "POST", "path": "/", "query": {}, "headers": {},
+            "timestamp": "2024-01-15T10:30:00.000Z"
+        });
+        if let Some(ct) = content_type {
+            doc["headers"] = json!({ "Content-Type": ct });
+        }
+        if let Some(b) = body {
+            doc["body"] = json!(b);
+        }
+        let req: RecordedRequest = serde_json::from_value(doc).expect("valid recording");
+        serde_json::to_value(&req).expect("serializes")
+    }
+
+    const FORM: &str = "application/x-www-form-urlencoded";
+
+    #[test]
+    fn ip_is_the_client_address_without_its_port() {
+        assert_eq!(printed("[::1]:5000", None, None)["ip"], json!("::1"));
+        assert_eq!(
+            printed("127.0.0.1:5000", None, None)["ip"],
+            json!("127.0.0.1")
+        );
+        // Tests and embedders record a bare IP.
+        assert_eq!(printed("10.0.0.7", None, None)["ip"], json!("10.0.0.7"));
+    }
+
+    #[test]
+    fn an_unparseable_request_from_omits_ip() {
+        assert!(printed("not-an-address", None, None).get("ip").is_none());
+    }
+
+    #[test]
+    fn form_is_printed_for_a_urlencoded_body_only() {
+        let form = printed("[::1]:1", Some(FORM), Some("a=1&a=2&b=x%20y&c"))["form"].clone();
+        assert_eq!(form, json!({"a": ["1", "2"], "b": "x y", "c": ""}));
+
+        assert!(
+            printed("[::1]:1", Some("application/json"), Some("a=1"))
+                .get("form")
+                .is_none()
+        );
+        assert!(
+            printed("[::1]:1", Some(FORM), Some(""))
+                .get("form")
+                .is_none()
+        );
+        assert!(printed("[::1]:1", Some(FORM), None).get("form").is_none());
+    }
+
+    // `form` prints in the client's order, array-index keys first, as `query` does (issue #1596).
+    #[test]
+    fn form_keeps_the_clients_key_order() {
+        let req: RecordedRequest = serde_json::from_value(json!({
+            "requestFrom": "[::1]:1", "method": "POST", "path": "/", "query": {},
+            "headers": {"Content-Type": FORM}, "body": "z=1&a=2&5=x&z=3", "timestamp": "t"
+        }))
+        .expect("valid");
+        let text = serde_json::to_string(&req).expect("json");
+        assert!(
+            text.contains(r#""form":{"5":"x","z":["1","3"],"a":"2"}"#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn form_is_never_printed_for_a_binary_or_omitted_body() {
+        let mut req: RecordedRequest = serde_json::from_value(json!({
+            "requestFrom": "[::1]:1", "method": "POST", "path": "/", "query": {},
+            "headers": {"Content-Type": FORM}, "body": "YT0x", "_mode": "binary",
+            "timestamp": "t"
+        }))
+        .expect("valid");
+        assert!(
+            serde_json::to_value(&req)
+                .expect("json")
+                .get("form")
+                .is_none()
+        );
+        req.mode = ResponseMode::Text;
+        req.body = None;
+        req.body_omitted = true;
+        assert!(
+            serde_json::to_value(&req)
+                .expect("json")
+                .get("form")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_incoming_ip_or_form_is_ignored_and_the_output_is_stable() {
+        let first = printed("[::1]:1", Some(FORM), Some("a=1"));
+        let mut again = first.clone();
+        again["ip"] = json!("9.9.9.9");
+        again["form"] = json!({"zzz": "1"});
+        let req: RecordedRequest = serde_json::from_value(again).expect("decodes");
+        assert_eq!(serde_json::to_value(&req).expect("json"), first);
     }
 }

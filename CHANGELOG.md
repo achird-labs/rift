@@ -242,6 +242,9 @@ record.
 
 ### Fixed
 
+- **Recorded requests carry `ip`, and `form` for a form body** (#1602), as Mountebank's do. Both are
+  derived when the request is printed (`GET /imposters/:port`, `savedRequests`, the SSE stream, the
+  FFI journal), so nothing is stored and the journal's byte budget is unchanged.
 - **`RANDOM_DATA_THEN_CLOSE` on an https imposter sends its garbage inside TLS** (#1600), as
   Mountebank does: the client completes the handshake and fails to parse the decrypted bytes as
   HTTP. Rift wrote them on the socket beneath TLS, so the client saw a TLS record error. The

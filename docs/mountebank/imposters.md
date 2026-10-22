@@ -268,6 +268,7 @@ curl http://localhost:2525/imposters/4545
       "path": "/api/users",
       "query": {},
       "headers": {...},
+      "ip": "::ffff:127.0.0.1",
       "timestamp": "2024-01-15T10:30:00.123456+00:00",
       "status": 200,
       "latencyMs": 0
@@ -276,7 +277,10 @@ curl http://localhost:2525/imposters/4545
 }
 ```
 
-`body` is omitted when the request had none. `status` and `latencyMs` are the status that went
+`body` is omitted when the request had none. `ip` is on every recorded request: the client's address
+without its port, the value the `ip` predicate sees. `form` is added for a non-empty
+`application/x-www-form-urlencoded` body (a key sent once is a string, a repeated key an array), as
+Mountebank prints them. Both are derived when the request is printed, not stored. `status` and `latencyMs` are the status that went
 back and how long the imposter took to produce it, in whole milliseconds. Both are **absent**, never
 `0`, when no answer was sent: an `X-Rift-Debug` request, a TCP fault, or a request abandoned before a
 response existed. An error response is an answer and is recorded like any other; a present

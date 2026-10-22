@@ -450,6 +450,46 @@
           "times": 3
         }
       ]
+    },
+    {
+      "name": "recording: Record a urlencoded body as form, and the client ip",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/form",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "a=1&a=2&b=x%20y&c"
+        }
+      ]
     }
   ]
 }

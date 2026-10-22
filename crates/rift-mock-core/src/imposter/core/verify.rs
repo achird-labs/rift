@@ -140,7 +140,7 @@ impl Imposter {
     ) -> anyhow::Result<bool> {
         let form = Self::parse_form_data(&req.headers, req.body.as_deref());
         let body_json = crate::behaviors::LazyJson::new(req.body.as_deref());
-        let client_ip = client_ip_of(req);
+        let client_ip = req.client_ip();
         // `RecordedRequest.query` is the fixed std-hasher journal/serde boundary (out of scope for
         // #704); `stub_matches_inner`'s `query_map` parameter is concretely `FastMap` (it is always
         // sourced from `parse_query`/`parse_query_string` elsewhere), so copy across here.
@@ -220,18 +220,6 @@ impl Imposter {
     }
 }
 
-/// The client IP an `ip` predicate matches against, recovered from the recorded `request_from`
-/// (`ip:port`). Live matching passes `client_addr.ip()` separately from `request_from`; the journal
-/// stores only the combined `ip:port`, so parse it back to a `SocketAddr` and take the IP. `None`
-/// (compared against `""`, never matching) only when `request_from` isn't a parseable socket
-/// address — the same "no client info" outcome the convenience matcher path produces.
-fn client_ip_of(req: &RecordedRequest) -> Option<String> {
-    req.request_from
-        .parse::<std::net::SocketAddr>()
-        .ok()
-        .map(|addr| addr.ip().to_string())
-}
-
 /// The request's actual values for the fields a failed predicate references, as a JSON object —
 /// the raw material for a readable diff. For a field-based op (`equals`/`contains`/…) only the
 /// referenced fields are projected; for a compound (`and`/`or`/`not`), an `inject`, or a
@@ -287,9 +275,9 @@ fn request_field(req: &RecordedRequest, key: &str) -> Option<Value> {
         "headers" => Some(json!(req.headers)),
         "body" => Some(json!(req.body)),
         "requestFrom" => Some(json!(req.request_from)),
-        // The `ip` predicate matches against the bare IP (`client_ip_of`), so report that as the
+        // The `ip` predicate matches against the bare IP (`RecordedRequest::client_ip`), so report that as the
         // actual — not the `ip:port` `request_from` the matcher never compares against.
-        "ip" => Some(json!(client_ip_of(req).unwrap_or_default())),
+        "ip" => Some(json!(req.client_ip().unwrap_or_default())),
         "form" => Some(shown(
             &Imposter::parse_form_data(&req.headers, req.body.as_deref()).unwrap_or_default(),
         )),
