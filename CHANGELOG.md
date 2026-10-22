@@ -59,6 +59,14 @@ record.
 
 ### Changed
 
+- **`GET /logs` returns recent log entries** (#1615), as Mountebank's does:
+  `{"logs":[{"level","message","timestamp"}]}` with `startIndex`/`endIndex` sliced as JavaScript's
+  `slice(startIndex, endIndex + 1)`. Entries come from a bounded in-memory ring (the most recent
+  10,000 entries / 4 MiB, each message cut at 4 KiB) fed by the same `--loglevel` filter as the
+  console. The `_links` key is gone (Mountebank sends none); with `--nologfile`, or on an embedder
+  that installed no ring, it answers `[{"level":"error","message":"No logfile"}]` as Mountebank
+  does. Script `logger.*` output (target `rift::script`) is not recorded. The `--log` file no
+  longer contains ANSI colour escapes.
 - **Recorded request `timestamp` now uses Mountebank's format**, millisecond precision with a `Z`
   suffix (`2026-10-17T10:00:00.123Z`), instead of microseconds and `+00:00`. Older values are still
   accepted wherever a journal is read back (#1610).

@@ -746,7 +746,8 @@ RUST_LOG=info,rift_mock_core::imposter=debug rift
 ```
 
 Log lines are plain text on stdout (the `tracing` default format); `--log <FILE>` writes the same
-lines to a file as well.
+lines to a file as well (without ANSI colour codes). `GET /logs` serves the most recent lines from
+memory unless `--nologfile` is given; see [`GET /logs`](../api/index.md#get-logs).
 
 ---
 
