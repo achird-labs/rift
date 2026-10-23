@@ -149,7 +149,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E032 | Lookup behavior missing `fromDataSource` | Lookup with only `key` |
 | E033 | Lookup behavior missing `into` | Lookup with `key` and `fromDataSource` only |
 | E034 | More than one operator in a single predicate | `{"equals": {...}, "contains": {...}}` — split them under `and` |
-| E035 | `repeat` is not an integer from 1 to 4294967295. On the response and in an object-form block, `0` and `null` are refused by the engine, as Mountebank refuses them; in a `behaviors` array element beside a behavior, a `null` clears `repeat` and is not flagged | `"repeat": 0` |
+| E035 | `repeat` is not an integer from 1 to 4294967295, on the response or in an object-form block. `0` and `null` are refused by the engine, as Mountebank refuses them. A `repeat` in a `behaviors` array element beside a behavior is not checked: it is ignored (see W024) | `"repeat": 0` |
 | E036 | `script` must specify exactly one of `code`, `file` or `ref` | Both `code` and `file` given |
 | E037 | Unknown script `ref` — no such entry in `_rift.scripts` | `"ref": "missing"` |
 | E038 | Script `file` (via `ref`) could not be read | `"file": "no-such.js"` |
@@ -200,6 +200,7 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | W021 | A proxy `predicateGenerators` `jsonpath` or `xpath` that is not an object with a string `selector` (and, for `xpath`, an `ns` object of strings), or an `ignore` that is not an object mapping a field to a key, an array of keys or a nested object. The engine records the whole body (or ignores the filter) instead | `"jsonpath": "$.id"` |
 | W022 | A top-level `fault` whose name the engine does not know. Names are case-sensitive, as in Mountebank. The imposter loads, and the fault is ignored at serve time, as in Mountebank: the stub answers an empty response completed by `defaultResponse`. The engine logs the same warning at load and reports it as `config_key_ignored` in `_rift.warnings`. An empty name is E014's | `{"fault": "NON_EXISTENT_FAULT"}` |
 | W023 | A `statusCode` string, in `is` or `defaultResponse`, that is not a status code and that no `copy`, `lookup` or `decorate` on the response rewrites. The engine keeps it, as Mountebank does, and reads it when it writes the response, so every request answers `500` `ERR_HTTP_INVALID_STATUS_CODE`. A `defaultResponse` status is never rewritten. A string Node reads as 100-999 (`" 404 "`, `"0x194"`) and the empty string are not flagged | `"statusCode": "${code}"` with no `copy` |
+| W024 | A `repeat` beside a behavior in a `behaviors` array element. The engine ignores it, as Mountebank does, and admits any value there: only the response's `repeat` (or the `_behaviors` object form's) repeats it. Releases up to 0.23.0 read it as the response's `repeat` | `"behaviors": [{"wait": 100, "repeat": 3}]` |
 
 ### Info
 

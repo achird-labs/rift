@@ -152,6 +152,7 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | W021 | A proxy `predicateGenerators` `jsonpath`, `xpath` or `ignore` the engine cannot use |
 | W022 | A top-level `fault` name the engine does not know; it is ignored at serve time, as in Mountebank |
 | W023 | A `statusCode` string that is not a status code and that no `copy`/`lookup`/`decorate` rewrites; it answers 500, as in Mountebank |
+| W024 | A `repeat` beside a behavior in a `behaviors` array element; the engine ignores it, as Mountebank does — put `repeat` on the response |
 
 ### Info
 

@@ -64,7 +64,7 @@ Behaviors can also be specified as an array of behavior objects:
 }
 ```
 
-The array form is a program, as in Mountebank: every element runs, in array order. Two `decorate` elements both run, two `wait` elements both delay, and a `decorate` written before a `copy` runs before it. A `copy`, `lookup` or `shellTransform` holding a list is one step per item. A `null` for a behavior removes every earlier step of that behavior; an empty list adds nothing and removes nothing. `repeat` is not a step and is not written in the array: put it on the response (see [`repeat`](#repeat)). An element that sets several behaviors is refused (`400`), as in Mountebank (`Each behavior object must have only one behavior type`, `rift-lint` `E059`); use one element per behavior, or the `_behaviors` object form. An element with no behavior in it, such as `{"repeat": 2}` or a misspelt key, is refused as `Unrecognized behavior` (`rift-lint` `E060`); a custom key beside one behavior is allowed, as in Mountebank. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
+The array form is a program, as in Mountebank: every element runs, in array order. Two `decorate` elements both run, two `wait` elements both delay, and a `decorate` written before a `copy` runs before it. A `copy`, `lookup` or `shellTransform` holding a list is one step per item. A `null` for a behavior removes every earlier step of that behavior; an empty list adds nothing and removes nothing. `repeat` is not a step: put it on the response (see [`repeat`](#repeat)). A `repeat` written beside a behavior in an array element, such as `{"wait": 100, "repeat": 3}`, is a custom key and is ignored, as in Mountebank: only the response's `repeat` (or the `_behaviors` object form's) repeats, and its value is not checked (`rift-lint` `W024`). Releases up to 0.23.0 read it as the response's `repeat`. An element that sets several behaviors is refused (`400`), as in Mountebank (`Each behavior object must have only one behavior type`, `rift-lint` `E059`); use one element per behavior, or the `_behaviors` object form. An element with no behavior in it, such as `{"repeat": 2}` or a misspelt key, is refused as `Unrecognized behavior` (`rift-lint` `E060`); a custom key beside one behavior is allowed, as in Mountebank. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
 
 `_behaviors` must be an object; the array form is only accepted under `behaviors`, and each of its elements must be an object (a non-object element is skipped). Any other shape — an array or scalar `_behaviors`, or a scalar `behaviors` — is refused: `POST /imposters` returns `400` and a config file fails to load. This holds with `--allowInjection` on too.
 
@@ -97,6 +97,8 @@ Mountebank loads, so a saved file can be posted to Mountebank as is:
   written one element per item, in order, which is how Mountebank spells it.
 - A `null` or empty behavior is not written.
 
+- A `repeat` written beside a behavior in an array element is written back inside its element, as
+  Mountebank writes it, and not as the response's `repeat`; it repeats nothing.
 - A key that is not a behavior configures nothing. It is written inside the element before it,
   where Mountebank and Rift allow a custom key; with no behavior before it, inside the first one
   after it; with no behavior at all, it is not written.
@@ -736,6 +738,9 @@ The first response is returned 3 times before advancing to the second:
 - Request 8 → "Second response"
 
 `repeat` works on every response type — `is`, `inject`, `proxy`, `fault` and `_rift`-only.
+
+In the `behaviors` array form, `repeat` goes on the response, not in an element: one beside a
+behavior in an element (`"behaviors": [{"wait": 100, "repeat": 3}]`) is ignored, as in Mountebank.
 
 Mountebank itself stores `repeat` on the response rather than in the block, and that is the form
 `mb save` writes; Rift reads it too:

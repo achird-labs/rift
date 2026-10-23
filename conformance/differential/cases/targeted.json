@@ -10039,6 +10039,93 @@
           "body": "f=fv"
         }
       ]
+    },
+    {
+      "name": "targeted: a repeat beside a behavior in a behaviors array element repeats nothing and is written back in its element (#1672)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "A"
+                    },
+                    "behaviors": [
+                      {
+                        "wait": 1,
+                        "repeat": 3
+                      }
+                    ]
+                  },
+                  {
+                    "is": {
+                      "body": "B"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "times": 4
+        }
+      ]
+    },
+    {
+      "name": "targeted: the response repeat cycles beside an inert element repeat, whose value is never validated (#1672)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "A"
+                    },
+                    "repeat": 2,
+                    "behaviors": [
+                      {
+                        "wait": 1,
+                        "repeat": "x"
+                      },
+                      {
+                        "wait": 2,
+                        "repeat": 0
+                      }
+                    ]
+                  },
+                  {
+                    "is": {
+                      "body": "B"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "times": 4
+        }
+      ]
     }
   ]
 }

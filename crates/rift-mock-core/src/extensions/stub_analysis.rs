@@ -117,6 +117,8 @@ fn ignored_behaviors_shape(response: &StubResponse) -> Option<&'static str> {
         _ => return None,
     };
     // The block is a compiled program (issue #1198): one element per step, `null`s already applied.
+    // No `repeat` sets anything here: the first element's is the response's, which applies to every
+    // response, and a later one is an inert custom key (issue #1672), as rift-lint reads it too.
     let sets_more_than_repeat = block.as_array().is_some_and(|program| {
         program
             .iter()

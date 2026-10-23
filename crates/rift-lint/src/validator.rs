@@ -380,9 +380,9 @@ fn check_conditional_never_fires(file: &Path, imposter: &Value, result: &mut Lin
 
 /// E035: `repeat` must be an integer greater than 0, and the engine reads it as a `u32` (#1162).
 /// On the response and in an object-form block a config door refuses `0` and `null`, as Mountebank
-/// does (#1582, issue #1587), so a `null` is checked here. In an array element beside a behavior
-/// the engine admits both (a `null` clears `repeat`, a `0` is served once), so the array arm passes
-/// only a non-null one and its `0` is flagged as never what the author meant.
+/// does (#1582, issue #1587), so a `null` is checked here. In an array element beside a behavior it
+/// is a custom key the engine ignores, as Mountebank does (issue #1672), so the array arm never
+/// passes one here and reports it as W024 instead.
 fn check_repeat(file: &Path, repeat: &Value, location: &str, result: &mut LintResult) {
     let valid = repeat
         .as_u64()
@@ -1785,7 +1785,8 @@ pub(crate) const STEP_BEHAVIORS: [&str; 5] =
 /// `_behaviors` when it is present and not `null`, and otherwise `behaviors`, and compiles it into
 /// the ordered program it runs (`compile_behaviors`, issue #1198). In an array every element's
 /// behaviors are steps and all of them run, unless a later `null` for the same key removes them;
-/// `repeat` is not a step, and the last element to set it wins; non-object elements are skipped.
+/// a `repeat` beside a behavior is a custom key the engine ignores, as Mountebank does (W024,
+/// issue #1672); non-object elements are skipped.
 /// A `null` `_behaviors` used to hide the array altogether.
 ///
 /// Every key is checked independently by [`validate_behavior`], so the array is validated one
@@ -1908,12 +1909,12 @@ fn validate_response_behaviors(
                     continue;
                 };
                 // Cloned: `validate_behavior` reads a behaviors object, and this one is assembled.
-                // A `null` `repeat` here clears it, which the engine admits (issue #1587).
+                // Never its `repeat`: beside a behavior (an element with none is E060 below) it is a
+                // custom key the engine and Mountebank ignore, so no value of it is refused; W024
+                // says so (issue #1672).
                 let won: serde_json::Map<String, Value> = obj
                     .iter()
-                    .filter(|(key, value)| {
-                        contributes(key, idx) && !(*key == "repeat" && value.is_null())
-                    })
+                    .filter(|(key, _)| contributes(key, idx) && *key != "repeat")
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect();
                 // A `null` behavior counts, as it does in Mountebank's `Object.keys(config)`.
@@ -1958,6 +1959,23 @@ fn validate_response_behaviors(
                         .with_suggestion(
                             "Put each behavior in its own element, in the order it should run, or \
                              use the `_behaviors` object form",
+                        ),
+                    );
+                }
+                if obj.contains_key("repeat") {
+                    result.add_issue(
+                        LintIssue::warning(
+                            "W024",
+                            format!(
+                                "`repeat` inside `behaviors[{idx}]` is ignored, as in Mountebank: \
+                                 only the response's `repeat` repeats it"
+                            ),
+                            file.to_path_buf(),
+                        )
+                        .with_location(format!("{location}.behaviors[{idx}].repeat"))
+                        .with_suggestion(
+                            "Put `repeat` on the response, e.g. {\"is\": {...}, \"repeat\": 2, \
+                             \"behaviors\": [...]}",
                         ),
                     );
                 }

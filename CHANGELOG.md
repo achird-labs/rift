@@ -69,6 +69,15 @@ record.
 
 ### Changed
 
+- **A `repeat` beside a behavior in a `behaviors` array element no longer repeats the response**
+  (#1672); Mountebank ignores it there. Put `repeat` on the response. `{"behaviors": [{"wait": 1,
+  "repeat": 3}]}` is now served once per cycle instead of three times, any value there is admitted
+  (`2.0` and `"x"` were refused), and `GET /imposters`, `rift save` and `--datadir` write it back
+  inside its element instead of as the response's `repeat`, as Mountebank does. A standalone
+  `{"repeat": n}` element an older engine stored, and the `_behaviors` object form's `repeat`, still
+  repeat. A stored config with this shape replays and now serves once per cycle; an id-less stub
+  holding one gets a new `stub_key` once, because its written form changes, so its cursor restarts.
+  `rift-lint` reports it as the new warning `W024` instead of checking it as `E035`.
 - **`rift_http_proxy::admin_api::replayable_value` returns an `OrderedJson`** (#1696), a new
   public JSON tree whose objects keep their key order, instead of a `serde_json::Value`. Embedders
   serialize it as before. The admin exports and the C-ABI views now print keys in struct order

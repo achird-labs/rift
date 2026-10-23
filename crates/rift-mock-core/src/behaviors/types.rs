@@ -34,7 +34,9 @@ pub struct BehaviorProgram {
 
 impl BehaviorProgram {
     /// Parse a program from its elements, each a behaviors object; the steps of one element run in
-    /// [`CANONICAL_ORDER`], elements in the order given, and the last `repeat` set wins.
+    /// [`CANONICAL_ORDER`], elements in the order given. The response's `repeat` is the first
+    /// element's: a `repeat` in a later element is an inert custom key (issue #1672), as a `repeat`
+    /// beside a behavior in a Mountebank `behaviors` element is, so it is neither read nor checked.
     ///
     /// # Errors
     /// The first element that is not a valid behaviors object.
@@ -42,9 +44,16 @@ impl BehaviorProgram {
         elements: impl IntoIterator<Item = &'a serde_json::Value>,
     ) -> Result<Self, serde_json::Error> {
         let mut program = Self::default();
-        for element in elements {
-            let behaviors = ResponseBehaviors::deserialize(element)?;
-            if behaviors.repeat.is_some() {
+        for (index, element) in elements.into_iter().enumerate() {
+            let behaviors = match element.as_object() {
+                Some(object) if index > 0 && object.contains_key("repeat") => {
+                    let mut object = object.clone();
+                    object.remove("repeat");
+                    ResponseBehaviors::deserialize(&serde_json::Value::Object(object))?
+                }
+                _ => ResponseBehaviors::deserialize(element)?,
+            };
+            if index == 0 {
                 program.repeat = behaviors.repeat;
             }
             program.steps.extend(behaviors.into_steps());
@@ -435,6 +444,24 @@ decorate: "response.body = 'decorated';"
         assert!(!program(&[serde_json::json!({"repeat": 2})]).transforms_response());
         assert!(program(&[serde_json::json!({"wait": 5})]).transforms_response());
         assert!(!program(&[]).transforms_response());
+    }
+
+    /// Issue #1672: only a program's first element is its response `repeat`; a `repeat` step after
+    /// it is an inert custom key, never read and never validated.
+    #[test]
+    fn only_the_first_element_is_the_response_repeat() {
+        use serde_json::json;
+        let program = BehaviorProgram::from_elements(&[json!({"wait": 5}), json!({"repeat": "x"})])
+            .expect("an inert repeat is not validated");
+        assert_eq!(program.repeat, None);
+        assert_eq!(program.steps.len(), 1);
+        let program = BehaviorProgram::from_elements(&[
+            json!({"repeat": 2}),
+            json!({"wait": 5}),
+            json!({"repeat": 4}),
+        ])
+        .expect("valid behaviors");
+        assert_eq!(program.repeat, Some(2));
     }
 
     /// Issue #1384: an owned `serde_json::Value` hands the visitor an owned `String`
