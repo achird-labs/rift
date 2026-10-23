@@ -328,6 +328,11 @@ record.
 
 ### Fixed
 
+- **A proxy's `predicateGenerators` `xpath` selector that fails to evaluate fails the request with
+  `500` "malformed xpath predicate selector"** (#1668), as in Mountebank, instead of recording the
+  body as `""` and answering `200`. It applies to an XML body only (a prefix `ns` does not bind, an
+  unknown function), and in every proxy mode, `proxyTransparent` included. The request is still
+  forwarded to the upstream first, and nothing is recorded.
 - **`?replayable=true` exports, and so `rift save` / `mb save`, keep a stub's header order**
   (#1696), completing #1606: the export went through a sorted `serde_json::Value`, so `is.headers`
   saved alphabetically and a save → load served them in that order. Fixed with it: `GET
