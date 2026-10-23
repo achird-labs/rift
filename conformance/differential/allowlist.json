@@ -4051,5 +4051,93 @@
     "reason": "Rift names the first behavior validation error; Mountebank lists every one",
     "mountebank": "{\"code\":\"bad data\",\"message\":\"copy behavior \\\"using\\\" field required\",\"source\":{\"copy\":{}}}",
     "rift": "(absent)"
+  },
+  {
+    "id": "numeric-header-prints-as-string/number",
+    "case": "targeted: a number or boolean header value prints as a string (#1626)",
+    "location": "*/is/headers/X-Count",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A header value posted as a number or boolean prints as a string (`\"Content-Length\": 852` prints as `\"852\"`), and a `decorate` or `shellTransform` script sees it as that string.",
+    "reason": "a number header value is coerced to text at decode and prints as that text",
+    "mountebank": "852",
+    "rift": "\"852\""
+  },
+  {
+    "id": "numeric-header-prints-as-string/bool",
+    "case": "targeted: a number or boolean header value prints as a string (#1626)",
+    "location": "*/is/headers/X-Cache-Hit",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A header value posted as a number or boolean prints as a string (`\"Content-Length\": 852` prints as `\"852\"`), and a `decorate` or `shellTransform` script sees it as that string.",
+    "reason": "a boolean header value is coerced to text at decode and prints as that text",
+    "mountebank": "true",
+    "rift": "\"true\""
+  },
+  {
+    "id": "numeric-header-prints-as-string/decorate-print",
+    "case": "targeted: a decorate sees a number header value as a string (#1626)",
+    "location": "*/is/headers/X-Count",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A header value posted as a number or boolean prints as a string (`\"Content-Length\": 852` prints as `\"852\"`), and a `decorate` or `shellTransform` script sees it as that string.",
+    "reason": "a number header value is coerced to text at decode and prints as that text",
+    "mountebank": "852",
+    "rift": "\"852\""
+  },
+  {
+    "id": "numeric-header-prints-as-string/decorate-sees",
+    "case": "targeted: a decorate sees a number header value as a string (#1626)",
+    "location": "step[1].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A header value posted as a number or boolean prints as a string (`\"Content-Length\": 852` prints as `\"852\"`), and a `decorate` or `shellTransform` script sees it as that string.",
+    "reason": "a decorate sees the coerced header value, a string",
+    "mountebank": "number",
+    "rift": "string"
+  },
+  {
+    "id": "number-prints-from-parsed-value",
+    "case": "admin_api: a number in a stub prints from its parsed value (#1631)",
+    "location": "*/stubs/0/*",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A number prints from its parsed value: `1.0` prints as `1.0` and `1e2` as `100.0`, where Mountebank prints `1` and `100`.",
+    "reason": "a JSON number is a serde_json f64 and prints with serde_json's float formatter",
+    "mountebank": "1",
+    "rift": "1.0"
+  },
+  {
+    "id": "contains-number-by-text/status",
+    "case": "predicates: contains against a JSON number body field matches by text (#1631)",
+    "location": "step[1].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "whenever the selected request value is not a string, whatever the predicate holds.",
+    "reason": "Rift matches a number body value by its text; Mountebank throws a TypeError",
+    "mountebank": "500",
+    "rift": "200"
+  },
+  {
+    "id": "contains-number-by-text/content-type",
+    "case": "predicates: contains against a JSON number body field matches by text (#1631)",
+    "location": "step[1].header.content-type",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "whenever the selected request value is not a string, whatever the predicate holds.",
+    "reason": "Mountebank's 500 error answer is JSON; Rift serves the stub",
+    "mountebank": "application/json",
+    "rift": "(absent)"
+  },
+  {
+    "id": "contains-number-by-text/body",
+    "case": "predicates: contains against a JSON number body field matches by text (#1631)",
+    "location": "step[1].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "whenever the selected request value is not a string, whatever the predicate holds.",
+    "reason": "Mountebank's TypeError body against the stub's body",
+    "mountebankMatches": "\\{\"errors\":\\[\\{\"message\":\"actual\\.indexOf is not a function\",\"name\":\"TypeError\".*",
+    "rift": "matched"
   }
 ]

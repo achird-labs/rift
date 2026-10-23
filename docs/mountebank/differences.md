@@ -211,11 +211,13 @@ reads the array's indexes as fields of the string, so `["f"]` matches there beca
 character of `first` is `f`. A value that is a JSON array (a body, a body field holding one, or
 `?key=["f"]`) is still compared as one. See [Arrays in a JSON body](predicates.md#arrays-in-a-json-body).
 
-## `contains` against a JSON `null`
+## `contains` against a JSON `null`, number or boolean
 
+`contains`, `startsWith` and `endsWith` compare a number or boolean body value by its JavaScript
+text, so `{"contains": {"body": {"n": "5"}}}` matches `{"n": 15}`, and they do not match a `null`:
 `{"contains": {"body": {"a": "x"}}}` against `{"a": null}` does not match in Rift. Mountebank
-answers `500` (`TypeError: Cannot read properties of null`), as it does for `startsWith` and
-`endsWith`; a `null` has no text to search.
+answers `500` (`TypeError: actual.indexOf is not a function`, or `Cannot read properties of null`)
+whenever the selected request value is not a string, whatever the predicate holds.
 
 ## `except` with an `xpath` or `jsonpath` selector
 
@@ -442,6 +444,8 @@ spelled differently from the input while meaning the same thing. Re-posting what
 the same imposter.
 
 - `statusCode` prints as a JSON number in a stub's `is`, as it already did in `defaultResponse`. A status posted as a string prints as a number (`"202"` prints as `202`). A string that is not a number, such as a `copy` token, is kept and printed as written, as Mountebank prints it.
+- A number prints from its parsed value: `1.0` prints as `1.0` and `1e2` as `100.0`, where Mountebank prints `1` and `100`. It means the same: predicates compare numbers as JavaScript prints them (see [Predicates](predicates.md)).
+- A header value posted as a number or boolean prints as a string (`"Content-Length": 852` prints as `"852"`), and a `decorate` or `shellTransform` script sees it as that string. Mountebank prints and passes the number. The header sent is the same.
 - A field left empty or at its default is not printed. This covers a stub's empty `predicates`,
   whether written or omitted, an empty `defaultResponse.headers`, and a proxy's default `mode`,
   `predicateGenerators`, `addWaitBehavior` and `injectHeaders`. Each reads back to the same value.

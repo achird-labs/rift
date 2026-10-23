@@ -162,7 +162,8 @@ field, by the rules of Mountebank's `predicates.js`:
   equals `"null"` under `deepEquals`, which compares every value as text. A field the body does not
   have reads as `""`, so `{"equals": {"body": {"a": ""}}}` matches `{}`.
 - **Numbers** compare as JavaScript prints them: `1.0` is `1` and `1e2` is `100`, under every
-  operator.
+  operator. `contains`/`startsWith`/`endsWith` read a number or boolean body value as that text
+  (see [Differences](differences.md#contains-against-a-json-null-number-or-boolean)).
 
 ### contains
 
