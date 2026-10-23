@@ -275,52 +275,10 @@
       "note": "the detail carries Rift's `enabled` and `_rift.warnings` (api/index.md)"
     },
     {
-      "id": "cli/configFileTest.js::--configfile should support legacy ejs 2.x include syntax in configuration files",
-      "class": "bug",
-      "issue": "#1657",
-      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
-      "note": "ECONNREFUSED on 4547: the request arrived between the pidfile write and the imposter bind. The config file loads since #1604; started by hand, 4547 and 4548 serve `origin` and `proxy`. This race is the macOS-only failure #1559 saw"
-    },
-    {
       "id": "cli/configFileTest.js::--configfile should evaluate stringify function in templates when loading configuration files",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#scripts-run-in-an-ecmascript-sandbox-not-node",
-      "note": "the config file loads since #1604, but proxy.ejs's inject calls `require('http')`: scripts have no Node core modules (#1593). The first request can also land before the bind (#1657)"
-    },
-    {
-      "id": "cli/configFileTest.js::--configfile should evaluate nested stringify functions when loading configuration files",
-      "class": "bug",
-      "issue": "#1657",
-      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
-      "note": "ECONNREFUSED on 4542: the request arrived between the pidfile write and the imposter bind. The config file loads since #1604; started by hand, 4542 serves `{\"success\": true}`"
-    },
-    {
-      "id": "cli/configFileTest.js::--configfile should evaluate stringify functions with injected data when loading configuration files",
-      "class": "bug",
-      "issue": "#1657",
-      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
-      "note": "ECONNREFUSED on 4542: the request arrived between the pidfile write and the imposter bind. The config file loads since #1604; started by hand, 4542 serves injectedValue 1111, 2222, 3333"
-    },
-    {
-      "id": "cli/configFileTest.js::--configfile should not render through ejs when --noParse option provided",
-      "class": "bug",
-      "issue": "#1657",
-      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters (~90 ms), and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
-      "note": "ECONNREFUSED on 4545: the request arrived between the pidfile write and the imposter bind. Mountebank writes the pidfile last (bin/mb), as its readiness signal"
-    },
-    {
-      "id": "cli/configFileTest.js::--configfile should evaluate gzipped requests (issue #477)",
-      "class": "bug",
-      "issue": "#1657",
-      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters (~90 ms), and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
-      "note": "ECONNREFUSED on 4542: the request arrived between the pidfile write and the imposter bind. Once bound, the gzip body matches (SUCCESS) since #1584"
-    },
-    {
-      "id": "cli/datadirTest.js::--datadir should allow configfile to overwrite imposters loaded from datadir",
-      "class": "bug",
-      "issue": "#1657",
-      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
-      "note": "ECONNREFUSED on 4545: the request arrived between the pidfile write and the imposter bind. The config file loads since #1604; by hand, --datadir plus --configfile serves the config file's `Order 123`"
+      "note": "the config file loads since #1604, but proxy.ejs's inject calls `require('http')`: scripts have no Node core modules (#1593)."
     },
     {
       "id": "cli/datadirTest.js::--datadir should not delete files outside of imposter directories when deleting imposter",
@@ -359,13 +317,6 @@
       "note": "--formatter is accepted and ignored"
     },
     {
-      "id": "cli/hostTest.js::--host should work with --configfile",
-      "class": "bug",
-      "issue": "#1657",
-      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
-      "note": "times out on 4545: the request arrived between the pidfile write and the imposter bind (the server itself starts since #1575, and answers on the host's name once bound)"
-    },
-    {
       "id": "cli/hostTest.js::--host should work with mb replay",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#command-line",
@@ -386,17 +337,10 @@
     },
     {
       "id": "cli/saveTest.js::mb save should allow saving replayable format",
-      "class": "bug",
-      "issue": "#1657",
-      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
-      "note": "ECONNREFUSED on 4545: the request arrived between the pidfile write and the imposter bind. The config file loads since #1604; the save itself deep-equals the replayable export (#1604 triage probe). mbTest's ENOENT on mb.json follows from the refused request"
-    },
-    {
-      "id": "cli/saveTest.js::mb save should allow saving to a different config file",
-      "class": "bug",
-      "issue": "#1657",
-      "flaky": "a race: Rift writes --pidfile before it loads --configfile and binds imposters, and mbTest's start returns when the pidfile appears; it passes when the first request lands after the bind",
-      "note": "ECONNREFUSED on 2526: the request arrived between the pidfile write and the imposter bind. The config file loads since #1604; the save itself deep-equals the replayable export (#1604 triage probe)"
+      "class": "documented",
+      "doc": "docs/mountebank/differences.md#command-line",
+      "flaky": "timing: the outcome depends on which of the leaked and the replacing server answers the save",
+      "note": "a cascade from cli/replayTest.js, which fails on Rift (`rift replay` does not switch a running server's proxies) before its `finally` stops its server: that server keeps test.pid and port 2526, so this test's start returns at once and its save reaches a server being replaced. Run alone it passes (since #1657)"
     },
     {
       "id": "cli/securityTest.js::security mb without --allowInjection should return a 400 if endOfResponseResolver is used",

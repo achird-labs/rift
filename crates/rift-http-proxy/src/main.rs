@@ -252,21 +252,19 @@ fn pidfile_or_default(cli: &Cli) -> std::path::PathBuf {
 
 /// Run in Mountebank-compatible mode
 fn run_mountebank_mode(cli: Cli, log_ring: Option<LogRing>) -> Result<(), anyhow::Error> {
-    // Write the PID file here — the one place every serving entry converges (plain start, the
-    // `restart` fall-through, and `Replay`'s re-entry). Writing it before the subcommand dispatch
-    // meant `rift --pidfile p restart` recorded its OWN pid and then SIGTERMed itself, and a
-    // transient `save`/`healthcheck` clobbered a running server's file (issue #827).
-    if let Some(ref pidfile) = cli.pidfile {
-        let pid = std::process::id();
-        std::fs::write(pidfile, pid.to_string())?;
-        info!("Wrote PID {} to {:?}", pid, pidfile);
-    }
+    // The PID file is owned by this path — the one place every serving entry converges (plain
+    // start, the `restart` fall-through, and `Replay`'s re-entry). Writing it before the
+    // subcommand dispatch meant `rift --pidfile p restart` recorded its OWN pid and then SIGTERMed
+    // itself, and a transient `save`/`healthcheck` clobbered a running server's file (issue #827).
+    // It is written by `serve`, once the server is listening (issue #1657).
+    //
     // Remembered before `cli` moves into the builder: the server removes the PID file it wrote on
     // the way out, on success and on error alike (issue #1155). It never used to, so a Ctrl+C, a
-    // plain `kill` or a `docker stop` all left a stale file behind.
-    let written_pidfile = cli.pidfile.clone();
-    let result = serve_topology(cli, log_ring);
-    if let Some(pidfile) = written_pidfile {
+    // plain `kill` or a `docker stop` all left a stale file behind. A startup that failed before
+    // writing it leaves nothing: `remove_own_pidfile` treats a missing file as done.
+    let pidfile = cli.pidfile.clone();
+    let result = serve_topology(cli, log_ring, pidfile.as_deref());
+    if let Some(pidfile) = pidfile {
         remove_own_pidfile(&pidfile);
     }
     info!("stopped");
@@ -298,7 +296,11 @@ fn remove_own_pidfile(pidfile: &std::path::Path) {
 
 /// Pick the runtime topology and serve on it until the admin plane exits or a termination signal
 /// arrives.
-fn serve_topology(cli: Cli, log_ring: Option<LogRing>) -> Result<(), anyhow::Error> {
+fn serve_topology(
+    cli: Cli,
+    log_ring: Option<LogRing>,
+    pidfile: Option<&std::path::Path>,
+) -> Result<(), anyhow::Error> {
     // Topology selection (RFC-712, issue #744). Clap already applied RIFT_RUNTIME env fallback
     // into `cli.runtime`, so resolve() only sees the merged value; the platform gate then
     // downgrades or rejects per RFC D5 (macOS falls back with a warning, Windows refuses).
@@ -316,7 +318,10 @@ fn serve_topology(cli: Cli, log_ring: Option<LogRing>) -> Result<(), anyhow::Err
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            let result = runtime.block_on(serve(with_ring(ServerBuilder::from_cli(cli), log_ring)));
+            let result = runtime.block_on(serve(
+                with_ring(ServerBuilder::from_cli(cli), log_ring),
+                pidfile,
+            ));
             // Bounded, not an implicit drop — a stuck `decorate` would otherwise hold the process
             // after a graceful shutdown for ever. See `runtime::BLOCKING_DRAIN`.
             runtime.shutdown_timeout(runtime::BLOCKING_DRAIN);
@@ -347,6 +352,7 @@ fn serve_topology(cli: Cli, log_ring: Option<LogRing>) -> Result<(), anyhow::Err
             let result = control.block_on(serve(
                 with_ring(ServerBuilder::from_cli(cli), log_ring)
                     .accept_runtimes(workers.handles()),
+                pidfile,
             ));
             workers.shutdown();
             control.shutdown_timeout(runtime::BLOCKING_DRAIN);
@@ -373,12 +379,28 @@ fn with_ring(builder: ServerBuilder, ring: Option<LogRing>) -> ServerBuilder {
 /// Mountebank's behaviour. It is deliberately **not** the FFI's `rift_stop`, which also calls
 /// `ImposterManager::shutdown` and so deletes every imposter *and unlinks its `--datadir` file*:
 /// wired to SIGTERM, that would make every `docker stop` wipe the datadir.
-async fn serve(builder: ServerBuilder) -> anyhow::Result<()> {
+///
+/// `--pidfile` is written here, once `start` has returned — the admin API and every startup
+/// imposter (`--configfile`, `--imposters`, `--datadir`) are bound by then — as Mountebank's
+/// `bin/mb` does: tooling waits for the file as a readiness signal (issue #1657). A failed startup
+/// therefore writes none. It is not written inside `ServerBuilder::start`: embedders share that
+/// seam and own their own PID file.
+async fn serve(builder: ServerBuilder, pidfile: Option<&std::path::Path>) -> anyhow::Result<()> {
     // Installed before the server starts, so a signal that lands during startup is held rather
     // than dropped — as PID 1, a SIGTERM with no handler is discarded by the kernel.
     let mut signals =
         TerminationSignals::install().context("installing the termination-signal handler")?;
     let server = builder.start().await?;
+    if let Some(pidfile) = pidfile {
+        let pid = std::process::id();
+        if let Err(e) = std::fs::write(pidfile, pid.to_string()) {
+            // Never leave a bound server running behind an `Err`.
+            server.shutdown().await;
+            return Err(anyhow::Error::new(e)
+                .context(format!("writing the PID file {}", pidfile.display())));
+        }
+        info!("Wrote PID {} to {:?}", pid, pidfile);
+    }
     tokio::select! {
         // The admin plane died on its own: surface it, and exit non-zero as before.
         result = server.wait() => return result,
