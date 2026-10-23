@@ -336,6 +336,11 @@ record.
 
 ### Fixed
 
+- **A second `proxyOnce` stub, or one whose recording was moved behind it, forwards and records**
+  (#1705). With `predicateGenerators`, a request that reached it replayed the recording another
+  proxy stub made, or the one now behind it, and forwarded nothing. It now forwards and records
+  in front of itself, as Mountebank does. A recording in front of the answering stub (concurrent
+  first requests) still replays, so the upstream still sees such a request once.
 - **An `inject`'s `statusCode` and a status a behavior leaves on a `proxy` response are read as
   Mountebank reads them** (#1635). An `inject` that returns a non-numeric, negative or out-of-range
   `statusCode`, or `true`, answers `500` `ERR_HTTP_INVALID_STATUS_CODE` as in Mountebank, instead

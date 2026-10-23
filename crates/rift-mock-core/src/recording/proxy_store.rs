@@ -264,6 +264,12 @@ pub trait ProxyRecordingStore: Send + Sync {
     /// edit (delete, replace, reconcile) removes the stub that recording was inserted as: in
     /// Mountebank the stub *is* the recording, so a deleted recording is recorded anew.
     ///
+    /// It is also called on the request path (issue #1705), when a request reaches a `proxyOnce`
+    /// stub while every stub recorded under `sig` sits behind it: that recording did not answer,
+    /// so the request is forwarded and recorded in front of the answering stub, as in Mountebank.
+    /// It must therefore stay quick and synchronous. The engine claims `sig` again right after, so
+    /// a store whose `forget_recorded` does nothing keeps replaying, as before.
+    ///
     /// A claim still in flight is not a recording yet and must be left to settle. `Err` is logged
     /// by the engine, which does not undo the stub edit that has already happened. The default does
     /// nothing, so a store that cannot forget keeps replaying the recording, as before #1386.
