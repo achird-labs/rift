@@ -525,7 +525,11 @@ record.
   header fails counts. A parse too large to cache is warned about once and holds its share of the
   budget while it is served. A `--configfile` lookup no longer blocks on a FIFO or device: only a
   regular file is read. An edited or replaced CSV file is read again on its next use, as
-  Mountebank, which re-reads it per request, sees the edit.
+  Mountebank, which re-reads it per request, sees the edit. A file whose parse is larger than the
+  whole budget is refused once, with one warning, until it changes. For embedders of
+  `rift-mock-core`: `CsvCache::get_or_load` and `get_fresh` return a `CsvHandle` (which derefs to
+  `CsvData`) instead of `Arc<CsvData>`, `get_or_load` takes the imposter's `BodyGuard` and returns a
+  `Result`, and `load_csv` / `LoadedCsv` are gone (use `CsvCache::load`).
 - **`--local-only` admin API and `/metrics` refuse a non-loopback client** (#1568). Both were
   protected only by their loopback bind, and a loopback listener still accepts a connection whose
   source is another of the host's own addresses (`curl --interface 192.168.x.y

@@ -224,16 +224,18 @@ pub struct CsvCache {
     entries: Mutex<CacheEntries>,
 }
 
-/// What a cache entry costs besides its parse and its key's heap bytes: the entry and the key in
-/// the map and in the recency index, the parse's `Arc` and struct, and the slots holding them.
-const ENTRY_OVERHEAD: usize = 2 * std::mem::size_of::<CacheKey>()
+/// What a cache entry costs besides its parse and its key's heap bytes: the key, shared by the map
+/// and the recency index through one `Arc`, the two `Arc` headers (key and parse), the entry, the
+/// parse's struct, and the slots holding them.
+const ENTRY_OVERHEAD: usize = std::mem::size_of::<CacheKey>()
+    + 2 * std::mem::size_of::<Arc<CacheKey>>()
+    + 4 * std::mem::size_of::<usize>()
     + std::mem::size_of::<CacheEntry>()
     + std::mem::size_of::<CsvData>()
-    + 2 * std::mem::size_of::<usize>()
     + 64;
 
-/// How many oversized keys are remembered as already warned about; past it the set starts over,
-/// so the warnings, not the memory, repeat.
+/// How many keys are remembered as already warned about, or as refused for an unchanged file;
+/// past it the record starts over, so the warnings and re-reads, not the memory, repeat.
 const MAX_WARNED: usize = 1024;
 
 /// Whether a parse was read under a trusted access or a confined one.
@@ -276,13 +278,16 @@ impl CacheKey {
 /// already warned about.
 #[derive(Default)]
 struct CacheEntries {
-    files: HashMap<CacheKey, CacheEntry>,
-    /// Last use → key, oldest first, so eviction is `O(log n)`.
-    recency: BTreeMap<u64, CacheKey>,
+    files: HashMap<Arc<CacheKey>, CacheEntry>,
+    /// Last use → key, oldest first, so eviction is `O(log n)`. The key is the map's own `Arc`.
+    recency: BTreeMap<u64, Arc<CacheKey>>,
     total_bytes: usize,
     clock: u64,
     /// Hashes, not keys: a key's delimiter may be long, and this set is not charged to the bound.
     warned: HashSet<u64>,
+    /// Key hash → the file a parse too large for the whole budget was read from, so the same
+    /// unchanged file is refused without being read again.
+    refused: HashMap<u64, FileStamp>,
     hasher: std::hash::RandomState,
 }
 
@@ -420,15 +425,15 @@ impl CsvCache {
             let mut entries = self.entries.lock();
             entries.clock += 1;
             let now = entries.clock;
-            let fresh = entries.files.get_mut(&key).map(|entry| {
-                (entry.stamp == stamp).then(|| {
-                    let last = std::mem::replace(&mut entry.last_used, now);
-                    (last, Arc::clone(&entry.data))
-                })
+            let fresh = entries.files.get_key_value(&key).map(|(shared, entry)| {
+                (entry.stamp == stamp).then(|| (Arc::clone(shared), entry.last_used))
             })?;
-            if let Some((last, data)) = fresh {
+            if let Some((shared, last)) = fresh {
+                let entry = entries.files.get_mut(&key)?;
+                entry.last_used = now;
+                let data = Arc::clone(&entry.data);
                 entries.recency.remove(&last);
-                entries.recency.insert(now, key);
+                entries.recency.insert(now, shared);
                 return Some(CsvHandle { data, _share: None });
             }
             entries.remove(&key)
@@ -491,6 +496,11 @@ impl CsvCache {
             Ok(metadata) => FileStamp::of(&metadata),
             Err(e) => return unreadable(e),
         };
+        let key = CacheKey::new(resolved, delimiter, access);
+        // Refused before and unchanged since: already logged, so not read or logged again.
+        if self.refused_before(&key, stamp) {
+            return Ok(None);
+        }
         let bytes = match read_under(&mut file, stamp.len, guard) {
             Ok(bytes) => bytes,
             Err(BodyReadError::BudgetExhausted) => return Err(exhausted()),
@@ -518,7 +528,6 @@ impl CsvCache {
                 return Ok(None);
             }
         };
-        let key = CacheKey::new(resolved, delimiter, access);
         let data_bytes = data.heap_bytes();
         let charge = key.charge(data_bytes);
         let bound = guard.limits().max_body_bytes();
@@ -535,16 +544,24 @@ impl CsvCache {
             Ok(share) => share,
             Err(BodyReadError::BudgetExhausted) => return Err(exhausted()),
             Err(e) => {
-                tracing::warn!(
-                    "lookup behavior: CSV data source '{path}' parses to about {data_bytes} bytes, \
-                     more than --body-memory-budget can hold ({e}), so it is not served and the \
-                     tokens are left in place"
-                );
+                if self.first_warning(&key, Some(stamp)) {
+                    tracing::warn!(
+                        "lookup behavior: CSV data source '{path}' parses to about {data_bytes} \
+                         bytes, more than --body-memory-budget can hold ({e}), so it is not served \
+                         and the tokens are left in place until the file changes"
+                    );
+                }
                 return Ok(None);
             }
         };
         drop(bytes);
-        self.warn_uncached_once(key, path, data_bytes, bound);
+        if self.first_warning(&key, None) {
+            tracing::warn!(
+                "lookup behavior: CSV data source '{path}' parses to about {data_bytes} bytes, more \
+                 than the lookup cache holds (--max-body-size, {bound} bytes), so it is not cached \
+                 and is read again on every use"
+            );
+        }
         Ok(Some(CsvHandle {
             data: Arc::new(data),
             _share: Some(share),
@@ -569,7 +586,8 @@ impl CsvCache {
             }
             entries.clock += 1;
             let now = entries.clock;
-            entries.recency.insert(now, key.clone());
+            let key = Arc::new(key);
+            entries.recency.insert(now, Arc::clone(&key));
             entries.files.insert(
                 key,
                 CacheEntry {
@@ -596,24 +614,30 @@ impl CsvCache {
         drop(dropped);
     }
 
-    /// Warn, once per file and delimiter, that a parse is too large to cache, so it is read again
-    /// on every use.
-    fn warn_uncached_once(&self, key: CacheKey, path: &str, data_bytes: usize, bound: usize) {
-        let first = {
-            let mut entries = self.entries.lock();
-            if entries.warned.len() >= MAX_WARNED {
-                entries.warned.clear();
-            }
-            let hash = std::hash::BuildHasher::hash_one(&entries.hasher, &key);
-            entries.warned.insert(hash)
-        };
-        if first {
-            tracing::warn!(
-                "lookup behavior: CSV data source '{path}' parses to about {data_bytes} bytes, more \
-                 than the lookup cache holds (--max-body-size, {bound} bytes), so it is not cached \
-                 and is read again on every use"
-            );
+    /// Whether this is the first warning for `key`, so it is logged once rather than on every
+    /// read. With `refused`, the file is remembered as refused while it stays unchanged, and the
+    /// warning is first again once it changes.
+    fn first_warning(&self, key: &CacheKey, refused: Option<FileStamp>) -> bool {
+        let mut entries = self.entries.lock();
+        if entries.warned.len() >= MAX_WARNED {
+            entries.warned.clear();
         }
+        if entries.refused.len() >= MAX_WARNED {
+            entries.refused.clear();
+        }
+        let hash = std::hash::BuildHasher::hash_one(&entries.hasher, key);
+        match refused {
+            // A changed file refused again is warned about again.
+            Some(stamp) => entries.refused.insert(hash, stamp) != Some(stamp),
+            None => entries.warned.insert(hash),
+        }
+    }
+
+    /// Whether `key`'s file, as `stamp` describes it, was refused before ([`Self::first_warning`]).
+    fn refused_before(&self, key: &CacheKey, stamp: FileStamp) -> bool {
+        let entries = self.entries.lock();
+        let hash = std::hash::BuildHasher::hash_one(&entries.hasher, key);
+        entries.refused.get(&hash) == Some(&stamp)
     }
 
     /// The bytes the cached entries are charged.
@@ -2082,6 +2106,47 @@ mod tests {
         );
         drop(served);
         assert_eq!(admitted().await, 16, "released once served");
+    }
+
+    /// A parse larger than the whole budget is refused once per unchanged file: the warning is
+    /// not repeated and the file is not read again until it changes.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_parse_the_budget_can_never_hold_is_refused_once_per_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = padded_csv(dir.path(), "wide.csv", "w", 3 * 1024);
+        // Ceiling and budget 4 KiB: the file fits, its parse never can.
+        let g = guard(4096, Some(4096));
+        let cache = CsvCache::default();
+        let access = ScriptFileAccess::trusted_cwd();
+        assert_eq!(
+            cache
+                .get_or_load(&path, ",", &access, &g)
+                .map(|d| d.is_some()),
+            Ok(false)
+        );
+        // With the whole budget held, a re-read would be refused as exhausted.
+        let _held = g
+            .start_without_waiting(Some(4096))
+            .await
+            .expect("fills the budget");
+        assert_eq!(
+            cache
+                .get_or_load(&path, ",", &access, &g)
+                .map(|d| d.is_some()),
+            Ok(false),
+            "the unchanged file is not read again"
+        );
+        logs_assert(|lines: &[&str]| {
+            match lines
+                .iter()
+                .filter(|l| l.contains("more than --body-memory-budget can hold"))
+                .count()
+            {
+                1 => Ok(()),
+                n => Err(format!("warned {n} times")),
+            }
+        });
     }
 
     /// A parse too large to cache is reported once, not on every read (review of #1654, S2).
