@@ -328,6 +328,10 @@ record.
   inline `config`. `POST /imposters/{port}/spaces/{flowId}/stubs` now also decodes under the
   admission budget every other config door uses (#1609).
 
+- **`--pidfile` is written only once the server and its startup imposters are listening** (#1657),
+  so tools that wait for it (as Mountebank's do) no longer race the first request. It used to be
+  written before the runtime started, ahead of the admin API and every `--configfile`, `--imposters`
+  and `--datadir` imposter. A startup that fails now leaves no PID file at all.
 - **`rift stop` no longer deletes a PID file another server has taken over.** When a `stop` and a
   `restart` waited on the same server, the `restart` wrote its own PID as soon as that server
   exited and the `stop` then removed the file, leaving the new server running with nothing able to
