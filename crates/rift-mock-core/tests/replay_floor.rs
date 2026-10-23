@@ -166,7 +166,9 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // #1609 `refuse_bad_proxy_identity`: an admission check (Admission::Checked only, re-run
         // in admission_check_stub, fixtures in issue_1267_replay_decode.rs); its call and its
         // decode of the identity.
-        30,
+        // #1639 the `refuse_list_valued_element` call in `refuse_door_only_behavior_shapes`:
+        // door-only (see #1582; fixture in issue_1267_replay_decode.rs).
+        31,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",
@@ -187,7 +189,9 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // derive makes and this census does not count.
         // #1609 `refuse_bad_proxy_identity`, half an identity (`cert` without `key` or the
         // reverse): an admission check (see above).
-        32,
+        // #1639 `refuse_list_valued_element`, a list-valued `copy`, `lookup` or `shellTransform`
+        // in a `behaviors` array element, three: door-only (see above).
+        35,
     ),
     ("crates/rift-types/src/wire.rs", "::custom", 4),
     ("crates/rift-types/src/wire.rs", "serde error helper", 0),
