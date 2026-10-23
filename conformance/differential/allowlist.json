@@ -3459,6 +3459,17 @@
     "rift": "(absent)"
   },
   {
+    "id": "xpath-eval-error-no-inner-generator",
+    "case": "proxy: a predicateGenerators xpath selector that fails to evaluate fails the request with 500 after forwarding (#1668)",
+    "location": "step*.body/errors/*/inner",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Nor does it add `inner`, the error Mountebank wraps in a `bad data` one.",
+    "reason": "Mountebank's malformed-xpath ValidationError from a predicateGenerators selector carries the wrapped error as inner; Rift's envelope does not (#1668)",
+    "mountebankMatches": "\\{.*\\}",
+    "rift": "(absent)"
+  },
+  {
     "id": "selector-compile-refused-xpath#0",
     "case": "coverage: xpath.js:36 a selector that does not compile is refused at load, where Mountebank fails each request (#1585)",
     "location": "step[0].admin.status",
