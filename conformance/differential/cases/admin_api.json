@@ -1739,6 +1739,43 @@
           "path": "/imposters/4546?removeProxies=true"
         }
       ]
+    },
+    {
+      "name": "admin_api: a number in a stub prints from its parsed value (#1631)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": 1.0
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": 1.0
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545"
+        }
+      ]
     }
   ]
 }

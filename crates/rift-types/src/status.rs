@@ -246,6 +246,16 @@ mod tests {
         assert_eq!(node_status_code(""), None);
     }
 
+    /// `ToInt32` truncates toward zero *before* it wraps, so it is not periodic in 2³² across zero
+    /// for a fraction: `trunc(-0.5)` is a ceiling, `trunc(2³² - 0.5)` a floor. These are Node's
+    /// answers (`(-0.5)|0 === 0`, `4294967295.5|0 === -1`); the old periodicity property drew real
+    /// numbers and failed on exactly this pair (issue #1656).
+    #[test]
+    fn to_int32_is_not_periodic_across_zero_for_fractions() {
+        assert_eq!(js_to_int32(-0.5), 0);
+        assert_eq!(js_to_int32(4_294_967_295.5), -1);
+    }
+
     proptest! {
         /// Any integer spelled in decimal, hex or with padding reads as itself, wrapped to 32 bits.
         #[test]
@@ -257,10 +267,18 @@ mod tests {
             }
         }
 
-        /// `ToInt32` is periodic in 2³² and lands in the signed 32-bit range.
+        /// `ToInt32` is periodic in 2³² on the integers, and lands in the signed 32-bit range.
         #[test]
-        fn to_int32_wraps_modulo_two_to_the_32(n in -1.0e15f64..1.0e15f64) {
-            prop_assert_eq!(js_to_int32(n), js_to_int32(n + 4_294_967_296.0));
+        fn to_int32_wraps_modulo_two_to_the_32(k in -(1_i64 << 52)..(1_i64 << 52)) {
+            let n = k as f64; // exact: |k| < 2^53
+            prop_assert_eq!(js_to_int32(n), js_to_int32(n + 4_294_967_296.0)); // exact: |n + 2^32| < 2^53
+            prop_assert_eq!(i64::from(js_to_int32(n)), i64::from(k as i32));
+        }
+
+        /// A fraction is truncated toward zero before the wrap.
+        #[test]
+        fn to_int32_truncates_toward_zero(n in -1.0e15f64..1.0e15f64) {
+            prop_assert_eq!(js_to_int32(n), js_to_int32(n.trunc()));
             prop_assert_eq!(i64::from(js_to_int32(n)), (n.trunc() as i64) as i32 as i64);
         }
 

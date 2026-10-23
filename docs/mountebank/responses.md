@@ -149,7 +149,9 @@ their string form, matching Mountebank, so a config like this is valid rather th
 ```
 
 sends `X-Count: 124` and `X-Cache-Hit: true`. Arrays may mix types the same way; `null`,
-objects and nested arrays are still rejected.
+objects and nested arrays are still rejected. The coerced string is also what `GET /imposters` prints
+and what a `decorate` or `shellTransform` script sees, where Mountebank keeps the number (see
+[Differences](differences.md#printed-imposters-are-normalized)).
 
 **A `Content-Length` you set is corrected to the body's real length.** As in Mountebank, the value
 is replaced with the byte length of the body actually sent, after behaviors (`decorate`, `copy`,
