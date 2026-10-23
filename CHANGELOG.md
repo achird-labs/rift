@@ -312,6 +312,11 @@ record.
 
 ### Fixed
 
+- **A proxy's `predicateGenerators` `xpath` selector that fails to evaluate fails the request with
+  `500` "malformed xpath predicate selector"** (#1668), as in Mountebank, instead of recording the
+  body as `""` and answering `200`. It applies to an XML body only (a prefix `ns` does not bind, an
+  unknown function), and in every proxy mode, `proxyTransparent` included. The request is still
+  forwarded to the upstream first, and nothing is recorded.
 - **`--pidfile` is written only once the server and its startup imposters are listening** (#1657),
   so tools that wait for it (as Mountebank's do) no longer race the first request. It used to be
   written before the runtime started, ahead of the admin API and every `--configfile`, `--imposters`
