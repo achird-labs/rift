@@ -58,7 +58,11 @@ serde = { version = "1.0", features = ["derive"] }
 # `float_roundtrip`: without it serde_json's float parse is not correctly rounded, so a literal can
 # come back one double away and be served with different digits — `7e23` as `6.999999999999999e23`
 # (issue #1085). Costs ~2x on float parsing only. Pinned by rift-types'
-# `serde_json_parses_floats_correctly_rounded`. `arbitrary_precision` and `preserve_order` stay off.
+# `serde_json_parses_floats_correctly_rounded`. `arbitrary_precision` and `preserve_order` stay off:
+# `preserve_order` would change `Value`'s map crate-wide, and `stub_key` (rift-cluster's cross-node
+# cursor key) and the proxy claim hashes are computed over sorted `Value`s (pinned in
+# rift-types' wire.rs). An admin export that must keep a stub's header order goes through
+# `admin_api::OrderedJson` instead of a `Value` (issue #1696).
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 indexmap = { version = "2", features = ["serde"] }
 serde_norway = "0.9"

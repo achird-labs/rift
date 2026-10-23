@@ -575,6 +575,11 @@ delete, or a shutdown, for up to those 2 s. Embedders set the same limits with
 `ImposterManager::with_body_limits`, or `maxBodySize` / `bodyMemoryBudget` in the C-ABI
 `ServeOptions`. The intercept listener keeps its own 1 MiB cap.
 
+A `lookup` behavior's CSV file is read under the same limits (#1654): a file larger than
+`--max-body-size` is not read (a warning is logged and the tokens are left in place), and while the
+budget is used up the request gets `503` with `Retry-After: 1`. The cache of parsed files holds at
+most `--max-body-size`. See [Behaviors](../mountebank/behaviors.md#csv-lookup).
+
 ## Environment Variables
 
 A flag given on the command line wins over its environment variable, and the environment variable

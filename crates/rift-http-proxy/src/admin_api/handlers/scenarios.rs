@@ -339,17 +339,24 @@ pub async fn handle_add_space_stub(
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
-    let payload = match parse_json_body(req, &manager.body_guard()).await {
-        Ok(v) => v,
-        Err(resp) => return resp,
+    let body = match collect_body(req, &manager.body_guard()).await {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
     };
-    // Before serde, which cannot tell "not a stub" from "an empty stub" (issue #336).
+    // Before serde, which cannot tell "not a stub" from "an empty stub" (issue #336). The `Value`
+    // serves this shape check only: it sorts every object, so the stub is decoded from the bytes,
+    // in the order it was written (issue #1696), under the admission budget every config door
+    // shares (issue #1609).
+    let payload: serde_json::Value = match serde_json::from_slice(body.bytes()) {
+        Ok(v) => v,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {e}")),
+    };
     if let Some(rejection) = reject_if_not_a_stub(&payload) {
         return rejection;
     }
-    let mut stub: Stub = match serde_json::from_value(payload) {
+    let mut stub: Stub = match super::decode_config_body(body.bytes().clone()).await {
         Ok(s) => s,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub: {e}")),
+        Err(e) => return e.into_response("Invalid stub"),
     };
     // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
     if let Some(rejection) =
@@ -399,12 +406,33 @@ pub async fn handle_add_space_stub(
         Ok(()) => match manager.get_imposter(port) {
             Ok(imposter) => json_response(
                 StatusCode::CREATED,
-                &serde_json::json!({ "space": flow_id, "stubs": imposter.space_stubs(flow_id) }),
+                &SpaceStubs {
+                    space: flow_id,
+                    stubs: imposter.space_stubs(flow_id),
+                },
             ),
             Err(e) => e.into(),
         },
         Err(e) => e.into(),
     }
+}
+
+/// A space's stubs as the space routes print them. A struct, not `json!`: a `serde_json::Value`
+/// sorts every object, a stub's `is.headers` among them (issue #1696).
+#[derive(serde::Serialize)]
+struct SpaceStubs<'a> {
+    space: &'a str,
+    stubs: Vec<Stub>,
+}
+
+/// `GET /imposters/:port/spaces/:flowId`: [`SpaceStubs`] plus the space's scenarios and requests.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpaceDetail<'a> {
+    space: &'a str,
+    stubs: Vec<Stub>,
+    scenarios: Vec<serde_json::Value>,
+    number_of_requests: usize,
 }
 
 /// GET /imposters/:port/spaces/:flowId/stubs — list a space's scoped stubs.
@@ -416,7 +444,10 @@ pub async fn handle_list_space_stubs(
     match manager.get_imposter(port) {
         Ok(imposter) => json_response(
             StatusCode::OK,
-            &serde_json::json!({ "space": flow_id, "stubs": imposter.space_stubs(flow_id) }),
+            &SpaceStubs {
+                space: flow_id,
+                stubs: imposter.space_stubs(flow_id),
+            },
         ),
         Err(e) => e.into(),
     }
@@ -446,12 +477,12 @@ pub async fn handle_get_space(
                 .count();
             json_response(
                 StatusCode::OK,
-                &serde_json::json!({
-                    "space": flow_id,
-                    "stubs": imposter.space_stubs(flow_id),
-                    "scenarios": scenarios,
-                    "numberOfRequests": number_of_requests
-                }),
+                &SpaceDetail {
+                    space: flow_id,
+                    stubs: imposter.space_stubs(flow_id),
+                    scenarios,
+                    number_of_requests,
+                },
             )
         }
         Err(e) => e.into(),
@@ -515,7 +546,7 @@ mod tests {
     #[test]
     fn a_payload_that_is_not_an_object_is_left_to_deserialization() {
         // Not "no reason to refuse" — a different refusal, with a better message, one step later.
-        // The guard only classifies objects; anything else fails `from_value::<Stub>` on its own.
+        // The guard only classifies objects; anything else fails the `Stub` decode on its own.
         assert!(not_a_stub_reason(&serde_json::json!([])).is_none());
         assert!(not_a_stub_reason(&serde_json::json!("a string")).is_none());
         assert!(not_a_stub_reason(&serde_json::Value::Null).is_none());

@@ -128,6 +128,14 @@ impl std::ops::Deref for CollectedBody {
     }
 }
 
+/// A share of the budget held by something other than a body ([`BodyGuard::try_reserve`]),
+/// released when this is dropped.
+#[derive(Debug)]
+#[must_use]
+pub struct BudgetShare {
+    _permit: Option<OwnedSemaphorePermit>,
+}
+
 /// The limits plus the budget they share. One per [`ImposterManager`](super::ImposterManager), so
 /// every listener, the proxy and the admin API draw on the same budget.
 #[derive(Debug)]
@@ -157,7 +165,25 @@ impl BodyGuard {
     /// its whole share up front, waiting up to [`RESERVE_WAIT`] for the budget. An unknown length
     /// (chunked) reserves as it goes and never waits.
     pub async fn start(&self, content_length: Option<u64>) -> Result<BodyCollector, BodyReadError> {
-        self.start_with(content_length, true).await
+        let (mut collector, length) = self.open(content_length)?;
+        if let (Some(budget), Some(length)) = (&self.budget, length) {
+            let wanted = units(length);
+            if wanted > 0 {
+                // The semaphore is never closed, so an `Err` from it cannot happen; it is treated
+                // as exhaustion rather than unwrapped.
+                let permit = tokio::time::timeout(
+                    RESERVE_WAIT,
+                    Arc::clone(budget).acquire_many_owned(wanted),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .ok_or(BodyReadError::BudgetExhausted)?;
+                collector.hold(permit, wanted);
+            }
+        }
+        collector.reserve_capacity(length);
+        Ok(collector)
     }
 
     /// [`Self::start`] without waiting for the budget, for a body read while another is already
@@ -167,51 +193,77 @@ impl BodyGuard {
         &self,
         content_length: Option<u64>,
     ) -> Result<BodyCollector, BodyReadError> {
-        self.start_with(content_length, false).await
+        self.try_start(content_length)
     }
 
-    async fn start_with(
+    /// [`Self::start_without_waiting`] for a caller that cannot await: a `lookup` CSV file read on
+    /// a blocking thread while the request's body holds its share (issue #1654).
+    pub fn try_start(&self, content_length: Option<u64>) -> Result<BodyCollector, BodyReadError> {
+        let (mut collector, length) = self.open(content_length)?;
+        if let (Some(budget), Some(length)) = (&self.budget, length) {
+            let wanted = units(length);
+            if wanted > 0 {
+                let permit = Arc::clone(budget)
+                    .try_acquire_many_owned(wanted)
+                    .map_err(|_| BodyReadError::BudgetExhausted)?;
+                collector.hold(permit, wanted);
+            }
+        }
+        collector.reserve_capacity(length);
+        Ok(collector)
+    }
+
+    /// Hold `bytes` of the budget without waiting, for memory that is not a body: a `lookup` CSV
+    /// parse the cache does not keep, held until its row is served (issue #1654). More than the
+    /// whole budget can never be held, so it is [`BodyReadError::TooLarge`] rather than
+    /// exhaustion; without a budget nothing is held.
+    ///
+    /// # Errors
+    /// [`BodyReadError::TooLarge`] past the whole budget, [`BodyReadError::BudgetExhausted`] when
+    /// it cannot be held now.
+    pub fn try_reserve(&self, bytes: usize) -> Result<BudgetShare, BodyReadError> {
+        let Some(budget) = &self.budget else {
+            return Ok(BudgetShare { _permit: None });
+        };
+        let wanted = units(bytes);
+        if wanted == 0 {
+            return Ok(BudgetShare { _permit: None });
+        }
+        let total = self.limits.budget_bytes().unwrap_or(usize::MAX);
+        if bytes > total {
+            return Err(BodyReadError::TooLarge { limit: total });
+        }
+        Arc::clone(budget)
+            .try_acquire_many_owned(wanted)
+            .map(|permit| BudgetShare {
+                _permit: Some(permit),
+            })
+            .map_err(|_| BodyReadError::BudgetExhausted)
+    }
+
+    /// An empty collector, and the known length checked against the ceiling. A known length over
+    /// it is refused here, before anything is reserved or read.
+    fn open(
         &self,
         content_length: Option<u64>,
-        wait: bool,
-    ) -> Result<BodyCollector, BodyReadError> {
+    ) -> Result<(BodyCollector, Option<usize>), BodyReadError> {
         let max = self.limits.max_body_bytes();
-        let mut collector = BodyCollector {
+        let length = content_length
+            .map(|length| {
+                usize::try_from(length)
+                    .ok()
+                    .filter(|length| *length <= max)
+                    .ok_or(BodyReadError::TooLarge { limit: max })
+            })
+            .transpose()?;
+        let collector = BodyCollector {
             buf: BytesMut::new(),
             max,
             budget: self.budget.clone(),
             reservation: None,
             reserved_units: 0,
         };
-        if let Some(length) = content_length {
-            let length = usize::try_from(length)
-                .ok()
-                .filter(|length| *length <= max)
-                .ok_or(BodyReadError::TooLarge { limit: max })?;
-            if let Some(budget) = &self.budget {
-                let wanted = units(length);
-                if wanted > 0 {
-                    // The semaphore is never closed, so an `Err` from it cannot happen; it is
-                    // treated as exhaustion rather than unwrapped.
-                    let permit = if wait {
-                        tokio::time::timeout(
-                            RESERVE_WAIT,
-                            Arc::clone(budget).acquire_many_owned(wanted),
-                        )
-                        .await
-                        .ok()
-                        .and_then(Result::ok)
-                    } else {
-                        Arc::clone(budget).try_acquire_many_owned(wanted).ok()
-                    }
-                    .ok_or(BodyReadError::BudgetExhausted)?;
-                    collector.reservation = Some(permit);
-                    collector.reserved_units = wanted;
-                }
-            }
-            collector.buf = BytesMut::with_capacity(length);
-        }
-        Ok(collector)
+        Ok((collector, length))
     }
 
     /// Collect a whole `hyper` body under the limits. The length comes from the body's own size
@@ -250,6 +302,20 @@ pub struct BodyCollector {
 }
 
 impl BodyCollector {
+    /// Take `permit`, worth `units` of the budget, as this body's up-front share.
+    fn hold(&mut self, permit: OwnedSemaphorePermit, units: u32) {
+        self.reservation = Some(permit);
+        self.reserved_units = units;
+    }
+
+    /// Allocate a known length once its share is held, never before: a refused body allocates
+    /// nothing.
+    fn reserve_capacity(&mut self, length: Option<usize>) {
+        if let Some(length) = length {
+            self.buf = BytesMut::with_capacity(length);
+        }
+    }
+
     /// Append a chunk, refusing it past the ceiling or when the budget cannot cover it now.
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), BodyReadError> {
         let length = self.buf.len() + chunk.len();

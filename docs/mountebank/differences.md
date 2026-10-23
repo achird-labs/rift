@@ -251,6 +251,10 @@ with `Retry-After` when the bodies buffered at once would exceed `--body-memory-
 1 GiB), where Mountebank would run out of heap. Below those limits the two serve the same bodies.
 See [Body size limits](../configuration/cli.md#body-size-limits).
 
+Mountebank's `lookup` streams a CSV file of any size. Rift reads a CSV file of up to
+`--max-body-size`, and a lookup answers `503` with `Retry-After` while the body memory budget is
+used up (#1654). See [Behaviors](behaviors.md#csv-lookup).
+
 ## `GET /logs` is a bounded ring
 
 Mountebank's `/logs` re-reads its whole JSON logfile on every request, and that file never rotates

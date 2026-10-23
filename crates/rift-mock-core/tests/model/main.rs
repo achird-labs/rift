@@ -36,7 +36,9 @@ use ops::{Edit, FLOW_KEYS, FLOWS, Method, Op, PATHS, SCENARIOS, Shape, Spec, app
 
 /// No connection pool: ports are reused (the kernel can reissue a freed auto-assigned port, and
 /// `Recreate` re-binds the same one), and a pooled connection to a deleted imposter is closed by the
-/// time the next request is written on it.
+/// time the next request is written on it. Both imposters bind `127.0.0.1`, the address every
+/// request dials: on the default `[::]` wildcard, macOS lets another process's later `SO_REUSEADDR`
+/// bind of `127.0.0.1:P` share the port and take every loopback connection (#1501, #1688).
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .pool_max_idle_per_host(0)
@@ -55,6 +57,7 @@ struct Sut {
 fn imposter_json(port: u16, stubs: Value) -> Value {
     json!({
         "port": port,
+        "host": "127.0.0.1",
         "protocol": "http",
         "_rift": { "flowState": { "flowIdSource": "header:X-Flow" } },
         "stubs": stubs
@@ -117,7 +120,7 @@ impl Sut {
             .collect();
         let upstream_port = manager
             .create_imposter(config(json!({
-                "port": 0, "protocol": "http", "recordRequests": true, "stubs": upstream_stubs
+                "port": 0, "host": "127.0.0.1", "protocol": "http", "recordRequests": true, "stubs": upstream_stubs
             })))
             .await
             .expect("upstream imposter");
@@ -329,7 +332,8 @@ async fn apply(
                 .expect("delete imposter");
             // The port was free a moment ago, but the manager auto-assigns ports to every other
             // test in this binary, so one may have taken it. Then the imposter moves to a new port,
-            // which a client sees as a new URL holding nothing cached.
+            // which a client sees as a new URL holding nothing cached. Binding loopback keeps another
+            // process's loopback listener from sharing the port instead (#1501, #1688).
             let port = match sut.manager.create_imposter(config.clone()).await {
                 Err(ImposterError::BindError(..)) => {
                     lm.0.clear();
@@ -875,4 +879,23 @@ fn a_reload_that_moves_a_recording_keeps_its_claim() {
         &[once_catch_all()],
         &[post_a(), Op::Reload(vec![ops::Edit::Swap(0, 1)]), post_a()],
     );
+}
+
+/// #1688: an imposter bound on the `[::]` wildcard shares its port with a later `127.0.0.1` bind
+/// on macOS (`SO_REUSEADDR`), and that loopback socket then takes every connection this test makes.
+/// Bound on loopback itself, the port is refused to any such listener, here or in another process.
+#[test]
+fn model_imposters_keep_their_loopback_port() {
+    runtime().block_on(async {
+        let sut = Sut::start(&[]).await;
+        for port in [sut.port, sut.upstream_port] {
+            let thief = std::net::TcpListener::bind(("127.0.0.1", port));
+            assert_eq!(
+                thief.as_ref().map_err(std::io::Error::kind).err(),
+                Some(std::io::ErrorKind::AddrInUse),
+                "a loopback listener took the model's port {port}: {thief:?}"
+            );
+        }
+        sut.manager.delete_all().await;
+    });
 }
