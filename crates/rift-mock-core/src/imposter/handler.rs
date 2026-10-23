@@ -1536,9 +1536,15 @@ async fn handle_request_inner(
                     // the function did not return is completed from `defaultResponse` (issue #1369),
                     // or is `200`, no headers and an empty body when there is none.
                     let authored = IsResponse::decoded(
-                        inject_response
-                            .status_code
-                            .map(super::types::StatusValue::Code),
+                        inject_response.status_code.map(|status| match status {
+                            crate::behaviors::ResponseStatus::Code(code) => {
+                                super::types::StatusValue::Code(code)
+                            }
+                            // Read when the response is written, as an `is` string is (#1635).
+                            crate::behaviors::ResponseStatus::Text(text) => {
+                                super::types::StatusValue::from_text(text)
+                            }
+                        }),
                         inject_response.headers.map(|headers| {
                             headers.into_iter().map(|(k, v)| (k, vec![v])).collect()
                         }),

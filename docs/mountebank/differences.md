@@ -40,6 +40,11 @@ differently. Nor does it add `inner`, the error Mountebank wraps in a `bad data`
 predicate `inject` carries `code` `invalid predicate injection`, where Mountebank says
 `invalid injection`.
 
+An `inject` whose `body` `JSON.stringify` cannot serialize (a cycle, a BigInt) answers `500` in both
+engines. Mountebank's body is the `TypeError` itself (`message`, `name`, `stack`); Rift's is its
+`invalid injection` envelope naming the error. A `decorate` that leaves such a body fails like any
+other failing decorate.
+
 When an imposter's address is held by another process, both engines answer `400`; Mountebank's body
 is node's raw `EADDRINUSE` object (`code`, `errno`, `syscall`, `address`, `port`, no `message`), Rift's
 is its own envelope.
@@ -401,6 +406,13 @@ string and body). To record exportable stubs, give the proxy `predicateGenerator
 `{"matches": {"method": true, "path": true, "query": true, "body": true}}`. See
 [Proxy](proxy.md).
 
+## A refused proxy status records nothing
+
+When a behavior leaves a `proxy` response with a `statusCode` Node refuses (`"abc"`, `-1`), both
+engines answer `500` `ERR_HTTP_INVALID_STATUS_CODE`. Mountebank also records the stub, so its
+replays keep answering `500`; Rift records nothing, so the next request is proxied again. See
+[Responses](responses.md).
+
 ## Generated predicates
 
 A proxy's `predicateGenerators` record predicates whose order, selector scope, selected-value type
@@ -433,7 +445,7 @@ without any of those keys, and that Mountebank refuses with `unrecognized respon
 
 ## `defaultResponse` completes a response by the fields it omits
 
-An imposter's `defaultResponse` is served when no stub matches, and it also supplies the `statusCode`, `headers`, `body` and `_mode` that an `is` or `inject` response omits, as in Mountebank. `headers` is taken whole, never merged key by key; a `proxy` response is never completed. Mountebank decides by falsiness and Rift by whether the field was written, which differs in two places:
+An imposter's `defaultResponse` is served when no stub matches, and it also supplies the `statusCode`, `headers`, `body` and `_mode` that an `is` or `inject` response omits, as in Mountebank. `headers` is taken whole, never merged key by key. A `proxy` response is not completed, except that a falsy `statusCode` a behavior leaves on it (`""`, `0`, `null`) takes the `defaultResponse` status, then `200`, as in Mountebank. Mountebank decides by falsiness and Rift by whether the field was written, which differs in two places:
 
 `defaultResponse` completes a response by the fields it omits: an explicit `"body": ""` is served empty, and a proxied empty body is served as the upstream sent it; Mountebank replaces both with the `defaultResponse` body.
 

@@ -541,7 +541,10 @@ mod tests {
             )
             .await
             .expect("fast inject");
-            assert_eq!(resp.status_code, Some(201));
+            assert_eq!(
+                resp.status_code,
+                Some(crate::behaviors::ResponseStatus::Code(201))
+            );
             assert_eq!(resp.body_text(), "from-inject");
         }
 

@@ -69,6 +69,15 @@ record.
 
 ### Changed
 
+- **A `repeat` beside a behavior in a `behaviors` array element no longer repeats the response**
+  (#1672); Mountebank ignores it there. Put `repeat` on the response. `{"behaviors": [{"wait": 1,
+  "repeat": 3}]}` is now served once per cycle instead of three times, any value there is admitted
+  (`2.0` and `"x"` were refused), and `GET /imposters`, `rift save` and `--datadir` write it back
+  inside its element instead of as the response's `repeat`, as Mountebank does. A standalone
+  `{"repeat": n}` element an older engine stored, and the `_behaviors` object form's `repeat`, still
+  repeat. A stored config with this shape replays and now serves once per cycle; an id-less stub
+  holding one gets a new `stub_key` once, because its written form changes, so its cursor restarts.
+  `rift-lint` reports it as the new warning `W024` instead of checking it as `E035`.
 - **A `behaviors` array element whose `copy`, `lookup` or `shellTransform` is a list is refused**
   (`400`, #1639), as Mountebank refuses it, with its first error (`shellTransform behavior
   "shellTransform" field must be a string, …`, `copy behavior "from" field required`, `lookup
@@ -332,6 +341,25 @@ record.
   proxy stub made, or the one now behind it, and forwarded nothing. It now forwards and records
   in front of itself, as Mountebank does. A recording in front of the answering stub (concurrent
   first requests) still replays, so the upstream still sees such a request once.
+- **An `inject`'s `statusCode` and a status a behavior leaves on a `proxy` response are read as
+  Mountebank reads them** (#1635). An `inject` that returns a non-numeric, negative or out-of-range
+  `statusCode`, or `true`, answers `500` `ERR_HTTP_INVALID_STATUS_CODE` as in Mountebank, instead
+  of falling back to the `defaultResponse` status or `200` (a number above 65535 is no longer
+  saturated to `65535` in the message). A string status that a `decorate`/`shellTransform`/`copy`
+  leaves on a `proxy` response is now served and recorded instead of ignored; one Node refuses
+  answers `500` and records nothing. A decorate that leaves a falsy `statusCode` (`null`, `NaN`,
+  deleted) gets the `defaultResponse` status, then `200`, instead of keeping the one it was given.
+  An `inject`'s number or boolean header values are sent instead of dropped. An `inject` or
+  `decorate` body that `JSON.stringify` cannot serialize (a cycle, a BigInt) now fails the script,
+  answering `500` as Mountebank does; a cycle used to overflow the stack and abort the process, and a
+  BigInt was served as `null`. An object body is now served as `JSON.stringify` writes it
+  (compact, in the script's key order rather than key-sorted, functions and `undefined` dropped,
+  `toJSON` honoured, a lone surrogate escaped as `\udXXX`), and one nested more than 128 levels
+  deep answers `500` instead of overflowing the stack. A script state that cannot be saved (a
+  cycle, nesting past 128 levels) is logged at error level, naming the imposter, instead of being
+  dropped silently. For embedders: `MountebankInjectResponse.status_code` is now
+  `Option<ResponseStatus>`, and `rift_types::schema::StatusCode`, unused since #1558, is deprecated.
+
 - **A response holding only a `_rift` block without a `script` is served** (#1685): for example
   the documented `{"_rift": {"fault": {"tcp": "…"}}}` was matched and then answered as a no-match
   (`200`, `x-rift-no-match`), so its fault, `stateOps` and `conditional` never ran. It is now

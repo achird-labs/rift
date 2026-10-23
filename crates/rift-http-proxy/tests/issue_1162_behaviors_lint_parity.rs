@@ -230,6 +230,10 @@ fn arrays() -> Vec<Value> {
         json!([{ "wait": 1, "custom": true }]),
         json!([{ "wait": 1, "repeat": 2 }]),
         json!([{ "wait": 1, "repeat": null }]),
+        // Issue #1672: a `repeat` beside a behavior is a custom key, read and checked by neither.
+        json!([{ "wait": 1, "repeat": 0 }]),
+        json!([{ "wait": 1, "repeat": 2.0 }]),
+        json!([{ "wait": 1, "repeat": "x" }]),
         json!([{}]),
         // A `from` of the wrong size a later `null` clears is still refused: it is judged as written.
         json!([{ "copy": { "from": { "query": "q", "headers": "h" }, "into": "${P}", "using": using() } },
