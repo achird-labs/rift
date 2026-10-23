@@ -1077,12 +1077,19 @@ impl Imposter {
 
     /// Whether any `is` response carries `_rift.stateOps` (issue #969) — such a stub writes the
     /// flow store on every matched request, so its imposter needs a real store even without
-    /// `_rift.flowState` configured. `is` only: the ops do not run on any other response shape.
+    /// `_rift.flowState` configured. `is` only, which includes a script-less bare `_rift` response
+    /// served as `is: {}` (issue #1685): the ops do not run on any other response shape.
     fn uses_state_ops(stubs: &[Stub]) -> bool {
         stubs
             .iter()
             .flat_map(|s| &s.responses)
-            .any(|resp| matches!(resp, StubResponse::Is { rift: Some(r), .. } if !r.state_ops.is_empty()))
+            .any(|resp| match resp {
+                StubResponse::Is { rift: Some(r), .. } => !r.state_ops.is_empty(),
+                StubResponse::RiftScript { rift, .. } => {
+                    rift.script.is_none() && !rift.state_ops.is_empty()
+                }
+                _ => false,
+            })
     }
 
     /// Whether any stub references a scenario — via the declarative FSM fields
@@ -1099,18 +1106,18 @@ impl Imposter {
         })
     }
 
-    /// Whether any stub can execute a Rift script (`_rift.script` on an `Is` response, or the
-    /// script-only `RiftScript` response) — such a stub might call `ctx.state`/`flow_store` at
+    /// Whether any stub can execute a Rift script (`_rift.script` on an `Is` response, or a
+    /// scripted `RiftScript` response) — such a stub might call `ctx.state`/`flow_store` at
     /// runtime, so its imposter needs a real flow store even without `_rift.flowState`
-    /// configured (issue #358). Conservative like [`Self::uses_tcp_faults`]: a `RiftScript`
-    /// response always counts, since whether it actually touches the store isn't visible here.
+    /// configured (issue #358). A `RiftScript` without a script runs none: it is served as
+    /// `is: {}` (issue #1685).
     fn uses_script(stubs: &[Stub]) -> bool {
         stubs
             .iter()
             .flat_map(|s| &s.responses)
             .any(|resp| match resp {
-                StubResponse::Is { rift: Some(r), .. } => r.script.is_some(),
-                StubResponse::RiftScript { .. } => true,
+                StubResponse::Is { rift: Some(r), .. }
+                | StubResponse::RiftScript { rift: r, .. } => r.script.is_some(),
                 _ => false,
             })
     }

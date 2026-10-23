@@ -208,6 +208,14 @@ fn arrays() -> Vec<Value> {
         json!([{ "shellTransform": 5 }, { "shellTransform": "echo a" }]),
         json!([{ "shellTransform": ["echo a", 1] }, { "shellTransform": null }]),
         json!([{ "shellTransform": "echo a" }, { "shellTransform": ["echo b"] }]),
+        // Issue #1639: a list in one element is refused by both, empty included, whatever follows.
+        json!([{ "shellTransform": ["echo a", "echo b"] }]),
+        json!([{ "shellTransform": [] }]),
+        json!([{ "copy": [copy] }]),
+        json!([{ "copy": [] }]),
+        json!([{ "lookup": [lookup] }]),
+        json!([{ "lookup": [] }, { "lookup": null }]),
+        json!([{ "shellTransform": "echo a" }, { "shellTransform": "echo b" }]),
         // Scalars stay last-wins.
         json!([{ "wait": true }, { "wait": 5 }]),
         json!([{ "wait": 5 }, { "wait": true }]),

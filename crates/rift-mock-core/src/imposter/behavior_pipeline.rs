@@ -10,7 +10,7 @@ use super::handler::{
 };
 use super::headers::StubRef;
 use super::response::{apply_decorate_bounded, body_text};
-use super::types::{IsResponse, StatusValue};
+use super::types::{IsResponse, ResponseMode, StatusValue};
 use crate::behaviors::{
     BehaviorProgram, BehaviorStep, CsvCache, Decorated, RequestContext, ResponseStatus,
     ShellTransformError, Spliced, SplicedHeaders, SplicedName, WaitScriptError, apply_copy_spliced,
@@ -40,9 +40,24 @@ pub(crate) struct ServedParts {
     /// Multi-value (issue #238): one entry per header name, one element per header line.
     pub headers: SplicedHeaders,
     pub body: Spliced,
+    /// The body as the JSON value it was written as, when that is not a string (issue #1639): an
+    /// `is` body written as an object, array, number or boolean. A shellTransform reads it as
+    /// `MB_RESPONSE.body`, as Mountebank hands a command the response object, until a step rewrites
+    /// the body. `None` for a string body, which is its own text, for a binary one (base64 text in
+    /// both engines) and for an upstream's body (text in both).
+    pub typed_body: Option<serde_json::Value>,
 }
 
 impl ServedParts {
+    /// [`ServedParts::typed_body`] for a body written as `body` in `mode`.
+    pub(crate) fn typed_body_of(
+        body: Option<&serde_json::Value>,
+        mode: &ResponseMode,
+    ) -> Option<serde_json::Value> {
+        body.filter(|body| !body.is_string() && *mode == ResponseMode::Text)
+            .cloned()
+    }
+
     /// A response a script wrote, completed from the imposter's `defaultResponse` (issue #1369)
     /// or, without one, from the built-in `200`, no headers and an empty body. What the script
     /// wrote is its own text (issue #1203); a string status taken from the default is supplied
@@ -74,6 +89,7 @@ impl ServedParts {
                 })
                 .collect(),
             body: Spliced::authored(body_text(completed.body.as_ref())),
+            typed_body: Self::typed_body_of(completed.body.as_ref(), &completed.mode),
         }
     }
 }
@@ -227,6 +243,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
             mut status_text,
             mut headers,
             mut body,
+            typed_body,
         } = parts;
         // What `decorate` and `shellTransform` see as `statusCode`, as Mountebank hands it over.
         let script_status = |status: u16, text: &Option<Spliced>| match text {
@@ -234,10 +251,14 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
             None => ResponseStatus::Code(status),
         };
         let mut degraded = false;
-        // The JSON body the last shellTransform returned (issue #1589), so the next command reads
-        // a number as a number, as in Mountebank. Used only while the body is still its rendering:
-        // any step that rewrites the body leaves text.
-        let mut shell_body: Option<serde_json::Value> = None;
+        // The body's JSON value: as the response was written (issue #1639), then as the last
+        // shellTransform or returned decorate object left it (#1589), so a command reads a number
+        // as a number, as in Mountebank. Used only while the body is still its rendering: any step
+        // that rewrites the body leaves text.
+        let mut shell_body = typed_body;
+        let still_typed = |shell_body: Option<serde_json::Value>, body: &Spliced| {
+            shell_body.filter(|value| body_text(Some(value)) == body.as_str())
+        };
 
         // Lazy request context (issue #561): only copy/lookup/decorate/shellTransform read
         // it, and `RequestContext::from_request` re-parses the query, clones a key and
@@ -447,6 +468,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                             status_text = completed.status_text;
                             headers = completed.headers;
                             body = completed.body;
+                            shell_body = completed.typed_body;
                         }
                         // A script's output is the author's text (issue #1203): ranges cannot
                         // survive an arbitrary rewrite, and the script is configuration.
@@ -536,10 +558,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     let response_in = serde_json::json!({
                         "statusCode": script_status(status, &status_text).to_json(),
                         "headers": headers_json(&headers),
-                        "body": shell_body
-                            .as_ref()
-                            .filter(|value| body_text(Some(value)) == body.as_str())
-                            .cloned()
+                        "body": still_typed(shell_body.clone(), &body)
                             .unwrap_or_else(|| body.as_str().into()),
                     });
                     // Run the fork/exec/wait off the tokio worker (issue #478): a synchronous
@@ -564,15 +583,13 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     };
                     match shell_result {
                         Ok(authored) => {
-                            let fallback = IsResponse::default();
-                            let default = self.default_response.unwrap_or(&fallback);
-                            shell_body.clone_from(&authored.completed_by(default).body);
                             let completed =
                                 ServedParts::completed(&authored, self.default_response);
                             status = completed.status;
                             status_text = completed.status_text;
                             headers = completed.headers;
                             body = completed.body;
+                            shell_body = completed.typed_body;
                         }
                         // Not a response (#1589), or the command failed: keep the response
                         // unchanged (issue #269) but signal the failure so it isn't a silent
@@ -611,6 +628,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
 
         BehaviorOutcome::Applied {
             parts: ServedParts {
+                typed_body: still_typed(shell_body, &body),
                 status,
                 status_text,
                 headers,
@@ -646,6 +664,7 @@ mod tests {
                 vec!["a=1".to_string(), "b=2".to_string()],
             )])),
             body: Spliced::authored("orig".to_string()),
+            typed_body: None,
         }
     }
 
@@ -658,12 +677,21 @@ mod tests {
         strict: bool,
         default_response: Option<&IsResponse>,
     ) -> BehaviorOutcome {
-        let behaviors = behaviors(block);
+        run_program(&behaviors(block), strict, default_response, original()).await
+    }
+
+    /// Run `behaviors` over `parts`.
+    async fn run_program(
+        behaviors: &BehaviorProgram,
+        strict: bool,
+        default_response: Option<&IsResponse>,
+        parts: ServedParts,
+    ) -> BehaviorOutcome {
         let uri: hyper::Uri = "/users/42?x=1".parse().expect("fixture uri");
         let request_headers: crate::imposter::Headers = crate::imposter::Headers::new();
         let csv_cache: &'static CsvCache = Box::leak(Box::new(CsvCache::new()));
         BehaviorRun {
-            behaviors: &behaviors,
+            behaviors,
             method: "GET",
             uri: &uri,
             request_headers: &request_headers,
@@ -680,7 +708,7 @@ mod tests {
             default_response,
             shutdown: None,
         }
-        .apply(original())
+        .apply(parts)
         .await
     }
 
@@ -1034,6 +1062,81 @@ mod tests {
         let (parts, _) = applied(run(block, false).await);
         let seen: serde_json::Value = serde_json::from_str(parts.body.as_str()).expect("JSON body");
         assert_eq!(seen, json!({ "statusCode": 203, "headers": {}, "body": 2 }));
+    }
+
+    /// The parts of an `is` response written with `body`, as the handler builds them.
+    fn is_parts(body: &serde_json::Value) -> ServedParts {
+        ServedParts {
+            body: Spliced::authored(body_text(Some(body))),
+            typed_body: ServedParts::typed_body_of(Some(body), &ResponseMode::Text),
+            ..original()
+        }
+    }
+
+    /// What the one command `printf '{"body":%s}' "$MB_RESPONSE"` saw as `MB_RESPONSE.body`,
+    /// after `before` ran.
+    async fn shell_saw_body(before: &[serde_json::Value], parts: ServedParts) -> serde_json::Value {
+        let shell = json!({ "shellTransform": r#"printf '{"body":%s}' "$MB_RESPONSE" #"# });
+        let program = BehaviorProgram::from_elements(before.iter().chain([&shell]))
+            .expect("fixture program parses");
+        let (parts, degraded) = applied(run_program(&program, false, None, parts).await);
+        assert!(!degraded, "{:?}", parts.headers);
+        let seen: serde_json::Value = serde_json::from_str(parts.body.as_str()).expect("JSON body");
+        seen["body"].clone()
+    }
+
+    /// Issue #1639: the first command reads an `is` body written as a number as that number, as
+    /// Mountebank hands it the response object, so `body + 1` adds.
+    #[tokio::test]
+    async fn the_first_shell_command_sees_a_typed_is_body() {
+        assert_eq!(shell_saw_body(&[], is_parts(&json!(3))).await, json!(3));
+        assert_eq!(
+            shell_saw_body(&[], is_parts(&json!(true))).await,
+            json!(true)
+        );
+        // A string body is its own text.
+        assert_eq!(shell_saw_body(&[], is_parts(&json!("3"))).await, json!("3"));
+    }
+
+    /// Issue #1639: an object or array body reaches `MB_RESPONSE.body` as that value.
+    #[tokio::test]
+    async fn an_object_is_body_reaches_mb_response_as_an_object() {
+        for body in [json!({ "a": 1, "b": [true, null] }), json!([1, "x"])] {
+            assert_eq!(shell_saw_body(&[], is_parts(&body)).await, body);
+        }
+    }
+
+    /// Issue #1639, the documented residual: Rift's `copy` is a text pass, so once it rewrote an
+    /// object body the command gets text. Mountebank's copy replaces inside the object.
+    #[tokio::test]
+    async fn a_copy_before_shell_transform_hands_text() {
+        let copy = json!({ "copy": { "from": "path", "into": "${P}",
+                                     "using": { "method": "regex", "selector": ".+" } } });
+        let body = json!({ "p": "${P}" });
+        assert_eq!(
+            shell_saw_body(std::slice::from_ref(&copy), is_parts(&body)).await,
+            json!(r#"{"p":"/users/42"}"#)
+        );
+        // A copy that substitutes nothing leaves the body as written, still a value.
+        let unmatched = json!({ "q": 1 });
+        assert_eq!(
+            shell_saw_body(&[copy], is_parts(&unmatched)).await,
+            unmatched
+        );
+    }
+
+    /// Issue #1639: a binary body is base64 text in both engines.
+    #[test]
+    fn a_binary_or_string_body_has_no_typed_value() {
+        assert_eq!(
+            ServedParts::typed_body_of(Some(&json!({ "a": 1 })), &ResponseMode::Binary),
+            None
+        );
+        assert_eq!(
+            ServedParts::typed_body_of(Some(&json!("AQID")), &ResponseMode::Text),
+            None
+        );
+        assert_eq!(ServedParts::typed_body_of(None, &ResponseMode::Text), None);
     }
 
     /// Issue #1589: stdout that is valid JSON but not an object replaces the response with an empty

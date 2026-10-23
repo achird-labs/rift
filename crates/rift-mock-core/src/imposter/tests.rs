@@ -526,6 +526,34 @@ fn compile_only(
     (behaviors, behaviors_parsed.map(|p| (*p).clone()))
 }
 
+/// [`compiled`] for a shape a config door refuses since #1639, a list inside one element, which
+/// engines up to v0.23.0 admitted and a store still replays.
+fn compiled_stored(
+    array: serde_json::Value,
+) -> (serde_json::Value, crate::behaviors::BehaviorProgram) {
+    let response = serde_json::json!({"is": {}, "behaviors": array});
+    assert!(
+        serde_json::from_value::<StubResponse>(response.clone()).is_err(),
+        "{response} is refused at a config door"
+    );
+    let response: StubResponse =
+        crate::imposter::deserialize_replayed(response).expect("the stored response replays");
+    let StubResponse::Is {
+        behaviors,
+        behaviors_parsed,
+        ..
+    } = response
+    else {
+        panic!("Expected Is response");
+    };
+    (
+        behaviors.expect("a program"),
+        behaviors_parsed
+            .map(|p| (*p).clone())
+            .expect("the program parses"),
+    )
+}
+
 fn compiled(array: serde_json::Value) -> (serde_json::Value, crate::behaviors::BehaviorProgram) {
     let (block, program) = compile_only(array);
     (
@@ -558,11 +586,12 @@ fn test_behaviors_array_repeated_list_keys_are_each_a_step() {
     );
 }
 
-/// Issue #1195: a list inside one element is one step per item, in order.
+/// Issue #1195: a list inside one element is one step per item, in order. A door refuses one since
+/// #1639, as Mountebank does; a stored one replays this way.
 #[test]
 fn test_behaviors_array_list_items_are_steps_in_order() {
     let (a, b, c) = (copy_into("${A}"), copy_into("${B}"), copy_into("${C}"));
-    let (block, _) = compiled(serde_json::json!([
+    let (block, _) = compiled_stored(serde_json::json!([
         {"copy": [a.clone(), b.clone()]},
         {"copy": c.clone()}
     ]));
@@ -571,7 +600,7 @@ fn test_behaviors_array_list_items_are_steps_in_order() {
         serde_json::json!([{"copy": a}, {"copy": b}, {"copy": c}])
     );
 
-    let (block, program) = compiled(serde_json::json!([
+    let (block, program) = compiled_stored(serde_json::json!([
         {"shellTransform": "echo x"},
         {"shellTransform": ["echo y", "echo z"]}
     ]));
@@ -620,7 +649,8 @@ fn test_behaviors_array_null_removes_earlier_steps_of_its_key() {
 #[test]
 fn test_behaviors_array_empty_list_does_not_clear() {
     let a = copy_into("${A}");
-    let (block, program) = compiled(serde_json::json!([{"copy": a.clone()}, {"copy": []}]));
+    // A door refuses the empty list since #1639; a stored one replays as nothing.
+    let (block, program) = compiled_stored(serde_json::json!([{"copy": a.clone()}, {"copy": []}]));
     assert_eq!(block, serde_json::json!([{"copy": a}]));
     assert_eq!(program.steps.len(), 1);
 }
