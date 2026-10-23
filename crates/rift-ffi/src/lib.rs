@@ -34,9 +34,10 @@
 
 use anyhow::Context;
 use parking_lot::Mutex;
+use rift_http_proxy::admin_api::types::TlsHeader;
 use rift_http_proxy::admin_api::{
-    AdminApiServer, RunningAdminApi, SERVE_OPTION_KEYS, filter_proxy_stubs, replayable_value,
-    tls_header,
+    AdminApiServer, OrderedJson, RunningAdminApi, SERVE_OPTION_KEYS, filter_proxy_stubs,
+    replayable_value, tls_header,
 };
 use rift_http_proxy::config_loader::{self, ConfigSource};
 use rift_http_proxy::injection_gate;
@@ -46,8 +47,8 @@ use rift_http_proxy::intercept_control::{
 use rift_http_proxy::intercept_rules::InterceptRule;
 use rift_http_proxy::server::{RunningMetrics, bind_metrics_server};
 use rift_mock_core::imposter::{
-    ApplyReport, Imposter, ImposterConfig, ImposterManager, PortReservation, ServerListener, Stub,
-    VerifyOptions,
+    ApplyReport, Imposter, ImposterConfig, ImposterManager, IsResponse, PortReservation,
+    RecordedRequest, ServerListener, Stub, VerifyOptions,
 };
 use rift_mock_core::proxy::truststore::{TrustStorePassword, ca_pem, export_jks, export_pkcs12};
 use serde_json::{Value, json};
@@ -257,7 +258,8 @@ struct ServeOptions {
     /// `--configfile` (issue #1107). The only escape for a literal `<%` in it, and the reload that
     /// re-reads the file keeps it. Refused without `configFile`, where it would do nothing.
     no_parse: Option<bool>,
-    config: Option<Value>,
+    /// An [`OrderedJson`], not a `Value`, so the imposters keep their header order (issue #1696).
+    config: Option<OrderedJson>,
     /// Gate script/inject imposters that reach Rift across a trust boundary: submitted THROUGH the
     /// admin plane (issue #492) or read off disk via `configFile` (issue #616). Default false,
     /// preserving the previous behavior.
@@ -295,10 +297,28 @@ struct ServeOptions {
     scripts_dir: Option<String>,
 }
 
+/// The `{"imposters":[...]}` reload input shape; any other key is ignored.
+#[derive(serde::Deserialize)]
+struct ImpostersDocument {
+    imposters: Option<Vec<ImposterConfig>>,
+}
+
 /// Parse `{"imposters":[...]}` or a bare `[...]` into imposter configs (the reload input shape).
-fn parse_imposter_configs(v: &Value) -> Result<Vec<ImposterConfig>, String> {
-    let array = v.get("imposters").unwrap_or(v);
-    serde_json::from_value::<Vec<ImposterConfig>>(array.clone()).map_err(|e| e.to_string())
+///
+/// Decoded from the text, never through a `serde_json::Value`: a `Value` sorts every object, and a
+/// stub's `is.headers` would serve alphabetically instead of in the order written (issue #1696). A
+/// document of neither shape is refused as a bare array would be ("expected a sequence").
+fn parse_imposter_configs(text: &str) -> Result<Vec<ImposterConfig>, String> {
+    if text.trim_start().starts_with('{') {
+        match serde_json::from_str::<ImpostersDocument>(text) {
+            Ok(ImpostersDocument {
+                imposters: Some(imposters),
+            }) => return Ok(imposters),
+            Ok(ImpostersDocument { imposters: None }) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    serde_json::from_str::<Vec<ImposterConfig>>(text).map_err(|e| e.to_string())
 }
 
 /// Start the engine. Returns an opaque handle, or null if the runtime could not be created.
@@ -629,6 +649,61 @@ struct ImposterProjection {
     remove_proxies: bool,
 }
 
+/// `{"imposters": [...]}`.
+#[derive(serde::Serialize)]
+struct ImpostersOf<T> {
+    imposters: Vec<T>,
+}
+
+// The C-ABI views are structs, never `json!`: a `serde_json::Value` sorts every object, so a stub's
+// `is.headers`, a `defaultResponse`'s and a recorded request's headers printed alphabetically
+// instead of in the order written or sent (issue #1696). Field order is the documented key order.
+
+/// One [`rift_list_imposters`] summary entry.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FfiImposterSummary<'a> {
+    protocol: &'a str,
+    port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_response: Option<&'a IsResponse>,
+    number_of_requests: u64,
+    enabled: bool,
+    #[serde(rename = "allowCORS", skip_serializing_if = "Option::is_none")]
+    allow_cors: Option<&'a Value>,
+}
+
+/// The [`rift_get_imposter`] detail.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FfiImposterDetail<'a> {
+    protocol: &'a str,
+    port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_response: Option<&'a IsResponse>,
+    number_of_requests: u64,
+    enabled: bool,
+    record_requests: bool,
+    #[serde(rename = "allowCORS", skip_serializing_if = "Option::is_none")]
+    allow_cors: Option<&'a Value>,
+    /// An https imposter's TLS metadata, as `GET /imposters/{port}` prints it.
+    #[serde(flatten)]
+    tls: Option<TlsHeader>,
+    stubs: Vec<Stub>,
+    requests: Vec<RecordedRequest>,
+}
+
+/// The [`rift_space_list_stubs`] answer.
+#[derive(serde::Serialize)]
+struct FfiSpaceStubs<'a> {
+    space: &'a str,
+    stubs: Vec<Stub>,
+}
+
 /// List imposters. `options_json` (null = defaults): `{"replayable":bool,"removeProxies":bool}`.
 /// Replayable returns `{"imposters":[<ImposterConfig>,...]}` (the same projection the admin
 /// `?replayable=true` route serves); otherwise a Mountebank-style summary
@@ -661,39 +736,32 @@ pub unsafe extern "C" fn rift_list_imposters(
                 .map(|i| replayable_value(i, opts.remove_proxies))
                 .collect::<Result<Vec<_>, _>>()
             {
-                Ok(configs) => json!({ "imposters": configs }),
+                Ok(configs) => serde_json::to_string(&ImpostersOf { imposters: configs }),
                 Err(e) => {
                     set_last_error(format!("rift_list_imposters: encode failed: {e}"));
                     return std::ptr::null_mut();
                 }
             }
         } else {
-            let summaries: Vec<Value> = imposters
+            let summaries: Vec<FfiImposterSummary> = imposters
                 .iter()
                 .filter_map(|i| {
-                    i.config.port.map(|port| {
-                        let mut entry = json!({
-                            "protocol": i.config.protocol,
-                            "port": port,
-                            "numberOfRequests": i.get_request_count(),
-                            "enabled": i.is_enabled(),
-                        });
-                        if let Some(name) = &i.config.name {
-                            entry["name"] = json!(name);
-                        }
-                        if let Some(default_response) = &i.config.default_response {
-                            entry["defaultResponse"] = json!(default_response);
-                        }
-                        if let Some(allow_cors) = i.config.allow_cors.value() {
-                            entry["allowCORS"] = allow_cors.clone();
-                        }
-                        entry
+                    i.config.port.map(|port| FfiImposterSummary {
+                        protocol: &i.config.protocol,
+                        port,
+                        name: i.config.name.as_deref(),
+                        default_response: i.config.default_response.as_ref(),
+                        number_of_requests: i.get_request_count(),
+                        enabled: i.is_enabled(),
+                        allow_cors: i.config.allow_cors.value(),
                     })
                 })
                 .collect();
-            json!({ "imposters": summaries })
+            serde_json::to_string(&ImpostersOf {
+                imposters: summaries,
+            })
         };
-        match serde_json::to_string(&body) {
+        match body {
             Ok(json) => into_c_string(json),
             Err(e) => {
                 set_last_error(format!("rift_list_imposters: encode failed: {e}"));
@@ -738,13 +806,7 @@ pub unsafe extern "C" fn rift_get_imposter(
             }
         };
         let body = if opts.replayable {
-            match replayable_value(&imposter, opts.remove_proxies) {
-                Ok(v) => v,
-                Err(e) => {
-                    set_last_error(format!("rift_get_imposter: encode failed: {e}"));
-                    return std::ptr::null_mut();
-                }
-            }
+            replayable_value(&imposter, opts.remove_proxies).and_then(|v| serde_json::to_string(&v))
         } else {
             // Honor `removeProxies` on the detail view too, filtering the LIVE stubs — the admin
             // `GET /imposters/{port}?removeProxies=true` applies it regardless of `replayable`.
@@ -753,46 +815,21 @@ pub unsafe extern "C" fn rift_get_imposter(
             } else {
                 imposter.get_stubs()
             };
-            let mut detail = json!({
-                "protocol": imposter.config.protocol,
-                "port": port,
-                "numberOfRequests": imposter.get_request_count(),
-                "enabled": imposter.is_enabled(),
-                "recordRequests": imposter.config.record_requests,
-                "stubs": stubs,
-                "requests": imposter.get_recorded_requests(),
-            });
-            if let Some(name) = &imposter.config.name {
-                detail["name"] = json!(name);
-            }
-            if let Some(default_response) = &imposter.config.default_response {
-                detail["defaultResponse"] = json!(default_response);
-            }
-            if let Some(allow_cors) = imposter.config.allow_cors.value() {
-                detail["allowCORS"] = allow_cors.clone();
-            }
-            if let Some(tls) = tls_header(&imposter.config) {
-                match serde_json::to_value(tls) {
-                    Ok(Value::Object(keys)) => {
-                        if let Some(obj) = detail.as_object_mut() {
-                            obj.extend(keys);
-                        }
-                    }
-                    Ok(other) => {
-                        set_last_error(format!(
-                            "rift_get_imposter: TLS metadata encoded as {other}, not an object"
-                        ));
-                        return std::ptr::null_mut();
-                    }
-                    Err(e) => {
-                        set_last_error(format!("rift_get_imposter: encode failed: {e}"));
-                        return std::ptr::null_mut();
-                    }
-                }
-            }
-            detail
+            serde_json::to_string(&FfiImposterDetail {
+                protocol: &imposter.config.protocol,
+                port,
+                name: imposter.config.name.as_deref(),
+                default_response: imposter.config.default_response.as_ref(),
+                number_of_requests: imposter.get_request_count(),
+                enabled: imposter.is_enabled(),
+                record_requests: imposter.config.record_requests,
+                allow_cors: imposter.config.allow_cors.value(),
+                tls: tls_header(&imposter.config),
+                stubs,
+                requests: imposter.get_recorded_requests(),
+            })
         };
-        match serde_json::to_string(&body) {
+        match body {
             Ok(json) => into_c_string(json),
             Err(e) => {
                 set_last_error(format!("rift_get_imposter: encode failed: {e}"));
@@ -1455,9 +1492,17 @@ pub unsafe extern "C" fn rift_space_list_stubs(
                 return std::ptr::null_mut();
             }
         };
-        into_c_string(
-            json!({ "space": flow_id, "stubs": imposter.space_stubs(flow_id) }).to_string(),
-        )
+        let listed = FfiSpaceStubs {
+            space: flow_id,
+            stubs: imposter.space_stubs(flow_id),
+        };
+        match serde_json::to_string(&listed) {
+            Ok(json) => into_c_string(json),
+            Err(e) => {
+                set_last_error(format!("rift_space_list_stubs: encode failed: {e}"));
+                std::ptr::null_mut()
+            }
+        }
     })
 }
 
@@ -2222,8 +2267,9 @@ async fn build_admin_plane_inner(
     };
 
     // Inline config is the desired state applied via apply_config (reconcile), mirroring reload.
-    if let Some(cfg) = opts.config.as_ref().filter(|v| !v.is_null()) {
-        let configs = parse_imposter_configs(cfg).map_err(anyhow::Error::msg)?;
+    if let Some(cfg) = opts.config.as_ref().filter(|v| **v != OrderedJson::Null) {
+        let text = serde_json::to_string(cfg).context("inline config encode")?;
+        let configs = parse_imposter_configs(&text).map_err(anyhow::Error::msg)?;
         let report = handle
             .manager
             .apply_config(configs)
@@ -2321,14 +2367,12 @@ pub unsafe extern "C" fn rift_apply_config(
             set_last_error("rift_apply_config: null handle or config pointer");
             return std::ptr::null_mut();
         };
-        let value: Value = match serde_json::from_str(s) {
-            Ok(v) => v,
-            Err(e) => {
-                set_last_error(format!("rift_apply_config: invalid JSON: {e}"));
-                return std::ptr::null_mut();
-            }
-        };
-        let configs = match parse_imposter_configs(&value) {
+        // Syntax first, so malformed JSON keeps its own message; the configs decode from the text.
+        if let Err(e) = serde_json::from_str::<serde::de::IgnoredAny>(s) {
+            set_last_error(format!("rift_apply_config: invalid JSON: {e}"));
+            return std::ptr::null_mut();
+        }
+        let configs = match parse_imposter_configs(s) {
             Ok(c) => c,
             Err(e) => {
                 set_last_error(format!("rift_apply_config: {e}"));

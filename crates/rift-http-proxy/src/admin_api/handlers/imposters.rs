@@ -1,11 +1,12 @@
 //! Imposter CRUD handlers.
 
+use crate::admin_api::OrderedJson;
 use crate::admin_api::request_filter::{parse_match_clauses, parse_since, request_matches};
 use crate::admin_api::types::{
     ADMIN_JSON_CONTENT_TYPE, ImposterDetail, ImposterListEntry, ImposterQueryParams,
-    ImposterSummary, ListImpostersResponse, RiftImposterExtensions, StubWithLinks, TlsHeader,
-    build_response_with_headers, collect_body, error_response, json_response, make_imposter_links,
-    make_stub_links, serialize_or_500,
+    ImposterSummary, RiftImposterExtensions, StubWithLinks, TlsHeader, build_response_with_headers,
+    collect_body, error_response, json_response, make_imposter_links, make_stub_links,
+    serialize_or_500,
 };
 use crate::extensions::decorate::backend_error_response;
 use crate::imposter::RecordedRequest;
@@ -289,9 +290,14 @@ fn imposter_list_value(
     manager: &ImposterManager,
     query: Option<&str>,
     base_url: &str,
-) -> Result<serde_json::Value, Box<Response<Full<Bytes>>>> {
+) -> Result<AdminDocument, Box<Response<Full<Bytes>>>> {
     imposters_value(&manager.list_imposters(), query, base_url)
 }
+
+/// A top-level admin JSON document, every value in the key order its type serialized it in. A
+/// `serde_json::Value` would sort every nested object — a stub's `is.headers` among them — since
+/// `preserve_order` is off workspace-wide (issue #1696).
+type AdminDocument = indexmap::IndexMap<String, OrderedJson>;
 
 /// The `{"imposters": [...]}` body for `imposters`, in the order given and the shape `query`
 /// selects. Shared by `GET /imposters` (ascending) and the `PUT /imposters` success reply (request
@@ -300,15 +306,16 @@ fn imposters_value(
     imposters: &[Arc<Imposter>],
     query: Option<&str>,
     base_url: &str,
-) -> Result<serde_json::Value, Box<Response<Full<Bytes>>>> {
+) -> Result<AdminDocument, Box<Response<Full<Bytes>>>> {
     let params = ImposterQueryParams::parse(query);
-    let render = |v: Result<serde_json::Value, serde_json::Error>| {
-        v.map_err(|e| {
-            Box::new(error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("failed to serialize response body: {e}"),
-            ))
-        })
+    let render = |v: Result<OrderedJson, serde_json::Error>| {
+        v.map(|imposters| AdminDocument::from([("imposters".to_owned(), imposters)]))
+            .map_err(|e| {
+                Box::new(error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("failed to serialize response body: {e}"),
+                ))
+            })
     };
 
     if params.replayable() {
@@ -316,7 +323,7 @@ fn imposters_value(
             .iter()
             .map(|i| replayable_value(i, params.remove_proxies))
             .collect::<Result<Vec<_>, _>>();
-        render(configs.map(|v| serde_json::json!({ "imposters": v })))
+        render(configs.map(OrderedJson::Array))
     } else if params.remove_proxies {
         // `removeProxies` without `replayable` is the full imposters with proxies stripped, the
         // projection `GET /imposters/:port` serves: Mountebank lists only when neither flag is set
@@ -329,7 +336,7 @@ fn imposters_value(
                     .map(|port| imposter_detail(i, port, base_url, true))
             })
             .collect::<Vec<_>>();
-        render(serde_json::to_value(details).map(|v| serde_json::json!({ "imposters": v })))
+        render(OrderedJson::encode(&details))
     } else if params.list {
         // Mountebank-compatible abbreviated listing: port, protocol, name, numberOfRequests, _links
         let entries: Vec<ImposterListEntry> = imposters
@@ -346,7 +353,7 @@ fn imposters_value(
                 })
             })
             .collect();
-        render(serde_json::to_value(&entries).map(|v| serde_json::json!({ "imposters": v })))
+        render(OrderedJson::encode(&entries))
     } else {
         let summaries: Vec<ImposterSummary> = imposters
             .iter()
@@ -365,9 +372,7 @@ fn imposters_value(
                 })
             })
             .collect();
-        render(serde_json::to_value(ListImpostersResponse {
-            imposters: summaries,
-        }))
+        render(OrderedJson::encode(&summaries))
     }
 }
 
@@ -559,8 +564,18 @@ async fn replace_all_from_bytes(
             .collect();
         return match imposters_value(&answered, None, base_url) {
             Ok(mut body) => {
-                if let Some(obj) = body.as_object_mut() {
-                    obj.extend(report.port_lists());
+                for (key, ports) in report.port_lists() {
+                    match OrderedJson::encode(&ports) {
+                        Ok(ports) => {
+                            body.insert(key, ports);
+                        }
+                        Err(e) => {
+                            return error_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                &format!("failed to serialize response body: {e}"),
+                            );
+                        }
+                    }
                 }
                 json_response(StatusCode::OK, &body)
             }
@@ -640,7 +655,7 @@ pub async fn handle_delete_all(
         Err(resp) => return *resp,
     };
     if report.failed.is_empty() {
-        return json_response(StatusCode::OK, &serde_json::json!({ "imposters": deleted }));
+        return json_response(StatusCode::OK, &ImpostersDoc { imposters: deleted });
     }
     // Issue #1124: an imposter whose datadir file could not be removed is still serving. The client
     // is told which, and which were deleted, in the Mountebank envelope plus the deleted list.
@@ -679,7 +694,7 @@ fn deleted_value(
     report: &crate::imposter::DeleteAllReport,
     base_url: &str,
     params: &ImposterQueryParams,
-) -> Result<Vec<serde_json::Value>, Box<Response<Full<Bytes>>>> {
+) -> Result<Vec<OrderedJson>, Box<Response<Full<Bytes>>>> {
     let replayable = params.replayable_unless_false();
     let ports: Vec<u16> = report.deleted.iter().filter_map(|c| c.port).collect();
     snapshot
@@ -689,7 +704,7 @@ fn deleted_value(
             let value = if replayable {
                 replayable_value(imposter, params.remove_proxies)
             } else {
-                serde_json::to_value(imposter_detail(
+                OrderedJson::encode(&imposter_detail(
                     imposter,
                     port,
                     base_url,
@@ -1134,18 +1149,24 @@ pub fn tls_header(config: &ImposterConfig) -> Option<TlsHeader> {
 /// byte-identical for every existing input. The added keys re-import unchanged (`ca: null` decodes
 /// as unset; a false flag is the default).
 ///
+/// An [`OrderedJson`], not a `serde_json::Value`: a `Value` sorts every object (`preserve_order`
+/// stays off workspace-wide), which printed a stub's `is.headers` alphabetically where Mountebank
+/// prints them in the order they were written, so a save → load round trip reordered them (issue
+/// #1696). The keys print in `ImposterConfig`'s field order, the TLS keys after them.
+///
 /// # Errors
 /// A serialization failure of the config, which the callers answer as an encode error.
 pub fn replayable_value(
     imposter: &Imposter,
     remove_proxies: bool,
-) -> Result<serde_json::Value, serde_json::Error> {
+) -> Result<OrderedJson, serde_json::Error> {
     let config = replayable_config(imposter, remove_proxies);
-    let mut value = serde_json::to_value(&config)?;
+    let mut value = OrderedJson::encode(&config)?;
     if let Some(tls) = tls_header(&config) {
-        // Both are structs, so both serialize to objects; `cert`/`key` carry the same values.
-        match (value.as_object_mut(), serde_json::to_value(tls)?) {
-            (Some(doc), serde_json::Value::Object(keys)) => doc.extend(keys),
+        // Both are structs, so both serialize to objects. `extend` replaces `cert`/`key` (the same
+        // values) and `ciphers` (upper-cased) in place and appends the rest: never a second key.
+        match (&mut value, OrderedJson::encode(&tls)?) {
+            (OrderedJson::Object(doc), OrderedJson::Object(keys)) => doc.extend(keys),
             _ => {
                 return Err(serde::ser::Error::custom(
                     "an https imposter's config or TLS metadata did not encode as an object",
@@ -1154,6 +1175,12 @@ pub fn replayable_value(
         }
     }
     Ok(value)
+}
+
+/// `{"imposters": [...]}` over already-encoded entries (issue #1696).
+#[derive(serde::Serialize)]
+struct ImpostersDoc {
+    imposters: Vec<OrderedJson>,
 }
 
 /// The replayable (`?replayable=true`) projection of one imposter: its config, carrying the stubs it
