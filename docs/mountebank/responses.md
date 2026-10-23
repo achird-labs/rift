@@ -106,13 +106,21 @@ Status codes can also be specified as strings for compatibility with some tools:
 { "is": { "statusCode": "404" } }
 ```
 
-`statusCode` may be any string, in `is` and in `defaultResponse`. A `copy` or `lookup` token in it
+`statusCode` may be any string, in `is` and in `defaultResponse`, in the response an `inject`
+returns, and in what a behavior (`decorate`, `shellTransform`, `copy`) leaves on a `proxy` response.
+A `copy` or `lookup` token in it
 is substituted, and the result is read as Node reads a status code when Mountebank writes the
 response: surrounding whitespace is ignored, a fraction is truncated and `0x194` is `404`. One
 outside 100–999 answers `500` with `{"errors": [{"code": "ERR_HTTP_INVALID_STATUS_CODE",
 "message": "Invalid status code: <value>", "name": "RangeError"}]}`, as Mountebank does, and so does
 a token no behavior filled in. Mountebank's error also carries the Node `stack`, which Rift leaves out. An empty string falls back to `defaultResponse.statusCode`, then
 `200`. A numeric string is stored as the number; any other string is stored as written.
+
+A script's `statusCode` need not be a string or an in-range number either. A negative or
+out-of-range number (`-1`, `70000`) and a non-number such as `true` answer the same `500`, naming the
+value as JavaScript prints it; a fractional number such as `404.7` is truncated to `404`. A falsy
+one (`0`, `false`, `null`, `NaN`, `""`, or none at all) falls back to `defaultResponse.statusCode`,
+then `200`. A `proxy` response a behavior leaves with a status Node refuses records nothing.
 
 ```json
 {
@@ -192,6 +200,11 @@ so a client or snapshot that compares the body *text* sees a different document 
 one that parses the JSON sees the same one. This is a deliberate divergence: Rift's JSON values are key-sorted throughout, and the
 stable stub identity used by incremental reload relies on that. When the exact bytes matter, write
 the body as a string (`"body": "{\"f\":0.1,\"big\":7e23}"`), which is served verbatim.
+
+An object body an `inject` returns or a `decorate` leaves is served as JavaScript's `JSON.stringify`
+writes it: compact, in the script's key order, with a lone surrogate escaped as `\udXXX`. One that
+`JSON.stringify` refuses (a cycle, a BigInt), or one nested more than 128 levels deep, answers
+`500`.
 
 ```json
 {

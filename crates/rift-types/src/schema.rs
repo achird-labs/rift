@@ -42,9 +42,14 @@ pub fn xpath_selector() -> Value {
 
 /// `statusCode` as [`wire::deserialize_status_code`](crate::wire::deserialize_status_code) reads
 /// it: a number, or a numeric string, both within `u16`.
+#[deprecated(
+    since = "0.24.0",
+    note = "the imposter grammar reads statusCode as rift_mock_core's ResponseStatusCode (#1558); this type is no longer used"
+)]
 #[derive(Debug)]
 pub struct StatusCode;
 
+#[allow(deprecated)]
 impl JsonSchema for StatusCode {
     fn schema_name() -> Cow<'static, str> {
         "StatusCode".into()
@@ -192,6 +197,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn status_code_carrier_matches_the_helper() {
         #[derive(Deserialize)]
         struct Probe {

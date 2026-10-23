@@ -246,7 +246,10 @@ The function changes the response in one of two ways:
 
 - **Mutate it.** Change `response.statusCode`, `response.headers` or `response.body` and return
   nothing (or anything falsy). The headers sent are exactly the ones `response.headers` holds when
-  the function ends, so `delete response.headers['X-Old']` removes that header.
+  the function ends, so `delete response.headers['X-Old']` removes that header. A string
+  `statusCode` is read as Node reads it (see [Responses](responses.md)), on a `proxy` response too:
+  `response.statusCode = "404"` serves and records `404`. A falsy one (`null`, `NaN`, or deleted)
+  takes the imposter's `defaultResponse` status, then `200`, as in Mountebank.
 - **Return a new one.** A returned object replaces the response; nothing of the original is kept.
   A field it leaves out is taken from the imposter's `defaultResponse`, or is `200`, no headers and
   an empty body when there is none, as in Mountebank. An `async` function's promise is settled

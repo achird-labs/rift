@@ -4051,5 +4051,43 @@
     "reason": "Rift names the first behavior validation error; Mountebank lists every one",
     "mountebank": "{\"code\":\"bad data\",\"message\":\"copy behavior \\\"using\\\" field required\",\"source\":{\"copy\":{}}}",
     "rift": "(absent)"
+  },
+  {
+    "case": "proxy: a decorate statusCode Node refuses on a proxy response answers 500 (#1635)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift records nothing, so the next request is proxied again.",
+    "reason": "Mountebank records the stub whose status Node refuses; Rift records nothing (#1635)",
+    "id": "refused-proxy-status-records-nothing#0",
+    "location": "stored[4545]/stubs"
+  },
+  {
+    "case": "proxy: a decorate statusCode Node refuses on a proxy response answers 500 (#1635)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift records nothing, so the next request is proxied again.",
+    "reason": "Mountebank records the stub whose status Node refuses; Rift records nothing (#1635)",
+    "id": "refused-proxy-status-records-nothing#1",
+    "location": "replayable[4545]/stubs"
+  },
+  {
+    "case": "proxy: a decorate statusCode Node refuses on a proxy response answers 500 (#1635)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift records nothing, so the next request is proxied again.",
+    "reason": "nothing was recorded, so Rift proxies the second request too (#1635)",
+    "id": "refused-proxy-status-records-nothing#2",
+    "location": "stored[4546]/numberOfRequests",
+    "mountebank": "1",
+    "rift": "2"
+  },
+  {
+    "case": "responses: Inject body JSON.stringify cannot serialize answers 500 (#1635)",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Mountebank's body is the `TypeError` itself (`message`, `name`, `stack`); Rift's is its",
+    "reason": "both answer 500; Mountebank's body is Node's TypeError, Rift's its invalid-injection envelope (#1635)",
+    "id": "unserializable-inject-body-envelope#0",
+    "location": "step[1].body"
   }
 ]

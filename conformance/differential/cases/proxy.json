@@ -2010,6 +2010,146 @@
           "path": "/imposters/4545"
         }
       ]
+    },
+    {
+      "name": "proxy: a decorate string statusCode on a proxy response is served and recorded (#1635)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "backend response"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "path": true
+                          }
+                        }
+                      ]
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "function (request, response) { response.statusCode = '404'; }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p"
+        }
+      ]
+    },
+    {
+      "name": "proxy: a decorate statusCode Node refuses on a proxy response answers 500 (#1635)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "backend response"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "path": true
+                          }
+                        }
+                      ]
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "function (request, response) { response.statusCode = 'abc'; }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/p"
+        }
+      ]
     }
   ]
 }

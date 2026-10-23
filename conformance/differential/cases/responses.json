@@ -1017,6 +1017,129 @@
           "port": 4545
         }
       ]
+    },
+    {
+      "name": "responses: Inject statusCode is read as Node's writeHead reads it (#1635)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 418
+            },
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/abc"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "inject": "function (config) { return { statusCode: 'abc', body: 'injected' }; }"
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/negative"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "inject": "function (config) { return { statusCode: -1, body: 'injected' }; }"
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/padded"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "inject": "function (config) { return { statusCode: ' 404 ', body: 'injected' }; }"
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/zero"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "inject": "function (config) { return { statusCode: 0, body: 'injected' }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/abc"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/negative"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/padded"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/zero"
+        }
+      ]
+    },
+    {
+      "name": "responses: Inject body JSON.stringify cannot serialize answers 500 (#1635)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "function () { const o = {}; o.self = o; return { body: o }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/cyclic"
+        }
+      ]
     }
   ]
 }
