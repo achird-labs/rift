@@ -1070,18 +1070,15 @@ fn inject_wait_behavior(response: StubResponse, wait_val: serde_json::Value) -> 
                 .any(|element| program_element(element).is_some_and(|(k, _)| k == "wait"));
             if !has_wait {
                 // The stub's delay runs first, where an object-form `wait` would.
-                let at = usize::from(
-                    program
-                        .first()
-                        .and_then(program_element)
-                        .is_some_and(|(k, _)| k == "repeat"),
-                );
+                let at = usize::from(program.first().is_some_and(is_repeat_element));
                 program.insert(at, serde_json::json!({ "wait": wait_val }));
             }
             let behaviors = Some(serde_json::Value::Array(program));
-            // Behaviors changed (the `wait` entry was injected) — recompute via `new_is` rather
-            // than reusing the stale `behaviors_parsed`/`rendered_body` that were dropped above.
-            StubResponse::new_is(is, behaviors, rift)
+            // Behaviors changed (the `wait` entry was injected) — recompute the caches rather than
+            // reusing the stale `behaviors_parsed`/`rendered_body` that were dropped above. Not
+            // recompiled: the program is compiled already, and a `repeat` step's meaning is
+            // positional (issue #1672).
+            StubResponse::new_is_compiled(is, behaviors, rift)
         }
         other => other,
     }
@@ -1204,7 +1201,16 @@ impl StubResponse {
         behaviors: Option<serde_json::Value>,
         rift: Option<Box<RiftResponseExtension>>,
     ) -> StubResponse {
-        let behaviors = behaviors.and_then(compile_behaviors);
+        Self::new_is_compiled(is, behaviors.and_then(compile_behaviors), rift)
+    }
+
+    /// [`StubResponse::new_is`] for a block [`compile_behaviors`] has compiled already, which must
+    /// not be compiled again (issue #1672).
+    fn new_is_compiled(
+        is: IsResponse,
+        behaviors: Option<serde_json::Value>,
+        rift: Option<Box<RiftResponseExtension>>,
+    ) -> StubResponse {
         let behaviors_parsed = parse_behaviors(behaviors.as_ref());
         // Only a non-string body needs rendering; a string body is served as-is. Serializing a
         // `serde_json::Value` is infallible by construction, so this never defaults (issue #611).
@@ -1232,13 +1238,14 @@ impl StubResponse {
     }
 
     /// Build a `Proxy` response, parsing its behaviors block once (issue #479). The only place a
-    /// `Proxy` variant should be constructed.
+    /// `Proxy` variant should be constructed. `behaviors` is a program [`compile_behaviors`] has
+    /// compiled already, which is not compiled again: a `repeat` step's meaning is positional
+    /// (issue #1672).
     pub(crate) fn new_proxy(
         proxy: ProxyResponse,
         ignored_rift: Option<Box<RiftResponseExtension>>,
         behaviors: Option<serde_json::Value>,
     ) -> StubResponse {
-        let behaviors = behaviors.and_then(compile_behaviors);
         let behaviors_parsed = parse_behaviors(behaviors.as_ref());
         StubResponse::Proxy {
             proxy: Box::new(proxy),
@@ -1249,13 +1256,14 @@ impl StubResponse {
     }
 
     /// Build an `Inject` response, parsing its behaviors block once (issue #479). The only place an
-    /// `Inject` variant should be constructed.
+    /// `Inject` variant should be constructed. `behaviors` is a program [`compile_behaviors`] has
+    /// compiled already, which is not compiled again: a `repeat` step's meaning is positional
+    /// (issue #1672).
     pub(crate) fn new_inject(
         inject: String,
         ignored_rift: Option<Box<RiftResponseExtension>>,
         behaviors: Option<serde_json::Value>,
     ) -> StubResponse {
-        let behaviors = behaviors.and_then(compile_behaviors);
         let behaviors_parsed = parse_behaviors(behaviors.as_ref());
         StubResponse::Inject {
             inject,
@@ -1727,10 +1735,13 @@ fn refuse_unparseable_behaviors(
         return Ok(());
     }
     match block {
-        // A compiled program: every step runs, so every step must parse.
+        // A compiled program: every step runs, so every step must parse. A `repeat` after the first
+        // element is an inert custom key Mountebank never reads, so it is not checked (#1672).
         Some(serde_json::Value::Array(program)) => program
             .iter()
-            .try_for_each(|element| refuse_unparseable_behaviors(Some(element), admission)),
+            .enumerate()
+            .filter(|(index, element)| *index == 0 || !is_repeat_element(element))
+            .try_for_each(|(_, element)| refuse_unparseable_behaviors(Some(element), admission)),
         Some(object @ serde_json::Value::Object(_)) => refuse_unparseable_object(object),
         // Nothing else reaches here: the field deserializers refuse other shapes.
         _ => Ok(()),
@@ -2094,13 +2105,19 @@ impl TryFrom<StubResponseRaw> for StubResponse {
         if let Some(repeat) = raw.repeat.clone().filter(|repeat| !repeat.is_null()) {
             let alone = serde_json::json!({ "repeat": repeat });
             refuse_unparseable_behaviors(Some(&alone), admission())?;
-            // Appended, so it is the last `repeat` and wins, as it does in Mountebank.
+            // It wins over the block's, as it does in Mountebank: it replaces the program's first
+            // element when that is the block's `repeat`, and is inserted there otherwise. Never
+            // recompiled, since a `repeat` step's meaning is positional (issue #1672).
             let mut program = match behaviors {
                 Some(serde_json::Value::Array(program)) => program,
                 _ => Vec::new(),
             };
-            program.push(alone);
-            behaviors = compile_behaviors(serde_json::Value::Array(program));
+            if program.first().is_some_and(is_repeat_element) {
+                program[0] = alone;
+            } else {
+                program.insert(0, alone);
+            }
+            behaviors = Some(serde_json::Value::Array(program));
         }
         // After the behaviors, top-level `repeat` included: `admission_check_stub` checks the
         // compiled behaviors first, and a door must name the same first failure it does.
@@ -2119,7 +2136,11 @@ impl TryFrom<StubResponseRaw> for StubResponse {
         // none above, so this order only decides what a replayed config admitted before #1551 decodes
         // to; it must not change.
         Ok(if let Some(is_raw) = raw.is {
-            StubResponse::new_is(IsResponse::from(is_raw), behaviors, raw.rift.map(Box::new))
+            StubResponse::new_is_compiled(
+                IsResponse::from(is_raw),
+                behaviors,
+                raw.rift.map(Box::new),
+            )
         } else if let Some(proxy) = raw.proxy {
             StubResponse::new_proxy(
                 proxy,
@@ -2147,14 +2168,14 @@ impl TryFrom<StubResponseRaw> for StubResponse {
         } else if raw.status_code.is_some() || raw.body.is_some() || raw.headers.is_some() {
             // Flat / recorded response form (issue #304): top-level statusCode/headers/body with
             // no `is` wrapper is rendered exactly like `is: { … }`. statusCode defaults to 200.
-            StubResponse::new_is(
+            StubResponse::new_is_compiled(
                 IsResponse::decoded(raw.status_code, raw.headers, raw.body, raw.mode),
                 behaviors,
                 None,
             )
         } else {
             // Default to empty Is response: every field is the author's to omit.
-            StubResponse::new_is(
+            StubResponse::new_is_compiled(
                 IsResponse::empty(),
                 // An empty block would only cost this response the #703 prepared fast path.
                 non_empty_behaviors(behaviors),
@@ -2241,9 +2262,11 @@ impl From<StubResponse> for StubResponseOut {
 /// Write a behaviors block in the grammar Mountebank loads (issue #1191), returning the response's
 /// `repeat` and its `behaviors` array.
 ///
-/// - `repeat` is a response field in Mountebank, and a `{"repeat": n}` element is refused. A `0`
-///   is not written: Mountebank and a config door refuse it (issue #1582), and Rift serves one it
-///   replays from an older engine as `1`, which is what an absent `repeat` means.
+/// - `repeat` is a response field in Mountebank, and a `{"repeat": n}` element is refused. The
+///   program's first element is the response's `repeat`; a `repeat` step after it is a custom key
+///   (issue #1672), written like any other below. A `0` response `repeat` is not written:
+///   Mountebank and a config door refuse it (issue #1582), and Rift serves one it replays from an
+///   older engine as `1`, which is what an absent `repeat` means.
 /// - Elements come in execution order.
 /// - Every step is its own element: a `copy`, `lookup` or `shellTransform` holding several items is
 ///   written one element per item, the only spelling Mountebank accepts (issue #1199).
@@ -2257,17 +2280,27 @@ fn behaviors_out(
     block: serde_json::Value,
 ) -> (Option<serde_json::Value>, Option<Vec<serde_json::Value>>) {
     use serde_json::{Map, Value};
-    let Some(Value::Array(program)) = compile_behaviors(block) else {
-        return (None, None);
+    // The stored program, as is: compiling it again would read an inert `repeat` step as the
+    // response's (issue #1672). Every constructor compiles, so a block is always a program.
+    let program = match block {
+        Value::Array(program) => program,
+        other => match compile_behaviors(other) {
+            Some(Value::Array(program)) => program,
+            _ => return (None, None),
+        },
     };
     let mut repeat = None;
     let mut elements: Vec<Map<String, Value>> = Vec::new();
     let mut leading = Map::new();
-    for element in program {
+    for (index, element) in program.into_iter().enumerate() {
         let Value::Object(element) = element else {
             continue;
         };
-        if let Some(value) = element.get("repeat") {
+        // Only the first element is the response's `repeat`; a later one is a custom key, written
+        // back inside the element before it, as Mountebank writes it.
+        if index == 0
+            && let Some(value) = element.get("repeat")
+        {
             repeat = Some(value.clone()).filter(|r| r.as_u64() != Some(0));
             continue;
         }
@@ -2300,19 +2333,32 @@ const LIST_BEHAVIORS: [&str; 3] = ["copy", "lookup", "shellTransform"];
 ///   contribute their keys in [`CANONICAL_ORDER`](crate::behaviors::CANONICAL_ORDER), then any
 ///   other key alphabetically. Array elements contribute in array order.
 /// - A `copy`, `lookup` or `shellTransform` list is one step per item; an empty list is none.
-/// - A `null` for a key removes every earlier step of that key (issues #1093, #1098). The last
-///   `repeat` wins; a `null` one clears it.
+/// - A `null` for a key removes every earlier step of that key (issues #1093, #1098).
+/// - `repeat` is the response's in the object form, which Mountebank's upcast lifts to the response,
+///   and in an array element that holds nothing else (refused at a door since #1582, but stored by
+///   older engines). The last such `repeat` wins; a `null` one clears it. Beside a behavior in an
+///   array element it is a custom key, as Mountebank's `behaviorsValidator.js` admits it, and
+///   becomes an inert `repeat` step where any other custom key would go (issue #1672).
 /// - Non-object array elements configure nothing and are skipped.
 ///
-/// Idempotent: compiling a compiled program returns it unchanged. `None` when nothing is left.
+/// The response's `repeat` is the program's first element and only that one: an inert `repeat`
+/// step is never first. So the meaning of a `repeat` step is positional, and a compiled program
+/// must never be compiled again — `[{"wait": 1}, {"repeat": 3}]` reads as an older engine's
+/// standalone element. Constructors that hold a compiled program use the `*_compiled` builders.
+/// `None` when nothing is left.
 pub(crate) fn compile_behaviors(block: serde_json::Value) -> Option<serde_json::Value> {
     use serde_json::Value;
+    /// `in_element`: `object` is an element of the array form, not the object form.
     fn push(
         object: serde_json::Map<String, Value>,
+        in_element: bool,
         steps: &mut Vec<(String, Value)>,
         repeat: &mut Option<Value>,
     ) {
         let order = crate::behaviors::CANONICAL_ORDER;
+        // Mountebank's test is key presence, so a `null` behavior counts.
+        let beside_a_behavior =
+            in_element && object.keys().any(|key| order.contains(&key.as_str()));
         let mut keys: Vec<&String> = object.keys().collect();
         keys.sort_by_key(|k| {
             (
@@ -2326,7 +2372,7 @@ pub(crate) fn compile_behaviors(block: serde_json::Value) -> Option<serde_json::
             let Some(value) = object.remove(&key) else {
                 continue;
             };
-            if key == "repeat" {
+            if key == "repeat" && !beside_a_behavior {
                 *repeat = (!value.is_null()).then_some(value);
                 continue;
             }
@@ -2351,11 +2397,11 @@ pub(crate) fn compile_behaviors(block: serde_json::Value) -> Option<serde_json::
     let mut steps = Vec::new();
     let mut repeat = None;
     match block {
-        Value::Object(object) => push(object, &mut steps, &mut repeat),
+        Value::Object(object) => push(object, false, &mut steps, &mut repeat),
         Value::Array(elements) => {
             for element in elements {
                 match element {
-                    Value::Object(object) => push(object, &mut steps, &mut repeat),
+                    Value::Object(object) => push(object, true, &mut steps, &mut repeat),
                     // A `null` element is absent, as a `null` key is (issues #1093, #1098).
                     Value::Null => {}
                     // Configures nothing: said, not silently dropped (issues #608, #1101).
@@ -2369,6 +2415,20 @@ pub(crate) fn compile_behaviors(block: serde_json::Value) -> Option<serde_json::
         }
         _ => return None,
     }
+    // Index 0 is the response's `repeat`, so an inert `repeat` step cannot lead the program. One
+    // leads only when nothing ran before it, e.g. `[{"wait": null, "repeat": 3}]`; Mountebank
+    // ignores the key anyway, so it is dropped, and said.
+    if repeat.is_none() {
+        let leading = steps.iter().take_while(|(key, _)| key == "repeat").count();
+        if leading > 0 {
+            tracing::warn!(
+                "a `repeat` beside a behavior in a `behaviors` element is ignored, as in \
+                 Mountebank, and nothing runs before it, so it is not kept; put `repeat` on the \
+                 response"
+            );
+            steps.drain(..leading);
+        }
+    }
     let program: Vec<Value> = repeat
         .map(|r| serde_json::json!({ "repeat": r }))
         .into_iter()
@@ -2380,6 +2440,12 @@ pub(crate) fn compile_behaviors(block: serde_json::Value) -> Option<serde_json::
 /// The single key and value of a compiled program element.
 fn program_element(element: &serde_json::Value) -> Option<(&String, &serde_json::Value)> {
     element.as_object().and_then(|o| o.iter().next())
+}
+
+/// Whether a compiled program element is a `repeat` one. Only the first element can be the
+/// response's `repeat`; a later one is an inert custom key (issue #1672).
+fn is_repeat_element(element: &serde_json::Value) -> bool {
+    program_element(element).is_some_and(|(key, _)| key == "repeat")
 }
 
 /// Response mode for body handling (Mountebank compatible)
@@ -7211,24 +7277,134 @@ mod mountebank_output_tests {
         }
     }
 
-    /// Issue #1198: compiling a compiled program changes nothing, so every constructor can
-    /// compile again without reshaping what the parser, the gate and the writer read.
+    /// Issue #1672: a `repeat` beside a behavior in a `behaviors` array element is a custom key, as
+    /// in Mountebank (`behaviorsValidator.js` admits it unchecked, and only `response.repeat`
+    /// cycles). It repeats nothing and is written back inside its element.
     #[test]
-    fn compiling_a_program_twice_changes_nothing() {
-        let copy = |t: &str| json!({"from": "path", "into": t, "using": {"method": "regex", "selector": ".+"}});
-        for block in [
-            json!({"repeat": 2, "wait": 1, "copy": [copy("${A}"), copy("${B}")], "decorate": "f",
-                   "shellTransform": ["x", "y"], "someFutureKey": 1}),
-            json!([{"decorate": "f"}, {"repeat": 3}, {"wait": 1}, {"decorate": "g"}, {"repeat": null}]),
-            json!([{"copy": copy("${A}")}, {"copy": null}, {"copy": [copy("${B}")]}]),
-            // Not a list of items: left whole, for the parser to refuse, and stable.
-            json!({"copy": [[copy("${A}")]]}),
-            json!({"shellTransform": ["x", null]}),
-        ] {
-            let once = compile_behaviors(block.clone());
-            let twice = once.clone().and_then(compile_behaviors);
-            assert_eq!(once, twice, "{block}");
+    fn an_element_repeat_beside_a_behavior_is_inert() {
+        use crate::behaviors::HasRepeatBehavior;
+        let response = json!({"is": {}, "behaviors": [{"wait": 1, "repeat": 3}]});
+        let parsed: StubResponse = serde_json::from_value(response.clone()).expect("parses");
+        assert_eq!(parsed.get_repeat(), None);
+        let StubResponse::Is {
+            behaviors_parsed: Some(program),
+            ..
+        } = &parsed
+        else {
+            panic!("an `is` response with a parsed program");
+        };
+        assert_eq!(program.repeat, None);
+        assert_eq!(program.steps.len(), 1, "only the `wait` runs");
+        let saved = out(response);
+        assert_eq!(saved.get("repeat"), None, "{saved}");
+        assert_eq!(saved["behaviors"], json!([{"wait": 1, "repeat": 3}]));
+    }
+
+    /// Issue #1672: the response's `repeat` is the one that cycles; an element-level one beside it
+    /// stays inert and round-trips where it was written.
+    #[test]
+    fn a_top_level_repeat_beside_an_inert_element_repeat() {
+        use crate::behaviors::HasRepeatBehavior;
+        let response = json!({"is": {}, "repeat": 2, "behaviors": [{"wait": 1, "repeat": 3}]});
+        let parsed: StubResponse = serde_json::from_value(response.clone()).expect("parses");
+        assert_eq!(parsed.get_repeat(), Some(2));
+        let saved = out(response);
+        assert_eq!(saved["repeat"], json!(2));
+        assert_eq!(saved["behaviors"], json!([{"wait": 1, "repeat": 3}]));
+    }
+
+    /// Issue #1672: Mountebank never reads an element-level `repeat` beside a behavior, so no value
+    /// there is refused — not by a door, and not by the admission check a store re-runs.
+    #[test]
+    fn an_inert_element_repeat_is_not_validated() {
+        use crate::behaviors::HasRepeatBehavior;
+        for repeat in [json!(0), json!(2.0), json!("x"), json!(-1)] {
+            let response = json!({"is": {}, "behaviors": [{"wait": 1, "repeat": repeat}]});
+            let parsed: StubResponse = serde_json::from_value(response.clone())
+                .unwrap_or_else(|e| panic!("{response} must be admitted: {e}"));
+            assert_eq!(parsed.get_repeat(), None, "{response}");
+            let stub = Stub {
+                responses: vec![parsed],
+                ..serde_json::from_value(json!({"responses": [{"is": {}}]})).expect("stub")
+            };
+            admission_check_stub(&stub)
+                .unwrap_or_else(|e| panic!("{response} must pass admission: {e}"));
         }
+    }
+
+    /// Issue #1672: a standalone `{"repeat": n}` element is refused at a door since #1582, but an
+    /// older engine stored it, and there it still means the response's `repeat`.
+    #[test]
+    fn a_standalone_repeat_element_still_repeats_on_replay() {
+        use crate::behaviors::HasRepeatBehavior;
+        let parsed: StubResponse = crate::imposter::deserialize_replayed(
+            json!({"is": {}, "behaviors": [{"decorate": "f"}, {"repeat": 3}]}),
+        )
+        .expect("replays");
+        assert_eq!(parsed.get_repeat(), Some(3));
+    }
+
+    /// Issue #1672: the `_behaviors` object form is upcast by Mountebank, which lifts its `repeat`
+    /// to the response.
+    #[test]
+    fn the_object_form_still_lifts_repeat() {
+        use crate::behaviors::HasRepeatBehavior;
+        let parsed: StubResponse =
+            serde_json::from_value(json!({"is": {}, "_behaviors": {"wait": 1, "repeat": 3}}))
+                .expect("parses");
+        assert_eq!(parsed.get_repeat(), Some(3));
+    }
+
+    /// Issue #1672: a stub-level `delayRange` rebuilds each response with a `wait`, which must not
+    /// turn an inert element-level `repeat` into the response's.
+    #[test]
+    fn a_delay_range_keeps_an_element_repeat_inert() {
+        use crate::behaviors::HasRepeatBehavior;
+        for behaviors in [
+            json!([{"decorate": "f", "repeat": 3}]),
+            json!([{"wait": 5, "repeat": 3}]),
+        ] {
+            let stub: Stub = serde_json::from_value(json!({
+                "delayRange": [{"min": 1, "max": 1}],
+                "responses": [{"is": {}, "behaviors": behaviors}]
+            }))
+            .expect("parses");
+            assert_eq!(stub.responses[0].get_repeat(), None, "{behaviors}");
+        }
+    }
+
+    /// Issue #1672 (replacing #1198's "compiling twice changes nothing"): a compiled program is never
+    /// compiled again, because a `repeat` step's meaning is positional. The contract is the round
+    /// trip: compiling raw input, writing it, and compiling the written form gives the same served
+    /// behaviour and the same written form.
+    #[test]
+    fn compiling_writing_and_compiling_again_changes_nothing() {
+        let copy = |t: &str| json!({"from": "path", "into": t, "using": {"method": "regex", "selector": ".+"}});
+        for response in [
+            json!({"is": {}, "_behaviors": {"repeat": 2, "wait": 1, "copy": [copy("${A}"), copy("${B}")],
+                   "decorate": "f", "shellTransform": ["x", "y"], "someFutureKey": 1}}),
+            json!({"is": {}, "behaviors": [{"copy": copy("${A}")}, {"copy": null}, {"copy": copy("${B}")}]}),
+            json!({"is": {}, "behaviors": [{"wait": 1, "repeat": 3}, {"decorate": "f"}]}),
+            json!({"is": {}, "repeat": 2, "behaviors": [{"wait": 1, "repeat": 3}, {"decorate": "f", "repeat": 4}]}),
+            json!({"is": {}, "behaviors": [{"wait": 1, "someFutureKey": 1, "repeat": 3}]}),
+        ] {
+            let once = out(response.clone());
+            let twice = out(once.clone());
+            assert_eq!(once, twice, "{response}");
+            assert_eq!(configured(&response), configured(&once), "{response}");
+        }
+        // Legacy shapes refused at a door since #1582 replay to the same written form too.
+        let response = json!({"is": {}, "behaviors": [{"decorate": "f"}, {"repeat": 3}, {"wait": 1},
+                              {"decorate": "g"}, {"repeat": null}]});
+        let once = replayed_out(response.clone());
+        assert_eq!(out(once.clone()), once, "{response}");
+        // A list in an array element is refused at a door since #1639; a stored one is one step per
+        // item, and writes back one element per item.
+        let response = json!({"is": {}, "behaviors": [{"copy": copy("${A}")}, {"copy": null},
+                              {"copy": [copy("${B}"), copy("${C}")]}, {"wait": 1, "repeat": 3}]});
+        let once = replayed_out(response.clone());
+        assert_eq!(out(once.clone()), once, "{response}");
+        assert_eq!(once.get("repeat"), None, "{once}");
     }
 
     /// A list item that is itself a list, or `null`, is not an item: the parser refuses the block,

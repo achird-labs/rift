@@ -2091,15 +2091,37 @@ fn behaviors_array_every_step_is_validated() {
     );
 }
 
-/// `repeat` is not a step: the last element to set it wins, so an earlier bad one is never read.
-/// It is written beside a behavior: an element holding only `repeat` is E060 (issue #1587).
+/// Issue #1672: a `repeat` beside a behavior in an array element is a custom key the engine and
+/// Mountebank ignore, so no value there is E035; each is W024, because the author meant it to
+/// repeat the response. An element holding only `repeat` is E060 (issue #1587).
 #[test]
-fn behaviors_array_repeat_is_last_write_wins() {
+fn behaviors_array_element_repeat_is_w024_never_e035() {
     let resp = json!({
         "is": { "statusCode": 200 },
         "behaviors": [{ "wait": 1, "repeat": 0.5 }, { "wait": 2, "repeat": 2 }]
     });
-    assert_eq!(behavior_findings(&resp), vec![]);
+    assert_eq!(
+        behavior_findings(&resp),
+        vec![
+            finding("W024", "loc.behaviors[0].repeat"),
+            finding("W024", "loc.behaviors[1].repeat"),
+        ]
+    );
+    for repeat in [json!(0), json!(2.0), json!("x"), json!(null), json!(3)] {
+        let resp = json!({ "is": {}, "behaviors": [{ "wait": 1, "repeat": repeat }] });
+        assert_eq!(
+            behavior_findings(&resp),
+            vec![finding("W024", "loc.behaviors[0].repeat")],
+            "{repeat}"
+        );
+    }
+    // The response's own `repeat` and the object form's are the ones that repeat: no W024.
+    for resp in [
+        json!({ "is": {}, "repeat": 2, "behaviors": [{ "wait": 1 }] }),
+        json!({ "is": {}, "_behaviors": { "wait": 1, "repeat": 2 } }),
+    ] {
+        assert_eq!(behavior_findings(&resp), vec![], "{resp}");
+    }
 }
 
 /// Every element is a step (issue #1198), so only the malformed one is reported, at its own index.
@@ -2127,7 +2149,7 @@ fn behaviors_array_disjoint_keys_are_each_validated_at_their_element() {
         vec![
             finding("E025", "loc.behaviors[0].wait"),
             finding("E048", "loc.behaviors[1]"),
-            finding("E035", "loc.behaviors[2].repeat"),
+            finding("W024", "loc.behaviors[2].repeat"),
         ]
     );
 }

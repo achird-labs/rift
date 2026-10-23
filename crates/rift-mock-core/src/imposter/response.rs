@@ -39,10 +39,12 @@ pub(crate) fn truncate_with_ellipsis(text: &str, max_len: usize) -> String {
 /// was merged into the compiled program at parse, as its `{"repeat": n}` element (issue #1198).
 impl HasRepeatBehavior for StubResponse {
     fn get_repeat(&self) -> Option<u32> {
+        // The program's first element only: a later `repeat` step is an inert custom key written
+        // beside a behavior in an array element, which Mountebank never reads (issue #1672).
         self.behaviors_block()?
             .as_array()?
-            .iter()
-            .find_map(|element| element.get("repeat"))
+            .first()?
+            .get("repeat")
             .and_then(serde_json::Value::as_u64)
             .and_then(|r| u32::try_from(r).ok())
     }

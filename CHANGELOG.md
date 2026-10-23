@@ -69,6 +69,15 @@ record.
 
 ### Changed
 
+- **A `repeat` beside a behavior in a `behaviors` array element no longer repeats the response**
+  (#1672); Mountebank ignores it there. Put `repeat` on the response. `{"behaviors": [{"wait": 1,
+  "repeat": 3}]}` is now served once per cycle instead of three times, any value there is admitted
+  (`2.0` and `"x"` were refused), and `GET /imposters`, `rift save` and `--datadir` write it back
+  inside its element instead of as the response's `repeat`, as Mountebank does. A standalone
+  `{"repeat": n}` element an older engine stored, and the `_behaviors` object form's `repeat`, still
+  repeat. A stored config with this shape replays and now serves once per cycle; an id-less stub
+  holding one gets a new `stub_key` once, because its written form changes, so its cursor restarts.
+  `rift-lint` reports it as the new warning `W024` instead of checking it as `E035`.
 - **A `behaviors` array element whose `copy`, `lookup` or `shellTransform` is a list is refused**
   (`400`, #1639), as Mountebank refuses it, with its first error (`shellTransform behavior
   "shellTransform" field must be a string, …`, `copy behavior "from" field required`, `lookup
