@@ -452,6 +452,9 @@ pub(crate) fn resolve_confined(
 /// anything that is not a regular file once open, a directory included, is refused as
 /// [`ConfinedPathError::Outside`] before it is resolved again or read. Links inside the root are
 /// still followed.
+// Only the JavaScript engine's `require()` reads a confined file whole; a `lookup` CSV opens it with
+// [`open_confined`] and reads it under the body limits (issue #1654).
+#[cfg_attr(not(feature = "javascript"), allow(dead_code))]
 pub(crate) fn read_confined(
     root: &Path,
     base: &Path,
@@ -459,7 +462,22 @@ pub(crate) fn read_confined(
     canonical: &Path,
 ) -> Result<String, ConfinedPathError> {
     use std::io::Read;
-    let mut file = open_without_blocking(canonical).map_err(ConfinedPathError::Read)?;
+    let mut file = open_confined(root, base, request, canonical)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(ConfinedPathError::Read)?;
+    Ok(text)
+}
+
+/// [`read_confined`]'s checks, returning the vetted file open and unread, for a caller that reads
+/// it under limits of its own (a `lookup` CSV, issue #1654).
+pub(crate) fn open_confined(
+    root: &Path,
+    base: &Path,
+    request: &str,
+    canonical: &Path,
+) -> Result<std::fs::File, ConfinedPathError> {
+    let file = open_without_blocking(canonical).map_err(ConfinedPathError::Read)?;
     let opened = file.metadata().map_err(ConfinedPathError::Read)?;
     if !opened.is_file() {
         return Err(ConfinedPathError::Outside);
@@ -470,10 +488,7 @@ pub(crate) fn read_confined(
     if again != canonical || !same_file(&opened, &current) {
         return Err(ConfinedPathError::Outside);
     }
-    let mut text = String::new();
-    file.read_to_string(&mut text)
-        .map_err(ConfinedPathError::Read)?;
-    Ok(text)
+    Ok(file)
 }
 
 /// Open `path` for reading without waiting on it: a FIFO with no writer, or a device, would
@@ -585,16 +600,48 @@ pub fn read_lookup_file(
     resolved: &Path,
     access: &ScriptFileAccess,
 ) -> Result<String, LookupFileError> {
+    use std::io::Read;
+    let mut text = String::new();
+    open_lookup_file(path, resolved, access)?
+        .read_to_string(&mut text)
+        .map_err(|source| LookupFileError::Unreadable {
+            path: path.to_string(),
+            source,
+        })?;
+    Ok(text)
+}
+
+/// [`read_lookup_file`]'s checks, returning the file open and unread, so the caller can read it
+/// under the body limits (issue #1654).
+///
+/// # Errors
+/// See [`LookupFileError`].
+pub fn open_lookup_file(
+    path: &str,
+    resolved: &Path,
+    access: &ScriptFileAccess,
+) -> Result<std::fs::File, LookupFileError> {
     match access {
         ScriptFileAccess::Refused => Err(LookupFileError::NoRoot(path.to_string())),
         ScriptFileAccess::Confined(root) => {
-            read_confined(root, root, path, resolved).map_err(|e| lookup_error(path, e))
+            open_confined(root, root, path, resolved).map_err(|e| lookup_error(path, e))
         }
+        // Opened without blocking and refused unless a regular file, as a confined read is: a
+        // FIFO or a device would otherwise hold the reading thread (issue #1654).
         ScriptFileAccess::Trusted { .. } => {
-            std::fs::read_to_string(resolved).map_err(|source| LookupFileError::Unreadable {
+            let unreadable = |source| LookupFileError::Unreadable {
                 path: path.to_string(),
                 source,
-            })
+            };
+            let file = open_without_blocking(resolved).map_err(unreadable)?;
+            let regular = file.metadata().map_err(unreadable)?.is_file();
+            if !regular {
+                return Err(unreadable(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "not a regular file",
+                )));
+            }
+            Ok(file)
         }
     }
 }

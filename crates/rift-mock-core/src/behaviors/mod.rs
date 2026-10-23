@@ -42,12 +42,12 @@ pub(crate) use extraction::{
     JsonView, LazyJson, LazyXmlDom, Selection, fold_selector, jsonpath_selection,
     validate_jsonpath_selector, validate_xpath_selector, xpath_selection, xpath_selection_in,
 };
-pub(crate) use lookup::apply_lookup_spliced;
 #[allow(unused_imports)]
 pub use lookup::{
-    CsvCache, CsvData, CsvDataSource, DataSource, DatasetBinding, LookupBehavior, LookupIndex,
-    LookupKey, apply_lookup_behaviors,
+    CsvCache, CsvData, CsvDataSource, CsvHandle, DataSource, DatasetBinding, LookupBehavior,
+    LookupIndex, LookupKey, LookupLoadError, apply_lookup_behaviors,
 };
+pub(crate) use lookup::{apply_lookup_row, lookup_key};
 pub use request::{RequestContext, header_to_title_case};
 pub use sequencer::{LocalSequencer, ResponseSequencer, SequenceKey};
 pub(crate) use spliced::{Spliced, SplicedHeaders, SplicedName, authored_headers, plain_headers};
