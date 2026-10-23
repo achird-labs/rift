@@ -69,6 +69,13 @@ record.
 
 ### Changed
 
+- **`rift_http_proxy::admin_api::replayable_value` returns an `OrderedJson`** (#1696), a new
+  public JSON tree whose objects keep their key order, instead of a `serde_json::Value`. Embedders
+  serialize it as before. The admin exports and the C-ABI views now print keys in struct order
+  rather than alphabetically (a `?replayable=true` export in `ImposterConfig`'s field order, an
+  https export's TLS keys after the config's own). The JSON shape is unchanged, but a consumer that
+  diffs saved files against older ones will see keys move.
+
 - **`proxy.cert`/`key`/`passphrase` are no longer dropped** (#1609). A config that carried them
   now presents them, and one with an invalid pair (half a pair, a wrong passphrase, a key that does
   not match, a legacy `Proc-Type` encrypted key) is refused at creation with `400` where it was
@@ -311,6 +318,15 @@ record.
   reports it as `E057`.
 
 ### Fixed
+
+- **`?replayable=true` exports, and so `rift save` / `mb save`, keep a stub's header order**
+  (#1696), completing #1606: the export went through a sorted `serde_json::Value`, so `is.headers`
+  saved alphabetically and a save → load served them in that order. Fixed with it: `GET
+  /imposters?removeProxies=true`, the `DELETE /imposters` answer, the space-stub routes, the C-ABI
+  `rift_get_imposter` (replayable and detail, recorded request headers included),
+  `rift_list_imposters`, `rift_space_list_stubs`, `rift_apply_config` and `rift_serve_admin`'s
+  inline `config`. `POST /imposters/{port}/spaces/{flowId}/stubs` now also decodes under the
+  admission budget every other config door uses (#1609).
 
 - **`rift stop` no longer deletes a PID file another server has taken over.** When a `stop` and a
   `restart` waited on the same server, the `restart` wrote its own PID as soon as that server
