@@ -11,6 +11,7 @@ use super::headers::sanitize_header_value;
 use super::predicates::parse_query_string;
 use super::response::{
     body_text, complete_from_default, execute_stub_response_with_rift, get_rift_script_config,
+    served_is,
 };
 use super::status::{invalid_status_response, resolve as resolve_status};
 use super::types::{
@@ -2023,9 +2024,12 @@ async fn handle_request_inner(
             };
             // Issue #1369: complete the authored response from `defaultResponse` before templating
             // and behaviors run, so a default body expands like a stub body.
-            if let (Some(StubResponse::Is { is, .. }), Some(default)) =
-                (response, imposter.config.default_response.as_ref())
-                && is.needs_default(default)
+            // `served_is` (issue #1685): a script-less `_rift`-only response is completed as the
+            // `is: {}` it is served as.
+            if let (Some(is), Some(default)) = (
+                response.and_then(served_is),
+                imposter.config.default_response.as_ref(),
+            ) && is.needs_default(default)
             {
                 // Mountebank merges the default's status after the behaviors, so a token in it is
                 // never substituted (issue #1558).
@@ -2210,12 +2214,22 @@ async fn handle_request_inner(
                         default_response: imposter.config.default_response.as_ref(),
                         shutdown: imposter.shutdown_tx.as_ref(),
                     };
+                    // The body as written, which a shellTransform reads as `MB_RESPONSE.body`
+                    // while the body is still its rendering (issue #1639). A body the default
+                    // supplied is text, as before: Mountebank merges the default after behaviors.
+                    let typed_body = match response {
+                        Some(StubResponse::Is { is, .. }) => {
+                            ServedParts::typed_body_of(is.body.as_ref(), &response_mode)
+                        }
+                        _ => None,
+                    };
                     match run
                         .apply(ServedParts {
                             status,
                             status_text: status_text.take(),
                             headers: spliced_headers,
                             body: spliced_body,
+                            typed_body,
                         })
                         .await
                     {

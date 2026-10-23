@@ -69,6 +69,12 @@ record.
 
 ### Changed
 
+- **A `behaviors` array element whose `copy`, `lookup` or `shellTransform` is a list is refused**
+  (`400`, #1639), as Mountebank refuses it, with its first error (`shellTransform behavior
+  "shellTransform" field must be a string, …`, `copy behavior "from" field required`, `lookup
+  behavior "key" field required`); `rift-lint` reports it as `E061`. Write one element per item, or
+  use the `_behaviors` object form, which still takes a list. A stored one (`--datadir`, a replayed
+  embedder config) still loads, one step per item.
 - **`rift_http_proxy::admin_api::replayable_value` returns an `OrderedJson`** (#1696), a new
   public JSON tree whose objects keep their key order, instead of a `serde_json::Value`. Embedders
   serialize it as before. The admin exports and the C-ABI views now print keys in struct order
@@ -239,7 +245,9 @@ record.
   `echo hello` is now a shellTransform failure, as in Mountebank (where it answers `500`): Rift
   serves the response as it was with `x-rift-shelltransform-error: true`, or `500` under
   `strictBehaviors`. Write `printf '{"body":"hello"}' #` instead. Commands written for Mountebank
-  now work unchanged.
+  now work unchanged. `MB_RESPONSE.body` is an `is` body as written, so one written as JSON (an
+  object, a number) reaches the first command as that value, as in Mountebank, until a step
+  rewrites the body (#1639).
 
 - A `wait` computed by a JavaScript function is no longer capped at 60 s, matching Mountebank and
   the numeric form (#1612).
@@ -324,6 +332,13 @@ record.
   proxy stub made, or the one now behind it, and forwarded nothing. It now forwards and records
   in front of itself, as Mountebank does. A recording in front of the answering stub (concurrent
   first requests) still replays, so the upstream still sees such a request once.
+- **A response holding only a `_rift` block without a `script` is served** (#1685): for example
+  the documented `{"_rift": {"fault": {"tcp": "…"}}}` was matched and then answered as a no-match
+  (`200`, `x-rift-no-match`), so its fault, `stateOps` and `conditional` never ran. It is now
+  served as `is: {}` with those effects, completed by `defaultResponse`. Its behaviors other than
+  `repeat` still do not run, and it reads back unchanged. The `state_ops_never_runs` and
+  `conditional_never_runs` warnings and `rift-lint` W019 now flag only a script response
+  (`_rift.script`); a script-less one is judged like an `is`.
 - **A proxy's `predicateGenerators` `xpath` selector that fails to evaluate fails the request with
   `500` "malformed xpath predicate selector"** (#1668), as in Mountebank, instead of recording the
   body as `""` and answering `200`. It applies to an XML body only (a prefix `ns` does not bind, an

@@ -1167,7 +1167,7 @@
           "description": "Script-based response generation"
         },
         "stateOps": {
-          "description": "Declarative post-response flow-state writes (issue #969): run in order against the\nrequest's resolved flow id after the response is rendered, just before it is written (see\n`crate::extensions::state_ops`). **`is` responses only** — carried here because this block\nbelongs to an `is` response; on a `proxy`, `inject` or script-only response it is not run\n(`stub_analysis` warns). Absent or empty ⇒ nothing runs and the response is served exactly\nas before, prepared fast path included.",
+          "description": "Declarative post-response flow-state writes (issue #969): run in order against the\nrequest's resolved flow id after the response is rendered, just before it is written (see\n`crate::extensions::state_ops`). **`is` responses only** — carried here because this block\nbelongs to an `is` response (a bare `_rift` response without a script is served as `is: {}`,\nissue #1685); on a `proxy`, `inject` or script response it is not run (`stub_analysis`\nwarns). Absent or empty ⇒ nothing runs and the response is served exactly\nas before, prepared fast path included.",
           "items": {
             "$ref": "#/$defs/StateOp"
           },

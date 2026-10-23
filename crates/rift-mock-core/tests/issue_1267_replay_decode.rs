@@ -588,6 +588,54 @@ fn the_door_only_behavior_shapes_replay_to_their_pre_1582_value() {
     }
 }
 
+/// Issue #1639: a `behaviors` array element whose `copy`, `lookup` or `shellTransform` is a list is
+/// refused at a door, as Mountebank refuses it, and is door-only: engines up to v0.23.0 admitted it
+/// (and wrote copy lists that way before #1199), and `compile_behaviors` splits it one step per item,
+/// so the stored bytes replay to that program and `admission_check` passes.
+#[test]
+fn a_list_valued_behavior_element_replays_to_its_pre_1639_value() {
+    let copy = serde_json::json!({ "from": "path", "into": "${P}",
+                                   "using": { "method": "regex", "selector": ".+" } });
+    let cases = [
+        (
+            r#"{ "responses": [{ "is": {}, "behaviors": [{ "shellTransform": ["echo a", "echo b"] }] }] }"#
+                .to_string(),
+            "shellTransform behavior \"shellTransform\" field must be a string",
+            serde_json::json!({ "is": {}, "behaviors": [
+                { "shellTransform": "echo a" }, { "shellTransform": "echo b" }
+            ] }),
+        ),
+        (
+            serde_json::json!({ "responses": [{ "is": {}, "behaviors": [{ "copy": [copy, copy] }] }] })
+                .to_string(),
+            "copy behavior \"from\" field required",
+            serde_json::json!({ "is": {}, "behaviors": [{ "copy": copy }, { "copy": copy }] }),
+        ),
+        (
+            r#"{ "responses": [{ "is": {}, "behaviors": [{ "wait": 1 }, { "lookup": [] }] }] }"#
+                .to_string(),
+            "lookup behavior \"key\" field required",
+            serde_json::json!({ "is": {}, "behaviors": [{ "wait": 1 }] }),
+        ),
+    ];
+    for (stub, refusal, replays_to) in cases {
+        let door = serde_json::from_str::<Stub>(&stub)
+            .expect_err("the validating decode refuses")
+            .to_string();
+        assert!(door.starts_with(refusal), "door: {door}");
+
+        let decoded: Stub = replayed(&stub).expect("the replayed decode admits the bytes");
+        assert_eq!(
+            serde_json::to_value(&decoded.responses[0]).expect("print"),
+            replays_to,
+            "{stub}"
+        );
+        assert_eq!(admission_check_stub(&decoded), Ok(()), "door-only: {stub}");
+        let config: ImposterConfig = replayed(&imposter_with(&stub)).expect("replay admits");
+        assert_eq!(admission_check(&config), Ok(()), "{stub}");
+    }
+}
+
 /// Issue #1582: a lookup `key.index` that is not a match position (Mountebank reads it as a
 /// property name and finds no row) is admitted on both paths, and prints back as written.
 #[test]
