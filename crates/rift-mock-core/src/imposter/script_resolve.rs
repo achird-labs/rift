@@ -626,11 +626,22 @@ pub fn open_lookup_file(
         ScriptFileAccess::Confined(root) => {
             open_confined(root, root, path, resolved).map_err(|e| lookup_error(path, e))
         }
+        // Opened without blocking and refused unless a regular file, as a confined read is: a
+        // FIFO or a device would otherwise hold the reading thread (issue #1654).
         ScriptFileAccess::Trusted { .. } => {
-            std::fs::File::open(resolved).map_err(|source| LookupFileError::Unreadable {
+            let unreadable = |source| LookupFileError::Unreadable {
                 path: path.to_string(),
                 source,
-            })
+            };
+            let file = open_without_blocking(resolved).map_err(unreadable)?;
+            let regular = file.metadata().map_err(unreadable)?.is_file();
+            if !regular {
+                return Err(unreadable(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "not a regular file",
+                )));
+            }
+            Ok(file)
         }
     }
 }

@@ -6,11 +6,11 @@ use super::request::RequestContext;
 use super::spliced::{
     Spliced, SplicedHeaders, authored_headers, plain_headers, replace_response_token,
 };
-use crate::imposter::body_limits::{BodyGuard, BodyReadError, CollectedBody};
+use crate::imposter::body_limits::{BodyGuard, BodyReadError, BudgetShare, CollectedBody};
 use crate::imposter::{LookupFileError, ScriptFileAccess, open_lookup_file, resolve_lookup_path};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -201,32 +201,98 @@ pub struct DatasetBinding {
     pub digest: Option<String>,
 }
 
-/// Parsed CSV files, keyed by the canonical path read and the delimiter it was parsed with: two
-/// lookups that read one file with different delimiters each get their own parse, as each gets
-/// its own in Mountebank, which re-reads the file per request (issues #1566, #1617).
+/// Parsed CSV files, keyed by the canonical path read, the delimiter it was parsed with (an empty
+/// one is `,`) and whether the read was confined: two lookups that read one file with different
+/// delimiters each get their own parse, as each gets its own in Mountebank, which re-reads the file
+/// per request (issues #1566, #1617). A parse read under a trusted access is never served to a
+/// confined one.
 ///
 /// A file's path is resolved under the imposter's [`ScriptFileAccess`] on every use, before the
 /// cache is consulted, so a path or link that has moved out of `--scripts-dir` since is refused
-/// even when its earlier content is cached. A cached file whose length or modification time has
-/// changed since it was read is read again, so an edited file is seen on the next request, as in
-/// Mountebank (issue #1654).
+/// even when its earlier content is cached. A cached file whose identity, length or modification
+/// time has changed since it was read is read again, so an edited file is seen on the next request,
+/// as in Mountebank (issue #1654).
 ///
-/// The cache holds at most the body ceiling (`--max-body-size`) of parsed data, measured by
-/// [`CsvData::heap_bytes`], and evicts the least recently used files past it (issue #1654). Each
-/// call names the ceiling of its own imposter's [`BodyGuard`], so with several managers sharing the
-/// cache the smallest ceiling in use wins. A file larger than that by itself is served and not
-/// cached. Mountebank has no cache at all, so an evicted file costs only the re-read Mountebank
-/// does on every request.
+/// The cache holds at most the body ceiling (`--max-body-size`) of entries, each charged its
+/// parse ([`CsvData::heap_bytes`]), its key and a fixed per-entry overhead, so even an empty parse
+/// counts. Past the bound the least recently used entries are evicted (issue #1654). Each call
+/// names the ceiling of its own imposter's [`BodyGuard`], so with several managers sharing the
+/// cache the smallest ceiling in use wins. An entry larger than the bound by itself is served and
+/// not cached, its parse held against the body memory budget until its row is served. Mountebank
+/// has no cache at all, so an evicted file costs only the re-read Mountebank does on every request.
 pub struct CsvCache {
     entries: Mutex<CacheEntries>,
 }
 
-/// The cached files, the bytes they account for, and a counter that orders their last uses.
+/// What a cache entry costs besides its parse and its key's heap bytes: the entry and the key in
+/// the map and in the recency index, the parse's `Arc` and struct, and the slots holding them.
+const ENTRY_OVERHEAD: usize = 2 * std::mem::size_of::<CacheKey>()
+    + std::mem::size_of::<CacheEntry>()
+    + std::mem::size_of::<CsvData>()
+    + 2 * std::mem::size_of::<usize>()
+    + 64;
+
+/// How many oversized keys are remembered as already warned about; past it the set starts over,
+/// so the warnings, not the memory, repeat.
+const MAX_WARNED: usize = 1024;
+
+/// Whether a parse was read under a trusted access or a confined one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ReadMode {
+    Trusted,
+    Confined,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
+    path: PathBuf,
+    delimiter: String,
+    mode: ReadMode,
+}
+
+impl CacheKey {
+    fn new(path: PathBuf, delimiter: &str, access: &ScriptFileAccess) -> Self {
+        // Mountebank passes `csvConfig.delimiter || ','`, so an empty delimiter is a comma, and
+        // both name one parse.
+        let delimiter = if delimiter.is_empty() { "," } else { delimiter };
+        let mode = match access {
+            ScriptFileAccess::Trusted { .. } => ReadMode::Trusted,
+            ScriptFileAccess::Confined(_) | ScriptFileAccess::Refused => ReadMode::Confined,
+        };
+        Self {
+            path,
+            delimiter: delimiter.to_string(),
+            mode,
+        }
+    }
+
+    /// What an entry for this key holding a parse of `data_bytes` costs the cache.
+    fn charge(&self, data_bytes: usize) -> usize {
+        data_bytes + self.path.as_os_str().len() + self.delimiter.capacity() + ENTRY_OVERHEAD
+    }
+}
+
+/// The cached files, the bytes they are charged, their recency order, and the oversized keys
+/// already warned about.
 #[derive(Default)]
 struct CacheEntries {
-    files: HashMap<(PathBuf, String), CacheEntry>,
+    files: HashMap<CacheKey, CacheEntry>,
+    /// Last use → key, oldest first, so eviction is `O(log n)`.
+    recency: BTreeMap<u64, CacheKey>,
     total_bytes: usize,
     clock: u64,
+    /// Hashes, not keys: a key's delimiter may be long, and this set is not charged to the bound.
+    warned: HashSet<u64>,
+    hasher: std::hash::RandomState,
+}
+
+impl CacheEntries {
+    fn remove(&mut self, key: &CacheKey) -> Option<CacheEntry> {
+        let entry = self.files.remove(key)?;
+        self.recency.remove(&entry.last_used);
+        self.total_bytes -= entry.bytes;
+        Some(entry)
+    }
 }
 
 struct CacheEntry {
@@ -236,37 +302,65 @@ struct CacheEntry {
     last_used: u64,
 }
 
-/// What a file looked like when it was read: a different length or modification time on a later
-/// use means it has been edited.
+/// What a file looked like when it was read: a different file, length or modification time on a
+/// later use means it has been replaced or edited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileStamp {
     len: u64,
     modified: Option<SystemTime>,
+    /// Device and inode, on Unix: a file swapped in with the same length and time is still a
+    /// different file.
+    identity: Option<(u64, u64)>,
 }
 
 impl FileStamp {
     fn of(metadata: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt;
+            Some((metadata.dev(), metadata.ino()))
+        };
+        #[cfg(not(unix))]
+        let identity = None;
         Self {
             len: metadata.len(),
-            // Domain-optional: a platform without modification times compares lengths alone.
+            // Domain-optional: a platform without modification times compares the rest alone.
             modified: metadata.modified().ok(),
+            identity,
         }
     }
 }
 
-/// A CSV file read and parsed by [`load_csv`], ready for [`CsvCache::insert`].
-pub struct LoadedCsv {
-    key: (PathBuf, String),
-    stamp: FileStamp,
-    data: CsvData,
+/// One lookup's parse of a CSV file. A parse too large for the cache also holds its share of the
+/// body memory budget until this is dropped, once its row is served (issue #1654).
+pub struct CsvHandle {
+    data: Arc<CsvData>,
+    _share: Option<BudgetShare>,
+}
+
+impl CsvHandle {
+    /// The parse.
+    #[must_use]
+    pub fn data(&self) -> &Arc<CsvData> {
+        &self.data
+    }
+}
+
+impl std::ops::Deref for CsvHandle {
+    type Target = CsvData;
+
+    fn deref(&self) -> &CsvData {
+        &self.data
+    }
 }
 
 /// Why a lookup cannot load its CSV file right now (issue #1654). A file that cannot be loaded at
 /// all is not an error here: it is logged and the lookup's tokens are left in place.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LookupLoadError {
-    /// The body memory budget cannot hold the file while it is read: transient server load, so
-    /// the request is answered `503` with `Retry-After`.
+    /// The body memory budget cannot hold the file while it is read, or a parse too large to cache
+    /// while it is served: transient server load, so the request is answered `503` with
+    /// `Retry-After`.
     #[error(
         "not enough body memory is free to read lookup CSV data source '{path}'; retry shortly"
     )]
@@ -287,7 +381,7 @@ impl CsvCache {
     }
 
     /// The parsed CSV file `path` names under `access`: the cached parse while the file is
-    /// unchanged, otherwise read under `guard` with [`load_csv`] and cached.
+    /// unchanged, otherwise read under `guard` with [`CsvCache::load`].
     ///
     /// `Ok(None)` when the path may not be read under `access` (issue #1617) or the file cannot be
     /// loaded; either is logged, so a lookup's tokens are never left in place silently.
@@ -300,84 +394,229 @@ impl CsvCache {
         delimiter: &str,
         access: &ScriptFileAccess,
         guard: &BodyGuard,
-    ) -> Result<Option<Arc<CsvData>>, LookupLoadError> {
+    ) -> Result<Option<CsvHandle>, LookupLoadError> {
         if let Some(data) = self.get_fresh(path, delimiter, access) {
             return Ok(Some(data));
         }
-        Ok(load_csv(path, delimiter, access, guard)?
-            .map(|loaded| self.insert(loaded, guard.limits().max_body_bytes())))
+        self.load(path, delimiter, access, guard)
     }
 
     /// The cached parse of `path` with `delimiter`, if there is one and the file has not changed
     /// since it was read. A changed file's parse is dropped. Does no more file I/O than resolving
     /// the path and one `stat`, so it runs on the caller's thread; a miss is loaded with
-    /// [`load_csv`].
+    /// [`CsvCache::load`].
     pub fn get_fresh(
         &self,
         path: &str,
         delimiter: &str,
         access: &ScriptFileAccess,
-    ) -> Option<Arc<CsvData>> {
+    ) -> Option<CsvHandle> {
         // Not an error here: a path that does not resolve or a file that cannot be stat'ed is a
-        // miss, and `load_csv` resolves it again and logs why it cannot be read.
+        // miss, and `load` resolves it again and logs why it cannot be read.
         let resolved = resolve_lookup_path(path, access).ok()?;
         let stamp = FileStamp::of(&std::fs::metadata(&resolved).ok()?);
-        let key = (resolved, delimiter.to_string());
-        let mut entries = self.entries.lock();
-        entries.clock += 1;
-        let now = entries.clock;
-        let entry = entries.files.get_mut(&key)?;
-        if entry.stamp == stamp {
-            entry.last_used = now;
-            return Some(Arc::clone(&entry.data));
-        }
-        let stale = entry.bytes;
-        entries.files.remove(&key);
-        entries.total_bytes -= stale;
+        let key = CacheKey::new(resolved, delimiter, access);
+        let stale = {
+            let mut entries = self.entries.lock();
+            entries.clock += 1;
+            let now = entries.clock;
+            let fresh = entries.files.get_mut(&key).map(|entry| {
+                (entry.stamp == stamp).then(|| {
+                    let last = std::mem::replace(&mut entry.last_used, now);
+                    (last, Arc::clone(&entry.data))
+                })
+            })?;
+            if let Some((last, data)) = fresh {
+                entries.recency.remove(&last);
+                entries.recency.insert(now, key);
+                return Some(CsvHandle { data, _share: None });
+            }
+            entries.remove(&key)
+        };
+        // Dropped outside the lock: freeing a large parse is not done while others wait on it.
+        drop(stale);
         None
     }
 
-    /// Cache `loaded`, evicting the least recently used files until the cache holds at most
-    /// `bound` bytes, and return its parse. A parse larger than `bound` by itself is returned and
-    /// not cached.
-    pub fn insert(&self, loaded: LoadedCsv, bound: usize) -> Arc<CsvData> {
-        let LoadedCsv { key, stamp, data } = loaded;
-        let bytes = data.heap_bytes();
-        let data = Arc::new(data);
-        if bytes > bound {
-            return data;
-        }
-        let mut entries = self.entries.lock();
-        entries.clock += 1;
-        let entry = CacheEntry {
-            data: Arc::clone(&data),
-            stamp,
-            bytes,
-            last_used: entries.clock,
+    /// Read and parse the CSV file `path` names under `access`, holding a share of `guard`'s body
+    /// memory budget for the file's bytes while it is read and parsed (issue #1654), and cache the
+    /// parse. A parse too large to cache instead holds its own share until the returned handle is
+    /// dropped, so the budget bounds the uncached parses in flight; it is logged once per file.
+    ///
+    /// Blocking file I/O and a full parse, so the serve path runs it off the async worker.
+    ///
+    /// `Ok(None)` when the file may not or cannot be read, or is larger than `guard`'s ceiling
+    /// (`--max-body-size`); each is logged, and the lookup's tokens are left in place.
+    ///
+    /// # Errors
+    /// [`LookupLoadError::BudgetExhausted`] when `guard`'s budget cannot hold the file now.
+    pub fn load(
+        &self,
+        path: &str,
+        delimiter: &str,
+        access: &ScriptFileAccess,
+        guard: &BodyGuard,
+    ) -> Result<Option<CsvHandle>, LookupLoadError> {
+        #[cfg(test)]
+        assert!(!path.ends_with("panic.csv"), "test-induced load panic");
+        let exhausted = || LookupLoadError::BudgetExhausted {
+            path: path.to_string(),
         };
-        if let Some(replaced) = entries.files.insert(key, entry) {
-            entries.total_bytes -= replaced.bytes;
-        }
-        entries.total_bytes += bytes;
-        while entries.total_bytes > bound {
-            // Never the entry just inserted while others remain: it is the most recently used,
-            // and alone it fits the bound.
-            let Some(lru) = entries
-                .files
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_used)
-                .map(|(key, _)| key.clone())
-            else {
-                break;
+        // A failure here means a misconfigured data source (missing/unreadable/malformed CSV);
+        // surface it instead of silently serving the response with the lookup tokens left
+        // unreplaced.
+        let unreadable = |source: std::io::Error| -> Result<Option<CsvHandle>, LookupLoadError> {
+            let e = LookupFileError::Unreadable {
+                path: path.to_string(),
+                source,
             };
-            if let Some(evicted) = entries.files.remove(&lru) {
-                entries.total_bytes -= evicted.bytes;
+            tracing::warn!("lookup behavior: {e}");
+            Ok(None)
+        };
+        let resolved = match resolve_lookup_path(path, access) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                tracing::warn!("lookup behavior: {e}");
+                return Ok(None);
             }
+        };
+        let mut file = match open_lookup_file(path, &resolved, access) {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::warn!("lookup behavior: {e}");
+                return Ok(None);
+            }
+        };
+        let stamp = match file.metadata() {
+            Ok(metadata) => FileStamp::of(&metadata),
+            Err(e) => return unreadable(e),
+        };
+        let bytes = match read_under(&mut file, stamp.len, guard) {
+            Ok(bytes) => bytes,
+            Err(BodyReadError::BudgetExhausted) => return Err(exhausted()),
+            Err(BodyReadError::TooLarge { limit }) => {
+                tracing::warn!(
+                    "lookup behavior: CSV data source '{path}' ({} bytes) is larger than \
+                     --max-body-size ({limit} bytes), so it is not read and the tokens are left in \
+                     place",
+                    stamp.len
+                );
+                return Ok(None);
+            }
+            Err(BodyReadError::Read(e)) => return unreadable(std::io::Error::other(e)),
+        };
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return unreadable(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            ));
+        };
+        let data = match CsvData::from_text(text, path, delimiter) {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::warn!("lookup behavior: failed to load CSV data source '{path}': {e}");
+                return Ok(None);
+            }
+        };
+        let key = CacheKey::new(resolved, delimiter, access);
+        let data_bytes = data.heap_bytes();
+        let charge = key.charge(data_bytes);
+        let bound = guard.limits().max_body_bytes();
+        if charge <= bound {
+            // The file's bytes, and their share of the budget, are released once parsed.
+            drop(bytes);
+            let data = Arc::new(data);
+            self.insert(key, stamp, Arc::clone(&data), charge, bound);
+            return Ok(Some(CsvHandle { data, _share: None }));
         }
-        data
+        // Too large to cache: the parse holds a share of its own while it is served, taken while
+        // the file's share is still held.
+        let share = match guard.try_reserve(data_bytes) {
+            Ok(share) => share,
+            Err(BodyReadError::BudgetExhausted) => return Err(exhausted()),
+            Err(e) => {
+                tracing::warn!(
+                    "lookup behavior: CSV data source '{path}' parses to about {data_bytes} bytes, \
+                     more than --body-memory-budget can hold ({e}), so it is not served and the \
+                     tokens are left in place"
+                );
+                return Ok(None);
+            }
+        };
+        drop(bytes);
+        self.warn_uncached_once(key, path, data_bytes, bound);
+        Ok(Some(CsvHandle {
+            data: Arc::new(data),
+            _share: Some(share),
+        }))
     }
 
-    /// The bytes the cached parses account for, by [`CsvData::heap_bytes`].
+    /// Cache `data` under `key`, charged `bytes`, evicting the least recently used entries until
+    /// the cache holds at most `bound` bytes. `bytes` is at most `bound`.
+    fn insert(
+        &self,
+        key: CacheKey,
+        stamp: FileStamp,
+        data: Arc<CsvData>,
+        bytes: usize,
+        bound: usize,
+    ) {
+        let mut dropped = Vec::new();
+        {
+            let mut entries = self.entries.lock();
+            if let Some(replaced) = entries.remove(&key) {
+                dropped.push(replaced);
+            }
+            entries.clock += 1;
+            let now = entries.clock;
+            entries.recency.insert(now, key.clone());
+            entries.files.insert(
+                key,
+                CacheEntry {
+                    data,
+                    stamp,
+                    bytes,
+                    last_used: now,
+                },
+            );
+            entries.total_bytes += bytes;
+            // Never the entry just inserted while others remain: it is the most recently used,
+            // and alone it fits the bound.
+            while entries.total_bytes > bound {
+                let Some((_, oldest)) = entries.recency.pop_first() else {
+                    break;
+                };
+                if let Some(evicted) = entries.files.remove(&oldest) {
+                    entries.total_bytes -= evicted.bytes;
+                    dropped.push(evicted);
+                }
+            }
+        }
+        // Dropped outside the lock: freeing evicted parses is not done while others wait on it.
+        drop(dropped);
+    }
+
+    /// Warn, once per file and delimiter, that a parse is too large to cache, so it is read again
+    /// on every use.
+    fn warn_uncached_once(&self, key: CacheKey, path: &str, data_bytes: usize, bound: usize) {
+        let first = {
+            let mut entries = self.entries.lock();
+            if entries.warned.len() >= MAX_WARNED {
+                entries.warned.clear();
+            }
+            let hash = std::hash::BuildHasher::hash_one(&entries.hasher, &key);
+            entries.warned.insert(hash)
+        };
+        if first {
+            tracing::warn!(
+                "lookup behavior: CSV data source '{path}' parses to about {data_bytes} bytes, more \
+                 than the lookup cache holds (--max-body-size, {bound} bytes), so it is not cached \
+                 and is read again on every use"
+            );
+        }
+    }
+
+    /// The bytes the cached entries are charged.
     #[must_use]
     pub fn cached_bytes(&self) -> usize {
         self.entries.lock().total_bytes
@@ -397,96 +636,14 @@ impl CsvCache {
 
     /// Clear cache
     pub fn clear(&self) {
-        let mut entries = self.entries.lock();
-        entries.files.clear();
-        entries.total_bytes = 0;
-    }
-}
-
-/// Read and parse the CSV file `path` names under `access`, holding a share of `guard`'s body
-/// memory budget for the file's bytes while it is read and parsed (issue #1654). The share is
-/// released when this returns: the parse a cache keeps is bounded by the cache, not the budget,
-/// which bounds only what is in flight.
-///
-/// Blocking file I/O and a full parse, so the serve path runs it off the async worker.
-///
-/// `Ok(None)` when the file may not or cannot be read, or is larger than `guard`'s ceiling
-/// (`--max-body-size`); each is logged, and the lookup's tokens are left in place.
-///
-/// # Errors
-/// [`LookupLoadError::BudgetExhausted`] when `guard`'s budget cannot hold the file now.
-pub fn load_csv(
-    path: &str,
-    delimiter: &str,
-    access: &ScriptFileAccess,
-    guard: &BodyGuard,
-) -> Result<Option<LoadedCsv>, LookupLoadError> {
-    // A failure here means a misconfigured data source (missing/unreadable/malformed CSV);
-    // surface it instead of silently serving the response with the lookup tokens left unreplaced.
-    let unreadable = |source: std::io::Error| -> Result<Option<LoadedCsv>, LookupLoadError> {
-        let e = LookupFileError::Unreadable {
-            path: path.to_string(),
-            source,
+        let dropped = {
+            let mut entries = self.entries.lock();
+            entries.recency.clear();
+            entries.total_bytes = 0;
+            std::mem::take(&mut entries.files)
         };
-        tracing::warn!("lookup behavior: {e}");
-        Ok(None)
-    };
-    let resolved = match resolve_lookup_path(path, access) {
-        Ok(resolved) => resolved,
-        Err(e) => {
-            tracing::warn!("lookup behavior: {e}");
-            return Ok(None);
-        }
-    };
-    let mut file = match open_lookup_file(path, &resolved, access) {
-        Ok(file) => file,
-        Err(e) => {
-            tracing::warn!("lookup behavior: {e}");
-            return Ok(None);
-        }
-    };
-    let stamp = match file.metadata() {
-        Ok(metadata) => FileStamp::of(&metadata),
-        Err(e) => return unreadable(e),
-    };
-    let bytes = match read_under(&mut file, stamp.len, guard) {
-        Ok(bytes) => bytes,
-        Err(BodyReadError::BudgetExhausted) => {
-            return Err(LookupLoadError::BudgetExhausted {
-                path: path.to_string(),
-            });
-        }
-        Err(BodyReadError::TooLarge { limit }) => {
-            tracing::warn!(
-                "lookup behavior: CSV data source '{path}' ({} bytes) is larger than \
-                 --max-body-size ({limit} bytes), so it is not read and the tokens are left in \
-                 place",
-                stamp.len
-            );
-            return Ok(None);
-        }
-        Err(BodyReadError::Read(e)) => return unreadable(std::io::Error::other(e)),
-    };
-    let Ok(text) = std::str::from_utf8(&bytes) else {
-        return unreadable(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "stream did not contain valid UTF-8",
-        ));
-    };
-    let data = match CsvData::from_text(text, path, delimiter) {
-        Ok(data) => data,
-        Err(e) => {
-            tracing::warn!("lookup behavior: failed to load CSV data source '{path}': {e}");
-            return Ok(None);
-        }
-    };
-    // The file's bytes, and their share of the budget, are released here, once parsed.
-    drop(bytes);
-    Ok(Some(LoadedCsv {
-        key: (resolved, delimiter.to_string()),
-        stamp,
-        data,
-    }))
+        drop(dropped);
+    }
 }
 
 /// Read `file`, `len` bytes long when it was opened, under `guard`. The collector refuses past the
@@ -900,7 +1057,7 @@ pub fn apply_lookup_behaviors(
 /// its body limits, under which a file is read (issue #1654).
 ///
 /// Reads a file it has not cached on the calling thread; the serve path instead loads it off the
-/// async worker, with [`lookup_key`], [`CsvCache::get_fresh`], [`load_csv`] and
+/// async worker, with [`lookup_key`], [`CsvCache::get_fresh`], [`CsvCache::load`] and
 /// [`apply_lookup_row`].
 ///
 /// # Errors
@@ -1671,6 +1828,7 @@ mod tests {
         cache
             .get_or_load(path, delimiter, access, &BodyGuard::default())
             .expect("the default budget holds a test file")
+            .map(|handle| Arc::clone(handle.data()))
     }
 
     fn guard(max: usize, budget: Option<usize>) -> BodyGuard {
@@ -1728,9 +1886,11 @@ mod tests {
         let b = padded_csv(dir.path(), "b.csv", "b", 2048);
         let c = padded_csv(dir.path(), "c.csv", "c", 2048);
         let access = ScriptFileAccess::trusted_cwd();
-        let one = load(&CsvCache::default(), &a, ",", &access)
-            .expect("loads")
-            .heap_bytes();
+        let one = {
+            let cache = CsvCache::default();
+            load(&cache, &a, ",", &access).expect("loads");
+            cache.cached_bytes()
+        };
         // Room for two files, not three.
         let guard = guard(2 * one + one / 2, None);
         let cache = CsvCache::default();
@@ -1792,8 +1952,8 @@ mod tests {
         let path = padded_csv(dir.path(), "data.csv", "x", 4096);
         let cache = CsvCache::default();
         let access = ScriptFileAccess::trusted_cwd();
-        let guard = guard(8192, Some(8192));
-        let held = guard.start(Some(6144)).await.expect("6 KiB fits");
+        let guard = guard(64 * 1024, Some(64 * 1024));
+        let held = guard.start(Some(62 * 1024)).await.expect("62 KiB fits");
         assert_eq!(
             cache.get_or_load(&path, ",", &access, &guard).map(|_| ()),
             Err(LookupLoadError::BudgetExhausted { path: path.clone() })
@@ -1811,14 +1971,143 @@ mod tests {
     async fn the_reservation_is_released_after_a_load() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = padded_csv(dir.path(), "data.csv", "x", 4096);
-        let guard = guard(8192, Some(8192));
-        load_csv(&path, ",", &ScriptFileAccess::trusted_cwd(), &guard)
+        let guard = guard(64 * 1024, Some(64 * 1024));
+        CsvCache::default()
+            .load(&path, ",", &ScriptFileAccess::trusted_cwd(), &guard)
             .expect("fits")
             .expect("loads");
         guard
-            .start_without_waiting(Some(8192))
+            .start_without_waiting(Some(64 * 1024))
             .await
             .expect("the whole budget is free again");
+    }
+
+    /// Review of #1654 (B1): an entry is charged its key and a fixed overhead, so a file whose
+    /// header fails, an empty parse, still counts and cannot fill memory one delimiter at a time.
+    #[test]
+    fn an_empty_parse_is_still_charged_and_evicted() {
+        let dir = tempfile::tempdir().expect("t");
+        let p = dir.path().join("bad.csv");
+        std::fs::write(&p, "\"unterminated\n").expect("w");
+        let p = p.to_string_lossy().into_owned();
+        let cache = CsvCache::default();
+        let g = guard(64 * 1024, None);
+        for i in 0..10_000 {
+            let _ = cache.get_or_load(&p, &format!("|{i}|"), &ScriptFileAccess::trusted_cwd(), &g);
+        }
+        assert!(
+            cache.cached_bytes() <= 64 * 1024 && cache.len() * ENTRY_OVERHEAD <= 64 * 1024,
+            "{} entries, {} bytes",
+            cache.len(),
+            cache.cached_bytes()
+        );
+    }
+
+    /// An empty delimiter is a comma, so both name one parse (review of #1654, N3).
+    #[test]
+    fn an_empty_delimiter_shares_the_comma_parse() {
+        let dir = tempfile::tempdir().expect("t");
+        let p = padded_csv(dir.path(), "d.csv", "x", 10);
+        let cache = CsvCache::default();
+        let a = ScriptFileAccess::trusted_cwd();
+        load(&cache, &p, "", &a).expect("e");
+        load(&cache, &p, ",", &a).expect("c");
+        assert_eq!(cache.len(), 1, "an empty delimiter is a comma");
+    }
+
+    /// A FIFO under a trusted access is refused without blocking (review of #1654, N1).
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_under_a_trusted_access_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().expect("t");
+        let p = dir.path().join("fifo.csv");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&p)
+                .status()
+                .expect("mkfifo")
+                .success()
+        );
+        let p = p.to_string_lossy().into_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = CsvCache::default()
+                .get_or_load(
+                    &p,
+                    ",",
+                    &ScriptFileAccess::trusted_cwd(),
+                    &BodyGuard::default(),
+                )
+                .map(|d| d.is_some());
+            let _ = tx.send(r);
+        });
+        let r = rx.recv_timeout(std::time::Duration::from_secs(3));
+        assert_eq!(
+            r.ok(),
+            Some(Ok(false)),
+            "refused at once, not blocked on or read"
+        );
+    }
+
+    /// A parse too large to cache holds its share of the budget until its handle is dropped, so
+    /// the budget bounds the uncached parses in flight (review of #1654, S2).
+    #[tokio::test]
+    async fn an_uncached_parse_holds_the_budget_until_served() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = padded_csv(dir.path(), "wide.csv", "w", 3 * 1024);
+        // A 4 KiB ceiling: the file fits it, its parse does not fit the cache.
+        let g = guard(4096, Some(64 * 1024));
+        // How many 4 KiB bodies the budget admits at once.
+        let admitted = || async {
+            let mut held = Vec::new();
+            while let Ok(body) = g.start_without_waiting(Some(4096)).await {
+                held.push(body);
+            }
+            held.len()
+        };
+        assert_eq!(admitted().await, 16);
+        let cache = CsvCache::default();
+        let served = cache
+            .get_or_load(&path, ",", &ScriptFileAccess::trusted_cwd(), &g)
+            .expect("the budget holds it")
+            .expect("served");
+        assert!(
+            served.heap_bytes() > 4096,
+            "the fixture's parse is over the bound"
+        );
+        assert!(cache.is_empty());
+        assert!(
+            admitted().await < 16,
+            "the uncached parse holds its share while it is served"
+        );
+        drop(served);
+        assert_eq!(admitted().await, 16, "released once served");
+    }
+
+    /// A parse too large to cache is reported once, not on every read (review of #1654, S2).
+    #[test]
+    #[tracing_test::traced_test]
+    fn an_uncached_parse_is_warned_about_once() {
+        let dir = tempfile::tempdir().expect("t");
+        let p = padded_csv(dir.path(), "wide.csv", "w", 3 * 1024);
+        let g = guard(4096, None);
+        let cache = CsvCache::default();
+        for _ in 0..3 {
+            cache
+                .get_or_load(&p, ",", &ScriptFileAccess::trusted_cwd(), &g)
+                .expect("b")
+                .expect("s");
+        }
+        logs_assert(|lines: &[&str]| {
+            match lines
+                .iter()
+                .filter(|l| l.contains("is not cached") && l.contains("--max-body-size"))
+                .count()
+            {
+                1 => Ok(()),
+                n => Err(format!("warned {n} times")),
+            }
+        });
     }
 
     /// Mountebank re-reads the file on every lookup, so an edit is seen on the next request.

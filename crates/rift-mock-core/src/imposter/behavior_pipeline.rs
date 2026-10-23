@@ -14,7 +14,7 @@ use super::types::{IsResponse, StatusValue};
 use crate::behaviors::{
     BehaviorProgram, BehaviorStep, CsvCache, Decorated, RequestContext, ResponseStatus,
     ShellTransformError, Spliced, SplicedHeaders, SplicedName, WaitScriptError, apply_copy_spliced,
-    apply_lookup_row, apply_shell_transform, load_csv, lookup_key,
+    apply_lookup_row, apply_shell_transform, lookup_key,
 };
 use crate::util::build_response_with_headers;
 use bytes::Bytes;
@@ -159,7 +159,8 @@ pub(crate) struct BehaviorRun<'a, SH> {
     /// What the imposter's scripts may `require()` (issue #1611).
     pub script_files: std::sync::Arc<crate::imposter::ScriptFileAccess>,
     pub stub: StubRef<'a>,
-    pub csv_cache: &'a CsvCache,
+    /// `'static` so a miss can be loaded and inserted on a blocking thread (issue #1654).
+    pub csv_cache: &'static CsvCache,
     /// The imposter's body limits, under which a `lookup` reads its CSV file (issue #1654).
     pub body_guard: &'a std::sync::Arc<BodyGuard>,
     pub script_timeout: Duration,
@@ -170,6 +171,22 @@ pub(crate) struct BehaviorRun<'a, SH> {
     /// The imposter's teardown signal, which cuts a sleeping `wait` off (issue #1616). `None` for
     /// an imposter that was never started by a manager.
     pub shutdown: Option<&'a tokio::sync::broadcast::Sender<()>>,
+}
+
+/// The `500` a `lookup` answers under `strictBehaviors` when loading its CSV file panicked.
+fn lookup_panic_response(path: &str) -> Response<Full<Bytes>> {
+    build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [
+            ("x-rift-imposter", "true"),
+            ("content-type", "application/json"),
+        ],
+        crate::response::error_body_typed(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::response::ErrorKind::BehaviorError,
+            &format!("lookup failed (strictBehaviors): loading CSV data source '{path}' failed"),
+        ),
+    )
 }
 
 /// The response's headers as a script sees them in `MB_RESPONSE` (issue #1589): one string per
@@ -309,17 +326,15 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                                 let (path, delimiter) = (csv.path.clone(), csv.delimiter.clone());
                                 let access = std::sync::Arc::clone(&self.script_files);
                                 let guard = std::sync::Arc::clone(self.body_guard);
+                                let cache = self.csv_cache;
+                                // The read, the parse, its accounting and the insert all run on
+                                // the blocking thread.
                                 let loaded = tokio::task::spawn_blocking(move || {
-                                    load_csv(&path, &delimiter, &access, &guard)
+                                    cache.load(&path, &delimiter, &access, &guard)
                                 })
                                 .await;
                                 match loaded {
-                                    Ok(Ok(loaded)) => loaded.map(|loaded| {
-                                        self.csv_cache.insert(
-                                            loaded,
-                                            self.body_guard.limits().max_body_bytes(),
-                                        )
-                                    }),
+                                    Ok(Ok(loaded)) => loaded,
                                     // Server load, not a behavior failure: a `503` with or without
                                     // `strictBehaviors`, never the tokens left in place quietly.
                                     Ok(Err(e)) => {
@@ -327,12 +342,21 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                                             lookup_budget_response(&e),
                                         );
                                     }
+                                    // A defect, not a data source fault: the response under
+                                    // `strictBehaviors`, as a failed shellTransform is; otherwise
+                                    // the tokens stay and the response is marked degraded.
                                     Err(e) => {
                                         tracing::error!(
                                             "lookup behavior: loading CSV data source '{}' \
                                              panicked: {e}; the tokens are left in place",
                                             csv.path
                                         );
+                                        if self.strict {
+                                            return BehaviorOutcome::StrictFailure(
+                                                lookup_panic_response(&csv.path),
+                                            );
+                                        }
+                                        degraded = true;
                                         None
                                     }
                                 }
@@ -637,7 +661,7 @@ mod tests {
         let behaviors = behaviors(block);
         let uri: hyper::Uri = "/users/42?x=1".parse().expect("fixture uri");
         let request_headers: crate::imposter::Headers = crate::imposter::Headers::new();
-        let csv_cache = CsvCache::new();
+        let csv_cache: &'static CsvCache = Box::leak(Box::new(CsvCache::new()));
         BehaviorRun {
             behaviors: &behaviors,
             method: "GET",
@@ -649,7 +673,7 @@ mod tests {
             script_state_key: 4545,
             script_files: std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
             stub: STUB,
-            csv_cache: &csv_cache,
+            csv_cache,
             body_guard: &std::sync::Arc::default(),
             script_timeout: Duration::from_secs(5),
             strict,
@@ -668,7 +692,7 @@ mod tests {
         let behaviors = behaviors(block);
         let uri: hyper::Uri = "/".parse().expect("fixture uri");
         let request_headers: crate::imposter::Headers = crate::imposter::Headers::new();
-        let csv_cache = CsvCache::new();
+        let csv_cache: &'static CsvCache = Box::leak(Box::new(CsvCache::new()));
         BehaviorRun {
             behaviors: &behaviors,
             method: "GET",
@@ -680,7 +704,7 @@ mod tests {
             script_state_key: 4545,
             script_files: std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
             stub: STUB,
-            csv_cache: &csv_cache,
+            csv_cache,
             body_guard: &std::sync::Arc::default(),
             script_timeout: Duration::from_secs(5),
             strict: false,
@@ -772,6 +796,14 @@ mod tests {
 
     /// A `lookup` on the CSV at `csv`, run with `guard` and the response `orig`, keyed by `?x=1`.
     async fn run_lookup(csv: &str, guard: &std::sync::Arc<BodyGuard>) -> BehaviorOutcome {
+        run_lookup_strict(csv, guard, false).await
+    }
+
+    async fn run_lookup_strict(
+        csv: &str,
+        guard: &std::sync::Arc<BodyGuard>,
+        strict: bool,
+    ) -> BehaviorOutcome {
         let behaviors = behaviors(json!({ "lookup": {
             "key": { "from": { "query": "x" }, "using": { "method": "regex", "selector": ".*" } },
             "fromDataSource": { "csv": { "path": csv, "keyColumn": "id" } },
@@ -779,7 +811,7 @@ mod tests {
         } }));
         let uri: hyper::Uri = "/users/42?x=1".parse().expect("fixture uri");
         let request_headers: crate::imposter::Headers = crate::imposter::Headers::new();
-        let csv_cache = CsvCache::new();
+        let csv_cache: &'static CsvCache = Box::leak(Box::new(CsvCache::new()));
         let parts = ServedParts {
             body: Spliced::authored("name=${row}[name]".to_string()),
             ..original()
@@ -795,10 +827,10 @@ mod tests {
             script_state_key: 4545,
             script_files: std::sync::Arc::new(crate::imposter::ScriptFileAccess::trusted_cwd()),
             stub: STUB,
-            csv_cache: &csv_cache,
+            csv_cache,
             body_guard: guard,
             script_timeout: Duration::from_secs(5),
-            strict: false,
+            strict,
             default_response: None,
             shutdown: None,
         }
@@ -816,9 +848,13 @@ mod tests {
             .expect("write csv");
         let csv = csv.to_string_lossy().into_owned();
         let guard = std::sync::Arc::new(BodyGuard::new(
-            super::super::body_limits::BodyLimits::new(4096, Some(4096)).expect("valid limits"),
+            super::super::body_limits::BodyLimits::new(64 * 1024, Some(64 * 1024))
+                .expect("valid limits"),
         ));
-        let held = guard.start(Some(4096)).await.expect("fills the budget");
+        let held = guard
+            .start(Some(64 * 1024))
+            .await
+            .expect("fills the budget");
         match run_lookup(&csv, &guard).await {
             BehaviorOutcome::StrictFailure(response) => {
                 assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -830,6 +866,30 @@ mod tests {
         match run_lookup(&csv, &guard).await {
             BehaviorOutcome::Applied { parts, .. } => assert_eq!(parts.body.as_str(), "name=ROW"),
             other => panic!("the budget is free again: {other:?}"),
+        }
+    }
+
+    /// Review of #1654 (S3): a load that panics is the response under `strictBehaviors`, and
+    /// otherwise leaves the tokens and marks the response degraded.
+    #[tokio::test]
+    async fn a_lookup_load_that_panics_fails_a_strict_response() {
+        let dir = tempfile::tempdir().expect("t");
+        let csv = dir.path().join("panic.csv");
+        std::fs::write(&csv, "id,name\n1,ROW\n").expect("w");
+        let csv = csv.to_string_lossy().into_owned();
+        let guard = std::sync::Arc::new(BodyGuard::default());
+        match run_lookup_strict(&csv, &guard, true).await {
+            BehaviorOutcome::StrictFailure(response) => {
+                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            other => panic!("strict mode must fail the response: {other:?}"),
+        }
+        match run_lookup_strict(&csv, &guard, false).await {
+            BehaviorOutcome::Applied { parts, degraded } => {
+                assert!(degraded);
+                assert_eq!(parts.body.as_str(), "name=${row}[name]");
+            }
+            other => panic!("lenient mode serves the response: {other:?}"),
         }
     }
 

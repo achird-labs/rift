@@ -520,9 +520,12 @@ record.
   `--max-body-size` with least-recently-used eviction, so an admin client can no longer grow it
   with one parse per distinct `delimiter`. A CSV file is read under the body memory budget (a
   `503` with `Retry-After` while it is used up), a file larger than `--max-body-size` is not read
-  (a warning, the tokens left in place), and the read and parse run off the async worker. An
-  edited CSV file is read again on its next use, as Mountebank, which re-reads it per request,
-  sees the edit.
+  (a warning, the tokens left in place), and the read and parse run off the async worker. Every
+  cache entry is charged its key and a fixed overhead as well as its parse, so even a file whose
+  header fails counts. A parse too large to cache is warned about once and holds its share of the
+  budget while it is served. A `--configfile` lookup no longer blocks on a FIFO or device: only a
+  regular file is read. An edited or replaced CSV file is read again on its next use, as
+  Mountebank, which re-reads it per request, sees the edit.
 - **`--local-only` admin API and `/metrics` refuse a non-loopback client** (#1568). Both were
   protected only by their loopback bind, and a loopback listener still accepts a connection whose
   source is another of the host's own addresses (`curl --interface 192.168.x.y

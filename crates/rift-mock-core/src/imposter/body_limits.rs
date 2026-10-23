@@ -128,6 +128,14 @@ impl std::ops::Deref for CollectedBody {
     }
 }
 
+/// A share of the budget held by something other than a body ([`BodyGuard::try_reserve`]),
+/// released when this is dropped.
+#[derive(Debug)]
+#[must_use]
+pub struct BudgetShare {
+    _permit: Option<OwnedSemaphorePermit>,
+}
+
 /// The limits plus the budget they share. One per [`ImposterManager`](super::ImposterManager), so
 /// every listener, the proxy and the admin API draw on the same budget.
 #[derive(Debug)]
@@ -203,6 +211,34 @@ impl BodyGuard {
         }
         collector.reserve_capacity(length);
         Ok(collector)
+    }
+
+    /// Hold `bytes` of the budget without waiting, for memory that is not a body: a `lookup` CSV
+    /// parse the cache does not keep, held until its row is served (issue #1654). More than the
+    /// whole budget can never be held, so it is [`BodyReadError::TooLarge`] rather than
+    /// exhaustion; without a budget nothing is held.
+    ///
+    /// # Errors
+    /// [`BodyReadError::TooLarge`] past the whole budget, [`BodyReadError::BudgetExhausted`] when
+    /// it cannot be held now.
+    pub fn try_reserve(&self, bytes: usize) -> Result<BudgetShare, BodyReadError> {
+        let Some(budget) = &self.budget else {
+            return Ok(BudgetShare { _permit: None });
+        };
+        let wanted = units(bytes);
+        if wanted == 0 {
+            return Ok(BudgetShare { _permit: None });
+        }
+        let total = self.limits.budget_bytes().unwrap_or(usize::MAX);
+        if bytes > total {
+            return Err(BodyReadError::TooLarge { limit: total });
+        }
+        Arc::clone(budget)
+            .try_acquire_many_owned(wanted)
+            .map(|permit| BudgetShare {
+                _permit: Some(permit),
+            })
+            .map_err(|_| BodyReadError::BudgetExhausted)
     }
 
     /// An empty collector, and the known length checked against the ceiling. A known length over

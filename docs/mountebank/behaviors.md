@@ -668,7 +668,10 @@ Reading a file draws on `--body-memory-budget`: while the budget is used up, the
 `503 Service Unavailable` with `Retry-After: 1`, with or without `strictBehaviors`. A file larger
 than `--max-body-size` is not read: a warning is logged and the tokens are left in place. The cache
 holds at most `--max-body-size` of parsed files and drops the least recently used past it, so a
-dropped file is read again on its next use (#1654).
+dropped file is read again on its next use. A file whose parse alone is larger than that is not
+cached: a warning is logged once, the file is read again on every use, and its parse draws on
+`--body-memory-budget` until the response is built (#1654). Only a regular file is read, from any
+door: a FIFO or a device is refused with a warning.
 
 Which files a lookup may read depends on how its imposter was written (#1617), unlike Mountebank,
 which reads any path:
