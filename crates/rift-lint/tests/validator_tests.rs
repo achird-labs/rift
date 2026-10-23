@@ -4319,6 +4319,21 @@ fn w019_conditional_on_a_script_only_response() {
     assert_eq!(w019, vec!["stubs[0].responses[0]._rift.conditional"]);
 }
 
+/// Issue #1685: a `_rift`-only response without a script is served as `is: {}`, so its
+/// `conditional` runs; W019 fires on it only for a method predicate that excludes GET and HEAD.
+#[test]
+fn w019_is_silent_for_a_script_less_rift_conditional() {
+    let (w019, _) = w019_locations(json!({"responses": [
+        {"_rift": {"conditional": true}}
+    ]}));
+    assert!(w019.is_empty(), "{w019:?}");
+    let (w019, _) = w019_locations(json!({
+        "predicates": [{"equals": {"method": "post"}}],
+        "responses": [{"_rift": {"conditional": true}}]
+    }));
+    assert_eq!(w019, vec!["stubs[0].predicates[0]"]);
+}
+
 #[test]
 fn w019_conditional_with_a_post_only_method_predicate() {
     let (w019, _) = w019_locations(json!({
