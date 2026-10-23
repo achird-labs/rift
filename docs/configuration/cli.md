@@ -575,6 +575,11 @@ delete, or a shutdown, for up to those 2 s. Embedders set the same limits with
 `ImposterManager::with_body_limits`, or `maxBodySize` / `bodyMemoryBudget` in the C-ABI
 `ServeOptions`. The intercept listener keeps its own 1 MiB cap.
 
+A `lookup` behavior's CSV file is read under the same limits (#1654): a file larger than
+`--max-body-size` is not read (a warning is logged and the tokens are left in place), and while the
+budget is used up the request gets `503` with `Retry-After: 1`. The cache of parsed files holds at
+most `--max-body-size`. See [Behaviors](../mountebank/behaviors.md#csv-lookup).
+
 ## Environment Variables
 
 A flag given on the command line wins over its environment variable, and the environment variable
@@ -839,6 +844,11 @@ rift stop --pidfile /var/run/rift.pid
 # Without --pidfile, stop reads ./rift.pid
 rift stop
 ```
+
+The PID file is written only once the server is ready: the admin API and every startup imposter
+(`--configfile`, `--imposters`, `--datadir`) are bound and serving. Tooling may wait for the file as
+a readiness signal, as Mountebank's build plugins do with `mb`. A startup that fails (a bad config
+file, a port in use, a refused injection) writes no PID file.
 
 `stop` sends `SIGTERM` (`taskkill /F` on Windows) and **waits for the process to exit** before it
 returns — up to 5 seconds, above the server's own shutdown bound — then removes the PID file (the

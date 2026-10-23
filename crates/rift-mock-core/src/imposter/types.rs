@@ -5674,6 +5674,27 @@ mod tests {
         );
     }
 
+    // Issue #1631: a number in a predicate or body is a `serde_json::Value` f64 and prints from
+    // its parsed value (`1.0` stays `1.0`, `1e2` becomes `100.0`), where Mountebank prints `1` and
+    // `100`. Documented in differences.md; changing it would move `stub_key` for such stubs, so
+    // pin it to make an accidental change visible.
+    #[test]
+    fn printed_predicate_number_keeps_serde_spelling() {
+        let stub: Stub = serde_json::from_str(
+            r#"{"predicates":[{"equals":{"body":1.0}}],"responses":[{"is":{"body":1e2}}]}"#,
+        )
+        .expect("a stub with numeric predicate and body values parses");
+        let printed = serde_json::to_string(&stub).expect("a parsed stub serializes");
+        assert!(
+            printed.contains(r#"{"equals":{"body":1.0}}"#),
+            "predicate number must print as 1.0: {printed}"
+        );
+        assert!(
+            printed.contains(r#""body":100.0"#),
+            "body number 1e2 must print as 100.0: {printed}"
+        );
+    }
+
     // Issue #1039: the same fold-and-merge invariant, observed through the two types that
     // actually reach a user — a recorded request and a stub response — rather than only through
     // the deserializer's own test harness.

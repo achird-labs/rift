@@ -69,6 +69,13 @@ record.
 
 ### Changed
 
+- **`rift_http_proxy::admin_api::replayable_value` returns an `OrderedJson`** (#1696), a new
+  public JSON tree whose objects keep their key order, instead of a `serde_json::Value`. Embedders
+  serialize it as before. The admin exports and the C-ABI views now print keys in struct order
+  rather than alphabetically (a `?replayable=true` export in `ImposterConfig`'s field order, an
+  https export's TLS keys after the config's own). The JSON shape is unchanged, but a consumer that
+  diffs saved files against older ones will see keys move.
+
 - **`proxy.cert`/`key`/`passphrase` are no longer dropped** (#1609). A config that carried them
   now presents them, and one with an invalid pair (half a pair, a wrong passphrase, a key that does
   not match, a legacy `Proc-Type` encrypted key) is refused at creation with `400` where it was
@@ -331,6 +338,19 @@ record.
   dropped silently. For embedders: `MountebankInjectResponse.status_code` is now
   `Option<ResponseStatus>`, and `rift_types::schema::StatusCode`, unused since #1558, is deprecated.
 
+- **`?replayable=true` exports, and so `rift save` / `mb save`, keep a stub's header order**
+  (#1696), completing #1606: the export went through a sorted `serde_json::Value`, so `is.headers`
+  saved alphabetically and a save → load served them in that order. Fixed with it: `GET
+  /imposters?removeProxies=true`, the `DELETE /imposters` answer, the space-stub routes, the C-ABI
+  `rift_get_imposter` (replayable and detail, recorded request headers included),
+  `rift_list_imposters`, `rift_space_list_stubs`, `rift_apply_config` and `rift_serve_admin`'s
+  inline `config`. `POST /imposters/{port}/spaces/{flowId}/stubs` now also decodes under the
+  admission budget every other config door uses (#1609).
+
+- **`--pidfile` is written only once the server and its startup imposters are listening** (#1657),
+  so tools that wait for it (as Mountebank's do) no longer race the first request. It used to be
+  written before the runtime started, ahead of the admin API and every `--configfile`, `--imposters`
+  and `--datadir` imposter. A startup that fails now leaves no PID file at all.
 - **`rift stop` no longer deletes a PID file another server has taken over.** When a `stop` and a
   `restart` waited on the same server, the `restart` wrote its own PID as soon as that server
   exited and the `stop` then removed the file, leaving the new server running with nothing able to
@@ -535,6 +555,20 @@ record.
 
 ### Security
 
+- **The `lookup` CSV cache no longer grows without bound** (#1654). It is bounded by
+  `--max-body-size` with least-recently-used eviction, so an admin client can no longer grow it
+  with one parse per distinct `delimiter`. A CSV file is read under the body memory budget (a
+  `503` with `Retry-After` while it is used up), a file larger than `--max-body-size` is not read
+  (a warning, the tokens left in place), and the read and parse run off the async worker. Every
+  cache entry is charged its key and a fixed overhead as well as its parse, so even a file whose
+  header fails counts. A parse too large to cache is warned about once and holds its share of the
+  budget while it is served. A `--configfile` lookup no longer blocks on a FIFO or device: only a
+  regular file is read. An edited or replaced CSV file is read again on its next use, as
+  Mountebank, which re-reads it per request, sees the edit. A file whose parse is larger than the
+  whole budget is refused once, with one warning, until it changes. For embedders of
+  `rift-mock-core`: `CsvCache::get_or_load` and `get_fresh` return a `CsvHandle` (which derefs to
+  `CsvData`) instead of `Arc<CsvData>`, `get_or_load` takes the imposter's `BodyGuard` and returns a
+  `Result`, and `load_csv` / `LoadedCsv` are gone (use `CsvCache::load`).
 - **`--local-only` admin API and `/metrics` refuse a non-loopback client** (#1568). Both were
   protected only by their loopback bind, and a loopback listener still accepts a connection whose
   source is another of the host's own addresses (`curl --interface 192.168.x.y
@@ -609,6 +643,18 @@ record.
   docs now say so, and that `--scripts-dir` is defence in depth, not a sandbox.
 
 ### Documentation
+
+- **Numbers in printed imposters keep serde_json's spelling, and `contains`/`startsWith`/`endsWith`
+  against a JSON number or boolean match by text** (#1631): `1.0` prints as `1.0` and `1e2` as
+  `100.0`, where Mountebank prints `1` and `100`; matching is unaffected. `{"contains": {"body":
+  {"n": "5"}}}` matches `{"n": 15}`, where Mountebank answers `500` whenever the selected request
+  value is not a string. Both are listed in `docs/mountebank/differences.md`.
+
+- **A number or boolean header value prints, and reaches scripts, as a string** (#1626): Rift
+  coerces it to text when the imposter is decoded, so `"Content-Length": 852` prints as `"852"` in
+  `GET /imposters` and `?replayable=true`, and a `decorate` or `shellTransform` sees the string;
+  Mountebank keeps the number. The header sent is the same. Listed in
+  `docs/mountebank/differences.md` under "Printed imposters are normalized".
 
 - **Imposter connections stay open** (#1592): Mountebank adds `Connection: close` to imposter
   responses that do not set it; Rift keeps the connection alive. `docs/mountebank/differences.md`

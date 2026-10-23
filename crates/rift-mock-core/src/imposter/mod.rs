@@ -60,7 +60,7 @@ pub(crate) use types::RESPONSE_VARIANT_KEYS;
 pub(crate) use script_resolve::{ConfinedPathError, read_confined, resolve_confined};
 pub use script_resolve::{
     LookupFileError, ScriptBaseDir, ScriptFileAccess, ScriptResolveError, check_lookup_paths,
-    read_lookup_file, resolve_lookup_path, resolve_scripts, resolve_stub_scripts,
+    open_lookup_file, read_lookup_file, resolve_lookup_path, resolve_scripts, resolve_stub_scripts,
 };
 
 // Re-export core imposter

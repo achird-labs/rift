@@ -18,7 +18,8 @@ use super::types::{
     ResponseMode, StubResponse, UpstreamTarget,
 };
 use crate::behaviors::{
-    CsvCache, Spliced, SplicedHeaders, authored_headers, header_to_title_case, plain_headers,
+    CsvCache, LookupLoadError, Spliced, SplicedHeaders, authored_headers, header_to_title_case,
+    plain_headers,
 };
 use crate::extensions::decorate::{
     ResponseDecorator, ResponsePhase, backend_error_response, with_annotation_scope,
@@ -93,33 +94,54 @@ fn decode_failed_response(e: &tokio::task::JoinError) -> Response<Full<Bytes>> {
 /// close ([`LingerOnClose`](super::fault_io::LingerOnClose), issue #1460), so that close does not
 /// reset the connection under the answer.
 fn body_refused_response(e: &BodyReadError) -> Response<Full<Bytes>> {
-    let (status, retry_after) = match e {
+    let status = match e {
         BodyReadError::BudgetExhausted => {
             // An expected overload state, not a server fault: a warning, not an error.
             warn!("refused a request body: {e}");
-            (StatusCode::SERVICE_UNAVAILABLE, true)
+            StatusCode::SERVICE_UNAVAILABLE
         }
-        _ => (StatusCode::PAYLOAD_TOO_LARGE, false),
+        _ => StatusCode::PAYLOAD_TOO_LARGE,
     };
+    let mut response = limits_response(status, &e.to_string(), true);
+    // The close must not discard this answer while the client is still sending (issue #1460).
+    response
+        .extensions_mut()
+        .insert(super::fault_io::LingerOnClose);
+    response
+}
+
+/// The `503` + `Retry-After` for a `lookup` whose CSV file the body memory budget cannot hold now
+/// (issue #1654): the same answer as a request body the budget refuses, except that the
+/// connection is kept, since the request's body has been read in full.
+pub(crate) fn lookup_budget_response(e: &LookupLoadError) -> Response<Full<Bytes>> {
+    // An expected overload state, not a server fault: a warning, not an error.
+    warn!("refused a lookup: {e}");
+    limits_response(StatusCode::SERVICE_UNAVAILABLE, &e.to_string(), false)
+}
+
+/// The body-limits answer: `status` with the canonical error body, `Retry-After: 1` on a `503`,
+/// and `Connection: close` when `close`.
+fn limits_response(status: StatusCode, message: &str, close: bool) -> Response<Full<Bytes>> {
     let mut response = build_response_with_headers(
         status,
         [
             ("x-rift-imposter", "true"),
             ("content-type", "application/json"),
-            ("connection", "close"),
         ],
-        crate::response::error_body(status, &e.to_string()),
+        crate::response::error_body(status, message),
     );
-    if retry_after {
+    if close {
+        response.headers_mut().insert(
+            hyper::header::CONNECTION,
+            hyper::header::HeaderValue::from_static("close"),
+        );
+    }
+    if status == StatusCode::SERVICE_UNAVAILABLE {
         response.headers_mut().insert(
             hyper::header::RETRY_AFTER,
             hyper::header::HeaderValue::from_static("1"),
         );
     }
-    // The close must not discard this answer while the client is still sending (issue #1460).
-    response
-        .extensions_mut()
-        .insert(super::fault_io::LingerOnClose);
     response
 }
 
@@ -1404,6 +1426,7 @@ async fn handle_request_inner(
                     script_files: imposter.script_file_access(),
                     stub: stub_ref(&imposter, stub_index, &stub_state.stub),
                     csv_cache: csv_cache(),
+                    body_guard: &imposter.body_guard,
                     script_timeout,
                     strict: strict_behaviors_for(&imposter.config),
                     default_response: imposter.config.default_response.as_ref(),
@@ -1547,6 +1570,7 @@ async fn handle_request_inner(
                             script_files: imposter.script_file_access(),
                             stub: stub_ref(&imposter, stub_index, &stub_state.stub),
                             csv_cache: csv_cache(),
+                            body_guard: &imposter.body_guard,
                             script_timeout,
                             strict: strict_behaviors_for(&imposter.config),
                             default_response: imposter.config.default_response.as_ref(),
@@ -2186,6 +2210,7 @@ async fn handle_request_inner(
                         script_files: imposter.script_file_access(),
                         stub: stub_ref(&imposter, stub_index, &stub_state.stub),
                         csv_cache: csv_cache(),
+                        body_guard: &imposter.body_guard,
                         script_timeout,
                         strict: strict_behaviors,
                         default_response: imposter.config.default_response.as_ref(),

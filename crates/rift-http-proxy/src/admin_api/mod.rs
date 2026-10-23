@@ -15,6 +15,7 @@
 pub mod authz;
 mod handlers;
 pub mod log_ring;
+mod ordered_json;
 mod request_filter;
 mod router;
 /// The admin listener's route table (issue #1145), for an embedder that must account for every
@@ -30,6 +31,7 @@ pub use handlers::imposters::{
 /// `POST /imposters/:port/spaces/:flowId/stubs` itself rather than proxying to the handler here.
 pub use handlers::scenarios::not_a_stub_reason;
 pub use log_ring::LogRing;
+pub use ordered_json::OrderedJson;
 pub use routes::{ADMIN_ROUTES, AdminRoute, RouteFamily};
 pub use server::{
     AdminApiServer, AdminExposurePolicy, RunningAdminApi, check_admin_exposure,
