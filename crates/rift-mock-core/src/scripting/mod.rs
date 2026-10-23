@@ -117,6 +117,11 @@ pub enum PredicateGeneratorError {
     /// (issue #1353). Recording it would drop it, or write a stub the engine cannot re-import.
     #[error("generated predicate is invalid: {0}")]
     Invalid(String),
+    /// A generator's `xpath` selector failed to evaluate on an XML body (issue #1668). Mountebank's
+    /// `xpathSelect` throws while recording, so the proxied request fails with `500 malformed
+    /// xpath predicate selector`, not with the `x-rift-generator-error` header.
+    #[error(transparent)]
+    Selector(#[from] crate::behaviors::XPathSelectorError),
 }
 
 impl PredicateGeneratorError {
@@ -129,6 +134,8 @@ impl PredicateGeneratorError {
             Self::Script(_) | Self::Threw { .. } => "script-error",
             Self::Output(_) => "invalid-output",
             Self::Invalid(_) => "invalid-predicate",
+            // For logs only: the request fails with a 500 instead of carrying the header.
+            Self::Selector(_) => "selector-error",
         }
     }
 }

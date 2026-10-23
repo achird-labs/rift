@@ -1922,6 +1922,76 @@ fn e060_flags_an_element_with_no_behavior() {
     }
 }
 
+/// E061 (issue #1639): a `behaviors` array element whose `copy`, `lookup` or `shellTransform` is a
+/// list, empty included, is refused by the engine and by Mountebank, which validates the value as
+/// written. The `_behaviors` object form is upcast one element per item, so a list there is fine.
+#[test]
+fn e061_flags_a_list_valued_behavior_in_an_array_element() {
+    let copy = json!({ "from": "path", "into": "${P}",
+                       "using": { "method": "regex", "selector": ".+" } });
+    let e061 = |resp: Value| {
+        let mut r = LintResult::new();
+        validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+        r.issues
+            .iter()
+            .filter(|i| i.code == "E061")
+            .map(|i| (i.message.clone(), i.location.clone().unwrap_or_default()))
+            .collect::<Vec<_>>()
+    };
+    for (key, value, said) in [
+        (
+            "shellTransform",
+            json!(["echo a", "echo b"]),
+            "field must be a string, representing the path to a command line application",
+        ),
+        (
+            "shellTransform",
+            json!([]),
+            "\"shellTransform\" field must be a string",
+        ),
+        (
+            "copy",
+            json!([copy.clone()]),
+            "copy behavior \"from\" field required",
+        ),
+        ("copy", json!([]), "copy behavior \"from\" field required"),
+        (
+            "lookup",
+            json!([]),
+            "lookup behavior \"key\" field required",
+        ),
+    ] {
+        let found = e061(json!({ "is": {}, "behaviors": [{ "wait": 1 }, { key: value }] }));
+        assert_eq!(found.len(), 1, "{key}: {value}: {found:?}");
+        let (message, location) = &found[0];
+        assert!(message.contains(said), "{key}: {message}");
+        assert_eq!(location, &format!("loc.behaviors[1].{key}"));
+        // A later `null` does not excuse it: it is judged as written.
+        let cleared = e061(json!({ "is": {}, "behaviors": [{ key: value }, { key: null }] }));
+        assert_eq!(cleared.len(), 1, "{key}: {value}: {cleared:?}");
+        // The object form takes a list.
+        assert_eq!(
+            e061(json!({ "is": {}, "_behaviors": { key: value } })),
+            vec![]
+        );
+        assert_eq!(
+            e061(json!({ "is": {}, "behaviors": { key: value } })),
+            vec![]
+        );
+    }
+    for clean in [
+        json!([{ "shellTransform": "echo a" }, { "shellTransform": "echo b" }]),
+        json!([{ "copy": copy }]),
+        json!([{ "copy": null }]),
+    ] {
+        assert_eq!(
+            e061(json!({ "is": {}, "behaviors": clean })),
+            vec![],
+            "{clean}"
+        );
+    }
+}
+
 /// E035 (issue #1587): the engine refuses a `0` or `null` `repeat` on the response and in an
 /// object-form block since #1582, as Mountebank does. In an array element beside a behavior a
 /// `null` clears `repeat`, which both admit.
@@ -2103,6 +2173,7 @@ fn a_live_underscore_behaviors_still_shadows_a_bad_array_at_its_own_location() {
 
 /// `copy`, `lookup` and `shellTransform` accumulate across elements (issue #1195), so every element
 /// that sets one is validated at its own index — the first `copy` is no longer shadowed by the last.
+/// A list inside one element is E061 since #1639, and its items are still validated.
 #[test]
 fn behaviors_array_folds_copy_lookup_and_shell_transform_too() {
     let resp = json!({
@@ -2119,9 +2190,11 @@ fn behaviors_array_folds_copy_lookup_and_shell_transform_too() {
     assert_eq!(
         behavior_findings(&resp),
         vec![
+            finding("E061", "loc.behaviors[0].copy"),
             finding("E029", "loc.behaviors[0].copy[0]"),
             finding("E032", "loc.behaviors[1].lookup"),
             finding("W008", "loc.behaviors[2].shellTransform"),
+            finding("E061", "loc.behaviors[3].copy"),
             finding("E029", "loc.behaviors[3].copy[1]"),
         ]
     );
@@ -2141,12 +2214,16 @@ fn behaviors_array_later_null_removes_earlier_list_steps() {
         let resp = json!({ "is": { "statusCode": 200 }, "behaviors": behaviors });
         assert_eq!(behavior_findings(&resp), vec![], "{resp}");
     }
-    // An empty list is not a `null`: it appends nothing and clears nothing.
+    // An empty list is not a `null`: it appends nothing and clears nothing. It is refused in an
+    // element since #1639 (E061).
     let resp = json!({ "is": { "statusCode": 200 },
                        "behaviors": [{ "copy": bad }, { "copy": [] }] });
     assert_eq!(
         behavior_findings(&resp),
-        vec![finding("E029", "loc.behaviors[0].copy")]
+        vec![
+            finding("E029", "loc.behaviors[0].copy"),
+            finding("E061", "loc.behaviors[1].copy")
+        ]
     );
 }
 

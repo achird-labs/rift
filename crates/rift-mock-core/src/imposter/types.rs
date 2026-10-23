@@ -835,7 +835,8 @@ where
 /// A response with more than one type, or none (#1551), is door-only for the same reason: the
 /// decoded response holds exactly one type, so what the door refused cannot reach this function.
 /// So are the behaviors rules #1582 added: a `behaviors` element with two behavior types or none,
-/// a `0` or `null` `repeat`, and a `copy.from` or lookup `key.from` without exactly one key. The
+/// a `0` or `null` `repeat`, and a `copy.from` or lookup `key.from` without exactly one key; and
+/// #1639's `behaviors` element whose `copy`, `lookup` or `shellTransform` is a list. The
 /// compiled program no longer holds some of them, and engines up to v0.23.0 stored all of them, so
 /// a store that replays (rift-cluster's log, `--datadir`) must not refuse them. The door checks
 /// them after everything this function re-runs, so where both refuse they name the same failure.
@@ -1834,6 +1835,34 @@ fn refuse_from_key_count(block: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
+/// A `behaviors` array element whose `copy`, `lookup` or `shellTransform` is a JSON array, empty
+/// included (issue #1639), refused with the first error Mountebank's `behaviorsValidator.js` reports
+/// for it: it validates the value as written, and an array has no `from` or `key` field and is not
+/// a command string. An element holding two such lists, which is refused either way, names the
+/// first in sorted key order, as [`refuse_door_only_behavior_shapes`] does.
+fn refuse_list_valued_element(
+    element: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    for (key, value) in element {
+        if !value.is_array() {
+            continue;
+        }
+        match key.as_str() {
+            "copy" => return Err("copy behavior \"from\" field required".to_string()),
+            "lookup" => return Err("lookup behavior \"key\" field required".to_string()),
+            "shellTransform" => {
+                return Err(
+                    "shellTransform behavior \"shellTransform\" field must be a string, \
+                            representing the path to a command line application"
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Refuse, at a config door, what Mountebank's `behaviorsValidator.js` and `dryRunValidator.js`
 /// refuse in a behaviors block and engines up to v0.23.0 admitted (issue #1582), in the order
 /// Mountebank reports them:
@@ -1843,13 +1872,17 @@ fn refuse_from_key_count(block: &serde_json::Value) -> Result<(), String> {
 ///   response field there), and an element with two or more behavior keys. An unknown key beside
 ///   one behavior is admitted, as there. The `_behaviors` object form is upcast key by key, so it
 ///   is never refused for either;
+/// - in the `behaviors` array form, an element whose `copy`, `lookup` or `shellTransform` is a list
+///   (issue #1639), in Mountebank's first error for it: an array has none of the fields a copy or
+///   lookup requires, and a shellTransform must be one command string. The `_behaviors` object form
+///   is upcast one element per list item first, so a list there is admitted;
 /// - a `repeat` of `0` or `null`, on the response or in an object-form block.
 ///
 /// The first key named is the first in the element's sorted keys, which is the written order for
 /// the one-key element this is almost always about.
 ///
-/// **Door-only.** [`compile_behaviors`] splits a multi-key element into one step per key and drops
-/// a `null` `repeat`, which is the stored program shape (#1198), so [`admission_check_stub`] cannot
+/// **Door-only.** [`compile_behaviors`] splits a multi-key element into one step per key, and a
+/// list-valued element into one step per item, and drops a `null` `repeat`, which is the stored program shape (#1198), so [`admission_check_stub`] cannot
 /// see those. A `0` `repeat` and a `from` of the wrong size it could see, and does not check either:
 /// engines up to v0.23.0 stored all of these (a `from` as written), and a store replays what it
 /// holds, `--datadir` included, so a check there would make an upgrade drop a stored imposter. A
@@ -1873,6 +1906,7 @@ fn refuse_door_only_behavior_shapes(
                 let Some(element) = element.as_object() else {
                     continue;
                 };
+                refuse_list_valued_element(element)?;
                 let behaviors = element.keys().filter(|key| known(key)).count();
                 if let (0, Some(first)) = (behaviors, element.keys().next()) {
                     return Err(format!("Unrecognized behavior: \"{first}\""));
@@ -6281,6 +6315,76 @@ mod tests {
             };
             let parsed = behaviors_parsed.expect("the merged block parses");
             assert_eq!(parsed.repeat, Some(3));
+        }
+    }
+
+    /// Issue #1639: the list-valued `behaviors` elements Mountebank refuses, with its first error.
+    fn list_valued_elements() -> [(serde_json::Value, &'static str); 4] {
+        let copy = json!({ "from": "path", "into": "${P}",
+                           "using": { "method": "regex", "selector": ".+" } });
+        [
+            (
+                json!({ "shellTransform": ["echo a", "echo b"] }),
+                "shellTransform behavior \"shellTransform\" field must be a string, representing \
+                 the path to a command line application",
+            ),
+            (
+                json!({ "copy": [copy] }),
+                "copy behavior \"from\" field required",
+            ),
+            (
+                json!({ "copy": [] }),
+                "copy behavior \"from\" field required",
+            ),
+            (
+                json!({ "lookup": [] }),
+                "lookup behavior \"key\" field required",
+            ),
+        ]
+    }
+
+    // Issue #1639: Mountebank validates a `behaviors` element's value as written, so a list there
+    // is refused; a config door refuses it the same way.
+    #[test]
+    fn a_list_valued_behavior_in_an_array_element_is_refused_at_a_door() {
+        for (element, message) in list_valued_elements() {
+            let msg = response_error(json!({ "is": {}, "behaviors": [{ "wait": 1 }, element] }));
+            assert!(msg.contains(message), "{element}: {msg}");
+        }
+    }
+
+    // Issue #1639: engines up to v0.23.0 admitted (and before #1199 wrote) a list inside one
+    // element, so a replayed config still decodes it, one step per item.
+    #[test]
+    fn a_list_valued_behavior_in_an_array_element_still_replays() {
+        for (element, _) in list_valued_elements() {
+            let items = element
+                .as_object()
+                .and_then(|o| o.values().next())
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len);
+            let response = json!({ "is": {}, "behaviors": [element] });
+            let resp: StubResponse = crate::imposter::deserialize_replayed(response.clone())
+                .unwrap_or_else(|e| panic!("{response}: {e}"));
+            let StubResponse::Is {
+                behaviors_parsed, ..
+            } = resp
+            else {
+                panic!("expected an Is response");
+            };
+            let steps = behaviors_parsed.map_or(0, |program| program.steps.len());
+            assert_eq!(steps, items, "{response}");
+        }
+    }
+
+    // Issue #1639: the `_behaviors` object form is upcast one element per item before Mountebank
+    // validates it, so a list there is admitted.
+    #[test]
+    fn the_object_form_still_takes_lists() {
+        for (element, _) in list_valued_elements() {
+            let response = json!({ "is": {}, "_behaviors": element });
+            serde_json::from_value::<StubResponse>(response.clone())
+                .unwrap_or_else(|e| panic!("{response}: {e}"));
         }
     }
 

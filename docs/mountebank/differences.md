@@ -150,9 +150,9 @@ arguments, as Mountebank does. Rift escapes a `'` inside the JSON as `'\''`, so 
 receives both arguments whole; Mountebank does not escape it, so a request or response containing
 `'` breaks its command line. Rift's JSON keys may come in a different order. Where Mountebank's
 command line works, each argument is the same JSON. See [Behaviors](behaviors.md#shelltransform).
-`MB_RESPONSE.body` is the body as text, where Mountebank hands an `is` body written as JSON (an
-object, a number) over as that value; a body a previous command in the chain printed keeps its JSON
-type in both.
+An `is` body written as JSON (an object, a number) reaches `MB_RESPONSE.body` as that value in
+both, but a `copy` or `lookup` that substituted into it first hands the command text: Rift's
+substitute into the body's text, where Mountebank's replace inside the object and keep it one.
 
 A command that fails, or prints anything other than JSON, is a `500` in Mountebank. Rift serves the
 response as it was before the command, with `x-rift-shelltransform-error: true`, and answers `500`

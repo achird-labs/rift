@@ -2150,6 +2150,88 @@
           "path": "/p"
         }
       ]
+    },
+    {
+      "name": "proxy: a predicateGenerators xpath selector that fails to evaluate fails the request with 500 after forwarding (#1668)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "up"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "body": true
+                          },
+                          "xpath": {
+                            "selector": "//x:id"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/orders",
+          "body": "<a><id>1</id></a>"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/orders",
+          "body": "<a><id>1</id></a>"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4546"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545"
+        }
+      ]
     }
   ]
 }

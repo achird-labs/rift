@@ -1793,7 +1793,8 @@ pub(crate) const STEP_BEHAVIORS: [&str; 5] =
 /// it came from. Each element holds one behavior, as Mountebank's `behaviorsValidator.js` requires
 /// and a config door enforces since #1582 (issue #1587): E059 flags one with several behavior keys
 /// (formerly the warning W018), and E060 one with no behavior key but some other key, a
-/// `{"repeat": n}` element included. Neither applies to the object form.
+/// `{"repeat": n}` element included. E061 flags one whose `copy`, `lookup` or `shellTransform` is a
+/// list (issue #1639). None of them applies to the object form.
 ///
 /// E048 (issue #1101) reports the shapes outside that model: a non-object `_behaviors` or a scalar
 /// `behaviors`, which the engine refuses, and a non-object, non-null array element, which it skips.
@@ -1960,6 +1961,36 @@ fn validate_response_behaviors(
                              use the `_behaviors` object form",
                         ),
                     );
+                }
+                // A list is refused as written (issue #1639), a later `null` or not: Mountebank
+                // validates an element's value as it stands, and only the object form is upcast
+                // one element per item.
+                for (key, said) in [
+                    ("copy", "copy behavior \"from\" field required"),
+                    ("lookup", "lookup behavior \"key\" field required"),
+                    (
+                        "shellTransform",
+                        "shellTransform behavior \"shellTransform\" field must be a string, \
+                         representing the path to a command line application",
+                    ),
+                ] {
+                    if obj.get(key).is_some_and(Value::is_array) {
+                        result.add_issue(
+                            LintIssue::error(
+                                "E061",
+                                format!(
+                                    "`behaviors[{idx}].{key}` is a list; the engine refuses it, as \
+                                     Mountebank does: {said}"
+                                ),
+                                file.to_path_buf(),
+                            )
+                            .with_location(format!("{location}.behaviors[{idx}].{key}"))
+                            .with_suggestion(format!(
+                                "Write one `{key}` element per item, in the order they should run, \
+                                 or use the `_behaviors` object form, which takes a list"
+                            )),
+                        );
+                    }
                 }
                 // A `from` of the wrong size is refused as written (issue #1587), so one in a step
                 // a later `null` removed, never validated below, is still reported.
@@ -2659,7 +2690,8 @@ pub fn validate_behavior(
     }
 
     // The engine refuses the file for a non-string `decorate`, or a `shellTransform` that is not a
-    // command or a list of commands (issue #1162).
+    // command or a list of commands (issue #1162). A list is the object form's: in a `behaviors`
+    // array element it is E061 (issue #1639).
     if let Some(decorate) = present("decorate")
         && !decorate.is_string()
     {
@@ -2682,7 +2714,8 @@ pub fn validate_behavior(
         report_malformed_behavior(
             file,
             &format!("{location}.shellTransform"),
-            "`shellTransform` must be a command string or an array of command strings",
+            "`shellTransform` must be a command string (or, in the `_behaviors` object form, an \
+             array of command strings)",
             result,
         );
     }

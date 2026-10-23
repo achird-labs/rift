@@ -340,6 +340,13 @@ without the create-time check (a replayed rift-cluster config, for one).
 A generator that legitimately returns an empty array (`[]`) is **not** a failure — it records a
 match-all stub as before. Only genuine generation failures skip recording and set the header.
 
+A generator `xpath` selector that fails to evaluate on an XML body (a prefix its `ns` does not bind,
+an unknown function) is not in that list. The request is forwarded, nothing is recorded, and the
+client gets `500` "malformed xpath predicate selector" instead of the upstream's response, as in
+Mountebank, in every proxy mode, `proxyTransparent` included. A body that is not XML never runs the
+selector and records `""`, and a `"predicateOperator": "exists"` generator never evaluates it.
+Rift used to record the body as `""` and answer `200`.
+
 #### The create-time dry run
 
 A generator `inject` is also run once when its stub is created, as in Mountebank: against an empty

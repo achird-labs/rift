@@ -69,6 +69,12 @@ record.
 
 ### Changed
 
+- **A `behaviors` array element whose `copy`, `lookup` or `shellTransform` is a list is refused**
+  (`400`, #1639), as Mountebank refuses it, with its first error (`shellTransform behavior
+  "shellTransform" field must be a string, …`, `copy behavior "from" field required`, `lookup
+  behavior "key" field required`); `rift-lint` reports it as `E061`. Write one element per item, or
+  use the `_behaviors` object form, which still takes a list. A stored one (`--datadir`, a replayed
+  embedder config) still loads, one step per item.
 - **`rift_http_proxy::admin_api::replayable_value` returns an `OrderedJson`** (#1696), a new
   public JSON tree whose objects keep their key order, instead of a `serde_json::Value`. Embedders
   serialize it as before. The admin exports and the C-ABI views now print keys in struct order
@@ -239,7 +245,9 @@ record.
   `echo hello` is now a shellTransform failure, as in Mountebank (where it answers `500`): Rift
   serves the response as it was with `x-rift-shelltransform-error: true`, or `500` under
   `strictBehaviors`. Write `printf '{"body":"hello"}' #` instead. Commands written for Mountebank
-  now work unchanged.
+  now work unchanged. `MB_RESPONSE.body` is an `is` body as written, so one written as JSON (an
+  object, a number) reaches the first command as that value, as in Mountebank, until a step
+  rewrites the body (#1639).
 
 - A `wait` computed by a JavaScript function is no longer capped at 60 s, matching Mountebank and
   the numeric form (#1612).
@@ -338,6 +346,11 @@ record.
   dropped silently. For embedders: `MountebankInjectResponse.status_code` is now
   `Option<ResponseStatus>`, and `rift_types::schema::StatusCode`, unused since #1558, is deprecated.
 
+- **A proxy's `predicateGenerators` `xpath` selector that fails to evaluate fails the request with
+  `500` "malformed xpath predicate selector"** (#1668), as in Mountebank, instead of recording the
+  body as `""` and answering `200`. It applies to an XML body only (a prefix `ns` does not bind, an
+  unknown function), and in every proxy mode, `proxyTransparent` included. The request is still
+  forwarded to the upstream first, and nothing is recorded.
 - **`?replayable=true` exports, and so `rift save` / `mb save`, keep a stub's header order**
   (#1696), completing #1606: the export went through a sorted `serde_json::Value`, so `is.headers`
   saved alphabetically and a save → load served them in that order. Fixed with it: `GET
