@@ -299,6 +299,8 @@ fn ignored_rift_shape(response: &Value) -> Option<&'static str> {
 
 /// W019 (issue #1296): `_rift.conditional` that can never answer 304. Mirrors the engine's
 /// `ConditionalNeverRuns`. A `proxy`/`inject`/`fault` response is W017's, so it is skipped here.
+/// A bare-`_rift` response without a `script` is served as `is: {}` (issue #1685), so it is judged
+/// as an `is` response: only by its stub's method predicate.
 /// Conservative: only a top-level `equals`/`deepEquals` `method` with a single string value other
 /// than GET/HEAD (case-insensitive) counts; `or`/`not`/`and`, `matches`, `exists`, `except`, a
 /// selector or a non-string value are not judged.
@@ -318,16 +320,28 @@ fn check_conditional_never_fires(file: &Path, imposter: &Value, result: &mut Lin
             .and_then(Value::as_array)
             .map_or(&[][..], Vec::as_slice);
         let present = |response: &Value, key: &str| response.get(key).is_some_and(|v| !v.is_null());
+        let scripted = |response: &Value| {
+            response
+                .get("_rift")
+                .and_then(|r| r.get("script"))
+                .is_some_and(|s| !s.is_null())
+        };
+        // Served as an `is`: an `is` response, or a script-less bare-`_rift` one (issue #1685).
+        let served_as_is = |response: &Value| {
+            present(response, "is")
+                || (!scripted(response) && ignored_rift_shape(response).is_none())
+        };
         for (resp_idx, response) in responses.iter().enumerate() {
             if declares(response)
                 && !present(response, "is")
+                && scripted(response)
                 && ignored_rift_shape(response).is_none()
             {
                 result.add_issue(
                     LintIssue::warning(
                         "W019",
-                        "`_rift.conditional` on a script-only response never fires: conditional \
-                         GET applies only to an `is` response",
+                        "`_rift.conditional` on a script response (`_rift.script`) never fires: \
+                         conditional GET applies only to an `is` response",
                         file.to_path_buf(),
                     )
                     .with_location(format!(
@@ -337,7 +351,7 @@ fn check_conditional_never_fires(file: &Path, imposter: &Value, result: &mut Lin
                 );
             }
         }
-        let has_is_conditional = responses.iter().any(|r| present(r, "is") && declares(r));
+        let has_is_conditional = responses.iter().any(|r| served_as_is(r) && declares(r));
         if !has_is_conditional {
             continue;
         }

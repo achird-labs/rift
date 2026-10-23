@@ -20,6 +20,7 @@ use crate::behaviors::is_js_function_decorate;
 #[cfg(not(feature = "javascript"))]
 use crate::behaviors::{is_js_config_decorate, rewrite_js_config_to_rhai};
 use crate::imposter::Predicate;
+use std::sync::LazyLock;
 
 /// Truncate a string with ellipsis if it exceeds the maximum byte length.
 ///
@@ -251,7 +252,35 @@ pub fn execute_stub_response_with_rift(
         )),
         StubResponse::Proxy { .. } => None,
         StubResponse::Inject { .. } => None,
+        // Issue #1685: a `_rift`-only response without a script is served as `is: {}` carrying its
+        // `_rift` effects (fault, conditional, stateOps, templated). Its behaviors other than
+        // `repeat` stay ignored, as documented, so none are returned.
+        StubResponse::RiftScript { rift, .. } if rift.script.is_none() => Some((
+            EMPTY_IS.status_code,
+            EMPTY_IS.headers.clone(),
+            String::new(),
+            None,
+            Some(rift.as_ref()),
+            EMPTY_IS.mode.clone(),
+            false,
+        )),
         StubResponse::RiftScript { .. } => None,
+    }
+}
+
+/// The `is: {}` a `_rift`-only response without a script is served as (issue #1685).
+static EMPTY_IS: LazyLock<IsResponse> = LazyLock::new(IsResponse::empty);
+
+/// The `is` this response is served as: its own, or `is: {}` for a `_rift`-only response
+/// without a script (#1685). `None` for proxy/inject/fault/scripted responses.
+pub(crate) fn served_is(response: &StubResponse) -> Option<&IsResponse> {
+    match response {
+        StubResponse::Is { is, .. } => Some(is),
+        StubResponse::RiftScript { rift, .. } if rift.script.is_none() => Some(&EMPTY_IS),
+        StubResponse::Fault { .. }
+        | StubResponse::Proxy { .. }
+        | StubResponse::Inject { .. }
+        | StubResponse::RiftScript { .. } => None,
     }
 }
 
@@ -1828,5 +1857,51 @@ mod prepared_response_tests {
             None,
         );
         assert!(prepared_of(&dynamic).is_none());
+    }
+}
+
+#[cfg(test)]
+mod rift_only_tests {
+    //! Issue #1685: a `_rift`-only response without a script is served as `is: {}`.
+    use super::*;
+    use serde_json::json;
+
+    fn rift_only(rift: serde_json::Value) -> StubResponse {
+        StubResponse::RiftScript {
+            rift: Box::new(serde_json::from_value(rift).expect("_rift parses")),
+            ignored_behaviors: Some(json!({ "wait": 10 })),
+        }
+    }
+
+    #[test]
+    fn script_less_rift_executes_as_empty_is() {
+        let response = rift_only(json!({ "fault": { "tcp": "malformed" } }));
+        let (status, headers, body, behaviors, rift, mode, is_fault) =
+            execute_stub_response_with_rift(&response).expect("served as `is: {}`");
+        assert_eq!(status, 200);
+        assert!(headers.is_empty(), "{headers:?}");
+        assert_eq!(body, "");
+        assert!(
+            behaviors.is_none(),
+            "behaviors other than repeat stay ignored"
+        );
+        assert!(
+            rift.is_some_and(|r| r.fault.is_some()),
+            "its `_rift` rides along"
+        );
+        assert_eq!(mode, ResponseMode::Text);
+        assert!(!is_fault);
+        let served = served_is(&response).expect("served as `is: {}`");
+        assert!(
+            served.omitted.status_code && served.omitted.body,
+            "every field omitted"
+        );
+    }
+
+    #[test]
+    fn scripted_rift_still_executes_as_none() {
+        let response = rift_only(json!({ "script": { "code": "response.body = 'x';" } }));
+        assert!(execute_stub_response_with_rift(&response).is_none());
+        assert!(served_is(&response).is_none());
     }
 }

@@ -209,6 +209,10 @@ Apply both latency and errors:
 }
 ```
 
+A `_rift` block on its own, as in the fragments on this page, is a complete response: it is served
+as `is: {}` — an empty `200` (completed by `defaultResponse`, if the imposter has one) — whenever
+the fault does not fire. Pair it with an `is` to set the normal answer.
+
 ### TCP Faults
 
 Simulate network-level failures. Unlike a script, none of `_rift.fault` needs

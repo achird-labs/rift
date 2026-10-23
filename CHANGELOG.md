@@ -327,6 +327,13 @@ record.
 
 ### Fixed
 
+- **A response holding only a `_rift` block without a `script` is served** (#1685): for example
+  the documented `{"_rift": {"fault": {"tcp": "…"}}}` was matched and then answered as a no-match
+  (`200`, `x-rift-no-match`), so its fault, `stateOps` and `conditional` never ran. It is now
+  served as `is: {}` with those effects, completed by `defaultResponse`. Its behaviors other than
+  `repeat` still do not run, and it reads back unchanged. The `state_ops_never_runs` and
+  `conditional_never_runs` warnings and `rift-lint` W019 now flag only a script response
+  (`_rift.script`); a script-less one is judged like an `is`.
 - **A proxy's `predicateGenerators` `xpath` selector that fails to evaluate fails the request with
   `500` "malformed xpath predicate selector"** (#1668), as in Mountebank, instead of recording the
   body as `""` and answering `200`. It applies to an XML body only (a prefix `ns` does not bind, an
