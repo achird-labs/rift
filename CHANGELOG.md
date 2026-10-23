@@ -75,6 +75,13 @@ record.
   behavior "key" field required`); `rift-lint` reports it as `E061`. Write one element per item, or
   use the `_behaviors` object form, which still takes a list. A stored one (`--datadir`, a replayed
   embedder config) still loads, one step per item.
+- **`rift_http_proxy::admin_api::replayable_value` returns an `OrderedJson`** (#1696), a new
+  public JSON tree whose objects keep their key order, instead of a `serde_json::Value`. Embedders
+  serialize it as before. The admin exports and the C-ABI views now print keys in struct order
+  rather than alphabetically (a `?replayable=true` export in `ImposterConfig`'s field order, an
+  https export's TLS keys after the config's own). The JSON shape is unchanged, but a consumer that
+  diffs saved files against older ones will see keys move.
+
 - **`proxy.cert`/`key`/`passphrase` are no longer dropped** (#1609). A config that carried them
   now presents them, and one with an invalid pair (half a pair, a wrong passphrase, a key that does
   not match, a legacy `Proc-Type` encrypted key) is refused at creation with `400` where it was
@@ -319,6 +326,20 @@ record.
   reports it as `E057`.
 
 ### Fixed
+
+- **A proxy's `predicateGenerators` `xpath` selector that fails to evaluate fails the request with
+  `500` "malformed xpath predicate selector"** (#1668), as in Mountebank, instead of recording the
+  body as `""` and answering `200`. It applies to an XML body only (a prefix `ns` does not bind, an
+  unknown function), and in every proxy mode, `proxyTransparent` included. The request is still
+  forwarded to the upstream first, and nothing is recorded.
+- **`?replayable=true` exports, and so `rift save` / `mb save`, keep a stub's header order**
+  (#1696), completing #1606: the export went through a sorted `serde_json::Value`, so `is.headers`
+  saved alphabetically and a save → load served them in that order. Fixed with it: `GET
+  /imposters?removeProxies=true`, the `DELETE /imposters` answer, the space-stub routes, the C-ABI
+  `rift_get_imposter` (replayable and detail, recorded request headers included),
+  `rift_list_imposters`, `rift_space_list_stubs`, `rift_apply_config` and `rift_serve_admin`'s
+  inline `config`. `POST /imposters/{port}/spaces/{flowId}/stubs` now also decodes under the
+  admission budget every other config door uses (#1609).
 
 - **`--pidfile` is written only once the server and its startup imposters are listening** (#1657),
   so tools that wait for it (as Mountebank's do) no longer race the first request. It used to be

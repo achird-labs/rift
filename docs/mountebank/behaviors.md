@@ -462,7 +462,9 @@ A namespaced XML source needs `ns`, as in Mountebank: `"using": { "method": "xpa
 "//mb:name", "ns": { "mb": "http://example.com/mb" } }`, even when the document declares the
 prefix. An XPath selector that fails when it runs on an XML source (a prefix `ns` does not bind, an
 unknown function or variable) fails a `copy` with `500` "malformed xpath predicate selector", as in
-Mountebank, whether or not the response uses the token. A `lookup` whose key selector fails is
+Mountebank, whether or not the response uses the token. So does a proxy's `predicateGenerators`
+`xpath` selector, after the request is forwarded (see
+[Generation Failures](proxy.md#generation-failures)). A `lookup` whose key selector fails is
 skipped and logged, leaving its tokens in place, as Mountebank does. `ns` must be
 an object of strings and is only accepted with `method: xpath`; anything else is refused when the
 imposter is loaded (`rift-lint` `E051`), where Mountebank 2.9.5 accepts it. Releases up to

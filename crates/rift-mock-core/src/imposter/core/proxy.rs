@@ -51,7 +51,9 @@ pub(crate) struct ProxiedResponse {
 pub(crate) enum ProxyOutcome {
     Served(ProxiedResponse),
     /// A behavior on the proxy response failed under `strictBehaviors` (#375), a `wait` function
-    /// threw, or the imposter was torn down during a `wait` (#1616): serve this instead.
+    /// threw, the imposter was torn down during a `wait` (#1616), or a `predicateGenerators`
+    /// `xpath` selector failed to evaluate after the request was forwarded (#1668): serve this
+    /// instead.
     StrictFailure(hyper::Response<http_body_util::Full<bytes::Bytes>>),
 }
 
@@ -268,34 +270,35 @@ fn generator_selector(
 
 /// What `selector` selects from `body`, as Mountebank's generator captures it: one value as a
 /// string, several as an array, nothing as `""`.
-fn selected_body(selector: &crate::imposter::PredicateSelector, body: &str) -> serde_json::Value {
+///
+/// # Errors
+///
+/// An XPath selector that fails to evaluate on an XML body (issue #1668): Mountebank's
+/// `xpathSelect` throws, and the proxied request fails. A JSONPath never errors, and a body that
+/// is not XML (or not JSON) selects nothing, as in Mountebank.
+fn selected_body(
+    selector: &crate::imposter::PredicateSelector,
+    body: &str,
+) -> Result<serde_json::Value, crate::behaviors::XPathSelectorError> {
     use crate::behaviors::{Selection, jsonpath_selection, xpath_selection_in};
     use crate::imposter::PredicateSelector;
 
     let selection = match selector {
+        // Domain-optional: a body that is not JSON selects nothing, as in Mountebank.
         PredicateSelector::JsonPath { selector } => serde_json::from_str(body)
             .ok()
             .and_then(|json| jsonpath_selection(&json, selector)),
         PredicateSelector::XPath {
             selector,
             namespaces,
-        } => match xpath_selection_in(body, selector, namespaces.as_ref()) {
-            Ok(selection) => selection,
-            // Not yet the failure it is in Mountebank, whose `predicateGenerators` xpath throws
-            // too (issue #1585 covers predicates and `copy`): captured as nothing selected, and
-            // logged at error level so the recording is not quietly wrong.
-            Err(e) => {
-                tracing::error!("predicateGenerator: {e}; the body is recorded as \"\"");
-                None
-            }
-        },
+        } => xpath_selection_in(body, selector, namespaces.as_ref())?,
     };
-    match selection.unwrap_or(Selection::One(String::new())) {
+    Ok(match selection.unwrap_or(Selection::One(String::new())) {
         Selection::One(value) => serde_json::Value::String(value),
         Selection::Many(values) => {
             serde_json::Value::Array(values.into_iter().map(serde_json::Value::String).collect())
         }
-    }
+    })
 }
 
 /// Mountebank's `objFilter`: a string removes that key, an array removes each named key. An object
@@ -394,16 +397,20 @@ enum Captured {
     Listed(serde_json::Map<String, serde_json::Value>),
 }
 
-/// Captures `field` as `matcher` asks, or `None` when the matcher asks for nothing.
+/// Captures `field` as `matcher` asks, `Ok(None)` when the matcher asks for nothing.
+///
+/// # Errors
+///
+/// The body's `xpath` selector failed to evaluate (issue #1668).
 fn capture<SH: BuildHasher>(
     field: &str,
     matcher: &serde_json::Value,
     request: &GeneratorRequest<'_, SH>,
     selector: Option<&crate::imposter::PredicateSelector>,
     ignore: Option<&serde_json::Value>,
-) -> Option<Captured> {
+) -> Result<Option<Captured>, crate::behaviors::XPathSelectorError> {
     let whole = matcher.as_bool() == Some(true);
-    match field {
+    Ok(match field {
         "method" | "path" | "body" if whole => {
             let value = match field {
                 "method" => serde_json::Value::String(request.method.to_string()),
@@ -411,7 +418,7 @@ fn capture<SH: BuildHasher>(
                 _ => {
                     let body = request.body.unwrap_or("");
                     match selector {
-                        Some(selector) => selected_body(selector, body),
+                        Some(selector) => selected_body(selector, body)?,
                         None => serde_json::Value::String(body.to_string()),
                     }
                 }
@@ -431,7 +438,10 @@ fn capture<SH: BuildHasher>(
             // A request without a form records no form predicate: Mountebank records
             // `deepEquals: {form: undefined}`, stored as `deepEquals: {}`, which constrains nothing.
             let form = if field == "form" {
-                Some(request.form()?)
+                let Some(form) = request.form() else {
+                    return Ok(None);
+                };
+                Some(form)
             } else {
                 None
             };
@@ -442,7 +452,9 @@ fn capture<SH: BuildHasher>(
                     _ => request.headers(),
                 }
             } else {
-                let listed = matcher.as_object()?;
+                let Some(listed) = matcher.as_object() else {
+                    return Ok(None);
+                };
                 let keyed = match field {
                     "query" => Some(request.query()),
                     "form" => form,
@@ -476,7 +488,7 @@ fn capture<SH: BuildHasher>(
             })
         }
         _ => None,
-    }
+    })
 }
 
 /// Mountebank's `predicatesFor` for one `matches` generator: one predicate per matched field.
@@ -487,14 +499,22 @@ fn capture<SH: BuildHasher>(
 /// per field, Rift stores that field's value; and a whole field the generator's `ignore` filters is
 /// recorded with `equals`, since Mountebank does not persist `ignore` and its `deepEquals` recording
 /// could never match a request carrying the ignored key.
+///
+/// # Errors
+///
+/// The generator's `xpath` selector failed to evaluate on the body (issue #1668).
 fn predicates_for_matcher<SH: BuildHasher>(
     generator: &serde_json::Map<String, serde_json::Value>,
     matches: &serde_json::Map<String, serde_json::Value>,
     request: &GeneratorRequest<'_, SH>,
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, crate::behaviors::XPathSelectorError> {
     // Checked by `generator_operator_error` before this runs: a string, or absent or `null`.
     let operator = generator.get("predicateOperator").and_then(|p| p.as_str());
     let selector = generator_selector(generator);
+    // `exists` never reads the captured value, and Mountebank's `buildExists` never runs the
+    // selector, so a selector that would fail to evaluate does not fail it either (issue #1668).
+    // The recorded predicate still carries the selector.
+    let capture_selector = selector.as_ref().filter(|_| operator != Some("exists"));
     // Copied onto every predicate only when present: an absent `caseSensitive` leaves the
     // predicate default (`false`), as in Mountebank.
     let mut parameters = serde_json::Map::new();
@@ -513,7 +533,7 @@ fn predicates_for_matcher<SH: BuildHasher>(
             continue;
         };
         let ignore = generator.get("ignore").and_then(|ignore| ignore.get(field));
-        let Some(captured) = capture(field, matcher, request, selector.as_ref(), ignore) else {
+        let Some(captured) = capture(field, matcher, request, capture_selector, ignore)? else {
             continue;
         };
         let (operator, value) = match (operator, captured) {
@@ -561,7 +581,7 @@ fn predicates_for_matcher<SH: BuildHasher>(
         predicate.extend(parameters.clone());
         predicates.push(serde_json::Value::Object(predicate));
     }
-    predicates
+    Ok(predicates)
 }
 
 /// A generator pass's predicates, as written and as decoded (issue #1353).
@@ -717,7 +737,8 @@ pub async fn dry_run_predicate_generators(
             E::Script(message) | E::Output(message) => Some(message),
             E::Pool(message) => return Err(GeneratorDryRun::Unavailable(message)),
             // Recorded as a failure when a real request generates it; not a create-time refusal.
-            E::Invalid(_) => continue,
+            // A selector cannot fail on the dry run's empty body, as in Mountebank (issue #1668).
+            E::Invalid(_) | E::Selector(_) => continue,
         };
         return Err(GeneratorDryRun::Refused {
             source: injection_source(failure.inject.as_deref()),
@@ -725,6 +746,45 @@ pub async fn dry_run_predicate_generators(
         });
     }
     Ok(())
+}
+
+/// Why `generate_stub_predicates` produced no predicates.
+#[derive(Debug)]
+enum GenerationFailed {
+    /// A generator's `xpath` selector failed to evaluate (issue #1668): the request is forwarded,
+    /// nothing is recorded, and the client gets Mountebank's `500 malformed xpath predicate
+    /// selector`.
+    Selector(crate::behaviors::XPathSelectorError),
+    /// Any other failure (issue #498): the upstream response is served with
+    /// `x-rift-generator-error: <token>`; `detail` is logged.
+    Other(&'static str, String),
+}
+
+impl From<crate::scripting::PredicateGeneratorError> for GenerationFailed {
+    fn from(error: crate::scripting::PredicateGeneratorError) -> Self {
+        match error {
+            crate::scripting::PredicateGeneratorError::Selector(e) => Self::Selector(e),
+            other => Self::Other(other.kind(), other.to_string()),
+        }
+    }
+}
+
+/// The first `matches` generator whose `xpath` selector fails to evaluate on `request`'s body, for
+/// a `proxyTransparent` response (issue #1668). It records nothing, but Mountebank still runs
+/// `predicatesFor` over it, and the selector's throw fails the request. Only the `matches`
+/// generators run here: an `inject` is not run under `proxyTransparent` (see #1708).
+fn transparent_selector_failure<SH: BuildHasher>(
+    generators: &[serde_json::Value],
+    request: &GeneratorRequest<'_, SH>,
+) -> Option<crate::behaviors::XPathSelectorError> {
+    generators
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .filter(|generator| generator.contains_key("xpath"))
+        .find_map(|generator| {
+            let matches = generator.get("matches")?.as_object()?;
+            predicates_for_matcher(generator, matches, request).err()
+        })
 }
 
 /// Mountebank's `source` for a generator injection: the call it evaluates.
@@ -902,7 +962,10 @@ impl Imposter {
                 query,
                 client_addr,
             };
-            predicates.extend(predicates_for_matcher(gen_obj, matches, &request));
+            predicates.extend(
+                predicates_for_matcher(gen_obj, matches, &request)
+                    .map_err(crate::scripting::PredicateGeneratorError::from)?,
+            );
         }
 
         // Every generator kind ends here, so an inject typo, an operator that cannot hold a field
@@ -1017,9 +1080,9 @@ impl Imposter {
     /// Run `predicateGenerators` over a request: the predicates of the stub its response is
     /// recorded as.
     ///
-    /// `Err((token, detail))` = generation failed and the predicates are unknown. The caller must
-    /// then record no stub: an empty or partial predicate list matches every future request (issue
-    /// #498). `token` is a short, header-safe category surfaced to the client; `detail` is logged.
+    /// `Err` = generation failed and the predicates are unknown. The caller must then record no
+    /// stub: an empty or partial predicate list matches every future request (issue #498). See
+    /// [`GenerationFailed`] for what the client is answered.
     async fn generate_stub_predicates<SH>(
         &self,
         proxy_config: &ProxyResponse,
@@ -1028,7 +1091,7 @@ impl Imposter {
         headers: &indexmap::IndexMap<String, Vec<String>, SH>,
         body: Option<ProxyBody<'_>>,
         client_addr: std::net::SocketAddr,
-    ) -> Result<GeneratedPredicates, (&'static str, String)>
+    ) -> Result<GeneratedPredicates, GenerationFailed>
     where
         SH: BuildHasher + Clone + Send + 'static,
     {
@@ -1046,7 +1109,7 @@ impl Imposter {
                 client_addr,
                 &self.script_file_access(),
             )
-            .map_err(|e| (e.kind(), e.to_string()));
+            .map_err(GenerationFailed::from);
         }
         let generators = proxy_config.predicate_generators.clone();
         let method = method.to_string();
@@ -1075,11 +1138,12 @@ impl Imposter {
         });
         match tokio::time::timeout(timeout, handle).await {
             Ok(Ok(Ok(preds))) => Ok(preds),
-            Ok(Ok(Err(gen_err))) => Err((gen_err.kind(), gen_err.to_string())),
-            Ok(Err(join_err)) => {
-                Err(("task-panic", format!("generator task panicked: {join_err}")))
-            }
-            Err(_elapsed) => Err((
+            Ok(Ok(Err(gen_err))) => Err(GenerationFailed::from(gen_err)),
+            Ok(Err(join_err)) => Err(GenerationFailed::Other(
+                "task-panic",
+                format!("generator task panicked: {join_err}"),
+            )),
+            Err(_elapsed) => Err(GenerationFailed::Other(
                 "timeout",
                 format!("timed out after {}ms", timeout.as_millis()),
             )),
@@ -1188,6 +1252,30 @@ impl Imposter {
                 .await,
             )
         };
+        // A generator `xpath` selector that fails to evaluate fails the request after it is
+        // forwarded, as Mountebank's `recordProxyResponse` throws after `proxy.to` (issue #1668).
+        // It takes no claim and records nothing. A transparent proxy records nothing either, but
+        // Mountebank runs its generators too, so its selectors are evaluated for the same failure.
+        let (generation, selector_failure) = match generation {
+            Some(Err(GenerationFailed::Selector(e))) => (None, Some(e)),
+            Some(Err(GenerationFailed::Other(token, detail))) => (Some(Err((token, detail))), None),
+            Some(Ok(predicates)) => (Some(Ok(predicates)), None),
+            None if transparent => {
+                let request = GeneratorRequest {
+                    method,
+                    path: uri.path(),
+                    headers,
+                    body: body.and_then(|b| b.text),
+                    query: uri.query(),
+                    client_addr,
+                };
+                (
+                    None,
+                    transparent_selector_failure(&proxy_config.predicate_generators, &request),
+                )
+            }
+            None => (None, None),
+        };
 
         // The replay key. Without predicateGenerators nothing names the request's identity, so it
         // is method, path, query and body (issue #1317); headers stay out. With generators the
@@ -1213,7 +1301,7 @@ impl Imposter {
         // A failed generation has no identity to key on, records no stub (issue #498) and must not
         // replay either: under the method, path and query key it would answer with another
         // request's recording, without the `x-rift-generator-error` the client should see.
-        let generation_failed = matches!(generation, Some(Err(_)));
+        let generation_failed = matches!(generation, Some(Err(_))) || selector_failure.is_some();
         // A concurrent proxyOnce loser forwards, but the winner records the identity: inserting
         // its stub too would stack a duplicate per loser.
         let mut lost_race = false;
@@ -1357,8 +1445,10 @@ impl Imposter {
             Some(run) => {
                 match transform_upstream(run, status, response_headers, body_bytes).await {
                     Transformed::Applied(status, headers, body) => (status, headers, body),
-                    // A failed behavior records nothing; returning drops (releases) the claim.
-                    Transformed::Degraded(status, headers, body) => {
+                    // A failed behavior records nothing; returning drops (releases) the claim. A
+                    // failed generator selector still fails the request (below), as Mountebank
+                    // records after its behaviors run.
+                    Transformed::Degraded(status, headers, body) if selector_failure.is_none() => {
                         return Ok(ProxyOutcome::Served(ProxiedResponse {
                             status,
                             headers,
@@ -1366,12 +1456,19 @@ impl Imposter {
                             latency_ms: recorded_latency,
                         }));
                     }
+                    Transformed::Degraded(status, headers, body) => (status, headers, body),
                     Transformed::StrictFailure(response) => {
                         return Ok(ProxyOutcome::StrictFailure(response));
                     }
                 }
             }
         };
+        if let Some(e) = selector_failure {
+            // No claim was taken, so there is nothing to release or record.
+            return Ok(ProxyOutcome::StrictFailure(
+                crate::imposter::handler::xpath_selector_error_response(&e),
+            ));
+        }
 
         // Build the recording if we hold a claim, but do NOT settle the claim yet: a store that
         // publishes stubs must be able to make "Recorded" conditional on publishing the stub, and
@@ -1730,6 +1827,49 @@ mod predicate_generator_selector_tests {
                 "caseSensitive": false
             })]
         );
+    }
+
+    /// Issue #1668: a selector that fails to evaluate on an XML body fails the generation, as
+    /// Mountebank's `xpathSelect` throws, instead of recording the body as `""`. Under `exists`
+    /// the value is never read, so Mountebank never runs the selector and neither does Rift.
+    #[test]
+    fn an_xpath_that_fails_to_evaluate_fails_the_generation() {
+        let headers = crate::imposter::Headers::new();
+        let run = |generator: serde_json::Value, body: &str| {
+            Imposter::generate_predicates_impl(
+                &[generator],
+                "POST",
+                "/orders",
+                &headers,
+                Some(body),
+                None,
+                TEST_PEER,
+                &std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
+            )
+        };
+        for selector in ["//x:id", "nosuchfn(//a)"] {
+            let generator =
+                json!({ "matches": { "body": true }, "xpath": { "selector": selector } });
+            let failed = run(generator.clone(), "<a><id>1</id></a>");
+            assert!(
+                matches!(
+                    &failed,
+                    Err(crate::scripting::PredicateGeneratorError::Selector(e)) if e.selector == selector
+                ),
+                "{selector}: {failed:?}"
+            );
+            // Not XML: the selector never runs, and nothing is selected.
+            let plain = run(generator, "plain")
+                .expect("a non-XML body generates")
+                .raw;
+            assert_eq!(plain[0]["deepEquals"]["body"], "", "{selector}");
+        }
+        let exists = json!({
+            "matches": { "body": true },
+            "xpath": { "selector": "//x:id" },
+            "predicateOperator": "exists"
+        });
+        run(exists, "<a><id>1</id></a>").expect("`exists` never evaluates the selector");
     }
 
     /// Issue #1329: the selected value is recorded raw and `except` travels with the predicate,
