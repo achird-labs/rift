@@ -598,6 +598,18 @@ record.
 
 ### Documentation
 
+- **Numbers in printed imposters keep serde_json's spelling, and `contains`/`startsWith`/`endsWith`
+  against a JSON number or boolean match by text** (#1631): `1.0` prints as `1.0` and `1e2` as
+  `100.0`, where Mountebank prints `1` and `100`; matching is unaffected. `{"contains": {"body":
+  {"n": "5"}}}` matches `{"n": 15}`, where Mountebank answers `500` whenever the selected request
+  value is not a string. Both are listed in `docs/mountebank/differences.md`.
+
+- **A number or boolean header value prints, and reaches scripts, as a string** (#1626): Rift
+  coerces it to text when the imposter is decoded, so `"Content-Length": 852` prints as `"852"` in
+  `GET /imposters` and `?replayable=true`, and a `decorate` or `shellTransform` sees the string;
+  Mountebank keeps the number. The header sent is the same. Listed in
+  `docs/mountebank/differences.md` under "Printed imposters are normalized".
+
 - **Imposter connections stay open** (#1592): Mountebank adds `Connection: close` to imposter
   responses that do not set it; Rift keeps the connection alive. `docs/mountebank/differences.md`
   explains how to opt in with `Connection: close` in `defaultResponse.headers` or a stub's headers.
