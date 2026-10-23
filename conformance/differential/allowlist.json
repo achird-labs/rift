@@ -4053,6 +4053,50 @@
     "rift": "(absent)"
   },
   {
+    "id": "behavior-errors-first-only-list-copy-into",
+    "case": "targeted: a list-valued behavior in a behaviors array element is refused (#1639)",
+    "location": "step[2].admin.body/errors/1",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "where Mountebank lists every one (a `copy` missing `from`, `into` and `using` is three errors",
+    "reason": "Rift names the first behavior validation error; Mountebank lists every one",
+    "mountebank": "{\"code\":\"bad data\",\"message\":\"copy behavior \\\"into\\\" field required\",\"source\":{\"copy\":[{\"from\":\"path\",\"into\":\"${P}\",\"using\":{\"method\":\"regex\",\"selector\":\".+\"}}]}}",
+    "rift": "(absent)"
+  },
+  {
+    "id": "behavior-errors-first-only-list-copy-using",
+    "case": "targeted: a list-valued behavior in a behaviors array element is refused (#1639)",
+    "location": "step[2].admin.body/errors/2",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "where Mountebank lists every one (a `copy` missing `from`, `into` and `using` is three errors",
+    "reason": "Rift names the first behavior validation error; Mountebank lists every one",
+    "mountebank": "{\"code\":\"bad data\",\"message\":\"copy behavior \\\"using\\\" field required\",\"source\":{\"copy\":[{\"from\":\"path\",\"into\":\"${P}\",\"using\":{\"method\":\"regex\",\"selector\":\".+\"}}]}}",
+    "rift": "(absent)"
+  },
+  {
+    "id": "behavior-errors-first-only-list-lookup-fromDataSource",
+    "case": "targeted: a list-valued behavior in a behaviors array element is refused (#1639)",
+    "location": "step[3].admin.body/errors/1",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "where Mountebank lists every one (a `copy` missing `from`, `into` and `using` is three errors",
+    "reason": "Rift names the first behavior validation error; Mountebank lists every one",
+    "mountebank": "{\"code\":\"bad data\",\"message\":\"lookup behavior \\\"fromDataSource\\\" field required\",\"source\":{\"lookup\":[]}}",
+    "rift": "(absent)"
+  },
+  {
+    "id": "behavior-errors-first-only-list-lookup-into",
+    "case": "targeted: a list-valued behavior in a behaviors array element is refused (#1639)",
+    "location": "step[3].admin.body/errors/2",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "where Mountebank lists every one (a `copy` missing `from`, `into` and `using` is three errors",
+    "reason": "Rift names the first behavior validation error; Mountebank lists every one",
+    "mountebank": "{\"code\":\"bad data\",\"message\":\"lookup behavior \\\"into\\\" field required\",\"source\":{\"lookup\":[]}}",
+    "rift": "(absent)"
+  },
+  {
     "id": "numeric-header-prints-as-string/number",
     "case": "targeted: a number or boolean header value prints as a string (#1626)",
     "location": "*/is/headers/X-Count",

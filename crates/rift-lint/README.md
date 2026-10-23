@@ -139,6 +139,7 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | E058 | A `matches` predicate or `jsonpath`/`xpath` selector in a `"mode": "binary"` imposter, which the engine refuses |
 | E059 | A `behaviors` array element with more than one behavior type, which the engine refuses (formerly `W018`) |
 | E060 | A `behaviors` array element with no behavior in it (`Unrecognized behavior`), which the engine refuses |
+| E061 | A `behaviors` array element whose `copy`, `lookup` or `shellTransform` is a list, which the engine refuses |
 
 ### Warnings
 

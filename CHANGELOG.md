@@ -69,6 +69,12 @@ record.
 
 ### Changed
 
+- **A `behaviors` array element whose `copy`, `lookup` or `shellTransform` is a list is refused**
+  (`400`, #1639), as Mountebank refuses it, with its first error (`shellTransform behavior
+  "shellTransform" field must be a string, …`, `copy behavior "from" field required`, `lookup
+  behavior "key" field required`); `rift-lint` reports it as `E061`. Write one element per item, or
+  use the `_behaviors` object form, which still takes a list. A stored one (`--datadir`, a replayed
+  embedder config) still loads, one step per item.
 - **`proxy.cert`/`key`/`passphrase` are no longer dropped** (#1609). A config that carried them
   now presents them, and one with an invalid pair (half a pair, a wrong passphrase, a key that does
   not match, a legacy `Proc-Type` encrypted key) is refused at creation with `400` where it was
@@ -232,7 +238,9 @@ record.
   `echo hello` is now a shellTransform failure, as in Mountebank (where it answers `500`): Rift
   serves the response as it was with `x-rift-shelltransform-error: true`, or `500` under
   `strictBehaviors`. Write `printf '{"body":"hello"}' #` instead. Commands written for Mountebank
-  now work unchanged.
+  now work unchanged. `MB_RESPONSE.body` is an `is` body as written, so one written as JSON (an
+  object, a number) reaches the first command as that value, as in Mountebank, until a step
+  rewrites the body (#1639).
 
 - A `wait` computed by a JavaScript function is no longer capped at 60 s, matching Mountebank and
   the numeric form (#1612).

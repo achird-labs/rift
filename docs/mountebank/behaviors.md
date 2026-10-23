@@ -64,7 +64,7 @@ Behaviors can also be specified as an array of behavior objects:
 }
 ```
 
-The array form is a program, as in Mountebank: every element runs, in array order. Two `decorate` elements both run, two `wait` elements both delay, and a `decorate` written before a `copy` runs before it. A `copy`, `lookup` or `shellTransform` holding a list is one step per item. A `null` for a behavior removes every earlier step of that behavior; an empty list adds nothing and removes nothing. `repeat` is not a step and is not written in the array: put it on the response (see [`repeat`](#repeat)). An element that sets several behaviors is refused (`400`), as in Mountebank (`Each behavior object must have only one behavior type`, `rift-lint` `E059`); use one element per behavior, or the `_behaviors` object form. An element with no behavior in it, such as `{"repeat": 2}` or a misspelt key, is refused as `Unrecognized behavior` (`rift-lint` `E060`); a custom key beside one behavior is allowed, as in Mountebank. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
+The array form is a program, as in Mountebank: every element runs, in array order. Two `decorate` elements both run, two `wait` elements both delay, and a `decorate` written before a `copy` runs before it. A `copy`, `lookup` or `shellTransform` holding a list is refused (`400`), as in Mountebank, which reads a list only in the `_behaviors` object form (`rift-lint` `E061`): write one element per item. A `null` for a behavior removes every earlier step of that behavior; an empty list adds nothing and removes nothing. `repeat` is not a step and is not written in the array: put it on the response (see [`repeat`](#repeat)). An element that sets several behaviors is refused (`400`), as in Mountebank (`Each behavior object must have only one behavior type`, `rift-lint` `E059`); use one element per behavior, or the `_behaviors` object form. An element with no behavior in it, such as `{"repeat": 2}` or a misspelt key, is refused as `Unrecognized behavior` (`rift-lint` `E060`); a custom key beside one behavior is allowed, as in Mountebank. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
 
 `_behaviors` must be an object; the array form is only accepted under `behaviors`, and each of its elements must be an object (a non-object element is skipped). Any other shape — an array or scalar `_behaviors`, or a scalar `behaviors` — is refused: `POST /imposters` returns `400` and a config file fails to load. This holds with `--allowInjection` on too.
 
@@ -104,9 +104,10 @@ Mountebank loads, so a saved file can be posted to Mountebank as is:
 One shape still does not load in Mountebank: a `wait` written as a `{"min", "max"}` range or
 `{"inject": …}` object is a Rift extension.
 
-Rift reads a list inside one `copy`, its pre-0.18.0 spelling. A pre-0.18.0 `{"repeat": n}` element
-is refused by `POST /imposters` and `--configfile` in releases after 0.23.0, as Mountebank refuses it:
-move it to the response's `repeat`. A `--datadir` holding one still loads, as does every other shape
+A pre-0.18.0 `{"repeat": n}` element is refused by `POST /imposters` and `--configfile` in releases
+after 0.23.0, as Mountebank refuses it: move it to the response's `repeat`. So is a list inside one
+`copy`, `lookup` or `shellTransform` element, which older releases read (and wrote, for `copy`) as one
+step per item: write one element per item. A `--datadir` holding one still loads, as does every other shape
 an older release stored (see [Data directory](../configuration/cli.md#data-directory---datadir)). The reverse
 does not hold either: a `--datadir` written by 0.18.0 and loaded by 0.17.0 or older loses `repeat`,
 which those releases do not read on the response.
@@ -348,8 +349,10 @@ Run one or more external shell commands that build a new response, as in Mounteb
 receives the request and the current response as JSON and prints the new response, as JSON, to its
 standard output. Useful for producing a response with an existing script or CLI tool.
 
-`shellTransform` accepts a single command string, or an array of commands that are **chained in
-sequence**: each command receives the response the previous one printed.
+`shellTransform` accepts a single command string, or, in the `_behaviors` object form, an array of
+commands that are **chained in sequence**: each command receives the response the previous one
+printed. In the `behaviors` array form, write one `shellTransform` element per command, as Mountebank
+requires; a list there is refused (`400`).
 
 ```json
 {
@@ -395,9 +398,11 @@ does not escape it, so there a request or response containing `'` breaks the com
 [Differences](differences.md#shelltransform-arguments)).
 
 `MB_RESPONSE.headers` holds one string per header, or an array for a header with several lines
-such as `Set-Cookie`. `MB_RESPONSE.body` is the body as text. After a command in the same chain
-printed a JSON body (a number, an object), the next command receives that value unchanged, so
-`body += 1` on a number adds, as in Mountebank.
+such as `Set-Cookie`. `MB_RESPONSE.body` is the body as written: an `is` body written as JSON (an
+object, a number) arrives as that value, as in Mountebank, until a step rewrites the body
+(`${request.*}`, `{{ }}`, `copy`, `lookup`, `decorate`), after which it is the body as text. A string
+body, a binary one and a proxied one are text. After a command in the same chain printed a JSON body,
+the next command receives that value unchanged, so `body += 1` on a number adds, as in Mountebank.
 
 `MB_REQUEST.headers` lists the headers in the order the client sent them, as Mountebank does, and
 holds one string per header name: a header the client sent more than once

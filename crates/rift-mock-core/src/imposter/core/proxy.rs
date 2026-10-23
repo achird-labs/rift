@@ -169,6 +169,8 @@ async fn transform_upstream<SH: BuildHasher>(
             // (#1189) exists to expand tokens the upstream returns.
             headers: crate::behaviors::authored_headers(grouped),
             body: crate::behaviors::Spliced::authored(text),
+            // An upstream's body is text, in Mountebank too (issue #1639).
+            typed_body: None,
         })
         .await
     {
