@@ -6,13 +6,15 @@ use super::request::RequestContext;
 use super::spliced::{
     Spliced, SplicedHeaders, authored_headers, plain_headers, replace_response_token,
 };
-use crate::imposter::{ScriptFileAccess, read_lookup_file, resolve_lookup_path};
-use parking_lot::RwLock;
+use crate::imposter::body_limits::{BodyGuard, BodyReadError, CollectedBody};
+use crate::imposter::{LookupFileError, ScriptFileAccess, open_lookup_file, resolve_lookup_path};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 /// Lookup behavior - query external data source
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -203,11 +205,72 @@ pub struct DatasetBinding {
 /// lookups that read one file with different delimiters each get their own parse, as each gets
 /// its own in Mountebank, which re-reads the file per request (issues #1566, #1617).
 ///
-/// A file is read once, on first use, and kept. Its path is resolved under the imposter's
-/// [`ScriptFileAccess`] on every use, before the cache is consulted, so a path or link that has
-/// moved out of `--scripts-dir` since is refused even when its earlier content is cached.
+/// A file's path is resolved under the imposter's [`ScriptFileAccess`] on every use, before the
+/// cache is consulted, so a path or link that has moved out of `--scripts-dir` since is refused
+/// even when its earlier content is cached. A cached file whose length or modification time has
+/// changed since it was read is read again, so an edited file is seen on the next request, as in
+/// Mountebank (issue #1654).
+///
+/// The cache holds at most the body ceiling (`--max-body-size`) of parsed data, measured by
+/// [`CsvData::heap_bytes`], and evicts the least recently used files past it (issue #1654). Each
+/// call names the ceiling of its own imposter's [`BodyGuard`], so with several managers sharing the
+/// cache the smallest ceiling in use wins. A file larger than that by itself is served and not
+/// cached. Mountebank has no cache at all, so an evicted file costs only the re-read Mountebank
+/// does on every request.
 pub struct CsvCache {
-    data: RwLock<HashMap<(PathBuf, String), Arc<CsvData>>>,
+    entries: Mutex<CacheEntries>,
+}
+
+/// The cached files, the bytes they account for, and a counter that orders their last uses.
+#[derive(Default)]
+struct CacheEntries {
+    files: HashMap<(PathBuf, String), CacheEntry>,
+    total_bytes: usize,
+    clock: u64,
+}
+
+struct CacheEntry {
+    data: Arc<CsvData>,
+    stamp: FileStamp,
+    bytes: usize,
+    last_used: u64,
+}
+
+/// What a file looked like when it was read: a different length or modification time on a later
+/// use means it has been edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl FileStamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            // Domain-optional: a platform without modification times compares lengths alone.
+            modified: metadata.modified().ok(),
+        }
+    }
+}
+
+/// A CSV file read and parsed by [`load_csv`], ready for [`CsvCache::insert`].
+pub struct LoadedCsv {
+    key: (PathBuf, String),
+    stamp: FileStamp,
+    data: CsvData,
+}
+
+/// Why a lookup cannot load its CSV file right now (issue #1654). A file that cannot be loaded at
+/// all is not an error here: it is logged and the lookup's tokens are left in place.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LookupLoadError {
+    /// The body memory budget cannot hold the file while it is read: transient server load, so
+    /// the request is answered `503` with `Retry-After`.
+    #[error(
+        "not enough body memory is free to read lookup CSV data source '{path}'; retry shortly"
+    )]
+    BudgetExhausted { path: String },
 }
 
 impl Default for CsvCache {
@@ -219,57 +282,232 @@ impl Default for CsvCache {
 impl CsvCache {
     pub fn new() -> Self {
         Self {
-            data: RwLock::new(HashMap::new()),
+            entries: Mutex::new(CacheEntries::default()),
         }
     }
 
-    /// The parsed CSV file `path` names under `access`, read and cached on first use.
+    /// The parsed CSV file `path` names under `access`: the cached parse while the file is
+    /// unchanged, otherwise read under `guard` with [`load_csv`] and cached.
     ///
-    /// `None` when the path may not be read under `access` (issue #1617) or the file cannot be
+    /// `Ok(None)` when the path may not be read under `access` (issue #1617) or the file cannot be
     /// loaded; either is logged, so a lookup's tokens are never left in place silently.
+    ///
+    /// # Errors
+    /// [`LookupLoadError::BudgetExhausted`] when `guard`'s budget cannot hold the file now.
     pub fn get_or_load(
         &self,
         path: &str,
         delimiter: &str,
         access: &ScriptFileAccess,
-    ) -> Option<Arc<CsvData>> {
-        let resolved = match resolve_lookup_path(path, access) {
-            Ok(resolved) => resolved,
-            Err(e) => {
-                tracing::warn!("lookup behavior: {e}");
-                return None;
-            }
-        };
-        let key = (resolved, delimiter.to_string());
-        if let Some(data) = self.data.read().get(&key) {
-            return Some(Arc::clone(data));
+        guard: &BodyGuard,
+    ) -> Result<Option<Arc<CsvData>>, LookupLoadError> {
+        if let Some(data) = self.get_fresh(path, delimiter, access) {
+            return Ok(Some(data));
         }
+        Ok(load_csv(path, delimiter, access, guard)?
+            .map(|loaded| self.insert(loaded, guard.limits().max_body_bytes())))
+    }
 
-        // A failure here means a misconfigured data source (missing/unreadable/malformed CSV);
-        // surface it instead of silently serving the response with the lookup tokens left
-        // unreplaced.
-        let text = match read_lookup_file(path, &key.0, access) {
-            Ok(text) => text,
-            Err(e) => {
-                tracing::warn!("lookup behavior: {e}");
-                return None;
-            }
+    /// The cached parse of `path` with `delimiter`, if there is one and the file has not changed
+    /// since it was read. A changed file's parse is dropped. Does no more file I/O than resolving
+    /// the path and one `stat`, so it runs on the caller's thread; a miss is loaded with
+    /// [`load_csv`].
+    pub fn get_fresh(
+        &self,
+        path: &str,
+        delimiter: &str,
+        access: &ScriptFileAccess,
+    ) -> Option<Arc<CsvData>> {
+        // Not an error here: a path that does not resolve or a file that cannot be stat'ed is a
+        // miss, and `load_csv` resolves it again and logs why it cannot be read.
+        let resolved = resolve_lookup_path(path, access).ok()?;
+        let stamp = FileStamp::of(&std::fs::metadata(&resolved).ok()?);
+        let key = (resolved, delimiter.to_string());
+        let mut entries = self.entries.lock();
+        entries.clock += 1;
+        let now = entries.clock;
+        let entry = entries.files.get_mut(&key)?;
+        if entry.stamp == stamp {
+            entry.last_used = now;
+            return Some(Arc::clone(&entry.data));
+        }
+        let stale = entry.bytes;
+        entries.files.remove(&key);
+        entries.total_bytes -= stale;
+        None
+    }
+
+    /// Cache `loaded`, evicting the least recently used files until the cache holds at most
+    /// `bound` bytes, and return its parse. A parse larger than `bound` by itself is returned and
+    /// not cached.
+    pub fn insert(&self, loaded: LoadedCsv, bound: usize) -> Arc<CsvData> {
+        let LoadedCsv { key, stamp, data } = loaded;
+        let bytes = data.heap_bytes();
+        let data = Arc::new(data);
+        if bytes > bound {
+            return data;
+        }
+        let mut entries = self.entries.lock();
+        entries.clock += 1;
+        let entry = CacheEntry {
+            data: Arc::clone(&data),
+            stamp,
+            bytes,
+            last_used: entries.clock,
         };
-        let data = match CsvData::from_text(&text, path, delimiter) {
-            Ok(data) => Arc::new(data),
-            Err(e) => {
-                tracing::warn!("lookup behavior: failed to load CSV data source '{path}': {e}");
-                return None;
+        if let Some(replaced) = entries.files.insert(key, entry) {
+            entries.total_bytes -= replaced.bytes;
+        }
+        entries.total_bytes += bytes;
+        while entries.total_bytes > bound {
+            // Never the entry just inserted while others remain: it is the most recently used,
+            // and alone it fits the bound.
+            let Some(lru) = entries
+                .files
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(evicted) = entries.files.remove(&lru) {
+                entries.total_bytes -= evicted.bytes;
             }
-        };
-        self.data.write().insert(key, Arc::clone(&data));
-        Some(data)
+        }
+        data
+    }
+
+    /// The bytes the cached parses account for, by [`CsvData::heap_bytes`].
+    #[must_use]
+    pub fn cached_bytes(&self) -> usize {
+        self.entries.lock().total_bytes
+    }
+
+    /// How many parses are cached.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.lock().files.len()
+    }
+
+    /// Whether nothing is cached.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Clear cache
     pub fn clear(&self) {
-        self.data.write().clear();
+        let mut entries = self.entries.lock();
+        entries.files.clear();
+        entries.total_bytes = 0;
     }
+}
+
+/// Read and parse the CSV file `path` names under `access`, holding a share of `guard`'s body
+/// memory budget for the file's bytes while it is read and parsed (issue #1654). The share is
+/// released when this returns: the parse a cache keeps is bounded by the cache, not the budget,
+/// which bounds only what is in flight.
+///
+/// Blocking file I/O and a full parse, so the serve path runs it off the async worker.
+///
+/// `Ok(None)` when the file may not or cannot be read, or is larger than `guard`'s ceiling
+/// (`--max-body-size`); each is logged, and the lookup's tokens are left in place.
+///
+/// # Errors
+/// [`LookupLoadError::BudgetExhausted`] when `guard`'s budget cannot hold the file now.
+pub fn load_csv(
+    path: &str,
+    delimiter: &str,
+    access: &ScriptFileAccess,
+    guard: &BodyGuard,
+) -> Result<Option<LoadedCsv>, LookupLoadError> {
+    // A failure here means a misconfigured data source (missing/unreadable/malformed CSV);
+    // surface it instead of silently serving the response with the lookup tokens left unreplaced.
+    let unreadable = |source: std::io::Error| -> Result<Option<LoadedCsv>, LookupLoadError> {
+        let e = LookupFileError::Unreadable {
+            path: path.to_string(),
+            source,
+        };
+        tracing::warn!("lookup behavior: {e}");
+        Ok(None)
+    };
+    let resolved = match resolve_lookup_path(path, access) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            tracing::warn!("lookup behavior: {e}");
+            return Ok(None);
+        }
+    };
+    let mut file = match open_lookup_file(path, &resolved, access) {
+        Ok(file) => file,
+        Err(e) => {
+            tracing::warn!("lookup behavior: {e}");
+            return Ok(None);
+        }
+    };
+    let stamp = match file.metadata() {
+        Ok(metadata) => FileStamp::of(&metadata),
+        Err(e) => return unreadable(e),
+    };
+    let bytes = match read_under(&mut file, stamp.len, guard) {
+        Ok(bytes) => bytes,
+        Err(BodyReadError::BudgetExhausted) => {
+            return Err(LookupLoadError::BudgetExhausted {
+                path: path.to_string(),
+            });
+        }
+        Err(BodyReadError::TooLarge { limit }) => {
+            tracing::warn!(
+                "lookup behavior: CSV data source '{path}' ({} bytes) is larger than \
+                 --max-body-size ({limit} bytes), so it is not read and the tokens are left in \
+                 place",
+                stamp.len
+            );
+            return Ok(None);
+        }
+        Err(BodyReadError::Read(e)) => return unreadable(std::io::Error::other(e)),
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return unreadable(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        ));
+    };
+    let data = match CsvData::from_text(text, path, delimiter) {
+        Ok(data) => data,
+        Err(e) => {
+            tracing::warn!("lookup behavior: failed to load CSV data source '{path}': {e}");
+            return Ok(None);
+        }
+    };
+    // The file's bytes, and their share of the budget, are released here, once parsed.
+    drop(bytes);
+    Ok(Some(LoadedCsv {
+        key: (resolved, delimiter.to_string()),
+        stamp,
+        data,
+    }))
+}
+
+/// Read `file`, `len` bytes long when it was opened, under `guard`. The collector refuses past the
+/// ceiling, so a file that grows after its length was read is still bounded.
+fn read_under(
+    file: &mut std::fs::File,
+    len: u64,
+    guard: &BodyGuard,
+) -> Result<CollectedBody, BodyReadError> {
+    use std::io::Read;
+    let mut collector = guard.try_start(Some(len))?;
+    let mut chunk = vec![0; 64 * 1024];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => collector.push(&chunk[..n])?,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(BodyReadError::Read(Box::new(e))),
+        }
+    }
+    Ok(collector.finish())
 }
 
 /// Parsed CSV data
@@ -344,6 +582,30 @@ impl CsvData {
             },
             error,
         )
+    }
+
+    /// The heap memory this parse holds, approximately: every cell's and header's string
+    /// capacity, the vectors holding them, and the first-column index. It grows with the content,
+    /// which is what the [`CsvCache`] bound needs of it (issue #1654).
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let strings = |cells: &[String], capacity: usize| {
+            capacity * size_of::<String>() + cells.iter().map(String::capacity).sum::<usize>()
+        };
+        strings(&self.headers, self.headers.capacity())
+            + self.rows.capacity() * size_of::<Vec<String>>()
+            + self
+                .rows
+                .iter()
+                .map(|row| strings(row, row.capacity()))
+                .sum::<usize>()
+            + self.first_column.capacity() * (size_of::<String>() + size_of::<usize>())
+            + self
+                .first_column
+                .keys()
+                .map(String::capacity)
+                .sum::<usize>()
     }
 
     /// Look up the first row, in file order, whose `key_column` cell equals `key`, and return its
@@ -592,6 +854,8 @@ impl CsvParser<'_> {
 
 /// Apply lookup behaviors to response body. Treats `body` and `headers` as authored text; the
 /// serve path uses [`apply_lookup_spliced`] so text an earlier pass inserted is not re-scanned.
+///
+/// Files are read under a default [`BodyGuard`] of their own, which nothing else draws on.
 pub fn apply_lookup_behaviors(
     body: &str,
     headers: &mut crate::imposter::Headers,
@@ -603,7 +867,7 @@ pub fn apply_lookup_behaviors(
 ) -> String {
     let mut spliced_body = Spliced::authored(body.to_string());
     let mut spliced_headers = authored_headers(std::mem::take(headers));
-    apply_lookup_spliced(
+    if let Err(e) = apply_lookup_spliced(
         &mut spliced_body,
         &mut spliced_headers,
         &mut None,
@@ -611,8 +875,13 @@ pub fn apply_lookup_behaviors(
         request,
         csv_cache,
         access,
+        &BodyGuard::default(),
         stub,
-    );
+    ) {
+        // A fresh default guard's budget is larger than its ceiling and held by nothing else, so
+        // a file is refused as too large before the budget can run out. Logged should it happen.
+        tracing::error!("lookup behavior: {e}; the response is served without this lookup");
+    }
     *headers = plain_headers(spliced_headers);
     spliced_body.into_text()
 }
@@ -627,7 +896,15 @@ pub fn apply_lookup_behaviors(
 /// `status` is a `statusCode` string (issue #1558), scanned like a header value, as Mountebank's
 /// `globalObjectReplace` replaces tokens in every string field of the response.
 ///
-/// `access` is the imposter's: it decides which CSV files may be read (issue #1617).
+/// `access` is the imposter's: it decides which CSV files may be read (issue #1617). `guard` is
+/// its body limits, under which a file is read (issue #1654).
+///
+/// Reads a file it has not cached on the calling thread; the serve path instead loads it off the
+/// async worker, with [`lookup_key`], [`CsvCache::get_fresh`], [`load_csv`] and
+/// [`apply_lookup_row`].
+///
+/// # Errors
+/// [`LookupLoadError::BudgetExhausted`] when the body memory budget cannot hold a file now.
 #[allow(clippy::too_many_arguments)] // each is a distinct input of one pass; a struct adds nothing
 pub(crate) fn apply_lookup_spliced(
     body: &mut Spliced,
@@ -637,46 +914,62 @@ pub(crate) fn apply_lookup_spliced(
     request: &RequestContext,
     csv_cache: &CsvCache,
     access: &ScriptFileAccess,
+    guard: &BodyGuard,
+    stub: crate::imposter::headers::StubRef<'_>,
+) -> Result<(), LookupLoadError> {
+    for behavior in behaviors {
+        let Some(key) = lookup_key(behavior, request) else {
+            continue;
+        };
+        let csv = &behavior.from_data_source.csv;
+        if let Some(csv_data) = csv_cache.get_or_load(&csv.path, &csv.delimiter, access, guard)? {
+            apply_lookup_row(body, headers, status, behavior, &key, &csv_data, stub);
+        }
+    }
+    Ok(())
+}
+
+/// The key `behavior` looks up for `request`, or `None` when there is none to look up.
+///
+/// Mountebank's `lookup` catches a key selector that fails (issue #1585), logs it at error level
+/// and leaves the response as it is, so the token stays as authored.
+pub(crate) fn lookup_key(behavior: &LookupBehavior, request: &RequestContext) -> Option<String> {
+    match behavior.key.extract(request) {
+        Ok(key) => key,
+        Err(e) => {
+            tracing::error!("lookup key: {e}; the response is served without this lookup");
+            None
+        }
+    }
+}
+
+/// Replace `behavior`'s tokens with the cells of the row `key` selects in `csv_data`. See
+/// [`apply_lookup_spliced`] for which tokens are replaced.
+pub(crate) fn apply_lookup_row(
+    body: &mut Spliced,
+    headers: &mut SplicedHeaders,
+    status: &mut Option<Spliced>,
+    behavior: &LookupBehavior,
+    key: &str,
+    csv_data: &CsvData,
     stub: crate::imposter::headers::StubRef<'_>,
 ) {
-    for behavior in behaviors {
-        // Mountebank's `lookup` catches a key selector that fails (issue #1585), logs it at error
-        // level and leaves the response as it is, so the token stays as authored.
-        let key_value = match behavior.key.extract(request) {
-            Ok(key) => key,
-            Err(e) => {
-                tracing::error!("lookup key: {e}; the response is served without this lookup");
-                continue;
-            }
-        };
+    let replacements = csv_data.lookup(key, &behavior.from_data_source.csv.key_column);
 
-        if let Some(key) = key_value {
-            // Load CSV data
-            if let Some(csv_data) = csv_cache.get_or_load(
-                &behavior.from_data_source.csv.path,
-                &behavior.from_data_source.csv.delimiter,
-                access,
-            ) {
-                // Lookup row
-                let replacements = csv_data.lookup(&key, &behavior.from_data_source.csv.key_column);
-
-                // Mountebank (behaviors.js replaceObjectValuesIn) accepts the column as
-                // `["col"]`, `['col']` or `[col]`; `lookup` keys each cell by the unquoted form.
-                for (column_token, value) in replacements {
-                    let column = column_token
-                        .strip_prefix('[')
-                        .and_then(|c| c.strip_suffix(']'))
-                        .unwrap_or(&column_token);
-                    let into = &behavior.into;
-                    for full_token in [
-                        format!("{into}[\"{column}\"]"),
-                        format!("{into}['{column}']"),
-                        format!("{into}[{column}]"),
-                    ] {
-                        replace_response_token(body, headers, status, &full_token, &value, stub);
-                    }
-                }
-            }
+    // Mountebank (behaviors.js replaceObjectValuesIn) accepts the column as `["col"]`, `['col']`
+    // or `[col]`; `lookup` keys each cell by the unquoted form.
+    for (column_token, value) in replacements {
+        let column = column_token
+            .strip_prefix('[')
+            .and_then(|c| c.strip_suffix(']'))
+            .unwrap_or(&column_token);
+        let into = &behavior.into;
+        for full_token in [
+            format!("{into}[\"{column}\"]"),
+            format!("{into}['{column}']"),
+            format!("{into}[{column}]"),
+        ] {
+            replace_response_token(body, headers, status, &full_token, &value, stub);
         }
     }
 }
@@ -1323,9 +1616,9 @@ mod tests {
         let path = path.to_string_lossy().into_owned();
         let cache = CsvCache::default();
         let access = ScriptFileAccess::trusted_cwd();
-        let comma = cache.get_or_load(&path, ",", &access).expect("comma");
+        let comma = load(&cache, &path, ",", &access).expect("comma");
         assert_eq!(comma.lookup("1;semi", "k;v")["[k;v]"], "1;semi");
-        let semi = cache.get_or_load(&path, ";", &access).expect("semi");
+        let semi = load(&cache, &path, ";", &access).expect("semi");
         assert_eq!(semi.lookup("1", "k")["[v]"], "semi");
     }
 
@@ -1337,56 +1630,215 @@ mod tests {
         std::fs::write(&path, "id,name\n1,x\n").expect("write csv");
         let path = path.to_string_lossy().into_owned();
         let cache = CsvCache::default();
-        assert!(
-            cache
-                .get_or_load(&path, ",", &ScriptFileAccess::trusted_cwd())
-                .is_some()
-        );
-        assert!(
-            cache
-                .get_or_load(&path, ",", &ScriptFileAccess::Refused)
-                .is_none()
-        );
+        assert!(load(&cache, &path, ",", &ScriptFileAccess::trusted_cwd()).is_some());
+        assert!(load(&cache, &path, ",", &ScriptFileAccess::Refused).is_none());
         let elsewhere = tempfile::tempdir().expect("tempdir");
         assert!(
-            cache
-                .get_or_load(
-                    &path,
-                    ",",
-                    &ScriptFileAccess::Confined(elsewhere.path().to_path_buf())
-                )
-                .is_none(),
+            load(
+                &cache,
+                &path,
+                ",",
+                &ScriptFileAccess::Confined(elsewhere.path().to_path_buf())
+            )
+            .is_none(),
             "the cached parse is not served to an access that may not read the file"
         );
     }
 
-    /// `clear` drops cached files, so the next `get_or_load` reads the file again.
+    /// `clear` drops cached files, so the next lookup reads the file again.
     #[test]
     fn clear_drops_the_cached_file() {
-        let path =
-            std::env::temp_dir().join(format!("rift_lookup_1384_clear_{}.csv", std::process::id()));
-        let path_str = path.to_string_lossy().into_owned();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("clear.csv");
         std::fs::write(&path, "id,name\n1,old\n").expect("write csv");
+        let path = path.to_string_lossy().into_owned();
         let cache = CsvCache::default();
-        let name = |cache: &CsvCache| {
+        assert!(load(&cache, &path, ",", &ScriptFileAccess::trusted_cwd()).is_some());
+        assert_eq!(cache.len(), 1);
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(cache.cached_bytes(), 0);
+    }
+
+    /// The default-guard `get_or_load` a test reads a file with: the parse, or `None` when it is
+    /// not loaded.
+    fn load(
+        cache: &CsvCache,
+        path: &str,
+        delimiter: &str,
+        access: &ScriptFileAccess,
+    ) -> Option<Arc<CsvData>> {
+        cache
+            .get_or_load(path, delimiter, access, &BodyGuard::default())
+            .expect("the default budget holds a test file")
+    }
+
+    fn guard(max: usize, budget: Option<usize>) -> BodyGuard {
+        BodyGuard::new(
+            crate::imposter::body_limits::BodyLimits::new(max, budget).expect("valid limits"),
+        )
+    }
+
+    /// A CSV file of at least `len` bytes whose row `1` has `name` = `marker`.
+    fn padded_csv(dir: &Path, file: &str, marker: &str, len: usize) -> String {
+        let mut text = format!("id,name\n1,{marker}\n");
+        // Long cells, so a parse is a small multiple of the file and several fit a bound.
+        let padding = format!("9,{}\n", "p".repeat(88));
+        while text.len() < len {
+            text.push_str(&padding);
+        }
+        let path = dir.join(file);
+        std::fs::write(&path, text).expect("write csv");
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Issue #1654: every delimiter is a parse of its own, so before the bound an admin client
+    /// could grow the cache without limit by varying it. The cache now stays within the ceiling.
+    #[test]
+    fn the_cache_stays_within_its_bound_across_delimiters() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = padded_csv(dir.path(), "big.csv", "x", 10 * 1024);
+        let cache = CsvCache::default();
+        let guard = guard(64 * 1024, None);
+        let access = ScriptFileAccess::trusted_cwd();
+        for i in 0..100 {
+            let delimiter = format!("|{i}|");
+            let data = cache
+                .get_or_load(&path, &delimiter, &access, &guard)
+                .expect("no budget to exhaust")
+                .expect("loads");
+            // With a delimiter that never occurs, each line is one cell under the header `id,name`.
+            assert_eq!(data.lookup("1,x", "id,name")["[id,name]"], "1,x");
+            assert!(!cache.is_empty(), "a parse within the bound is cached");
+            assert!(
+                cache.cached_bytes() <= 64 * 1024,
+                "after {} delimiters the cache holds {} bytes",
+                i + 1,
+                cache.cached_bytes()
+            );
+        }
+        assert!(cache.len() < 100, "older parses were evicted");
+    }
+
+    /// The least recently used file is the one evicted.
+    #[test]
+    fn the_least_recently_used_file_is_evicted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = padded_csv(dir.path(), "a.csv", "a", 2048);
+        let b = padded_csv(dir.path(), "b.csv", "b", 2048);
+        let c = padded_csv(dir.path(), "c.csv", "c", 2048);
+        let access = ScriptFileAccess::trusted_cwd();
+        let one = load(&CsvCache::default(), &a, ",", &access)
+            .expect("loads")
+            .heap_bytes();
+        // Room for two files, not three.
+        let guard = guard(2 * one + one / 2, None);
+        let cache = CsvCache::default();
+        for path in [&a, &b, &a, &c] {
             cache
-                .get_or_load(&path_str, ",", &ScriptFileAccess::trusted_cwd())
+                .get_or_load(path, ",", &access, &guard)
+                .expect("no budget")
+                .expect("loads");
+        }
+        let cached = |path: &str| cache.get_fresh(path, ",", &access).is_some();
+        assert!(cached(&a), "used after b, so kept");
+        assert!(!cached(&b), "the least recently used, so evicted");
+        assert!(cached(&c));
+    }
+
+    #[test]
+    fn an_entry_larger_than_the_bound_is_served_but_not_cached() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The file fits the 4 KiB ceiling; its parse, with every cell a `String`, does not.
+        let path = padded_csv(dir.path(), "wide.csv", "w", 3 * 1024);
+        let cache = CsvCache::default();
+        let data = cache
+            .get_or_load(
+                &path,
+                ",",
+                &ScriptFileAccess::trusted_cwd(),
+                &guard(4096, None),
+            )
+            .expect("no budget")
+            .expect("served");
+        assert!(
+            data.heap_bytes() > 4096,
+            "the fixture's parse is over the bound"
+        );
+        assert_eq!(data.lookup("1", "id")["[name]"], "w");
+        assert!(cache.is_empty(), "not cached");
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn a_file_over_the_ceiling_is_not_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = padded_csv(dir.path(), "big.csv", "x", 4096);
+        let cache = CsvCache::default();
+        let loaded = cache.get_or_load(
+            &path,
+            ",",
+            &ScriptFileAccess::trusted_cwd(),
+            &guard(1024, None),
+        );
+        assert_eq!(loaded.map(|data| data.is_some()), Ok(false));
+        assert!(cache.is_empty());
+        assert!(logs_contain("--max-body-size (1024 bytes)"));
+    }
+
+    #[tokio::test]
+    async fn a_load_the_budget_cannot_hold_is_budget_exhausted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = padded_csv(dir.path(), "data.csv", "x", 4096);
+        let cache = CsvCache::default();
+        let access = ScriptFileAccess::trusted_cwd();
+        let guard = guard(8192, Some(8192));
+        let held = guard.start(Some(6144)).await.expect("6 KiB fits");
+        assert_eq!(
+            cache.get_or_load(&path, ",", &access, &guard).map(|_| ()),
+            Err(LookupLoadError::BudgetExhausted { path: path.clone() })
+        );
+        assert!(cache.is_empty());
+        drop(held);
+        let data = cache
+            .get_or_load(&path, ",", &access, &guard)
+            .expect("the budget is free again")
+            .expect("loads");
+        assert_eq!(data.lookup("1", "id")["[name]"], "x");
+    }
+
+    #[tokio::test]
+    async fn the_reservation_is_released_after_a_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = padded_csv(dir.path(), "data.csv", "x", 4096);
+        let guard = guard(8192, Some(8192));
+        load_csv(&path, ",", &ScriptFileAccess::trusted_cwd(), &guard)
+            .expect("fits")
+            .expect("loads");
+        guard
+            .start_without_waiting(Some(8192))
+            .await
+            .expect("the whole budget is free again");
+    }
+
+    /// Mountebank re-reads the file on every lookup, so an edit is seen on the next request.
+    #[test]
+    fn an_edited_file_is_read_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("edited.csv");
+        std::fs::write(&path, "id,name\n1,old\n").expect("write csv");
+        let path_str = path.to_string_lossy().into_owned();
+        let cache = CsvCache::default();
+        let name = || {
+            load(&cache, &path_str, ",", &ScriptFileAccess::trusted_cwd())
                 .expect("loads")
                 .lookup("1", "id")["[name]"]
                 .clone()
         };
-        assert_eq!(name(&cache), "old");
-
-        std::fs::write(&path, "id,name\n1,new\n").expect("rewrite csv");
-        assert_eq!(
-            name(&cache),
-            "old",
-            "the cached file is served until cleared"
-        );
-
-        cache.clear();
-        assert_eq!(name(&cache), "new", "clear forces a reload");
-        let _ = std::fs::remove_file(&path);
+        assert_eq!(name(), "old");
+        std::fs::write(&path, "id,name\n1,newer\n").expect("rewrite csv");
+        assert_eq!(name(), "newer");
+        assert_eq!(cache.len(), 1, "the stale parse was replaced");
     }
 
     /// Writes `contents` to a per-process temp CSV named after `tag` and loads it with
@@ -1750,8 +2202,10 @@ mod tests {
             &request,
             &CsvCache::default(),
             &ScriptFileAccess::trusted_cwd(),
+            &BodyGuard::default(),
             FIXTURE_STUB,
-        );
+        )
+        .expect("the default budget holds the file");
         let _ = std::fs::remove_file(&csv);
         assert_eq!(
             body.as_str(),

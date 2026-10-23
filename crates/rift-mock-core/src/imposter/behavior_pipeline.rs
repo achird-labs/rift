@@ -4,14 +4,17 @@
 //! One function so every response type that carries behaviors runs the same pipeline with the
 //! same failure contract (issue #1184): the `is`, `inject` and `proxy` serve paths call it.
 
-use super::handler::{SCRIPT_TIMEOUT_HEADER, xpath_selector_error_response};
+use super::body_limits::BodyGuard;
+use super::handler::{
+    SCRIPT_TIMEOUT_HEADER, lookup_budget_response, xpath_selector_error_response,
+};
 use super::headers::StubRef;
 use super::response::{apply_decorate_bounded, body_text};
 use super::types::{IsResponse, StatusValue};
 use crate::behaviors::{
     BehaviorProgram, BehaviorStep, CsvCache, Decorated, RequestContext, ResponseStatus,
     ShellTransformError, Spliced, SplicedHeaders, SplicedName, WaitScriptError, apply_copy_spliced,
-    apply_lookup_spliced, apply_shell_transform,
+    apply_lookup_row, apply_shell_transform, load_csv, lookup_key,
 };
 use crate::util::build_response_with_headers;
 use bytes::Bytes;
@@ -157,6 +160,8 @@ pub(crate) struct BehaviorRun<'a, SH> {
     pub script_files: std::sync::Arc<crate::imposter::ScriptFileAccess>,
     pub stub: StubRef<'a>,
     pub csv_cache: &'a CsvCache,
+    /// The imposter's body limits, under which a `lookup` reads its CSV file (issue #1654).
+    pub body_guard: &'a std::sync::Arc<BodyGuard>,
     pub script_timeout: Duration,
     pub strict: bool,
     /// The imposter's `defaultResponse`: it completes a response a `decorate` returned (issue
@@ -286,16 +291,65 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     }
                 }
                 BehaviorStep::Lookup(lookup) => {
-                    apply_lookup_spliced(
-                        &mut body,
-                        &mut headers,
-                        &mut status_text,
-                        std::slice::from_ref(lookup),
-                        request_context.get_or_init(build_request_context),
-                        self.csv_cache,
-                        &self.script_files,
-                        self.stub,
-                    );
+                    let key =
+                        lookup_key(lookup, request_context.get_or_init(build_request_context));
+                    if let Some(key) = key {
+                        let csv = &lookup.from_data_source.csv;
+                        // A cache hit, the common case, is served here. A miss reads and parses
+                        // the file off the tokio worker (issue #1654), as shellTransform runs its
+                        // command (#478): a large file would otherwise stall every request
+                        // multiplexed on the worker.
+                        let data = match self.csv_cache.get_fresh(
+                            &csv.path,
+                            &csv.delimiter,
+                            &self.script_files,
+                        ) {
+                            Some(data) => Some(data),
+                            None => {
+                                let (path, delimiter) = (csv.path.clone(), csv.delimiter.clone());
+                                let access = std::sync::Arc::clone(&self.script_files);
+                                let guard = std::sync::Arc::clone(self.body_guard);
+                                let loaded = tokio::task::spawn_blocking(move || {
+                                    load_csv(&path, &delimiter, &access, &guard)
+                                })
+                                .await;
+                                match loaded {
+                                    Ok(Ok(loaded)) => loaded.map(|loaded| {
+                                        self.csv_cache.insert(
+                                            loaded,
+                                            self.body_guard.limits().max_body_bytes(),
+                                        )
+                                    }),
+                                    // Server load, not a behavior failure: a `503` with or without
+                                    // `strictBehaviors`, never the tokens left in place quietly.
+                                    Ok(Err(e)) => {
+                                        return BehaviorOutcome::StrictFailure(
+                                            lookup_budget_response(&e),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "lookup behavior: loading CSV data source '{}' \
+                                             panicked: {e}; the tokens are left in place",
+                                            csv.path
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                        };
+                        if let Some(data) = data {
+                            apply_lookup_row(
+                                &mut body,
+                                &mut headers,
+                                &mut status_text,
+                                lookup,
+                                &key,
+                                &data,
+                                self.stub,
+                            );
+                        }
+                    }
                 }
                 BehaviorStep::Decorate(decorate_script) => {
                     // decorate uses a single-value JS/Rhai object model. Set-Cookie is held
@@ -596,6 +650,7 @@ mod tests {
             script_files: std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
             stub: STUB,
             csv_cache: &csv_cache,
+            body_guard: &std::sync::Arc::default(),
             script_timeout: Duration::from_secs(5),
             strict,
             default_response,
@@ -626,6 +681,7 @@ mod tests {
             script_files: std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
             stub: STUB,
             csv_cache: &csv_cache,
+            body_guard: &std::sync::Arc::default(),
             script_timeout: Duration::from_secs(5),
             strict: false,
             default_response: None,
@@ -711,6 +767,69 @@ mod tests {
             BehaviorOutcome::StrictFailure(_) | BehaviorOutcome::Aborted => {
                 panic!("lenient mode must not fail the response")
             }
+        }
+    }
+
+    /// A `lookup` on the CSV at `csv`, run with `guard` and the response `orig`, keyed by `?x=1`.
+    async fn run_lookup(csv: &str, guard: &std::sync::Arc<BodyGuard>) -> BehaviorOutcome {
+        let behaviors = behaviors(json!({ "lookup": {
+            "key": { "from": { "query": "x" }, "using": { "method": "regex", "selector": ".*" } },
+            "fromDataSource": { "csv": { "path": csv, "keyColumn": "id" } },
+            "into": "${row}"
+        } }));
+        let uri: hyper::Uri = "/users/42?x=1".parse().expect("fixture uri");
+        let request_headers: crate::imposter::Headers = crate::imposter::Headers::new();
+        let csv_cache = CsvCache::new();
+        let parts = ServedParts {
+            body: Spliced::authored("name=${row}[name]".to_string()),
+            ..original()
+        };
+        BehaviorRun {
+            behaviors: &behaviors,
+            method: "GET",
+            uri: &uri,
+            request_headers: &request_headers,
+            request_body: None,
+            request_body_undefined: false,
+            client_addr: None,
+            script_state_key: 4545,
+            script_files: std::sync::Arc::new(crate::imposter::ScriptFileAccess::trusted_cwd()),
+            stub: STUB,
+            csv_cache: &csv_cache,
+            body_guard: guard,
+            script_timeout: Duration::from_secs(5),
+            strict: false,
+            default_response: None,
+            shutdown: None,
+        }
+        .apply(parts)
+        .await
+    }
+
+    /// Issue #1654: a CSV file the body memory budget cannot hold now is a `503` with
+    /// `Retry-After`, even without `strictBehaviors`; once the budget frees, the row is served.
+    #[tokio::test]
+    async fn a_lookup_the_budget_cannot_hold_is_a_503() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let csv = dir.path().join("data.csv");
+        std::fs::write(&csv, format!("id,name\n1,ROW\n{}", "9,pad\n".repeat(400)))
+            .expect("write csv");
+        let csv = csv.to_string_lossy().into_owned();
+        let guard = std::sync::Arc::new(BodyGuard::new(
+            super::super::body_limits::BodyLimits::new(4096, Some(4096)).expect("valid limits"),
+        ));
+        let held = guard.start(Some(4096)).await.expect("fills the budget");
+        match run_lookup(&csv, &guard).await {
+            BehaviorOutcome::StrictFailure(response) => {
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(response.headers()["retry-after"], "1");
+            }
+            other => panic!("an exhausted budget must answer 503: {other:?}"),
+        }
+        drop(held);
+        match run_lookup(&csv, &guard).await {
+            BehaviorOutcome::Applied { parts, .. } => assert_eq!(parts.body.as_str(), "name=ROW"),
+            other => panic!("the budget is free again: {other:?}"),
         }
     }
 
