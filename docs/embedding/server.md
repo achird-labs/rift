@@ -486,10 +486,13 @@ match &cli.command {
 }
 ```
 
-The `rift` binary writes `--pidfile` only on the **serving** path (inside `run_mountebank_mode`),
-never before subcommand dispatch — otherwise `rift --pidfile p restart` would record its own PID and
-then signal itself, and a transient `save`/`healthcheck` would clobber a running server's file
-(issue #827). An alternative binary should keep that ordering.
+The `rift` binary writes `--pidfile` only on the **serving** path, after `ServerBuilder::start`
+returns, never before subcommand dispatch — otherwise `rift --pidfile p restart` would record its
+own PID and then signal itself, and a transient `save`/`healthcheck` would clobber a running
+server's file (issue #827). Writing it after `start` means the admin API and every startup imposter
+are bound by the time it exists, so tooling can wait on it as a readiness signal, as with
+Mountebank, and a failed startup leaves none (issue #1657). `start` itself never writes it. An
+alternative binary should keep that ordering.
 
 `save_imposters` builds its own tokio runtime and blocks on it (it is a sync subcommand path), so do
 not call it from inside a running async runtime — it would panic starting a nested runtime. From
