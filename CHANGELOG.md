@@ -319,6 +319,11 @@ record.
 
 ### Fixed
 
+- **A second `proxyOnce` stub, or one whose recording was moved behind it, forwards and records**
+  (#1705). With `predicateGenerators`, a request that reached it replayed the recording another
+  proxy stub made, or the one now behind it, and forwarded nothing. It now forwards and records
+  in front of itself, as Mountebank does. A recording in front of the answering stub (concurrent
+  first requests) still replays, so the upstream still sees such a request once.
 - **A proxy's `predicateGenerators` `xpath` selector that fails to evaluate fails the request with
   `500` "malformed xpath predicate selector"** (#1668), as in Mountebank, instead of recording the
   body as `""` and answering `200`. It applies to an XML body only (a prefix `ns` does not bind, an

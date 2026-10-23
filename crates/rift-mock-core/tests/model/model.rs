@@ -231,7 +231,17 @@ impl Model {
             Kind::Recorded { responses, .. } => Served::plain(responses[turn].clone(), false),
             Kind::Authored(Spec::Proxy { mode, gen_body, .. }) => {
                 let key = (r.method, r.path, r.query, gen_body.then_some(r.body));
+                // A recording only behind the answering stub did not answer this request: it
+                // missed, so it is forwarded and recorded in front of this stub, as in Mountebank
+                // (#1705). One in front (a concurrent first request, in the engine) replays.
+                // The first carrier is the frontmost: every carrier is behind iff it is.
+                let shadowed = self
+                    .stubs
+                    .iter()
+                    .position(|s| s.claim == Some(key))
+                    .is_some_and(|first| first > i);
                 if mode == Mode::Once
+                    && !shadowed
                     && let Some(body) = self.claims.get(&key)
                 {
                     return Served::plain(body.clone(), true);

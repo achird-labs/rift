@@ -57,9 +57,12 @@ What a proxy records depends on whether it has `predicateGenerators` (or `addWai
 - **With generators**, the proxy records each response as a new stub in the imposter, which then
   answers later matching requests. Under `proxyOnce` a request that matches no recorded stub is
   forwarded and recorded as another stub, as in Mountebank — a second body under a `body`
-  generator, a second `X-Tenant` under a `headers` generator. Concurrent first requests for the
-  same generated predicates record once. The recorded stub *is* the recording: delete it, or
-  replace the stubs without it, and the next matching request is forwarded and recorded again.
+  generator, a second `X-Tenant` under a `headers` generator. This holds even when that request
+  was already recorded in front of another proxy stub, or its recording sits behind the proxy
+  stub that answered: it is forwarded and recorded in front of the stub that answered. Concurrent
+  first requests for the same generated predicates record once. The recorded stub *is* the
+  recording: delete it, or replace the stubs without it, and the next matching request is
+  forwarded and recorded again.
 - **Without generators**, the imposter's `stubs` never change. `"mode": "proxyOnce"` still replays:
   it keeps the first response for each request in an internal store, so the upstream sees each
   request once. A request is identified by its method, path, query string and request body;

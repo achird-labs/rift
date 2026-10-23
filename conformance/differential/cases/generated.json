@@ -1,0 +1,190 @@
+{
+  "source": "shrunk cases the generative differential test found (#1549), kept as regressions once fixed",
+  "cases": [
+    {
+      "name": "generated: eb482ddb",
+      "steps": [
+        {
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "up/a#0"
+                    }
+                  },
+                  {
+                    "is": {
+                      "body": "up/a#1"
+                    }
+                  },
+                  {
+                    "is": {
+                      "body": "up/a#2"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "up/b#0"
+                    }
+                  },
+                  {
+                    "is": {
+                      "body": "up/b#1"
+                    }
+                  },
+                  {
+                    "is": {
+                      "body": "up/b#2"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters"
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters/4546/stubs",
+          "body": {
+            "stub": {
+              "predicates": [
+                {
+                  "equals": {
+                    "path": "/c"
+                  }
+                }
+              ],
+              "responses": [
+                {
+                  "is": {
+                    "body": "up/c"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "proxy": {
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "path": true
+                          }
+                        }
+                      ],
+                      "to": "http://localhost:4546"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters"
+        },
+        {
+          "do": "send",
+          "method": "GET",
+          "path": "/b",
+          "port": 4545
+        },
+        {
+          "body": {
+            "index": 0,
+            "stub": {
+              "predicates": [],
+              "responses": [
+                {
+                  "is": {
+                    "body": "p0",
+                    "statusCode": 200
+                  }
+                }
+              ]
+            }
+          },
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters/4545/stubs"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545"
+        },
+        {
+          "body": {
+            "predicates": [],
+            "responses": [
+              {
+                "proxy": {
+                  "mode": "proxyOnce",
+                  "predicateGenerators": [
+                    {
+                      "matches": {
+                        "path": true
+                      }
+                    }
+                  ],
+                  "to": "http://localhost:4546"
+                }
+              }
+            ]
+          },
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs/0"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545"
+        },
+        {
+          "do": "send",
+          "method": "GET",
+          "path": "/b",
+          "port": 4545
+        }
+      ]
+    }
+  ]
+}

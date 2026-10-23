@@ -1011,6 +1011,32 @@ impl Imposter {
     /// `proxy_to`. With neither, a `proxyOnce` recording goes last and a `proxyAlways` one merges
     /// from the top of the list.
     ///
+    /// Whether the `proxyOnce` recording under `sig` is *shadowed* (issue #1705): the stub at slot
+    /// `answering` answered the request, and every stub recorded under `sig` sits behind it, so
+    /// none of them answered. A carrier in front of the answering stub is the concurrent first
+    /// request (it matched a snapshot taken before the winner's stub landed), and no carrier at
+    /// all is a store that publishes stubs or has not delivered them yet: both replay, keeping
+    /// `proxyOnce` exactly-once (#171/#118).
+    fn recording_is_shadowed(&self, answering: Option<u64>, sig: &RequestSignature) -> bool {
+        // A publishing store's stubs carry no claim locally, so there is nothing to compare.
+        if self.proxy_store.publishes_stubs() {
+            return false;
+        }
+        let Some(slot) = answering else {
+            return false;
+        };
+        let snapshot = self.snapshot();
+        let stubs = snapshot.stubs();
+        let Some(at) = stubs.iter().position(|s| s.slot == slot) else {
+            return false;
+        };
+        // The first carrier is the frontmost: every carrier is behind iff it is.
+        stubs
+            .iter()
+            .position(|s| s.recorded_claim.as_deref() == Some(sig))
+            .is_some_and(|first| first > at)
+    }
+
     /// `claim` is the `proxyOnce` signature the recording settled under: the new stub carries it,
     /// so a later edit that removes the stub forgets the claim too (issue #1386).
     pub fn insert_or_append_proxy_stub(
@@ -1306,7 +1332,33 @@ impl Imposter {
         let claim = if transparent || generation_failed {
             None
         } else {
-            match self.proxy_store.try_claim_as(port, &signature, mode) {
+            let outcome = match self.proxy_store.try_claim_as(port, &signature, mode) {
+                // A recording only behind the stub that answered did not answer this request: it
+                // missed, so it is forwarded and recorded in front of this stub, as Mountebank's
+                // `proxyAndRecord` does (issue #1705). Forget the shadowed recording and claim
+                // again; the outcome then runs through the same match as a first claim.
+                Ok(ClaimOutcome::AlreadyRecorded)
+                    if generates_stub
+                        && mode_is_once
+                        && self.recording_is_shadowed(answering, &signature) =>
+                {
+                    match self.proxy_store.forget_recorded(port, &signature) {
+                        Ok(()) => self.proxy_store.try_claim_as(port, &signature, mode),
+                        // Terminal fallback, logged: replaying the recording is the behaviour
+                        // before #1705, still a correct `proxyOnce` answer, just not Mountebank's.
+                        Err(e) => {
+                            error!(
+                                port,
+                                path = %signature.path,
+                                "Failed to forget a shadowed proxy recording; replaying it: {e}"
+                            );
+                            Ok(ClaimOutcome::AlreadyRecorded)
+                        }
+                    }
+                }
+                outcome => outcome,
+            };
+            match outcome {
                 Ok(ClaimOutcome::AlreadyRecorded) => {
                     if let Some(recorded) = self.proxy_store.lookup(port, &signature) {
                         debug!("Returning recorded proxy response (proxyOnce mode)");
@@ -2792,6 +2844,42 @@ mod claim_tests {
         imp.delete_stub(0).expect("delete");
 
         assert!(!recorded(&imp, &sig));
+    }
+
+    /// The slot of the stub at `index`.
+    fn slot_at(imp: &Imposter, index: usize) -> u64 {
+        imp.snapshot().stubs()[index].slot
+    }
+
+    // Issue #1705: a recording in front of the answering stub replays (the concurrent first
+    // request); one only behind it is shadowed, so the request is forwarded and recorded again.
+    #[test]
+    fn a_recording_is_shadowed_only_when_every_carrier_is_behind_the_answering_stub() {
+        let imp = imposter();
+        let sig = record(&imp);
+        let proxy = slot_at(&imp, 1);
+        assert!(
+            !imp.recording_is_shadowed(Some(proxy), &sig),
+            "carrier in front"
+        );
+
+        imp.move_stub(0, 1)
+            .expect("move the recording behind the proxy");
+        assert!(
+            imp.recording_is_shadowed(Some(proxy), &sig),
+            "carrier behind"
+        );
+
+        let other = RequestSignature::new("GET", "/elsewhere", None, &[]);
+        assert!(
+            !imp.recording_is_shadowed(Some(proxy), &other),
+            "no carrier"
+        );
+        assert!(!imp.recording_is_shadowed(None, &sig), "no answering stub");
+        assert!(
+            !imp.recording_is_shadowed(Some(u64::MAX), &sig),
+            "the answering stub is gone"
+        );
     }
 
     // A stub edit that leaves the recording alone keeps its claim.
