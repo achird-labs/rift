@@ -68,12 +68,13 @@ pub enum WarningType {
     /// executes only after an `is` response is rendered (see `extensions::state_ops`'s module
     /// doc). A `proxy`, `inject` or `fault` response does not get this warning: no part of its
     /// `_rift` block applies, and the whole block is reported as `ConfigKeyIgnored` instead. The
-    /// reachable case is a `RiftScript` response — which also covers the bare-`_rift` "flat" form
-    /// (no `is`/`proxy`/`inject`/`fault`), since that too parses to `RiftScript`.
+    /// reachable case is a script response (`_rift.script`). A bare-`_rift` response without a
+    /// script is served as `is: {}` (issue #1685), so its `stateOps` run and it is not flagged.
     StateOpsNeverRuns,
     /// `_rift.conditional` (issue #1280) that can never answer 304 (issue #1296): it is read only
-    /// on an `is` response, and only for GET/HEAD. Raised for a script-only response, and for an
-    /// `is` response in a stub whose top-level `method` predicate excludes GET and HEAD. A
+    /// on an `is` response, and only for GET/HEAD. Raised for a script response (`_rift.script`),
+    /// and for an `is` response — or a bare-`_rift` one without a script, served as `is: {}`
+    /// (issue #1685) — in a stub whose top-level `method` predicate excludes GET and HEAD. A
     /// `proxy`/`inject`/`fault` response gets [`WarningType::ConfigKeyIgnored`] instead.
     ConditionalNeverRuns,
     /// A key this engine parses and does not act on (issue #1152). The value reads back unchanged,
@@ -448,10 +449,11 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
 
         // `_rift.stateOps` on a response shape that never runs it (issue #969). `proxy`/`inject`
         // keep their `_rift` as `ignored_rift` (reported as `ConfigKeyIgnored`), so the only
-        // reachable shape here is `RiftScript` (which also covers the bare-`_rift` "flat" form —
-        // see `WarningType::StateOpsNeverRuns`).
+        // reachable shape here is a scripted `RiftScript`; a script-less one is served as `is: {}`
+        // and runs its ops (issue #1685).
         for response in &stub.responses {
             if let StubResponse::RiftScript { rift, .. } = response
+                && rift.script.is_some()
                 && !rift.state_ops.is_empty()
             {
                 push(
@@ -459,9 +461,9 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
                     StubWarning {
                         warning_type: WarningType::StateOpsNeverRuns,
                         message: format!(
-                            "Stub at index {index} has _rift.stateOps on a non-`is` response; \
-                             stateOps only runs after an `is` response is rendered, so these \
-                             operations never execute"
+                            "Stub at index {index} has _rift.stateOps on a script response \
+                             (`_rift.script`); stateOps only runs after an `is` response is \
+                             rendered, so these operations never execute"
                         ),
                         stub_index: Some(index),
                         stub_id: stub.id.clone(),
@@ -475,14 +477,22 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
         let excluded_method = non_get_head_method(&stub.predicates);
         for response in &stub.responses {
             let message = match response {
-                StubResponse::RiftScript { rift, .. } if declares_conditional(rift) => format!(
-                    "Stub at index {index} has _rift.conditional on a script-only response; \
-                     conditional GET applies only to an `is` response (move it to an `is`, or \
-                     drop it)"
-                ),
+                StubResponse::RiftScript { rift, .. }
+                    if rift.script.is_some() && declares_conditional(rift) =>
+                {
+                    format!(
+                        "Stub at index {index} has _rift.conditional on a script response \
+                         (`_rift.script`); conditional GET applies only to an `is` response \
+                         (move it to an `is`, or drop it)"
+                    )
+                }
+                // A script-less `_rift` response is served as `is: {}` (issue #1685).
                 StubResponse::Is {
                     rift: Some(rift), ..
-                } if declares_conditional(rift) => {
+                }
+                | StubResponse::RiftScript { rift, .. }
+                    if declares_conditional(rift) =>
+                {
                     let Some(method) = excluded_method else {
                         continue;
                     };
@@ -1175,6 +1185,7 @@ mod tests {
     #[test]
     fn state_ops_on_a_rift_script_response_warns() {
         let rift: RiftResponseExtension = serde_json::from_value(json!({
+            "script": { "code": "response.body = 'x';" },
             "stateOps": [{ "op": "increment", "key": "hits" }]
         }))
         .expect("parses");
@@ -1279,6 +1290,51 @@ mod tests {
         );
     }
 
+    // Issue #1685: a `_rift`-only response without a script is served as `is: {}`, so its
+    // `stateOps` run and must not be flagged.
+    #[test]
+    fn state_ops_on_a_script_less_rift_response_does_not_warn() {
+        let rift: RiftResponseExtension = serde_json::from_value(json!({
+            "stateOps": [{ "op": "increment", "key": "hits" }]
+        }))
+        .expect("parses");
+        let mut stub = conditional_stub(json!([]), true);
+        stub.responses = vec![StubResponse::RiftScript {
+            rift: Box::new(rift),
+            ignored_behaviors: None,
+        }];
+        let result = analyze_stubs(&[stub]);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::StateOpsNeverRuns),
+            "a script-less `_rift` response runs its stateOps: {:?}",
+            result.warnings
+        );
+    }
+
+    // Issue #1685: the same for `conditional` — it is read as on `is: {}`, so it warns only when the
+    // stub's method predicate excludes GET and HEAD, as on an `is` response.
+    #[test]
+    fn conditional_on_a_script_less_rift_response_warns_only_like_is() {
+        let script_less = |predicates: serde_json::Value| {
+            let mut stub = conditional_stub(predicates, true);
+            stub.responses = vec![StubResponse::RiftScript {
+                rift: Box::new(
+                    serde_json::from_value(json!({ "conditional": true })).expect("parses"),
+                ),
+                ignored_behaviors: None,
+            }];
+            conditional_warnings(stub)
+        };
+        let w = script_less(json!([]));
+        assert!(w.is_empty(), "{w:?}");
+        let w = script_less(json!([{ "equals": { "method": "post" } }]));
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].message.contains("post"), "{}", w[0].message);
+    }
+
     // ─── Issue #1296: `_rift.conditional` that can never fire ───────────────────────────────
 
     fn conditional_stub(predicates: serde_json::Value, script_only: bool) -> Stub {
@@ -1326,7 +1382,7 @@ mod tests {
     fn conditional_on_script_only_warns() {
         let w = conditional_warnings(conditional_stub(json!([]), true));
         assert_eq!(w.len(), 1, "{w:?}");
-        assert!(w[0].message.contains("script-only"), "{}", w[0].message);
+        assert!(w[0].message.contains("script response"), "{}", w[0].message);
     }
 
     #[test]

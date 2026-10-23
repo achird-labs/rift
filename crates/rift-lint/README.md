@@ -148,7 +148,7 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | W001 | Privileged port |
 | W004-W016 | Potential issues (`W002` retired, folded into `E006`; `W003` retired, now `E056`; `W018` retired, now `E059`), including lossy number literals (W012), unset EJS env vars (W013) and state used without `_rift.flowState` (W014) |
 | W017 | A key the engine accepts but ignores (`_rift.metrics`, `_rift.proxy`, `recordMatches: true`, ...) |
-| W019 | `_rift.conditional` that can never answer 304 (script-only response, or a `method` predicate excluding GET and HEAD) |
+| W019 | `_rift.conditional` that can never answer 304 (script response (`_rift.script`), or a `method` predicate excluding GET and HEAD) |
 | W020 | A proxy `predicateGenerators` key the engine does not read (a typo such as `matchs`) |
 | W021 | A proxy `predicateGenerators` `jsonpath`, `xpath` or `ignore` the engine cannot use |
 | W022 | A top-level `fault` name the engine does not know; it is ignored at serve time, as in Mountebank |

@@ -36,7 +36,8 @@
 //!   fail-loud, not transactional; otherwise it is logged at `warn` and the remaining ops still
 //!   run. A template token that fails inside a `set` value follows `template_fn`'s own policy
 //!   (empty substitution + warn, or an error in debug).
-//! - **Where they run, and where they do not.** `is` responses only: a `proxy`, `inject` or
+//! - **Where they run, and where they do not.** `is` responses only, which includes a bare `_rift`
+//!   response without a script, served as `is: {}` (issue #1685): a `proxy`, `inject` or
 //!   `_rift.script` response has its own means, and `_rift.stateOps` on one of those is not run
 //!   (`stub_analysis` warns). Not run either when the response was pre-empted before it was built:
 //!   a fired `_rift.fault` / `fault` (a probabilistic fault therefore makes the ops probabilistic

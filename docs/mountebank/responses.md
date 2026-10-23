@@ -75,7 +75,7 @@ imposter loads, and rift-lint reports it as
 ### Where behaviors and `_rift` apply
 
 Every response needs exactly one type: `is`, `proxy`, `inject` or `fault` (or one of Rift's two
-extensions, the flat form below and a `_rift`-only script response). A config door refuses a
+extensions, the flat form below and a `_rift`-only response). A config door refuses a
 response with two, with `each response object must have only one response type`, and one with none
 — `{}`, a misspelt key, only a behaviors block or only `repeat` — with `unrecognized response type`,
 as Mountebank does. For a plain delayed `200`, write `{"is": {}, "behaviors": [{"wait": 500}]}`.
@@ -83,7 +83,9 @@ as Mountebank does. For a plain delayed `200`, write `{"is": {}, "behaviors": [{
 `_behaviors`/`behaviors` run on an `is` response (and the flat form below), on an `inject`
 response and on a `proxy` response; `repeat` applies to every response type — see
 [Behaviors](behaviors.md). A response-level `_rift` block is read on an
-`is` response only. On a `proxy`, `inject` or `fault` response it is kept and returned by
+`is` response only. A `_rift`-only response without a `script` is served as `is: {}` with its
+`_rift` effects (`fault`, `conditional`, `stateOps`, `templated`): an empty `200`, completed by
+`defaultResponse` like any `is`. Its behaviors other than `repeat` still do not run. On a `proxy`, `inject` or `fault` response it is kept and returned by
 `GET /imposters/:port`, but not acted on, and is reported as `config_key_ignored` in
 `_rift.warnings` and by `rift-lint` `W017`.
 
@@ -604,7 +606,7 @@ A client that polls with validators (a CDN-hosted datafile, a feature-flag SDK) 
     scenario's key, which returns the scenario to `Started` with no write; revalidate with
     `If-None-Match` (the `ETag` follows the body) if your scenarios expire that way.
 
-On a script-only response, or behind a non-GET method predicate, it never fires; `rift-lint` W019 says so.
+On a script response (`_rift.script`), or behind a non-GET method predicate, it never fires; `rift-lint` W019 says so.
 
 It applies only to a `GET` or `HEAD` that the stub answers with a 2xx; any other request or status
 is served unchanged, without validators. The validators replace any `ETag` or `Last-Modified` the

@@ -179,14 +179,14 @@ A catch-all stub appears before other stubs, shadowing them:
 
 ### state_ops_never_runs
 
-A response carries `_rift.stateOps` but has no `is` body — a script-only `_rift` response, or the
-bare `_rift` form. `stateOps` runs only after an `is` response is rendered, so the operations never
-execute (see [Flow State](flow-state.md#is-responses-only)):
+A response carries `_rift.stateOps` on a script response (`_rift.script`). `stateOps` runs only
+after an `is` response is rendered, so the operations never execute. A bare `_rift` response without
+a `script` is served as `is: {}`, so its `stateOps` run and it is not flagged (see [Flow State](flow-state.md#is-responses-only)):
 
 ```json
 {
   "warningType": "state_ops_never_runs",
-  "message": "Stub at index 0 has _rift.stateOps on a non-`is` response; stateOps only runs after an `is` response is rendered, so these operations never execute",
+  "message": "Stub at index 0 has _rift.stateOps on a script response (`_rift.script`); stateOps only runs after an `is` response is rendered, so these operations never execute",
   "stubIndex": 0
 }
 ```
@@ -194,8 +194,8 @@ execute (see [Flow State](flow-state.md#is-responses-only)):
 ### conditional_never_runs
 
 A response carries `_rift.conditional` but it can never answer 304 (issue #1296): it is on a
-script-only `_rift` response (conditional GET reads only an `is` response), or on an `is` response
-in a stub whose top-level `equals`/`deepEquals` `method` predicate is a single string other than
+script response (`_rift.script`; conditional GET reads only an `is` response), or on an `is`
+response (or a bare `_rift` response without a `script`, which is served as `is: {}`) in a stub whose top-level `equals`/`deepEquals` `method` predicate is a single string other than
 `GET`/`HEAD`. A `method` under `or`/`not`/`and`, or matched with `matches`/`exists`, is not judged.
 `rift-lint` reports the same shapes as W019.
 
