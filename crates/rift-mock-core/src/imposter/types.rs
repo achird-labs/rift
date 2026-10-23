@@ -1472,6 +1472,17 @@ pub(crate) enum StatusValue {
     Text(Box<str>),
 }
 
+impl StatusValue {
+    /// A string `statusCode`: a [`Code`](Self::Code) when it parses as a `u16`, else kept as
+    /// written. The one rule for the grammar and for a status an `inject` returns (issue #1635).
+    pub(crate) fn from_text(text: String) -> Self {
+        match text.parse::<u16>() {
+            Ok(code) => StatusValue::Code(code),
+            Err(_) => StatusValue::Text(text.into_boxed_str()),
+        }
+    }
+}
+
 impl Serialize for StatusValue {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
@@ -1486,10 +1497,7 @@ impl Serialize for StatusValue {
 /// out-of-range number) and their messages unchanged.
 fn status_value<'de, D: serde::Deserializer<'de>>(d: D) -> Result<StatusValue, D::Error> {
     match serde_json::Value::deserialize(d)? {
-        serde_json::Value::String(text) => Ok(match text.parse::<u16>() {
-            Ok(code) => StatusValue::Code(code),
-            Err(_) => StatusValue::Text(text.into_boxed_str()),
-        }),
+        serde_json::Value::String(text) => Ok(StatusValue::from_text(text)),
         other => rift_types::wire::deserialize_status_code(other)
             .map(StatusValue::Code)
             .map_err(serde::de::Error::custom),

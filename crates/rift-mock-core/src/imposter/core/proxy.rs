@@ -164,8 +164,7 @@ async fn transform_upstream<SH: BuildHasher>(
     let (parts, mut degraded) = match run
         .apply(ServedParts {
             status,
-            // An upstream's status is a number; a script that leaves a string status here is not
-            // read, as before (issue #1558 reads one on the `is` and `inject` paths).
+            // An upstream's status is a number; a status a behavior leaves is read below.
             status_text: None,
             // The upstream's body is the author's choice of text (issue #1203): a proxy `lookup`
             // (#1189) exists to expand tokens the upstream returns.
@@ -183,6 +182,24 @@ async fn transform_upstream<SH: BuildHasher>(
             return Transformed::StrictFailure(
                 crate::imposter::behavior_pipeline::aborted_response(),
             );
+        }
+    };
+    // The status a behavior left, read as Mountebank's `postProcess` and Node's `writeHead` read
+    // it (issue #1635): a string is served as the number Node makes of it, a falsy one takes the
+    // `defaultResponse` status, then 200, and one Node refuses answers 500 and records nothing.
+    let status = match crate::imposter::status::resolve(
+        parts.status,
+        parts
+            .status_text
+            .as_ref()
+            .map(crate::behaviors::Spliced::as_str),
+        run.default_response,
+    ) {
+        Ok(status) => status.as_u16(),
+        Err(value) => {
+            return Transformed::StrictFailure(crate::imposter::status::invalid_status_response(
+                &value,
+            ));
         }
     };
     let mut headers: Vec<(String, String)> = parts
@@ -208,9 +225,9 @@ async fn transform_upstream<SH: BuildHasher>(
         bytes::Bytes::from(parts.body.into_text())
     };
     if degraded {
-        Transformed::Degraded(parts.status, headers, body)
+        Transformed::Degraded(status, headers, body)
     } else {
-        Transformed::Applied(parts.status, headers, body)
+        Transformed::Applied(status, headers, body)
     }
 }
 

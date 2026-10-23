@@ -1043,6 +1043,61 @@ mod tests {
         (body, status, headers)
     }
 
+    // A decorate body `JSON.stringify` cannot serialize fails the decorate, as Mountebank's
+    // `postProcess` throws on it, whether the body was mutated or returned.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn a_decorate_unserializable_body_fails_the_decorate() {
+        for script in [
+            "(req, res) => { const o = {}; o.self = o; res.body = o; }",
+            "(req, res) => ({ body: { n: 10n } })",
+        ] {
+            let result = apply_js_or_rhai_decorate(
+                script,
+                &decorate_req(),
+                "orig",
+                &ResponseStatus::Code(200),
+                &crate::util::OrderedMap::default(),
+                test_port(),
+                None,
+                &trusted_files(),
+            );
+            assert!(result.is_err(), "{script}");
+        }
+    }
+
+    // Issue #1635: a falsy status a decorate leaves is falsy, for the default to complete, as
+    // Mountebank's `postProcess` does; any other value is read as Node reads it.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn a_decorate_status_is_read_as_mountebank_reads_it() {
+        for (script, want) in [
+            (
+                "(req, res) => { res.statusCode = null; }",
+                ResponseStatus::Code(0),
+            ),
+            (
+                "(req, res) => { res.statusCode = NaN; }",
+                ResponseStatus::Code(0),
+            ),
+            (
+                "(req, res) => { delete res.statusCode; }",
+                ResponseStatus::Code(0),
+            ),
+            (
+                "(req, res) => { res.statusCode = -1; }",
+                ResponseStatus::Text("-1".to_string()),
+            ),
+            (
+                "(req, res) => { res.statusCode = 404; }",
+                ResponseStatus::Code(404),
+            ),
+        ] {
+            let (_, status, _) = decorate_1567(script, 201);
+            assert_eq!(status, want, "{script}");
+        }
+    }
+
     #[cfg(feature = "javascript")]
     #[test]
     fn every_arrow_form_runs_as_javascript() {

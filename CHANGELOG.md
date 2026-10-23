@@ -327,6 +327,25 @@ record.
 
 ### Fixed
 
+- **An `inject`'s `statusCode` and a status a behavior leaves on a `proxy` response are read as
+  Mountebank reads them** (#1635). An `inject` that returns a non-numeric, negative or out-of-range
+  `statusCode`, or `true`, answers `500` `ERR_HTTP_INVALID_STATUS_CODE` as in Mountebank, instead
+  of falling back to the `defaultResponse` status or `200` (a number above 65535 is no longer
+  saturated to `65535` in the message). A string status that a `decorate`/`shellTransform`/`copy`
+  leaves on a `proxy` response is now served and recorded instead of ignored; one Node refuses
+  answers `500` and records nothing. A decorate that leaves a falsy `statusCode` (`null`, `NaN`,
+  deleted) gets the `defaultResponse` status, then `200`, instead of keeping the one it was given.
+  An `inject`'s number or boolean header values are sent instead of dropped. An `inject` or
+  `decorate` body that `JSON.stringify` cannot serialize (a cycle, a BigInt) now fails the script,
+  answering `500` as Mountebank does; a cycle used to overflow the stack and abort the process, and a
+  BigInt was served as `null`. An object body is now served as `JSON.stringify` writes it
+  (compact, in the script's key order rather than key-sorted, functions and `undefined` dropped,
+  `toJSON` honoured, a lone surrogate escaped as `\udXXX`), and one nested more than 128 levels
+  deep answers `500` instead of overflowing the stack. A script state that cannot be saved (a
+  cycle, nesting past 128 levels) is logged at error level, naming the imposter, instead of being
+  dropped silently. For embedders: `MountebankInjectResponse.status_code` is now
+  `Option<ResponseStatus>`, and `rift_types::schema::StatusCode`, unused since #1558, is deprecated.
+
 - **A response holding only a `_rift` block without a `script` is served** (#1685): for example
   the documented `{"_rift": {"fault": {"tcp": "…"}}}` was matched and then answered as a no-match
   (`200`, `x-rift-no-match`), so its fault, `stateOps` and `conditional` never ran. It is now

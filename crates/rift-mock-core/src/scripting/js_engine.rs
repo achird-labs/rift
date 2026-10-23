@@ -1761,8 +1761,51 @@ fn json_to_js_result(context: &mut Context, value: &Value) -> JsResult<JsValue> 
     }
 }
 
-/// Convert JavaScript value to JSON Value
+/// How deep a script value may nest when it is read as JSON: a response body, or the state a
+/// script leaves (issue #1635). serde_json's own parse limit, so nothing deeper could be posted
+/// as an imposter either. Both readers recurse on the native stack — Boa's `JSON.stringify` has
+/// no bound of its own — and 1000 levels already overflow a script worker's 2 MiB stack in a
+/// debug build.
+const MAX_JSON_DEPTH: usize = 128;
+
+/// Convert JavaScript value to JSON Value. A cycle is a `TypeError`, as in `JSON.stringify`; it
+/// used to recurse until the stack overflowed and aborted the process.
 fn js_to_json(context: &mut Context, value: &JsValue) -> JsResult<Value> {
+    js_to_json_within(context, value, &mut Vec::new())
+}
+
+/// [`js_to_json`] with the objects being converted above `value`, to detect a cycle.
+fn js_to_json_within(
+    context: &mut Context,
+    value: &JsValue,
+    ancestors: &mut Vec<JsObject>,
+) -> JsResult<Value> {
+    if let Some(obj) = value.as_object() {
+        if ancestors.iter().any(|a| JsObject::equals(a, &obj)) {
+            return Err(JsNativeError::typ()
+                .with_message("cyclic object value")
+                .into());
+        }
+        if ancestors.len() >= MAX_JSON_DEPTH {
+            return Err(JsNativeError::typ()
+                .with_message(format!(
+                    "the value nests deeper than {MAX_JSON_DEPTH} levels"
+                ))
+                .into());
+        }
+        ancestors.push(obj.clone());
+        let converted = js_to_json_value(context, value, ancestors);
+        ancestors.pop();
+        return converted;
+    }
+    js_to_json_value(context, value, ancestors)
+}
+
+fn js_to_json_value(
+    context: &mut Context,
+    value: &JsValue,
+    ancestors: &mut Vec<JsObject>,
+) -> JsResult<Value> {
     if value.is_null() || value.is_undefined() {
         return Ok(Value::Null);
     }
@@ -1799,7 +1842,7 @@ fn js_to_json(context: &mut Context, value: &JsValue) -> JsResult<Value> {
             let mut arr = Vec::new();
             for i in 0..len {
                 let item = obj.get(i, context)?;
-                arr.push(js_to_json(context, &item)?);
+                arr.push(js_to_json_within(context, &item, ancestors)?);
             }
             return Ok(Value::Array(arr));
         }
@@ -1814,7 +1857,7 @@ fn js_to_json(context: &mut Context, value: &JsValue) -> JsResult<Value> {
                     PropertyKey::Symbol(_) => continue, // Skip symbols
                 };
                 if let Ok(val) = obj.get(key.clone(), context) {
-                    map.insert(key_str, js_to_json(context, &val)?);
+                    map.insert(key_str, js_to_json_within(context, &val, ancestors)?);
                 }
             }
         }
@@ -1833,7 +1876,9 @@ fn js_to_json(context: &mut Context, value: &JsValue) -> JsResult<Value> {
 /// headers/empty when there is none.
 #[derive(Debug, Clone)]
 pub struct MountebankInjectResponse {
-    pub status_code: Option<u16>,
+    /// The `statusCode` as the function returned it (issue #1635): a number, or a string that is
+    /// read as Node's `writeHead` reads it when the response is written. `None` for a falsy value.
+    pub status_code: Option<crate::behaviors::ResponseStatus>,
     pub headers: Option<crate::util::OrderedMap<String, String>>,
     pub body: Option<String>,
 }
@@ -2213,12 +2258,39 @@ fn execute_mountebank_inject_within(
         .get(js_string!("__imposterState"), &mut *context)
         .map_err(|e| anyhow!("Failed to get updated state: {e}"))?;
 
-    if let Ok(Value::Object(map)) = js_to_json(&mut *context, &updated_state) {
-        *imposter_state = map;
-    }
+    save_script_state(
+        &mut *context,
+        &updated_state,
+        &mut imposter_state,
+        imposter_port,
+        "inject",
+    );
 
     // Parse the response
     parse_mountebank_response(&mut *context, result)
+}
+
+/// Saves the state a script left as the imposter's script state. A state that cannot be read as a
+/// JSON object (a cycle, nesting past [`MAX_JSON_DEPTH`], or no longer an object) keeps the state
+/// from before the run, as before, but is logged at error level: Mountebank keeps the live object,
+/// so the script's next run would see the change there and does not here (issue #1635).
+fn save_script_state(
+    context: &mut Context,
+    state: &JsValue,
+    imposter_state: &mut serde_json::Map<String, Value>,
+    imposter_port: u16,
+    hook: &str,
+) {
+    match js_to_json(context, state) {
+        Ok(Value::Object(map)) => *imposter_state = map,
+        Ok(_) => tracing::error!(
+            "imposter {imposter_port}: the {hook}'s state is not saved: it is no longer an object"
+        ),
+        Err(e) => tracing::error!(
+            "imposter {imposter_port}: the {hook}'s state is not saved: it cannot be stored as \
+             JSON: {e}"
+        ),
+    }
 }
 
 /// A Mountebank response `inject` that threw at serve time. `detail` is Rift's message text;
@@ -2417,10 +2489,17 @@ fn execute_predicate_inject_in(
     };
 
     // Update the persisted, shared per-port state.
-    if let Ok(updated_state) = global.get(js_string!("__imposterState"), &mut *context)
-        && let Ok(Value::Object(map)) = js_to_json(&mut *context, &updated_state)
-    {
-        *imposter_state = map;
+    match global.get(js_string!("__imposterState"), &mut *context) {
+        Ok(updated_state) => save_script_state(
+            &mut *context,
+            &updated_state,
+            &mut imposter_state,
+            imposter_port,
+            "predicate inject",
+        ),
+        Err(e) => tracing::error!(
+            "imposter {imposter_port}: the predicate inject's state is not saved: it cannot be read: {e}"
+        ),
     }
 
     Ok(result.to_boolean())
@@ -2808,49 +2887,19 @@ fn parse_mountebank_response(
         .ok_or_else(|| anyhow!("Inject function must return an object"))?;
 
     // statusCode, headers and body are each optional: an absent one is completed by the caller.
-    let status_code = obj
-        .get(js_string!("statusCode"), context)
-        .ok()
-        .and_then(|v| match v.as_string() {
-            // A numeric string reads like every other `statusCode` (`deserialize_status_code`).
-            Some(text) => text.to_std_string_escaped().parse::<u16>().ok(),
-            None => v.as_number().map(|n| n as u16),
-        });
+    let status_code = status_from_js(
+        obj.get(js_string!("statusCode"), context)
+            .map_err(|e| anyhow!("Failed to read statusCode: {e}"))?,
+        context,
+    )?;
+    // A number or boolean header value is sent as JavaScript prints it, as Node's `writeHead`
+    // sends it (issue #1635); it used to be dropped.
+    let headers = headers_from_js(&obj, context)?;
 
-    let mut headers = None;
-    if let Ok(headers_val) = obj.get(js_string!("headers"), context)
-        && let Some(headers_obj) = headers_val.as_object()
-        && let Ok(keys) = headers_obj.own_property_keys(context)
-    {
-        let mut map = crate::util::OrderedMap::default();
-        for key in keys {
-            let key_str = match &key {
-                PropertyKey::String(s) => s.to_std_string_escaped(),
-                PropertyKey::Index(i) => i.get().to_string(),
-                PropertyKey::Symbol(_) => continue,
-            };
-            if let Ok(val) = headers_obj.get(key.clone(), context)
-                && let Some(s) = val.as_string()
-            {
-                map.insert(key_str, s.to_std_string_escaped());
-            }
-        }
-        headers = Some(map);
-    }
-
-    let body = obj.get(js_string!("body"), context).ok().and_then(|v| {
-        if let Some(s) = v.as_string() {
-            Some(s.to_std_string_escaped())
-        } else if v.is_object() {
-            // Convert object to JSON string
-            let json = js_to_json(context, &v).unwrap_or(Value::Null);
-            Some(serde_json::to_string(&json).unwrap_or_default())
-        } else if v.is_null() || v.is_undefined() {
-            None
-        } else {
-            Some(v.display().to_string())
-        }
-    });
+    let body = obj
+        .get(js_string!("body"), context)
+        .map_err(|e| anyhow!("Failed to read body: {e}"))?;
+    let body = body_from_js(&body, context)?;
 
     Ok(MountebankInjectResponse {
         status_code,
@@ -2868,18 +2917,37 @@ fn status_to_js(status: &crate::behaviors::ResponseStatus) -> JsValue {
     }
 }
 
-/// The `statusCode` a decorate script left: a number, or a string, which is read when the response
-/// is written (issue #1558). `None` for anything else, which keeps the status the script was given.
-fn status_from_js(value: Option<JsValue>) -> Option<crate::behaviors::ResponseStatus> {
-    let value = value?;
-    if let Some(text) = value.as_string() {
-        return Some(crate::behaviors::ResponseStatus::Text(
-            text.to_std_string_escaped(),
-        ));
+/// A `statusCode` a script returned or left, as Mountebank hands it to Node's `writeHead` (issues
+/// #1558, #1635). `None` for `undefined`, `null`, `false` and `NaN`, which are falsy, so the
+/// default status completes them. A string is kept as written. An integer in `0..=65535` is a code
+/// (`0` stays falsy for [`crate::imposter::status`]). Any other value — a negative, fractional,
+/// out-of-range or infinite number, `true`, an object — is its JavaScript `String(value)`, which
+/// the status resolver reads as Node does: `"404.7"` is served as 404, `"-1"` or `"true"` answers
+/// 500 `ERR_HTTP_INVALID_STATUS_CODE` naming that text.
+fn status_from_js(
+    value: JsValue,
+    context: &mut Context,
+) -> Result<Option<crate::behaviors::ResponseStatus>> {
+    use crate::behaviors::ResponseStatus;
+    if value.is_undefined() || value.is_null() || value.as_boolean() == Some(false) {
+        return Ok(None);
     }
-    value
-        .as_number()
-        .map(|n| crate::behaviors::ResponseStatus::Code(n as u16))
+    if let Some(text) = value.as_string() {
+        return Ok(Some(ResponseStatus::Text(text.to_std_string_escaped())));
+    }
+    if let Some(n) = value.as_number() {
+        if n.is_nan() {
+            return Ok(None);
+        }
+        if n.fract() == 0.0 && (0.0..=f64::from(u16::MAX)).contains(&n) {
+            // An integer within `u16`, just checked, so the cast is exact.
+            return Ok(Some(ResponseStatus::Code(n as u16)));
+        }
+    }
+    let text = value
+        .to_string(context)
+        .map_err(|e| anyhow!("Failed to read statusCode: {e}"))?;
+    Ok(Some(ResponseStatus::Text(text.to_std_string_escaped())))
 }
 
 /// `module.exports` of every module one hook run has loaded, by resolved path (issue #305): a
@@ -3362,9 +3430,13 @@ fn execute_mountebank_decorate_within_budget(
     let returned = settle_promise(returned, &mut *context, jobs, budget)?;
 
     // Persist any mutation the decorate made to the shared, per-port state.
-    if let Ok(Value::Object(map)) = js_to_json(&mut *context, &state_obj) {
-        *imposter_state = map;
-    }
+    save_script_state(
+        &mut *context,
+        &state_obj,
+        &mut imposter_state,
+        imposter_port,
+        "decorate",
+    );
 
     let left = config_obj
         .get(js_string!("response"), &mut *context)
@@ -3392,11 +3464,14 @@ fn execute_mountebank_decorate_within_budget(
     let obj = left
         .as_object()
         .ok_or_else(|| anyhow!("a decorate function must leave config.response as an object"))?;
-    let status_code = status_from_js(Some(
+    let status_code = status_from_js(
         obj.get(js_string!("statusCode"), &mut *context)
             .map_err(|e| anyhow!("Failed to read statusCode: {e}"))?,
-    ))
-    .unwrap_or_else(|| response_status.clone());
+        &mut *context,
+    )?
+    // A falsy status the script left (`null`, `NaN`, deleted) is falsy to `postProcess` too, which
+    // completes it from `defaultResponse`, then 200 (issue #1635), rather than keeping the old one.
+    .unwrap_or(crate::behaviors::ResponseStatus::Code(0));
     let headers = headers_from_js(&obj, &mut *context)?.unwrap_or_else(|| response_headers.clone());
     let body = obj
         .get(js_string!("body"), &mut *context)
@@ -3404,7 +3479,7 @@ fn execute_mountebank_decorate_within_budget(
     Ok(crate::behaviors::Decorated {
         status_code,
         headers,
-        body: body_from_js(&body, &mut *context).unwrap_or_default(),
+        body: body_from_js(&body, &mut *context)?.unwrap_or_default(),
         returned: None,
     })
 }
@@ -3446,15 +3521,16 @@ fn settle_promise(
 /// does not carry (absent, `undefined` or `null`) is marked omitted, for the pipeline to complete
 /// from `defaultResponse`.
 fn returned_response(obj: &JsObject, context: &mut Context) -> Result<crate::behaviors::Decorated> {
-    let status = status_from_js(Some(
+    let status = status_from_js(
         obj.get(js_string!("statusCode"), context)
             .map_err(|e| anyhow!("Failed to read statusCode: {e}"))?,
-    ));
+        context,
+    )?;
     let headers = headers_from_js(obj, context)?;
     let body = obj
         .get(js_string!("body"), context)
         .map_err(|e| anyhow!("Failed to read body: {e}"))?;
-    let body = body_from_js(&body, context);
+    let body = body_from_js(&body, context)?;
     let omits = crate::behaviors::ReturnedOmits {
         status_code: status.is_none(),
         headers: headers.is_none(),
@@ -3500,7 +3576,7 @@ fn headers_from_js(
             headers.insert(name, value.display().to_string());
         } else {
             tracing::warn!(
-                "decorate header {name:?} is {}, not a single header value; it is not sent",
+                "script response header {name:?} is {}, not a single header value; it is not sent",
                 value.type_of()
             );
         }
@@ -3508,20 +3584,67 @@ fn headers_from_js(
     Ok(Some(headers))
 }
 
-/// A response body as served: a string as it is, an object as JSON, anything else as JavaScript
-/// prints it. `None` for `undefined` or `null`.
-fn body_from_js(value: &JsValue, context: &mut Context) -> Option<String> {
+/// `JSON.stringify(value)` with a replacer that refuses a value nested deeper than `limit`: Boa's
+/// `JSON.stringify` recurses on the native stack with no bound of its own. The replacer is called
+/// on every value before it is descended into, with the holder as `this`, so the holders above it
+/// are the stack, trimmed back to the current holder. It uses no prototype method a script could
+/// have replaced, and `stringify` is the intrinsic, passed in.
+const BOUNDED_STRINGIFY: &str = r#"(function (stringify, value, limit) {
+    var stack = [];
+    return stringify(value, function (key, v) {
+        while (stack.length > 0 && stack[stack.length - 1] !== this) { stack.length = stack.length - 1; }
+        if (v !== null && typeof v === 'object') {
+            if (stack.length >= limit) { throw new TypeError('the response body nests deeper than ' + limit + ' levels'); }
+            stack[stack.length] = v;
+        }
+        return v;
+    });
+})"#;
+
+/// A response body as served: a string as it is, an object as `JSON.stringify` writes it (compact,
+/// in the object's key order, a lone surrogate escaped as `\udXXX`, as Node writes it), anything
+/// else as JavaScript prints it. `None` for `undefined` or `null`. An object `JSON.stringify`
+/// refuses (a cycle, a BigInt) or one nested past [`MAX_JSON_DEPTH`] is an error, as Mountebank's
+/// `postProcess` throws on the first two and answers 500.
+fn body_from_js(value: &JsValue, context: &mut Context) -> Result<Option<String>> {
     if value.is_null() || value.is_undefined() {
-        return None;
+        return Ok(None);
     }
-    Some(if let Some(s) = value.as_string() {
-        s.to_std_string_escaped()
-    } else if value.is_object() {
-        let json = js_to_json(context, value).unwrap_or(Value::Null);
-        serde_json::to_string(&json).unwrap_or_default()
-    } else {
-        value.display().to_string()
-    })
+    if let Some(s) = value.as_string() {
+        return Ok(Some(s.to_std_string_escaped()));
+    }
+    if !value.is_object() {
+        return Ok(Some(value.display().to_string()));
+    }
+    let stringify = context
+        .intrinsics()
+        .objects()
+        .json()
+        .get(js_string!("stringify"), context)
+        .map_err(|e| anyhow!("Failed to read JSON.stringify: {e}"))?;
+    let bounded = context
+        .eval(Source::from_bytes(BOUNDED_STRINGIFY))
+        .map_err(|e| anyhow!("Failed to compile the body serializer: {e}"))?;
+    let text = bounded
+        .as_callable()
+        .ok_or_else(|| anyhow!("the body serializer is not a function"))?
+        .call(
+            &JsValue::undefined(),
+            &[
+                stringify,
+                value.clone(),
+                JsValue::from(MAX_JSON_DEPTH as u32),
+            ],
+            context,
+        )
+        .map_err(|e| anyhow!("the response body cannot be serialized as JSON: {e}"))?;
+    // `undefined` when the object's `toJSON` gives nothing; Mountebank then fails writing it.
+    let text = text
+        .as_string()
+        .ok_or_else(|| anyhow!("the response body serializes to {}", text.display()))?;
+    // Well-formed `JSON.stringify` output is ASCII-escaped wherever it is not valid UTF-16, so
+    // this conversion is exact.
+    Ok(Some(text.to_std_string_escaped()))
 }
 
 #[cfg(test)]
@@ -4949,8 +5072,8 @@ function respond(ctx) {
         }
     }
 
-    // Issue #1369: a numeric-string statusCode reads like every other `statusCode`; an absent or
-    // unreadable one is `None`, left to the imposter's `defaultResponse`.
+    // Issue #1369: a numeric-string statusCode reads like every other `statusCode` (the handler
+    // reads the string, #1635); an absent one is `None`, left to the imposter's `defaultResponse`.
     #[test]
     fn inject_status_code_accepts_a_numeric_string() {
         let script = r#"function(config) { return { statusCode: "201", body: "b" }; }"#;
@@ -4962,7 +5085,10 @@ function respond(ctx) {
             &trusted_files(),
         )
         .expect("inject should run");
-        assert_eq!(resp.status_code, Some(201));
+        assert_eq!(
+            resp.status_code,
+            Some(crate::behaviors::ResponseStatus::Text("201".to_string()))
+        );
         let script = r#"function(config) { return { body: "b" }; }"#;
         let resp = execute_mountebank_inject(
             script,
@@ -4973,6 +5099,184 @@ function respond(ctx) {
         )
         .expect("inject should run");
         assert_eq!(resp.status_code, None);
+    }
+
+    /// The `statusCode` an inject returns, read with no request context.
+    fn inject_status(expr: &str) -> Option<crate::behaviors::ResponseStatus> {
+        let script = format!("function(config) {{ return {{ statusCode: {expr}, body: 'b' }}; }}");
+        execute_mountebank_inject(
+            &script,
+            &mb_req("GET", "/1635"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("inject should run")
+        .status_code
+    }
+
+    // Issue #1635: a string Node cannot read is kept, for the handler to refuse with a 500, not
+    // dropped to the `defaultResponse` status.
+    #[test]
+    fn inject_status_code_keeps_a_non_numeric_string() {
+        assert_eq!(
+            inject_status("'abc'"),
+            Some(crate::behaviors::ResponseStatus::Text("abc".to_string()))
+        );
+    }
+
+    // Issue #1635: a number is a code only while it is an integer within `u16`; any other value
+    // that is not falsy is its JavaScript string, which Node refuses or reads, never saturated.
+    #[test]
+    fn inject_status_code_reads_numbers_as_node_does() {
+        use crate::behaviors::ResponseStatus::{Code, Text};
+        assert_eq!(inject_status("404"), Some(Code(404)));
+        assert_eq!(inject_status("0"), Some(Code(0)));
+        assert_eq!(inject_status("-1"), Some(Text("-1".to_string())));
+        assert_eq!(inject_status("70000"), Some(Text("70000".to_string())));
+        assert_eq!(inject_status("404.7"), Some(Text("404.7".to_string())));
+        assert_eq!(inject_status("true"), Some(Text("true".to_string())));
+        assert_eq!(
+            inject_status("{}"),
+            Some(Text("[object Object]".to_string()))
+        );
+        assert_eq!(inject_status("NaN"), None);
+        assert_eq!(inject_status("false"), None);
+        assert_eq!(inject_status("null"), None);
+        assert_eq!(inject_status("undefined"), None);
+    }
+
+    // Issue #1635: a number or boolean header value is sent as JavaScript prints it, as Node's
+    // `writeHead` sends it, instead of being dropped.
+    #[test]
+    fn inject_numeric_header_values_are_sent() {
+        let script = r#"function(config) {
+            return { headers: { "X-Count": 5, "X-Flag": true, "X-Name": "n" }, body: "b" };
+        }"#;
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/1635"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("inject should run");
+        let headers = resp.headers.expect("headers returned");
+        assert_eq!(headers.get("X-Count").map(String::as_str), Some("5"));
+        assert_eq!(headers.get("X-Flag").map(String::as_str), Some("true"));
+        assert_eq!(headers.get("X-Name").map(String::as_str), Some("n"));
+    }
+
+    // Mountebank serves an object body with `JSON.stringify`, which throws for a cycle or a BigInt,
+    // and answers 500 (`baseHttpServer.js:36`, `:150-155`). The inject fails here too, instead of
+    // overflowing the stack or serving `null`.
+    #[test]
+    fn inject_unserializable_body_is_an_error() {
+        for body in [
+            "(() => { const o = {}; o.self = o; return o; })()",
+            "{ n: 10n }",
+        ] {
+            let script = format!("function(config) {{ return {{ body: {body} }}; }}");
+            let result = execute_mountebank_inject(
+                &script,
+                &mb_req("GET", "/1635"),
+                test_port(),
+                None,
+                &trusted_files(),
+            );
+            assert!(result.is_err(), "{body}: {:?}", result.map(|r| r.body));
+        }
+    }
+
+    // What `JSON.stringify` drops (a function, `undefined`) is dropped from the body too, and a
+    // `toJSON` is honoured.
+    #[test]
+    fn inject_object_body_is_serialized_as_json_stringify_does() {
+        let script = r#"function(config) {
+            return { body: { b: 1, f: function () {}, u: undefined, d: { toJSON() { return 'D'; } } } };
+        }"#;
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/1635"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("inject should run");
+        assert_eq!(resp.body_text(), r#"{"b":1,"d":"D"}"#);
+    }
+
+    // Node's well-formed `JSON.stringify` escapes a lone surrogate as `\udXXX`, and Mountebank
+    // serves that text; so does Rift.
+    #[test]
+    fn inject_body_with_a_lone_surrogate_is_served_escaped() {
+        let script = r#"function(config) { return { body: { s: '\ud800', t: 'ok' } }; }"#;
+        let resp = execute_mountebank_inject(
+            script,
+            &mb_req("GET", "/1635"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+        .expect("inject should run");
+        assert_eq!(resp.body_text(), r#"{"s":"\ud800","t":"ok"}"#);
+    }
+
+    /// An inject whose body nests `depth` objects, built without recursion.
+    fn nested_body_inject(depth: usize) -> Result<MountebankInjectResponse> {
+        let script = format!(
+            "function(config) {{ let o = {{}}; for (let i = 1; i < {depth}; i++) {{ o = {{ a: o }}; }} return {{ body: o }}; }}"
+        );
+        execute_mountebank_inject(
+            &script,
+            &mb_req("GET", "/1635"),
+            test_port(),
+            None,
+            &trusted_files(),
+        )
+    }
+
+    // A body nested past the cap is refused, rather than recursing until the stack overflows;
+    // one at the cap is served.
+    #[test]
+    fn inject_body_nesting_is_capped() {
+        let at_cap = nested_body_inject(MAX_JSON_DEPTH).expect("at the cap");
+        assert!(at_cap.body_text().starts_with(r#"{"a":{"a":"#));
+        assert!(nested_body_inject(MAX_JSON_DEPTH + 1).is_err());
+        assert!(nested_body_inject(200_000).is_err());
+    }
+
+    #[test]
+    fn js_to_json_refuses_nesting_past_the_cap() {
+        let mut context = Context::default();
+        let deep = |depth: usize, context: &mut Context| {
+            context
+                .eval(Source::from_bytes(&format!(
+                    "(() => {{ let o = {{}}; for (let i = 1; i < {depth}; i++) {{ o = [o]; }} return o; }})()"
+                )))
+                .expect("evaluates")
+        };
+        let at_cap = deep(MAX_JSON_DEPTH, &mut context);
+        assert!(js_to_json(&mut context, &at_cap).is_ok());
+        let past = deep(200_000, &mut context);
+        assert!(js_to_json(&mut context, &past).is_err());
+    }
+
+    #[test]
+    fn js_to_json_refuses_a_cycle() {
+        let mut context = Context::default();
+        let cyclic = context
+            .eval(Source::from_bytes("const o = { a: [1] }; o.a.push(o); o"))
+            .expect("evaluates");
+        assert!(js_to_json(&mut context, &cyclic).is_err());
+        // A shared, acyclic reference is not a cycle.
+        let shared = context
+            .eval(Source::from_bytes("const s = {}; ({ x: s, y: [s, s] })"))
+            .expect("evaluates");
+        assert_eq!(
+            js_to_json(&mut context, &shared).expect("acyclic"),
+            serde_json::json!({ "x": {}, "y": [{}, {}] })
+        );
     }
 
     // (a) v2 config convention: function(config) { ...config.request.path... }
