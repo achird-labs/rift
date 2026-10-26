@@ -83,7 +83,7 @@ as Mountebank does. For a plain delayed `200`, write `{"is": {}, "behaviors": [{
 `_behaviors`/`behaviors` run on an `is` response (and the flat form below), on an `inject`
 response and on a `proxy` response; `repeat` applies to every response type — see
 [Behaviors](behaviors.md). A response-level `_rift` block is read on an
-`is` response only. A `_rift`-only response without a `script` is served as `is: {}` with its
+`is` response, or the flat form, only. A `_rift`-only response without a `script` is served as `is: {}` with its
 `_rift` effects (`fault`, `conditional`, `stateOps`, `templated`): an empty `200`, completed by
 `defaultResponse` like any `is`. Its behaviors other than `repeat` still do not run. On a `proxy`, `inject` or `fault` response it is kept and returned by
 `GET /imposters/:port`, but not acted on, and is reported as `config_key_ignored` in
@@ -940,6 +940,10 @@ Mountebank refuses this form with `unrecognized response type`: it is a Rift ext
 ```
 
 `is` wins when both are present. `GET /imposters` returns the response in the `is` form.
+
+A `_rift` block beside the flat form applies to it as beside `is` (#1722), so
+`{"statusCode": 503, "_rift": {"fault": {...}}}` answers `503` with the fault's effect and runs its
+behaviors. Beside `_rift.script` the flat form is refused, as a second response type (#1729).
 
 ### Combined Alternative Format
 

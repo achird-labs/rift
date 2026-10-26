@@ -280,6 +280,18 @@ fn unread_in_response(
         .copied()
         .find(|key| present(object, key))
         .or_else(|| present(object, "_rift").then_some("_rift"));
+    // Beside a `_rift` block without a script, the flat form is the response (issue #1722): the
+    // engine decodes it as an `is` the block applies to, on its own condition (`has_flat_fields`:
+    // a `statusCode`, `body` or `headers`, an empty `headers` included; `_mode` alone is not).
+    let script = object
+        .get("_rift")
+        .and_then(|rift| rift.get("script"))
+        .is_some_and(|script| !script.is_null());
+    let flat_is = variant == Some("_rift")
+        && !script
+        && ["statusCode", "body", "headers"]
+            .into_iter()
+            .any(|key| present(object, key));
     if let Some(read) = variant {
         for key in RESPONSE_VARIANTS {
             if key != read && present(object, key) {
@@ -295,12 +307,14 @@ fn unread_in_response(
                 .is_some_and(|h| !h.is_empty()),
             other => present(object, other),
         };
-        unread.extend(
-            FLAT_RESPONSE_KEYS
-                .iter()
-                .filter(|key| flat(key))
-                .map(|key| join(path, key)),
-        );
+        if !flat_is {
+            unread.extend(
+                FLAT_RESPONSE_KEYS
+                    .iter()
+                    .filter(|key| flat(key))
+                    .map(|key| join(path, key)),
+            );
+        }
     }
     // A `proxy`, `inject` or `fault` response keeps its `_rift` only to report it ignored
     // (`ignored_rift`); `stub_analysis` warns `ConfigKeyIgnored` on it.
@@ -319,7 +333,7 @@ fn unread_in_response(
     };
     if let Some(key) = block {
         let block_path = join(path, key);
-        if matches!(variant, Some("fault" | "_rift")) {
+        if matches!(variant, Some("fault" | "_rift")) && !flat_is {
             // `ignored_behaviors`: only the cycler's `repeat` is read on these responses.
             for (element_path, element) in one_or_many(&object[key], &block_path) {
                 unread_outside(&element, &["repeat"], &element_path, unread);
@@ -1241,6 +1255,18 @@ fn a_lint_error_on_a_docs_example_is_reported() {
         dir.path(),
     );
     assert_eq!(fragment, Vec::<String>::new());
+}
+
+// Issue #1722: beside a `_rift` block without a script the flat form is an `is`, so its fields
+// and behaviors are read; `_mode` alone is not the flat form, and beside a script nothing flat is.
+#[test]
+fn the_flat_form_beside_a_script_less_rift_is_read() {
+    let document = imposter_of(json!({ "responses": [
+        { "statusCode": 503, "body": "down", "_rift": { "templated": true },
+          "_behaviors": { "wait": 5 } },
+        { "_mode": "binary", "_rift": { "templated": true } }
+    ] }));
+    assert_eq!(unread(document), vec!["stubs.0.responses.1._mode"]);
 }
 
 #[test]

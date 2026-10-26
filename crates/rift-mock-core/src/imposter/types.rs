@@ -1426,6 +1426,14 @@ pub(crate) struct StubResponseRaw {
     pub repeat: Option<serde_json::Value>,
 }
 
+impl StubResponseRaw {
+    /// Whether the response is written in the flat form (issue #304): a top-level `statusCode`,
+    /// `headers` or `body`. `_mode` alone is not.
+    fn has_flat_fields(&self) -> bool {
+        self.status_code.is_some() || self.body.is_some() || self.headers.is_some()
+    }
+}
+
 /// Serialization type for stub responses - outputs Mountebank-compatible format
 /// Uses `behaviors` as array (Mountebank standard format)
 /// Field ordering matches Mountebank: behaviors, is, proxy
@@ -2089,6 +2097,8 @@ impl TryFrom<StubResponseRaw> for StubResponse {
     fn try_from(raw: StubResponseRaw) -> Result<Self, Self::Error> {
         // First, as Mountebank's `resolve` checks it before anything else in the response.
         refuse_response_type_count(&raw, admission())?;
+        // Read before the behaviors are moved out of `raw` below.
+        let flat = raw.has_flat_fields();
         // Judged on the block as written, which the compile below consumes; reported last.
         let door_only = refuse_door_only_behavior_shapes(&raw, admission());
         // `_behaviors` when present, else `behaviors`, compiled into the program that runs
@@ -2159,20 +2169,22 @@ impl TryFrom<StubResponseRaw> for StubResponse {
                 ignored_rift: raw.rift.map(Box::new),
                 ignored_behaviors: non_empty_behaviors(behaviors),
             }
+        } else if flat && raw.rift.as_ref().is_none_or(|rift| rift.script.is_none()) {
+            // Flat / recorded response form (issue #304): top-level statusCode/headers/body with
+            // no `is` wrapper is rendered exactly like `is: { … }`. statusCode defaults to 200.
+            // A `_rift` block without a script applies to it as beside `is` (issue #1722); beside a
+            // script a door has refused it above, and a replay keeps the script response below.
+            StubResponse::new_is_compiled(
+                IsResponse::decoded(raw.status_code, raw.headers, raw.body, raw.mode),
+                behaviors,
+                raw.rift.map(Box::new),
+            )
         } else if let Some(rift) = raw.rift {
             // Rift-only response (script generates the response)
             StubResponse::RiftScript {
                 rift: Box::new(rift),
                 ignored_behaviors: non_empty_behaviors(behaviors),
             }
-        } else if raw.status_code.is_some() || raw.body.is_some() || raw.headers.is_some() {
-            // Flat / recorded response form (issue #304): top-level statusCode/headers/body with
-            // no `is` wrapper is rendered exactly like `is: { … }`. statusCode defaults to 200.
-            StubResponse::new_is_compiled(
-                IsResponse::decoded(raw.status_code, raw.headers, raw.body, raw.mode),
-                behaviors,
-                None,
-            )
         } else {
             // Default to empty Is response: every field is the author's to omit.
             StubResponse::new_is_compiled(
@@ -2879,7 +2891,7 @@ fn refuse_response_type_count(raw: &StubResponseRaw, admission: Admission) -> Re
     .into_iter()
     .filter(|present| *present)
     .count();
-    let flat = raw.status_code.is_some() || raw.body.is_some() || raw.headers.is_some();
+    let flat = raw.has_flat_fields();
     // An empty `headers` beside a script adds nothing it could drop, as rift-lint reads it.
     let flat_beside_script = raw.status_code.is_some()
         || raw.body.is_some()
@@ -4253,6 +4265,39 @@ mod tests {
                     "{responses}: expected `{MULTIPLE_TYPES}`, got `{error}`"
                 );
             }
+        }
+
+        /// Issue #1722: the flat form beside a `_rift` block without a script is the `is` it
+        /// spells, with the block applying to it, as beside `is`.
+        #[test]
+        fn flat_fields_beside_a_script_less_rift_decode_as_is() {
+            let responses = r#"[{"statusCode":503,"headers":{"X-A":"1"},"body":"down","_rift":{"fault":{"latency":{"probability":1.0,"ms":5}}}}]"#;
+            let config: ImposterConfig = serde_json::from_str(&imposter_with_responses(responses))
+                .unwrap_or_else(|e| panic!("{responses}: {e}"));
+            match &config.stubs[0].responses[0] {
+                StubResponse::Is { is, rift, .. } => {
+                    assert_eq!(is.status_code, 503);
+                    assert_eq!(is.headers["X-A"], vec!["1".to_string()]);
+                    assert!(rift.as_ref().is_some_and(|rift| rift.fault.is_some()));
+                }
+                other => panic!("expected an `is` carrying its `_rift`, got {other:?}"),
+            }
+        }
+
+        /// Issue #1722: the flat form beside a script stays a script response on replay, as an
+        /// earlier engine stored it; a door refuses it (#1729).
+        #[test]
+        fn flat_fields_beside_a_rift_script_still_replay_as_the_script() {
+            let stored = serde_json::json!({
+                "statusCode": 503,
+                "_rift": {"script": {"engine": "rhai", "code": "fn respond(ctx) { pass() }"}}
+            });
+            let response: StubResponse =
+                deserialize_replayed(stored).expect("a replayed response decodes");
+            assert!(
+                matches!(response, StubResponse::RiftScript { .. }),
+                "{response:?}"
+            );
         }
 
         /// Issue #1729: the other `_rift` keys still apply beside `is`, so they stay admitted.
