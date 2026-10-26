@@ -581,6 +581,12 @@ pub struct Imposter {
     /// Level-triggered, unlike `shutdown_tx`, so a request that arrives just before the delete
     /// still sees it. Never cancelled for an imposter no manager started.
     pub(crate) cancel: tokio_util::sync::CancellationToken,
+    /// This imposter's Mountebank script `state` (issue #1726), owned by this instance as
+    /// Mountebank's `imposterState` is owned by its imposter object. A run that outlives the delete
+    /// writes into this cell, not into the one a same-port re-create starts with. Swapped, never
+    /// cleared in place, by a runtime restart: a run holds the inner lock for its whole duration.
+    pub(crate) script_state:
+        arc_swap::ArcSwap<parking_lot::Mutex<serde_json::Map<String, serde_json::Value>>>,
     /// Flow store for Rift extensions (stateful scripting)
     pub flow_store: Arc<dyn FlowStore>,
     /// Whether `flow_store` is the built-in in-memory store rather than a
@@ -727,6 +733,7 @@ impl Imposter {
             serve_handles: Mutex::new(Vec::new()),
             conn_tracker: tokio_util::task::TaskTracker::new(),
             cancel: tokio_util::sync::CancellationToken::new(),
+            script_state: arc_swap::ArcSwap::default(),
             flow_store,
             flow_store_is_default,
             sequencer,
@@ -1158,20 +1165,20 @@ impl Imposter {
             })
     }
 
-    /// The scope of this imposter's Mountebank inject/decorate script runs (issue #1726): their
-    /// state is stored under it in the process-global `IMPOSTER_STATE` map, keyed by the imposter's
-    /// bound listener port.
+    /// The scope of this imposter's Mountebank inject/decorate script runs (issue #1726): this
+    /// instance's own state cell, and its bound listener port for the logger and host globals.
     ///
     /// `config.port` is `Some(bound_port)` for the entire life of a live imposter: the manager
     /// assigns and records the real, distinct bound port in `create_imposter_staged` *before* the
-    /// imposter is constructed or serves a request, so distinct imposters (including auto-bind
-    /// ones) always get distinct keys and never clobber each other's script state (issue #439).
+    /// imposter is constructed or serves a request, so the logger and host globals of distinct
+    /// imposters (including auto-bind ones) always name distinct ports (issue #439). The state is
+    /// never keyed by the port: each instance has its own cell (issue #1726).
     /// The `unwrap_or(0)` fallback is therefore unreachable for a live imposter — `0` is the
     /// documented "no live imposter" sentinel (see `rift-ffi`); it exists only to keep this
     /// total. Centralised here so the invariant has one greppable home rather than a scattered
     /// magic `config.port.unwrap_or(0)` at every script call site.
     pub(crate) fn script_scope(&self) -> crate::scripting::ScriptScope {
-        crate::scripting::ScriptScope::detached(self.bound_port())
+        crate::scripting::ScriptScope::new(self.bound_port(), self.script_state.load_full())
     }
 
     /// This imposter's bound listener port, carrying the same invariant [`Self::script_scope`]

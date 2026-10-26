@@ -344,6 +344,11 @@ record.
 
 ### Fixed
 
+- **An imposter re-created on the same port no longer starts with script `state` written by the
+  imposter it replaced** (#1726). A response inject, decorate or predicate inject of the deleted
+  imposter that ran after the delete, still queued on the script pool or on a predicate scan the
+  delete did not stop, wrote into the new imposter's state. Script state now belongs to the imposter
+  instance, as in Mountebank.
 - **A second `proxyOnce` stub, or one whose recording was moved behind it, forwards and records**
   (#1705). With `predicateGenerators`, a request that reached it replayed the recording another
   proxy stub made, or the one now behind it, and forwarded nothing. It now forwards and records

@@ -363,7 +363,8 @@ const MB_SCRIPT_CACHE_CAPACITY: usize = 64;
 /// Mountebank: none can borrow more file access from another, but one can see what another's
 /// script passes through a builtin it patched. Every global the hooks *contract* on is re-set per run
 /// (`__config`/`__logger`/state globals), and the per-imposter state object is rebuilt per run
-/// from the port-keyed `IMPOSTER_STATE` map, so cross-imposter isolation of *state* is unaffected.
+/// from the run's [`ScriptScope`], the imposter's own cell (issue #1726), so cross-imposter isolation
+/// of *state* is unaffected.
 /// `require` is never a global: each run passes its own into the hook's scope, and a `require` a
 /// script keeps answers only during the run that made it (issue #1611).
 struct MbJsThread {
@@ -1891,35 +1892,6 @@ impl MountebankInjectResponse {
     }
 }
 
-/// Per-imposter script state for Mountebank inject/decorate functions, shared across a port's
-/// predicate injects, response injects, and decorate (issue #355 Item 0).
-///
-/// Sharded by port, and each port's cell is a `parking_lot::Mutex` held across the *whole*
-/// get→run→save of a single inject/decorate call (issue #477): concurrent same-imposter script
-/// runs therefore serialize — matching Mountebank's single-threaded state semantics, so no update
-/// is lost — while unrelated imposters never contend, and parking_lot never poisons, so a
-/// panicking script can't wedge the map. The outer mutex is taken only briefly, to look up or
-/// create a port's cell.
-use std::sync::LazyLock;
-
-/// One imposter's script-state map behind its own lock (issue #477).
-type ImposterStateCell = std::sync::Arc<parking_lot::Mutex<serde_json::Map<String, Value>>>;
-
-static IMPOSTER_STATE: LazyLock<
-    parking_lot::Mutex<std::collections::HashMap<u16, ImposterStateCell>>,
-> = LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
-
-/// The state cell for `port`, creating an empty one on first use. Lock the returned cell to read
-/// and write the port's state atomically across a script run.
-fn imposter_state_cell(port: u16) -> ImposterStateCell {
-    std::sync::Arc::clone(IMPOSTER_STATE.lock().entry(port).or_default())
-}
-
-/// Clear state for an imposter (called when imposter is deleted).
-pub fn clear_imposter_state(port: u16) {
-    IMPOSTER_STATE.lock().remove(&port);
-}
-
 /// Execute a Mountebank-style inject function.
 ///
 /// Implements Mountebank v2's `config`-first calling convention (issue #355 Item 0), built like
@@ -2112,7 +2084,7 @@ fn execute_mountebank_inject_within(
     // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
     // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
     // guard is written back at the end of this call.
-    let cell = imposter_state_cell(scope.port);
+    let cell = Arc::clone(&scope.state);
     let mut imposter_state = cell.lock();
     let state_map = imposter_state.clone();
     let state_obj = json_to_js(&mut *context, &Value::Object(state_map))?;
@@ -2402,7 +2374,7 @@ fn execute_predicate_inject_in(
     // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
     // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
     // guard is written back at the end of this call.
-    let cell = imposter_state_cell(scope.port);
+    let cell = Arc::clone(&scope.state);
     let mut imposter_state = cell.lock();
     let state_map = imposter_state.clone();
     let state_obj = match json_to_js(&mut *context, &Value::Object(state_map)) {
@@ -3357,7 +3329,7 @@ fn execute_mountebank_decorate_within_budget(
     // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
     // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
     // guard is written back at the end of this call.
-    let cell = imposter_state_cell(scope.port);
+    let cell = Arc::clone(&scope.state);
     let mut imposter_state = cell.lock();
     let state_map = imposter_state.clone();
     let state_obj = json_to_js(&mut *context, &Value::Object(state_map))?;
@@ -4181,8 +4153,7 @@ function respond(ctx) {
         }
     }
 
-    // Allocates a fresh, never-reused port number for each test that touches the process-global
-    // `IMPOSTER_STATE` map, so parallel tests never see each other's persisted state.
+    // A fresh, never-reused port number per test, so the logger lines of parallel tests stay apart.
     fn test_port() -> u16 {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(40_100);
@@ -5889,8 +5860,8 @@ function respond(ctx) {
         )
         .expect("response inject should run");
         assert_eq!(resp_a.body_text(), "from-A");
-        // (Decorate keys the SAME `IMPOSTER_STATE` map via the identical `imposter_port`, so its
-        // isolation follows from the same mechanism proven here.)
+        // (Decorate reads the same scope's cell, so its isolation follows from the same mechanism
+        // proven here.)
     }
 
     // Issue #477: concurrent injects on the SAME imposter must not lose state updates. With the old
@@ -5956,16 +5927,12 @@ function respond(ctx) {
         );
     }
 
-    // Issue #743 (RFC-712 pre-work): the hypothesized defect — thread-local per-port script
-    // state surviving imposter deletion on other pool workers — does NOT exist: `IMPOSTER_STATE`
-    // is one process-global map shared by every worker, and `clear_imposter_state` removes the
-    // port's entry for all of them at once. This test proves it across concurrent pool workers
-    // and locks the invariant in as a regression gate, so a future topology change (per-core
-    // runtimes, RFC-712) cannot silently break it: state accumulated from many workers vanishes
-    // after the delete-path clear, and a recreated imposter on the same port starts fresh no
-    // matter which worker serves it.
+    // Issue #743 (RFC-712 pre-work), reworked by #1726: an imposter's script state is one cell that
+    // every pool worker reads and writes, never a per-worker copy, and an imposter re-created on the
+    // same port gets a cell of its own. State accumulated from many workers stays with the first
+    // scope; the new one starts fresh on every worker.
     #[test]
-    fn clear_imposter_state_resets_state_for_every_pool_worker() {
+    fn state_is_one_cell_for_every_pool_worker_and_a_new_scope_starts_fresh() {
         let port = test_port();
         let scope = ScriptScope::detached(port);
         let incr = r#"function(config) {
@@ -6004,16 +5971,15 @@ function respond(ctx) {
             "precondition: increments from every worker persisted into the shared cell"
         );
 
-        // The imposter-delete path (`manager.rs` shutdown, after connection drain) calls
-        // exactly this — a replace routes through the same shutdown.
-        clear_imposter_state(port);
+        // The imposter re-created on the same port: its own cell.
+        let recreated = ScriptScope::detached(port);
 
         // A recreated imposter on the same port must see fresh state from EVERY worker. Reads
         // run concurrently so multiple pool workers serve them — a worker-cached copy of the
         // old state would resurface here.
         std::thread::scope(|s| {
             for _ in 0..8 {
-                let scope = scope.clone();
+                let scope = recreated.clone();
                 s.spawn(move || {
                     let resp = execute_mountebank_inject(
                         read,
@@ -6026,11 +5992,19 @@ function respond(ctx) {
                     assert_eq!(
                         resp.body_text(),
                         "0",
-                        "post-delete reads must see fresh state on every worker"
+                        "the re-created imposter starts with fresh state on every worker"
                     );
                 });
             }
         });
+        let kept =
+            execute_mountebank_inject(read, &mb_req("GET", "/gen"), scope, None, &trusted_files())
+                .expect("read inject should run");
+        assert_eq!(
+            kept.body_text(),
+            n.to_string(),
+            "the first imposter's state is its own"
+        );
     }
 
     // =========================================================================================

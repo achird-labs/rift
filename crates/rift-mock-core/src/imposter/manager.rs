@@ -2180,10 +2180,7 @@ impl ImposterManager {
             );
         }
 
-        // Clear JavaScript inject state for this imposter
-        #[cfg(feature = "javascript")]
-        crate::scripting::clear_imposter_state(port);
-
+        // No script state to clear: it belongs to this instance and goes with it (issue #1726).
         if let Some(sequencer) = &self.sequencer {
             sequencer.reset_scope(port, None);
         }
@@ -2963,8 +2960,9 @@ impl ImposterManager {
             .clear_recorded_requests()
             .map_err(ImposterError::Backend)?;
         imposter.proxy_store.clear(port);
-        #[cfg(feature = "javascript")]
-        crate::scripting::clear_imposter_state(port);
+        // A fresh cell, not a cleared one: a script run in flight holds the old cell's lock for its
+        // whole duration. It, and a run already submitted, finish in the old cell (#1726).
+        imposter.script_state.store(std::sync::Arc::default());
         imposter
             .restart_flow_state()
             .map_err(ImposterError::Backend)

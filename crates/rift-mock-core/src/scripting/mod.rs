@@ -43,27 +43,54 @@ mod js_runtime;
 pub(crate) use js_engine::bounded_js_context;
 #[cfg(feature = "javascript")]
 pub use js_engine::{
-    InjectionFailure, JsEngine, MountebankRequest, PredicateInjectionError, clear_imposter_state,
-    compile_js_to_bytecode, execute_mountebank_decorate, execute_mountebank_decorate_within,
-    execute_mountebank_inject, execute_mountebank_inject_bounded,
-    execute_predicate_generator_inject, execute_predicate_inject,
+    InjectionFailure, JsEngine, MountebankRequest, PredicateInjectionError, compile_js_to_bytecode,
+    execute_mountebank_decorate, execute_mountebank_decorate_within, execute_mountebank_inject,
+    execute_mountebank_inject_bounded, execute_predicate_generator_inject,
+    execute_predicate_inject,
 };
 #[cfg(feature = "javascript")]
 #[allow(unused_imports)]
 pub use js_engine::{MountebankInjectResponse, execute_js_bytecode};
 
+/// One imposter's script-state map behind its own lock (issue #477).
+pub(crate) type ScriptStateCell =
+    std::sync::Arc<parking_lot::Mutex<serde_json::Map<String, serde_json::Value>>>;
+
 /// The imposter a script run belongs to (issue #1726): the port its logger and host globals name,
-/// and — through it — the script `state` it reads and writes.
+/// and the script `state` its inject, decorate and predicate inject read and write.
+///
+/// The state belongs to one imposter instance, as Mountebank's `imposterState` belongs to one
+/// imposter object. A run that outlives its imposter's delete writes into that imposter's cell,
+/// never into the one an imposter re-created on the same port starts with. A run holds the cell's
+/// lock across its whole get, run and save (issue #477), so concurrent runs of one imposter
+/// serialize and lose no update, while other imposters never contend.
 #[derive(Debug, Clone)]
 pub struct ScriptScope {
     pub port: u16,
+    #[cfg_attr(not(feature = "javascript"), allow(dead_code))]
+    pub(crate) state: ScriptStateCell,
 }
 
 impl ScriptScope {
-    /// A scope for a run that no managed imposter owns: a standalone match, a test.
+    pub(crate) fn new(port: u16, state: ScriptStateCell) -> Self {
+        Self { port, state }
+    }
+
+    /// A scope with its own empty state, for a run no imposter owns, such as a test.
     #[must_use]
     pub fn detached(port: u16) -> Self {
-        Self { port }
+        Self::new(port, ScriptStateCell::default())
+    }
+
+    /// The scope of a standalone match ([`stub_matches`](crate::imposter::stub_matches) and
+    /// [`predicate_matches`](crate::imposter::predicate_matches), which intercept rules use): one
+    /// state per port, kept for the life of the process, as every script state was before #1726.
+    pub(crate) fn standalone(port: u16) -> Self {
+        static STANDALONE: std::sync::LazyLock<
+            parking_lot::Mutex<std::collections::HashMap<u16, ScriptStateCell>>,
+        > = std::sync::LazyLock::new(Default::default);
+        let state = std::sync::Arc::clone(STANDALONE.lock().entry(port).or_default());
+        Self::new(port, state)
     }
 }
 
