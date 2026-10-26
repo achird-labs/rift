@@ -324,14 +324,21 @@ the predicate default applies and the recording ignores case, as in Mountebank. 
 ### Generation Failures
 
 A predicate generator can also be an [`inject`](../features/scripting.md) function that builds
-predicates in JavaScript. If that generation **fails** — the script throws, returns something other
-than a predicate array, the script pool is unavailable, or it exceeds the script timeout — Rift does
-**not** record a stub. Recording a stub with the empty/partial predicate list would produce a
-match-all stub that shadows every future request, so the failure is surfaced instead of hidden:
+predicates in JavaScript. If that `inject` **fails** when a request reaches it — it throws, returns
+something other than an array, or exceeds the script timeout — the request is forwarded, its
+behaviors run, nothing is recorded, and the client gets Mountebank's `500` with
+`{"errors":[{"code":"invalid injection","message":"invalid predicateGenerator injection",
+"source":"(<fn>)(config);","data":"<the error's message>"}]}` instead of the upstream's response
+(#1708). `data` is left out for a thrown value without a message (`throw 'text'`), and names the
+timeout for a script past its deadline. This holds in every proxy mode, `proxyTransparent`
+included, whose generators run on every request and whose predicates are discarded. When the script
+pool cannot run the generator, or its task panics, the answer is a Rift `500 internal error`
+instead. Each of these responses carries an `x-rift-generator-error` header naming the failure:
+`script-error`, `invalid-output`, `timeout`, `pool-failure` or `task-panic`.
 
-- **no stub is recorded** for that request (the proxied response is still returned to the client), and
-- the proxied response carries an `x-rift-generator-error` header whose value names the failure —
-  `script-error`, `invalid-output`, `invalid-predicate`, `pool-failure`, `timeout`, or `task-panic`.
+A generated predicate the engine would not admit is different: the upstream's response is served,
+nothing is recorded, and it carries `x-rift-generator-error: invalid-predicate`. Recording a stub
+with the remaining predicates would match every later request.
 
 `invalid-predicate` covers any generated predicate the engine would not admit, from any generator:
 an `inject` that returns a misspelled operator (`{"equal": …}`), or a `"predicateOperator":
@@ -341,7 +348,7 @@ later request. It also covers an unreadable generator entry in a config that rea
 without the create-time check (a replayed rift-cluster config, for one).
 
 A generator that legitimately returns an empty array (`[]`) is **not** a failure — it records a
-match-all stub as before. Only genuine generation failures skip recording and set the header.
+match-all stub as before. Only genuine generation failures skip recording.
 
 A generator `xpath` selector that fails to evaluate on an XML body (a prefix its `ns` does not bind,
 an unknown function) is not in that list. The request is forwarded, nothing is recorded, and the

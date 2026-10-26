@@ -18,6 +18,7 @@ the response configures. Some responses carry one more marker:
 | `x-rift-proxy-latency: <ms>` | A proxied response, with the upstream's time in milliseconds |
 | `x-rift-proxy-error: true` | The proxy could not reach the upstream (see [Proxy](proxy.md)) |
 | `x-rift-wait-error: true` | A `wait` function threw; the body is Mountebank's `invalid wait injection` error (see [Behaviors](behaviors.md#how-a-wait-string-is-read)) |
+| `x-rift-generator-error: <failure>` | A proxy `predicateGenerators` generator failed while recording; on a `500` the body is Mountebank's `invalid predicateGenerator injection` error, and on `invalid-predicate` the upstream's response is served (see [Proxy](proxy.md#generation-failures)) |
 | `x-rift-inject-error: true` | A response or predicate `inject` threw; the body is Mountebank's `invalid injection` error (a throw is `500` with the thrown message in `data`) |
 | `x-rift-inject: true` | An `inject` response produced it |
 | `x-rift-default-response: true` | No stub matched and the imposter's `defaultResponse` answered |
@@ -432,6 +433,14 @@ and header-name lookup differ from Mountebank 2.9.1's. So do a whole field filte
 request), and a listed query or form key the request repeats (the array of its values, where
 Mountebank records `{}`). Each difference, and why Rift's recording is the one that replays, is
 listed under [Proxy: What Gets Recorded](proxy.md#what-gets-recorded).
+
+A `predicateGenerators` `inject` that fails on a real request answers Mountebank's `500 invalid
+predicateGenerator injection` in Rift too (#1708), with three differences. For a non-array return,
+`data` is Rift's description, not V8's `TypeError` text, and `name` and `stack` are left out, as
+on every Rift error. A string return answers the same `500`, and an array of non-predicates serves
+the upstream with `x-rift-generator-error: invalid-predicate` and records nothing, where Mountebank
+records either as a stub that fails every later request with `missing predicate`. Rift's script deadline, which Mountebank lacks, answers the
+same `500`, with `data` naming the timeout.
 
 Mountebank 2.9.5 refuses every generator with `"predicateOperator": "exists"` when the imposter is
 created (an internal error with no message), although its docs describe it; Rift records

@@ -69,6 +69,13 @@ record.
 
 ### Changed
 
+- **A proxy `predicateGenerators` `inject` that fails on a real request answers Mountebank's `500
+  invalid predicateGenerator injection`** (#1708), with `source` and `data`, after the request is
+  forwarded and its behaviors run, in every proxy mode. It used to serve the upstream response with
+  `x-rift-generator-error`, which is kept as a marker on the `500`. `proxyTransparent` now runs its
+  generator injects on every request, as Mountebank does, and discards what they generate. A
+  script-pool failure or a panic answers a Rift `500 internal error`. An invalid generated predicate
+  still serves the upstream with `x-rift-generator-error: invalid-predicate` and records nothing.
 - **A response with `_rift.script` beside `is`, `proxy`, `inject`, `fault` or the flat
   `statusCode`/`headers`/`body` form is refused at a config door** (#1729), with `each response
   object must have only one response type`. The script never ran there: the `is` (or other type) was

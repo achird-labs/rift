@@ -149,16 +149,7 @@ pub(crate) async fn reject_failing_generators(
 /// Mountebank's `400 invalid injection` for a generator inject its dry run caught (issue #1580).
 /// `data` is left out when the thrown value had no message, as Mountebank leaves it out.
 fn generator_injection_refused(source: &str, data: Option<&str>) -> Response<Full<Bytes>> {
-    let mut error = serde_json::json!({
-        "code": ErrorKind::InvalidInjection.slug(),
-        "type": ErrorKind::InvalidInjection.slug(),
-        "message": "invalid predicateGenerator injection",
-        "source": source,
-    });
-    if let Some(data) = data {
-        error["data"] = data.into();
-    }
-    let body = serde_json::json!({ "errors": [error] }).to_string();
+    let body = crate::response::generator_injection_error_body(source, data);
     build_response_with_headers(
         StatusCode::BAD_REQUEST,
         [("Content-Type", ADMIN_JSON_CONTENT_TYPE)],

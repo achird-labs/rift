@@ -88,6 +88,17 @@
     "rift": "true"
   },
   {
+    "id": "marker-x-rift-generator-error",
+    "case": "*",
+    "location": "step*.header.x-rift-generator-error",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "| `x-rift-generator-error: <failure>` | A proxy `predicateGenerators` generator failed while recording; on a `500` the body is Mountebank's `invalid predicateGenerator injection` error, and on `invalid-predicate` the upstream's response is served (see [Proxy](proxy.md#generation-failures)) |",
+    "reason": "Rift marker header x-rift-generator-error",
+    "mountebank": "(absent)",
+    "riftMatches": "script-error|invalid-output|invalid-predicate|timeout|pool-failure|task-panic"
+  },
+  {
     "id": "marker-x-rift-proxy-latency",
     "case": "*",
     "location": "step*.header.x-rift-proxy-latency",
