@@ -1355,7 +1355,7 @@ fn parse_behaviors(
     feature = "schema",
     derive(schemars::JsonSchema),
     schemars(
-        description = "One response of a stub: an `is`, `proxy`, `inject` or `fault` response, a `_rift`-only script response, or the flat recorded form (`statusCode`/`headers`/`body` at the top level). Exactly one of `is`, `proxy`, `inject`, `fault`, or a `_rift`-only or flat response; a config door refuses two, or none."
+        description = "One response of a stub: an `is`, `proxy`, `inject` or `fault` response, a `_rift`-only script response, or the flat recorded form (`statusCode`/`headers`/`body` at the top level). Exactly one of `is`, `proxy`, `inject`, `fault`, or a `_rift`-only or flat response; a config door refuses two, or none. `_rift.script` is a response type of its own: beside `is`, `proxy`, `inject`, `fault` or the flat form it is refused (#1729); the other `_rift` keys apply to the response they sit beside."
     )
 )]
 #[serde(rename_all = "camelCase")]
@@ -2856,6 +2856,10 @@ impl ProxyResponse {
 /// empty `inject`/`fault` string are absent. A `_rift`-only response and the flat
 /// `statusCode`/`headers`/`body` form (#304) are Rift extensions and still count as a response.
 ///
+/// `_rift.script` is a response type of its own (issue #1729): a script builds the whole response,
+/// and beside `is`, `proxy`, `inject`, `fault` or the flat form it never ran, so that is refused as
+/// two types. The other `_rift` keys still apply to the response they sit beside.
+///
 /// **Door-only.** [`admission_check_stub`] cannot re-run it: the decoded [`StubResponse`] holds one
 /// type, so what this refuses is already gone, and what it serialises never carries two or none.
 /// A replayed decode ([`Admission::Skipped`]) keeps the precedence reduction older engines applied.
@@ -2864,17 +2868,26 @@ fn refuse_response_type_count(raw: &StubResponseRaw, admission: Admission) -> Re
         return Ok(());
     }
     let truthy = |text: &Option<String>| text.as_deref().is_some_and(|text| !text.is_empty());
+    let script = raw.rift.as_ref().is_some_and(|rift| rift.script.is_some());
     let types = [
         raw.is.is_some(),
         raw.proxy.is_some(),
         truthy(&raw.inject),
         truthy(&raw.fault),
+        script,
     ]
     .into_iter()
     .filter(|present| *present)
     .count();
     let flat = raw.status_code.is_some() || raw.body.is_some() || raw.headers.is_some();
-    if types > 1 {
+    // An empty `headers` beside a script adds nothing it could drop, as rift-lint reads it.
+    let flat_beside_script = raw.status_code.is_some()
+        || raw.body.is_some()
+        || raw
+            .headers
+            .as_ref()
+            .is_some_and(|headers| !headers.is_empty());
+    if types > 1 || (script && flat_beside_script) {
         Err("each response object must have only one response type".to_string())
     } else if types == 0 && raw.rift.is_none() && !flat {
         Err("unrecognized response type".to_string())
@@ -4215,6 +4228,76 @@ mod tests {
                     "{responses}: expected `{message}`, got `{error}`"
                 );
             }
+        }
+
+        /// Issue #1729: `_rift.script` is a response type of its own. Beside `is`, `proxy`,
+        /// `inject`, `fault` or the flat form it never ran, and a config door refuses it as two.
+        #[test]
+        fn a_rift_script_beside_another_response_type_is_refused() {
+            let script = r#"{"script":{"engine":"rhai","code":"fn respond(ctx) { pass() }"}}"#;
+            for other in [
+                r#""is":{"statusCode":200}"#,
+                r#""proxy":{"to":"http://localhost:1"}"#,
+                r#""inject":"function () { return {}; }""#,
+                r#""fault":"CONNECTION_RESET_BY_PEER""#,
+                r#""statusCode":503"#,
+                r#""body":"flat""#,
+            ] {
+                let responses = format!(r#"[{{{other},"_rift":{script}}}]"#);
+                let error =
+                    serde_json::from_str::<ImposterConfig>(&imposter_with_responses(&responses))
+                        .expect_err(&responses)
+                        .to_string();
+                assert!(
+                    error.starts_with(MULTIPLE_TYPES),
+                    "{responses}: expected `{MULTIPLE_TYPES}`, got `{error}`"
+                );
+            }
+        }
+
+        /// Issue #1729: the other `_rift` keys still apply beside `is`, so they stay admitted.
+        #[test]
+        fn a_rift_block_without_a_script_beside_is_is_admitted() {
+            let responses = r#"[{"is":{"statusCode":200},"_rift":{"fault":{"latency":{"probability":1.0,"ms":5}}}}]"#;
+            let config: ImposterConfig = serde_json::from_str(&imposter_with_responses(responses))
+                .unwrap_or_else(|e| panic!("{responses}: {e}"));
+            assert!(matches!(
+                &config.stubs[0].responses[0],
+                StubResponse::Is { rift: Some(_), .. }
+            ));
+            // An empty `headers` beside a script is not the flat form, as rift-lint reads it.
+            let responses = r#"[{"_rift":{"script":{"engine":"rhai","code":"fn respond(ctx) { pass() }"}},"headers":{}}]"#;
+            let config: ImposterConfig = serde_json::from_str(&imposter_with_responses(responses))
+                .unwrap_or_else(|e| panic!("{responses}: {e}"));
+            assert!(matches!(
+                &config.stubs[0].responses[0],
+                StubResponse::RiftScript { .. }
+            ));
+        }
+
+        /// Issue #1729: the refusal is door-only. A stored config an older engine admitted still
+        /// replays, as the `is` with its script, and passes the stored-config admission check.
+        #[test]
+        fn a_rift_script_beside_is_still_replays() {
+            let stored = serde_json::json!({
+                "is": {"statusCode": 200},
+                "_rift": {"script": {"engine": "rhai", "code": "fn respond(ctx) { pass() }"}}
+            });
+            let response: StubResponse =
+                deserialize_replayed(stored.clone()).expect("a replayed response decodes");
+            match &response {
+                StubResponse::Is {
+                    rift: Some(rift), ..
+                } => assert!(rift.script.is_some()),
+                other => panic!("expected an `is` carrying its script, got {other:?}"),
+            }
+            let config: ImposterConfig = deserialize_replayed(serde_json::json!({
+                "port": 4700,
+                "protocol": "http",
+                "stubs": [{"responses": [stored]}]
+            }))
+            .expect("a replayed imposter decodes");
+            assert_eq!(super::super::admission_check(&config), Ok(()));
         }
 
         /// The rows Mountebank admits, by the truthiness it counts types with, and Rift's two

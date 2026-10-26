@@ -1248,8 +1248,6 @@ fn rift_and_behaviors_a_response_keeps_only_to_report_are_unread() {
     let document = imposter_of(json!({ "responses": [
         { "fault": "CONNECTION_RESET_BY_PEER", "_rift": { "templated": true },
           "_behaviors": { "wait": 5, "repeat": 2 } },
-        { "_rift": { "script": { "code": "fn respond(ctx) {}" } }, "statusCode": 404,
-          "headers": {} },
         { "inject": "function () { return {}; }", "_behaviors": { "wait": 5 } }
     ] }));
     assert_eq!(
@@ -1257,7 +1255,6 @@ fn rift_and_behaviors_a_response_keeps_only_to_report_are_unread() {
         vec![
             "stubs.0.responses.0._behaviors.wait",
             "stubs.0.responses.0._rift",
-            "stubs.0.responses.1.statusCode",
         ]
     );
 }

@@ -286,10 +286,15 @@ fn check_ignored_keys(file: &Path, imposter: &Value, result: &mut LintResult) {
 
 /// The shape of a response whose `_rift` block the engine keeps but never applies: `proxy`,
 /// `inject` or `fault`, in the engine's parse precedence (`is` first, then those three in order).
-/// A `null` value is absent, as serde reads it.
+/// A `null` value is absent, as serde reads it. A block with a `script` is E056's instead: the
+/// engine refuses it beside another response type (issue #1729).
 fn ignored_rift_shape(response: &Value) -> Option<&'static str> {
     let present = |key: &str| response.get(key).is_some_and(|v| !v.is_null());
-    if present("is") || !present("_rift") {
+    let script = response
+        .get("_rift")
+        .and_then(|rift| rift.get("script"))
+        .is_some_and(|script| !script.is_null());
+    if present("is") || !present("_rift") || script {
         return None;
     }
     UNAPPLIED_RIFT_SHAPES
@@ -1716,10 +1721,22 @@ pub fn validate_response(
     // `responseResolver.js` (issue #1551): by JavaScript truthiness, so `null` and an empty
     // `inject`/`fault` string are absent. Two are refused; none is refused unless the response is
     // one of Rift's two extensions, `_rift`-only or the flat form.
-    let types: Vec<&str> = RESPONSE_TYPE_KEYS
+    let mut types: Vec<&str> = RESPONSE_TYPE_KEYS
         .into_iter()
         .filter(|key| response.get(*key).is_some_and(js_truthy))
         .collect();
+    // `_rift.script` is a response type of its own (issue #1729): beside another type, or beside
+    // the flat form, the engine refuses it at a config door, since the script never ran there.
+    if response
+        .get("_rift")
+        .and_then(|rift| rift.get("script"))
+        .is_some_and(|script| !script.is_null())
+    {
+        types.push("_rift.script");
+        if has_flat {
+            types.push("the flat statusCode/headers/body");
+        }
+    }
     if types.len() > 1 {
         result.add_issue(
             LintIssue::error(
@@ -1732,8 +1749,9 @@ pub fn validate_response(
             )
             .with_location(location)
             .with_suggestion(
-                "Keep one of 'is', 'proxy', 'inject' and 'fault' per response; to pair a status \
-                 with a transport fault, put '_rift.fault' inside 'is'",
+                "Keep one of 'is', 'proxy', 'inject', 'fault' and '_rift.script' per response; to \
+                 pair a status with a transport fault, put '_rift.fault' inside 'is'; a script \
+                 builds the whole response, so answer from it with http(...) instead of an 'is'",
             ),
         );
     } else if types.is_empty() && !has_rift && !has_flat {

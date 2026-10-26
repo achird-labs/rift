@@ -69,6 +69,12 @@ record.
 
 ### Changed
 
+- **A response with `_rift.script` beside `is`, `proxy`, `inject`, `fault` or the flat
+  `statusCode`/`headers`/`body` form is refused at a config door** (#1729), with `each response
+  object must have only one response type`. The script never ran there: the `is` (or other type) was
+  served, so a script's `pass()` never reached it. Write the success answer in the script with
+  `http(...)`. A stored or `--datadir` config an earlier engine admitted still loads, with a
+  `config_key_ignored` warning; `rift-lint` E056 reports the shape too.
 - **Deleting or replacing an imposter cuts off every request it is still answering** (#1643): a
   slow proxy upstream, a running `shellTransform`, an `inject` waiting on a timer, not just a request
   in a `wait` (#1616), through every door including the `/__rift/:port/` gateway, as Mountebank
@@ -691,6 +697,10 @@ record.
 
 ### Documentation
 
+- **The two flow-state examples in `docs/mountebank/responses.md`** (per-user retry, quota) now
+  answer success from the script with `http(200, ...)` (#1729). They put the success answer in an
+  `is` beside `_rift.script` and relied on `pass()` reaching it, which never happened: the `is` was
+  always served.
 - **An `async` decorate that returns nothing is documented as differing from Mountebank** (#1679):
   Rift serves the mutated response, as for a synchronous decorate; Mountebank answers `500` for
   `undefined` and an empty response for `0`, `''` or `false`. A differential case pins both.

@@ -102,6 +102,18 @@ fn ignored_rift_shape(response: &StubResponse) -> Option<&'static str> {
     }
 }
 
+/// The shape of a response whose `_rift.script` never runs (issue #1729): one beside an `is`. Every
+/// config door refuses it as two response types, so only a replayed or `--datadir` config an older
+/// engine admitted reaches here; the `is` is served, with the block's other keys.
+fn ignored_script_shape(response: &StubResponse) -> Option<&'static str> {
+    match response {
+        StubResponse::Is {
+            rift: Some(rift), ..
+        } if rift.script.is_some() => Some("is"),
+        _ => None,
+    }
+}
+
 /// The shape of a response whose behaviors block holds something no behavior runs on (issue #1181).
 /// Behaviors run on `is`, `inject` and `proxy` responses; `repeat` applies to every response (#1188), so a
 /// block that sets nothing else is not ignored.
@@ -233,6 +245,15 @@ pub fn ignored_config_keys(config: &ImposterConfig, stubs: &[Stub]) -> Vec<StubW
                 ),
             ));
         }
+    }
+    if let Some((first, listed)) = stubs_with_shape(stubs, "is", ignored_script_shape) {
+        warnings.push(per_shape(
+            first,
+            format!(
+                "`_rift.script` beside an `is` response has no effect: a script is a response type \
+                 of its own, and the `is` is served (stubs {listed})"
+            ),
+        ));
     }
     for (shape, noun, why) in [
         (
@@ -1588,6 +1609,39 @@ mod tests {
         assert_eq!(count(&result, WarningType::PotentiallyShadowed), 1);
         let result = analyze_new_stub(&stubs[..1], &stubs[1], 1);
         assert_eq!(count(&result, WarningType::PotentiallyShadowed), 1);
+    }
+
+    /// Issue #1729: a `_rift.script` beside `is`, which only a replayed config can still carry, is
+    /// one load-time entry; a `_rift` block without a script beside `is` applies and is not listed.
+    #[test]
+    fn a_rift_script_beside_is_is_reported_ignored() {
+        let replayed = |response: serde_json::Value| -> Stub {
+            crate::imposter::deserialize_replayed(json!({ "responses": [response] }))
+                .expect("a replayed stub decodes")
+        };
+        let script =
+            json!({ "script": { "engine": "rhai", "code": "fn respond(ctx) { pass() }" } });
+        let stubs = [
+            replayed(json!({ "is": { "body": "plain" } })),
+            replayed(json!({ "is": { "statusCode": 200 }, "_rift": script })),
+            replayed(
+                json!({ "is": {}, "_rift": { "fault": { "latency": { "probability": 1.0, "ms": 5 } } } }),
+            ),
+            replayed(json!({ "is": { "statusCode": 201 }, "_rift": script })),
+        ];
+        let config: ImposterConfig =
+            serde_json::from_value(json!({ "port": 0, "protocol": "http" })).expect("config");
+        let warnings = ignored_config_keys(&config, &stubs);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].warning_type, WarningType::ConfigKeyIgnored);
+        assert_eq!(warnings[0].stub_index, Some(1));
+        assert_eq!(
+            warnings[0].message,
+            "`_rift.script` beside an `is` response has no effect: a script is a response type of \
+             its own, and the `is` is served (stubs 1, 3)"
+        );
+        assert!(ignored_config_keys(&config, &stubs[..1]).is_empty());
+        assert!(ignored_config_keys(&config, &stubs[2..3]).is_empty());
     }
 
     /// Issue #1327: predicate-generator keys the engine does not read are one entry, naming the
