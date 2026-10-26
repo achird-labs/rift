@@ -220,8 +220,38 @@ pub struct DatasetBinding {
 /// cache the smallest ceiling in use wins. An entry larger than the bound by itself is served and
 /// not cached, its parse held against the body memory budget until its row is served. Mountebank
 /// has no cache at all, so an evicted file costs only the re-read Mountebank does on every request.
+///
+/// Concurrent misses on one file share one read and parse (issue #1715): the first starts the load
+/// and the rest wait for it and take its outcome, a failure included, instead of each reading the
+/// file under its own share of the budget.
 pub struct CsvCache {
     entries: Mutex<CacheEntries>,
+    /// The loads in progress, one per file version and budget. An entry lives while a request
+    /// waits on it and is removed by the last one, so an outcome, a failure above all, is never
+    /// remembered past its flight.
+    flights: Mutex<HashMap<FlightKey, Flight>>,
+    #[cfg(test)]
+    loads: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    gate: Mutex<Option<Arc<tests::Gate>>>,
+}
+
+/// A load in progress: the requests waiting on it share its one outcome.
+type Flight = Arc<tokio::sync::OnceCell<LoadOutcome>>;
+
+/// What a flight loads: one version of a file ([`CacheKey`], [`FileStamp`]) under one budget, named
+/// by its [`BodyGuard`]'s address, so a flight never charges, or bounds by, another manager's.
+type FlightKey = (CacheKey, FileStamp, usize);
+
+/// What a `lookup` gets for its CSV file from [`CsvCache::fetch`].
+#[derive(Debug, Clone)]
+pub enum LoadOutcome {
+    /// The parse, or `None` when the file may not or cannot be loaded (logged).
+    Loaded(Option<CsvHandle>),
+    /// The budget cannot hold the file now: a `503`.
+    Exhausted(LookupLoadError),
+    /// The load panicked, with the panic's description: a defect, not a data source fault.
+    Panicked(String),
 }
 
 /// What a cache entry costs besides its parse and its key's heap bytes: the key, shared by the map
@@ -309,7 +339,7 @@ struct CacheEntry {
 
 /// What a file looked like when it was read: a different file, length or modification time on a
 /// later use means it has been replaced or edited.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FileStamp {
     len: u64,
     modified: Option<SystemTime>,
@@ -337,10 +367,21 @@ impl FileStamp {
 }
 
 /// One lookup's parse of a CSV file. A parse too large for the cache also holds its share of the
-/// body memory budget until this is dropped, once its row is served (issue #1654).
+/// body memory budget until this is dropped, once its row is served (issue #1654); the requests of
+/// one flight share the parse and the share (issue #1715), released with the last of them.
+#[derive(Clone)]
 pub struct CsvHandle {
     data: Arc<CsvData>,
-    _share: Option<BudgetShare>,
+    _share: Option<Arc<BudgetShare>>,
+}
+
+impl fmt::Debug for CsvHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CsvHandle")
+            .field("data_bytes", &self.data.heap_bytes())
+            .field("holds_budget", &self._share.is_some())
+            .finish()
+    }
 }
 
 impl CsvHandle {
@@ -382,6 +423,62 @@ impl CsvCache {
     pub fn new() -> Self {
         Self {
             entries: Mutex::new(CacheEntries::default()),
+            flights: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            loads: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            gate: Mutex::new(None),
+        }
+    }
+
+    /// The parsed CSV file `path` names under `access`, for the serve path: the cached parse while
+    /// the file is unchanged; otherwise a [`CsvCache::load`] off the async worker, shared with every
+    /// concurrent request that misses on the same version of the file under the same `guard`
+    /// (issue #1715). The waiters do not hold a blocking thread. If the request running the load is
+    /// cancelled, the next waiter runs it.
+    pub async fn fetch(
+        &'static self,
+        path: &str,
+        delimiter: &str,
+        access: Arc<ScriptFileAccess>,
+        guard: Arc<BodyGuard>,
+    ) -> LoadOutcome {
+        if let Some(handle) = self.get_fresh(path, delimiter, &access) {
+            return LoadOutcome::Loaded(Some(handle));
+        }
+        let load = || self.load_off_worker(path, delimiter, &access, &guard);
+        // A path that does not resolve or a file that cannot be stat'ed is not shared: `load`
+        // fails fast and logs why, so there is nothing to save by waiting on another request.
+        let Ok(resolved) = resolve_lookup_path(path, &access) else {
+            return load().await;
+        };
+        let Ok(metadata) = std::fs::metadata(&resolved) else {
+            return load().await;
+        };
+        let key = (
+            CacheKey::new(resolved, delimiter, &access),
+            FileStamp::of(&metadata),
+            Arc::as_ptr(&guard) as usize,
+        );
+        FlightHolder::join(&self.flights, key).outcome(load).await
+    }
+
+    /// [`CsvCache::load`] on a blocking thread, as its outcome.
+    async fn load_off_worker(
+        &'static self,
+        path: &str,
+        delimiter: &str,
+        access: &Arc<ScriptFileAccess>,
+        guard: &Arc<BodyGuard>,
+    ) -> LoadOutcome {
+        let (path, delimiter) = (path.to_string(), delimiter.to_string());
+        let (access, guard) = (Arc::clone(access), Arc::clone(guard));
+        match tokio::task::spawn_blocking(move || self.load(&path, &delimiter, &access, &guard))
+            .await
+        {
+            Ok(Ok(handle)) => LoadOutcome::Loaded(handle),
+            Ok(Err(e)) => LoadOutcome::Exhausted(e),
+            Err(e) => LoadOutcome::Panicked(e.to_string()),
         }
     }
 
@@ -462,6 +559,8 @@ impl CsvCache {
         access: &ScriptFileAccess,
         guard: &BodyGuard,
     ) -> Result<Option<CsvHandle>, LookupLoadError> {
+        #[cfg(test)]
+        self.test_hooks();
         #[cfg(test)]
         assert!(!path.ends_with("panic.csv"), "test-induced load panic");
         let exhausted = || LookupLoadError::BudgetExhausted {
@@ -564,7 +663,7 @@ impl CsvCache {
         }
         Ok(Some(CsvHandle {
             data: Arc::new(data),
-            _share: Some(share),
+            _share: Some(Arc::new(share)),
         }))
     }
 
@@ -667,6 +766,95 @@ impl CsvCache {
             std::mem::take(&mut entries.files)
         };
         drop(dropped);
+    }
+}
+
+#[cfg(test)]
+impl CsvCache {
+    /// Count the load, then wait at the gate a test closed, if any.
+    fn test_hooks(&self) {
+        self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let gate = self.gate.lock().clone();
+        if let Some(gate) = gate {
+            gate.wait();
+        }
+    }
+
+    /// Hold every load at its start until the returned gate is opened.
+    fn close_gate(&self) -> Arc<tests::Gate> {
+        let gate = Arc::new(tests::Gate::default());
+        *self.gate.lock() = Some(Arc::clone(&gate));
+        gate
+    }
+
+    fn load_count(&self) -> usize {
+        self.loads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The requests waiting on a flight, across every flight.
+    fn flight_holders(&self) -> usize {
+        self.flights
+            .lock()
+            .values()
+            .map(|cell| Arc::strong_count(cell) - 1)
+            .sum()
+    }
+
+    fn flight_count(&self) -> usize {
+        self.flights.lock().len()
+    }
+}
+
+/// One request's place in a flight. Dropped by the last request of the flight, it removes the
+/// flight. Every place is taken and given back under the flights' lock, so the count read there is
+/// exact.
+struct FlightHolder<'a> {
+    flights: &'a Mutex<HashMap<FlightKey, Flight>>,
+    key: FlightKey,
+    /// `None` only once the place has been given back, while dropping.
+    cell: Option<Flight>,
+}
+
+impl<'a> FlightHolder<'a> {
+    fn join(flights: &'a Mutex<HashMap<FlightKey, Flight>>, key: FlightKey) -> Self {
+        let cell = Arc::clone(flights.lock().entry(key.clone()).or_default());
+        Self {
+            flights,
+            key,
+            cell: Some(cell),
+        }
+    }
+
+    /// The flight's outcome, loaded with `load` unless another request is loading it already.
+    async fn outcome<F, Fut>(&self, load: F) -> LoadOutcome
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = LoadOutcome>,
+    {
+        match &self.cell {
+            Some(cell) => cell.get_or_init(load).await.clone(),
+            None => load().await,
+        }
+    }
+}
+
+impl Drop for FlightHolder<'_> {
+    fn drop(&mut self) {
+        let mut flights = self.flights.lock();
+        let Some(cell) = self.cell.take() else {
+            return;
+        };
+        // The map's reference and this one: no other request is waiting on the flight.
+        let last = flights
+            .get(&self.key)
+            .is_some_and(|held| Arc::ptr_eq(held, &cell) && Arc::strong_count(held) == 2);
+        if last {
+            flights.remove(&self.key);
+        }
+        // Given back before the lock is: a reference released after it would let two last
+        // requests each count the other and leave the flight, and its outcome, in the map.
+        drop(cell);
+        drop(flights);
     }
 }
 
@@ -2570,5 +2758,248 @@ mod tests {
             plain_headers(headers),
             crate::imposter::Headers::from([("X-${row}[name]".to_string(), vec!["1".to_string()])])
         );
+    }
+
+    // ===== Issue #1715: concurrent misses on one file share one read and parse =====
+
+    /// Holds loads at their start until opened ([`CsvCache::close_gate`]).
+    #[derive(Default)]
+    pub(super) struct Gate {
+        open: std::sync::Mutex<bool>,
+        opened: std::sync::Condvar,
+    }
+
+    impl Gate {
+        pub(super) fn wait(&self) {
+            let mut open = self.open.lock().expect("gate lock");
+            while !*open {
+                open = self.opened.wait(open).expect("gate lock");
+            }
+        }
+
+        pub(super) fn open(&self) {
+            *self.open.lock().expect("gate lock") = true;
+            self.opened.notify_all();
+        }
+    }
+
+    /// A cache the serve path can hand to `spawn_blocking`, as the process-wide one is.
+    fn leaked_cache() -> &'static CsvCache {
+        Box::leak(Box::new(CsvCache::new()))
+    }
+
+    /// Wait until `cache` has `holders` requests in its flights, failing after 5 s.
+    async fn until_holders(cache: &CsvCache, holders: usize) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while cache.flight_holders() != holders {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{} holders, waiting for {holders}",
+                cache.flight_holders()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// `n` concurrent fetches of `path` through `guard`, spawned, not yet awaited.
+    fn fetches(
+        cache: &'static CsvCache,
+        path: &str,
+        guard: &Arc<BodyGuard>,
+        n: usize,
+    ) -> Vec<tokio::task::JoinHandle<LoadOutcome>> {
+        (0..n)
+            .map(|_| {
+                let (path, guard) = (path.to_string(), Arc::clone(guard));
+                tokio::spawn(async move {
+                    cache
+                        .fetch(&path, ",", Arc::new(ScriptFileAccess::trusted_cwd()), guard)
+                        .await
+                })
+            })
+            .collect()
+    }
+
+    async fn joined(tasks: Vec<tokio::task::JoinHandle<LoadOutcome>>) -> Vec<LoadOutcome> {
+        let mut outcomes = Vec::new();
+        for task in tasks {
+            outcomes.push(task.await.expect("fetch task"));
+        }
+        outcomes
+    }
+
+    fn loaded(outcome: &LoadOutcome) -> &CsvHandle {
+        match outcome {
+            LoadOutcome::Loaded(Some(handle)) => handle,
+            other => panic!("expected a loaded parse, got {other:?}"),
+        }
+    }
+
+    // Before #1715 every miss read and parsed the file under its own share of the budget, so with
+    // room for one read, seven of eight concurrent requests were answered `503`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_misses_on_one_file_load_it_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = padded_csv(dir.path(), "data.csv", "x", 20 * 1024);
+        let cache = leaked_cache();
+        let guard = Arc::new(guard(64 * 1024, Some(64 * 1024)));
+        // Room for one read of the file, not two.
+        let _held = guard.try_reserve(40 * 1024).expect("40 KiB fits");
+        let gate = cache.close_gate();
+        let tasks = fetches(cache, &path, &guard, 8);
+        until_holders(cache, 8).await;
+        gate.open();
+        let outcomes = joined(tasks).await;
+        let first = Arc::clone(loaded(&outcomes[0]).data());
+        for outcome in &outcomes {
+            assert!(Arc::ptr_eq(loaded(outcome).data(), &first), "one parse");
+        }
+        assert_eq!(first.lookup("1", "id")["[name]"], "x");
+        assert_eq!(cache.load_count(), 1);
+        assert_eq!(cache.flight_holders(), 0);
+        assert_eq!(cache.flight_count(), 0);
+    }
+
+    // A parse too large to cache is shared too, under its one share of the budget.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn waiters_share_one_uncached_parse_and_its_one_share() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = padded_csv(dir.path(), "data.csv", "x", 6 * 1024);
+        let cache = leaked_cache();
+        // The file fits the 8 KiB ceiling; its parse does not, so it is not cached.
+        let guard = Arc::new(guard(8 * 1024, Some(64 * 1024)));
+        let gate = cache.close_gate();
+        let tasks = fetches(cache, &path, &guard, 4);
+        until_holders(cache, 4).await;
+        gate.open();
+        let outcomes = joined(tasks).await;
+        let first = Arc::clone(loaded(&outcomes[0]).data());
+        for outcome in &outcomes {
+            assert!(Arc::ptr_eq(loaded(outcome).data(), &first), "one parse");
+        }
+        assert_eq!(cache.load_count(), 1);
+        assert!(cache.is_empty(), "too large to cache");
+        assert!(
+            guard.try_reserve(64 * 1024).is_err(),
+            "the shared parse still holds its share"
+        );
+        drop(outcomes);
+        drop(first);
+        assert!(
+            guard.try_reserve(64 * 1024).is_ok(),
+            "released with the last handle"
+        );
+    }
+
+    // Every request in a failed flight gets its failure; the next request loads afresh.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_flight_is_not_remembered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = padded_csv(dir.path(), "data.csv", "x", 4096);
+        let cache = leaked_cache();
+        let guard = Arc::new(guard(64 * 1024, Some(64 * 1024)));
+        let held = guard.try_reserve(64 * 1024).expect("the whole budget");
+        let gate = cache.close_gate();
+        let tasks = fetches(cache, &path, &guard, 3);
+        until_holders(cache, 3).await;
+        gate.open();
+        for outcome in joined(tasks).await {
+            assert!(
+                matches!(
+                    outcome,
+                    LoadOutcome::Exhausted(LookupLoadError::BudgetExhausted { .. })
+                ),
+                "{outcome:?}"
+            );
+        }
+        assert_eq!(cache.load_count(), 1);
+        assert_eq!(cache.flight_count(), 0);
+        drop(held);
+        let outcome = joined(fetches(cache, &path, &guard, 1)).await;
+        assert_eq!(loaded(&outcome[0]).lookup("1", "id")["[name]"], "x");
+        assert_eq!(cache.load_count(), 2);
+        assert_eq!(cache.flight_count(), 0);
+    }
+
+    // The first request's client going away does not strand the others: the load passes on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cancelled_leader_hands_the_load_to_a_waiter() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = padded_csv(dir.path(), "data.csv", "x", 4096);
+        let cache = leaked_cache();
+        let guard = Arc::new(guard(64 * 1024, None));
+        let gate = cache.close_gate();
+        let leader = fetches(cache, &path, &guard, 1);
+        until_holders(cache, 1).await;
+        let waiter = fetches(cache, &path, &guard, 1);
+        until_holders(cache, 2).await;
+        for task in &leader {
+            task.abort();
+        }
+        until_holders(cache, 1).await;
+        gate.open();
+        let outcome = joined(waiter).await;
+        assert_eq!(loaded(&outcome[0]).lookup("1", "id")["[name]"], "x");
+        assert_eq!(cache.flight_count(), 0);
+    }
+
+    // An edited file is a different version: a request that sees it does not wait on, or take,
+    // the flight loading the old one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_edited_file_starts_a_new_flight() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = padded_csv(dir.path(), "data.csv", "old", 4096);
+        let cache = leaked_cache();
+        let guard = Arc::new(guard(64 * 1024, None));
+        let gate = cache.close_gate();
+        let first = fetches(cache, &path, &guard, 1);
+        until_holders(cache, 1).await;
+        padded_csv(dir.path(), "data.csv", "new", 8192);
+        let second = fetches(cache, &path, &guard, 1);
+        until_holders(cache, 2).await;
+        assert_eq!(cache.flight_count(), 2);
+        gate.open();
+        let second = joined(second).await;
+        assert_eq!(loaded(&second[0]).lookup("1", "id")["[name]"], "new");
+        drop(joined(first).await);
+        assert_eq!(cache.flight_count(), 0);
+    }
+
+    // Many requests finishing a flight together all give their place back: the flight never
+    // outlives them, so no outcome is remembered for the next request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_flight_never_outlives_its_requests() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = leaked_cache();
+        let guard = Arc::new(guard(64 * 1024, None));
+        for round in 0..50 {
+            let path = padded_csv(dir.path(), &format!("data{round}.csv"), "x", 1024);
+            for outcome in joined(fetches(cache, &path, &guard, 16)).await {
+                assert_eq!(loaded(&outcome).lookup("1", "id")["[name]"], "x");
+            }
+            assert_eq!(cache.flight_count(), 0, "round {round}");
+        }
+    }
+
+    // Two managers' budgets are never charged for each other: each guard is its own flight.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn different_guards_do_not_share_a_flight() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = padded_csv(dir.path(), "data.csv", "x", 4096);
+        let cache = leaked_cache();
+        let (one, two) = (
+            Arc::new(guard(64 * 1024, None)),
+            Arc::new(guard(64 * 1024, None)),
+        );
+        let gate = cache.close_gate();
+        let mut tasks = fetches(cache, &path, &one, 1);
+        tasks.extend(fetches(cache, &path, &two, 1));
+        until_holders(cache, 2).await;
+        assert_eq!(cache.flight_count(), 2);
+        gate.open();
+        for outcome in joined(tasks).await {
+            assert_eq!(loaded(&outcome).lookup("1", "id")["[name]"], "x");
+        }
+        assert_eq!(cache.load_count(), 2);
     }
 }

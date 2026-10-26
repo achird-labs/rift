@@ -344,6 +344,10 @@ record.
 
 ### Fixed
 
+- **Concurrent `lookup` requests that miss on one CSV file read and parse it once** (#1715), and
+  share the outcome. Each used to read and parse the file under its own share of
+  `--body-memory-budget`, so under budget pressure all but one were answered `503` on a cold or
+  just-edited file. A parse too large to cache is shared under its one share too.
 - **An imposter re-created on the same port no longer starts with script `state` written by the
   imposter it replaced** (#1726). A response inject, decorate or predicate inject of the deleted
   imposter that ran after the delete, still queued on the script pool or on a predicate scan the
