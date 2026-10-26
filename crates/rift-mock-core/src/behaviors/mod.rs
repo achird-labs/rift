@@ -44,8 +44,8 @@ pub(crate) use extraction::{
 };
 #[allow(unused_imports)]
 pub use lookup::{
-    CsvCache, CsvData, CsvDataSource, CsvHandle, DataSource, DatasetBinding, LookupBehavior,
-    LookupIndex, LookupKey, LookupLoadError, apply_lookup_behaviors,
+    CsvCache, CsvData, CsvDataSource, CsvHandle, DataSource, DatasetBinding, LoadOutcome,
+    LookupBehavior, LookupIndex, LookupKey, LookupLoadError, apply_lookup_behaviors,
 };
 pub(crate) use lookup::{apply_lookup_row, lookup_key};
 pub use request::{RequestContext, header_to_title_case};
