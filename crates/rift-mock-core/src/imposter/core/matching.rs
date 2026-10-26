@@ -145,7 +145,7 @@ impl Imposter {
         // Parse form data if Content-Type is application/x-www-form-urlencoded
         let form = Self::parse_form_data(headers_map, body);
 
-        let imposter_port = self.script_state_key();
+        let script_scope = self.script_scope();
         let script_files = self.script_file_access();
         let flow_id = self.resolve_flow_id(headers_map);
         // The request body as JSON, parsed at most once per request and shared across every stub's
@@ -198,7 +198,7 @@ impl Imposter {
                 request_from,
                 client_ip,
                 form.as_ref(),
-                imposter_port,
+                &script_scope,
                 &script_files,
                 &body_json,
                 xml_dom.as_ref(),
@@ -385,7 +385,7 @@ impl Imposter {
         let snapshot = self.snapshot();
         let stubs = snapshot.stubs();
         let form = Self::parse_form_data(headers_map, body);
-        let imposter_port = self.script_state_key();
+        let script_scope = self.script_scope();
         let script_files = self.script_file_access();
         let flow_id = self.resolve_flow_id(headers_map);
         let body_json = crate::behaviors::LazyJson::new(body);
@@ -414,7 +414,7 @@ impl Imposter {
                 request_from,
                 client_ip,
                 form.as_ref(),
-                imposter_port,
+                &script_scope,
                 &script_files,
                 &body_json,
                 xml_dom.as_ref(),

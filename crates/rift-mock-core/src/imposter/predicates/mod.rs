@@ -140,7 +140,7 @@ where
         request_from,
         client_ip,
         form_fast.as_ref(),
-        imposter_port,
+        &crate::scripting::ScriptScope::detached(imposter_port),
         refused_script_files(),
         &body_json,
         None,
@@ -166,7 +166,7 @@ pub(crate) fn stub_matches_inner<H>(
     // request hot path; unlike `headers`, this can't be generic (a bare `None` form argument, the
     // common non-form-predicate case, gives type inference nothing to pin the hasher to).
     form: Option<&MultiValueMap>,
-    imposter_port: u16,
+    script_scope: &crate::scripting::ScriptScope,
     // What a predicate `inject` may `require()` (issue #1611).
     script_files: &Arc<crate::imposter::ScriptFileAccess>,
     body_json: &LazyJson<'_>,
@@ -192,7 +192,7 @@ where
         request_from,
         client_ip,
         form,
-        imposter_port,
+        script_scope,
         script_files,
         body_json,
         xml_dom,
@@ -226,7 +226,7 @@ pub(crate) fn stub_matches_explained<H>(
     request_from: Option<&str>,
     client_ip: Option<&str>,
     form: Option<&MultiValueMap>,
-    imposter_port: u16,
+    script_scope: &crate::scripting::ScriptScope,
     // What a predicate `inject` may `require()` (issue #1611).
     script_files: &Arc<crate::imposter::ScriptFileAccess>,
     body_json: &LazyJson<'_>,
@@ -247,7 +247,7 @@ where
             request_from,
             client_ip,
             form,
-            imposter_port,
+            script_scope,
             script_files,
             body_json,
             xml_dom,
@@ -339,7 +339,7 @@ where
         request_from,
         client_ip,
         form_fast.as_ref(),
-        imposter_port,
+        &crate::scripting::ScriptScope::detached(imposter_port),
         refused_script_files(),
         &body_json,
         None,
@@ -353,7 +353,7 @@ where
 ///
 /// See [`stub_matches`] for the `Err` contract (issue #440).
 #[allow(clippy::too_many_arguments)]
-// `imposter_port` and `script_files` are consumed by the `inject` predicate evaluator, which is
+// `script_scope` and `script_files` are consumed by the `inject` predicate evaluator, which is
 // `javascript`-gated (issue #599); without that feature the arm doesn't use them, so they are only
 // threaded through the recursive And/Or descent — a false positive for this build only.
 #[cfg_attr(not(feature = "javascript"), allow(clippy::only_used_in_recursion))]
@@ -368,7 +368,7 @@ pub(crate) fn predicate_matches_inner<H>(
     client_ip: Option<&str>,
     // Concretely `FastMap` — see `stub_matches_inner`.
     form: Option<&MultiValueMap>,
-    imposter_port: u16,
+    script_scope: &crate::scripting::ScriptScope,
     // What a predicate `inject` may `require()` (issue #1611).
     script_files: &Arc<crate::imposter::ScriptFileAccess>,
     body_json: &LazyJson<'_>,
@@ -672,7 +672,7 @@ where
             request_from,
             client_ip,
             form,
-            imposter_port,
+            script_scope,
             script_files,
             body_json,
             xml_dom,
@@ -693,7 +693,7 @@ where
                     request_from,
                     client_ip,
                     form,
-                    imposter_port,
+                    script_scope,
                     script_files,
                     body_json,
                     xml_dom,
@@ -718,7 +718,7 @@ where
                     request_from,
                     client_ip,
                     form,
-                    imposter_port,
+                    script_scope,
                     script_files,
                     body_json,
                     xml_dom,
@@ -762,7 +762,7 @@ where
                         .cloned(),
                     is_dry_run: false,
                 };
-                execute_predicate_inject(inject_fn, &mb_request, imposter_port, script_files)
+                execute_predicate_inject(inject_fn, &mb_request, script_scope.clone(), script_files)
             }
             #[cfg(not(feature = "javascript"))]
             {
@@ -873,6 +873,7 @@ pub use crate::util::parse_query_string;
 mod tests {
     use super::*;
     use crate::imposter::types::{Predicate, PredicateOperation, PredicateParameters};
+    use crate::scripting::ScriptScope;
     use serde_json::json;
 
     /// Helper to build a Predicate from operation with default parameters
@@ -3449,7 +3450,7 @@ mod tests {
                 None,
                 None,
                 None,
-                0,
+                &ScriptScope::detached(0),
                 refused_script_files(),
                 &LazyJson::absent(),
                 None,
@@ -3471,7 +3472,7 @@ mod tests {
                 None,
                 None,
                 None,
-                0,
+                &ScriptScope::detached(0),
                 refused_script_files(),
                 &LazyJson::absent(),
                 None,
@@ -3493,7 +3494,7 @@ mod tests {
                 None,
                 None,
                 None,
-                0,
+                &ScriptScope::detached(0),
                 refused_script_files(),
                 &LazyJson::absent(),
                 None,
@@ -3554,7 +3555,7 @@ mod tests {
             None,
             None,
             None,
-            0,
+            &ScriptScope::detached(0),
             refused_script_files(),
             &LazyJson::absent(),
             None,
@@ -3571,7 +3572,7 @@ mod tests {
             None,
             None,
             None,
-            0,
+            &ScriptScope::detached(0),
             refused_script_files(),
             &LazyJson::absent(),
             None,
@@ -3690,7 +3691,7 @@ mod tests {
             None,
             None,
             None,
-            0,
+            &ScriptScope::detached(0),
             refused_script_files(),
             &LazyJson::absent(),
             None,
@@ -3752,7 +3753,7 @@ mod tests {
                 None,
                 None,
                 None,
-                0,
+                &ScriptScope::detached(0),
                 refused_script_files(),
                 &LazyJson::absent(),
                 None,

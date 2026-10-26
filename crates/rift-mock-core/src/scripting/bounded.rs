@@ -233,6 +233,8 @@ mod tests {
     use super::*;
     use crate::extensions::flow_state::NoOpFlowStore;
     use crate::imposter::ResponseMode;
+    #[cfg(feature = "javascript")]
+    use crate::scripting::ScriptScope;
     use std::time::Instant;
 
     fn req() -> ScriptRequest {
@@ -534,7 +536,7 @@ mod tests {
             let resp = execute_mountebank_inject_bounded(
                 "function (config) { return { statusCode: 201, body: 'from-inject' }; }".into(),
                 mb_req("/a"),
-                test_port(),
+                ScriptScope::detached(test_port()),
                 None,
                 std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
                 Duration::from_millis(60_000),
@@ -556,7 +558,7 @@ mod tests {
             let res = execute_mountebank_inject_bounded(
                 SLOW_INJECT.into(),
                 mb_req("/hang"),
-                test_port(),
+                ScriptScope::detached(test_port()),
                 None,
                 std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
                 Duration::from_millis(25),
@@ -583,11 +585,12 @@ mod tests {
         #[tokio::test]
         async fn mb_inject_bounded_state_persists_across_calls() {
             let port = test_port();
+            let scope = ScriptScope::detached(port);
             let incr = "function (config) { config.state.count = (config.state.count || 0) + 1; return { statusCode: 200, body: String(config.state.count) }; }";
             let first = execute_mountebank_inject_bounded(
                 incr.into(),
                 mb_req("/count"),
-                port,
+                scope.clone(),
                 None,
                 std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
                 Duration::from_millis(60_000),
@@ -597,7 +600,7 @@ mod tests {
             let second = execute_mountebank_inject_bounded(
                 incr.into(),
                 mb_req("/count"),
-                port,
+                scope.clone(),
                 None,
                 std::sync::Arc::new(crate::imposter::ScriptFileAccess::Refused),
                 Duration::from_millis(60_000),

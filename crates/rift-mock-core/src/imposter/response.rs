@@ -558,7 +558,7 @@ pub fn create_stub_from_proxy_response(
 /// returned object replaces the response, and the headers are exactly the script's. Anything else
 /// runs as Rhai.
 ///
-/// `imposter_port` identifies the per-imposter state shared with predicate injects and response
+/// `scope` identifies the per-imposter state shared with predicate injects and response
 /// injects for the same imposter (issue #355 Item 0) — decorate reads and writes the same
 /// persisted state rather than a throwaway object. `stub_id` tags the script logger's tracing
 /// events with the owning stub, when known (issue #355 AC1). `files` is what the imposter's
@@ -572,7 +572,7 @@ pub fn apply_js_or_rhai_decorate(
     body: &str,
     status: &ResponseStatus,
     headers: &crate::util::OrderedMap<String, String>,
-    imposter_port: u16,
+    scope: &crate::scripting::ScriptScope,
     stub_id: Option<&str>,
     files: &std::sync::Arc<crate::imposter::ScriptFileAccess>,
 ) -> Result<Decorated, DecorateError> {
@@ -582,7 +582,7 @@ pub fn apply_js_or_rhai_decorate(
         body,
         status,
         headers,
-        imposter_port,
+        scope,
         stub_id,
         files,
         std::time::Duration::from_millis(crate::scripting::DEFAULT_SCRIPT_TIMEOUT_MS),
@@ -598,15 +598,15 @@ fn apply_js_or_rhai_decorate_within(
     body: &str,
     status: &ResponseStatus,
     headers: &crate::util::OrderedMap<String, String>,
-    imposter_port: u16,
+    scope: &crate::scripting::ScriptScope,
     stub_id: Option<&str>,
     files: &std::sync::Arc<crate::imposter::ScriptFileAccess>,
     timeout: std::time::Duration,
 ) -> Result<Decorated, DecorateError> {
-    // Only the JS engine call sites below consume `imposter_port`/`stub_id`/`files`/`timeout`;
+    // Only the JS engine call sites below consume `scope`/`stub_id`/`files`/`timeout`;
     // without the feature the parameters would otherwise be unused.
     #[cfg(not(feature = "javascript"))]
-    let _ = (imposter_port, stub_id, files, timeout);
+    let _ = (scope, stub_id, files, timeout);
 
     if !is_javascript_decorate(script) {
         return decorate_rhai(script, request, body, status, headers);
@@ -646,7 +646,7 @@ fn apply_js_or_rhai_decorate_within(
             body,
             status,
             headers,
-            imposter_port,
+            scope.clone(),
             stub_id,
             files,
             timeout,
@@ -720,7 +720,7 @@ pub async fn apply_decorate_bounded(
     body: String,
     status: ResponseStatus,
     headers: crate::util::OrderedMap<String, String>,
-    imposter_port: u16,
+    scope: crate::scripting::ScriptScope,
     stub_id: Option<String>,
     files: std::sync::Arc<crate::imposter::ScriptFileAccess>,
     timeout: std::time::Duration,
@@ -741,7 +741,7 @@ pub async fn apply_decorate_bounded(
             &body,
             &status,
             &headers,
-            imposter_port,
+            &scope,
             stub_id.as_deref(),
             &files,
             timeout,
@@ -762,6 +762,7 @@ pub async fn apply_decorate_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scripting::ScriptScope;
 
     // Allocates a fresh port per test so parallel tests never share `IMPOSTER_STATE` (disjoint
     // from the range used by `rift-mock-core/src/scripting/js_engine.rs`'s own tests in this binary).
@@ -802,7 +803,7 @@ mod tests {
             "original",
             &ResponseStatus::Code(200),
             &headers,
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -820,7 +821,7 @@ mod tests {
             "original",
             &ResponseStatus::Code(200),
             &headers,
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -854,7 +855,7 @@ mod tests {
             "original",
             &ResponseStatus::Code(200),
             &headers,
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         );
@@ -893,7 +894,7 @@ mod tests {
             "original",
             &ResponseStatus::Code(200),
             &headers,
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -930,7 +931,7 @@ mod tests {
             "original",
             &ResponseStatus::Code(200),
             &headers,
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -951,7 +952,7 @@ mod tests {
             "original",
             &ResponseStatus::Code(200),
             &headers,
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -970,7 +971,7 @@ mod tests {
             "original",
             &ResponseStatus::Code(200),
             &headers,
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -989,7 +990,7 @@ mod tests {
             "original",
             &ResponseStatus::Code(200),
             &headers,
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -1006,7 +1007,7 @@ mod tests {
             "original",
             &ResponseStatus::Code(200),
             &headers,
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -1037,7 +1038,7 @@ mod tests {
             "orig",
             &ResponseStatus::Code(status),
             &headers,
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -1060,7 +1061,7 @@ mod tests {
                 "orig",
                 &ResponseStatus::Code(200),
                 &crate::util::OrderedMap::default(),
-                test_port(),
+                &ScriptScope::detached(test_port()),
                 None,
                 &trusted_files(),
             );
@@ -1508,7 +1509,7 @@ mod tests {
             "orig".to_string(),
             ResponseStatus::Code(200),
             crate::util::OrderedMap::default(),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             trusted_files(),
             std::time::Duration::from_millis(60_000),
@@ -1532,7 +1533,7 @@ mod tests {
             "orig".to_string(),
             ResponseStatus::Code(200),
             crate::util::OrderedMap::default(),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             trusted_files(),
             std::time::Duration::from_millis(25),
@@ -1559,7 +1560,7 @@ mod tests {
             "orig".to_string(),
             ResponseStatus::Code(200),
             crate::util::OrderedMap::default(),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             trusted_files(),
             std::time::Duration::from_millis(100),
