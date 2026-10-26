@@ -87,7 +87,9 @@ response and on a `proxy` response; `repeat` applies to every response type — 
 `_rift` effects (`fault`, `conditional`, `stateOps`, `templated`): an empty `200`, completed by
 `defaultResponse` like any `is`. Its behaviors other than `repeat` still do not run. On a `proxy`, `inject` or `fault` response it is kept and returned by
 `GET /imposters/:port`, but not acted on, and is reported as `config_key_ignored` in
-`_rift.warnings` and by `rift-lint` `W017`.
+`_rift.warnings` and by `rift-lint` `W017`. `_rift.script` is a response type of its own: beside
+`is`, `proxy`, `inject`, `fault` or the flat form, a config door refuses it with `each response
+object must have only one response type` (#1729), and `rift-lint` reports `E056`.
 
 ---
 
@@ -485,10 +487,9 @@ With standard cycling, if User A triggers the first failure, User B gets the sec
       "_rift": {
         "script": {
           "engine": "rhai",
-          "code": "fn respond(ctx) { let attempts = ctx.state.incr(\"attempts\"); if attempts <= 2 { http(503, #{ error: \"Temporary failure\", attempt: attempts, user: ctx.flowId }).header(\"Retry-After\", \"1\") } else { pass() } }"
+          "code": "fn respond(ctx) { let attempts = ctx.state.incr(\"attempts\"); if attempts <= 2 { http(503, #{ error: \"Temporary failure\", attempt: attempts, user: ctx.flowId }).header(\"Retry-After\", \"1\") } else { http(200, #{ status: \"success\" }) } }"
         }
-      },
-      "is": { "statusCode": 200, "body": "{\"status\": \"success\"}" }
+      }
     }]
   }]
 }
@@ -516,10 +517,9 @@ Now each user experiences their own retry sequence:
         "_rift": {
           "script": {
             "engine": "rhai",
-            "code": "fn respond(ctx) { if ctx.request.header(\"X-Api-Key\") == () { return http(401, #{ error: \"API key required\" }); }; let used = ctx.state.get_or(\"quota_used\", 0); let limit = 1000; if used >= limit { http(402, #{ error: \"Quota exceeded\", used: used, limit: limit }) } else { ctx.state.set(\"quota_used\", used + 1); pass() } }"
+            "code": "fn respond(ctx) { if ctx.request.header(\"X-Api-Key\") == () { return http(401, #{ error: \"API key required\" }); }; let used = ctx.state.get_or(\"quota_used\", 0); let limit = 1000; if used >= limit { http(402, #{ error: \"Quota exceeded\", used: used, limit: limit }) } else { ctx.state.set(\"quota_used\", used + 1); http(200, #{ result: \"expensive computation\" }) } }"
           }
-        },
-        "is": { "statusCode": 200, "body": "{\"result\": \"expensive computation\"}" }
+        }
       }]
     },
     {

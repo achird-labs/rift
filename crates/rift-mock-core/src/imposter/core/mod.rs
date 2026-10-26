@@ -1649,7 +1649,8 @@ mod tests {
     // must persist across calls; NoOp's `increment` always returns 1).
     #[test]
     fn script_stub_without_flow_state_auto_provisions_in_memory() {
-        let cfg = serde_json::from_value(json!({
+        // A replayed config: every config door refuses `is` beside `_rift.script` (issue #1729).
+        let cfg = crate::imposter::deserialize_replayed(json!({
             "port": 0, "protocol": "http",
             "stubs": [{
                 "responses": [{

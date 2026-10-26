@@ -1525,7 +1525,7 @@
     },
     "StubResponse": {
       "additionalProperties": false,
-      "description": "One response of a stub: an `is`, `proxy`, `inject` or `fault` response, a `_rift`-only script response, or the flat recorded form (`statusCode`/`headers`/`body` at the top level). Exactly one of `is`, `proxy`, `inject`, `fault`, or a `_rift`-only or flat response; a config door refuses two, or none.",
+      "description": "One response of a stub: an `is`, `proxy`, `inject` or `fault` response, a `_rift`-only script response, or the flat recorded form (`statusCode`/`headers`/`body` at the top level). Exactly one of `is`, `proxy`, `inject`, `fault`, or a `_rift`-only or flat response; a config door refuses two, or none. `_rift.script` is a response type of its own: beside `is`, `proxy`, `inject`, `fault` or the flat form it is refused (#1729); the other `_rift` keys apply to the response they sit beside.",
       "properties": {
         "_behaviors": {
           "anyOf": [

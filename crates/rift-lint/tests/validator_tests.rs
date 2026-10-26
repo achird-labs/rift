@@ -4725,3 +4725,74 @@ fn e058_reported_through_a_config_document() {
     let r = lint_json(&text, "imposters.json", &opts());
     assert!(has_code(&r, "E058"), "{:?}", codes(&r));
 }
+
+/// Issue #1729: `_rift.script` is a response type of its own, so beside any of the four, or beside
+/// the flat form, it is E056, as the engine refuses it at a config door.
+#[test]
+fn e056_rift_script_beside_another_response_type() {
+    let script = json!({ "script": { "engine": "rhai", "code": "fn respond(ctx) { pass() }" } });
+    for (other, value, listed) in [
+        ("is", json!({ "statusCode": 200 }), "is, _rift.script"),
+        (
+            "proxy",
+            json!({ "to": "http://example.com" }),
+            "proxy, _rift.script",
+        ),
+        (
+            "inject",
+            json!("function () { return {}; }"),
+            "inject, _rift.script",
+        ),
+        (
+            "fault",
+            json!("CONNECTION_RESET_BY_PEER"),
+            "fault, _rift.script",
+        ),
+        (
+            "statusCode",
+            json!(503),
+            "_rift.script, the flat statusCode/headers/body",
+        ),
+    ] {
+        let mut response = serde_json::Map::new();
+        response.insert(other.to_string(), value);
+        response.insert("_rift".to_string(), script.clone());
+        let resp = serde_json::Value::Object(response);
+        let r = lint_response(&resp);
+        let issue = r
+            .issues
+            .iter()
+            .find(|issue| issue.code == "E056")
+            .unwrap_or_else(|| panic!("{resp}: {:?}", codes(&r)));
+        assert!(issue.message.ends_with(listed), "{resp}: {}", issue.message);
+    }
+}
+
+/// Issue #1729: a bare `_rift.script`, and a `_rift` block without a script beside `is`, are one type.
+#[test]
+fn e056_not_for_a_bare_rift_script_or_is_with_other_rift_keys() {
+    for resp in [
+        json!({ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { pass() }" } } }),
+        json!({ "is": { "statusCode": 200 }, "_rift": { "fault": { "latency": { "probability": 1.0, "ms": 5 } } } }),
+        json!({ "is": { "statusCode": 200 }, "_rift": { "script": null } }),
+    ] {
+        let r = lint_response(&resp);
+        assert!(!has_code(&r, "E056"), "{resp}: {:?}", codes(&r));
+    }
+}
+
+/// Issue #1729: proxy/inject/fault beside `_rift.script` is E056 alone, not also W017's "parsed but
+/// has no effect"; and an empty `headers` beside a script is not the flat form, as the engine reads it.
+#[test]
+fn e056_rift_script_is_not_also_w017_and_empty_headers_are_not_flat() {
+    let script = json!({ "script": { "engine": "rhai", "code": "fn respond(ctx) { pass() }" } });
+    let proxied = json!({ "protocol": "http", "stubs": [{ "responses": [
+        { "proxy": { "to": "http://example.com" }, "_rift": script }
+    ] }] });
+    let r = lint_imposter(&proxied);
+    assert!(has_code(&r, "E056"), "{:?}", codes(&r));
+    assert!(!has_code(&r, "W017"), "{:?}", codes(&r));
+
+    let r = lint_response(&json!({ "_rift": script, "headers": {} }));
+    assert!(!has_code(&r, "E056"), "{:?}", codes(&r));
+}

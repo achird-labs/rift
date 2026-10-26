@@ -212,7 +212,9 @@ response (or a bare `_rift` response without a `script`, which is served as `is:
 A key the engine parses and does not act on (issue #1152). The value reads back unchanged, so
 nothing else would distinguish "honoured" from "dropped". Reported for `_rift.metrics`,
 `_rift.proxy`, `recordMatches: true`, `ciphers` on an `https` imposter and `defaultResponse.proxy` (imposter-level, no `stubIndex`), for a `_rift` block on
-a `proxy`, `inject` or `fault` response, and for a `_behaviors`/`behaviors` block setting anything
+a `proxy`, `inject` or `fault` response, for a `_rift.script` beside an `is` response (only a
+stored or `--datadir` config an earlier engine admitted can carry one: every config door refuses it,
+issue #1729, and `rift-lint` reports it as `E056`, not `W017`), and for a `_behaviors`/`behaviors` block setting anything
 besides `repeat` on a `fault` or `_rift`-only response (issues #1181, #1188, #1189) — one entry per key and shape,
 naming the stubs, with the first as `stubIndex`. A proxy `predicateGenerators` entry with a key the
 engine does not read (a typo such as `matchs`; issue #1327) is one entry naming the keys and the

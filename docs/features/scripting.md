@@ -527,7 +527,9 @@ Available in `respond(ctx)` (and as the return value of a bare-expression script
 
 A `_rift.script` response is script-only: there is no `is` body behind it to fall through to, and
 `pass()` does not advance to the stub's next response or to another stub. Use `http(...)` to shape
-the success response too. Every script response carries `x-rift-script: <engine>`.
+the success response too. A config door refuses `_rift.script` beside `is`, `proxy`, `inject`,
+`fault` or the flat `statusCode`/`headers`/`body` form, as two response types (#1729): the script
+never ran there. Every script response carries `x-rift-script: <engine>`.
 
 `http`'s body is a **value**, not a hand-assembled JSON string: pass a map/array and it is
 JSON-serialized with `Content-Type: application/json` set automatically (unless you set your own
