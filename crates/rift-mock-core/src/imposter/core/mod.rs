@@ -1158,8 +1158,9 @@ impl Imposter {
             })
     }
 
-    /// The key under which this imposter's Mountebank inject/decorate script state is stored in
-    /// the process-global `IMPOSTER_STATE` map — the imposter's bound listener port.
+    /// The scope of this imposter's Mountebank inject/decorate script runs (issue #1726): their
+    /// state is stored under it in the process-global `IMPOSTER_STATE` map, keyed by the imposter's
+    /// bound listener port.
     ///
     /// `config.port` is `Some(bound_port)` for the entire life of a live imposter: the manager
     /// assigns and records the real, distinct bound port in `create_imposter_staged` *before* the
@@ -1169,11 +1170,11 @@ impl Imposter {
     /// documented "no live imposter" sentinel (see `rift-ffi`); it exists only to keep this
     /// total. Centralised here so the invariant has one greppable home rather than a scattered
     /// magic `config.port.unwrap_or(0)` at every script call site.
-    pub(crate) fn script_state_key(&self) -> u16 {
-        self.bound_port()
+    pub(crate) fn script_scope(&self) -> crate::scripting::ScriptScope {
+        crate::scripting::ScriptScope::detached(self.bound_port())
     }
 
-    /// This imposter's bound listener port, carrying the same invariant [`Self::script_state_key`]
+    /// This imposter's bound listener port, carrying the same invariant [`Self::script_scope`]
     /// documents: `Some(bound_port)` for the whole life of a live imposter, with `0` as the
     /// documented "no live imposter" sentinel, unreachable in practice.
     ///

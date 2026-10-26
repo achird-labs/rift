@@ -2,7 +2,7 @@ use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result};
 use crate::imposter::{ResponseMode, ScriptFileAccess};
 use crate::scripting::{
     FaultDecision, PredicateGeneratorError, ScriptCtxExtras, ScriptCtxInput, ScriptRequest,
-    ScriptResult, ScriptResultBody, ScriptStubContext, entrypoints,
+    ScriptResult, ScriptResultBody, ScriptScope, ScriptStubContext, entrypoints,
 };
 use anyhow::{Result, anyhow};
 use boa_engine::{
@@ -1950,7 +1950,7 @@ pub fn clear_imposter_state(port: u16) {
 pub fn execute_mountebank_inject(
     inject_fn: &str,
     request: &MountebankRequest,
-    imposter_port: u16,
+    scope: ScriptScope,
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
 ) -> Result<MountebankInjectResponse> {
@@ -1963,7 +1963,7 @@ pub fn execute_mountebank_inject(
             thread,
             &inject_fn,
             &request,
-            imposter_port,
+            &scope,
             stub_id.as_deref(),
             &files,
         )
@@ -1980,7 +1980,7 @@ pub fn execute_mountebank_inject(
 pub async fn execute_mountebank_inject_bounded(
     inject_fn: String,
     request: MountebankRequest,
-    imposter_port: u16,
+    scope: ScriptScope,
     stub_id: Option<String>,
     files: Arc<ScriptFileAccess>,
     timeout: std::time::Duration,
@@ -1994,7 +1994,7 @@ pub async fn execute_mountebank_inject_bounded(
             thread,
             &inject_fn,
             &request,
-            imposter_port,
+            &scope,
             stub_id.as_deref(),
             &files,
             budget,
@@ -2069,7 +2069,7 @@ fn execute_mountebank_inject_in(
     thread: &mut MbJsThread,
     inject_fn: &str,
     request: &MountebankRequest,
-    imposter_port: u16,
+    scope: &ScriptScope,
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
 ) -> Result<MountebankInjectResponse> {
@@ -2077,7 +2077,7 @@ fn execute_mountebank_inject_in(
         thread,
         inject_fn,
         request,
-        imposter_port,
+        scope,
         stub_id,
         files,
         RunBudget::default_now(),
@@ -2088,7 +2088,7 @@ fn execute_mountebank_inject_within(
     thread: &mut MbJsThread,
     inject_fn: &str,
     request: &MountebankRequest,
-    imposter_port: u16,
+    scope: &ScriptScope,
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
     budget: RunBudget,
@@ -2102,7 +2102,7 @@ fn execute_mountebank_inject_within(
     // Mountebank gives every injection `require` (issue #1611); this run's is bound to its own
     // imposter, passed into the hook's scope (#1645), and dies with the guard.
     let (_run, require) = install_require(&mut *context, files);
-    install_host_globals(&mut *context, imposter_port, stub_id)?;
+    install_host_globals(&mut *context, scope.port, stub_id)?;
 
     // Create request object
     let request_obj = create_mountebank_request_object(&mut *context, request)?;
@@ -2112,13 +2112,13 @@ fn execute_mountebank_inject_within(
     // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
     // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
     // guard is written back at the end of this call.
-    let cell = imposter_state_cell(imposter_port);
+    let cell = imposter_state_cell(scope.port);
     let mut imposter_state = cell.lock();
     let state_map = imposter_state.clone();
     let state_obj = json_to_js(&mut *context, &Value::Object(state_map))?;
 
     let logger_obj =
-        create_script_logger_object(&mut *context, imposter_port, stub_id.map(str::to_owned))?;
+        create_script_logger_object(&mut *context, scope.port, stub_id.map(str::to_owned))?;
 
     // Build config = { request, state, logger } and flatten request fields onto config itself.
     let config_obj = create_js_object(&*context);
@@ -2262,7 +2262,7 @@ fn execute_mountebank_inject_within(
         &mut *context,
         &updated_state,
         &mut imposter_state,
-        imposter_port,
+        scope,
         "inject",
     );
 
@@ -2278,17 +2278,19 @@ fn save_script_state(
     context: &mut Context,
     state: &JsValue,
     imposter_state: &mut serde_json::Map<String, Value>,
-    imposter_port: u16,
+    scope: &ScriptScope,
     hook: &str,
 ) {
     match js_to_json(context, state) {
         Ok(Value::Object(map)) => *imposter_state = map,
         Ok(_) => tracing::error!(
-            "imposter {imposter_port}: the {hook}'s state is not saved: it is no longer an object"
+            "imposter {}: the {hook}'s state is not saved: it is no longer an object",
+            scope.port
         ),
         Err(e) => tracing::error!(
-            "imposter {imposter_port}: the {hook}'s state is not saved: it cannot be stored as \
-             JSON: {e}"
+            "imposter {}: the {hook}'s state is not saved: it cannot be stored as \
+             JSON: {e}",
+            scope.port
         ),
     }
 }
@@ -2358,14 +2360,14 @@ impl PredicateInjectionError {
 pub fn execute_predicate_inject(
     inject_fn: &str,
     request: &MountebankRequest,
-    imposter_port: u16,
+    scope: ScriptScope,
     files: &Arc<ScriptFileAccess>,
 ) -> anyhow::Result<bool> {
     let inject_fn = inject_fn.to_string();
     let request = request.clone();
     let files = Arc::clone(files);
     with_mb_js_thread(move |thread| {
-        execute_predicate_inject_in(thread, &inject_fn, &request, imposter_port, &files)
+        execute_predicate_inject_in(thread, &inject_fn, &request, &scope, &files)
     })?
 }
 
@@ -2373,7 +2375,7 @@ fn execute_predicate_inject_in(
     thread: &mut MbJsThread,
     inject_fn: &str,
     request: &MountebankRequest,
-    imposter_port: u16,
+    scope: &ScriptScope,
     files: &Arc<ScriptFileAccess>,
 ) -> anyhow::Result<bool> {
     let MbRealm {
@@ -2382,7 +2384,7 @@ fn execute_predicate_inject_in(
     let (_run, require) = install_require(&mut *context, files);
     // Mountebank does not wait for a predicate: its timers and promise jobs are queued and never
     // run here (issue #1593).
-    if let Err(e) = install_host_globals(&mut *context, imposter_port, None) {
+    if let Err(e) = install_host_globals(&mut *context, scope.port, None) {
         return Err(PredicateInjectionError::internal(format!("{e:#}")).into());
     }
 
@@ -2400,7 +2402,7 @@ fn execute_predicate_inject_in(
     // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
     // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
     // guard is written back at the end of this call.
-    let cell = imposter_state_cell(imposter_port);
+    let cell = imposter_state_cell(scope.port);
     let mut imposter_state = cell.lock();
     let state_map = imposter_state.clone();
     let state_obj = match json_to_js(&mut *context, &Value::Object(state_map)) {
@@ -2417,7 +2419,7 @@ fn execute_predicate_inject_in(
     // stub_id is left None here: predicate matching operates on a `PredicateOperation` tree and
     // the owning stub's id is not threaded through the matcher without an invasive change to the
     // predicate-matching signatures (issue #355 AC1 note).
-    let logger_obj = match create_script_logger_object(&mut *context, imposter_port, None) {
+    let logger_obj = match create_script_logger_object(&mut *context, scope.port, None) {
         Ok(obj) => obj,
         Err(e) => {
             tracing::warn!("inject predicate: failed to build logger object: {e:#}");
@@ -2494,11 +2496,12 @@ fn execute_predicate_inject_in(
             &mut *context,
             &updated_state,
             &mut imposter_state,
-            imposter_port,
+            scope,
             "predicate inject",
         ),
         Err(e) => tracing::error!(
-            "imposter {imposter_port}: the predicate inject's state is not saved: it cannot be read: {e}"
+            "imposter {}: the predicate inject's state is not saved: it cannot be read: {e}",
+            scope.port
         ),
     }
 
@@ -3212,7 +3215,7 @@ pub fn execute_mountebank_decorate(
     response_body: &str,
     response_status: &crate::behaviors::ResponseStatus,
     response_headers: &crate::util::OrderedMap<String, String>,
-    imposter_port: u16,
+    scope: &ScriptScope,
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
 ) -> Result<crate::behaviors::Decorated> {
@@ -3222,7 +3225,7 @@ pub fn execute_mountebank_decorate(
         response_body,
         response_status,
         response_headers,
-        imposter_port,
+        scope.clone(),
         stub_id,
         files,
         std::time::Duration::from_millis(crate::scripting::DEFAULT_SCRIPT_TIMEOUT_MS),
@@ -3239,7 +3242,7 @@ pub fn execute_mountebank_decorate_within(
     response_body: &str,
     response_status: &crate::behaviors::ResponseStatus,
     response_headers: &crate::util::OrderedMap<String, String>,
-    imposter_port: u16,
+    scope: ScriptScope,
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
     timeout: std::time::Duration,
@@ -3260,7 +3263,7 @@ pub fn execute_mountebank_decorate_within(
             &response_body,
             &response_status,
             &response_headers,
-            imposter_port,
+            &scope,
             stub_id.as_deref(),
             &files,
             budget,
@@ -3278,7 +3281,7 @@ fn execute_mountebank_decorate_in(
     response_body: &str,
     response_status: &crate::behaviors::ResponseStatus,
     response_headers: &crate::util::OrderedMap<String, String>,
-    imposter_port: u16,
+    scope: &ScriptScope,
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
 ) -> Result<crate::behaviors::Decorated> {
@@ -3289,7 +3292,7 @@ fn execute_mountebank_decorate_in(
         response_body,
         response_status,
         response_headers,
-        imposter_port,
+        scope,
         stub_id,
         files,
         RunBudget::default_now(),
@@ -3304,7 +3307,7 @@ fn execute_mountebank_decorate_within_budget(
     response_body: &str,
     response_status: &crate::behaviors::ResponseStatus,
     response_headers: &crate::util::OrderedMap<String, String>,
-    imposter_port: u16,
+    scope: &ScriptScope,
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
     budget: RunBudget,
@@ -3315,7 +3318,7 @@ fn execute_mountebank_decorate_within_budget(
         jobs,
         ..
     } = thread.realm(files);
-    install_host_globals(&mut *context, imposter_port, stub_id)?;
+    install_host_globals(&mut *context, scope.port, stub_id)?;
 
     let request_obj = create_mountebank_request_object(&mut *context, request)?;
 
@@ -3354,12 +3357,12 @@ fn execute_mountebank_decorate_within_budget(
     // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
     // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
     // guard is written back at the end of this call.
-    let cell = imposter_state_cell(imposter_port);
+    let cell = imposter_state_cell(scope.port);
     let mut imposter_state = cell.lock();
     let state_map = imposter_state.clone();
     let state_obj = json_to_js(&mut *context, &Value::Object(state_map))?;
     let logger_obj =
-        create_script_logger_object(&mut *context, imposter_port, stub_id.map(str::to_owned))?;
+        create_script_logger_object(&mut *context, scope.port, stub_id.map(str::to_owned))?;
 
     // config: { request, response, path, state, logger } + the flattened request.
     let config_obj = create_js_object(&*context);
@@ -3434,7 +3437,7 @@ fn execute_mountebank_decorate_within_budget(
         &mut *context,
         &state_obj,
         &mut imposter_state,
-        imposter_port,
+        scope,
         "decorate",
     );
 
@@ -4207,7 +4210,7 @@ function respond(ctx) {
             "original",
             &crate::behaviors::ResponseStatus::Code(200),
             &headers,
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         );
@@ -4233,7 +4236,7 @@ function respond(ctx) {
                 "orig",
                 &crate::behaviors::ResponseStatus::Code(200),
                 &crate::util::OrderedMap::default(),
-                test_port(),
+                &ScriptScope::detached(test_port()),
                 None,
                 &trusted_files(),
             )
@@ -4350,7 +4353,7 @@ function respond(ctx) {
             "original",
             &crate::behaviors::ResponseStatus::Code(200),
             &headers,
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         );
@@ -4403,7 +4406,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         );
@@ -4426,7 +4429,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -4444,7 +4447,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -4494,7 +4497,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         );
@@ -4518,7 +4521,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         );
@@ -4573,10 +4576,16 @@ function respond(ctx) {
             "config => {{ try {{ return {{ body: 'OK:' + JSON.stringify(require({module:?})) }}; }} \
              catch (e) {{ return {{ body: 'ERR:' + String(e) }}; }} }}"
         );
-        execute_mountebank_inject(&script, &mb_req("GET", "/r"), test_port(), None, files)
-            .expect("inject runs")
-            .body
-            .expect("a body")
+        execute_mountebank_inject(
+            &script,
+            &mb_req("GET", "/r"),
+            ScriptScope::detached(test_port()),
+            None,
+            files,
+        )
+        .expect("inject runs")
+        .body
+        .expect("a body")
     }
 
     #[test]
@@ -4661,7 +4670,7 @@ function respond(ctx) {
             &mut thread,
             stash,
             &mb_req("GET", "/a"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted,
         )
@@ -4679,7 +4688,7 @@ function respond(ctx) {
             &mut thread,
             &replay,
             &mb_req("GET", "/b"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted,
         )
@@ -4697,7 +4706,7 @@ function respond(ctx) {
             &mut thread,
             &replay,
             &mb_req("GET", "/c"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &refused,
         )
@@ -4725,7 +4734,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &confined,
         )
@@ -4737,7 +4746,7 @@ function respond(ctx) {
                 &mut thread,
                 "config => require('top.js') === 'A>B:true'",
                 &mb_req("GET", "/p"),
-                test_port(),
+                &ScriptScope::detached(test_port()),
                 &confined,
             )
             .expect("predicate inject")
@@ -4746,7 +4755,7 @@ function respond(ctx) {
             &mut thread,
             "config => require('top.js') === 'A>B:true'",
             &mb_req("GET", "/p"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             &refused,
         );
         assert!(
@@ -4788,7 +4797,7 @@ function respond(ctx) {
             &mut thread,
             &plant,
             &mb_req("GET", "/a"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &confined,
         )
@@ -4800,7 +4809,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted,
         )
@@ -4810,7 +4819,7 @@ function respond(ctx) {
             &mut thread,
             "config => ({ body: String(globalThis.__x) })",
             &mb_req("GET", "/b"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &confined,
         )
@@ -4841,7 +4850,7 @@ function respond(ctx) {
             &mut thread,
             &patch,
             &mb_req("GET", "/a"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &confined,
         )
@@ -4850,7 +4859,7 @@ function respond(ctx) {
             &mut thread,
             "config => ({ body: JSON.stringify({ a: 1 }) + ':' + typeof globalThis.__y })",
             &mb_req("GET", "/t"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted,
         )
@@ -4864,7 +4873,7 @@ function respond(ctx) {
             &mut thread,
             "config => ({ body: String(globalThis.__y) })",
             &mb_req("GET", "/b"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &confined,
         )
@@ -4885,7 +4894,7 @@ function respond(ctx) {
             &mut thread,
             &format!("config => ({{ body: {probe} }})"),
             &mb_req("GET", "/a"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &confined,
         )
@@ -4898,7 +4907,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &confined,
         )
@@ -4909,7 +4918,7 @@ function respond(ctx) {
                 &mut thread,
                 &format!("config => ({probe}) === 'undefined:function'"),
                 &mb_req("GET", "/p"),
-                test_port(),
+                &ScriptScope::detached(test_port()),
                 &confined,
             )
             .expect("predicate inject")
@@ -4939,7 +4948,7 @@ function respond(ctx) {
             "config => { Promise.resolve().then(() => { globalThis.__ran = 'yes'; }); \
              return { body: 'queued' }; }",
             &mb_req("GET", "/a"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &refused,
         )
@@ -4951,7 +4960,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &refused,
         )
@@ -5021,7 +5030,7 @@ function respond(ctx) {
                     "orig",
                     &crate::behaviors::ResponseStatus::Code(200),
                     &crate::util::OrderedMap::default(),
-                    test_port(),
+                    &ScriptScope::detached(test_port()),
                     None,
                     &files,
                 )
@@ -5080,7 +5089,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req("GET", "/s"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5093,7 +5102,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req("GET", "/s"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5107,7 +5116,7 @@ function respond(ctx) {
         execute_mountebank_inject(
             &script,
             &mb_req("GET", "/1635"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5156,7 +5165,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req("GET", "/1635"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5180,7 +5189,7 @@ function respond(ctx) {
             let result = execute_mountebank_inject(
                 &script,
                 &mb_req("GET", "/1635"),
-                test_port(),
+                ScriptScope::detached(test_port()),
                 None,
                 &trusted_files(),
             );
@@ -5198,7 +5207,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req("GET", "/1635"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5214,7 +5223,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req("GET", "/1635"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5230,7 +5239,7 @@ function respond(ctx) {
         execute_mountebank_inject(
             &script,
             &mb_req("GET", "/1635"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5287,7 +5296,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req("GET", "/a-path"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5302,6 +5311,7 @@ function respond(ctx) {
     #[test]
     fn mb_script_parse_cached_across_calls() {
         let port = test_port();
+        let scope = ScriptScope::detached(port);
         let marker = format!("parse-cache-{port}");
         let script =
             format!("function(config) {{ return {{ statusCode: 200, body: '{marker}' }}; }}");
@@ -5309,7 +5319,7 @@ function respond(ctx) {
             let resp = execute_mountebank_inject(
                 &script,
                 &mb_req("GET", "/c"),
-                port,
+                scope.clone(),
                 None,
                 &trusted_files(),
             )
@@ -5331,7 +5341,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req("GET", "/nobody"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5349,7 +5359,7 @@ function respond(ctx) {
             "original",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5366,8 +5376,14 @@ function respond(ctx) {
             body_undefined: true,
             ..mb_req("POST", "/gz")
         };
-        let resp = execute_mountebank_inject(script, &request, test_port(), None, &trusted_files())
-            .expect("inject runs");
+        let resp = execute_mountebank_inject(
+            script,
+            &request,
+            ScriptScope::detached(test_port()),
+            None,
+            &trusted_files(),
+        )
+        .expect("inject runs");
         assert_eq!(resp.body_text(), "undefined:false");
     }
 
@@ -5376,7 +5392,7 @@ function respond(ctx) {
         let matched = execute_predicate_inject(
             r#"function(config) { return config.request.body === ""; }"#,
             &mb_req("GET", "/nobody"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             &trusted_files(),
         )
         .expect("predicate inject runs");
@@ -5402,7 +5418,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req_with_headers(),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5419,7 +5435,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req_with_headers(),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5434,7 +5450,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req_with_headers(),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5460,7 +5476,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req_with_headers(),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5482,7 +5498,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req_with_headers(),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5495,7 +5511,7 @@ function respond(ctx) {
         let matched = execute_predicate_inject(
             r#"function(config) { return config.request.headers['x-id'] === '7'; }"#,
             &mb_req_with_headers(),
-            test_port(),
+            ScriptScope::detached(test_port()),
             &trusted_files(),
         )
         .expect("predicate inject runs");
@@ -5506,7 +5522,7 @@ function respond(ctx) {
             "original",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5521,7 +5537,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req("GET", "/legacy"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5536,7 +5552,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req("POST", "/flat"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5555,7 +5571,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req("GET", "/shim"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5574,7 +5590,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req("GET", "/hybrid"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5592,7 +5608,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req("GET", "/cb"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5608,7 +5624,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             script,
             &mb_req("GET", "/cb2"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5624,7 +5640,7 @@ function respond(ctx) {
             execute_predicate_inject(
                 script,
                 &mb_req("GET", "/match"),
-                test_port(),
+                ScriptScope::detached(test_port()),
                 &trusted_files()
             )
             .unwrap()
@@ -5638,7 +5654,7 @@ function respond(ctx) {
             execute_predicate_inject(
                 script,
                 &mb_req("GET", "/match"),
-                test_port(),
+                ScriptScope::detached(test_port()),
                 &trusted_files()
             )
             .unwrap()
@@ -5652,7 +5668,7 @@ function respond(ctx) {
             execute_predicate_inject(
                 script,
                 &mb_req("GET", "/match"),
-                test_port(),
+                ScriptScope::detached(test_port()),
                 &trusted_files()
             )
             .unwrap()
@@ -5669,7 +5685,7 @@ function respond(ctx) {
             execute_predicate_inject(
                 script,
                 &mb_req("GET", "/match"),
-                test_port(),
+                ScriptScope::detached(test_port()),
                 &trusted_files()
             )
             .unwrap()
@@ -5686,7 +5702,7 @@ function respond(ctx) {
             execute_predicate_inject(
                 script,
                 &mb_req("GET", "/match"),
-                test_port(),
+                ScriptScope::detached(test_port()),
                 &trusted_files()
             )
             .unwrap()
@@ -5703,7 +5719,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5720,7 +5736,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5737,7 +5753,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5757,7 +5773,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5777,7 +5793,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -5790,13 +5806,14 @@ function respond(ctx) {
     #[test]
     fn state_shared_between_predicate_and_response_inject() {
         let port = test_port();
+        let scope = ScriptScope::detached(port);
         let predicate_script =
             r#"function(config) { config.state.seen = "from-predicate"; return true; }"#;
         assert!(
             execute_predicate_inject(
                 predicate_script,
                 &mb_req("GET", "/shared"),
-                port,
+                scope.clone(),
                 &trusted_files()
             )
             .unwrap()
@@ -5806,7 +5823,7 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(
             inject_script,
             &mb_req("GET", "/shared"),
-            port,
+            scope.clone(),
             None,
             &trusted_files(),
         )
@@ -5826,7 +5843,9 @@ function respond(ctx) {
     #[test]
     fn mountebank_inject_state_isolated_between_distinct_imposters() {
         let port_a = test_port();
+        let scope_a = ScriptScope::detached(port_a);
         let port_b = test_port();
+        let scope_b = ScriptScope::detached(port_b);
         assert_ne!(
             port_a, port_b,
             "distinct imposters must have distinct state keys"
@@ -5835,8 +5854,13 @@ function respond(ctx) {
         // Imposter A writes state via a predicate inject.
         let writer = r#"function(config) { config.state.marker = "from-A"; return true; }"#;
         assert!(
-            execute_predicate_inject(writer, &mb_req("GET", "/iso"), port_a, &trusted_files())
-                .unwrap()
+            execute_predicate_inject(
+                writer,
+                &mb_req("GET", "/iso"),
+                scope_a.clone(),
+                &trusted_files()
+            )
+            .unwrap()
         );
 
         // Imposter B reads state via a response inject: it must see its own (empty) state, not A's.
@@ -5844,7 +5868,7 @@ function respond(ctx) {
         let resp_b = execute_mountebank_inject(
             reader,
             &mb_req("GET", "/iso"),
-            port_b,
+            scope_b.clone(),
             None,
             &trusted_files(),
         )
@@ -5859,7 +5883,7 @@ function respond(ctx) {
         let resp_a = execute_mountebank_inject(
             reader,
             &mb_req("GET", "/iso"),
-            port_a,
+            scope_a.clone(),
             None,
             &trusted_files(),
         )
@@ -5876,6 +5900,7 @@ function respond(ctx) {
     #[test]
     fn concurrent_injects_do_not_lose_state_updates() {
         let port = test_port();
+        let scope = ScriptScope::detached(port);
         let incr = r#"function(config) {
             config.state.count = (config.state.count || 0) + 1;
             return { statusCode: 200, body: String(config.state.count) };
@@ -5889,12 +5914,13 @@ function respond(ctx) {
         let n: usize = 40;
         std::thread::scope(|s| {
             for i in 0..n {
+                let scope = scope.clone();
                 s.spawn(move || {
                     if i % 2 == 0 {
                         execute_mountebank_inject(
                             incr,
                             &mb_req("POST", "/count"),
-                            port,
+                            scope.clone(),
                             None,
                             &trusted_files(),
                         )
@@ -5903,7 +5929,7 @@ function respond(ctx) {
                         execute_predicate_inject(
                             pred_incr,
                             &mb_req("POST", "/count"),
-                            port,
+                            scope.clone(),
                             &trusted_files(),
                         )
                         .expect("predicate inject should run");
@@ -5915,9 +5941,14 @@ function respond(ctx) {
         let read = r#"function(config) {
             return { statusCode: 200, body: String(config.state.count || 0) };
         }"#;
-        let final_resp =
-            execute_mountebank_inject(read, &mb_req("GET", "/count"), port, None, &trusted_files())
-                .expect("read inject should run");
+        let final_resp = execute_mountebank_inject(
+            read,
+            &mb_req("GET", "/count"),
+            scope.clone(),
+            None,
+            &trusted_files(),
+        )
+        .expect("read inject should run");
         assert_eq!(
             final_resp.body_text(),
             n.to_string(),
@@ -5936,6 +5967,7 @@ function respond(ctx) {
     #[test]
     fn clear_imposter_state_resets_state_for_every_pool_worker() {
         let port = test_port();
+        let scope = ScriptScope::detached(port);
         let incr = r#"function(config) {
             config.state.count = (config.state.count || 0) + 1;
             return true;
@@ -5943,18 +5975,29 @@ function respond(ctx) {
         let n: usize = 32;
         std::thread::scope(|s| {
             for _ in 0..n {
+                let scope = scope.clone();
                 s.spawn(move || {
-                    execute_predicate_inject(incr, &mb_req("POST", "/gen"), port, &trusted_files())
-                        .expect("predicate inject should run");
+                    execute_predicate_inject(
+                        incr,
+                        &mb_req("POST", "/gen"),
+                        scope.clone(),
+                        &trusted_files(),
+                    )
+                    .expect("predicate inject should run");
                 });
             }
         });
         let read = r#"function(config) {
             return { statusCode: 200, body: String(config.state.count || 0) };
         }"#;
-        let before =
-            execute_mountebank_inject(read, &mb_req("GET", "/gen"), port, None, &trusted_files())
-                .expect("read inject should run");
+        let before = execute_mountebank_inject(
+            read,
+            &mb_req("GET", "/gen"),
+            scope.clone(),
+            None,
+            &trusted_files(),
+        )
+        .expect("read inject should run");
         assert_eq!(
             before.body_text(),
             n.to_string(),
@@ -5970,11 +6013,12 @@ function respond(ctx) {
         // old state would resurface here.
         std::thread::scope(|s| {
             for _ in 0..8 {
+                let scope = scope.clone();
                 s.spawn(move || {
                     let resp = execute_mountebank_inject(
                         read,
                         &mb_req("GET", "/gen"),
-                        port,
+                        scope.clone(),
                         None,
                         &trusted_files(),
                     )
@@ -6040,6 +6084,7 @@ function respond(ctx) {
             events: Arc::clone(&events),
         };
         let port = test_port();
+        let scope = ScriptScope::detached(port);
 
         let script = r#"function(config) {
             config.logger.debug("dbg-msg");
@@ -6053,7 +6098,7 @@ function respond(ctx) {
             execute_mountebank_inject(
                 script,
                 &mb_req("GET", "/log"),
-                port,
+                scope.clone(),
                 Some("stub-log-42"),
                 &trusted_files(),
             )
@@ -6093,7 +6138,7 @@ function respond(ctx) {
         let result = execute_mountebank_inject(
             script,
             &mb_req("GET", "/loop"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         );
@@ -6113,7 +6158,7 @@ function respond(ctx) {
         let result = execute_mountebank_inject(
             script,
             &mb_req("GET", "/throw"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         );
@@ -6130,7 +6175,7 @@ function respond(ctx) {
         let err = execute_mountebank_inject(
             &script,
             &mb_req("GET", "/throw"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -6164,7 +6209,7 @@ function respond(ctx) {
         let err = execute_predicate_inject(
             "function(config) { throw new Error('pboom'); }",
             &mb_req("GET", "/p"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             &trusted_files(),
         )
         .expect_err("a throwing predicate must be Err");
@@ -6749,7 +6794,7 @@ function respond(ctx) {
         execute_mountebank_inject(
             script,
             &mb_req("GET", "/1593"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -6845,7 +6890,7 @@ function respond(ctx) {
                setTimeout(() => callback({ body: 'never' }), 10000); }"
                 .to_string(),
             mb_req("GET", "/1593"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             trusted_files(),
             std::time::Duration::from_millis(200),
@@ -6869,7 +6914,7 @@ function respond(ctx) {
             "async config => { async function f() { await 0; return f(); } return f(); }"
                 .to_string(),
             mb_req("GET", "/1593"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             trusted_files(),
             std::time::Duration::from_millis(200),
@@ -6893,7 +6938,7 @@ function respond(ctx) {
             &mut thread,
             "(config, state, logger, callback) => { setTimeout(() => callback({}), 10000); }",
             &mb_req("GET", "/1593"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
             RunBudget::starting_now(std::time::Duration::from_millis(100)),
@@ -6914,13 +6959,14 @@ function respond(ctx) {
             events: Arc::clone(&events),
         };
         let port = test_port();
+        let scope = ScriptScope::detached(port);
         let result = tracing::subscriber::with_default(subscriber, || {
             execute_mountebank_inject(
                 "() => { console.log('x-1593', { a: 1 }); console.warn('w-1593'); \
                    console.error('e-1593'); console.info('i-1593'); console.debug('d-1593'); \
                    return { body: 'logged' }; }",
                 &mb_req("GET", "/log"),
-                port,
+                scope.clone(),
                 Some("stub-1593"),
                 &trusted_files(),
             )
@@ -6965,7 +7011,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -6988,7 +7034,7 @@ function respond(ctx) {
                 "orig",
                 &crate::behaviors::ResponseStatus::Code(201),
                 &crate::util::OrderedMap::default(),
-                test_port(),
+                &ScriptScope::detached(test_port()),
                 None,
                 &trusted_files(),
             )
@@ -7006,7 +7052,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
             std::time::Duration::from_millis(100),
@@ -7034,7 +7080,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )
@@ -7047,7 +7093,7 @@ function respond(ctx) {
         let matched = execute_predicate_inject(
             "config => { console.log('pred-1593'); setTimeout(() => {}, 1); return true; }",
             &mb_req("GET", "/p"),
-            test_port(),
+            ScriptScope::detached(test_port()),
             &trusted_files(),
         )
         .expect("predicate inject");
@@ -7065,7 +7111,7 @@ function respond(ctx) {
             "config => { setTimeout(() => { globalThis.__timer1593 = 'fired'; }, 0); \
              return { body: 'queued' }; }",
             &mb_req("GET", "/a"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &refused,
         )
@@ -7075,7 +7121,7 @@ function respond(ctx) {
             "(config, state, logger, callback) => { \
                setTimeout(() => callback({ body: String(globalThis.__timer1593) }), 5); }",
             &mb_req("GET", "/b"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &refused,
         )
@@ -7105,7 +7151,7 @@ function respond(ctx) {
             &mut thread,
             &plant,
             &mb_req("GET", "/a"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &confined,
         )
@@ -7118,7 +7164,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted,
         )
@@ -7129,7 +7175,7 @@ function respond(ctx) {
             "(config, state, logger, callback) => { \
                setTimeout(() => callback({ body: String(globalThis.__x1593) }), 5); }",
             &mb_req("GET", "/b"),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &confined,
         )
@@ -7156,7 +7202,7 @@ function respond(ctx) {
             "orig",
             &crate::behaviors::ResponseStatus::Code(200),
             &crate::util::OrderedMap::default(),
-            test_port(),
+            &ScriptScope::detached(test_port()),
             None,
             &trusted_files(),
         )

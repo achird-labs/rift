@@ -52,6 +52,21 @@ pub use js_engine::{
 #[allow(unused_imports)]
 pub use js_engine::{MountebankInjectResponse, execute_js_bytecode};
 
+/// The imposter a script run belongs to (issue #1726): the port its logger and host globals name,
+/// and — through it — the script `state` it reads and writes.
+#[derive(Debug, Clone)]
+pub struct ScriptScope {
+    pub port: u16,
+}
+
+impl ScriptScope {
+    /// A scope for a run that no managed imposter owns: a standalone match, a test.
+    #[must_use]
+    pub fn detached(port: u16) -> Self {
+        Self { port }
+    }
+}
+
 // Validator trait and unified error types
 mod validator;
 #[allow(unused_imports)]
