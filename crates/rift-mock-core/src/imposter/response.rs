@@ -764,8 +764,8 @@ mod tests {
     use super::*;
     use crate::scripting::ScriptScope;
 
-    // Allocates a fresh port per test so parallel tests never share `IMPOSTER_STATE` (disjoint
-    // from the range used by `rift-mock-core/src/scripting/js_engine.rs`'s own tests in this binary).
+    // A fresh port per test (disjoint from `scripting/js_engine.rs`'s test range in this binary),
+    // so parallel tests' logger lines stay apart; each test's state is its own `ScriptScope`.
     /// The unconfined `require` of a local door (issue #1611): these tests write their modules to
     /// the temp dir.
     fn trusted_files() -> std::sync::Arc<crate::imposter::ScriptFileAccess> {

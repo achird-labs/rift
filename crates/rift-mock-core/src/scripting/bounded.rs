@@ -507,8 +507,8 @@ mod tests {
         use crate::scripting::{MountebankRequest, execute_mountebank_inject_bounded};
         use std::sync::atomic::AtomicU32;
 
-        // Fresh port per test so parallel tests never share `IMPOSTER_STATE`; range disjoint
-        // from js_engine.rs and imposter/response.rs test ranges.
+        // Fresh port per test, range disjoint from js_engine.rs and imposter/response.rs test
+        // ranges; each test's state is its own `ScriptScope`.
         fn test_port() -> u16 {
             static NEXT: AtomicU32 = AtomicU32::new(42_500);
             NEXT.fetch_add(1, Ordering::Relaxed) as u16
