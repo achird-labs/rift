@@ -1752,12 +1752,13 @@ fn behaviors_array_format_still_dispatches() {
 }
 
 #[test]
-fn underscore_behaviors_takes_priority_over_behaviors_array() {
-    // When both forms are present, _behaviors wins (matches proxy behaviour)
+fn behaviors_array_takes_priority_over_underscore_behaviors() {
+    // When both forms are present, `behaviors` runs and `_behaviors` is ignored, as in Mountebank
+    // (issue #1709): an invalid `_behaviors` is not reached.
     let resp = json!({
         "is": { "statusCode": 200 },
-        "_behaviors": { "wait": 100 },
-        "behaviors": [{ "wait": true }]  // invalid, but should not be reached
+        "_behaviors": { "wait": true },
+        "behaviors": [{ "wait": 100 }]
     });
     let mut r = LintResult::new();
     validate_response(
@@ -1770,9 +1771,10 @@ fn underscore_behaviors_takes_priority_over_behaviors_array() {
     );
     assert!(
         !has_code(&r, "E025"),
-        "_behaviors (valid) should shadow behaviors array, got {:?}",
+        "the ignored _behaviors should not be validated, got {:?}",
         codes(&r)
     );
+    assert!(has_code(&r, "W025"), "{:?}", codes(&r));
 }
 
 /// Issue #1099: every behavior finding on `resp`, as `(code, location)`, validated the way
@@ -2181,15 +2183,22 @@ fn behaviors_object_form_is_validated() {
 }
 
 #[test]
-fn a_live_underscore_behaviors_still_shadows_a_bad_array_at_its_own_location() {
+fn beside_behaviors_the_array_is_validated_and_underscore_behaviors_is_not() {
+    // Issue #1709: `behaviors` runs, so its bad `wait` is reported; the ignored `_behaviors`, with
+    // its bad `repeat`, is not validated.
     let resp = json!({
         "is": { "statusCode": 200 },
         "_behaviors": { "repeat": 0 },
         "behaviors": [{ "wait": true }]
     });
-    assert_eq!(
-        behavior_findings(&resp),
-        vec![finding("E035", "loc._behaviors.repeat")]
+    let findings = behavior_findings(&resp);
+    assert!(
+        findings.iter().any(|(code, _)| code == "E025"),
+        "{findings:?}"
+    );
+    assert!(
+        !findings.iter().any(|(code, _)| code == "E035"),
+        "{findings:?}"
     );
 }
 
@@ -4812,4 +4821,43 @@ fn behaviors_on_flat_with_script_less_rift_are_not_reported_ignored() {
     ] }] });
     let r = lint_imposter(&bare);
     assert!(has_code(&r, "W017"), "{:?}", codes(&r));
+}
+
+/// Issue #1709: W025 for a `_behaviors` the engine ignores, beside `behaviors` (a `null` one
+/// included) or a top-level `repeat`; none for `_behaviors` alone, a `null` one or an empty one.
+#[test]
+fn w025_underscore_behaviors_beside_behaviors_or_repeat() {
+    for resp in [
+        json!({ "is": {}, "_behaviors": { "wait": 10 }, "behaviors": [{ "wait": 20 }] }),
+        json!({ "is": {}, "_behaviors": { "wait": 10 }, "behaviors": null }),
+        json!({ "is": {}, "_behaviors": { "wait": 10 }, "repeat": 2 }),
+    ] {
+        let r = lint_response(&resp);
+        assert!(has_code(&r, "W025"), "{resp}: {:?}", codes(&r));
+    }
+    for resp in [
+        json!({ "is": {}, "_behaviors": { "wait": 10, "repeat": 2 } }),
+        json!({ "is": {}, "_behaviors": null, "behaviors": [{ "wait": 20 }] }),
+        json!({ "is": {}, "_behaviors": {}, "repeat": 2 }),
+    ] {
+        let r = lint_response(&resp);
+        assert!(!has_code(&r, "W025"), "{resp}: {:?}", codes(&r));
+    }
+}
+
+/// Issue #1709: the ignored block is not validated (its bad `repeat` is no E035), but the one that
+/// runs is, and a non-object `_behaviors` stays E048 wherever it sits.
+#[test]
+fn an_ignored_underscore_behaviors_is_not_validated_but_a_non_object_one_is_e048() {
+    let r = lint_response(&json!({ "is": {}, "repeat": 2, "_behaviors": { "repeat": "bad" } }));
+    assert!(!has_code(&r, "E035"), "{:?}", codes(&r));
+    let r = lint_response(&json!({ "is": {}, "_behaviors": { "wait": 10 },
+        "behaviors": [{ "repeat": 2 }] }));
+    assert!(
+        has_code(&r, "E060"),
+        "the running block is checked: {:?}",
+        codes(&r)
+    );
+    let r = lint_response(&json!({ "is": {}, "repeat": 2, "_behaviors": [1] }));
+    assert!(has_code(&r, "E048"), "{:?}", codes(&r));
 }

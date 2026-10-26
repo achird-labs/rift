@@ -69,6 +69,16 @@ record.
 
 ### Changed
 
+- **`_behaviors` beside `behaviors` (a `null` one included) or a top-level `repeat` is ignored, as in
+  Mountebank** (#1709). Rift used to run `_behaviors` there and ignore `behaviors`. A
+  `{"repeat": n, "_behaviors": {...}}` response now repeats and runs none of the block's behaviors.
+  An ignored `_behaviors` is no longer type-checked (apart from an inverted `wait` range), no longer
+  needs `--allowInjection` for a `decorate` or `shellTransform` in it, and is left out of
+  `GET /imposters`. The reverse holds too: a `behaviors` block beside `_behaviors` is now the one
+  checked, so a config that loaded with a malformed one can be refused. A stub without an `id`
+  stored with both blocks keys differently once (rift-cluster). `rift-lint` reports an ignored block
+  as `W025`. Releases up to 0.23.0 ran `_behaviors` there. SDKs that write a response-level `repeat`
+  beside a `_behaviors` object (rift-java, rift-scala) need to write the `behaviors` array instead.
 - **A response with `_rift.script` beside `is`, `proxy`, `inject`, `fault` or the flat
   `statusCode`/`headers`/`body` form is refused at a config door** (#1729), with `each response
   object must have only one response type`. The script never ran there: the `is` (or other type) was
