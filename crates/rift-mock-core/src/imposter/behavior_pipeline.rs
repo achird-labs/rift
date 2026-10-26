@@ -12,9 +12,9 @@ use super::headers::StubRef;
 use super::response::{apply_decorate_bounded, body_text};
 use super::types::{IsResponse, ResponseMode, StatusValue};
 use crate::behaviors::{
-    BehaviorProgram, BehaviorStep, CsvCache, Decorated, RequestContext, ResponseStatus,
-    ShellTransformError, Spliced, SplicedHeaders, SplicedName, WaitScriptError, apply_copy_spliced,
-    apply_lookup_row, apply_shell_transform, lookup_key,
+    BehaviorProgram, BehaviorStep, CsvCache, Decorated, LoadOutcome, RequestContext,
+    ResponseStatus, ShellTransformError, Spliced, SplicedHeaders, SplicedName, WaitScriptError,
+    apply_copy_spliced, apply_lookup_row, apply_shell_transform, lookup_key,
 };
 use crate::util::build_response_with_headers;
 use bytes::Bytes;
@@ -316,51 +316,40 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                         // A cache hit, the common case, is served here. A miss reads and parses
                         // the file off the tokio worker (issue #1654), as shellTransform runs its
                         // command (#478): a large file would otherwise stall every request
-                        // multiplexed on the worker.
-                        let data = match self.csv_cache.get_fresh(
-                            &csv.path,
-                            &csv.delimiter,
-                            &self.script_files,
-                        ) {
-                            Some(data) => Some(data),
-                            None => {
-                                let (path, delimiter) = (csv.path.clone(), csv.delimiter.clone());
-                                let access = std::sync::Arc::clone(&self.script_files);
-                                let guard = std::sync::Arc::clone(self.body_guard);
-                                let cache = self.csv_cache;
-                                // The read, the parse, its accounting and the insert all run on
-                                // the blocking thread.
-                                let loaded = tokio::task::spawn_blocking(move || {
-                                    cache.load(&path, &delimiter, &access, &guard)
-                                })
-                                .await;
-                                match loaded {
-                                    Ok(Ok(loaded)) => loaded,
-                                    // Server load, not a behavior failure: a `503` with or without
-                                    // `strictBehaviors`, never the tokens left in place quietly.
-                                    Ok(Err(e)) => {
-                                        return BehaviorOutcome::StrictFailure(
-                                            lookup_budget_response(&e),
-                                        );
-                                    }
-                                    // A defect, not a data source fault: the response under
-                                    // `strictBehaviors`, as a failed shellTransform is; otherwise
-                                    // the tokens stay and the response is marked degraded.
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "lookup behavior: loading CSV data source '{}' \
-                                             panicked: {e}; the tokens are left in place",
-                                            csv.path
-                                        );
-                                        if self.strict {
-                                            return BehaviorOutcome::StrictFailure(
-                                                lookup_panic_response(&csv.path),
-                                            );
-                                        }
-                                        degraded = true;
-                                        None
-                                    }
+                        // multiplexed on the worker. Concurrent misses on one file share that one
+                        // load and its outcome (issue #1715).
+                        let data = match self
+                            .csv_cache
+                            .fetch(
+                                &csv.path,
+                                &csv.delimiter,
+                                std::sync::Arc::clone(&self.script_files),
+                                std::sync::Arc::clone(self.body_guard),
+                            )
+                            .await
+                        {
+                            LoadOutcome::Loaded(loaded) => loaded,
+                            // Server load, not a behavior failure: a `503` with or without
+                            // `strictBehaviors`, never the tokens left in place quietly.
+                            LoadOutcome::Exhausted(e) => {
+                                return BehaviorOutcome::StrictFailure(lookup_budget_response(&e));
+                            }
+                            // A defect, not a data source fault: the response under
+                            // `strictBehaviors`, as a failed shellTransform is; otherwise the
+                            // tokens stay and the response is marked degraded.
+                            LoadOutcome::Panicked(e) => {
+                                tracing::error!(
+                                    "lookup behavior: loading CSV data source '{}' panicked: {e}; \
+                                     the tokens are left in place",
+                                    csv.path
+                                );
+                                if self.strict {
+                                    return BehaviorOutcome::StrictFailure(lookup_panic_response(
+                                        &csv.path,
+                                    ));
                                 }
+                                degraded = true;
+                                None
                             }
                         };
                         if let Some(data) = data {

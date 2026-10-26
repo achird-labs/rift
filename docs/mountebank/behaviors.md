@@ -683,8 +683,10 @@ than `--max-body-size` is not read: a warning is logged and the tokens are left 
 holds at most `--max-body-size` of parsed files and drops the least recently used past it, so a
 dropped file is read again on its next use. A file whose parse alone is larger than that is not
 cached: a warning is logged once, the file is read again on every use, and its parse draws on
-`--body-memory-budget` until the response is built (#1654). Only a regular file is read, from any
-door: a FIFO or a device is refused with a warning.
+`--body-memory-budget` until the response is built (#1654). Concurrent requests that miss on the
+same file share one read and parse, and its outcome (#1715): a cold or just-edited file draws on the
+budget once, not once per request. Only a regular file is read, from any door: a FIFO or a device is
+refused with a warning.
 
 Which files a lookup may read depends on how its imposter was written (#1617), unlike Mountebank,
 which reads any path:
