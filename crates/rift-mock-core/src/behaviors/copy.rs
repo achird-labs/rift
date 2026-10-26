@@ -31,7 +31,12 @@ pub enum CopySource {
     /// case-insensitively, as Mountebank does.
     Simple(String),
     /// Nested field: {"query": "name"}, {"headers": "Content-Type"} or {"form": "name"}. The
-    /// container key is exact; the name inside it is matched case-insensitively.
+    /// container key is exact; the name inside it is matched case-insensitively. Exactly one key,
+    /// as a config door requires (#1582).
+    #[cfg_attr(
+        feature = "schema",
+        schemars(extend("minProperties" = 1, "maxProperties" = 1))
+    )]
     Nested(HashMap<String, String>),
 }
 

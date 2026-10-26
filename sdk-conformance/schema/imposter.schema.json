@@ -1,5 +1,55 @@
 {
   "$defs": {
+    "BehaviorElement": {
+      "additionalProperties": false,
+      "description": "One element of the `behaviors` array: at most one behavior, as every config door and Mountebank's behaviorsValidator.js require. `copy`, `lookup` and `shellTransform` take one item here, never a list: write several as several elements, or use the `_behaviors` object form. `repeat` belongs on the response; inside an element it is never read. A `null` value removes the earlier steps of that behavior.",
+      "maxProperties": 1,
+      "properties": {
+        "copy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CopyBehavior"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decorate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lookup": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LookupBehavior"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shellTransform": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wait": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WaitBehavior"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
     "ConditionalGet": {
       "anyOf": [
         {
@@ -71,7 +121,9 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Nested field: {\"query\": \"name\"}, {\"headers\": \"Content-Type\"} or {\"form\": \"name\"}. The\ncontainer key is exact; the name inside it is matched case-insensitively.",
+          "description": "Nested field: {\"query\": \"name\"}, {\"headers\": \"Content-Type\"} or {\"form\": \"name\"}. The\ncontainer key is exact; the name inside it is matched case-insensitively. Exactly one key,\nas a config door requires (#1582).",
+          "maxProperties": 1,
+          "minProperties": 1,
           "type": "object"
         }
       ],
@@ -791,11 +843,8 @@
           "description": "Repeat response N times before advancing to next",
           "format": "uint32",
           "maximum": 4294967295,
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "minimum": 1,
+          "type": "integer"
         },
         "shellTransform": {
           "anyOf": [
@@ -1563,7 +1612,7 @@
               "items": {
                 "anyOf": [
                   {
-                    "$ref": "#/$defs/ResponseBehaviors"
+                    "$ref": "#/$defs/BehaviorElement"
                   },
                   {
                     "type": "null"
@@ -1621,11 +1670,8 @@
           "description": "Mountebank's canonical `repeat` (issue #1188): it lifts `_behaviors.repeat` to the response,\nso this is the form `mb save` writes. Merged into the behaviors block at parse, where it\nwins over a `repeat` inside the block, as it does in Mountebank. Must be greater than 0: a\nconfig door refuses `0` and `null`, as Mountebank does (issue #1582).",
           "format": "uint32",
           "maximum": 4294967295,
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "minimum": 1,
+          "type": "integer"
         },
         "statusCode": {
           "anyOf": [

@@ -1421,7 +1421,11 @@ pub(crate) struct StubResponseRaw {
     #[serde(default, deserialize_with = "present_value")]
     #[cfg_attr(
         feature = "schema",
-        schemars(with = "Option<u32>", range(max = 4_294_967_295_u64))
+        schemars(
+            with = "Option<u32>",
+            range(min = 1, max = 4_294_967_295_u64),
+            extend("type" = "integer")
+        )
     )]
     pub repeat: Option<serde_json::Value>,
 }

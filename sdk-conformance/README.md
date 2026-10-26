@@ -65,6 +65,10 @@ example on every commit. It is the machine-readable answer to "which keys does t
 - `$defs/Stub` and `$defs/StubResponse` are the *wire* shapes — every alias (`rules`), every
   spelling (`statusCode` as a number or a string, a header as one value or a list) and the flat
   recorded response form — not the engine's internal types.
+- `$defs/BehaviorElement` is one element of the `behaviors` array: at most one behavior, a single
+  item for `copy`/`lookup`/`shellTransform`, and no `repeat` (it belongs on the response), as
+  every config door reads an element (#1724). `$defs/ResponseBehaviors` is the `_behaviors` object
+  form, where lists, `repeat` and several behaviors are all legal.
 - `x-rift-*` extensions carry the lists an SDK or a linter would otherwise keep by hand:
   `x-rift-known-keys` (the `predicateGenerators` keys the recorder reads), `x-rift-canonical-order`
   (the order one object's behaviors run in), `x-rift-response-variants` (the response-type keys in
