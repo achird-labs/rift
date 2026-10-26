@@ -761,40 +761,83 @@ pub async fn dry_run_predicate_generators(
 /// Why `generate_stub_predicates` produced no predicates.
 #[derive(Debug)]
 enum GenerationFailed {
-    /// A generator's `xpath` selector failed to evaluate (issue #1668): the request is forwarded,
-    /// nothing is recorded, and the client gets Mountebank's `500 malformed xpath predicate
-    /// selector`.
-    Selector(crate::behaviors::XPathSelectorError),
-    /// Any other failure (issue #498): the upstream response is served with
-    /// `x-rift-generator-error: <token>`; `detail` is logged.
-    Other(&'static str, String),
+    /// The request fails after it is forwarded, in every proxy mode, as Mountebank's
+    /// `recordProxyResponse` throws after `proxy.to` and the behaviors.
+    Runtime(RuntimeFailure),
+    /// A generated predicate the engine would not admit (issue #1353): the upstream response is
+    /// served with `x-rift-generator-error: <token>` and nothing is recorded (issue #498).
+    /// Mountebank serves it too, but records a stub that fails every later request.
+    Invalid { token: &'static str, detail: String },
 }
 
-impl From<crate::scripting::PredicateGeneratorError> for GenerationFailed {
-    fn from(error: crate::scripting::PredicateGeneratorError) -> Self {
-        match error {
-            crate::scripting::PredicateGeneratorError::Selector(e) => Self::Selector(e),
-            other => Self::Other(other.kind(), other.to_string()),
+/// A generator failure that fails the proxied request (issues #1668, #1708).
+#[derive(Debug)]
+enum RuntimeFailure {
+    /// A generator's `xpath` selector failed to evaluate: Mountebank's `500 malformed xpath
+    /// predicate selector` (issue #1668).
+    Selector(crate::behaviors::XPathSelectorError),
+    /// An `inject` threw, returned something other than an array, or ran past the script deadline:
+    /// Mountebank's `500 invalid predicateGenerator injection`, with the call it ran as `source`.
+    Injection {
+        token: &'static str,
+        source: String,
+        data: Option<String>,
+        detail: String,
+    },
+    /// The script pool could not run the generator, or its task panicked: a Rift internal `500`.
+    Unavailable { token: &'static str, detail: String },
+}
+
+impl RuntimeFailure {
+    /// The response the client gets, with the failure logged.
+    fn response(self) -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
+        match self {
+            Self::Selector(e) => crate::imposter::handler::xpath_selector_error_response(&e),
+            Self::Injection {
+                token,
+                source,
+                data,
+                detail,
+            } => {
+                warn!("predicateGenerators injection failed ({detail}); nothing is recorded");
+                crate::imposter::handler::generator_injection_error_response(
+                    &source,
+                    data.as_deref(),
+                    token,
+                )
+            }
+            Self::Unavailable { token, detail } => {
+                error!(
+                    "could not run a predicateGenerators injection ({detail}); nothing is recorded"
+                );
+                crate::imposter::handler::generator_unavailable_response(token)
+            }
         }
     }
 }
 
-/// The first `matches` generator whose `xpath` selector fails to evaluate on `request`'s body, for
-/// a `proxyTransparent` response (issue #1668). It records nothing, but Mountebank still runs
-/// `predicatesFor` over it, and the selector's throw fails the request. Only the `matches`
-/// generators run here: an `inject` is not run under `proxyTransparent` (see #1708).
-fn transparent_selector_failure<SH: BuildHasher>(
-    generators: &[serde_json::Value],
-    request: &GeneratorRequest<'_, SH>,
-) -> Option<crate::behaviors::XPathSelectorError> {
-    generators
-        .iter()
-        .filter_map(serde_json::Value::as_object)
-        .filter(|generator| generator.contains_key("xpath"))
-        .find_map(|generator| {
-            let matches = generator.get("matches")?.as_object()?;
-            predicates_for_matcher(generator, matches, request).err()
-        })
+impl From<GeneratorFailure> for GenerationFailed {
+    fn from(failure: GeneratorFailure) -> Self {
+        use crate::scripting::PredicateGeneratorError as E;
+        let token = failure.error.kind();
+        let detail = failure.error.to_string();
+        let source = injection_source(failure.inject.as_deref());
+        let injection = |data: Option<String>| {
+            Self::Runtime(RuntimeFailure::Injection {
+                token,
+                source: source.clone(),
+                data,
+                detail: detail.clone(),
+            })
+        };
+        match failure.error {
+            E::Selector(e) => Self::Runtime(RuntimeFailure::Selector(e)),
+            E::Threw { message, .. } => injection(message),
+            E::Script(message) | E::Output(message) => injection(Some(message)),
+            E::Pool(_) => Self::Runtime(RuntimeFailure::Unavailable { token, detail }),
+            E::Invalid(_) => Self::Invalid { token, detail },
+        }
+    }
 }
 
 /// Mountebank's `source` for a generator injection: the call it evaluates.
@@ -815,7 +858,7 @@ impl Imposter {
         body: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
-        Self::generate_predicates_impl(
+        Self::run_generators(
             generators,
             method,
             path,
@@ -824,14 +867,15 @@ impl Imposter {
             query,
             TEST_PEER,
             &self.script_file_access(),
+            false,
         )
         .map(|generated| generated.raw)
+        .map_err(|failure| failure.error)
     }
 
-    /// [`Self::generate_predicates_from_request`] without `&self`, so the proxy-recording path
-    /// can run it on `spawn_blocking` (issue #476) — a `predicateGenerators.inject` script must
-    /// not execute (and block on the MB script pool) on a tokio async worker. `script_files` is what
-    /// a `predicateGenerators.inject` may `require()` (issue #1611).
+    /// [`Self::run_generators`] for a real request, as the tests drive it: the failure's error,
+    /// without the `inject` the recording path names in its `500` (issue #1708).
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn generate_predicates_impl<SH: BuildHasher>(
         generators: &[serde_json::Value],
@@ -1135,7 +1179,7 @@ impl Imposter {
         // under the script deadline (issue #476). Script-free generator lists (the common case)
         // keep the inline path — pure predicate building, no script pool.
         if !has_inject_generator(&proxy_config.predicate_generators) {
-            return Self::generate_predicates_impl(
+            return Self::run_generators(
                 &proxy_config.predicate_generators,
                 method,
                 uri.path(),
@@ -1144,9 +1188,17 @@ impl Imposter {
                 uri.query(),
                 client_addr,
                 &self.script_file_access(),
+                false,
             )
             .map_err(GenerationFailed::from);
         }
+        // The first inject names a timeout: the pass cannot say which one was running, as in the
+        // create-time dry run.
+        let first_inject = proxy_config
+            .predicate_generators
+            .iter()
+            .find_map(|g| g.get("inject").and_then(serde_json::Value::as_str))
+            .map(str::to_owned);
         let generators = proxy_config.predicate_generators.clone();
         let method = method.to_string();
         let path = uri.path().to_string();
@@ -1161,7 +1213,7 @@ impl Imposter {
         // `execute_predicate_generator_inject` never installs a flow store, so a predicate
         // generator has no `ctx.state` and nothing here can annotate.
         let handle = tokio::task::spawn_blocking(move || {
-            Self::generate_predicates_impl(
+            Self::run_generators(
                 &generators,
                 &method,
                 &path,
@@ -1170,19 +1222,25 @@ impl Imposter {
                 query.as_deref(),
                 client_addr,
                 &script_files,
+                false,
             )
         });
         match tokio::time::timeout(timeout, handle).await {
             Ok(Ok(Ok(preds))) => Ok(preds),
-            Ok(Ok(Err(gen_err))) => Err(GenerationFailed::from(gen_err)),
-            Ok(Err(join_err)) => Err(GenerationFailed::Other(
-                "task-panic",
-                format!("generator task panicked: {join_err}"),
-            )),
-            Err(_elapsed) => Err(GenerationFailed::Other(
-                "timeout",
-                format!("timed out after {}ms", timeout.as_millis()),
-            )),
+            Ok(Ok(Err(failure))) => Err(GenerationFailed::from(failure)),
+            Ok(Err(join_err)) => Err(GenerationFailed::Runtime(RuntimeFailure::Unavailable {
+                token: "task-panic",
+                detail: format!("generator task panicked: {join_err}"),
+            })),
+            Err(_elapsed) => {
+                let data = format!("timed out after {}ms", timeout.as_millis());
+                Err(GenerationFailed::Runtime(RuntimeFailure::Injection {
+                    token: "timeout",
+                    source: injection_source(first_inject.as_deref()),
+                    data: Some(data.clone()),
+                    detail: data,
+                }))
+            }
         }
     }
 
@@ -1288,27 +1346,26 @@ impl Imposter {
                 .await,
             )
         };
-        // A generator `xpath` selector that fails to evaluate fails the request after it is
-        // forwarded, as Mountebank's `recordProxyResponse` throws after `proxy.to` (issue #1668).
-        // It takes no claim and records nothing. A transparent proxy records nothing either, but
-        // Mountebank runs its generators too, so its selectors are evaluated for the same failure.
-        let (generation, selector_failure) = match generation {
-            Some(Err(GenerationFailed::Selector(e))) => (None, Some(e)),
-            Some(Err(GenerationFailed::Other(token, detail))) => (Some(Err((token, detail))), None),
+        // A generator that fails to run (a failing `xpath` selector, a throwing or non-array
+        // `inject`) fails the request after it is forwarded, as Mountebank's `recordProxyResponse`
+        // throws after `proxy.to` (issues #1668, #1708). It takes no claim and records nothing. A
+        // transparent proxy records nothing either, but Mountebank runs its whole generator pass,
+        // injects included, for the same failure; what it generates is discarded.
+        let (generation, runtime_failure) = match generation {
+            Some(Err(GenerationFailed::Runtime(failure))) => (None, Some(failure)),
+            Some(Err(GenerationFailed::Invalid { token, detail })) => {
+                (Some(Err((token, detail))), None)
+            }
             Some(Ok(predicates)) => (Some(Ok(predicates)), None),
-            None if transparent => {
-                let request = GeneratorRequest {
-                    method,
-                    path: uri.path(),
-                    headers,
-                    body: body.and_then(|b| b.text),
-                    query: uri.query(),
-                    client_addr,
-                };
-                (
-                    None,
-                    transparent_selector_failure(&proxy_config.predicate_generators, &request),
-                )
+            None if transparent && !proxy_config.predicate_generators.is_empty() => {
+                match self
+                    .generate_stub_predicates(proxy_config, method, uri, headers, body, client_addr)
+                    .await
+                {
+                    Err(GenerationFailed::Runtime(failure)) => (None, Some(failure)),
+                    // Nothing is recorded, so a predicate it could not record is never noticed.
+                    Ok(_) | Err(GenerationFailed::Invalid { .. }) => (None, None),
+                }
             }
             None => (None, None),
         };
@@ -1337,7 +1394,7 @@ impl Imposter {
         // A failed generation has no identity to key on, records no stub (issue #498) and must not
         // replay either: under the method, path and query key it would answer with another
         // request's recording, without the `x-rift-generator-error` the client should see.
-        let generation_failed = matches!(generation, Some(Err(_))) || selector_failure.is_some();
+        let generation_failed = matches!(generation, Some(Err(_))) || runtime_failure.is_some();
         // A concurrent proxyOnce loser forwards, but the winner records the identity: inserting
         // its stub too would stack a duplicate per loser.
         let mut lost_race = false;
@@ -1508,9 +1565,9 @@ impl Imposter {
                 match transform_upstream(run, status, response_headers, body_bytes).await {
                     Transformed::Applied(status, headers, body) => (status, headers, body),
                     // A failed behavior records nothing; returning drops (releases) the claim. A
-                    // failed generator selector still fails the request (below), as Mountebank
-                    // records after its behaviors run.
-                    Transformed::Degraded(status, headers, body) if selector_failure.is_none() => {
+                    // failed generator still fails the request (below), as Mountebank records
+                    // after its behaviors run.
+                    Transformed::Degraded(status, headers, body) if runtime_failure.is_none() => {
                         return Ok(ProxyOutcome::Served(ProxiedResponse {
                             status,
                             headers,
@@ -1525,11 +1582,9 @@ impl Imposter {
                 }
             }
         };
-        if let Some(e) = selector_failure {
+        if let Some(failure) = runtime_failure {
             // No claim was taken, so there is nothing to release or record.
-            return Ok(ProxyOutcome::StrictFailure(
-                crate::imposter::handler::xpath_selector_error_response(&e),
-            ));
+            return Ok(ProxyOutcome::StrictFailure(failure.response()));
         }
 
         // Build the recording if we hold a claim, but do NOT settle the claim yet: a store that
@@ -3024,5 +3079,77 @@ mod dry_run_tests {
             .expect("valid stub"),
         ];
         assert_eq!(dry_run(&stubs, Duration::ZERO).await, Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod generation_failed_tests {
+    use super::*;
+    use crate::scripting::PredicateGeneratorError as E;
+
+    fn classify(error: E) -> GenerationFailed {
+        GenerationFailed::from(GeneratorFailure {
+            inject: Some("function (config) { return 1; }".to_string()),
+            error,
+        })
+    }
+
+    // Issue #1708: every generator failure the pass can return, and what the request gets for it.
+    #[test]
+    fn each_generator_failure_is_classified_as_the_request_answers_it() {
+        let source = "(function (config) { return 1; })(config);";
+        let injection = |error: E, token: &str, data: Option<&str>| match classify(error) {
+            GenerationFailed::Runtime(RuntimeFailure::Injection {
+                token: t,
+                source: s,
+                data: d,
+                ..
+            }) => {
+                assert_eq!(t, token);
+                assert_eq!(s, source);
+                assert_eq!(d.as_deref(), data);
+            }
+            other => panic!("expected an injection failure, got {other:?}"),
+        };
+        injection(
+            E::Threw {
+                message: Some("boom".into()),
+                detail: "Error: boom at 1:1".into(),
+            },
+            "script-error",
+            Some("boom"),
+        );
+        injection(
+            E::Threw {
+                message: None,
+                detail: "text".into(),
+            },
+            "script-error",
+            None,
+        );
+        injection(
+            E::Script("no context".into()),
+            "script-error",
+            Some("no context"),
+        );
+        injection(
+            E::Output("not an array".into()),
+            "invalid-output",
+            Some("not an array"),
+        );
+        assert!(matches!(
+            classify(E::Pool("gone".into())),
+            GenerationFailed::Runtime(RuntimeFailure::Unavailable {
+                token: "pool-failure",
+                ..
+            })
+        ));
+        assert!(matches!(
+            classify(E::Invalid("equal".into())),
+            GenerationFailed::Invalid {
+                token: "invalid-predicate",
+                ..
+            }
+        ));
     }
 }

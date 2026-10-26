@@ -201,8 +201,9 @@ from the serialized form when `None`:
   `proxyOnce` proxy stub with generators missed every stub recorded before it, so it has to be
   forwarded and recorded, not answered with another identity's recording; keying the claim on the
   generated predicates does that and keeps each identity recorded exactly once. When generation
-  fails the engine does not consult the store at all: it forwards, tags the response
-  `x-rift-generator-error` and records nothing.
+  fails the engine does not consult the store at all: it forwards and records nothing, then
+  answers `500` (or, for an invalid generated predicate, serves the upstream response tagged
+  `x-rift-generator-error`).
 
 A store that serializes the signature as its key misses pre-upgrade recordings once: requests that
 had a body (since #1317), and every recording made under `predicateGenerators` (since #1333). With

@@ -498,6 +498,45 @@ pub(crate) fn xpath_selector_error_response(
     )
 }
 
+/// Mountebank's answer to a proxy request whose `predicateGenerators` injection failed while
+/// recording (issue #1708): `500` with the body the create-time dry run answers `400` with
+/// ([`generator_injection_error_body`](crate::response::generator_injection_error_body)), after the
+/// request was forwarded. `x-rift-generator-error` keeps the failure's token as a marker.
+pub(crate) fn generator_injection_error_response(
+    source: &str,
+    data: Option<&str>,
+    token: &str,
+) -> Response<Full<Bytes>> {
+    build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [
+            ("x-rift-imposter", "true"),
+            ("content-type", "application/json"),
+            ("x-rift-generator-error", token),
+        ],
+        crate::response::generator_injection_error_body(source, data),
+    )
+}
+
+/// The `500` for a proxy request whose `predicateGenerators` injection could not run at all (issue
+/// #1708): the script pool failed or the generator's task panicked. A Rift-only failure, so it is a
+/// Rift internal error rather than Mountebank's `invalid injection`.
+pub(crate) fn generator_unavailable_response(token: &str) -> Response<Full<Bytes>> {
+    build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [
+            ("x-rift-imposter", "true"),
+            ("content-type", "application/json"),
+            ("x-rift-generator-error", token),
+        ],
+        crate::response::error_body_typed(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::response::ErrorKind::InternalError,
+            "could not run a predicateGenerator injection",
+        ),
+    )
+}
+
 #[cfg(feature = "javascript")]
 /// The `{"errors":[...]}` body of a throwing `inject`: `message` is Rift's text, `data` is
 /// Mountebank's (the thrown error's `message`), left out when the script threw no message.
