@@ -73,11 +73,29 @@ for port in "$engine_port" 2526 2527 "$snapshot_port" 3000 4545 "$metrics_port" 
   fi
 done
 
+# Stop the server mbTest's `mb.start` left in test.pid, if any (issue #1714). A test file that fails
+# before its `mb.stop` leaves it running on 2526, and the next file's `mb.start` returns at once on
+# the stale pid file. Removing the file alone would only hide that server. Prints what it stopped,
+# so the leak stays visible: `stop_test_pid <label> [log]`.
+stop_test_pid() {
+  local label="$1" log="${2:-}" pidfile="$mbtest/test.pid" pid
+  [[ -f "$pidfile" ]] || return 0
+  pid="$(tr -cd '0-9' <"$pidfile")"
+  rm -f "$pidfile"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  kill -KILL "$pid" 2>/dev/null || true
+  local msg="run.sh: $label left pid $pid running (test.pid); stopped it"
+  echo "$msg" >&2
+  [[ -z "$log" ]] || echo "$msg" >>"$log"
+}
+
 pids=()
 cleanup() {
   local pid
   for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
-  rm -f "$mbtest/test.pid"
+  stop_test_pid "the run"
 }
 trap cleanup EXIT
 
@@ -137,10 +155,56 @@ run_phase() { # engine phase executable files...
   (cd "$mbtest" && MB_PORT="$engine_port" MB_EXECUTABLE="$executable" RIFT_BIN="${RIFT_BIN:-}" \
     SHIM_METRICS_PORT="$shim_metrics_port" "${mocha[@]}" --reporter json \
     --reporter-option "output=$out/$engine/$phase.json" "$@" >"$out/$engine/$phase.out" 2>&1) || true
-  rm -f "$mbtest/test.pid"
+  stop_test_pid "$engine $phase" "$out/$engine/$phase.out"
   [[ -s "$out/$engine/$phase.json" ]] || {
     echo "run.sh: $engine $phase wrote no results; see $out/$engine/$phase.out" >&2
     tail -20 "$out/$engine/$phase.out" >&2
+  }
+}
+
+# The CLI phase, one mocha process per file (issue #1714): each file starts and stops its own server
+# on 2526, so a file that fails before its `mb.stop` must not decide whether the next one passes.
+# Between files, whatever test.pid still names is stopped and reported. The per-file reports are
+# merged into cli.json, the one report check.py reads.
+run_cli_phase() { # engine executable
+  local engine="$1" executable="$2" file name port
+  local dir="$out/$engine/cli" log="$out/$engine/cli.out"
+  echo "== $engine: cli"
+  mkdir -p "$dir"
+  : >"$log"
+  for file in "$mbtest"/cli/*Test.js; do
+    name="$(basename "$file" .js)"
+    (cd "$mbtest" && MB_PORT="$engine_port" MB_EXECUTABLE="$executable" RIFT_BIN="${RIFT_BIN:-}" \
+      SHIM_METRICS_PORT="$shim_metrics_port" "${mocha[@]}" --reporter json \
+      --reporter-option "output=$dir/$name.json" "cli/$name.js" >>"$log" 2>&1) || true
+    stop_test_pid "cli/$name.js" "$log"
+    for port in 2525 2526 2527 2528; do
+      if port_busy "$port"; then
+        echo "run.sh: port $port is still in use after cli/$name.js, by a process test.pid does not name" >&2
+        echo "run.sh: port $port is still in use after cli/$name.js" >>"$log"
+      fi
+    done
+  done
+  python3 -I - "$dir" "$out/$engine/cli.json" <<'MERGE'
+import json, pathlib, sys
+
+parts = sorted(pathlib.Path(sys.argv[1]).glob("*.json"))
+merged = {"stats": {}, "tests": [], "pending": [], "failures": [], "passes": []}
+for part in parts:
+    report = json.loads(part.read_text())
+    for key in ("tests", "pending", "failures", "passes"):
+        merged[key].extend(report.get(key, []))
+    for key, value in report.get("stats", {}).items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            merged["stats"][key] = merged["stats"].get(key, 0) + value
+        else:
+            merged["stats"].setdefault(key, value)
+if parts:
+    pathlib.Path(sys.argv[2]).write_text(json.dumps(merged, indent=2))
+MERGE
+  [[ -s "$out/$engine/cli.json" ]] || {
+    echo "run.sh: $engine cli wrote no results; see $log" >&2
+    tail -20 "$log" >&2
   }
 }
 
@@ -154,7 +218,7 @@ for engine in $engines; do
     'api/http/*Test.js' 'api/https/*Test.js'
   stop_pid "$engine_pid"
 
-  run_phase "$engine" cli "$executable" 'cli/*Test.js'
+  run_cli_phase "$engine" "$executable"
 
   start_engine "$engine" docs
   (cd "$mbtest" && MBTEST_DIR="$mbtest" MB_PORT="$snapshot_port" ENGINE_PORT="$engine_port" \
