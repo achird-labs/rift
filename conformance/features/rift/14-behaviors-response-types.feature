@@ -100,7 +100,7 @@ Feature: Behaviors and repeat on inject, proxy and fault responses (rift#1184)
     When the client sends "POST" "/fault"
     Then the response body is "after"
 
-  Scenario: a top-level repeat wins over a block repeat
+  Scenario: a top-level repeat wins over a behaviors block repeat
     Given a fresh imposter from fixture "behaviors-response-types/repeat"
     When the client sends "GET" "/top-level"
     Then the response body is "a"

@@ -12,7 +12,7 @@
     {
       "predicates": [{ "equals": { "path": "/top-level" } }],
       "responses": [
-        { "is": { "statusCode": 200, "body": "a" }, "repeat": 3, "_behaviors": { "repeat": 1 } },
+        { "is": { "statusCode": 200, "body": "a" }, "repeat": 3, "behaviors": { "repeat": 1 } },
         { "is": { "statusCode": 200, "body": "b" } }
       ]
     }

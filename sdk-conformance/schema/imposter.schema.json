@@ -1586,7 +1586,7 @@
             }
           ],
           "default": null,
-          "description": "Mountebank-style behaviors (with underscore prefix): an object, or absent/`null`."
+          "description": "Mountebank-style behaviors (with underscore prefix): an object, or absent/`null`. It runs only\nwhen the response sets no `behaviors` and no top-level `repeat`; beside either it is ignored\nwhole, as Mountebank ignores it (issue #1709)."
         },
         "_mode": {
           "$ref": "#/$defs/ResponseMode",
@@ -1667,7 +1667,7 @@
         },
         "repeat": {
           "default": null,
-          "description": "Mountebank's canonical `repeat` (issue #1188): it lifts `_behaviors.repeat` to the response,\nso this is the form `mb save` writes. Merged into the behaviors block at parse, where it\nwins over a `repeat` inside the block, as it does in Mountebank. Must be greater than 0: a\nconfig door refuses `0` and `null`, as Mountebank does (issue #1582).",
+          "description": "Mountebank's canonical `repeat` (issue #1188): it lifts `_behaviors.repeat` to the response,\nso this is the form `mb save` writes. Merged into the behaviors block at parse, where it\nwins over a `repeat` inside a `behaviors` block, and keeps a `_behaviors` block from running\nat all (issue #1709), as in Mountebank. Must be greater than 0: a\nconfig door refuses `0` and `null`, as Mountebank does (issue #1582).",
           "format": "uint32",
           "maximum": 4294967295,
           "minimum": 1,

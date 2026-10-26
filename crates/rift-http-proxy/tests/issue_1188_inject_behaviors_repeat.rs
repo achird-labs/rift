@@ -404,32 +404,33 @@ async fn a_top_level_repeat_that_is_not_a_u32_is_refused() {
     }
 }
 
-/// Both are held to the rule, as rift-lint holds them: the top-level one replacing a malformed
-/// block `repeat` does not make the file valid.
+/// Issue #1709: beside a top-level `repeat`, `_behaviors` is ignored whole, as Mountebank ignores
+/// it, so its malformed `repeat` is not checked: admitted, and rift-lint says the block is ignored
+/// (W025) instead of reporting its `repeat` (E035).
 #[tokio::test]
-async fn a_malformed_block_repeat_is_refused_under_a_valid_top_level_one() {
+async fn a_malformed_block_beside_a_top_level_repeat_is_ignored() {
     let (client, admin, _manager) = start_admin().await;
     let imposter = json!({"protocol": "http", "stubs": [{"responses": [
         {"is": {"body": "a"}, "repeat": 2, "_behaviors": {"repeat": "bad"}}
     ]}]});
     let response = create(&client, &admin, &imposter).await;
-    assert_eq!(response.status().as_u16(), 400);
-    let text = response.text().await.expect("body");
-    assert!(text.contains("`repeat`"), "{text}");
+    assert_eq!(response.status().as_u16(), 201);
     let lint = rift_lint::lint_json(
         &imposter.to_string(),
         "fixture.json",
         &rift_lint::LintOptions::default(),
     );
-    let e035: Vec<_> = lint
-        .issues
-        .iter()
-        .filter(|i| i.code == "E035")
-        .map(|i| i.location.clone().unwrap_or_default())
-        .collect();
+    let located = |code: &str| -> Vec<String> {
+        lint.issues
+            .iter()
+            .filter(|i| i.code == code)
+            .map(|i| i.location.clone().unwrap_or_default())
+            .collect()
+    };
+    assert_eq!(located("E035"), Vec::<String>::new());
     assert_eq!(
-        e035,
-        vec!["stubs[0].responses[0]._behaviors.repeat".to_string()]
+        located("W025"),
+        vec!["stubs[0].responses[0]._behaviors".to_string()]
     );
 }
 

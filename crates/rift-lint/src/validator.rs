@@ -420,8 +420,8 @@ fn check_repeat(file: &Path, repeat: &Value, location: &str, result: &mut LintRe
 }
 
 /// A behaviors block holding something the engine keeps but never runs (issue #1181): the key it
-/// reads, and the response shape it sits on. Mirrors the engine's parse: `_behaviors` wins over
-/// `behaviors` unless it is `null`, the array form folds its objects into one (a later element
+/// reads, and the response shape it sits on. Mirrors the engine's parse: the block it runs
+/// ([`behaviors_key`], issue #1709), the array form folded into one object (a later element
 /// wins; for a list key that holds for whether it is `null`, which is all this reads), and a
 /// `null` key is absent. Behaviors run on `is`, `proxy` and `inject` responses
 /// (issues #1188, #1189), and `repeat` on every response, so the shapes are `fault` and `_rift`
@@ -445,11 +445,7 @@ fn ignored_behaviors(response: &Value) -> Option<(&'static str, &'static str)> {
     if shape == "_rift" && !script && ["statusCode", "body", "headers"].into_iter().any(present) {
         return None;
     }
-    let key = if present("_behaviors") {
-        "_behaviors"
-    } else {
-        "behaviors"
-    };
+    let key = behaviors_key(response)?;
     let mut folded: HashMap<&str, &Value> = HashMap::new();
     match response.get(key)? {
         Value::Object(block) => folded.extend(block.iter().map(|(k, v)| (k.as_str(), v))),
@@ -706,7 +702,7 @@ fn body_rewritten_before_decode(response: &Value) -> bool {
     templated || has_behavior(response, &BODY_REWRITING_BEHAVIORS)
 }
 
-/// Whether the response's `_behaviors` or `behaviors` block names any of `keys`.
+/// Whether the behaviors block the engine runs ([`behaviors_key`]) names any of `keys`.
 fn has_behavior(response: &Value, keys: &[&str]) -> bool {
     let names = |block: &Value| match block {
         Value::Object(map) => keys.iter().any(|k| map.contains_key(*k)),
@@ -715,7 +711,23 @@ fn has_behavior(response: &Value, keys: &[&str]) -> bool {
             .any(|e| keys.iter().any(|k| e.get(*k).is_some())),
         _ => false,
     };
-    response.get("_behaviors").is_some_and(names) || response.get("behaviors").is_some_and(names)
+    behaviors_key(response)
+        .and_then(|key| response.get(key))
+        .is_some_and(names)
+}
+
+/// The behaviors key whose block the engine runs (issue #1709), by Mountebank's upcast rule:
+/// `_behaviors` only when the response has no `behaviors` key (a `null` one included) and no
+/// non-`null` top-level `repeat`; otherwise `behaviors`, when it is not `null`. `None` for neither.
+pub(crate) fn behaviors_key(response: &Value) -> Option<&'static str> {
+    let set = |key: &str| response.get(key).is_some_and(|v| !v.is_null());
+    if set("_behaviors") && response.get("behaviors").is_none() && !set("repeat") {
+        Some("_behaviors")
+    } else if set("behaviors") {
+        Some("behaviors")
+    } else {
+        None
+    }
 }
 
 /// W015: a `_mode: "binary"` body the engine cannot decode (issue #1151).
@@ -1246,8 +1258,10 @@ fn check_state_without_flow_state(file: &Path, imposter: &Value, result: &mut Li
 /// it validates every `behaviors` array element and both `_behaviors` and `behaviors`, regardless of
 /// which one it will go on to evaluate. The linter's normal path is precedence-aware and only
 /// inspects the winning value, so without this the linter would pass files the engine then refuses:
-/// an inverted range in a non-last array element, or in a `behaviors` block shadowed by
-/// `_behaviors`. A rule whose whole claim is "the engine refuses this" has to match the engine.
+/// an inverted range in a non-last array element, or in the block that does not run (a `_behaviors`
+/// ignored beside `behaviors` or a top-level `repeat`, issue #1709, or a `behaviors` beside a
+/// running `_behaviors`). A rule whose whole claim is "the engine refuses this" has to match the
+/// engine.
 fn report_inverted_wait_range(file: &Path, wait: &Value, location: &str, result: &mut LintResult) {
     let (Some(min), Some(max)) = (
         wait.get("min").and_then(Value::as_u64),
@@ -1823,7 +1837,8 @@ pub(crate) const STEP_BEHAVIORS: [&str; 5] =
 /// Validate the behaviors block the engine will actually read (issue #1099).
 ///
 /// The engine's raw response (`StubResponseRaw` in rift-mock-core's `imposter/types.rs`) takes
-/// `_behaviors` when it is present and not `null`, and otherwise `behaviors`, and compiles it into
+/// `_behaviors` only beside no `behaviors` and no top-level `repeat` ([`behaviors_key`], issue
+/// #1709; W025 says when it is ignored), and otherwise `behaviors`, and compiles it into
 /// the ordered program it runs (`compile_behaviors`, issue #1198). In an array every element's
 /// behaviors are steps and all of them run, unless a later `null` for the same key removes them;
 /// a `repeat` beside a behavior is a custom key the engine ignores, as Mountebank does (W024,
@@ -1855,22 +1870,53 @@ fn validate_response_behaviors(
         check_repeat(file, repeat, &format!("{location}.repeat"), result);
     }
 
+    // `_behaviors` runs only beside no `behaviors` and no top-level `repeat` (issue #1709). A
+    // non-object one is refused by the engine wherever it sits, so it is the block reported.
+    let underscore = present("_behaviors");
+    let underscore_runs = behaviors_key(response) == Some("_behaviors");
+    let underscore_taken = underscore.filter(|block| underscore_runs || !block.is_object());
+    let (taken, shadowed) = match underscore_taken {
+        Some(block) => (
+            (Some(block), None),
+            present("behaviors").map(|block| (block, "behaviors")),
+        ),
+        None => (
+            (None, present("behaviors")),
+            underscore.map(|block| (block, "_behaviors")),
+        ),
+    };
+
     // The engine refuses an inverted wait range wherever it sits, including in a block it will
-    // never evaluate, so sweep the one the precedence arms below will not descend into (issue
-    // #1148). The winning block's own `wait` is reported by `validate_behavior`; sweeping only the
-    // shadowed one keeps each finding to a single issue.
-    if present("_behaviors").is_some()
-        && let Some(shadowed) = present("behaviors")
-    {
-        report_inverted_wait_ranges_in_block(
-            file,
-            shadowed,
-            &format!("{location}.behaviors"),
-            result,
+    // never evaluate, so sweep the one the arms below will not descend into (issue #1148). The
+    // running block's own `wait` is reported by `validate_behavior`; sweeping only the shadowed one
+    // keeps each finding to a single issue.
+    if let Some((block, key)) = shadowed {
+        report_inverted_wait_ranges_in_block(file, block, &format!("{location}.{key}"), result);
+    }
+    let ignored = |block: &Value| block.as_object().is_some_and(|map| !map.is_empty());
+    if !underscore_runs && underscore.is_some_and(ignored) {
+        let beside = if response.get("behaviors").is_some() {
+            "`behaviors`"
+        } else {
+            "a top-level `repeat`"
+        };
+        result.add_issue(
+            LintIssue::warning(
+                "W025",
+                format!(
+                    "`_behaviors` is ignored because the response also sets {beside}, as in \
+                     Mountebank: none of its behaviors run, and its `repeat` does not apply"
+                ),
+                file.to_path_buf(),
+            )
+            .with_location(format!("{location}._behaviors"))
+            .with_suggestion(
+                "Move its behaviors into the `behaviors` array, and its `repeat` onto the response",
+            ),
         );
     }
 
-    match (present("_behaviors"), present("behaviors")) {
+    match taken {
         (Some(block @ Value::Object(_)), _) => {
             validate_behavior(
                 file,
@@ -3770,10 +3816,11 @@ mod ignored_behaviors_tests {
             ),
             at("_behaviors")
         );
-        // `_behaviors` shadows `behaviors`, as in the engine: the block it reads is the one named.
+        // Beside `behaviors`, `_behaviors` is ignored, as in the engine (#1709): the block it reads
+        // is the one named.
         assert_eq!(
             w017(json!({"fault": fault, "_behaviors": {"wait": 1}, "behaviors": [{"wait": 2}]})),
-            at("_behaviors")
+            at("behaviors")
         );
         // A null `_behaviors` is absent, so the engine falls through to `behaviors`.
         assert_eq!(

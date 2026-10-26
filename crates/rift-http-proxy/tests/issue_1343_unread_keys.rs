@@ -322,13 +322,17 @@ fn unread_in_response(
     if !rift_read && present(object, "_rift") {
         unread.push(join(path, "_rift"));
     }
-    // `_behaviors` wins over `behaviors` when both are set.
-    let block = if present(object, "_behaviors") {
-        if present(object, "behaviors") {
-            unread.push(join(path, "behaviors"));
-        }
+    // `_behaviors` runs only beside no `behaviors` (a `null` one included) and no top-level
+    // `repeat`, as Mountebank upcasts it (issue #1709); otherwise it is the unread block.
+    let underscore_runs = present(object, "_behaviors")
+        && !object.contains_key("behaviors")
+        && !present(object, "repeat");
+    let block = if underscore_runs {
         Some("_behaviors")
     } else {
+        if present(object, "_behaviors") {
+            unread.push(join(path, "_behaviors"));
+        }
         present(object, "behaviors").then_some("behaviors")
     };
     if let Some(key) = block {
@@ -1124,8 +1128,9 @@ fn a_shadowed_flat_field_and_behaviors_block_are_reported() {
     }] }));
     assert_eq!(
         unread(document),
+        // Beside `behaviors`, `_behaviors` is the unread block, as Mountebank ignores it (#1709).
         vec![
-            "stubs.0.responses.0.behaviors",
+            "stubs.0.responses.0._behaviors",
             "stubs.0.responses.0.statusCode",
         ]
     );
@@ -1164,7 +1169,7 @@ fn a_clean_document_reports_nothing() {
         "predicates": [{ "equals": { "path": "/x" }, "caseSensitive": true,
                          "xpath": { "selector": "//a", "ns": { "a": "urn:a" } } }],
         "responses": [{ "is": { "statusCode": 200 }, "repeat": 2,
-                        "_behaviors": { "wait": { "min": 1, "max": 2 } } }]
+                        "behaviors": [{ "wait": { "min": 1, "max": 2 } }] }]
     }));
     assert_eq!(unread(document), Vec::<String>::new());
 }
