@@ -69,6 +69,14 @@ record.
 
 ### Changed
 
+- **Deleting or replacing an imposter cuts off every request it is still answering** (#1643): a
+  slow proxy upstream, a running `shellTransform`, an `inject` waiting on a timer, not just a request
+  in a `wait` (#1616), through every door including the `/__rift/:port/` gateway, as Mountebank
+  destroys every socket of a deleted imposter. The delete no longer holds for up to 5 s while such a
+  request finishes, and the client is no longer answered by the deleted imposter afterwards. A
+  request that arrived just before the delete no longer slips through, and a late proxy answer no
+  longer records into a shared proxy store's cleared port. A response already being written still
+  finishes.
 - **A `repeat` beside a behavior in a `behaviors` array element no longer repeats the response**
   (#1672); Mountebank ignores it there. Put `repeat` on the response. `{"behaviors": [{"wait": 1,
   "repeat": 3}]}` is now served once per cycle instead of three times, any value there is admitted

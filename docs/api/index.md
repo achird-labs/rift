@@ -324,9 +324,13 @@ for any in-flight response. So once `DELETE` returns you can immediately re-`POS
 same port without racing the old one: a pooled client connection gets a clean close and reconnects to
 the new imposter, never the deleted one's state.
 
-A request still in a `wait` behavior is cut off, as in Mountebank: its connection closes without a
-response (over HTTP/2, the whole connection closes), so the delete does not wait for it and the
-deleted imposter never answers it. Any other in-flight response is still finished.
+A request still being answered — in a `wait` behavior, on a proxy upstream, in a `shellTransform` or
+in an `inject` — is cut off, as in Mountebank: its connection closes without a response (over
+HTTP/2, the whole connection closes), so the delete does not wait for it and the deleted imposter
+never answers it. This holds whichever way the request arrived, including the `/__rift/:port/`
+gateway, and for a request that arrived just before the delete. A response already being written is
+still finished. Mountebank never kills a running `shellTransform` command or an upstream request
+either: their results are discarded.
 
 Query parameters, read as on `GET /imposters/{port}`: `replayable=true` answers the replayable export
 instead of the detail, and `removeProxies=true` strips proxy responses from either. Values are

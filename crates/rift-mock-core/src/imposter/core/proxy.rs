@@ -51,9 +51,8 @@ pub(crate) struct ProxiedResponse {
 pub(crate) enum ProxyOutcome {
     Served(ProxiedResponse),
     /// A behavior on the proxy response failed under `strictBehaviors` (#375), a `wait` function
-    /// threw, the imposter was torn down during a `wait` (#1616), or a `predicateGenerators`
-    /// `xpath` selector failed to evaluate after the request was forwarded (#1668): serve this
-    /// instead.
+    /// threw (#1616), or a `predicateGenerators` `xpath` selector failed to evaluate after the
+    /// request was forwarded (#1668): serve this instead.
     StrictFailure(hyper::Response<http_body_util::Full<bytes::Bytes>>),
 }
 
@@ -177,12 +176,6 @@ async fn transform_upstream<SH: BuildHasher>(
     {
         BehaviorOutcome::Applied { parts, degraded } => (parts, degraded),
         BehaviorOutcome::StrictFailure(response) => return Transformed::StrictFailure(response),
-        // Served in place of the upstream's response, and recorded nowhere (issue #1616).
-        BehaviorOutcome::Aborted => {
-            return Transformed::StrictFailure(
-                crate::imposter::behavior_pipeline::aborted_response(),
-            );
-        }
     };
     // The status a behavior left, read as Mountebank's `postProcess` and Node's `writeHead` read
     // it (issue #1635): a string is served as the number Node makes of it, a falsy one takes the

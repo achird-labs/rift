@@ -646,14 +646,38 @@ pub async fn handle_imposter_request(
     let started = Instant::now();
     let mut journal_index = None;
     let mut inspection: Option<Inspection> = None;
-    let mut response = handle_request_inner(
+    let inner = handle_request_inner(
         req,
         Arc::clone(&imposter),
         client_addr,
         &mut journal_index,
         &mut inspection,
-    )
-    .await?;
+    );
+    /*
+     * Issue #1643: a delete or replace cancels the generation, and every request it is still
+     * computing — in a `wait`, on a proxy upstream, in a `shellTransform`, in an inject — is cut
+     * off here, at the one funnel every door shares, as Mountebank destroys every socket of a
+     * deleted imposter. Dropping `inner` drops the upstream request, the `shellTransform` join
+     * handle and the script pool's reply channel with it. A response this returned before the
+     * cancel is written under hyper's graceful shutdown (#207).
+     *
+     * The cancel is polled first, so `inner` is not polled again once a wake sees it. Level-
+     * triggered, so a request that arrived before the delete still sees it. An aborted request is
+     * not offered to the exchange inspector: a `Reject` verdict would make the deleted imposter
+     * answer after all.
+     */
+    let computed = tokio::select! {
+        biased;
+        () = imposter.cancel.cancelled() => None,
+        response = inner => Some(response?),
+    };
+    let mut response = match computed {
+        Some(response) => response,
+        None => {
+            inspection = None;
+            aborted_response()
+        }
+    };
 
     // Issue #966: the response-side hook of an installed exchange inspector runs HERE — the one
     // funnel every path shares (the serve loop, the `/__rift/` gateway and an embedder's
@@ -1431,7 +1455,6 @@ async fn handle_request_inner(
                     script_timeout,
                     strict: strict_behaviors_for(&imposter.config),
                     default_response: imposter.config.default_response.as_ref(),
-                    shutdown: imposter.shutdown_tx.as_ref(),
                 });
             // Per-request entry announcement — `trace!` so it compiles out of release (issue #706);
             // the outcome (status/latency) is captured by metrics and the response's x-rift-* headers.
@@ -1575,12 +1598,10 @@ async fn handle_request_inner(
                             script_timeout,
                             strict: strict_behaviors_for(&imposter.config),
                             default_response: imposter.config.default_response.as_ref(),
-                            shutdown: imposter.shutdown_tx.as_ref(),
                         };
                         match run.apply(parts).await {
                             BehaviorOutcome::Applied { parts: applied, .. } => parts = applied,
                             BehaviorOutcome::StrictFailure(response) => return Ok(response),
-                            BehaviorOutcome::Aborted => return Ok(aborted_response()),
                         }
                     }
 
@@ -2218,7 +2239,6 @@ async fn handle_request_inner(
                         script_timeout,
                         strict: strict_behaviors,
                         default_response: imposter.config.default_response.as_ref(),
-                        shutdown: imposter.shutdown_tx.as_ref(),
                     };
                     // The body as written, which a shellTransform reads as `MB_RESPONSE.body`
                     // while the body is still its rendering (issue #1639). A body the default
@@ -2246,7 +2266,6 @@ async fn handle_request_inner(
                             spliced_body = parts.body;
                         }
                         BehaviorOutcome::StrictFailure(response) => return Ok(response),
-                        BehaviorOutcome::Aborted => return Ok(aborted_response()),
                     }
                 }
                 body = spliced_body.into_text();

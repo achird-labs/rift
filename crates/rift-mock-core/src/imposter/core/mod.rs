@@ -575,6 +575,12 @@ pub struct Imposter {
     /// Tracks this generation's live per-connection tasks (issue #596) so `delete` can drain them
     /// (each already reacts to `shutdown_tx` with a hyper graceful shutdown, #207) within a bound.
     pub(crate) conn_tracker: tokio_util::task::TaskTracker,
+    /// Cancelled when this generation is deleted or replaced (issue #1643). Every request still
+    /// being answered races it in [`handle_imposter_request`](super::handler::handle_imposter_request)
+    /// and is cut off with no response, as Mountebank destroys every socket of a deleted imposter.
+    /// Level-triggered, unlike `shutdown_tx`, so a request that arrives just before the delete
+    /// still sees it. Never cancelled for an imposter no manager started.
+    pub(crate) cancel: tokio_util::sync::CancellationToken,
     /// Flow store for Rift extensions (stateful scripting)
     pub flow_store: Arc<dyn FlowStore>,
     /// Whether `flow_store` is the built-in in-memory store rather than a
@@ -720,6 +726,7 @@ impl Imposter {
             shutdown_tx: None,
             serve_handles: Mutex::new(Vec::new()),
             conn_tracker: tokio_util::task::TaskTracker::new(),
+            cancel: tokio_util::sync::CancellationToken::new(),
             flow_store,
             flow_store_is_default,
             sequencer,
