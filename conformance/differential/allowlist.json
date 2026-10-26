@@ -4232,5 +4232,82 @@
     "reason": "Rift names the first behavior validation error; Mountebank lists every one",
     "mountebank": "{\"code\":\"bad data\",\"message\":\"lookup behavior \\\"into\\\" field required\",\"source\":{\"lookup\":[]}}",
     "rift": "(absent)"
+  },
+  {
+    "id": "async-decorate-undefined-status",
+    "case": "targeted: an async decorate that returns nothing (#1679)",
+    "location": "step[1].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A promise that settles to `undefined` or `null` fails the request with `500`",
+    "reason": "An async decorate that settles to undefined mutates the response in Rift; Mountebank's postProcess throws a TypeError and answers 500 (#1679)",
+    "mountebank": "500",
+    "rift": "201"
+  },
+  {
+    "id": "async-decorate-undefined-content-type",
+    "case": "targeted: an async decorate that returns nothing (#1679)",
+    "location": "step[1].header.content-type",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A promise that settles to `undefined` or `null` fails the request with `500`",
+    "reason": "An async decorate that settles to undefined mutates the response in Rift; Mountebank's postProcess throws a TypeError and answers 500 (#1679)",
+    "mountebank": "application/json",
+    "rift": "(absent)"
+  },
+  {
+    "id": "async-decorate-undefined-x-orig",
+    "case": "targeted: an async decorate that returns nothing (#1679)",
+    "location": "step[1].header.x-orig",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A promise that settles to `undefined` or `null` fails the request with `500`",
+    "reason": "An async decorate that settles to undefined mutates the response in Rift; Mountebank's postProcess throws a TypeError and answers 500 (#1679)",
+    "mountebank": "(absent)",
+    "rift": "1"
+  },
+  {
+    "id": "async-decorate-undefined-body",
+    "case": "targeted: an async decorate that returns nothing (#1679)",
+    "location": "step[1].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A promise that settles to `undefined` or `null` fails the request with `500`",
+    "reason": "An async decorate that settles to undefined mutates the response in Rift; Mountebank's postProcess throws a TypeError and answers 500 (#1679)",
+    "mountebankMatches": "\\{\"errors\":\\[\\{\"message\":\"Cannot read properties of undefined \\(reading 'statusCode'\\)\",\"name\":\"TypeError\".*",
+    "rift": "mutated"
+  },
+  {
+    "id": "async-decorate-falsy-status",
+    "case": "targeted: an async decorate that returns nothing (#1679)",
+    "location": "step[2].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "`0`, `''` or `false` serves an empty response completed from the imposter's `defaultResponse`.",
+    "reason": "An async decorate that settles to 0 mutates the response in Rift; Mountebank serves an empty response (#1679)",
+    "mountebank": "200",
+    "rift": "201"
+  },
+  {
+    "id": "async-decorate-falsy-x-orig",
+    "case": "targeted: an async decorate that returns nothing (#1679)",
+    "location": "step[2].header.x-orig",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "`0`, `''` or `false` serves an empty response completed from the imposter's `defaultResponse`.",
+    "reason": "An async decorate that settles to 0 mutates the response in Rift; Mountebank serves an empty response (#1679)",
+    "mountebank": "(absent)",
+    "rift": "1"
+  },
+  {
+    "id": "async-decorate-falsy-body",
+    "case": "targeted: an async decorate that returns nothing (#1679)",
+    "location": "step[2].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "`0`, `''` or `false` serves an empty response completed from the imposter's `defaultResponse`.",
+    "reason": "An async decorate that settles to 0 mutates the response in Rift; Mountebank serves an empty response (#1679)",
+    "mountebank": "",
+    "rift": "mutated"
   }
 ]

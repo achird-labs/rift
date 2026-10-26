@@ -93,6 +93,17 @@ the undecorated response with `x-rift-decorate-error: true` instead, and `500` o
 `strictBehaviors` — see [Behaviors](behaviors.md). A decorate that is not a function at all (`42`,
 a bare expression) answers `500` in Mountebank; Rift runs it as a Rhai script, so it may succeed.
 
+## An `async` decorate that returns nothing
+
+In Rift, an `async` decorate whose promise settles to `undefined`, or to any falsy value, mutates the
+response, exactly as a synchronous decorate that returns nothing: `async config => {
+config.response.body = 'm'; }` serves `m`. Mountebank never falls back to the mutated response for an
+`async` function, because its fallback tests the promise, which is always truthy, and not the value
+it settles to. A promise that settles to `undefined` or `null` fails the request with `500`
+(`TypeError: Cannot read properties of undefined (reading 'statusCode')`), and one that settles to
+`0`, `''` or `false` serves an empty response completed from the imposter's `defaultResponse`.
+Return the response, or a new object, from an `async` decorate to behave the same in both.
+
 ## `require()` loads files only, from `--scripts-dir`
 
 Mountebank's `require` is Node's: it loads built-ins such as `fs` and any file on the host. Rift's

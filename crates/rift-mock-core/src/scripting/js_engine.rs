@@ -6973,6 +6973,30 @@ function respond(ctx) {
         assert_eq!(decorated.body, "after-timer");
     }
 
+    // Issue #1679: an `async` decorate that settles to a falsy value mutated the response, as a
+    // synchronous one that returns nothing does. Mountebank answers 500 (`undefined`) or an empty
+    // response (`0`) instead; documented in `differences.md`, kept on purpose.
+    #[test]
+    fn an_async_decorate_resolving_to_a_falsy_value_is_a_mutation() {
+        for script in [
+            "async config => { config.response.body = 'm'; }",
+            "async config => { config.response.body = 'm'; return 0; }",
+        ] {
+            let decorated = execute_mountebank_decorate(
+                script,
+                &config_req(),
+                "orig",
+                &crate::behaviors::ResponseStatus::Code(201),
+                &crate::util::OrderedMap::default(),
+                test_port(),
+                None,
+                &trusted_files(),
+            )
+            .expect("decorate");
+            assert_eq!(decorated.body, "m", "{script}");
+        }
+    }
+
     #[test]
     fn a_decorate_timer_past_its_deadline_is_the_timeout_error() {
         let started = std::time::Instant::now();
