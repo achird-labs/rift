@@ -240,6 +240,10 @@ fn extraction_methods_and_regex_flags_are_the_schemas() {
 fn behavior_element_keys_are_the_canonical_order() {
     let element = def("BehaviorElement");
     assert_eq!(properties(element), sorted(&STEP_BEHAVIORS));
+    // Every key has a deliberate shape: one falling through to `true` would accept anything.
+    for (key, shape) in element["properties"].as_object().expect("properties") {
+        assert_ne!(shape, &Value::Bool(true), "{key} has no shape");
+    }
     assert_eq!(element["additionalProperties"], Value::Bool(false));
     assert_eq!(element["maxProperties"], 1);
     let behaviors = &def("StubResponse")["properties"]["behaviors"];
