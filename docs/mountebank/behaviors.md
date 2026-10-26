@@ -256,8 +256,9 @@ The function changes the response in one of two ways:
 - **Return a new one.** A returned object replaces the response; nothing of the original is kept.
   A field it leaves out is taken from the imposter's `defaultResponse`, or is `200`, no headers and
   an empty body when there is none, as in Mountebank. An `async` function's promise is settled
-  first and the same rule applies to its value. Returning anything truthy that is not an object
-  fails the decorate.
+  first and the same rule applies to its value (Mountebank differs when it is falsy; see
+  [differences](differences.md#an-async-decorate-that-returns-nothing)). Returning anything
+  truthy that is not an object fails the decorate.
 
 While a returned promise is pending, its promise jobs and timers run, so an `async` decorate may
 `await` a `setTimeout`. Waiting is bounded by the imposter's script timeout; a decorate still

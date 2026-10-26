@@ -10333,6 +10333,82 @@
           "times": 4
         }
       ]
+    },
+    {
+      "name": "targeted: an async decorate that returns nothing (#1679)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/nothing"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "headers": {
+                        "X-Orig": "1"
+                      },
+                      "body": "orig"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "async config => { config.response.body = 'mutated'; }"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/zero"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "headers": {
+                        "X-Orig": "1"
+                      },
+                      "body": "orig"
+                    },
+                    "behaviors": [
+                      {
+                        "decorate": "async config => { config.response.body = 'mutated'; return 0; }"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/nothing"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/zero"
+        }
+      ]
     }
   ]
 }

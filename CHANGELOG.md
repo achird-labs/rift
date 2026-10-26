@@ -678,6 +678,9 @@ record.
 
 ### Documentation
 
+- **An `async` decorate that returns nothing is documented as differing from Mountebank** (#1679):
+  Rift serves the mutated response, as for a synchronous decorate; Mountebank answers `500` for
+  `undefined` and an empty response for `0`, `''` or `false`. A differential case pins both.
 - **Numbers in printed imposters keep serde_json's spelling, and `contains`/`startsWith`/`endsWith`
   against a JSON number or boolean match by text** (#1631): `1.0` prints as `1.0` and `1e2` as
   `100.0`, where Mountebank prints `1` and `100`; matching is unaffected. `{"contains": {"body":
