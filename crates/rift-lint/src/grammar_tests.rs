@@ -233,3 +233,27 @@ fn extraction_methods_and_regex_flags_are_the_schemas() {
     assert_eq!(methods, sorted(&EXTRACTION_METHODS));
     assert_eq!(properties(def("RegexOptions")), sorted(&REGEX_FLAGS));
 }
+
+/// Issue #1724: the `behaviors` array element is its own definition, holding one of rift-lint's
+/// step behaviors, closed, with at most one key, and the array form's items name it.
+#[test]
+fn behavior_element_keys_are_the_canonical_order() {
+    let element = def("BehaviorElement");
+    assert_eq!(properties(element), sorted(&STEP_BEHAVIORS));
+    // Every key has a deliberate shape: one falling through to `true` would accept anything.
+    for (key, shape) in element["properties"].as_object().expect("properties") {
+        assert_ne!(shape, &Value::Bool(true), "{key} has no shape");
+    }
+    assert_eq!(element["additionalProperties"], Value::Bool(false));
+    assert_eq!(element["maxProperties"], 1);
+    let behaviors = &def("StubResponse")["properties"]["behaviors"];
+    let items = behaviors["anyOf"]
+        .as_array()
+        .and_then(|arms| arms.iter().find(|arm| arm["type"] == "array"))
+        .map(|arm| &arm["items"])
+        .expect("an array arm");
+    assert!(
+        items.to_string().contains("#/$defs/BehaviorElement"),
+        "{items}"
+    );
+}

@@ -367,6 +367,12 @@ record.
 
 ### Fixed
 
+- **`imposter.schema.json` describes a `behaviors` array element as every config door reads it**
+  (#1724): a new `$defs/BehaviorElement` refuses an element with two behaviors, one with only
+  `repeat` or another non-behavior key, a list-valued `copy`/`lookup`/`shellTransform`, and an
+  element-level `repeat` (ignored since #1672). It also refuses a `repeat` of `0` or `null` and a
+  `from` object without exactly one key. The engine refused all of these already (#1582, #1639);
+  the schema admitted them, so an SDK validating against it was told they were fine.
 - **A flat response (`statusCode`/`headers`/`body`) carrying a `_rift` block without a `script` is
   served as that `is` response with its `_rift` effects** (#1722): a `503` with a latency fault
   answers `503` after the delay, `templated` renders its body and its behaviors run. It used to decode

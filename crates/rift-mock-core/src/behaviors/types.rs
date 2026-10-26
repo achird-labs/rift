@@ -86,7 +86,11 @@ pub struct ResponseBehaviors {
 
     /// Repeat response N times before advancing to next
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schema", schemars(range(max = 4_294_967_295_u64)))]
+    // At least 1 and never `null`: a config door refuses `0` and `null` (issue #1582).
+    #[cfg_attr(
+        feature = "schema",
+        schemars(range(min = 1, max = 4_294_967_295_u64), extend("type" = "integer"))
+    )]
     pub repeat: Option<u32>,
 
     /// Copy fields from request to response

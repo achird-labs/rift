@@ -203,19 +203,61 @@ pub(crate) fn predicate_generators(_: &mut SchemaGenerator) -> Schema {
     })
 }
 
-/// `behaviors` (no underscore): one behaviors object, or an array of them. An array element may
-/// be `null`, which configures nothing.
+/// `behaviors` (no underscore): one behaviors object, or an array of [`BehaviorElement`]s. An
+/// array element may be `null`, which configures nothing.
 pub(crate) fn behaviors_block(generator: &mut SchemaGenerator) -> Schema {
     let block = generator.subschema_for::<crate::behaviors::ResponseBehaviors>();
+    let element = generator.subschema_for::<BehaviorElement>();
     json_schema!({
-        "description": "The behaviors block in array form: each element's behaviors are steps, \
+        "description": "The behaviors block in array form: each element's behavior is a step, \
                         run in array order. The object form is the same as `_behaviors`.",
         "anyOf": [
             block,
-            { "type": "array", "items": { "anyOf": [block, { "type": "null" }] } },
+            { "type": "array", "items": { "anyOf": [element, { "type": "null" }] } },
             { "type": "null" }
         ]
     })
+}
+
+/// One element of the `behaviors` array (issue #1724), as every config door reads it: at most one
+/// behavior, as Mountebank's `behaviorsValidator.js` requires; `copy`, `lookup` and
+/// `shellTransform` as one item, never a list (#1639); and no `repeat`, which an element never
+/// cycles (#1672). Closed like every object, so a key the engine does not read is refused.
+pub(crate) struct BehaviorElement;
+
+impl schemars::JsonSchema for BehaviorElement {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "BehaviorElement".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let nullable = |schema: Schema| json!({ "anyOf": [schema, { "type": "null" }] });
+        let mut properties = Map::new();
+        // Every key is matched explicitly; a key added to the canonical order without a shape here
+        // gets `true`, which `behavior_element_keys_are_the_canonical_order` refuses.
+        for key in crate::behaviors::CANONICAL_ORDER {
+            let schema = match key {
+                "wait" => nullable(generator.subschema_for::<crate::behaviors::WaitBehavior>()),
+                "lookup" => nullable(generator.subschema_for::<crate::behaviors::LookupBehavior>()),
+                "copy" => nullable(generator.subschema_for::<crate::behaviors::CopyBehavior>()),
+                "shellTransform" | "decorate" => json!({ "type": ["string", "null"] }),
+                _ => Value::Bool(true),
+            };
+            properties.insert(key.to_owned(), schema);
+        }
+        json_schema!({
+            "description": "One element of the `behaviors` array: at most one behavior, as every \
+                            config door and Mountebank's behaviorsValidator.js require. `copy`, \
+                            `lookup` and `shellTransform` take one item here, never a list: write \
+                            several as several elements, or use the `_behaviors` object form. \
+                            `repeat` belongs on the response; inside an element it is never read. \
+                            A `null` value removes the earlier steps of that behavior.",
+            "type": "object",
+            "properties": properties,
+            "additionalProperties": false,
+            "maxProperties": 1
+        })
+    }
 }
 
 /// A response's `statusCode` as the imposter grammar reads it (issue #1558): a number within `u16`,
@@ -474,10 +516,12 @@ mod tests {
         refused(imposter(
             json!({ "proxy": { "to": "http://x", "mode": "once" } }),
         ));
-        // Behaviors: object form, array form with a null element and a null key.
+        // Behaviors: object form, array form with a null element and a null key; `repeat` on the
+        // response. One behavior per element (#1724).
         valid(imposter(json!({
             "is": {},
-            "behaviors": [null, { "wait": 10, "copy": null }, { "decorate": "x" }, { "repeat": 2 }]
+            "behaviors": [null, { "wait": 10 }, { "copy": null }, { "decorate": "x" }],
+            "repeat": 2
         })));
         valid(imposter(json!({
             "is": {},
@@ -490,6 +534,21 @@ mod tests {
             }
         })));
         refused(imposter(json!({ "is": {}, "_behaviors": { "waitt": 10 } })));
+        // `repeat` is at least 1 and never `null`, wherever it sits (#1582, #1724).
+        for response in [
+            json!({ "is": {}, "repeat": 0 }),
+            json!({ "is": {}, "repeat": null }),
+            json!({ "is": {}, "_behaviors": { "repeat": 0 } }),
+            json!({ "is": {}, "_behaviors": { "repeat": null } }),
+        ] {
+            refused(imposter(response));
+        }
+        // A `copy` or `lookup` `from` object names exactly one container (#1582, #1724).
+        for from in [json!({}), json!({ "query": "a", "headers": "b" })] {
+            refused(imposter(json!({ "is": {}, "_behaviors": { "copy": {
+                "from": from, "into": "${X}", "using": { "method": "regex", "selector": ".*" }
+            } } })));
+        }
         // Predicates: one operator, nested, with a selector; two operators or both selectors are
         // refused.
         valid(predicate(json!({ "and": [
@@ -560,6 +619,65 @@ mod tests {
         refused(imposter(
             json!({ "is": { "statusCode": 200, "bodyy": "x" } }),
         ));
+    }
+
+    /// Issue #1724: a `behaviors` array element is valid exactly when every config door admits it.
+    /// The schema is closed, so a key the engine never reads is the one documented exception:
+    /// refused here, admitted and ignored by the door.
+    #[test]
+    fn behaviors_elements_match_the_door() {
+        let schema = imposter_schema();
+        let validator = jsonschema::validator_for(&schema).expect("compiles");
+        let copy = json!({ "from": "path", "into": "${X}", "using": { "method": "regex", "selector": ".*" } });
+        let lookup = json!({ "key": { "from": "path", "using": { "method": "regex", "selector": "x" } },
+                             "fromDataSource": { "csv": { "path": "p", "keyColumn": "k" } },
+                             "into": "${R}" });
+        let admitted_by_both = [
+            json!(null),
+            json!({}),
+            json!({ "copy": null }),
+            json!({ "wait": 10 }),
+            json!({ "copy": copy.clone() }),
+            json!({ "lookup": lookup.clone() }),
+            json!({ "shellTransform": "x" }),
+            json!({ "decorate": "x" }),
+        ];
+        let refused_by_both = [
+            json!({ "repeat": 2 }),
+            json!({ "foo": 1 }),
+            json!({ "wait": 10, "copy": null }),
+            json!({ "wait": 1, "decorate": "x" }),
+            json!({ "copy": [] }),
+            json!({ "lookup": [] }),
+            json!({ "shellTransform": ["a"] }),
+            json!({ "copy": [copy] }),
+        ];
+        // Unread keys: the closed schema refuses them; the door admits and ignores them (#1672).
+        let unread_keys = [
+            json!({ "wait": 1, "repeat": 3 }),
+            json!({ "wait": 1, "repeat": "x" }),
+            json!({ "wait": 1, "foo": 1 }),
+        ];
+        let response = |element: &Value| json!({ "is": {}, "behaviors": [element] });
+        let schema_valid = |element: &Value| {
+            let document =
+                json!({ "protocol": "http", "stubs": [{ "responses": [response(element)] }] });
+            validator.is_valid(&document)
+        };
+        let door_admits =
+            |element: &Value| serde_json::from_value::<StubResponse>(response(element)).is_ok();
+        for element in &admitted_by_both {
+            assert!(schema_valid(element), "schema refuses {element}");
+            assert!(door_admits(element), "door refuses {element}");
+        }
+        for element in &refused_by_both {
+            assert!(!schema_valid(element), "schema admits {element}");
+            assert!(!door_admits(element), "door admits {element}");
+        }
+        for element in &unread_keys {
+            assert!(!schema_valid(element), "schema admits {element}");
+            assert!(door_admits(element), "door refuses {element}");
+        }
     }
 
     /// `RESPONSE_VARIANT_KEYS` lists the response-type keys in the order `TryFrom<StubResponseRaw>`
