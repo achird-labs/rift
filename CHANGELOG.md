@@ -716,6 +716,10 @@ record.
 
 ### Testing
 
+- **mbTest's CLI phase runs each test file in its own process** (#1714) and stops any server a
+  failing file left in `test.pid`, reporting it in `cli.out`. A failure in one file, such as
+  `cli/replayTest.js` on Rift, no longer fails the next file's start. `cli/saveTest.js`'s 'saving
+  replayable format' is no longer listed as a flaky expected failure.
 - **The differential suite measures how much of Mountebank it exercises** (#1548):
   `scripts/mb-coverage.sh` runs the oracle under V8 coverage and holds the covered line, branch and
   function counts of 28 in-scope Mountebank files against `conformance/differential/mb-coverage.json`

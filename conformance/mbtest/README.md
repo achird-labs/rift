@@ -35,7 +35,7 @@ and runs the phases one at a time.
 | Phase | What runs | The engine |
 |:--|:--|:--|
 | `api` | `api/homeControllerTest.js`, `api/impostersControllerTest.js`, `api/http/*`, `api/https/*` | One engine on 2525, `--allowInjection --localOnly` (as mbTest's `tasks/mbtest.js` starts it). Two tests spawn their own through `MB_EXECUTABLE`. |
-| `cli` | `cli/*` | None: every test spawns `MB_EXECUTABLE` itself. |
+| `cli` | `cli/*` | None: every test spawns `MB_EXECUTABLE` itself. Each file runs in its own mocha process; a server a failing file left in `test.pid` is stopped before the next file and reported in `cli.out` (#1714). The per-file reports are merged into `cli.json`. |
 | `docs` | [`docsScenarios.js`](docsScenarios.js): every scenario on the 14 pages `web/docsIntegrityTest.js` checks, one test each | One engine on 2525; the pages from a snapshot on 2600. |
 
 For Rift, `MB_EXECUTABLE` is [`rift-as-mb`](rift-as-mb), which makes exactly one change: every
