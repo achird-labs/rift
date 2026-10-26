@@ -162,6 +162,24 @@ pub(crate) fn error_body_typed(status: StatusCode, kind: ErrorKind, message: &st
     serde_json::to_string_pretty(&error).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Mountebank's `{"errors":[...]}` for a `predicateGenerators` injection that failed: `invalid
+/// injection`, `invalid predicateGenerator injection`, the call it ran as `source` and the error's
+/// `message` as `data`, left out when the thrown value had none, as Mountebank leaves it out. The
+/// create-time dry run answers it `400` (issue #1580) and a recording request `500` (issue #1708).
+#[must_use]
+pub fn generator_injection_error_body(source: &str, data: Option<&str>) -> String {
+    let mut error = serde_json::json!({
+        "code": ErrorKind::InvalidInjection.slug(),
+        "type": ErrorKind::InvalidInjection.slug(),
+        "message": "invalid predicateGenerator injection",
+        "source": source,
+    });
+    if let Some(data) = data {
+        error["data"] = data.into();
+    }
+    serde_json::json!({ "errors": [error] }).to_string()
+}
+
 /// Create a Mountebank-format error response.
 pub fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
     error_response_typed(status, ErrorKind::for_status(status), message)

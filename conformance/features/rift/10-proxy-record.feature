@@ -70,20 +70,19 @@ Feature: Proxy record/replay — proxyOnce, proxyTransparent, proxyAlways chains
     And the imposter on port 4811 first recorded predicate includes "X-Trace"
     And the imposter on port 4811 first recorded predicate includes "abc123"
 
-  # rift 0.13.0 (rift#498): when a proxy's predicateGenerators.inject THROWS during recording, rift
-  # tags the proxied response with `x-rift-generator-error: script-error` and SKIPS recording the
-  # shadowing match-all stub (previously it recorded a match-all that would shadow the real upstream
-  # on replay). The proxy still forwards the upstream response — only the unsafe recording is
-  # suppressed — so the stub count stays at the single proxy stub. The fixture's inject returns `[]`
-  # on `config.request.isDryRun`: since rift#1580 one that throws there is refused at creation, as in
+  # rift#498: when a proxy's predicateGenerators.inject THROWS during recording, rift SKIPS recording
+  # the shadowing match-all stub (previously it recorded a match-all that would shadow the real
+  # upstream on replay), so the stub count stays at the single proxy stub. Since rift#1708 the request
+  # is still forwarded but answered Mountebank's `500 invalid predicateGenerator injection`, with
+  # `x-rift-generator-error: script-error` kept as a marker. The fixture's inject returns `[]` on
+  # `config.request.isDryRun`: since rift#1580 one that throws there is refused at creation, as in
   # Mountebank's dry run.
-  Scenario: a failing predicateGenerators.inject tags the response and records no shadowing stub
+  Scenario: a failing predicateGenerators.inject answers 500 and records no shadowing stub
     Given a fresh verbatim imposter from fixture "proxy/generror-upstream"
     And a fresh verbatim imposter from fixture "proxy/generror-proxy"
     Then the imposter on port 4819 has 1 stubs
     When the client sends "GET" "/svc" to port 4819
-    Then the response status is 200
-    And the response body is "UP"
+    Then the response status is 500
     And the response header "x-rift-generator-error" is "script-error"
     And the imposter on port 4819 still has 1 stubs after recording settles
 

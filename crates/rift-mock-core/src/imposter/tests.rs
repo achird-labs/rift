@@ -5141,11 +5141,8 @@ mod proxy_generator_failure_tests {
         let port_1 = proxy_with_generator(&manager, port_0, throwing).await;
 
         let resp = get(port_1, "/gen").await;
-        assert_eq!(
-            resp.status(),
-            200,
-            "proxied response still returned to client"
-        );
+        // Issue #1708: Mountebank's `500 invalid predicateGenerator injection`, after forwarding.
+        assert_eq!(resp.status(), 500, "the generator's failure is the answer");
         assert_eq!(
             resp.headers()
                 .get("x-rift-generator-error")
@@ -5153,7 +5150,12 @@ mod proxy_generator_failure_tests {
             Some("script-error"),
             "a generator failure must be surfaced to the client, not only logged"
         );
-        assert_eq!(resp.text().await.unwrap(), "OK");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(
+            body["errors"][0]["message"],
+            "invalid predicateGenerator injection"
+        );
+        assert_eq!(body["errors"][0]["data"], "boom");
 
         // The proxy imposter must still have ONLY its original proxy stub — no match-all stub
         // was recorded from the failed generation.
@@ -5343,7 +5345,8 @@ mod proxy_generator_failure_tests {
         .await;
 
         let resp = get(port, "/a").await;
-        assert_eq!(resp.status(), 200);
+        // Issue #1708: a timed-out generator is an injection failure, named as the dry run names it.
+        assert_eq!(resp.status(), 500);
         assert_eq!(
             resp.headers()
                 .get("x-rift-generator-error")
@@ -5351,7 +5354,9 @@ mod proxy_generator_failure_tests {
             Some("timeout"),
             "a generator over the script deadline must time out, not run inline"
         );
-        assert_eq!(resp.text().await.unwrap(), "OK");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["errors"][0]["data"], "timed out after 20ms");
+        assert_eq!(body["errors"][0]["source"], format!("({slow})(config);"));
         assert_eq!(
             manager.get_imposter(port).unwrap().get_stubs().len(),
             1,

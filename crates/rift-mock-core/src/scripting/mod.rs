@@ -167,8 +167,10 @@ pub enum PredicateGeneratorError {
 }
 
 impl PredicateGeneratorError {
-    /// Short, stable, header-safe token for the `x-rift-generator-error` response header
-    /// (the full detail goes to the server log, not to the client).
+    /// Short, stable, header-safe token for the `x-rift-generator-error` response header (the full
+    /// detail goes to the server log, not to the client). It marks the `500` a failed recording
+    /// answers (issue #1708), except `invalid-predicate`, which marks the upstream response served
+    /// instead.
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {

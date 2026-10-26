@@ -438,7 +438,13 @@ async fn a_failed_generation_forwards_every_request() {
             Some("script-error"),
             "{path}"
         );
-        assert_eq!(response.text().await.expect("body"), "up");
+        // Issue #1708: each request is forwarded, then answered Mountebank's `500`.
+        assert_eq!(response.status().as_u16(), 500, "{path}");
+        let body: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(
+            body["errors"][0]["message"], "invalid predicateGenerator injection",
+            "{path}"
+        );
     }
     assert_eq!(admin.upstream_hits(upstream).await, 3);
     assert_eq!(admin.stubs(port).await.len(), 1, "no stub was recorded");
