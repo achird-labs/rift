@@ -57,7 +57,6 @@ rift-ejs = { path = "../rift-ejs", version = "0.1.0" }
 rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-features = false }
 
 # Stable stub id generation for id-addressed stub ops (issue #202)
-uuid.workspace = true
 
 # Logging & Observability
 tracing.workspace = true
@@ -118,6 +117,7 @@ path = "."
 features = ["test-util"]
 
 [dev-dependencies]
+uuid.workspace = true
 # Test-only: drives a real WebSocket handshake and real frames through the intercept tunnel
 # (issue #997). `handshake` only — the TLS legs are built from the repo's own rustls config, so
 # none of this crate's TLS features are wanted.

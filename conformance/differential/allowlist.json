@@ -362,17 +362,6 @@
     "riftMatches": "\\[[0-9,]*\\]"
   },
   {
-    "id": "auto-stub-id",
-    "case": "*",
-    "location": "*/stubs/*/id",
-    "kind": "documented",
-    "doc": "docs/api/index.md",
-    "quote": "Every stub has a stable `id` (auto-generated as a UUID when omitted).",
-    "reason": "Rift gives a stub added through the API a stable id",
-    "mountebank": "(absent)",
-    "riftMatches": "\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\""
-  },
-  {
     "id": "list-prints-record-requests",
     "case": "*",
     "location": "*.body/imposters/*/recordRequests",
