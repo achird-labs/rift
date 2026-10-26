@@ -350,6 +350,12 @@ record.
 
 ### Fixed
 
+- **A flat response (`statusCode`/`headers`/`body`) carrying a `_rift` block without a `script` is
+  served as that `is` response with its `_rift` effects** (#1722): a `503` with a latency fault
+  answers `503` after the delay, `templated` renders its body and its behaviors run. It used to decode
+  as a script-less `_rift` response, losing its flat fields and `_rift` effects: answered as a no-match
+  (or, since #1685, an empty `200`), and dropped from `GET /imposters` and `--datadir`. A datadir an
+  earlier engine saved has already lost them.
 - **Concurrent `lookup` requests that miss on one CSV file read and parse it once** (#1715), and
   share the outcome. Each used to read and parse the file under its own share of
   `--body-memory-budget`, so under budget pressure all but one were answered `503` on a cold or

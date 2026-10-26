@@ -4796,3 +4796,20 @@ fn e056_rift_script_is_not_also_w017_and_empty_headers_are_not_flat() {
     let r = lint_response(&json!({ "_rift": script, "headers": {} }));
     assert!(!has_code(&r, "E056"), "{:?}", codes(&r));
 }
+
+/// Issue #1722: behaviors on the flat form beside a `_rift` block without a script run, as on
+/// `is`, so they are not reported ignored; beside a bare script-less `_rift` they still are.
+#[test]
+fn behaviors_on_flat_with_script_less_rift_are_not_reported_ignored() {
+    let flat = json!({ "protocol": "http", "stubs": [{ "responses": [
+        { "statusCode": 503, "_rift": { "templated": true }, "_behaviors": { "wait": 10 } }
+    ] }] });
+    let r = lint_imposter(&flat);
+    assert!(!has_code(&r, "W017"), "{:?}", codes(&r));
+
+    let bare = json!({ "protocol": "http", "stubs": [{ "responses": [
+        { "_rift": { "templated": true }, "_behaviors": { "wait": 10 } }
+    ] }] });
+    let r = lint_imposter(&bare);
+    assert!(has_code(&r, "W017"), "{:?}", codes(&r));
+}

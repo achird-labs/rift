@@ -436,6 +436,15 @@ fn ignored_behaviors(response: &Value) -> Option<(&'static str, &'static str)> {
     if shape == "proxy" || shape == "inject" {
         return None;
     }
+    // The flat form beside a `_rift` block without a script is an `is` response, with the block
+    // applying to it, as the engine decodes it (issue #1722): its behaviors run.
+    let script = response
+        .get("_rift")
+        .and_then(|rift| rift.get("script"))
+        .is_some_and(|script| !script.is_null());
+    if shape == "_rift" && !script && ["statusCode", "body", "headers"].into_iter().any(present) {
+        return None;
+    }
     let key = if present("_behaviors") {
         "_behaviors"
     } else {
