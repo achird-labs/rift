@@ -1368,7 +1368,9 @@ pub(crate) struct StubResponseRaw {
     pub inject: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fault: Option<String>,
-    /// Mountebank-style behaviors (with underscore prefix): an object, or absent/`null`.
+    /// Mountebank-style behaviors (with underscore prefix): an object, or absent/`null`. It runs only
+    /// when the response sets no `behaviors` and no top-level `repeat`; beside either it is ignored
+    /// whole, as Mountebank ignores it (issue #1709).
     #[serde(
         rename = "_behaviors",
         default,
@@ -1414,7 +1416,8 @@ pub(crate) struct StubResponseRaw {
     pub mode: Option<ResponseMode>,
     /// Mountebank's canonical `repeat` (issue #1188): it lifts `_behaviors.repeat` to the response,
     /// so this is the form `mb save` writes. Merged into the behaviors block at parse, where it
-    /// wins over a `repeat` inside the block, as it does in Mountebank. Must be greater than 0: a
+    /// wins over a `repeat` inside a `behaviors` block, and keeps a `_behaviors` block from running
+    /// at all (issue #1709), as in Mountebank. Must be greater than 0: a
     /// config door refuses `0` and `null`, as Mountebank does (issue #1582).
     // Decoded with its presence, so a written `null` is `Some(Null)` for the door to refuse; a
     // replayed decode reads it as absent, as every engine before #1582 did.
@@ -1727,7 +1730,8 @@ fn refuse_inverted_waits_in_block(block: &serde_json::Value) -> Result<(), Strin
 /// The block `new_is` is about to parse must parse (issue #1162). `new_is` cannot fail, so a block
 /// it could not read used to be admitted and served with every behavior but `repeat` ignored and
 /// only a log line to say so. Checked on the compiled program — every step that will run — so a
-/// step a later `null` removes, or a `behaviors` shadowed by `_behaviors`, is not refused: it
+/// step a later `null` removes, or a `_behaviors` ignored beside `behaviors` or a top-level
+/// `repeat` (issue #1709), is not refused: it
 /// configures nothing, and rift-lint reads the array the same way. Every other element is live
 /// (#1195, #1198), so a malformed earlier element is refused rather than overridden.
 ///
@@ -1918,7 +1922,12 @@ fn refuse_door_only_behavior_shapes(
         repeat.is_some_and(|repeat| repeat.is_null() || repeat.as_u64() == Some(0))
     };
     let known = |key: &String| crate::behaviors::CANONICAL_ORDER.contains(&key.as_str());
-    match raw.underscore_behaviors.as_ref().or(raw.behaviors.as_ref()) {
+    let selected = if uses_underscore_behaviors(raw) {
+        raw.underscore_behaviors.as_ref()
+    } else {
+        raw.behaviors.as_ref()
+    };
+    match selected {
         Some(Value::Array(elements)) => {
             for element in elements {
                 refuse_from_key_count(element)?;
@@ -2027,6 +2036,17 @@ fn validate_extraction_selector(
         .map_err(|e| format!("`{key}` behavior `{method}` selector `{selector}` is invalid: {e}"))
 }
 
+/// Whether `_behaviors` is the block that runs (issue #1709). Mountebank upcasts it to the
+/// `behaviors` array only when the response sets no `behaviors` (a `null` one included) and no
+/// top-level `repeat` (`compatibility.js` `canUpcastBehaviors`); otherwise it ignores `_behaviors`
+/// whole, its `repeat` included. A `null` `repeat` is absent here: a door refuses it, and a replayed
+/// one was stored by an engine that ran the `_behaviors` beside it.
+fn uses_underscore_behaviors(raw: &StubResponseRaw) -> bool {
+    raw.underscore_behaviors.is_some()
+        && raw.behaviors.is_none()
+        && raw.repeat.as_ref().is_none_or(serde_json::Value::is_null)
+}
+
 fn deserialize_underscore_behaviors<'de, D>(
     deserializer: D,
 ) -> Result<Option<serde_json::Value>, D::Error>
@@ -2049,18 +2069,22 @@ where
 
 /// `behaviors` is an object or an array of behavior objects; a scalar used to normalize to no block
 /// at all, silently dropping what the author wrote.
+///
+/// Decoded with its presence: a written `null` is `Some(Null)`, since a `behaviors` key, even a
+/// `null` one, keeps `_behaviors` from running, as in Mountebank (issue #1709). It compiles to no
+/// program.
 fn deserialize_behaviors<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    match Option::<serde_json::Value>::deserialize(deserializer)? {
-        block @ (None | Some(serde_json::Value::Object(_) | serde_json::Value::Array(_))) => {
-            if let Some(inner) = &block {
-                refuse_inverted_waits_in_block(inner).map_err(serde::de::Error::custom)?;
-            }
-            Ok(block)
+    match serde_json::Value::deserialize(deserializer)? {
+        block @ (serde_json::Value::Null
+        | serde_json::Value::Object(_)
+        | serde_json::Value::Array(_)) => {
+            refuse_inverted_waits_in_block(&block).map_err(serde::de::Error::custom)?;
+            Ok(Some(block))
         }
-        Some(other) => Err(serde::de::Error::invalid_type(
+        other => Err(serde::de::Error::invalid_type(
             unexpected_json(&other),
             &"`behaviors` to be an object or an array of behavior objects",
         )),
@@ -2101,15 +2125,18 @@ impl TryFrom<StubResponseRaw> for StubResponse {
         let flat = raw.has_flat_fields();
         // Judged on the block as written, which the compile below consumes; reported last.
         let door_only = refuse_door_only_behavior_shapes(&raw, admission());
-        // `_behaviors` when present, else `behaviors`, compiled into the program that runs
-        // (issue #1198). Checked before the response type is chosen, so a block on a `proxy`,
-        // `inject` or `fault` response is held to the same rule rift-lint applies to every response.
-        let mut behaviors = raw
-            .underscore_behaviors
-            .or(raw.behaviors)
-            .and_then(compile_behaviors);
-        // Both are checked before the merge, so a malformed `repeat` in the block is refused even
-        // when the top-level one replaces it — the rule rift-lint applies to each.
+        // The block Mountebank runs (issue #1709): `_behaviors` only beside no `behaviors` and no
+        // top-level `repeat`, else `behaviors`, compiled into the program that runs (issue #1198).
+        // Checked before the response type is chosen, so a block on a `proxy`, `inject` or `fault`
+        // response is held to the same rule rift-lint applies to every response.
+        let selected = if uses_underscore_behaviors(&raw) {
+            raw.underscore_behaviors
+        } else {
+            raw.behaviors
+        };
+        let mut behaviors = selected.and_then(compile_behaviors);
+        // Both are checked before the merge, so a malformed `repeat` in the `behaviors` block is
+        // refused even when the top-level one replaces it — the rule rift-lint applies to each.
         refuse_unparseable_behaviors(behaviors.as_ref(), admission())?;
         // A `null` one is absent here; a door has refused it below.
         if let Some(repeat) = raw.repeat.clone().filter(|repeat| !repeat.is_null()) {
@@ -6594,28 +6621,67 @@ mod tests {
         assert!(msg.contains("`wait`"), "{msg}");
     }
 
-    // A block the engine does not use is not what this refusal is about: `_behaviors` shadows
-    // `behaviors`, which is never parsed.
+    /// The compiled program a response runs (issue #1709), `None` for none.
+    fn program_of(response: serde_json::Value) -> Option<serde_json::Value> {
+        match serde_json::from_value::<StubResponse>(response).expect("admitted") {
+            StubResponse::Is { behaviors, .. } => behaviors,
+            other => panic!("expected an Is response, got {other:?}"),
+        }
+    }
+
+    // Issue #1709: Mountebank upcasts `_behaviors` only beside no `behaviors` and no top-level
+    // `repeat` (`compatibility.js` `canUpcastBehaviors`); otherwise it ignores `_behaviors` whole.
     #[test]
-    fn a_shadowed_behaviors_block_is_not_parsed() {
-        let resp: StubResponse = serde_json::from_value(json!({
-            "is": {},
-            "_behaviors": { "wait": 10 },
-            "behaviors": { "wait": { "min": "1", "max": "2" } }
-        }))
-        .expect("the shadowed block is not the one the engine uses");
-        let StubResponse::Is {
-            behaviors_parsed, ..
-        } = resp
-        else {
-            panic!("expected an Is response");
-        };
-        assert!(matches!(
-            behaviors_parsed.expect("parsed").steps.as_slice(),
-            [crate::behaviors::BehaviorStep::Wait(
-                crate::behaviors::WaitBehavior::Fixed(10)
-            )]
-        ));
+    fn underscore_behaviors_beside_behaviors_is_ignored() {
+        assert_eq!(
+            program_of(
+                json!({ "is": {}, "_behaviors": { "wait": 10 }, "behaviors": [{ "wait": 20 }] })
+            ),
+            Some(json!([{ "wait": 20 }]))
+        );
+    }
+
+    #[test]
+    fn underscore_behaviors_beside_a_null_behaviors_is_ignored() {
+        assert_eq!(
+            program_of(json!({ "is": {}, "_behaviors": { "wait": 10 }, "behaviors": null })),
+            None
+        );
+    }
+
+    #[test]
+    fn underscore_behaviors_beside_a_top_level_repeat_is_ignored() {
+        assert_eq!(
+            program_of(json!({ "is": {}, "repeat": 2, "_behaviors": { "wait": 10, "repeat": 5 } })),
+            Some(json!([{ "repeat": 2 }]))
+        );
+    }
+
+    #[test]
+    fn underscore_behaviors_alone_runs_with_its_repeat() {
+        assert_eq!(
+            program_of(json!({ "is": {}, "_behaviors": { "wait": 10, "repeat": 3 } })),
+            Some(json!([{ "repeat": 3 }, { "wait": 10 }]))
+        );
+    }
+
+    // Mountebank never validates a `_behaviors` it ignores, so neither does a config door.
+    #[test]
+    fn an_ignored_underscore_behaviors_is_not_type_checked() {
+        assert_eq!(
+            program_of(
+                json!({ "is": {}, "repeat": 2, "_behaviors": { "repeat": "bad", "wait": "x" } })
+            ),
+            Some(json!([{ "repeat": 2 }]))
+        );
+    }
+
+    // Kept refused even when ignored: an inverted wait range anywhere (#1148), decoded in the field.
+    #[test]
+    fn an_inverted_wait_in_an_ignored_underscore_behaviors_is_still_refused() {
+        let msg = response_error(json!({ "is": {}, "repeat": 2,
+            "_behaviors": { "wait": { "min": 50, "max": 10 } } }));
+        assert!(msg.contains("wait"), "{msg}");
     }
 
     /// An all-`null` block is no behaviors at all: it loads, with nothing to run. A `null`
@@ -7384,13 +7450,14 @@ mod mountebank_output_tests {
         );
     }
 
-    /// Issue #1188/#1198: a top-level `repeat` wins over one in the block, whichever form the
-    /// block takes, and is what the cycler reads.
+    /// Issue #1188/#1198: a top-level `repeat` wins over one in a `behaviors` block, whichever
+    /// form the block takes, and is what the cycler reads. Beside `_behaviors` it voids the whole
+    /// block instead (#1709).
     #[test]
     fn a_top_level_repeat_wins_over_the_blocks() {
         use crate::behaviors::HasRepeatBehavior;
         for response in [
-            json!({"is": {}, "repeat": 4, "_behaviors": {"repeat": 2, "wait": 1}}),
+            json!({"is": {}, "repeat": 4, "behaviors": {"repeat": 2, "wait": 1}}),
             // Refused at a door since #1582; an older engine's stored config replays.
             json!({"is": {}, "repeat": 4, "behaviors": [{"repeat": 2}, {"wait": 1}]}),
         ] {

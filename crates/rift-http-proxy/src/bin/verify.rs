@@ -1129,7 +1129,11 @@ fn check_if_dynamic(responses: &[serde_json::Value]) -> (bool, Option<String>) {
     if first.get("repeat").is_some_and(|r| !r.is_null()) {
         return (true, Some(label("repeat").to_string()));
     }
-    if let Some(obj) = first.get("_behaviors").and_then(|v| v.as_object()) {
+    // `_behaviors` runs only beside no `behaviors` key and no top-level `repeat` (issue #1709); a
+    // Mountebank echo keeps an ignored one, which configures nothing.
+    if first.get("behaviors").is_none()
+        && let Some(obj) = first.get("_behaviors").and_then(|v| v.as_object())
+    {
         for k in DYNAMIC_BEHAVIORS {
             if has(obj, k) {
                 return (true, Some(label(k).to_string()));
@@ -2740,10 +2744,11 @@ mod verify_tests {
         ]}));
         assert_eq!(check_if_dynamic(&later_null_clears_repeat), (false, None));
 
-        let underscore_wins = wire(serde_json::json!({"responses": [
-            {"is": {"statusCode": 200}, "_behaviors": {"wait": 5}, "behaviors": [{"repeat": 2}]}
+        // Issue #1709: beside `behaviors`, `_behaviors` is ignored, its `repeat` included.
+        let behaviors_wins = wire(serde_json::json!({"responses": [
+            {"is": {"statusCode": 200}, "_behaviors": {"repeat": 2}, "behaviors": [{"wait": 5}]}
         ]}));
-        assert_eq!(check_if_dynamic(&underscore_wins), (false, None));
+        assert_eq!(check_if_dynamic(&behaviors_wins), (false, None));
 
         let empty_list_survives_the_round_trip = wire(serde_json::json!({"responses": [
             {"is": {"statusCode": 200}, "_behaviors": {"copy": []}}

@@ -189,6 +189,15 @@ Rift refuses a behaviors block with the same rules as Mountebank, but names only
 where Mountebank lists every one (a `copy` missing `from`, `into` and `using` is three errors
 there), Rift's `400` names the first.
 
+## An ignored `_behaviors`
+
+`_behaviors` beside `behaviors` or a top-level `repeat` is ignored in Rift as in Mountebank (#1709),
+with two differences. Rift still refuses an inverted `wait` range and a non-object `_behaviors` in
+it, which Mountebank admits when it ignores the block. And `GET /imposters`, `rift save` and
+`--datadir` leave the ignored block out, where Mountebank echoes it: the saved file behaves the same
+in either. An object-form `behaviors` beside `_behaviors` is served by Rift; Mountebank answers
+`500` (its upcast treats `behaviors` as an array).
+
 ## `repeat` is a whole number
 
 `repeat` must be a whole number from 1 to 4294967295, written as a number. Mountebank also accepts

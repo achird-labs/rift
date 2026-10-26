@@ -645,8 +645,9 @@ fn admission_check_reports_the_first_failure_in_decode_order() {
 /// `admission_check_stub` names the `repeat`. Both refuse.
 #[test]
 fn a_malformed_top_level_repeat_is_reported_before_the_block() {
+    // `behaviors`, not `_behaviors`: beside a top-level `repeat` the latter is ignored (#1709).
     let stub = r#"{"responses":[{"is":{"statusCode":200},"repeat":2.5,
-        "_behaviors":{"copy":{"from":"body","into":"${T}","using":{"method":"regex","selector":"(unclosed"}}}}]}"#;
+        "behaviors":{"copy":{"from":"body","into":"${T}","using":{"method":"regex","selector":"(unclosed"}}}}]}"#;
     let door = serde_json::from_str::<Stub>(stub)
         .expect_err("door refuses")
         .to_string();
@@ -667,8 +668,7 @@ fn a_malformed_top_level_repeat_is_reported_before_the_block() {
 /// serve time: the program that runs is `repeat: 3`.
 #[test]
 fn a_replaced_block_repeat_is_the_doors_refusal_alone() {
-    let stub =
-        r#"{"responses":[{"is":{"statusCode":200},"_behaviors":{"repeat":2.5},"repeat":3}]}"#;
+    let stub = r#"{"responses":[{"is":{"statusCode":200},"behaviors":{"repeat":2.5},"repeat":3}]}"#;
     let door = serde_json::from_str::<Stub>(stub)
         .expect_err("door refuses")
         .to_string();
