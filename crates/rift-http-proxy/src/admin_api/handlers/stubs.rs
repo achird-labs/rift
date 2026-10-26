@@ -92,12 +92,6 @@ pub async fn handle_add(
         return rejection;
     }
 
-    // Issue #202: honor a caller-supplied `id`, but generate a stable one if absent so every
-    // stub is addressable via the by-id endpoints.
-    if add_req.stub.id.is_none() {
-        add_req.stub.id = Some(uuid::Uuid::new_v4().to_string());
-    }
-
     // Validate scripts in the stub before adding
     let insert_index = add_req.index.unwrap_or(0);
     let validation_result = validate_stub(&add_req.stub, insert_index);

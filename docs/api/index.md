@@ -483,8 +483,9 @@ it get a new `_rift.conditional` `Last-Modified: load`, since they may now answe
 
 ### Stub operations by stable id
 
-Every stub has a stable `id` (auto-generated as a UUID when omitted). These endpoints address a stub
-by that id instead of by positional index, so concurrent edits don't shift the target.
+A stub you give an `id` can be addressed by it; a stub without one is addressable by index only, as
+in Mountebank, which never generates one (#1598). These endpoints address a stub by its id instead
+of by positional index, so concurrent edits don't shift the target.
 
 | Method | Path | Action |
 |:-------|:-----|:-------|

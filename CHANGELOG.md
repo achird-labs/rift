@@ -69,6 +69,10 @@ record.
 
 ### Changed
 
+- **`POST /imposters/:port/stubs` no longer gives a stub without an `id` a generated UUID** (#1598),
+  matching Mountebank and every other way of creating a stub. Set `id` on a stub you want to address
+  by id. This also fixes `PUT /imposters?reconcile=true` resetting the response cycle of a stub added
+  this way: its generated id was its reconcile key, which the config's copy never matched.
 - **`_behaviors` beside `behaviors` (a `null` one included) or a top-level `repeat` is ignored, as in
   Mountebank** (#1709). Rift used to run `_behaviors` there and ignore `behaviors`. A
   `{"repeat": n, "_behaviors": {...}}` response now repeats and runs none of the block's behaviors.

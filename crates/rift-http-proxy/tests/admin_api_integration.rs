@@ -794,18 +794,84 @@ async fn stub_by_id_admin_endpoints() {
         404
     );
 
-    // POST without an id generates one so it is by-id addressable
+    // Issue #1598: POST without an id stores the stub as given, as Mountebank does and as every
+    // other way of creating a stub does: no id is generated, printed or exported.
     assert_eq!(
         add(serde_json::Value::Null, "auto").await.unwrap().status(),
         200
     );
     let imposter = manager.get_imposter(imposter_port).unwrap();
     assert!(
-        imposter.get_stubs()[0].id.is_some(),
-        "POST without id should generate one"
+        imposter.get_stubs()[0].id.is_none(),
+        "POST without id must not generate one"
     );
+    for query in ["", "?replayable=true"] {
+        let printed: serde_json::Value = serde_json::from_str(
+            &text(&c, format!("{admin}/imposters/{imposter_port}{query}")).await,
+        )
+        .unwrap();
+        assert!(
+            printed["stubs"][0].get("id").is_none(),
+            "{query}: {}",
+            printed["stubs"][0]
+        );
+    }
 
     let _ = manager.delete_imposter(imposter_port).await;
+}
+
+// Issue #1598: a stub added with `POST .../stubs` keys by its content, as every other stub does, so
+// a reconcile that leaves it unchanged keeps its response cycle. A generated id used to be its key,
+// which the config's id-less copy never matched, so the cycle was reset.
+#[tokio::test]
+async fn a_stub_added_by_post_keeps_its_cycle_through_a_reconcile() {
+    let manager = std::sync::Arc::new(ImposterManager::new());
+    let admin = bind_admin(rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    ))
+    .await;
+    let c = reqwest::Client::new();
+    let port = manager
+        .create_imposter(
+            serde_json::from_value(serde_json::json!({ "protocol": "http", "stubs": [] })).unwrap(),
+        )
+        .await
+        .expect("create");
+    let stub = serde_json::json!({
+        "responses": [{ "is": { "body": "x" } }, { "is": { "body": "y" } }]
+    });
+    let added = c
+        .post(format!("{admin}/imposters/{port}/stubs"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "stub": stub }).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(added.status(), 200);
+    let send = || async {
+        reqwest::get(format!("http://127.0.0.1:{port}/"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    };
+    assert_eq!(send().await, "x");
+    let reconciled = c
+        .put(format!("{admin}/imposters?reconcile=true"))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({ "imposters": [{ "port": port, "protocol": "http", "stubs": [stub] }] })
+                .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reconciled.status(), 200);
+    assert_eq!(send().await, "y", "the unchanged stub keeps its cycle");
+    let _ = manager.delete_imposter(port).await;
 }
 
 // Issue #1334: Mountebank's imposterPrinter prints `defaultResponse` in every form (create body,

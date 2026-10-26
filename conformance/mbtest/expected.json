@@ -203,22 +203,10 @@
       "note": "an object body is served with Content-Type: application/json, so the client parses it"
     },
     {
-      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should support adding single stub without restarting the imposter",
-      "class": "bug",
-      "issue": "#1598",
-      "note": "a stub added with POST /imposters/:id/stubs prints its generated `id`; stubs created with the imposter print none, nor does Mountebank"
-    },
-    {
       "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should provide a good error message when adding stub with missing information",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#error-envelopes",
       "note": "code/type and message wording differ"
-    },
-    {
-      "id": "api/http/httpStubTest.js::http imposter POST /imposters with stubs should support adding single stub at end without index ",
-      "class": "bug",
-      "issue": "#1598",
-      "note": "a stub added with POST /imposters/:id/stubs prints its generated `id`; stubs created with the imposter print none, nor does Mountebank"
     },
     {
       "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should support JSON bodies",
@@ -233,22 +221,10 @@
       "note": "an object body is served with Content-Type: application/json, so the client parses it"
     },
     {
-      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should support adding single stub without restarting the imposter",
-      "class": "bug",
-      "issue": "#1598",
-      "note": "a stub added with POST /imposters/:id/stubs prints its generated `id`; stubs created with the imposter print none, nor does Mountebank"
-    },
-    {
       "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should provide a good error message when adding stub with missing information",
       "class": "documented",
       "doc": "docs/mountebank/differences.md#error-envelopes",
       "note": "code/type and message wording differ"
-    },
-    {
-      "id": "api/http/httpStubTest.js::https imposter POST /imposters with stubs should support adding single stub at end without index ",
-      "class": "bug",
-      "issue": "#1598",
-      "note": "a stub added with POST /imposters/:id/stubs prints its generated `id`; stubs created with the imposter print none, nor does Mountebank"
     },
     {
       "id": "api/https/httpsCertificateTest.js::https imposter should support proxying to origin server requiring mutual auth",
