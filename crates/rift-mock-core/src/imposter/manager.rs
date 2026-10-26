@@ -676,9 +676,10 @@ pub struct ImposterManager {
 }
 
 /// Default bound for the post-delete connection drain (issue #596). Generous: normal graceful
-/// shutdown of idle/short connections completes in milliseconds, so this only caps a genuinely
-/// stalled in-flight request (e.g. a slow proxy upstream) rather than hanging the delete. A `wait`
-/// behavior does not reach it: the teardown signal cuts the wait off (issue #1616).
+/// shutdown of idle/short connections completes in milliseconds, so this only caps a client too
+/// slow to read a response already produced rather than hanging the delete. A request still being
+/// computed (a `wait`, a proxy upstream, a `shellTransform`, an inject) does not reach it: the
+/// generation's cancel cuts it off (issues #1616, #1643).
 const DEFAULT_CONN_DRAIN: Duration = Duration::from_secs(5);
 
 impl ImposterManager {
@@ -1547,6 +1548,7 @@ impl ImposterManager {
             .try_claim(port, Arc::clone(&imposter))
             .is_err()
         {
+            imposter.cancel.cancel();
             let _ = shutdown_tx.send(());
             return Err(ImposterError::PortInUse(port));
         }
@@ -1563,6 +1565,7 @@ impl ImposterManager {
             // No file to clean up: a failed persist leaves `{port}.json` exactly as it was (issue
             // #1158). The unlink that used to be here, for a truncated file, also deleted a reload's
             // own input file, and could delete a concurrent create's freshly persisted one.
+            imposter.cancel.cancel();
             let _ = shutdown_tx.send(());
             return Err(e);
         }
@@ -2142,6 +2145,10 @@ impl ImposterManager {
         // teardown so this delete does not return until the old generation can no longer serve
         // (issue #596): otherwise a same-port re-create races a still-bound listener / still-open
         // keep-alive connection and can be answered by the previous generation's state.
+        //
+        // The cancel cuts off every request this generation is still computing, through every door
+        // (issue #1643), so the drain below only waits for responses already being written.
+        imposter.cancel.cancel();
         if let Some(ref tx) = imposter.shutdown_tx {
             let _ = tx.send(());
         }
@@ -2157,10 +2164,10 @@ impl ImposterManager {
             }
         }
         // Drain in-flight connections within a bound. Each reacts to the signal above with a hyper
-        // graceful shutdown (finish the in-flight response, then close), and a request sleeping in
-        // a `wait` is cut off by the same signal with its connection closed (issue #1616), so this
-        // is normally sub-millisecond; a genuinely stalled request (e.g. a slow proxy upstream) is
-        // capped rather than hanging the delete.
+        // graceful shutdown (finish writing a response already produced, then close), and a
+        // request still being computed was cut off by the cancel with its connection closed (issue
+        // #1643), so this is normally sub-millisecond; a client too slow to read a produced
+        // response is capped rather than hanging the delete.
         imposter.conn_tracker.close();
         if tokio::time::timeout(self.conn_drain, imposter.conn_tracker.wait())
             .await
@@ -4582,7 +4589,7 @@ mod tests {
 
     /// A plain HTTP/1 upstream on an ephemeral port that reads each request head and answers
     /// `200 done` after `delay`, or never answers when `delay` is `None`: an in-flight response
-    /// that is slow for a reason other than a `wait` behavior, which a delete aborts (issue #1616).
+    /// that is slow for a reason other than a `wait` behavior (issues #1616, #1643).
     async fn slow_upstream(delay: Option<std::time::Duration>) -> u16 {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -4618,14 +4625,27 @@ mod tests {
         port
     }
 
-    // Issue #596: `delete` must await the in-flight generation's quiesce, not fire-and-forget. With
-    // a request in flight on a slow upstream, delete cannot return until that response has been
-    // served and the connection drained — so a returning delete is proof the old generation is
-    // gone. Deterministic: pre-fix `delete` returns in ~0ms; post-fix it blocks for the in-flight
-    // response. Issue #1616: the slow response is a proxy, not a `wait`, which a delete now cuts
-    // off; every other in-flight response still finishes (#207).
+    /// Read `stream` to EOF within `within`, returning every byte received. Panics if the
+    /// connection is still open at the deadline.
+    async fn read_to_close(
+        stream: &mut tokio::net::TcpStream,
+        within: std::time::Duration,
+    ) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+        let mut received = Vec::new();
+        // A reset after the close is a close too; only the bytes matter.
+        let _ = tokio::time::timeout(within, stream.read_to_end(&mut received))
+            .await
+            .expect("the connection is closed in time, not left open");
+        received
+    }
+
+    // Issue #596: once `delete` returns, the deleted generation never answers. Issue #1643: a
+    // request still on a slow proxy upstream is cut off at the delete, as Mountebank destroys every
+    // socket of a deleted imposter. It used to hold the delete until the upstream answered, and
+    // the client was then served by the deleted generation.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn delete_blocks_until_inflight_response_drains() {
+    async fn delete_cuts_off_a_request_on_a_slow_upstream_and_never_answers_it() {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpStream;
 
@@ -4639,18 +4659,9 @@ mod tests {
             }]
         }))
         .unwrap();
-        // Issue #809: OS-assigned. A hardcoded port collides with an unrelated listener during a
-        // full-workspace run (many test binaries at once) and fails the *create* — which is how
-        // this test actually flaked: it panicked at `create`, not at the drain assertion below.
-        //
-        // Auto-assign is only safe for a test that never touches the port again after deleting it.
-        // A test that re-binds or re-probes the port must keep a fixed one below the ephemeral
-        // range, because `delete` returns the port to the kernel, which can hand it to a
-        // concurrent test's auto-assign — see `delete_then_recreate_same_port_serves_new_generation`.
+        // Issue #809: OS-assigned, safe because the test never touches the port after the delete.
         let port = manager.create_imposter(config).await.expect("create");
 
-        // Send a request that will spend ~1.5s on the upstream before its response is written;
-        // don't read yet — the response is still in flight on this connection.
         let mut stream = TcpStream::connect(("127.0.0.1", port))
             .await
             .expect("connect");
@@ -4658,46 +4669,38 @@ mod tests {
             .write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .await
             .unwrap();
-        // Let the request reach the server and enter the wait. Issue #809: the margins here are
-        // deliberately wide (1500ms wait / 400ms entry / 700ms floor rather than 400/80/250). The
-        // assertion below only means anything if the request is *already waiting* when delete runs,
-        // and under a saturated `cargo test --workspace` this task can be descheduled for far
-        // longer than a tight margin allows — which would fail the drain assertion for a scheduling
-        // reason rather than a real regression.
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
         let started = std::time::Instant::now();
         manager.delete_imposter(port).await.expect("delete");
         let elapsed = started.elapsed();
-
         assert!(
-            elapsed >= std::time::Duration::from_millis(700),
-            "delete must block until the in-flight response drains (issue #596); returned in {elapsed:?}"
+            elapsed < std::time::Duration::from_millis(700),
+            "delete cuts the slow request off instead of waiting for the upstream; took {elapsed:?}"
         );
-        // The in-flight response was served gracefully (finished, not aborted mid-write).
-        let served = read_until(&mut stream, "done").await;
+        // Read past the moment the upstream answers (1.5 s): not a byte of it reaches the client.
+        let received = read_to_close(&mut stream, std::time::Duration::from_secs(3)).await;
         assert!(
-            served.contains("200") && served.contains("done"),
-            "in-flight request served gracefully before close, got: {served:?}"
+            received.is_empty(),
+            "the deleted generation never answers, got {:?}",
+            String::from_utf8_lossy(&received)
         );
     }
 
-    // Issue #596: the drain is *bounded*. A stalled in-flight request must not hang `delete` forever
-    // — it returns within the drain budget (with a warning) rather than blocking on the full wait.
+    // Issue #596: the drain is *bounded*. Issue #1643: with every request still being computed cut
+    // off, what the drain still waits for is a response already produced that the client is slow
+    // to read. One that never reads must not hang `delete`: it returns at the drain bound.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn delete_with_stalled_request_is_bounded_by_drain() {
+    async fn delete_with_an_unread_response_is_bounded_by_drain() {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpStream;
 
         let manager = ImposterManager::new().with_conn_drain(std::time::Duration::from_millis(150));
-        // An upstream that never answers (issue #1616: a `wait` no longer stalls a delete).
-        let upstream = slow_upstream(None).await;
+        // Far larger than the socket buffers, so the write stalls on a client that never reads.
+        let body = "x".repeat(32 * 1024 * 1024);
         let config: ImposterConfig = serde_json::from_value(serde_json::json!({
             "protocol": "http",
-            "stubs": [{
-                "predicates": [{"equals": {"path": "/stall"}}],
-                "responses": [{"proxy": {"to": format!("http://127.0.0.1:{upstream}")}}]
-            }]
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "body": body}}]}]
         }))
         .unwrap();
         let port = manager.create_imposter(config).await.expect("create");
@@ -4706,10 +4709,12 @@ mod tests {
             .await
             .expect("connect");
         stream
-            .write_all(b"GET /stall HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        // The response is produced and being written before the delete; from here on nothing reads.
+        let head = read_until(&mut stream, "HTTP/1.1 200").await;
+        assert!(head.contains("HTTP/1.1 200"), "{head:?}");
 
         let started = std::time::Instant::now();
         manager.delete_imposter(port).await.expect("delete");
@@ -4717,11 +4722,103 @@ mod tests {
 
         assert!(
             elapsed < std::time::Duration::from_secs(1),
-            "delete must return within the drain bound (~150ms), not wait out the stall; took {elapsed:?}"
+            "delete must return within the drain bound (~150ms), not wait for the reader; took {elapsed:?}"
         );
         assert!(
             elapsed >= std::time::Duration::from_millis(100),
-            "delete waited ~the drain bound before giving up (proves it attempted the drain); took {elapsed:?}"
+            "delete waited ~the drain bound for the response being written; took {elapsed:?}"
+        );
+        drop(stream);
+    }
+
+    // Issue #1643: the cancel belongs to one generation. Deleting one imposter leaves a slow
+    // request on another to be answered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_leaves_another_imposters_slow_request_alone() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpStream;
+
+        let manager = ImposterManager::new();
+        let upstream = slow_upstream(Some(std::time::Duration::from_millis(800))).await;
+        let proxy = |path: &str| -> ImposterConfig {
+            serde_json::from_value(serde_json::json!({
+                "protocol": "http",
+                "stubs": [{
+                    "predicates": [{"equals": {"path": path}}],
+                    "responses": [{"proxy": {"to": format!("http://127.0.0.1:{upstream}")}}]
+                }]
+            }))
+            .unwrap()
+        };
+        let deleted = manager
+            .create_imposter(proxy("/a"))
+            .await
+            .expect("create a");
+        let kept = manager
+            .create_imposter(proxy("/b"))
+            .await
+            .expect("create b");
+
+        let mut stream = TcpStream::connect(("127.0.0.1", kept))
+            .await
+            .expect("connect");
+        stream
+            .write_all(b"GET /b HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        manager.delete_imposter(deleted).await.expect("delete a");
+        let served = read_until(&mut stream, "done").await;
+        assert!(
+            served.contains("200") && served.contains("done"),
+            "the other imposter's request is answered, got: {served:?}"
+        );
+        manager.delete_imposter(kept).await.expect("delete b");
+    }
+
+    // Issue #1643: a request in flight before the delete whose `wait` starts only after it. #1616
+    // subscribed to the teardown when the wait started, so this request missed it and slept the
+    // whole wait while the delete held for its drain. The upstream answers after the delete, so
+    // the wait would begin after it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_cancels_a_request_that_had_not_reached_its_wait() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpStream;
+
+        let manager = ImposterManager::new();
+        let upstream = slow_upstream(Some(std::time::Duration::from_millis(600))).await;
+        let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "stubs": [{"responses": [{
+                "proxy": {"to": format!("http://127.0.0.1:{upstream}")},
+                "_behaviors": {"wait": 60000}
+            }]}]
+        }))
+        .unwrap();
+        let port = manager.create_imposter(config).await.expect("create");
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let started = std::time::Instant::now();
+        manager.delete_imposter(port).await.expect("delete");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "delete cuts the request off before its wait, not after the drain; took {elapsed:?}"
+        );
+        let received = read_to_close(&mut stream, std::time::Duration::from_secs(2)).await;
+        assert!(
+            received.is_empty(),
+            "no response bytes may be written, got {:?}",
+            String::from_utf8_lossy(&received)
         );
     }
 
@@ -8116,6 +8213,7 @@ mod tests {
             claims: Mutex<Vec<u16>>,
             releases: Mutex<Vec<u16>>,
             clears: Mutex<Vec<u16>>,
+            records: Mutex<Vec<u16>>,
         }
 
         impl SpyProxyStore {
@@ -8148,6 +8246,7 @@ mod tests {
                     claims: Mutex::new(Vec::new()),
                     releases: Mutex::new(Vec::new()),
                     clears: Mutex::new(Vec::new()),
+                    records: Mutex::new(Vec::new()),
                 }
             }
         }
@@ -8189,6 +8288,7 @@ mod tests {
                 token: ClaimToken,
                 resp: RecordedResponse,
             ) -> std::result::Result<(), ProxyStoreError> {
+                self.records.lock().push(port);
                 if self.fail_record {
                     // Simulate a backend that fails WITHOUT self-clearing its claim, so the
                     // caller's release-on-error is what keeps the signature retryable.
@@ -8265,6 +8365,47 @@ mod tests {
             );
 
             manager.delete_all().await;
+        }
+
+        // Issue #1643: a proxy whose upstream answers after the delete cleared the port's slice of a
+        // shared store must not record into it, or a same-port re-create inherits that recording.
+        // It used to: the delete returned at its drain bound with the request still forwarding.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn late_proxy_response_does_not_record_into_a_recreated_port() {
+            use tokio::io::AsyncWriteExt;
+
+            let spy = Arc::new(SpyProxyStore::new());
+            let manager = ImposterManager::new()
+                .with_conn_drain(std::time::Duration::from_millis(150))
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+            let upstream = slow_upstream(Some(std::time::Duration::from_millis(1000))).await;
+            let port = proxy_imposter(&manager, &format!("http://127.0.0.1:{upstream}")).await;
+
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("connect");
+            stream
+                .write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .expect("write request");
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert!(
+                spy.claims.lock().contains(&port),
+                "the request is forwarding"
+            );
+
+            manager.delete_imposter(port).await.expect("delete");
+            assert!(
+                spy.clears.lock().contains(&port),
+                "delete cleared the slice"
+            );
+            // Past the upstream's answer.
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            assert_eq!(
+                *spy.records.lock(),
+                Vec::<u16>::new(),
+                "nothing is recorded after the delete"
+            );
         }
 
         /// Build a proxyOnce imposter forwarding to `to` on an OS-assigned port; returns the port.
