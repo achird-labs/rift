@@ -44,7 +44,8 @@ pub(crate) use js_engine::bounded_js_context;
 #[cfg(feature = "javascript")]
 pub use js_engine::{
     InjectionFailure, JsEngine, MountebankRequest, PredicateInjectionError, compile_js_to_bytecode,
-    execute_mountebank_decorate, execute_mountebank_decorate_within, execute_mountebank_inject,
+    execute_mountebank_decorate, execute_mountebank_decorate_bounded,
+    execute_mountebank_decorate_within, execute_mountebank_inject,
     execute_mountebank_inject_bounded, execute_predicate_generator_inject,
     execute_predicate_inject,
 };
@@ -61,9 +62,11 @@ pub(crate) type ScriptStateCell =
 ///
 /// The state belongs to one imposter instance, as Mountebank's `imposterState` belongs to one
 /// imposter object. A run that outlives its imposter's delete writes into that imposter's cell,
-/// never into the one an imposter re-created on the same port starts with. A run holds the cell's
-/// lock across its whole get, run and save (issue #477), so concurrent runs of one imposter
-/// serialize and lose no update, while other imposters never contend.
+/// never into the one an imposter re-created on the same port starts with. The runs of one
+/// imposter all execute on one MB pool worker while any is in flight, sharing one live JS `state`
+/// object built from the cell and saved back to it as each run ends (issue #1678): they interleave
+/// at `await`s as in Mountebank, a synchronous section never interleaves with another, and no
+/// update is lost (issue #477). The cell's lock is held only to seed and save the live object.
 #[derive(Debug, Clone)]
 pub struct ScriptScope {
     pub port: u16,

@@ -614,32 +614,7 @@ fn apply_js_or_rhai_decorate_within(
 
     #[cfg(feature = "javascript")]
     {
-        let mb_request = crate::scripting::MountebankRequest {
-            method: request.method.clone(),
-            path: request.path.clone(),
-            query: request.query.clone(),
-            headers: request.headers.clone(),
-            body: request.body.clone(),
-            body_undefined: request.body_undefined,
-            // `RequestContext` doesn't track binary/text, so the classification is genuinely
-            // unknown here — say so rather than asserting `Text` over a possibly-base64 body
-            // (issue #636). `isBinary` is then absent for decorate scripts, not falsely false.
-            mode: None,
-            request_from: request.request_from.clone(),
-            ip: request.ip.clone(),
-            form: request.form.clone(),
-            is_dry_run: false,
-        };
-        // The executor calls the script as a function value, so a bare body in the `config`
-        // convention ("config.response.body = ...;") is wrapped into one first. The test is the
-        // start-anchored function recogniser, NOT a substring `=>` test (B4, issue #357): a bare
-        // body can contain an inner arrow, e.g. `items.map(x => x.id)`, and leaving it unwrapped
-        // would produce `var __fn = <statement>` (a throw).
-        let wrapped_script = if is_js_function_decorate(script) {
-            std::borrow::Cow::Borrowed(script)
-        } else {
-            std::borrow::Cow::Owned(format!("function(config) {{ {script} }}"))
-        };
+        let (wrapped_script, mb_request) = js_decorate_input(script, request);
         crate::scripting::execute_mountebank_decorate_within(
             &wrapped_script,
             &mb_request,
@@ -651,13 +626,7 @@ fn apply_js_or_rhai_decorate_within(
             files,
             timeout,
         )
-        .map_err(
-            |e| match e.downcast_ref::<crate::scripting::ScriptTimeoutError>() {
-                // Its jobs could not finish by the deadline: the same answer as the caller's timeout.
-                Some(t) => DecorateError::Timeout(t.timeout_ms),
-                None => DecorateError::JavaScript(e.to_string()),
-            },
-        )
+        .map_err(js_decorate_error)
     }
 
     // No JS engine compiled in (`--no-default-features`): fall back to textual rewrites so
@@ -688,6 +657,51 @@ fn apply_js_or_rhai_decorate_within(
     }
 }
 
+/// A JavaScript decorate as the MB executor takes it: the script as a function value, and the
+/// request in Mountebank's shape.
+#[cfg(feature = "javascript")]
+fn js_decorate_input(
+    script: &str,
+    request: &RequestContext,
+) -> (String, crate::scripting::MountebankRequest) {
+    let mb_request = crate::scripting::MountebankRequest {
+        method: request.method.clone(),
+        path: request.path.clone(),
+        query: request.query.clone(),
+        headers: request.headers.clone(),
+        body: request.body.clone(),
+        body_undefined: request.body_undefined,
+        // `RequestContext` doesn't track binary/text, so the classification is genuinely
+        // unknown here — say so rather than asserting `Text` over a possibly-base64 body
+        // (issue #636). `isBinary` is then absent for decorate scripts, not falsely false.
+        mode: None,
+        request_from: request.request_from.clone(),
+        ip: request.ip.clone(),
+        form: request.form.clone(),
+        is_dry_run: false,
+    };
+    // The executor calls the script as a function value, so a bare body in the `config`
+    // convention ("config.response.body = ...;") is wrapped into one first. The test is the
+    // start-anchored function recogniser, NOT a substring `=>` test (B4, issue #357): a bare
+    // body can contain an inner arrow, e.g. `items.map(x => x.id)`, and leaving it unwrapped
+    // would produce `var __fn = <statement>` (a throw).
+    let wrapped_script = if is_js_function_decorate(script) {
+        script.to_string()
+    } else {
+        format!("function(config) {{ {script} }}")
+    };
+    (wrapped_script, mb_request)
+}
+
+#[cfg(feature = "javascript")]
+fn js_decorate_error(e: anyhow::Error) -> DecorateError {
+    match e.downcast_ref::<crate::scripting::ScriptTimeoutError>() {
+        // Its jobs could not finish by the deadline: the same answer as the caller's timeout.
+        Some(t) => DecorateError::Timeout(t.timeout_ms),
+        None => DecorateError::JavaScript(e.to_string()),
+    }
+}
+
 /// Run a Rhai decorate over a copy of `headers`; the script changes the response it is handed.
 fn decorate_rhai(
     script: &str,
@@ -706,13 +720,14 @@ fn decorate_rhai(
     })
 }
 
-/// Run [`apply_js_or_rhai_decorate`] off the async worker with a wall-clock deadline
-/// (issue #476) — the same `spawn_blocking` + `tokio::time::timeout` shape as
-/// `scripting::bounded`. Takes the header map by value because the execution moves
-/// to a blocking thread. No abort flag: Boa has no per-instruction interrupt, so after a timeout
-/// the loop-iteration cap (issue #327) is what eventually frees the blocking thread; the client
-/// is released at the deadline either way. The deadline is the imposter's
-/// `resolve_script_timeout_ms` budget, shared with `_rift.script`.
+/// Run a decorate with a wall-clock deadline (issue #476), the imposter's
+/// `resolve_script_timeout_ms` budget, shared with `_rift.script`. A JavaScript decorate goes
+/// straight to the MB script pool, where an `async` one waiting on a promise job or a timer holds
+/// no thread (issue #1678) and is dropped once this future is. A Rhai decorate (or, without a JS
+/// engine, its textual fallback) runs on a `spawn_blocking` thread with `tokio::time::timeout`, the
+/// same shape as `scripting::bounded`; Rhai has no per-instruction interrupt, so after a timeout
+/// its operation cap is what eventually frees the thread, while the client is released at the
+/// deadline either way.
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_decorate_bounded(
     script: String,
@@ -725,6 +740,29 @@ pub async fn apply_decorate_bounded(
     files: std::sync::Arc<crate::imposter::ScriptFileAccess>,
     timeout: std::time::Duration,
 ) -> Result<Decorated, DecorateError> {
+    #[cfg(feature = "javascript")]
+    if is_javascript_decorate(&script) {
+        let (wrapped_script, mb_request) = js_decorate_input(&script, &request);
+        return crate::scripting::execute_mountebank_decorate_bounded(
+            wrapped_script,
+            mb_request,
+            body,
+            status,
+            headers,
+            scope,
+            stub_id,
+            files,
+            timeout,
+        )
+        .await
+        .map_err(|e| {
+            let e = js_decorate_error(e);
+            if let DecorateError::Timeout(ms) = e {
+                tracing::warn!("decorate script timed out after {ms}ms");
+            }
+            e
+        });
+    }
     let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
     // Deliberately a plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987): the
     // decorate script has no `ctx.state`, so nothing on this thread can annotate. What makes that

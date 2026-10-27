@@ -108,21 +108,23 @@ async fn get(port: u16) -> reqwest::Result<String> {
         .await
 }
 
-/// Fill every script-pool worker (4-16) twice over with injects that sleep 1.5 s on a timer, so a
-/// job submitted next waits in the queue for about 3 s.
+/// Occupy every script-pool worker (4-16) with an inject that keeps it busy for 1.5 s, so a job
+/// submitted next waits in a queue. Busy, not sleeping: a run waiting on a timer holds no worker
+/// (issue #1678). Sixteen imposters, one run each, as the pool keeps each imposter's runs on one
+/// worker and spreads imposters over the workers.
 async fn fill_the_pool(admin: &Admin) -> Vec<tokio::task::JoinHandle<()>> {
-    let blocker = admin
-        .imposter(json!({"stubs": [{"responses": [{"inject":
-            "function (config) { return new Promise(r => setTimeout(() => r({ body: 'b' }), 1500)); }"
-        }]}]}))
-        .await;
-    let blockers = (0..32)
-        .map(|_| {
-            tokio::spawn(async move {
-                let _ = get(blocker).await;
-            })
-        })
-        .collect();
+    let mut blockers = Vec::new();
+    for _ in 0..16 {
+        let blocker = admin
+            .imposter(json!({"stubs": [{"responses": [{"inject":
+                "function (config) { var e = Date.now() + 1500; while (Date.now() < e) {} \
+                 return { body: 'b' }; }"
+            }]}]}))
+            .await;
+        blockers.push(tokio::spawn(async move {
+            let _ = get(blocker).await;
+        }));
+    }
     tokio::time::sleep(Duration::from_millis(200)).await;
     blockers
 }

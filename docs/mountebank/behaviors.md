@@ -262,8 +262,10 @@ The function changes the response in one of two ways:
 
 While a returned promise is pending, its promise jobs and timers run, so an `async` decorate may
 `await` a `setTimeout`. Waiting is bounded by the imposter's script timeout; a decorate still
-pending then fails with the decorate timeout. A decorate that returns no promise is not waited for,
-as in Mountebank: a timer it sets never runs. Decorate scripts have the same globals as `inject`
+pending then fails with the decorate timeout. A waiting decorate holds up neither its imposter's
+other requests nor any other imposter's scripts, and shares the imposter's `state` object with its
+runs in flight, as an inject does ([asynchronous injection](responses.md#asynchronous-injection)).
+A decorate that returns no promise is not waited for, as in Mountebank: a timer it sets never runs. Decorate scripts have the same globals as `inject`
 (`console`, timers, Promises) and no `process` or Node core modules; see
 [What a script can use](responses.md#what-a-script-can-use).
 

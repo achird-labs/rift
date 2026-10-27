@@ -69,6 +69,16 @@ record.
 
 ### Changed
 
+- **A Mountebank-style `inject` or `async` decorate waiting on a timer or a promise no longer holds
+  its imposter or a script worker** (#1678). As in Mountebank, an imposter's requests interleave
+  while one waits, and sleeping scripts can no longer starve the script pool (4–16 workers shared by
+  every imposter and, in rift-cluster, every tenant). An imposter's runs share one live `state`
+  object, as Mountebank's `imposterState` is shared: a write is visible to a waiting run at its next
+  `await`, a synchronous section never interleaves with another run, and a write made before a
+  function throws is now kept (it was discarded). A run whose caller stopped waiting (its timeout, a
+  delete) is dropped at once rather than at its script timeout. Every run of one imposter executes
+  on one worker, so a CPU-bound script delays the imposters sharing that worker until it ends or the
+  loop-iteration cap stops it.
 - **`POST /imposters/:port/stubs` no longer gives a stub without an `id` a generated UUID** (#1598),
   matching Mountebank and every other way of creating a stub. Set `id` on a stub you want to address
   by id. This also fixes `PUT /imposters?reconcile=true` resetting the response cycle of a stub added

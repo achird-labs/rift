@@ -3,11 +3,13 @@
 //! Mountebank runs a script in Node, so a script may `await`, chain `.then`, or call its callback
 //! from a `setTimeout`. Rift runs it in Boa, whose promise reactions and timers are jobs queued on
 //! the context's [`JobExecutor`]. [`MbJobExecutor`] is that executor for every MB pool realm: it
-//! holds the queued jobs and runs them only through [`MbJobExecutor::drain`], which a hook calls
-//! after its function returned, with the run's wall-clock deadline (issue #476). Nothing runs a
-//! job outside a drain, so an endless chain of jobs (`async function f() { await 0; f(); }`) ends
-//! at the deadline, and a job never outlives the run that queued it: the realm discards what is
-//! left before its next run (issue #1645).
+//! holds the queued jobs, each tagged with the run that queued it, and hands them out one at a time
+//! to the worker's event loop (`js_engine::MbRealm::step`, issue #1678), which runs each as its own
+//! run. A job never outlives the deadline of the run that queued it (issues #476, #1645): a run's
+//! jobs end with it, so an endless chain of jobs (`async function f() { await 0; f(); }`) ends at
+//! its deadline; when a run answers while another run of its imposter waits in the realm, what it
+//! left passes to that run ([`MbJobExecutor::retag`]), still bounded by the first run's deadline,
+//! as are the jobs those queue in turn.
 
 use boa_engine::{
     Context, JsNativeError, JsObject, JsResult, JsValue,
@@ -44,6 +46,16 @@ thread_local! {
     /// the timer functions record as a timer's owner, so the timers a run leaves are forgotten
     /// with it ([`TimerGlobals::forget_run`]).
     static CURRENT_RUN: Cell<Option<RunId>> = const { Cell::new(None) };
+}
+
+/// The run executing on this thread ([`CURRENT_RUN`]).
+pub(crate) fn current_run() -> Option<RunId> {
+    CURRENT_RUN.get()
+}
+
+/// Restore the run executing on this thread, as a nested run's guard does on its way out.
+pub(crate) fn set_current_run(run: Option<RunId>) {
+    CURRENT_RUN.set(run);
 }
 
 /// How a [`MbJobExecutor::drain`] ended.
@@ -88,6 +100,27 @@ impl ReadyJob {
     }
 }
 
+/// Whom a queued job belongs to: the run it runs as, and, for a job a run inherited from another
+/// ([`MbJobExecutor::retag`]), the deadline of the run that first queued it, past which it is
+/// dropped. The jobs such a job queues carry the same deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Tag {
+    pub(crate) run: RunId,
+    pub(crate) expiry: Option<Instant>,
+}
+
+impl Tag {
+    fn live(self, now: Instant) -> bool {
+        self.expiry.is_none_or(|expiry| now < expiry)
+    }
+}
+
+impl PartialEq<RunId> for Tag {
+    fn eq(&self, run: &RunId) -> bool {
+        self.run == *run
+    }
+}
+
 /// What one run has queued ([`MbJobExecutor::queued_for`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RunJobs {
@@ -98,10 +131,11 @@ pub(crate) struct RunJobs {
 }
 
 /// The job executor of an MB pool realm (issues #1593, #1678). FIFO promise, generic and async
-/// jobs, and timers ordered by due time, each tagged with the [`RunId`] that was current when it
-/// was queued, so the runs of one realm can interleave and a run's jobs end with it
-/// ([`drop_run`](Self::drop_run)): a job never outlives the run that queued it (issue #1645). A
-/// job queued while no run is current has no run to belong to and is dropped.
+/// jobs, and timers ordered by due time, each [tagged](Tag) with the [`RunId`] that was current
+/// when it was queued, so the runs of one realm can interleave and a run's jobs end with it
+/// ([`drop_run`](Self::drop_run)), or by its deadline when another run inherited them
+/// ([`retag`](Self::retag)): a job never outlives the deadline of the run that queued it (issue
+/// #1645). A job queued while no run is current has no run to belong to and is dropped.
 ///
 /// `Atomics.waitAsync`, whose waiter would outlive its run in Boa's process-wide futex list, is
 /// removed from every script context (`js_engine::build_sealed_js_context`). `FinalizationRegistry`
@@ -110,11 +144,13 @@ pub(crate) struct RunJobs {
 #[derive(Default)]
 pub(crate) struct MbJobExecutor {
     current: Cell<Option<RunId>>,
-    promise_jobs: RefCell<VecDeque<(RunId, PromiseJob)>>,
-    generic_jobs: RefCell<VecDeque<(RunId, GenericJob)>>,
-    async_jobs: RefCell<VecDeque<(RunId, NativeAsyncJob)>>,
+    /// The expiry of the inherited job being run, which the jobs it queues inherit.
+    expiry: Cell<Option<Instant>>,
+    promise_jobs: RefCell<VecDeque<(Tag, PromiseJob)>>,
+    generic_jobs: RefCell<VecDeque<(Tag, GenericJob)>>,
+    async_jobs: RefCell<VecDeque<(Tag, NativeAsyncJob)>>,
     /// Keyed by due time, then by enqueue order, so timers due together run in the order set.
-    timers: RefCell<BTreeMap<(Instant, u64), (RunId, TimeoutJob)>>,
+    timers: RefCell<BTreeMap<(Instant, u64), (Tag, TimeoutJob)>>,
     next_timer: Cell<u64>,
 }
 
@@ -135,6 +171,12 @@ impl MbJobExecutor {
         self.current.replace(run)
     }
 
+    /// Make `expiry` the deadline of the jobs queued from now on (the expiry of an inherited job
+    /// while it runs); the previous one.
+    pub(crate) fn set_expiry(&self, expiry: Option<Instant>) -> Option<Instant> {
+        self.expiry.replace(expiry)
+    }
+
     /// Drop every job and timer `run` queued, without running it.
     pub(crate) fn drop_run(&self, run: RunId) {
         self.promise_jobs.borrow_mut().retain(|(r, _)| *r != run);
@@ -144,54 +186,133 @@ impl MbJobExecutor {
     }
 
     /// The next job to run, if one is ready by `now`: promise and generic jobs first, as Node runs
-    /// microtasks before the next timer, then async jobs, then the first due timer.
-    pub(crate) fn pop_ready(&self, now: Instant) -> Option<(RunId, ReadyJob)> {
-        if let Some((run, job)) = self.promise_jobs.borrow_mut().pop_front() {
-            return Some((run, ReadyJob::Promise(job)));
+    /// microtasks before the next timer, then async jobs, then the first due timer. A job past its
+    /// expiry is dropped on the way.
+    pub(crate) fn pop_ready(&self, now: Instant) -> Option<(Tag, ReadyJob)> {
+        fn front<J>(jobs: &RefCell<VecDeque<(Tag, J)>>, now: Instant) -> Option<(Tag, J)> {
+            let mut jobs = jobs.borrow_mut();
+            while let Some((tag, job)) = jobs.pop_front() {
+                if tag.live(now) {
+                    return Some((tag, job));
+                }
+            }
+            None
         }
-        if let Some((run, job)) = self.generic_jobs.borrow_mut().pop_front() {
-            return Some((run, ReadyJob::Generic(job)));
+        if let Some((tag, job)) = front(&self.promise_jobs, now) {
+            return Some((tag, ReadyJob::Promise(job)));
         }
-        if let Some((run, job)) = self.async_jobs.borrow_mut().pop_front() {
-            return Some((run, ReadyJob::Async(job)));
+        if let Some((tag, job)) = front(&self.generic_jobs, now) {
+            return Some((tag, ReadyJob::Generic(job)));
+        }
+        if let Some((tag, job)) = front(&self.async_jobs, now) {
+            return Some((tag, ReadyJob::Async(job)));
         }
         let mut timers = self.timers.borrow_mut();
-        let due = timers
+        while timers
             .first_key_value()
-            .is_some_and(|((due, _), _)| *due <= now);
-        if due {
-            return timers
-                .pop_first()
-                .map(|(_, (run, job))| (run, ReadyJob::Timer(job)));
+            .is_some_and(|((due, _), _)| *due <= now)
+        {
+            if let Some((_, (tag, job))) = timers.pop_first()
+                && tag.live(now)
+            {
+                return Some((tag, ReadyJob::Timer(job)));
+            }
         }
         None
     }
 
-    /// What `run` has queued.
+    /// Give every job and timer of `from` to `to`, to be dropped once `expiry` (`from`'s deadline)
+    /// passes, or the earlier expiry it already had.
+    pub(crate) fn retag(&self, from: RunId, to: RunId, expiry: Instant) {
+        let moved = |tag: &mut Tag| {
+            if *tag == from {
+                *tag = Tag {
+                    run: to,
+                    expiry: Some(tag.expiry.map_or(expiry, |had| had.min(expiry))),
+                };
+            }
+        };
+        self.promise_jobs
+            .borrow_mut()
+            .iter_mut()
+            .for_each(|(r, _)| moved(r));
+        self.generic_jobs
+            .borrow_mut()
+            .iter_mut()
+            .for_each(|(r, _)| moved(r));
+        self.async_jobs
+            .borrow_mut()
+            .iter_mut()
+            .for_each(|(r, _)| moved(r));
+        self.timers
+            .borrow_mut()
+            .values_mut()
+            .for_each(|(r, _)| moved(r));
+    }
+
+    /// [`pop_ready`](Self::pop_ready), for `run`'s jobs only.
+    fn pop_ready_for(&self, run: RunId, now: Instant) -> Option<ReadyJob> {
+        fn take<J>(jobs: &RefCell<VecDeque<(Tag, J)>>, run: RunId) -> Option<J> {
+            let mut jobs = jobs.borrow_mut();
+            let at = jobs.iter().position(|(r, _)| *r == run)?;
+            jobs.remove(at).map(|(_, job)| job)
+        }
+        if let Some(job) = take(&self.promise_jobs, run) {
+            return Some(ReadyJob::Promise(job));
+        }
+        if let Some(job) = take(&self.generic_jobs, run) {
+            return Some(ReadyJob::Generic(job));
+        }
+        if let Some(job) = take(&self.async_jobs, run) {
+            return Some(ReadyJob::Async(job));
+        }
+        let mut timers = self.timers.borrow_mut();
+        let key = timers
+            .iter()
+            .find(|((due, _), (r, _))| *r == run && *due <= now)
+            .map(|(key, _)| *key)?;
+        timers.remove(&key).map(|(_, job)| ReadyJob::Timer(job))
+    }
+
+    /// Whether a job is ready without waiting for a timer.
+    pub(crate) fn has_ready(&self) -> bool {
+        !self.promise_jobs.borrow().is_empty()
+            || !self.generic_jobs.borrow().is_empty()
+            || !self.async_jobs.borrow().is_empty()
+    }
+
+    /// When the first timer of any run is due.
+    pub(crate) fn next_due(&self) -> Option<Instant> {
+        self.timers.borrow().keys().next().map(|(due, _)| *due)
+    }
+
+    /// What `run` has queued that has not expired.
     pub(crate) fn queued_for(&self, run: RunId) -> RunJobs {
+        let now = Instant::now();
+        let mine = |tag: &Tag| *tag == run && tag.live(now);
         let ready = self
             .promise_jobs
             .borrow()
             .iter()
-            .filter(|(r, _)| *r == run)
+            .filter(|(t, _)| mine(t))
             .count()
             + self
                 .generic_jobs
                 .borrow()
                 .iter()
-                .filter(|(r, _)| *r == run)
+                .filter(|(t, _)| mine(t))
                 .count()
             + self
                 .async_jobs
                 .borrow()
                 .iter()
-                .filter(|(r, _)| *r == run)
+                .filter(|(t, _)| mine(t))
                 .count();
         let next_timer = self
             .timers
             .borrow()
             .iter()
-            .find(|(_, (r, _))| *r == run)
+            .find(|(_, (t, _))| mine(t))
             .map(|((due, _), _)| *due);
         RunJobs { ready, next_timer }
     }
@@ -230,7 +351,7 @@ impl MbJobExecutor {
             if now >= deadline {
                 return Ok(Drained::Deadline);
             }
-            if let Some((_, job)) = self.pop_ready(now) {
+            if let Some(job) = self.pop_ready_for(run, now) {
                 job.run(context)?;
                 continue;
             }
@@ -254,6 +375,10 @@ impl JobExecutor for MbJobExecutor {
                 "a script job was queued outside any run and is dropped: {job:?}"
             );
             return;
+        };
+        let run = Tag {
+            run,
+            expiry: self.expiry.get(),
         };
         match job {
             Job::PromiseJob(job) => self.promise_jobs.borrow_mut().push_back((run, job)),
@@ -414,6 +539,15 @@ impl TimerGlobals {
         Ok(())
     }
 
+    /// Give the timers `from` set to `to`.
+    pub(crate) fn retag(&self, from: RunId, to: RunId) {
+        for owner in self.table.borrow_mut().1.values_mut() {
+            if *owner == from.raw() {
+                *owner = to.raw();
+            }
+        }
+    }
+
     /// The live timers' count.
     #[cfg(test)]
     pub(crate) fn live(&self) -> usize {
@@ -499,10 +633,10 @@ mod tests {
     /// Run every ready job, as the worker does, until none is left; the runs they belonged to.
     fn run_ready(context: &mut Context, jobs: &MbJobExecutor) -> Vec<RunId> {
         let mut ran = Vec::new();
-        while let Some((run, job)) = jobs.pop_ready(Instant::now()) {
-            jobs.set_current(Some(run));
+        while let Some((tag, job)) = jobs.pop_ready(Instant::now()) {
+            jobs.set_current(Some(tag.run));
             job.run(context).expect("job");
-            ran.push(run);
+            ran.push(tag.run);
         }
         ran
     }
@@ -727,5 +861,61 @@ mod tests {
         assert_eq!(timers.live(), 3);
         timers.forget_run(a);
         assert_eq!(timers.live(), 1);
+    }
+
+    #[test]
+    fn retag_gives_a_runs_jobs_and_timers_to_another() {
+        let jobs = Rc::new(MbJobExecutor::new());
+        let mut context = crate::scripting::js_engine::sealed_js_context_on(Rc::clone(&jobs));
+        let timers = install_timers(&mut context).expect("timers");
+        let a = RunId::next();
+        jobs.set_current(Some(a));
+        eval(
+            &mut context,
+            "Promise.resolve().then(() => {}); setTimeout(() => {}, 0);",
+        );
+        let b = RunId::next();
+        jobs.retag(a, b, Instant::now() + Duration::from_secs(60));
+        timers.retag(a, b);
+        timers.forget_run(a);
+        assert_eq!(timers.live(), 1, "b owns the timer now");
+        assert_eq!(jobs.queued_for(a).ready, 0);
+        assert_eq!(jobs.queued_for(b).ready, 1);
+        assert!(jobs.queued_for(b).next_timer.is_some());
+    }
+
+    // A job a run inherited is dropped at the deadline of the run that queued it, and so are the
+    // jobs it queues in turn: an endless chain handed from run to run still ends.
+    #[test]
+    fn an_inherited_chain_ends_at_its_first_runs_deadline() {
+        let (mut context, jobs, a) = context();
+        eval(
+            &mut context,
+            "var n = 0; (async function f() { n++; await 0; f(); })();",
+        );
+        let b = RunId::next();
+        let expiry = Instant::now() + Duration::from_millis(50);
+        jobs.retag(a, b, expiry);
+        let mut ran = 0;
+        while let Some((tag, job)) = jobs.pop_ready(Instant::now()) {
+            assert_eq!((tag.run, tag.expiry), (b, Some(expiry)));
+            jobs.set_current(Some(tag.run));
+            let previous = jobs.set_expiry(tag.expiry);
+            job.run(&mut context).expect("job");
+            jobs.set_expiry(previous);
+            ran += 1;
+            assert!(ran < 10_000_000, "the chain never ended");
+        }
+        assert!(
+            Instant::now() >= expiry,
+            "the chain ended before its expiry"
+        );
+        assert_eq!(
+            jobs.queued_for(b),
+            RunJobs {
+                ready: 0,
+                next_timer: None
+            }
+        );
     }
 }
