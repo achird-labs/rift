@@ -11,6 +11,13 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **`rift_http_proxy::admin_api::admin_path` is public** (#1746): the normalisation the admin
+  listener applies before it routes (one trailing `/` dropped, route words spelled as in
+  `ADMIN_ROUTES`), so an embedder that classifies admin paths itself, such as rift-cluster's admin
+  front, routes what the listener would.
+
 ## [0.24.0] - 2026-10-26
 
 ### Added

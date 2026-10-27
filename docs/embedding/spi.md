@@ -671,6 +671,19 @@ new per-imposter route, therefore reaches you as a new entry. A wholly new top-l
 addition those tests cannot see on their own, so it is a review rule upstream. The gateway
 (`/__rift/...`) is not in the table, for the same reason `classify` answers `None` for it.
 
+Match a request's path against the table only after `rift_http_proxy::admin_api::admin_path` has
+normalised it, as the listener does before it routes: it drops one trailing `/` and spells route
+words as the table does (`/imposters/4545/STUBS/0/` is `/imposters/4545/stubs/0`), leaving `{param}`
+segments and unknown paths as sent. Matching the raw path would forward a request the listener then
+serves as a terminated route.
+
+```rust
+use rift_http_proxy::admin_api::admin_path;
+
+assert_eq!(admin_path("/imposters/4545/STUBS/0/"), "/imposters/4545/stubs/0");
+assert_eq!(admin_path("/imposters/"), "/imposters");
+```
+
 ## Backend errors and annotations
 
 A custom backend signals unavailability by attaching `BackendUnavailable` to a failed operation's
