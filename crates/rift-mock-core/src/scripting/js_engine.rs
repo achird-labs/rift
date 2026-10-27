@@ -646,9 +646,10 @@ impl MbRealm {
         })
     }
 
-    /// End run `i`: its hook answers for `end`, its imposter's live state is saved, what it left
+    /// End run `i`: its imposter's live state is saved, its hook answers for `end`, what it left
     /// queued is dropped, and its claim on the worker is released, in that order, so the cell is
-    /// current before another worker can take the imposter's next run. When it answered while
+    /// current before its caller has the answer and before another worker can take the
+    /// imposter's next run. When it answered while
     /// another run of its imposter is in flight in this realm, what it left goes to that run
     /// instead (it may be what that run waits for: a promise the two share), still to be dropped
     /// at this run's deadline, so nothing it queued outlives that (issue #1645). A predicate run's
@@ -665,12 +666,14 @@ impl MbRealm {
         let bequeaths = matches!(end, RunEnd::Finished | RunEnd::Idle) && hook.bequeaths();
         {
             let _active = run.activate(&mut self.context);
+            // Saved before the answer goes out, so a caller holding the answer finds the cell
+            // current.
+            if let Some(scope) = &scope {
+                self.save_state(scope, name);
+            }
             match end {
                 RunEnd::Abandoned => drop(hook),
                 end => hook.finish(&mut self.context, end),
-            }
-            if let Some(scope) = &scope {
-                self.save_state(scope, name);
             }
         }
         let key = scope.as_ref().map(state_key);
@@ -7983,7 +7986,9 @@ function respond(ctx) {
             }),
             "{err:#}"
         );
-        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        // Not the 10 s the timer is due in: the run gives up as soon as it sees the timer is due
+        // after its deadline (a slow CI runner may hold the job in a worker's queue a while first).
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     // A decorate that returns no promise is not waited for, as in Mountebank: its timer never
