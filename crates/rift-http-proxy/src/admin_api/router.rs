@@ -105,8 +105,8 @@ impl ImposterRoute {
 /// An admin path as the routes see it: the one spelling every consumer matches on.
 ///
 /// This is the shared matcher. The listener rewrites the request with it once
-/// ([`normalize_admin_uri`]), before the api-key gate, `authz::classify`, the SSE streams and the
-/// router; `classify` and [`template_of`] apply it again for callers that bypass the listener. It is
+/// (`normalize_admin_uri`), before the api-key gate, `authz::classify`, the SSE streams and the
+/// router; `classify` and `template_of` apply it again for callers that bypass the listener. It is
 /// idempotent, and everything downstream of it matches exact-case, so no two consumers can resolve
 /// one request to different routes. Mountebank's Express 5 router makes two allowances:
 ///
@@ -114,10 +114,17 @@ impl ImposterRoute {
 ///   matches at most one trailing `/`, so a path ending in `//` names none and is left as it is
 ///   (except `//`, which Express answers as `/`). Repeated slashes are never collapsed.
 /// - **Route names are case-insensitive**, as Express allows without `caseSensitive` (issue
-///   #1484): see [`with_route_names_as_listed`]. The values in a route are not.
+///   #1484): a route word is spelled as [`ADMIN_ROUTES`](super::ADMIN_ROUTES) spells it when the
+///   whole path names a route there. `{param}` segments and paths that name no route are left as
+///   sent: the values in a route are case-sensitive.
 ///
 /// The `/__rift/` gateway never comes through here: its path is the stub's own.
-pub(crate) fn admin_path(path: &str) -> Cow<'_, str> {
+///
+/// Public for an embedder that classifies admin paths itself, such as a front that terminates some
+/// routes and forwards the rest (issue #1746): matching the raw path instead would send
+/// `PUT /imposters/4545/stubs/0/` or `/imposters/4545/STUBS/0` down the wrong side, while the
+/// listener routes both. Apply it before matching, as the listener does.
+pub fn admin_path(path: &str) -> Cow<'_, str> {
     with_route_names_as_listed(without_trailing_slash(path))
 }
 

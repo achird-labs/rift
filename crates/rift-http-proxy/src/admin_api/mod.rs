@@ -32,6 +32,7 @@ pub use handlers::imposters::{
 pub use handlers::scenarios::not_a_stub_reason;
 pub use log_ring::LogRing;
 pub use ordered_json::OrderedJson;
+pub use router::admin_path;
 pub use routes::{ADMIN_ROUTES, AdminRoute, RouteFamily};
 pub use server::{
     AdminApiServer, AdminExposurePolicy, RunningAdminApi, check_admin_exposure,
