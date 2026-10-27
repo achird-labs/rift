@@ -367,19 +367,56 @@ const MB_SCRIPT_CACHE_CAPACITY: usize = 64;
 /// ([`MbRun`]), and the per-imposter state object comes from the run's [`ScriptScope`], the
 /// imposter's own cell (issue #1726), so cross-imposter isolation of *state* is unaffected. A
 /// `require` a script keeps answers only during the run that made it.
+///
+/// A worker is an event loop (issue #1678), as Node is: a run waiting on a promise job or a timer
+/// stays in its realm ([`MbRealm::runs`]) while the worker starts other runs and runs whatever job
+/// is ready, so a waiting run holds no worker.
 struct MbJsThread {
-    /// Most recently used first; at most [`MB_REALMS_PER_WORKER`].
+    /// Most recently used first; at most [`MB_REALMS_PER_WORKER`] beside those with a run in
+    /// flight, which are never dropped.
     realms: Vec<MbRealm>,
+    /// Runs waiting to start until their imposter has no run in flight in another realm
+    /// ([`MbJsThread::split_from`]), tried again after every step.
+    deferred: Vec<DeferredStart>,
 }
+
+/// A run start put off on its worker ([`MbJsThread::deferred`]).
+type DeferredStart = Box<dyn FnOnce(&mut MbJsThread)>;
 
 /// Distinct [`ScriptFileAccess`] realms one MB worker keeps (issue #1645). Plain rift has at most
 /// three (trusted, confined to `--scripts-dir`, refused); an embedder with a root per tenant
 /// rebuilds the least recently used realm past this.
 const MB_REALMS_PER_WORKER: usize = 8;
 
+/// Jobs a realm runs before its worker looks at its queue again (issue #1678): an endless chain of
+/// promise jobs delays requests new to the worker by at most this many jobs. The chain still ends
+/// at the deadline of the run that started it.
+const MB_JOBS_PER_STEP: usize = 256;
+
+/// Requests a worker starts before it runs the jobs of the runs already in flight (issue #1678).
+const MB_STARTS_PER_STEP: usize = 64;
+
+/// How often a worker with a run in flight looks for runs nobody waits for any more, when no
+/// timer or deadline wakes it sooner (issue #1678). Such a run is dropped: it is what bounds a run
+/// that never answers, rather than its script timeout, which a config may set as high as it likes.
+const MB_ABANDON_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 impl MbJsThread {
     fn new() -> Self {
-        Self { realms: Vec::new() }
+        Self {
+            realms: Vec::new(),
+            deferred: Vec::new(),
+        }
+    }
+
+    /// Whether `scope`'s imposter has a run in flight in a realm other than `files`'s: its script
+    /// file access changed meanwhile (`ImposterCore::set_script_file_access`). Its next run must
+    /// wait for those to end, as two realms would hold two live `state` objects and lose updates.
+    fn split_from(&self, scope: &ScriptScope, files: &ScriptFileAccess) -> bool {
+        let key = state_key(scope);
+        self.realms
+            .iter()
+            .any(|realm| realm.access != *files && realm.live_state.contains_key(&key))
     }
 
     /// The realm for hooks running under `files` (issue #1645).
@@ -391,23 +428,79 @@ impl MbJsThread {
                 self.realms.insert(0, realm);
             }
             None => {
-                self.realms.truncate(MB_REALMS_PER_WORKER - 1);
+                if self.realms.len() >= MB_REALMS_PER_WORKER
+                    && let Some(idle) = self.realms.iter().rposition(|realm| realm.runs.is_empty())
+                {
+                    self.realms.remove(idle);
+                }
                 self.realms.insert(0, MbRealm::new(files.clone()));
             }
         }
         &mut self.realms[0]
     }
+
+    fn has_runs(&self) -> bool {
+        !self.deferred.is_empty() || self.realms.iter().any(|realm| !realm.runs.is_empty())
+    }
+
+    /// Run the ready jobs of the runs in flight, end the runs that are done, and try the deferred
+    /// starts again.
+    fn step(&mut self) {
+        for realm in &mut self.realms {
+            if !realm.runs.is_empty() {
+                realm.step();
+            }
+        }
+        for start in std::mem::take(&mut self.deferred) {
+            start(self);
+        }
+    }
+
+    /// When a run in flight next needs the worker: a ready job, a timer, a deadline, or the next
+    /// look for abandoned runs.
+    fn next_wake(&self) -> std::time::Instant {
+        let poll = std::time::Instant::now() + MB_ABANDON_POLL;
+        self.realms
+            .iter()
+            .filter_map(MbRealm::next_wake)
+            .fold(poll, std::time::Instant::min)
+    }
+
+    /// Drive every run in flight to its end on this thread: a test's worker, or a run nested in a
+    /// worker's own job ([`run_blocking`]). A pool worker never calls this.
+    fn drive(&mut self) {
+        loop {
+            self.step();
+            if !self.has_runs() {
+                return;
+            }
+            std::thread::sleep(
+                self.next_wake()
+                    .saturating_duration_since(std::time::Instant::now()),
+            );
+        }
+    }
 }
 
-/// One access's reused Boa context and its parsed scripts (issues #476, #1645).
+/// One access's reused Boa context, its parsed scripts, and the runs in flight in it (issues #476,
+/// #1645, #1678).
 struct MbRealm {
     access: ScriptFileAccess,
     context: Context,
     scripts: MbScriptCache,
-    /// The context's job executor: runs jobs only in a hook's bounded drain (issue #1593).
+    /// The context's job executor: its jobs run only through [`MbRealm::step`] (issue #1593).
     jobs: std::rc::Rc<super::js_runtime::MbJobExecutor>,
     /// The timer functions over the realm's one timer table, set again at every run start.
     timers: super::js_runtime::TimerGlobals,
+    /// The runs waiting on a promise job or a timer (issue #1678), in start order.
+    runs: Vec<InFlight>,
+    /// The live `state` object of each imposter with a run in this realm (issue #1678): all its
+    /// runs share it, as Mountebank's share `imposterState`, so a write is visible to a waiting run
+    /// at its next `await`, and a synchronous section never interleaves with another run. Saved to
+    /// the imposter's cell whenever one of its runs ends, and dropped when the last one does, so
+    /// the cell is current whenever no run of the imposter is in flight. The pool routes every run
+    /// of an imposter to the one worker holding its runs ([`MbPool::claim`]).
+    live_state: std::collections::HashMap<StateKey, JsValue>,
 }
 
 impl MbRealm {
@@ -424,8 +517,274 @@ impl MbRealm {
             scripts: std::collections::HashMap::new(),
             jobs: executor,
             timers,
+            runs: Vec::new(),
+            live_state: std::collections::HashMap::new(),
         }
     }
+
+    /// The `state` object `scope`'s imposter's runs in this realm share: the live one while a run
+    /// of it is in flight, else a new one built from its cell.
+    fn live_state(&mut self, scope: &ScriptScope) -> Result<JsValue> {
+        let key = state_key(scope);
+        if let Some(state) = self.live_state.get(&key) {
+            return Ok(state.clone());
+        }
+        let seed = scope.state.lock().clone();
+        let state = json_to_js(&mut self.context, &Value::Object(seed))?;
+        self.live_state.insert(key, state.clone());
+        Ok(state)
+    }
+
+    /// Save `scope`'s live state to its cell, and drop it when no run of the imposter is left.
+    fn save_state(&mut self, scope: &ScriptScope, hook: &str) {
+        let key = state_key(scope);
+        let Some(state) = self.live_state.get(&key).cloned() else {
+            return;
+        };
+        save_script_state(
+            &mut self.context,
+            &state,
+            &mut scope.state.lock(),
+            scope,
+            hook,
+        );
+        let in_flight = self.runs.iter().any(|run| run.key() == Some(key));
+        if !in_flight {
+            self.live_state.remove(&key);
+        }
+    }
+
+    /// Take in a run whose hook function has run: end it now when it is done, else keep it in
+    /// flight until a job answers it, its jobs run out, its deadline passes or nobody waits.
+    fn admit(&mut self, run: InFlight, started: Result<(), RunEnd>) {
+        self.runs.push(run);
+        let last = self.runs.len() - 1;
+        match started {
+            Err(end) => self.end(last, end),
+            Ok(()) if self.answered(last) => self.end(last, RunEnd::Finished),
+            Ok(()) => {}
+        }
+    }
+
+    fn answered(&mut self, i: usize) -> bool {
+        let InFlight { run, hook, .. } = &self.runs[i];
+        let _active = run.activate(&mut self.context);
+        hook.answered(&mut self.context)
+    }
+
+    /// Run up to [`MB_JOBS_PER_STEP`] ready jobs, each as the run that queued it, then end every
+    /// run that is done.
+    fn step(&mut self) {
+        for _ in 0..MB_JOBS_PER_STEP {
+            let Some((tag, job)) = self.jobs.pop_ready(std::time::Instant::now()) else {
+                break;
+            };
+            // Every job of a run that ended was dropped with it, or passed on.
+            let Some(i) = self.runs.iter().position(|run| tag == run.run.id) else {
+                continue;
+            };
+            let ran = {
+                let _active = self.runs[i].run.activate(&mut self.context);
+                let previous = self.jobs.set_expiry(tag.expiry);
+                let ran = job.run(&mut self.context);
+                self.jobs.set_expiry(previous);
+                ran
+            };
+            match ran {
+                Err(e) => self.end(i, RunEnd::Threw(e)),
+                Ok(()) if self.answered(i) => self.end(i, RunEnd::Finished),
+                Ok(()) => {}
+            }
+        }
+        self.context.clear_kept_objects();
+        let mut i = 0;
+        while i < self.runs.len() {
+            match self.ending(i) {
+                Some(end) => self.end(i, end),
+                None => i += 1,
+            }
+        }
+    }
+
+    /// How run `i` ends now, if it does.
+    fn ending(&mut self, i: usize) -> Option<RunEnd> {
+        if self.runs[i].hook.abandoned() {
+            return Some(RunEnd::Abandoned);
+        }
+        if self.answered(i) {
+            return Some(RunEnd::Finished);
+        }
+        let deadline = self.runs[i].deadline;
+        if std::time::Instant::now() >= deadline {
+            return Some(RunEnd::Deadline);
+        }
+        let queued = self.jobs.queued_for(self.runs[i].run.id);
+        if queued.ready > 0 {
+            return None;
+        }
+        match queued.next_timer {
+            // A run of the same imposter may still settle what this one waits for: a promise the
+            // two share through `state`, as Mountebank's runs can.
+            None if self.kin_have_jobs(i) => None,
+            None => Some(RunEnd::Idle),
+            // Its next timer is due after its deadline: it cannot answer in time (issue #1593).
+            Some(due) if due > deadline => Some(RunEnd::Deadline),
+            Some(_) => None,
+        }
+    }
+
+    /// Whether another run of run `i`'s imposter in this realm has a job or timer queued.
+    fn kin_have_jobs(&self, i: usize) -> bool {
+        let Some(key) = self.runs[i].key() else {
+            return false;
+        };
+        self.runs.iter().enumerate().any(|(j, run)| {
+            j != i && run.key() == Some(key) && {
+                let queued = self.jobs.queued_for(run.run.id);
+                queued.ready > 0 || queued.next_timer.is_some()
+            }
+        })
+    }
+
+    /// End run `i`: its hook answers for `end`, its imposter's live state is saved, what it left
+    /// queued is dropped, and its claim on the worker is released, in that order, so the cell is
+    /// current before another worker can take the imposter's next run. When it answered while
+    /// another run of its imposter is in flight in this realm, what it left goes to that run
+    /// instead (it may be what that run waits for: a promise the two share), still to be dropped
+    /// at this run's deadline, so nothing it queued outlives that (issue #1645). A predicate run's
+    /// jobs always end with it, as Mountebank does not wait for a predicate.
+    fn end(&mut self, i: usize, end: RunEnd) {
+        let InFlight {
+            run,
+            deadline,
+            hook,
+            scope,
+            claim,
+        } = self.runs.remove(i);
+        let name = hook.name();
+        let bequeaths = matches!(end, RunEnd::Finished | RunEnd::Idle) && hook.bequeaths();
+        {
+            let _active = run.activate(&mut self.context);
+            match end {
+                RunEnd::Abandoned => drop(hook),
+                end => hook.finish(&mut self.context, end),
+            }
+            if let Some(scope) = &scope {
+                self.save_state(scope, name);
+            }
+        }
+        let key = scope.as_ref().map(state_key);
+        let heir = self
+            .runs
+            .iter()
+            .find(|other| bequeaths && key.is_some() && other.key() == key)
+            .map(|other| other.run.id);
+        if let Some(heir) = heir {
+            self.jobs.retag(run.id, heir, deadline);
+            self.timers.retag(run.id, heir);
+        }
+        // The run's jobs go before its claim (see above).
+        drop(run);
+        drop(claim);
+    }
+
+    fn next_wake(&self) -> Option<std::time::Instant> {
+        if self.runs.is_empty() {
+            return None;
+        }
+        if self.jobs.has_ready() {
+            return Some(std::time::Instant::now());
+        }
+        let deadlines = self.runs.iter().map(|run| run.deadline);
+        self.jobs.next_due().into_iter().chain(deadlines).min()
+    }
+}
+
+/// A run taken in by its realm ([`MbRealm::admit`]) until it ends.
+struct InFlight {
+    run: MbRun,
+    deadline: std::time::Instant,
+    hook: Box<dyn MbHook>,
+    /// The imposter whose live state the run shares; `None` for a hook with no `state`.
+    scope: Option<ScriptScope>,
+    claim: Claim,
+}
+
+impl InFlight {
+    fn key(&self) -> Option<StateKey> {
+        self.scope.as_ref().map(state_key)
+    }
+}
+
+/// How a run ends (issue #1678).
+enum RunEnd {
+    /// Its answer is ready.
+    Finished,
+    /// It has no job left and no answer.
+    Idle,
+    /// Its deadline passed, or its next timer is due after it.
+    Deadline,
+    /// One of its jobs threw.
+    Threw(boa_engine::JsError),
+    /// Building its inputs failed, or its hook function threw (each hook words its own error).
+    Failed(anyhow::Error),
+    /// Nobody waits for its answer any more: the caller timed out, or its request was cancelled
+    /// (issue #1643). It is dropped without one.
+    Abandoned,
+}
+
+impl From<anyhow::Error> for RunEnd {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Failed(e)
+    }
+}
+
+/// The part of a hook run that outlives its start (issue #1678): whether it has its answer, and
+/// how to give it.
+trait MbHook {
+    fn name(&self) -> &'static str;
+    /// Whether nobody waits for the answer any more: the caller timed out, or its request was
+    /// cancelled (issue #1643).
+    fn abandoned(&self) -> bool;
+    fn answered(&self, context: &mut Context) -> bool;
+    fn finish(self: Box<Self>, context: &mut Context, end: RunEnd);
+    /// Whether what the run leaves queued when it answers may pass to another run of its imposter
+    /// ([`MbRealm::end`]).
+    fn bequeaths(&self) -> bool {
+        true
+    }
+}
+
+/// Where a hook run's answer goes: a caller awaiting it, or one blocked on it.
+enum Reply<T> {
+    Async(tokio::sync::oneshot::Sender<T>),
+    Sync(std::sync::mpsc::SyncSender<T>),
+}
+
+impl<T> Reply<T> {
+    fn send(self, answer: T) {
+        // Domain-optional: a caller that stopped waiting (its timeout, a delete) wants no answer.
+        match self {
+            Self::Async(tx) => drop(tx.send(answer)),
+            Self::Sync(tx) => drop(tx.send(answer)),
+        }
+    }
+
+    fn abandoned(&self) -> bool {
+        match self {
+            Self::Async(tx) => tx.is_closed(),
+            Self::Sync(_) => false,
+        }
+    }
+}
+
+/// An imposter's identity in the pool: its state cell's address (issue #1678). Unique while a run
+/// holds the cell, which every claim keyed by it does; a `restart` swaps the cell, so the
+/// imposter's next runs are a new key with a new live state.
+type StateKey = usize;
+
+fn state_key(scope: &ScriptScope) -> StateKey {
+    Arc::as_ptr(&scope.state).addr()
 }
 
 /// Script-source → parsed-`Script` cache for one worker's MB context.
@@ -499,7 +858,7 @@ fn call_mb_wrapper(
     wrapper.call(&JsValue::undefined(), args, context)
 }
 
-/// A unit of work for the MB script pool: runs on a worker with that worker's reused context.
+/// A unit of work for the MB script pool: runs on a worker with that worker's realms.
 type MbJob = Box<dyn FnOnce(&mut MbJsThread) + Send>;
 
 thread_local! {
@@ -509,75 +868,275 @@ thread_local! {
     static IS_MB_WORKER: Cell<bool> = const { Cell::new(false) };
 }
 
-/// The dedicated worker pool that executes every Mountebank JS hook (issue #476). Workers own
-/// their [`MbJsThread`] as a loop local (see its doc for why TLS is unsound here) and are reused
-/// for the process lifetime, so realm construction and script parsing amortize across requests.
-/// Sized like the `_rift.script` pool (`script_pool.rs`): half the cores, clamped to [2, 16] —
-/// these are CPU-bound interpreter jobs.
+/// The dedicated worker pool that executes every Mountebank JS hook (issues #476, #1678). Workers
+/// own their [`MbJsThread`] as a loop local (see its doc for why TLS is unsound here) and are
+/// reused for the process lifetime, so realm construction and script parsing amortize across
+/// requests. Half the cores, clamped to [4, 16]: a CPU-bound script holds its worker until the
+/// loop-iteration cap (#327) throws, so with 2 workers two runaways would stall all MB scripting.
 ///
-/// A runaway script occupies its worker until the loop-iteration cap (#327) throws — the same
-/// thread-lingering trade-off as the `spawn_blocking` path (#308), but bounded by the pool size;
-/// callers are released at their wall-clock deadline regardless.
-fn mb_js_pool() -> &'static crossbeam::channel::Sender<MbJob> {
-    static POOL: std::sync::OnceLock<crossbeam::channel::Sender<MbJob>> =
-        std::sync::OnceLock::new();
-    POOL.get_or_init(|| {
-        // Minimum 4 (not the script pool's 2): a runaway script parks its worker until the loop
-        // cap throws, so with only 2 workers two concurrent runaways would stall ALL MB
-        // scripting on small machines.
-        let workers = (num_cpus::get() / 2).clamp(4, 16);
-        let (tx, rx) = crossbeam::channel::unbounded::<MbJob>();
-        for worker_id in 0..workers {
-            let rx = rx.clone();
-            let spawned = std::thread::Builder::new()
-                .name(format!("mb-js-worker-{worker_id}"))
-                .spawn(move || {
-                    IS_MB_WORKER.set(true);
-                    let mut state = MbJsThread::new();
-                    while let Ok(job) = rx.recv() {
-                        // A panicking job (an engine bug — scripts themselves error, not panic)
-                        // must not kill the worker; its context may be mid-mutation, so rebuild.
-                        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            job(&mut state)
-                        }));
-                        if run.is_err() {
-                            tracing::error!("MB script job panicked; rebuilding worker context");
-                            state = MbJsThread::new();
-                        }
-                    }
-                });
-            if let Err(e) = spawned {
-                tracing::error!("failed to spawn MB script worker {worker_id}: {e}");
+/// Each worker has its own queue, and every run of one imposter goes to one worker while any of
+/// its runs is queued or in flight ([`MbPool::claim`]), where they share the imposter's live
+/// `state` object. A new imposter's runs go to the worker with the fewest runs. A waiting run
+/// holds no worker, so the pool is never starved by sleeping scripts; a CPU-bound one delays the
+/// imposters that share its worker until the loop cap throws, where Mountebank's one event loop
+/// stalls every imposter.
+#[derive(Debug)]
+struct MbPool {
+    queues: Vec<crossbeam::channel::Sender<MbJob>>,
+    /// Jobs of no imposter (`predicateGenerators.inject`), which need no worker of their own: the
+    /// first worker free takes each, as no job queues behind a CPU-bound script there.
+    shared: crossbeam::channel::Sender<MbJob>,
+    /// Whether each worker is executing (not waiting for its queue or a timer), and the jobs sent
+    /// to it that it has not started: a new imposter's runs go to an idle worker with an empty
+    /// queue first, as the job ahead of them may be a CPU-bound script.
+    busy: Vec<std::sync::atomic::AtomicBool>,
+    queued: Vec<std::sync::atomic::AtomicUsize>,
+    routes: parking_lot::Mutex<Routes>,
+}
+
+#[derive(Debug)]
+struct Routes {
+    /// Claims held on each worker: runs queued or in flight there.
+    load: Vec<usize>,
+    /// The worker every run of an imposter goes to, and how many claims are held for it.
+    owners: std::collections::HashMap<StateKey, Owner>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Owner {
+    worker: usize,
+    claims: usize,
+}
+
+/// A run's place on a pool worker, held from submission until the run ends; dropping it releases
+/// the place, and the imposter's route with its last claim. `None` for a run that holds no pool
+/// place: one driven on a thread of its own ([`MbJsThread::drive`]), or of no imposter, which any
+/// worker takes from the shared queue.
+#[derive(Debug)]
+#[must_use = "dropping a claim releases its worker place"]
+struct Claim(Option<Place>);
+
+#[derive(Debug)]
+struct Place {
+    pool: &'static MbPool,
+    worker: usize,
+    key: Option<StateKey>,
+}
+
+impl Claim {
+    fn local() -> Self {
+        Self(None)
+    }
+
+    #[cfg(test)]
+    fn worker(&self) -> Option<usize> {
+        self.0.as_ref().map(|place| place.worker)
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        if let Some(place) = self.0.take() {
+            place.pool.release(place.worker, place.key);
+        }
+    }
+}
+
+impl MbPool {
+    /// The worker a run goes to: its imposter's while the imposter has a claim, else an idle one
+    /// with nothing queued and the fewest claims, else the one with the fewest.
+    fn claim(&'static self, key: Option<StateKey>) -> Result<Claim> {
+        let mut routes = self.routes.lock();
+        let owned = key
+            .and_then(|key| routes.owners.get_mut(&key))
+            .map(|owner| {
+                owner.claims += 1;
+                owner.worker
+            });
+        let worker = match owned {
+            Some(worker) => worker,
+            None => {
+                let worker = (0..self.queues.len())
+                    .min_by_key(|&worker| {
+                        let busy = self.busy[worker].load(std::sync::atomic::Ordering::Relaxed)
+                            || self.queued[worker].load(std::sync::atomic::Ordering::Relaxed) > 0;
+                        (busy, routes.load[worker])
+                    })
+                    .ok_or_else(|| anyhow!("MB script pool is unavailable"))?;
+                if let Some(key) = key {
+                    routes.owners.insert(key, Owner { worker, claims: 1 });
+                }
+                worker
+            }
+        };
+        routes.load[worker] += 1;
+        Ok(Claim(Some(Place {
+            pool: self,
+            worker,
+            key,
+        })))
+    }
+
+    fn release(&self, worker: usize, key: Option<StateKey>) {
+        let mut routes = self.routes.lock();
+        routes.load[worker] -= 1;
+        if let Some(key) = key
+            && let std::collections::hash_map::Entry::Occupied(mut owner) = routes.owners.entry(key)
+        {
+            owner.get_mut().claims -= 1;
+            if owner.get().claims == 0 {
+                owner.remove();
             }
         }
-        tx
+    }
+}
+
+fn mb_js_pool() -> &'static MbPool {
+    static POOL: std::sync::OnceLock<MbPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let workers = (num_cpus::get() / 2).clamp(4, 16);
+        let mut queues = Vec::with_capacity(workers);
+        let (shared, shared_rx) = crossbeam::channel::unbounded::<MbJob>();
+        for worker_id in 0..workers {
+            let (tx, rx) = crossbeam::channel::unbounded::<MbJob>();
+            let shared_rx = shared_rx.clone();
+            // The index this worker's queue takes in `queues` (and its flag in `busy`).
+            let index = queues.len();
+            let spawned = std::thread::Builder::new()
+                .name(format!("mb-js-worker-{worker_id}"))
+                .spawn(move || run_mb_worker(index, &rx, &shared_rx));
+            match spawned {
+                Ok(_) => queues.push(tx),
+                Err(e) => tracing::error!("failed to spawn MB script worker {worker_id}: {e}"),
+            }
+        }
+        MbPool {
+            busy: (0..queues.len())
+                .map(|_| std::sync::atomic::AtomicBool::new(false))
+                .collect(),
+            queued: (0..queues.len())
+                .map(|_| std::sync::atomic::AtomicUsize::new(0))
+                .collect(),
+            routes: parking_lot::Mutex::new(Routes {
+                load: vec![0; queues.len()],
+                owners: std::collections::HashMap::new(),
+            }),
+            queues,
+            shared,
+        }
     })
 }
 
-/// Submit a job to the MB script pool. `Err` only if the pool is gone (never in practice: the
-/// sender is a process-lifetime static).
-///
-/// The caller's `tracing` dispatcher travels with the job, so script-logger events (issue #355)
-/// keep routing to whatever subscriber was active at the call site — a thread-scoped capture
-/// included — exactly as they did when the hooks ran inline. (Span *parentage* does not cross
-/// the pool boundary, like any thread hop; the logger events carry the imposter port and stub
-/// id as explicit fields.)
-fn submit_mb_job(job: MbJob) -> Result<()> {
-    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
-    let wrapped: MbJob = Box::new(move |state| {
-        tracing::dispatcher::with_default(&dispatcher, || job(state));
-    });
-    mb_js_pool()
-        .send(wrapped)
-        .map_err(|_| anyhow!("MB script pool is unavailable"))
+/// A pool worker's event loop (issue #1678): wait for a request, or until a run in flight needs
+/// the worker; start what arrived; run the ready jobs; end the runs that are done.
+fn run_mb_worker(
+    index: usize,
+    rx: &crossbeam::channel::Receiver<MbJob>,
+    shared: &crossbeam::channel::Receiver<MbJob>,
+) {
+    IS_MB_WORKER.set(true);
+    let busy = |now: bool| {
+        mb_js_pool().busy[index].store(now, std::sync::atomic::Ordering::Relaxed);
+    };
+    let mut thread = MbJsThread::new();
+    loop {
+        busy(false);
+        // The pool's senders live for the process, so a disconnected queue never happens; if it
+        // did, the worker would have nothing left to serve.
+        let first = if thread.has_runs() {
+            let wait = thread
+                .next_wake()
+                .saturating_duration_since(std::time::Instant::now());
+            crossbeam::channel::select! {
+                recv(rx) -> job => match job { Ok(job) => Some(job), Err(_) => return },
+                recv(shared) -> job => match job { Ok(job) => Some(job), Err(_) => return },
+                default(wait) => None,
+            }
+        } else {
+            crossbeam::channel::select! {
+                recv(rx) -> job => match job { Ok(job) => Some(job), Err(_) => return },
+                recv(shared) -> job => match job { Ok(job) => Some(job), Err(_) => return },
+            }
+        };
+        busy(true);
+        // A panicking job (an engine bug — scripts themselves error, not panic) must not kill the
+        // worker; its context may be mid-mutation, so rebuild. The worker's runs in flight go with
+        // it: their callers see the job fail, and their unsaved `state` writes are lost.
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some(job) = first {
+                job(&mut thread);
+            }
+            for job in rx.try_iter().take(MB_STARTS_PER_STEP) {
+                job(&mut thread);
+            }
+            if let Ok(job) = shared.try_recv() {
+                job(&mut thread);
+            }
+            thread.step();
+        }));
+        if let Err(panic) = turn {
+            let payload = panic
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "a non-string panic".to_string());
+            let lost: usize = thread.realms.iter().map(|realm| realm.runs.len()).sum();
+            tracing::error!(
+                "MB script job panicked ({payload}); rebuilding worker context, failing its {lost} \
+                 runs in flight"
+            );
+            thread = MbJsThread::new();
+        }
+    }
 }
 
-/// Run `f` on an MB pool worker's reused context and block until it completes. The caller is
-/// always off the async runtime already (a `spawn_blocking` matcher thread, a bounded decorate
-/// thread, or a test); the pool hop is what buys context/parse reuse. `Err` means the job
-/// infrastructure failed (worker panicked mid-job, pool unavailable) — script errors travel
-/// inside `R`. On a reentrant call from a worker itself, runs inline on a fresh context
-/// (dropped safely on the live thread).
+/// Submit a job to the MB script pool, to the worker `key`'s imposter is claimed on, or to the
+/// first free worker when `None`. `Err` only if the pool is gone (never in practice: the senders are process-lifetime
+/// statics).
+///
+/// The caller's `tracing` dispatcher travels with the job, and a run started in it keeps it for
+/// every job of its own ([`MbRun::activate`]), so script-logger events (issue #355) keep routing to
+/// whatever subscriber was active at the call site — a thread-scoped capture included. (Span
+/// *parentage* does not cross the pool boundary, like any thread hop; the logger events carry the
+/// imposter port and stub id as explicit fields.)
+fn submit_mb_job(
+    key: Option<StateKey>,
+    job: impl FnOnce(&mut MbJsThread, Claim) + Send + 'static,
+) -> Result<()> {
+    let pool = mb_js_pool();
+    let Some(key) = key else {
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+        let wrapped: MbJob = Box::new(move |thread| {
+            tracing::dispatcher::with_default(&dispatcher, || job(thread, Claim::local()));
+        });
+        return pool
+            .shared
+            .send(wrapped)
+            .map_err(|_| anyhow!("MB script pool is unavailable"));
+    };
+    let claim = pool.claim(Some(key))?;
+    let worker = claim.0.as_ref().map_or(0, |place| place.worker);
+    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+    pool.queued[worker].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let wrapped: MbJob = Box::new(move |thread| {
+        pool.queued[worker].fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::dispatcher::with_default(&dispatcher, || job(thread, claim));
+    });
+    pool.queues[worker].send(wrapped).map_err(|_| {
+        pool.queued[worker].fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        anyhow!("MB script pool is unavailable")
+    })
+}
+
+/// The error of a caller whose pool job ended without an answer.
+fn worker_panicked<E>(_: E) -> anyhow::Error {
+    anyhow!("MB script job failed (worker panicked)")
+}
+
+/// Run `f` on an MB pool worker and block until it completes: a hook that never waits for a job
+/// (`predicateGenerators.inject`). `Err` means the job infrastructure failed (worker panicked
+/// mid-job, pool unavailable) — script errors travel inside `R`. On a reentrant call from a worker
+/// itself, runs inline on a fresh context (dropped safely on the live thread).
 fn with_mb_js_thread<R, F>(f: F) -> Result<R>
 where
     R: Send + 'static,
@@ -587,11 +1146,39 @@ where
         return Ok(f(&mut MbJsThread::new()));
     }
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    submit_mb_job(Box::new(move |state| {
-        let _ = tx.send(f(state));
-    }))?;
-    rx.recv()
-        .map_err(|_| anyhow!("MB script job failed (worker panicked)"))
+    submit_mb_job(None, move |thread, _claim| {
+        let _ = tx.send(f(thread));
+    })?;
+    rx.recv().map_err(worker_panicked)
+}
+
+/// Start a hook run with `start` and block until it answers: the callers off the async runtime (a
+/// `spawn_blocking` matcher thread, a test). The run goes to `scope`'s imposter's worker; on a
+/// pool worker itself (a reentrant call), it runs to its end on a fresh worker state instead.
+fn run_blocking<T: Send + 'static>(
+    scope: &ScriptScope,
+    start: impl FnOnce(&mut MbJsThread, Reply<Result<T>>, Claim) + Send + 'static,
+) -> Result<T> {
+    if IS_MB_WORKER.get() {
+        return run_here(&mut MbJsThread::new(), start);
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    submit_mb_job(Some(state_key(scope)), move |thread, claim| {
+        start(thread, Reply::Sync(tx), claim);
+    })?;
+    rx.recv().map_err(worker_panicked)?
+}
+
+/// Start a hook run with `start` on `thread`, and drive the thread until it answers.
+fn run_here<T>(
+    thread: &mut MbJsThread,
+    start: impl FnOnce(&mut MbJsThread, Reply<Result<T>>, Claim),
+) -> Result<T> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    start(thread, Reply::Sync(tx), Claim::local());
+    thread.drive();
+    rx.try_recv()
+        .map_err(|_| anyhow!("the script run ended without an answer"))?
 }
 
 /// The top-level function names a JS script declares, for the static entrypoint check (issue
@@ -1924,29 +2511,22 @@ pub fn execute_mountebank_inject(
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
 ) -> Result<MountebankInjectResponse> {
-    let inject_fn = inject_fn.to_string();
-    let request = request.clone();
-    let stub_id = stub_id.map(str::to_string);
-    let files = Arc::clone(files);
-    with_mb_js_thread(move |thread| {
-        execute_mountebank_inject_in(
-            thread,
-            &inject_fn,
-            &request,
-            &scope,
-            stub_id.as_deref(),
-            &files,
-        )
-    })?
+    let input = InjectInput::new(inject_fn, request, scope, stub_id, files);
+    let key_scope = input.scope.clone();
+    run_blocking(&key_scope, move |thread, reply, claim| {
+        start_inject(thread, input, RunBudget::default_now(), reply, claim);
+    })
 }
 
 /// Run a Mountebank response-`inject` on the MB script pool with a wall-clock deadline
 /// (issue #476) — the async counterpart of [`execute_mountebank_inject`], mirroring the
 /// `spawn_blocking` + `tokio::time::timeout` shape of `bounded::should_inject_bounded` but
-/// submitting straight to the pool (no blocking thread is parked while the script runs). No
-/// abort flag: Boa exposes no per-instruction interrupt, so after a timeout the loop-iteration
-/// cap (issue #327) is what eventually frees the worker. The deadline is the imposter's
-/// `resolve_script_timeout_ms` budget, shared with `_rift.script`.
+/// submitting straight to the pool (no blocking thread is parked while the script runs). A run
+/// that waits on a promise job or a timer holds no worker meanwhile (issue #1678), and is dropped
+/// once this future is (its timeout, or a delete cancelling the request, #1643). No abort flag
+/// for a CPU-bound script: Boa exposes no per-instruction interrupt, so the loop-iteration cap
+/// (issue #327) is what ends it. The deadline is the imposter's `resolve_script_timeout_ms`
+/// budget, shared with `_rift.script`.
 pub async fn execute_mountebank_inject_bounded(
     inject_fn: String,
     request: MountebankRequest,
@@ -1955,21 +2535,21 @@ pub async fn execute_mountebank_inject_bounded(
     files: Arc<ScriptFileAccess>,
     timeout: std::time::Duration,
 ) -> Result<MountebankInjectResponse> {
-    // The budget starts at submission, as the caller's timeout does, so a job's drain ends no
-    // later than the caller stops waiting for it (issue #1593).
+    // The budget starts at submission, as the caller's timeout does, so a run ends no later than
+    // the caller stops waiting for it (issue #1593).
     let budget = RunBudget::starting_now(timeout);
+    let key = state_key(&scope);
+    let input = InjectInput {
+        inject_fn,
+        request,
+        scope,
+        stub_id,
+        files,
+    };
     let (tx, rx) = tokio::sync::oneshot::channel();
-    submit_mb_job(Box::new(move |thread| {
-        let _ = tx.send(execute_mountebank_inject_within(
-            thread,
-            &inject_fn,
-            &request,
-            &scope,
-            stub_id.as_deref(),
-            &files,
-            budget,
-        ));
-    }))?;
+    submit_mb_job(Some(key), move |thread, claim| {
+        start_inject(thread, input, budget, Reply::Async(tx), claim);
+    })?;
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(result)) => result,
         Ok(Err(_recv)) => Err(anyhow!("inject task failed (script worker panicked)")),
@@ -2035,6 +2615,34 @@ fn is_pending_promise(value: &JsValue) -> bool {
     )
 }
 
+/// What a response `inject` runs on, owned so it can move to a pool worker.
+struct InjectInput {
+    inject_fn: String,
+    request: MountebankRequest,
+    scope: ScriptScope,
+    stub_id: Option<String>,
+    files: Arc<ScriptFileAccess>,
+}
+
+impl InjectInput {
+    fn new(
+        inject_fn: &str,
+        request: &MountebankRequest,
+        scope: ScriptScope,
+        stub_id: Option<&str>,
+        files: &Arc<ScriptFileAccess>,
+    ) -> Self {
+        Self {
+            inject_fn: inject_fn.to_string(),
+            request: request.clone(),
+            scope,
+            stub_id: stub_id.map(str::to_string),
+            files: Arc::clone(files),
+        }
+    }
+}
+
+#[cfg(test)]
 fn execute_mountebank_inject_in(
     thread: &mut MbJsThread,
     inject_fn: &str,
@@ -2054,6 +2662,8 @@ fn execute_mountebank_inject_in(
     )
 }
 
+/// Run an inject on `thread` to its end, within `budget`.
+#[cfg(test)]
 fn execute_mountebank_inject_within(
     thread: &mut MbJsThread,
     inject_fn: &str,
@@ -2063,30 +2673,95 @@ fn execute_mountebank_inject_within(
     files: &Arc<ScriptFileAccess>,
     budget: RunBudget,
 ) -> Result<MountebankInjectResponse> {
-    let realm = thread.realm(files);
+    let input = InjectInput::new(inject_fn, request, scope.clone(), stub_id, files);
+    run_here(thread, |thread, reply, claim| {
+        start_inject(thread, input, budget, reply, claim);
+    })
+}
+
+/// Start an inject run on `thread`: call the inject function, and admit the run, which answers
+/// `reply` now or once a job gives it an answer.
+fn start_inject(
+    thread: &mut MbJsThread,
+    input: InjectInput,
+    budget: RunBudget,
+    reply: Reply<Result<MountebankInjectResponse>>,
+    claim: Claim,
+) {
+    // Nobody waits any more (issue #1643): the script never runs.
+    if reply.abandoned() {
+        return;
+    }
+    if thread.split_from(&input.scope, &input.files) {
+        thread
+            .deferred
+            .push(Box::new(move |thread: &mut MbJsThread| {
+                start_inject(thread, input, budget, reply, claim);
+            }));
+        return;
+    }
+    let InjectInput {
+        inject_fn,
+        request,
+        scope,
+        stub_id,
+        files,
+    } = input;
+    let realm = thread.realm(&files);
     // Mountebank gives every injection `require` (issue #1611); this run's is bound to its own
     // imposter, passed into the hook's scope (#1645), and dies with the run.
-    let (run, require) = MbRun::begin(realm, files, scope.port, stub_id)?;
+    let (run, require) = match MbRun::begin(realm, &files, scope.port, stub_id.as_deref()) {
+        Ok(begun) => begun,
+        Err(e) => return reply.send(Err(e)),
+    };
+    let started = {
+        let _active = run.activate(&mut realm.context);
+        call_inject(
+            realm,
+            require,
+            &inject_fn,
+            &request,
+            &scope,
+            stub_id.as_deref(),
+        )
+    };
+    let (outcome, started) = match started {
+        Ok(outcome) => (Some(outcome), Ok(())),
+        Err(end) => (None, Err(end)),
+    };
+    let hook = InjectHook {
+        outcome,
+        budget,
+        reply,
+    };
+    realm.admit(
+        InFlight {
+            run,
+            deadline: budget.deadline,
+            hook: Box::new(hook),
+            scope: Some(scope),
+            claim,
+        },
+        started,
+    );
+}
+
+/// Build the inject's `config` and call the function; the outcome record its answer goes to.
+fn call_inject(
+    realm: &mut MbRealm,
+    require: JsValue,
+    inject_fn: &str,
+    request: &MountebankRequest,
+    scope: &ScriptScope,
+    stub_id: Option<&str>,
+) -> Result<JsObject, RunEnd> {
+    let request_obj = create_mountebank_request_object(&mut realm.context, request)?;
+    // The imposter's one live state object (issue #1678), shared with its predicate injects,
+    // response injects and decorates (issue #355 Item 0), and with its runs still in flight.
+    let state_obj = realm.live_state(scope)?;
     let MbRealm {
-        context,
-        scripts,
-        jobs,
-        ..
+        context, scripts, ..
     } = realm;
-    let _active = run.activate(context)?;
-
-    // Create request object
-    let request_obj = create_mountebank_request_object(&mut *context, request)?;
-
-    // Get current (persisted, per-port) state for this imposter — shared across predicate
-    // injects, response injects, and decorate for the same imposter (issue #355 Item 0).
-    // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
-    // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
-    // guard is written back at the end of this call.
-    let cell = Arc::clone(&scope.state);
-    let mut imposter_state = cell.lock();
-    let state_map = imposter_state.clone();
-    let state_obj = json_to_js(&mut *context, &Value::Object(state_map))?;
 
     let logger_obj =
         create_script_logger_object(&mut *context, scope.port, stub_id.map(str::to_owned))?;
@@ -2119,7 +2794,7 @@ fn execute_mountebank_inject_within(
     // config field convention both work. As in Mountebank, the answer is the first of: a value
     // the function returned that is not `undefined`, or what `done` was first called with — now or
     // later, from a promise job or a timer (issue #1593). The wrapper returns the outcome record
-    // the drain below watches.
+    // the run is answered from.
     let wrapper_script = format!(
         r#"
         (function (require, __config, __injectState, __logger, __imposterState) {{
@@ -2138,85 +2813,108 @@ fn execute_mountebank_inject_within(
         "#
     );
 
-    let failed = |e: boa_engine::JsError, context: &mut Context| {
-        anyhow::Error::new(InjectionFailure {
-            detail: format!("Failed to execute inject function: {e}"),
-            data: thrown_message(&e, context),
-        })
-    };
     // injectState and imposterState are the SAME shared, persisted state object as config.state.
     let args = [
         require,
         config_obj.into(),
         state_obj.clone(),
         logger_obj,
-        state_obj.clone(),
+        state_obj,
     ];
-    let outcome = call_mb_wrapper(context, scripts, &wrapper_script, &args)
-        .map_err(|e| failed(e, &mut *context))?;
-    let outcome = outcome
+    let outcome =
+        call_mb_wrapper(context, scripts, &wrapper_script, &args).map_err(RunEnd::Threw)?;
+    outcome
         .as_object()
-        .ok_or_else(|| anyhow!("the inject wrapper did not return its outcome"))?;
-    let read = |name: &str, context: &mut Context| {
-        outcome
-            .get(js_string!(name), context)
-            .map_err(|e| anyhow!("Failed to read the inject outcome: {e}"))
-    };
+        .ok_or_else(|| RunEnd::Failed(anyhow!("the inject wrapper did not return its outcome")))
+}
 
-    // Run the jobs the script queued until it has an answer that is not a pending promise: a
-    // returned or called-back promise is awaited, as Mountebank's `done(promise)` adopts it.
-    // Bounded by this run's deadline (issue #476); a script whose jobs end without an answer is
-    // left with none, which `parse_mountebank_response` refuses below.
-    let drained = jobs
-        .drain(&mut *context, run.id, budget.deadline, |context| {
-            // The outcome is the wrapper's own object, but the inject source is pasted into the
-            // wrapper's scope, so a script can reach `__outcome` and give it a getter. That runs
-            // only this run's code, in its own realm; a getter that throws reads as no answer.
-            let called = outcome
-                .get(js_string!("called"), context)
-                .is_ok_and(|v| v.to_boolean());
-            called
-                && !outcome
-                    .get(js_string!("value"), context)
-                    .is_ok_and(|v| is_pending_promise(&v))
-        })
-        .map_err(|e| failed(e, &mut *context))?;
-    if drained == super::js_runtime::Drained::Deadline {
-        return Err(budget.timed_out("inject").into());
-    }
-    let mut result = read("value", &mut *context)?;
-    match promise_state(&result) {
-        None => {}
-        Some(boa_engine::builtins::promise::PromiseState::Fulfilled(value)) => result = value,
-        Some(boa_engine::builtins::promise::PromiseState::Rejected(reason)) => {
-            let thrown = boa_engine::JsError::from_opaque(reason.clone());
-            return Err(anyhow::Error::new(InjectionFailure {
-                detail: format!(
-                    "the inject function's promise was rejected: {}",
-                    reason.display()
-                ),
-                data: thrown_message(&thrown, &mut *context),
-            }));
-        }
-        Some(boa_engine::builtins::promise::PromiseState::Pending) => {
-            return Err(anyhow::Error::new(InjectionFailure {
-                detail: "the inject function's promise never settled".to_string(),
-                data: None,
-            }));
-        }
+/// An inject run, answered from its wrapper's outcome record.
+struct InjectHook {
+    /// `None` when its start failed, which ends it at once.
+    outcome: Option<JsObject>,
+    budget: RunBudget,
+    reply: Reply<Result<MountebankInjectResponse>>,
+}
+
+impl MbHook for InjectHook {
+    fn name(&self) -> &'static str {
+        "inject"
     }
 
-    // Save updated state back (config.state/injectState/imposterState all alias the same object).
-    save_script_state(
-        &mut *context,
-        &state_obj,
-        &mut imposter_state,
-        scope,
-        "inject",
-    );
+    fn abandoned(&self) -> bool {
+        self.reply.abandoned()
+    }
 
-    // Parse the response
-    parse_mountebank_response(&mut *context, result)
+    /// Whether the run has an answer that is not a pending promise: a returned or called-back
+    /// promise is awaited, as Mountebank's `done(promise)` adopts it.
+    fn answered(&self, context: &mut Context) -> bool {
+        let Some(outcome) = &self.outcome else {
+            return false;
+        };
+        // The outcome is the wrapper's own object, but the inject source is pasted into the
+        // wrapper's scope, so a script can reach `__outcome` and give it a getter. That runs only
+        // this run's code, in its own realm; a getter that throws reads as no answer.
+        let called = outcome
+            .get(js_string!("called"), context)
+            .is_ok_and(|v| v.to_boolean());
+        called
+            && !outcome
+                .get(js_string!("value"), context)
+                .is_ok_and(|v| is_pending_promise(&v))
+    }
+
+    fn finish(self: Box<Self>, context: &mut Context, end: RunEnd) {
+        let answer = self.answer(context, end);
+        self.reply.send(answer);
+    }
+}
+
+impl InjectHook {
+    /// The inject's response for how its run ended. A run whose jobs ended without an answer is
+    /// left with none, which `parse_mountebank_response` refuses.
+    fn answer(&self, context: &mut Context, end: RunEnd) -> Result<MountebankInjectResponse> {
+        let failed = |e: boa_engine::JsError, context: &mut Context| {
+            anyhow::Error::new(InjectionFailure {
+                detail: format!("Failed to execute inject function: {e}"),
+                data: thrown_message(&e, context),
+            })
+        };
+        match end {
+            RunEnd::Failed(e) => return Err(e),
+            RunEnd::Threw(e) => return Err(failed(e, context)),
+            RunEnd::Deadline => return Err(self.budget.timed_out("inject").into()),
+            RunEnd::Abandoned => return Err(anyhow!("the inject run was abandoned")),
+            RunEnd::Finished | RunEnd::Idle => {}
+        }
+        let outcome = self
+            .outcome
+            .as_ref()
+            .ok_or_else(|| anyhow!("the inject wrapper did not return its outcome"))?;
+        let mut result = outcome
+            .get(js_string!("value"), context)
+            .map_err(|e| anyhow!("Failed to read the inject outcome: {e}"))?;
+        match promise_state(&result) {
+            None => {}
+            Some(boa_engine::builtins::promise::PromiseState::Fulfilled(value)) => result = value,
+            Some(boa_engine::builtins::promise::PromiseState::Rejected(reason)) => {
+                let thrown = boa_engine::JsError::from_opaque(reason.clone());
+                return Err(anyhow::Error::new(InjectionFailure {
+                    detail: format!(
+                        "the inject function's promise was rejected: {}",
+                        reason.display()
+                    ),
+                    data: thrown_message(&thrown, context),
+                }));
+            }
+            Some(boa_engine::builtins::promise::PromiseState::Pending) => {
+                return Err(anyhow::Error::new(InjectionFailure {
+                    detail: "the inject function's promise never settled".to_string(),
+                    data: None,
+                }));
+            }
+        }
+        parse_mountebank_response(context, result)
+    }
 }
 
 /// Saves the state a script left as the imposter's script state. A state that cannot be read as a
@@ -2312,14 +3010,26 @@ pub fn execute_predicate_inject(
     scope: ScriptScope,
     files: &Arc<ScriptFileAccess>,
 ) -> anyhow::Result<bool> {
-    let inject_fn = inject_fn.to_string();
-    let request = request.clone();
-    let files = Arc::clone(files);
-    with_mb_js_thread(move |thread| {
-        execute_predicate_inject_in(thread, &inject_fn, &request, &scope, &files)
-    })?
+    let input = PredicateInput {
+        inject_fn: inject_fn.to_string(),
+        request: request.clone(),
+        scope: scope.clone(),
+        files: Arc::clone(files),
+    };
+    run_blocking(&scope, move |thread, reply, claim| {
+        start_predicate_inject(thread, input, reply, claim);
+    })
 }
 
+/// What a predicate `inject` runs on, owned so it can move to a pool worker.
+struct PredicateInput {
+    inject_fn: String,
+    request: MountebankRequest,
+    scope: ScriptScope,
+    files: Arc<ScriptFileAccess>,
+}
+
+#[cfg(test)]
 fn execute_predicate_inject_in(
     thread: &mut MbJsThread,
     inject_fn: &str,
@@ -2327,59 +3037,99 @@ fn execute_predicate_inject_in(
     scope: &ScriptScope,
     files: &Arc<ScriptFileAccess>,
 ) -> anyhow::Result<bool> {
-    let realm = thread.realm(files);
-    // Mountebank does not wait for a predicate: its timers and promise jobs are queued and never
-    // run here (issue #1593); they end with the run.
-    let (run, require) = MbRun::begin(realm, files, scope.port, None)
-        .map_err(|e| PredicateInjectionError::internal(format!("{e:#}")))?;
+    let input = PredicateInput {
+        inject_fn: inject_fn.to_string(),
+        request: request.clone(),
+        scope: scope.clone(),
+        files: Arc::clone(files),
+    };
+    run_here(thread, |thread, reply, claim| {
+        start_predicate_inject(thread, input, reply, claim);
+    })
+}
+
+/// Start a predicate inject run on `thread`. Mountebank does not wait for a predicate: the run
+/// answers as soon as its function returns, and the timers and promise jobs it queued end with it
+/// (issue #1593).
+fn start_predicate_inject(
+    thread: &mut MbJsThread,
+    input: PredicateInput,
+    reply: Reply<anyhow::Result<bool>>,
+    claim: Claim,
+) {
+    if thread.split_from(&input.scope, &input.files) {
+        thread
+            .deferred
+            .push(Box::new(move |thread: &mut MbJsThread| {
+                start_predicate_inject(thread, input, reply, claim);
+            }));
+        return;
+    }
+    let PredicateInput {
+        inject_fn,
+        request,
+        scope,
+        files,
+    } = input;
+    let realm = thread.realm(&files);
+    let (run, require) = match MbRun::begin(realm, &files, scope.port, None) {
+        Ok(begun) => begun,
+        Err(e) => {
+            return reply.send(Err(
+                PredicateInjectionError::internal(format!("{e:#}")).into()
+            ));
+        }
+    };
+    let started = {
+        let _active = run.activate(&mut realm.context);
+        call_predicate_inject(realm, require, &inject_fn, &request, &scope)
+    };
+    let (result, started) = match started {
+        Ok(result) => (result, Ok(())),
+        Err(end) => (false, Err(end)),
+    };
+    realm.admit(
+        InFlight {
+            run,
+            deadline: std::time::Instant::now(),
+            hook: Box::new(PredicateHook { result, reply }),
+            scope: Some(scope),
+            claim,
+        },
+        started,
+    );
+}
+
+/// Build the predicate inject's `config` and call the function; whether it matched. A failure to
+/// build its inputs is a [`PredicateInjectionError`] (issue #440); the function throwing is the
+/// run's [`RunEnd::Threw`].
+fn call_predicate_inject(
+    realm: &mut MbRealm,
+    require: JsValue,
+    inject_fn: &str,
+    request: &MountebankRequest,
+    scope: &ScriptScope,
+) -> Result<bool, RunEnd> {
+    let internal = |what: &str, e: &dyn std::fmt::Display| {
+        tracing::warn!("inject predicate: failed to build {what}: {e:#}");
+        RunEnd::Failed(
+            PredicateInjectionError::internal(format!("failed to build {what}: {e}")).into(),
+        )
+    };
+    let request_obj = create_mountebank_request_object(&mut realm.context, request)
+        .map_err(|e| internal("request object", &e))?;
+    let state_obj = realm
+        .live_state(scope)
+        .map_err(|e| internal("state object", &e))?;
     let MbRealm {
         context, scripts, ..
     } = realm;
-    let _active = run
-        .activate(context)
-        .map_err(|e| PredicateInjectionError::internal(format!("{e:#}")))?;
-
-    let request_obj = match create_mountebank_request_object(&mut *context, request) {
-        Ok(obj) => obj,
-        Err(e) => {
-            tracing::warn!("inject predicate: failed to build request object: {e:#}");
-            return Err(PredicateInjectionError::internal(format!(
-                "failed to build request object: {e}"
-            ))
-            .into());
-        }
-    };
-
-    // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
-    // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
-    // guard is written back at the end of this call.
-    let cell = Arc::clone(&scope.state);
-    let mut imposter_state = cell.lock();
-    let state_map = imposter_state.clone();
-    let state_obj = match json_to_js(&mut *context, &Value::Object(state_map)) {
-        Ok(obj) => obj,
-        Err(e) => {
-            tracing::warn!("inject predicate: failed to build state object: {e:#}");
-            return Err(PredicateInjectionError::internal(format!(
-                "failed to build state object: {e}"
-            ))
-            .into());
-        }
-    };
 
     // stub_id is left None here: predicate matching operates on a `PredicateOperation` tree and
     // the owning stub's id is not threaded through the matcher without an invasive change to the
     // predicate-matching signatures (issue #355 AC1 note).
-    let logger_obj = match create_script_logger_object(&mut *context, scope.port, None) {
-        Ok(obj) => obj,
-        Err(e) => {
-            tracing::warn!("inject predicate: failed to build logger object: {e:#}");
-            return Err(PredicateInjectionError::internal(format!(
-                "failed to build logger object: {e}"
-            ))
-            .into());
-        }
-    };
+    let logger_obj = create_script_logger_object(&mut *context, scope.port, None)
+        .map_err(|e| internal("logger object", &e))?;
 
     let config_obj = create_js_object(&*context);
     if config_obj
@@ -2403,10 +3153,7 @@ fn execute_predicate_inject_in(
             .is_err()
         || flatten_request_onto(&config_obj, &request_obj, &mut *context).is_err()
     {
-        tracing::warn!("inject predicate: failed to build config object");
-        return Err(
-            PredicateInjectionError::internal("failed to build config object".to_string()).into(),
-        );
+        return Err(internal("config object", &"a property could not be set"));
     }
 
     let wrapper_script = format!(
@@ -2418,30 +3165,55 @@ fn execute_predicate_inject_in(
         }})
         "#
     );
-
-    let args = [require, config_obj.into(), logger_obj, state_obj.clone()];
-    let result = match call_mb_wrapper(context, scripts, &wrapper_script, &args) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("inject predicate: script execution error: {e}");
-            return Err(PredicateInjectionError(
-                format!("script execution error: {e}"),
-                thrown_message(&e, &mut *context),
-            )
-            .into());
-        }
-    };
-
-    // Update the persisted, shared per-imposter state.
-    save_script_state(
-        &mut *context,
-        &state_obj,
-        &mut imposter_state,
-        scope,
-        "predicate inject",
-    );
-
+    let args = [require, config_obj.into(), logger_obj, state_obj];
+    let result =
+        call_mb_wrapper(context, scripts, &wrapper_script, &args).map_err(RunEnd::Threw)?;
     Ok(result.to_boolean())
+}
+
+/// A predicate inject run: answered as soon as it starts.
+struct PredicateHook {
+    result: bool,
+    reply: Reply<anyhow::Result<bool>>,
+}
+
+impl MbHook for PredicateHook {
+    fn name(&self) -> &'static str {
+        "predicate inject"
+    }
+
+    fn abandoned(&self) -> bool {
+        self.reply.abandoned()
+    }
+
+    fn answered(&self, _context: &mut Context) -> bool {
+        true
+    }
+
+    fn bequeaths(&self) -> bool {
+        false
+    }
+
+    /// `Ok(true)`/`Ok(false)` for a match/non-match. The function throwing is an `Err`
+    /// (issue #440), as Mountebank fails the request rather than treating an injection error as
+    /// "did not match".
+    fn finish(self: Box<Self>, context: &mut Context, end: RunEnd) {
+        let answer = match end {
+            RunEnd::Failed(e) => Err(e),
+            RunEnd::Threw(e) => {
+                tracing::warn!("inject predicate: script execution error: {e}");
+                Err(PredicateInjectionError(
+                    format!("script execution error: {e}"),
+                    thrown_message(&e, context),
+                )
+                .into())
+            }
+            RunEnd::Finished | RunEnd::Idle | RunEnd::Deadline | RunEnd::Abandoned => {
+                Ok(self.result)
+            }
+        };
+        self.reply.send(answer);
+    }
 }
 
 /// Execute a `predicateGenerators.inject` function during proxy recording.
@@ -2486,9 +3258,7 @@ fn execute_predicate_generator_inject_in(
     let MbRealm {
         context, scripts, ..
     } = realm;
-    let _active = run
-        .activate(context)
-        .map_err(|e| PredicateGeneratorError::Script(format!("{e:#}")))?;
+    let _active = run.activate(context);
 
     let request_obj = create_mountebank_request_object(&mut *context, request).map_err(|e| {
         PredicateGeneratorError::Script(format!("failed to build request object: {e}"))
@@ -2955,22 +3725,40 @@ impl MbRun {
     /// Make this the run being executed, until the guard drops: the jobs queued meanwhile belong
     /// to it, its `require` answers, the global `console` is its own, and its logger events go to
     /// its dispatcher. Restores the run that was executing before, which is none except for a run
-    /// nested inside another on the same thread.
-    fn activate(&self, context: &mut Context) -> Result<ActiveRun> {
+    /// nested inside another on the same thread. Called before every job of the run, as runs of
+    /// one realm interleave (issue #1678).
+    fn activate(&self, context: &mut Context) -> ActiveRun {
+        let previous_thread_run = super::js_runtime::current_run();
         let previous_run = self.jobs.set_current(Some(self.id));
         let previous_require = REQUIRE_RUN
             .with_borrow_mut(|run| run.replace((self.id.raw(), Arc::clone(&self.files))));
         let active = ActiveRun {
             jobs: std::rc::Rc::clone(&self.jobs),
             previous_run,
+            previous_thread_run,
             previous_require,
             _dispatch: tracing::dispatcher::set_default(&self.dispatch),
         };
-        context
-            .global_object()
-            .set(js_string!("console"), self.console.clone(), false, context)
-            .map_err(|e| anyhow!("Failed to set console: {e}"))?;
-        Ok(active)
+        // Domain-optional: only a script of this realm can make `console` refuse the write (made
+        // read-only, or an accessor that throws), and it then keeps its own `console` in its own
+        // realm, as an overwritten `console` stays overwritten in Mountebank's one process.
+        match context.global_object().set(
+            js_string!("console"),
+            self.console.clone(),
+            false,
+            context,
+        ) {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(
+                target: "rift::script",
+                "a script made console read-only; this run logs through its console"
+            ),
+            Err(e) => tracing::debug!(
+                target: "rift::script",
+                "a script's console refused to be set: {e}"
+            ),
+        }
+        active
     }
 }
 
@@ -2985,6 +3773,9 @@ impl Drop for MbRun {
 struct ActiveRun {
     jobs: std::rc::Rc<super::js_runtime::MbJobExecutor>,
     previous_run: Option<super::js_runtime::RunId>,
+    /// The run executing on this thread before, which may belong to another realm's executor (a
+    /// run nested on a fresh worker state).
+    previous_thread_run: Option<super::js_runtime::RunId>,
     previous_require: Option<(u64, Arc<ScriptFileAccess>)>,
     _dispatch: tracing::dispatcher::DefaultGuard,
 }
@@ -2992,6 +3783,7 @@ struct ActiveRun {
 impl Drop for ActiveRun {
     fn drop(&mut self) {
         self.jobs.set_current(self.previous_run);
+        super::js_runtime::set_current_run(self.previous_thread_run);
         let previous = self.previous_require.take();
         REQUIRE_RUN.with_borrow_mut(|run| *run = previous);
     }
@@ -3225,7 +4017,8 @@ pub fn execute_mountebank_decorate(
 
 /// [`execute_mountebank_decorate`] with the caller's script timeout (issue #1593): an `async`
 /// decorate's jobs and timers run until its promise settles, or until `timeout` from now, when
-/// the run fails with a [`crate::scripting::ScriptTimeoutError`].
+/// the run fails with a [`crate::scripting::ScriptTimeoutError`]. Blocks until it answers; the
+/// serving path awaits [`execute_mountebank_decorate_bounded`] instead.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_mountebank_decorate_within(
     decorate_fn: &str,
@@ -3239,30 +4032,72 @@ pub fn execute_mountebank_decorate_within(
     timeout: std::time::Duration,
 ) -> Result<crate::behaviors::Decorated> {
     let budget = RunBudget::starting_now(timeout);
-    let decorate_fn = decorate_fn.to_string();
-    let request = request.clone();
-    let response_body = response_body.to_string();
-    let response_status = response_status.clone();
-    let response_headers = response_headers.clone();
-    let stub_id = stub_id.map(str::to_string);
-    let files = Arc::clone(files);
-    with_mb_js_thread(move |thread| {
-        execute_mountebank_decorate_within_budget(
-            thread,
-            &decorate_fn,
-            &request,
-            &response_body,
-            &response_status,
-            &response_headers,
-            &scope,
-            stub_id.as_deref(),
-            &files,
-            budget,
-        )
-    })?
+    let input = DecorateInput {
+        decorate_fn: decorate_fn.to_string(),
+        request: request.clone(),
+        response_body: response_body.to_string(),
+        response_status: response_status.clone(),
+        response_headers: response_headers.clone(),
+        scope: scope.clone(),
+        stub_id: stub_id.map(str::to_string),
+        files: Arc::clone(files),
+    };
+    run_blocking(&scope, move |thread, reply, claim| {
+        start_decorate(thread, input, budget, reply, claim);
+    })
 }
 
-/// [`execute_mountebank_decorate_within_budget`] on a given worker state, with the default budget.
+/// [`execute_mountebank_decorate_within`] for an async caller (issue #1678): no thread waits while
+/// an `async` decorate's jobs and timers run, and the run is dropped once this future is. Fails
+/// with a [`crate::scripting::ScriptTimeoutError`] when it has not answered within `timeout`.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_mountebank_decorate_bounded(
+    decorate_fn: String,
+    request: MountebankRequest,
+    response_body: String,
+    response_status: crate::behaviors::ResponseStatus,
+    response_headers: crate::util::OrderedMap<String, String>,
+    scope: ScriptScope,
+    stub_id: Option<String>,
+    files: Arc<ScriptFileAccess>,
+    timeout: std::time::Duration,
+) -> Result<crate::behaviors::Decorated> {
+    let budget = RunBudget::starting_now(timeout);
+    let key = state_key(&scope);
+    let input = DecorateInput {
+        decorate_fn,
+        request,
+        response_body,
+        response_status,
+        response_headers,
+        scope,
+        stub_id,
+        files,
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    submit_mb_job(Some(key), move |thread, claim| {
+        start_decorate(thread, input, budget, Reply::Async(tx), claim);
+    })?;
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_recv)) => Err(anyhow!("decorate task failed (script worker panicked)")),
+        Err(_elapsed) => Err(budget.timed_out("decorate").into()),
+    }
+}
+
+/// What a `decorate` runs on, owned so it can move to a pool worker.
+struct DecorateInput {
+    decorate_fn: String,
+    request: MountebankRequest,
+    response_body: String,
+    response_status: crate::behaviors::ResponseStatus,
+    response_headers: crate::util::OrderedMap<String, String>,
+    scope: ScriptScope,
+    stub_id: Option<String>,
+    files: Arc<ScriptFileAccess>,
+}
+
+/// Run a decorate on `thread` to its end, with the default budget.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn execute_mountebank_decorate_in(
@@ -3276,8 +4111,44 @@ fn execute_mountebank_decorate_in(
     stub_id: Option<&str>,
     files: &Arc<ScriptFileAccess>,
 ) -> Result<crate::behaviors::Decorated> {
-    execute_mountebank_decorate_within_budget(
-        thread,
+    let input = DecorateInput {
+        decorate_fn: decorate_fn.to_string(),
+        request: request.clone(),
+        response_body: response_body.to_string(),
+        response_status: response_status.clone(),
+        response_headers: response_headers.clone(),
+        scope: scope.clone(),
+        stub_id: stub_id.map(str::to_string),
+        files: Arc::clone(files),
+    };
+    run_here(thread, |thread, reply, claim| {
+        start_decorate(thread, input, RunBudget::default_now(), reply, claim);
+    })
+}
+
+/// Start a decorate run on `thread`. A decorate that returns a promise is answered once it
+/// settles, its jobs and timers running meanwhile; any other one at once, with no job run, as
+/// Mountebank does not wait for a decorate that returns no promise (issue #1593).
+fn start_decorate(
+    thread: &mut MbJsThread,
+    input: DecorateInput,
+    budget: RunBudget,
+    reply: Reply<Result<crate::behaviors::Decorated>>,
+    claim: Claim,
+) {
+    // Nobody waits any more (issue #1643): the script never runs.
+    if reply.abandoned() {
+        return;
+    }
+    if thread.split_from(&input.scope, &input.files) {
+        thread
+            .deferred
+            .push(Box::new(move |thread: &mut MbJsThread| {
+                start_decorate(thread, input, budget, reply, claim);
+            }));
+        return;
+    }
+    let DecorateInput {
         decorate_fn,
         request,
         response_body,
@@ -3286,13 +4157,62 @@ fn execute_mountebank_decorate_in(
         scope,
         stub_id,
         files,
-        RunBudget::default_now(),
-    )
+    } = input;
+    let realm = thread.realm(&files);
+    // A fresh CommonJS `require()` bound to this imposter (issues #305, #1611), passed into the
+    // hook's scope (#1645) and live until the run ends.
+    let (run, require) = match MbRun::begin(realm, &files, scope.port, stub_id.as_deref()) {
+        Ok(begun) => begun,
+        Err(e) => return reply.send(Err(e)),
+    };
+    let started = {
+        let _active = run.activate(&mut realm.context);
+        call_decorate(
+            realm,
+            require,
+            &decorate_fn,
+            &request,
+            &response_body,
+            &response_status,
+            &response_headers,
+            &scope,
+            stub_id.as_deref(),
+        )
+    };
+    let (called, started) = match started {
+        Ok(called) => (Some(called), Ok(())),
+        Err(end) => (None, Err(end)),
+    };
+    let hook = DecorateHook {
+        called,
+        response_headers,
+        budget,
+        reply,
+    };
+    realm.admit(
+        InFlight {
+            run,
+            deadline: budget.deadline,
+            hook: Box::new(hook),
+            scope: Some(scope),
+            claim,
+        },
+        started,
+    );
 }
 
+/// A decorate function that has been called: what it returned, and the objects it was handed.
+struct DecorateCall {
+    returned: JsValue,
+    config: JsObject,
+    response: JsObject,
+}
+
+/// Build the decorate's `config` and `response` and call the function.
 #[allow(clippy::too_many_arguments)]
-fn execute_mountebank_decorate_within_budget(
-    thread: &mut MbJsThread,
+fn call_decorate(
+    realm: &mut MbRealm,
+    require: JsValue,
     decorate_fn: &str,
     request: &MountebankRequest,
     response_body: &str,
@@ -3300,22 +4220,12 @@ fn execute_mountebank_decorate_within_budget(
     response_headers: &crate::util::OrderedMap<String, String>,
     scope: &ScriptScope,
     stub_id: Option<&str>,
-    files: &Arc<ScriptFileAccess>,
-    budget: RunBudget,
-) -> Result<crate::behaviors::Decorated> {
-    let realm = thread.realm(files);
-    // A fresh CommonJS `require()` bound to this imposter (issues #305, #1611), passed into the
-    // hook's scope (#1645) and live until the run ends.
-    let (run, require) = MbRun::begin(realm, files, scope.port, stub_id)?;
+) -> Result<DecorateCall, RunEnd> {
+    let request_obj = create_mountebank_request_object(&mut realm.context, request)?;
+    let state_obj = realm.live_state(scope)?;
     let MbRealm {
-        context,
-        scripts,
-        jobs,
-        ..
+        context, scripts, ..
     } = realm;
-    let _active = run.activate(context)?;
-
-    let request_obj = create_mountebank_request_object(&mut *context, request)?;
 
     let response_obj = create_js_object(&*context);
     response_obj
@@ -3349,13 +4259,6 @@ fn execute_mountebank_decorate_within_budget(
         .set(js_string!("headers"), headers_obj, false, &mut *context)
         .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
 
-    // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
-    // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
-    // guard is written back at the end of this call.
-    let cell = Arc::clone(&scope.state);
-    let mut imposter_state = cell.lock();
-    let state_map = imposter_state.clone();
-    let state_obj = json_to_js(&mut *context, &Value::Object(state_map))?;
     let logger_obj =
         create_script_logger_object(&mut *context, scope.port, stub_id.map(str::to_owned))?;
 
@@ -3412,100 +4315,123 @@ fn execute_mountebank_decorate_within_budget(
         config_obj.clone().into(),
         response_obj.clone().into(),
         logger_obj,
-        state_obj.clone(),
+        state_obj,
     ];
     let returned = call_mb_wrapper(context, scripts, &wrapper_script, &args)
         .map_err(|e| anyhow!("Failed to execute decorate function: {e}"))?;
-    let returned = settle_promise(returned, &mut *context, jobs, run.id, budget)?;
-
-    // Persist any mutation the decorate made to the shared, per-port state.
-    save_script_state(
-        &mut *context,
-        &state_obj,
-        &mut imposter_state,
-        scope,
-        "decorate",
-    );
-
-    let left = config_obj
-        .get(js_string!("response"), &mut *context)
-        .map_err(|e| anyhow!("Failed to read config.response: {e}"))?;
-    // `return response;` hands back the response it was given: that is a mutation, and keeps
-    // what the script never saw (the held-aside Set-Cookie lines).
-    let is_given = |value: &JsValue| {
-        value.as_object().is_some_and(|obj| {
-            JsObject::equals(&obj, &response_obj)
-                || left
-                    .as_object()
-                    .is_some_and(|left| JsObject::equals(&obj, &left))
-        })
-    };
-    if returned.to_boolean() && !is_given(&returned) {
-        let obj = returned.as_object().ok_or_else(|| {
-            anyhow!(
-                "a decorate function must return a response object or nothing, not {}",
-                returned.display()
-            )
-        })?;
-        return returned_response(&obj, &mut *context);
-    }
-
-    let obj = left
-        .as_object()
-        .ok_or_else(|| anyhow!("a decorate function must leave config.response as an object"))?;
-    let status_code = status_from_js(
-        obj.get(js_string!("statusCode"), &mut *context)
-            .map_err(|e| anyhow!("Failed to read statusCode: {e}"))?,
-        &mut *context,
-    )?
-    // A falsy status the script left (`null`, `NaN`, deleted) is falsy to `postProcess` too, which
-    // completes it from `defaultResponse`, then 200 (issue #1635), rather than keeping the old one.
-    .unwrap_or(crate::behaviors::ResponseStatus::Code(0));
-    let headers = headers_from_js(&obj, &mut *context)?.unwrap_or_else(|| response_headers.clone());
-    let body = obj
-        .get(js_string!("body"), &mut *context)
-        .map_err(|e| anyhow!("Failed to read body: {e}"))?;
-    Ok(crate::behaviors::Decorated {
-        status_code,
-        headers,
-        body: body_from_js(&body, &mut *context)?.unwrap_or_default(),
-        returned: None,
+    Ok(DecorateCall {
+        returned,
+        config: config_obj,
+        response: response_obj,
     })
 }
 
-/// The value an `async` decorate's promise settles to, after running the queued jobs and timers
-/// within `budget` (issue #1593); any other value as it is, with no job run, as Mountebank does
-/// not wait for a decorate that returns no promise.
-fn settle_promise(
-    value: JsValue,
-    context: &mut Context,
-    jobs: &super::js_runtime::MbJobExecutor,
-    run: super::js_runtime::RunId,
+/// A decorate run, answered once what its function returned is no pending promise.
+struct DecorateHook {
+    /// `None` when its start failed, which ends it at once.
+    called: Option<DecorateCall>,
+    response_headers: crate::util::OrderedMap<String, String>,
     budget: RunBudget,
-) -> Result<JsValue> {
-    if promise_state(&value).is_none() {
-        return Ok(value);
+    reply: Reply<Result<crate::behaviors::Decorated>>,
+}
+
+impl MbHook for DecorateHook {
+    fn name(&self) -> &'static str {
+        "decorate"
     }
-    let drained = jobs
-        .drain(context, run, budget.deadline, |_| {
-            !is_pending_promise(&value)
-        })
-        .map_err(|e| anyhow!("Failed to run the decorate's promise jobs: {e}"))?;
-    if drained == super::js_runtime::Drained::Deadline {
-        return Err(budget.timed_out("decorate").into());
+
+    fn abandoned(&self) -> bool {
+        self.reply.abandoned()
     }
-    let Some(state) = promise_state(&value) else {
-        return Ok(value);
-    };
-    match state {
-        boa_engine::builtins::promise::PromiseState::Fulfilled(value) => Ok(value),
-        boa_engine::builtins::promise::PromiseState::Rejected(reason) => Err(anyhow!(
-            "the decorate function's promise was rejected: {}",
-            reason.display()
-        )),
-        boa_engine::builtins::promise::PromiseState::Pending => {
-            Err(anyhow!("the decorate function's promise never settled"))
+
+    fn answered(&self, _context: &mut Context) -> bool {
+        self.called
+            .as_ref()
+            .is_some_and(|called| !is_pending_promise(&called.returned))
+    }
+
+    fn finish(self: Box<Self>, context: &mut Context, end: RunEnd) {
+        let answer = self.answer(context, end);
+        self.reply.send(answer);
+    }
+}
+
+impl DecorateHook {
+    fn answer(&self, context: &mut Context, end: RunEnd) -> Result<crate::behaviors::Decorated> {
+        match end {
+            RunEnd::Failed(e) => return Err(e),
+            RunEnd::Threw(e) => {
+                return Err(anyhow!("Failed to run the decorate's promise jobs: {e}"));
+            }
+            RunEnd::Deadline => return Err(self.budget.timed_out("decorate").into()),
+            RunEnd::Abandoned => return Err(anyhow!("the decorate run was abandoned")),
+            RunEnd::Finished | RunEnd::Idle => {}
         }
+        let called = self
+            .called
+            .as_ref()
+            .ok_or_else(|| anyhow!("the decorate function was not called"))?;
+        let returned = match promise_state(&called.returned) {
+            None => called.returned.clone(),
+            Some(boa_engine::builtins::promise::PromiseState::Fulfilled(value)) => value,
+            Some(boa_engine::builtins::promise::PromiseState::Rejected(reason)) => {
+                return Err(anyhow!(
+                    "the decorate function's promise was rejected: {}",
+                    reason.display()
+                ));
+            }
+            Some(boa_engine::builtins::promise::PromiseState::Pending) => {
+                return Err(anyhow!("the decorate function's promise never settled"));
+            }
+        };
+
+        let left = called
+            .config
+            .get(js_string!("response"), context)
+            .map_err(|e| anyhow!("Failed to read config.response: {e}"))?;
+        // `return response;` hands back the response it was given: that is a mutation, and keeps
+        // what the script never saw (the held-aside Set-Cookie lines).
+        let is_given = |value: &JsValue| {
+            value.as_object().is_some_and(|obj| {
+                JsObject::equals(&obj, &called.response)
+                    || left
+                        .as_object()
+                        .is_some_and(|left| JsObject::equals(&obj, &left))
+            })
+        };
+        if returned.to_boolean() && !is_given(&returned) {
+            let obj = returned.as_object().ok_or_else(|| {
+                anyhow!(
+                    "a decorate function must return a response object or nothing, not {}",
+                    returned.display()
+                )
+            })?;
+            return returned_response(&obj, context);
+        }
+
+        let obj = left.as_object().ok_or_else(|| {
+            anyhow!("a decorate function must leave config.response as an object")
+        })?;
+        let status_code = status_from_js(
+            obj.get(js_string!("statusCode"), context)
+                .map_err(|e| anyhow!("Failed to read statusCode: {e}"))?,
+            context,
+        )?
+        // A falsy status the script left (`null`, `NaN`, deleted) is falsy to `postProcess` too,
+        // which completes it from `defaultResponse`, then 200 (issue #1635), rather than keeping
+        // the old one.
+        .unwrap_or(crate::behaviors::ResponseStatus::Code(0));
+        let headers =
+            headers_from_js(&obj, context)?.unwrap_or_else(|| self.response_headers.clone());
+        let body = obj
+            .get(js_string!("body"), context)
+            .map_err(|e| anyhow!("Failed to read body: {e}"))?;
+        Ok(crate::behaviors::Decorated {
+            status_code,
+            headers,
+            body: body_from_js(&body, context)?.unwrap_or_default(),
+            returned: None,
+        })
     }
 }
 
@@ -5883,8 +6809,8 @@ function respond(ctx) {
 
     // Issue #477: concurrent injects on the SAME imposter must not lose state updates. With the old
     // read-clone-mutate-overwrite (lock released across script execution) N racing increments lose
-    // updates; holding a per-port lock across the whole get→run→save section makes the final count
-    // exactly N.
+    // updates; running every one of the imposter's runs on one worker over one live state object
+    // (issue #1678) makes the final count exactly N.
     #[test]
     fn concurrent_injects_do_not_lose_state_updates() {
         let port = test_port();
@@ -7211,5 +8137,476 @@ function respond(ctx) {
                 .to_std_string_escaped();
             assert_eq!(value, expected, "the {name} context");
         }
+    }
+
+    // ---- Issue #1678: the runs of one realm interleave on their worker. ----
+
+    /// Start an inject on `thread` without driving it; its answer arrives once it has one.
+    fn start_inject_on(
+        thread: &mut MbJsThread,
+        inject: &str,
+        scope: &ScriptScope,
+        files: &Arc<ScriptFileAccess>,
+    ) -> std::sync::mpsc::Receiver<Result<MountebankInjectResponse>> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        start_inject(
+            thread,
+            InjectInput::new(inject, &mb_req("GET", "/1678"), scope.clone(), None, files),
+            RunBudget::default_now(),
+            Reply::Sync(tx),
+            Claim::local(),
+        );
+        rx
+    }
+
+    /// [`start_inject_on`] within `budget`.
+    fn start_inject_within_on(
+        thread: &mut MbJsThread,
+        inject: &str,
+        scope: &ScriptScope,
+        budget: RunBudget,
+    ) -> std::sync::mpsc::Receiver<Result<MountebankInjectResponse>> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        start_inject(
+            thread,
+            InjectInput::new(
+                inject,
+                &mb_req("GET", "/1678"),
+                scope.clone(),
+                None,
+                &trusted_files(),
+            ),
+            budget,
+            Reply::Sync(tx),
+            Claim::local(),
+        );
+        rx
+    }
+
+    fn answer_body(rx: &std::sync::mpsc::Receiver<Result<MountebankInjectResponse>>) -> String {
+        rx.try_recv()
+            .expect("the run answered")
+            .expect("the inject")
+            .body_text()
+            .to_string()
+    }
+
+    fn owned(key: StateKey) -> bool {
+        mb_js_pool().routes.lock().owners.contains_key(&key)
+    }
+
+    #[test]
+    fn runs_of_one_imposter_interleave_over_one_live_state() {
+        let mut thread = MbJsThread::new();
+        let scope = ScriptScope::detached(test_port());
+        let slow = start_inject_on(
+            &mut thread,
+            "async config => { config.state.order = 'a'; \
+             await new Promise(r => setTimeout(r, 50)); \
+             config.state.order += 'c'; return { body: config.state.order }; }",
+            &scope,
+            &trusted_files(),
+        );
+        let quick = start_inject_on(
+            &mut thread,
+            "config => { config.state.order += 'b'; return { body: config.state.order }; }",
+            &scope,
+            &trusted_files(),
+        );
+        // The quick run answered while the slow one waited, saw its write, and the slow one saw
+        // the quick one's at its next await.
+        assert_eq!(answer_body(&quick), "ab");
+        thread.drive();
+        assert_eq!(answer_body(&slow), "abc");
+        assert_eq!(scope.state.lock().get("order"), Some(&json!("abc")));
+    }
+
+    // A run that throws keeps the writes it made before, in the live object its imposter's runs
+    // share and so in the cell, as Mountebank's `imposterState` does.
+    #[test]
+    fn a_throwing_runs_state_writes_persist() {
+        let scope = ScriptScope::detached(test_port());
+        let err = execute_mountebank_inject(
+            "config => { config.state.seen = true; throw new Error('boom-1678'); }",
+            &mb_req("GET", "/1678"),
+            scope.clone(),
+            None,
+            &trusted_files(),
+        )
+        .expect_err("it throws");
+        assert!(err.to_string().contains("boom-1678"), "{err:#}");
+        assert_eq!(scope.state.lock().get("seen"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn a_job_that_throws_fails_only_its_own_run() {
+        let mut thread = MbJsThread::new();
+        let thrower = start_inject_on(
+            &mut thread,
+            "config => new Promise(() => setTimeout(() => { throw new Error('tick-1678'); }, 10))",
+            &ScriptScope::detached(test_port()),
+            &trusted_files(),
+        );
+        let waiter = start_inject_on(
+            &mut thread,
+            "config => new Promise(r => setTimeout(() => r({ body: 'fine' }), 30))",
+            &ScriptScope::detached(test_port()),
+            &trusted_files(),
+        );
+        thread.drive();
+        let err = thrower
+            .try_recv()
+            .expect("answered")
+            .expect_err("its timer threw");
+        assert!(err.to_string().contains("tick-1678"), "{err:#}");
+        assert_eq!(answer_body(&waiter), "fine");
+    }
+
+    // A `require` a run keeps answers in that run's own timer, even after another run of the realm
+    // ran in between, and never in the other run.
+    #[test]
+    fn a_kept_require_answers_only_in_its_own_run() {
+        let tree = scripts_tree();
+        let trusted = Arc::new(ScriptFileAccess::Trusted {
+            base: tree.root.clone(),
+        });
+        let mut thread = MbJsThread::new();
+        let scope = ScriptScope::detached(test_port());
+        let keeper = start_inject_on(
+            &mut thread,
+            "async config => { globalThis.__kept1678 = require; \
+             await new Promise(r => setTimeout(r, 30)); \
+             return { body: String(require('top.js')) }; }",
+            &scope,
+            &trusted,
+        );
+        let borrower = start_inject_on(
+            &mut thread,
+            "config => { try { return { body: String(__kept1678('top.js')) }; } \
+             catch (e) { return { body: 'ERR:' + String(e) }; } }",
+            &scope,
+            &trusted,
+        );
+        let borrowed = answer_body(&borrower);
+        assert!(
+            borrowed.starts_with("ERR:") && borrowed.contains("another run"),
+            "{borrowed}"
+        );
+        thread.drive();
+        assert_eq!(answer_body(&keeper), "A>B:true");
+    }
+
+    #[test]
+    fn console_in_a_timer_logs_as_its_own_run() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber {
+            events: Arc::clone(&events),
+        };
+        tracing::subscriber::with_default(subscriber, || {
+            let mut thread = MbJsThread::new();
+            let a = start_inject_on(
+                &mut thread,
+                "config => new Promise(r => setTimeout(() => { console.log('from-a-1678'); \
+                 r({ body: 'a' }); }, 30))",
+                &ScriptScope::detached(41_678),
+                &trusted_files(),
+            );
+            let b = start_inject_on(
+                &mut thread,
+                "config => new Promise(r => setTimeout(() => { console.log('from-b-1678'); \
+                 r({ body: 'b' }); }, 10))",
+                &ScriptScope::detached(42_678),
+                &trusted_files(),
+            );
+            thread.drive();
+            assert_eq!((answer_body(&a), answer_body(&b)), ("a".into(), "b".into()));
+        });
+        let logs = events.lock().unwrap();
+        let line = |message: &str| {
+            logs.iter()
+                .find(|l| l.contains(message))
+                .cloned()
+                .unwrap_or_else(|| panic!("no event for {message}: {logs:?}"))
+        };
+        let (a, b) = (line("from-a-1678"), line("from-b-1678"));
+        assert!(a.contains("41678") && !a.contains("42678"), "{a}");
+        assert!(b.contains("42678") && !b.contains("41678"), "{b}");
+    }
+
+    // A restart swaps the imposter's cell (issue #1726), which is a new live state: a run still in
+    // flight finishes on the old one and saves into the old cell; the next run starts fresh.
+    #[test]
+    fn a_new_cell_starts_fresh_while_the_old_ones_runs_finish() {
+        let mut thread = MbJsThread::new();
+        let old = ScriptScope::detached(test_port());
+        let parked = start_inject_on(
+            &mut thread,
+            "async config => { config.state.n = 1; await new Promise(r => setTimeout(r, 30)); \
+             config.state.n += 1; return { body: String(config.state.n) }; }",
+            &old,
+            &trusted_files(),
+        );
+        let fresh = ScriptScope::detached(old.port);
+        let read = start_inject_on(
+            &mut thread,
+            "config => ({ body: String(config.state.n) })",
+            &fresh,
+            &trusted_files(),
+        );
+        assert_eq!(answer_body(&read), "undefined");
+        thread.drive();
+        assert_eq!(answer_body(&parked), "2");
+        assert_eq!(old.state.lock().get("n"), Some(&json!(2)));
+        assert!(fresh.state.lock().is_empty());
+    }
+
+    #[test]
+    fn a_realm_with_a_run_in_flight_is_never_dropped() {
+        let mut thread = MbJsThread::new();
+        let dir = tempfile::tempdir().expect("a directory");
+        let parked = start_inject_on(
+            &mut thread,
+            "config => new Promise(r => setTimeout(() => r({ body: 'kept' }), 30))",
+            &ScriptScope::detached(test_port()),
+            &trusted_files(),
+        );
+        for i in 0..MB_REALMS_PER_WORKER + 2 {
+            let access = Arc::new(ScriptFileAccess::Confined(dir.path().join(i.to_string())));
+            let other = start_inject_on(
+                &mut thread,
+                "config => ({ body: 'other' })",
+                &ScriptScope::detached(test_port()),
+                &access,
+            );
+            assert_eq!(answer_body(&other), "other");
+        }
+        thread.drive();
+        assert_eq!(answer_body(&parked), "kept");
+    }
+
+    /// A pool of `workers` with no threads behind it, for the routing rules alone.
+    fn routing_pool(workers: usize) -> &'static MbPool {
+        Box::leak(Box::new(MbPool {
+            queues: (0..workers)
+                .map(|_| crossbeam::channel::unbounded().0)
+                .collect(),
+            shared: crossbeam::channel::unbounded().0,
+            busy: (0..workers)
+                .map(|_| std::sync::atomic::AtomicBool::new(false))
+                .collect(),
+            queued: (0..workers)
+                .map(|_| std::sync::atomic::AtomicUsize::new(0))
+                .collect(),
+            routes: parking_lot::Mutex::new(Routes {
+                load: vec![0; workers],
+                owners: std::collections::HashMap::new(),
+            }),
+        }))
+    }
+
+    #[test]
+    fn every_claim_of_an_imposter_goes_to_one_worker_until_the_last_is_released() {
+        let pool = routing_pool(2);
+        // Held for the test, as a run holds its scope: a key is unique only while its cell lives.
+        let scopes: Vec<_> = (0..4).map(|_| ScriptScope::detached(test_port())).collect();
+        let key = state_key(&scopes[0]);
+        let claims: Vec<Claim> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| s.spawn(|| pool.claim(Some(key)).expect("a claim")))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("claim thread"))
+                .collect()
+        });
+        assert!(claims.iter().all(|claim| claim.worker() == Some(0)));
+        assert_eq!(
+            pool.routes
+                .lock()
+                .owners
+                .get(&key)
+                .map(|owner| owner.claims),
+            Some(16)
+        );
+        // Another imposter goes to the worker with fewer claims...
+        let second = pool.claim(Some(state_key(&scopes[1]))).expect("a claim");
+        assert_eq!(second.worker(), Some(1));
+        // ...unless that one is busy executing, or has a job it has not started: an idle worker
+        // with an empty queue comes first.
+        pool.busy[1].store(true, std::sync::atomic::Ordering::Relaxed);
+        let third = pool.claim(Some(state_key(&scopes[2]))).expect("a claim");
+        assert_eq!(third.worker(), Some(0));
+        pool.busy[1].store(false, std::sync::atomic::Ordering::Relaxed);
+        pool.queued[1].store(1, std::sync::atomic::Ordering::Relaxed);
+        let fourth = pool.claim(Some(state_key(&scopes[3]))).expect("a claim");
+        assert_eq!(fourth.worker(), Some(0));
+        drop(fourth);
+        drop(claims);
+        assert!(!pool.routes.lock().owners.contains_key(&key));
+        drop((second, third));
+        assert_eq!(pool.routes.lock().load, [0, 0]);
+    }
+
+    // A run whose caller stopped waiting is dropped long before its deadline: its interval stops
+    // firing, and its worker place is released. That bounds a run that never answers, whatever
+    // script timeout its imposter sets.
+    #[tokio::test]
+    async fn an_abandoned_run_is_dropped_before_its_deadline() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let _capture = tracing::subscriber::set_default(CapturingSubscriber {
+            events: Arc::clone(&events),
+        });
+        let ticks = || {
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l.contains("tick-1678"))
+                .count()
+        };
+        let scope = ScriptScope::detached(test_port());
+        let key = state_key(&scope);
+        let caller = tokio::spawn(execute_mountebank_inject_bounded(
+            "config => { setInterval(() => console.log('tick-1678'), 5); }".to_string(),
+            mb_req("GET", "/1678"),
+            scope.clone(),
+            None,
+            trusted_files(),
+            std::time::Duration::from_secs(60),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(owned(key), "precondition: the run is in flight");
+        assert!(ticks() > 0, "precondition: its interval fires");
+        caller.abort();
+        let started = std::time::Instant::now();
+        while owned(key) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "the abandoned run is still in flight"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let at_drop = ticks();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(ticks(), at_drop, "its interval fired after it was dropped");
+    }
+
+    // Two runs of one imposter can share a promise through `state`, as in Mountebank: the one
+    // waiting on the other's promise is not ended for want of jobs of its own, and the reaction it
+    // registered still runs after the run that settled the promise has answered.
+    #[test]
+    fn runs_of_one_imposter_can_share_a_promise_through_state() {
+        let mut thread = MbJsThread::new();
+        let scope = ScriptScope::detached(test_port());
+        let maker = start_inject_on(
+            &mut thread,
+            "config => { config.state.p = new Promise(r => setTimeout(() => r('shared'), 20)); \
+             return config.state.p.then(v => ({ body: 'maker:' + v })); }",
+            &scope,
+            &trusted_files(),
+        );
+        let waiter = start_inject_on(
+            &mut thread,
+            "config => config.state.p.then(v => ({ body: 'waiter:' + v }))",
+            &scope,
+            &trusted_files(),
+        );
+        thread.drive();
+        assert_eq!(answer_body(&maker), "maker:shared");
+        assert_eq!(answer_body(&waiter), "waiter:shared");
+    }
+
+    // An imposter's script file access can change while it runs (an admin stub write narrows it),
+    // which puts its next run in another realm: that run waits for the runs in the old realm, so
+    // one live state object holds the imposter's state at a time and no update is lost.
+    #[test]
+    fn a_run_waits_while_its_imposter_has_runs_in_another_realm() {
+        let mut thread = MbJsThread::new();
+        let scope = ScriptScope::detached(test_port());
+        let first = start_inject_on(
+            &mut thread,
+            "async config => { const n = config.state.n || 0; \
+             await new Promise(r => setTimeout(r, 30)); \
+             config.state.n = n + 1; return { body: String(config.state.n) }; }",
+            &scope,
+            &trusted_files(),
+        );
+        let second = start_inject_on(
+            &mut thread,
+            "config => { config.state.n = (config.state.n || 0) + 1; \
+             return { body: String(config.state.n) }; }",
+            &scope,
+            &Arc::new(ScriptFileAccess::Refused),
+        );
+        assert!(second.try_recv().is_err(), "the second run waits");
+        thread.drive();
+        assert_eq!(answer_body(&first), "1");
+        assert_eq!(answer_body(&second), "2");
+        assert_eq!(scope.state.lock().get("n"), Some(&json!(2)));
+    }
+
+    // A worker runs a bounded number of one run's jobs before it starts the requests queued for it:
+    // an endless chain of promise jobs does not hold up its imposter's other requests.
+    #[tokio::test]
+    async fn an_endless_promise_chain_does_not_hold_up_its_imposters_next_run() {
+        let scope = ScriptScope::detached(test_port());
+        let chain = tokio::spawn(execute_mountebank_inject_bounded(
+            "async config => { async function f() { await 0; return f(); } return f(); }"
+                .to_string(),
+            mb_req("GET", "/1678"),
+            scope.clone(),
+            None,
+            trusted_files(),
+            std::time::Duration::from_secs(5),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let started = std::time::Instant::now();
+        let quick = execute_mountebank_inject_bounded(
+            "config => ({ body: 'quick' })".to_string(),
+            mb_req("GET", "/1678"),
+            scope.clone(),
+            None,
+            trusted_files(),
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .expect("the quick run answers");
+        let took = started.elapsed();
+        chain.abort();
+        assert_eq!(quick.body_text(), "quick");
+        assert!(
+            took < std::time::Duration::from_secs(1),
+            "the quick run waited {took:?} behind the chain"
+        );
+    }
+
+    // What a run leaves queued when it answers may pass to another run of its imposter, but never
+    // past its own deadline: an endless chain it started dies then, rather than living on run
+    // after run while the imposter has traffic (and starving the timers of every run it reaches).
+    #[test]
+    fn a_passed_on_chain_ends_at_the_deadline_of_the_run_that_started_it() {
+        let mut thread = MbJsThread::new();
+        let scope = ScriptScope::detached(test_port());
+        let waiter = start_inject_on(
+            &mut thread,
+            "config => new Promise(r => setTimeout(() => r({ body: 'timer ran' }), 50))",
+            &scope,
+            &trusted_files(),
+        );
+        let spinner = start_inject_within_on(
+            &mut thread,
+            "config => { (async function f() { await 0; f(); })(); return { body: 'spinning' }; }",
+            &scope,
+            RunBudget::starting_now(std::time::Duration::from_millis(100)),
+        );
+        assert_eq!(answer_body(&spinner), "spinning");
+        let started = std::time::Instant::now();
+        thread.drive();
+        assert_eq!(answer_body(&waiter), "timer ran");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the passed-on chain outlived its run's deadline: {:?}",
+            started.elapsed()
+        );
     }
 }

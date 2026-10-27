@@ -816,6 +816,16 @@ the script timeout (`504`). A function that returns `undefined` and whose callba
 once its jobs and timers have run fails with `Inject function must return an object`; Mountebank
 never answers that request.
 
+While an inject waits, other requests go on, as in Mountebank's event loop: a second request to the
+same imposter runs while the first awaits its timer, and a waiting inject holds no script worker,
+so sleeping injects never hold up another imposter's scripts. An inject whose client stops waiting
+(its script timeout, a delete of the imposter) is dropped, and its timers never fire.
+
+The imposter's `state` is one object shared by all its runs in flight, as Mountebank's
+`imposterState` is: a write is visible to a run that is still waiting, at its next `await`, and code
+between two `await`s never interleaves with another run, so `state.n = (state.n || 0) + 1` loses no
+update. A write made before the function throws is kept.
+
 ### What a script can use
 
 `inject`, predicate `inject`, `decorate` and `wait` functions run standard JavaScript in Rift's

@@ -347,7 +347,11 @@ medians, spread and each arm's delta against it.
 
 1. **Minimize stub count** - Fewer stubs = faster matching
 2. **Use simple responses** - Static `is` responses are fastest
-3. **Avoid injection** - JavaScript execution adds latency
+3. **Avoid injection** - JavaScript execution adds latency. Mountebank-style scripts run on a pool
+   of half the cores (4 to 16 threads); every run of one imposter executes on one of them, over the
+   imposter's shared `state`, so one imposter's synchronous script work uses one core. A script
+   waiting on a timer or a promise holds no thread. A CPU-bound script delays the imposters sharing
+   its thread until it finishes, or until the loop-iteration cap stops it.
 4. **Enable connection pooling** - Reuse upstream connections
 
 ### Resource Allocation
