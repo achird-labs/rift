@@ -7,6 +7,7 @@ use super::core::Imposter;
 use super::datadir_file;
 use super::fault_io::{FaultCell, FaultIo, TcpFaultKind, TlsPayloadFault};
 use super::handler::handle_imposter_request_decorated;
+use super::probe::{Point, ProbeHandle};
 use super::reconcile::{
     ApplyReport, DeleteAllReport, DesiredImposter, EventContext, ImposterEvent,
     ImposterEventListener, Persistence, StubReconcile,
@@ -673,6 +674,10 @@ pub struct ImposterManager {
     /// What scripts may `require()` in an imposter created through a call that names no access
     /// (issue #1611). See [`Self::with_script_file_access`].
     script_file_access: ScriptFileAccess,
+    /// The lifecycle probe (`formal/lifecycle`), `None` in production. See [`Self::with_probe`].
+    probe: ProbeHandle,
+    /// Numbers the imposters this manager creates, for the probe's generations.
+    generations: std::sync::atomic::AtomicU64,
 }
 
 /// Default bound for the post-delete connection drain (issue #596). Generous: normal graceful
@@ -710,6 +715,8 @@ impl ImposterManager {
             body_guard: ArcSwap::from_pointee(super::body_limits::BodyGuard::default()),
             no_match_interceptor: None,
             exchange_inspector_provider: None,
+            probe: None,
+            generations: std::sync::atomic::AtomicU64::new(0),
             accept_runtimes: None,
             serve_unbound: false,
             default_host: None,
@@ -1118,6 +1125,21 @@ impl ImposterManager {
         self
     }
 
+    /// Install a lifecycle probe (`formal/lifecycle/README.md`, "Trace validation"): the engine
+    /// calls it at each [`Point`] of a create, delete, replace or apply, in the order it takes
+    /// them, so a test can record a run and check it against the TLA+ model. Nothing is
+    /// installed by default, and the engine never waits on the probe.
+    #[must_use]
+    pub fn with_probe(mut self, probe: Arc<dyn super::probe::Probe>) -> Self {
+        self.probe = Some(probe);
+        self
+    }
+
+    #[inline]
+    fn probe(&self, point: Point) {
+        super::probe::fire(&self.probe, point);
+    }
+
     fn emit(&self, event: ImposterEvent) {
         if let Some(listener) = &self.event_listener {
             // Built only when someone is listening — outside a request scope this is a cheap miss,
@@ -1474,10 +1496,24 @@ impl ImposterManager {
         imposter.journal_file = journal_file;
         imposter.set_persistence(persistence);
         imposter.set_script_file_access(script_files);
+        imposter.generation = self
+            .generations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        imposter.probe = self.probe.clone();
+        self.probe(Point::CreateBound {
+            port,
+            generation: imposter.generation,
+        });
         let floor = self.load_floors.lock().get(&port).copied();
         if let Some(floor) = floor {
             imposter.continue_load_clock(floor);
         }
+        self.probe(Point::CreateFloorRead {
+            port,
+            generation: imposter.generation,
+            floor,
+        });
 
         // Inject the shared proxy-recording store, if one is registered (issue #315);
         // otherwise the imposter keeps its private per-mode LocalProxyStore.
@@ -1537,6 +1573,10 @@ impl ImposterManager {
                 port,
             );
         }
+        self.probe(Point::CreateAccepting {
+            port,
+            generation: imposter.generation,
+        });
 
         // Store imposter. `try_claim`'s internal mutex closes the same TOCTOU the old write lock
         // did between the earlier read-only check and the bind: with SO_REUSEADDR/REUSEPORT two
@@ -1550,8 +1590,16 @@ impl ImposterManager {
         {
             imposter.cancel.cancel();
             let _ = shutdown_tx.send(());
+            self.probe(Point::CreateClaimLost {
+                port,
+                generation: imposter.generation,
+            });
             return Err(ImposterError::PortInUse(port));
         }
+        self.probe(Point::CreateClaimed {
+            port,
+            generation: imposter.generation,
+        });
 
         // Persist synchronously and surface the result: a create that can't be durably recorded
         // must fail loudly rather than return a success that vanishes on restart (issue #563).
@@ -1567,8 +1615,16 @@ impl ImposterManager {
             // own input file, and could delete a concurrent create's freshly persisted one.
             imposter.cancel.cancel();
             let _ = shutdown_tx.send(());
+            self.probe(Point::CreateRolledBack {
+                port,
+                generation: imposter.generation,
+            });
             return Err(e);
         }
+        self.probe(Point::CreatePersisted {
+            port,
+            generation: imposter.generation,
+        });
 
         Ok((port, bind_failure))
     }
@@ -2102,6 +2158,11 @@ impl ImposterManager {
             .entry(port)
             .and_modify(|f| *f = (*f).max(floor))
             .or_insert(floor);
+        self.probe(Point::DeleteFloorRecorded {
+            port,
+            generation: imposter.generation,
+            floor,
+        });
     }
 
     async fn delete_imposter_inner(
@@ -2116,7 +2177,14 @@ impl ImposterManager {
             // Held until the imposter is out of the map, so no write can recreate its file between
             // the unlink and the removal.
             let _persist = self.persist_lock.lock().await;
-            let imposter = self.get_imposter(port)?;
+            self.probe(Point::DeleteLocked { port });
+            let imposter = self
+                .get_imposter(port)
+                .inspect_err(|_| self.probe(Point::DeleteNotFound { port }))?;
+            self.probe(Point::DeleteLookedUp {
+                port,
+                generation: imposter.generation,
+            });
             // Before the unlink, so a scoped clear or a flush cannot write its recorded requests
             // back after it (issue #1608); undone if the imposter stays.
             detach_journal(&imposter);
@@ -2124,18 +2192,45 @@ impl ImposterManager {
                 if let Some(file) = &imposter.journal_file {
                     file.reattach();
                 }
+                self.probe(Point::DeleteUnlinkFailed {
+                    port,
+                    generation: imposter.generation,
+                });
                 return Err(e);
             }
+            self.probe(Point::DeleteUnlinked {
+                port,
+                generation: imposter.generation,
+            });
             self.record_load_floor(port, &imposter);
-            self.imposters
+            let removed = self
+                .imposters
                 .remove_if_same(port, &imposter)
-                .ok_or(ImposterError::NotFound(port))?
+                .ok_or(ImposterError::NotFound(port))
+                .inspect_err(|_| self.probe(Point::DeleteNotFound { port }))?;
+            self.probe(Point::DeleteRemoved {
+                port,
+                generation: removed.generation,
+            });
+            removed
         } else {
-            self.record_load_floor(port, &*self.get_imposter(port)?);
+            let looked_up = self
+                .get_imposter(port)
+                .inspect_err(|_| self.probe(Point::DeleteNotFound { port }))?;
+            self.probe(Point::DeleteLookedUp {
+                port,
+                generation: looked_up.generation,
+            });
+            self.record_load_floor(port, &looked_up);
             let imposter = self
                 .imposters
                 .remove(port)
-                .ok_or(ImposterError::NotFound(port))?;
+                .ok_or(ImposterError::NotFound(port))
+                .inspect_err(|_| self.probe(Point::DeleteNotFound { port }))?;
+            self.probe(Point::DeleteRemoved {
+                port,
+                generation: imposter.generation,
+            });
             // Before a replace's create on the port removes the file (issue #1608).
             detach_journal(&imposter);
             imposter
@@ -2152,6 +2247,10 @@ impl ImposterManager {
         if let Some(ref tx) = imposter.shutdown_tx {
             let _ = tx.send(());
         }
+        self.probe(Point::DeleteCancelled {
+            port,
+            generation: imposter.generation,
+        });
         // Await the accept loop: its `select!` breaks on the signal and drops the listener, so the
         // bind is released by the time this resolves. A `JoinError` (loop task panicked) is
         // irrelevant here — we only need it stopped — but is surfaced as a warning rather than swallowed.
@@ -2169,16 +2268,21 @@ impl ImposterManager {
         // #1643), so this is normally sub-millisecond; a client too slow to read a produced
         // response is capped rather than hanging the delete.
         imposter.conn_tracker.close();
-        if tokio::time::timeout(self.conn_drain, imposter.conn_tracker.wait())
+        let timed_out = tokio::time::timeout(self.conn_drain, imposter.conn_tracker.wait())
             .await
-            .is_err()
-        {
+            .is_err();
+        if timed_out {
             warn!(
                 "imposter on port {port}: connection drain exceeded {:?}; returning with {} connection(s) still closing",
                 self.conn_drain,
                 imposter.conn_tracker.len()
             );
         }
+        self.probe(Point::DeleteDrained {
+            port,
+            generation: imposter.generation,
+            timed_out,
+        });
 
         // No script state to clear: it belongs to this instance and goes with it (issue #1726).
         if let Some(sequencer) = &self.sequencer {
@@ -2199,6 +2303,10 @@ impl ImposterManager {
         }
 
         info!("Imposter on port {} deleted", port);
+        self.probe(Point::DeleteReturned {
+            port,
+            generation: imposter.generation,
+        });
         // Handed back whole, so callers read the config as it was at delete time (issue #1229:
         // `DELETE /imposters` is Mountebank's save-before-reset export) and the final counters (#1399).
         Ok(imposter)
@@ -2221,7 +2329,9 @@ impl ImposterManager {
     /// then each deleted port gets its own `Deleted`, because the others are still serving.
     pub async fn delete_all(&self) -> DeleteAllReport {
         let mut report = DeleteAllReport::default();
-        for port in self.imposters.ports() {
+        let ports = self.imposters.ports();
+        self.probe(Point::DeleteAllSwept { swept: ports.len() });
+        for port in ports {
             match self.delete_imposter_inner(port, true).await {
                 Ok(imposter) => report.deleted.push(imposter.current_config()),
                 // A concurrent delete got there first: already gone, which is what was asked.
@@ -2396,6 +2506,9 @@ impl ImposterManager {
             .into_iter()
             .filter(|port| !desired_ports.contains(port))
             .collect();
+        self.probe(Point::ApplySwept {
+            swept: removed_ports.len(),
+        });
         for port in removed_ports {
             match self.delete_imposter_inner(port, true).await {
                 Ok(_) => {

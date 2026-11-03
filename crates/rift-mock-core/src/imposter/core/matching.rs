@@ -595,6 +595,24 @@ impl Imposter {
         stub_index: usize,
         transitions: &HashMap<String, chrono::DateTime<chrono::Utc>>,
     ) -> chrono::DateTime<chrono::Utc> {
+        let stamp = self.served_load_stamp_unprobed(stub_state, stub_index, transitions);
+        crate::imposter::probe::fire(
+            &self.probe,
+            crate::imposter::probe::Point::Served {
+                port: self.config.port.unwrap_or(0),
+                generation: self.generation,
+                stamp: stamp.timestamp(),
+            },
+        );
+        stamp
+    }
+
+    fn served_load_stamp_unprobed(
+        &self,
+        stub_state: &StubState,
+        stub_index: usize,
+        transitions: &HashMap<String, chrono::DateTime<chrono::Utc>>,
+    ) -> chrono::DateTime<chrono::Utc> {
         let own = stub_state.loaded_at();
         if transitions.is_empty() {
             return own;

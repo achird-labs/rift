@@ -1,0 +1,14 @@
+{"generation": 1, "point": "CreateBound", "port": 58422, "seq": 0}
+{"floor": null, "generation": 1, "point": "CreateFloorRead", "port": 58422, "seq": 1}
+{"generation": 1, "point": "CreateAccepting", "port": 58422, "seq": 2}
+{"generation": 1, "point": "CreateClaimed", "port": 58422, "seq": 3}
+{"generation": 1, "point": "CreatePersisted", "port": 58422, "seq": 4}
+{"point": "DeleteLocked", "port": 58422, "seq": 5}
+{"generation": 1, "point": "DeleteLookedUp", "port": 58422, "seq": 6}
+{"generation": 1, "point": "DeleteUnlinked", "port": 58422, "seq": 7}
+{"floor": 1793741191, "generation": 1, "point": "DeleteFloorRecorded", "port": 58422, "seq": 8}
+{"generation": 1, "point": "DeleteRemoved", "port": 58422, "seq": 9}
+{"generation": 1, "point": "DeleteCancelled", "port": 58422, "seq": 10}
+{"generation": 1, "point": "DeleteDrained", "port": 58422, "seq": 11, "timedOut": false}
+{"generation": 1, "point": "DeleteReturned", "port": 58422, "seq": 12}
+{"generation": 1, "point": "Served", "port": 58422, "seq": 13, "stamp": 1793741191}

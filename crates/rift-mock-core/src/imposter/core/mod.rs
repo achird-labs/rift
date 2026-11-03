@@ -506,6 +506,11 @@ pub struct Imposter {
     stubs_write: Mutex<()>,
     /// Where new content's `Last-Modified: load` comes from (issue #1301).
     pub(crate) load_clock: LoadClock,
+    /// Which imposter this is among all the manager created, for the lifecycle probe
+    /// (`formal/lifecycle`). `0` for an imposter built outside a manager.
+    pub(crate) generation: crate::imposter::probe::Generation,
+    /// The lifecycle probe the manager installed, `None` in production.
+    pub(crate) probe: crate::imposter::probe::ProbeHandle,
     /// When each scenario last changed state, by scenario name (issue #1307). A transition changes
     /// which stub answers with no stub changing, so the served `Last-Modified` folds in the
     /// transitions of every scenario gating the answering stub or a stub ahead of it. Keyed by name,
@@ -713,6 +718,8 @@ impl Imposter {
             stubs_snapshot: ArcSwap::from_pointee(StubSnapshot::build(stubs)),
             stubs_write: Mutex::new(()),
             load_clock,
+            generation: 0,
+            probe: None,
             scenario_transitions: ArcSwap::from_pointee(HashMap::new()),
             // Each request claims with its own proxy response's mode (issue #1387).
             proxy_store: Arc::new(LocalProxyStore::new(ProxyMode::ProxyOnce)),
