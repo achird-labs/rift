@@ -36,7 +36,7 @@ cases = [
     ('two creates pass the bind check and both bind; the claim decides (manager.rs:1540)',
      only(known_cfg, 'BindCheckSuffices'), 'BindCheckSuffices'),
     # Filed findings, reachable until fixed (README.md, "Findings").
-    ('a request stamped between record_load_floor and the cancel is above the recorded floor',
+    ('a content change between record_load_floor and the cancel is above the recorded floor (#1762)',
      only(mutants_cfg, 'FloorMonotone'), 'FloorMonotone'),
     ('a create that loses the claim has answered requests', only(known_cfg, 'LoserNeverAnswers'),
      'LoserNeverAnswers'),

@@ -22,7 +22,8 @@ The mapping (formal/lifecycle/README.md, "Trace validation"):
   CreateFloorRead               -> CreateReadFloor
   CreateAccepting               -> CreateSpawnAccept
   CreateClaimed / ClaimLost     -> CreateTryClaim, ok = won
-  CreatePersisted / RolledBack  -> CreatePersistWrite, ok = persisted; RolledBack also -> CreateRollback
+  CreatePersisted / PersistFailed -> CreatePersistWrite, ok = persisted
+  CreateRolledBack              -> CreateRollback
   DeleteLocked                  -> DeleteLock
   DeleteLookedUp / NotFound     -> DeleteLookup, ok = found
   DeleteUnlinked / UnlinkFailed -> DeleteUnlink, ok = unlinked
@@ -87,12 +88,13 @@ def labels(records):
             port, n = gen_fields(r)
             out.append({"action": "CreateTryClaim", "op": creator_of[r["generation"]], "port": port, "n": n,
                         "ok": p == "CreateClaimed"})
-        elif p in ("CreatePersisted", "CreateRolledBack"):
+        elif p in ("CreatePersisted", "CreatePersistFailed"):
             port, n = gen_fields(r)
             o = creator_of[r["generation"]]
             out.append({"action": "CreatePersistWrite", "op": o, "port": port, "n": n, "ok": p == "CreatePersisted"})
-            if p == "CreateRolledBack":
-                out.append({"action": "CreateRollback", "op": o, "port": port, "n": n, "ok": True})
+        elif p == "CreateRolledBack":
+            port, n = gen_fields(r)
+            out.append({"action": "CreateRollback", "op": creator_of[r["generation"]], "port": port, "n": n, "ok": True})
         elif p in ("ApplySwept", "DeleteAllSwept"):
             if open_sweep is not None:
                 return None  # two sweeps at once: not attributed

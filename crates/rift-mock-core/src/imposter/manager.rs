@@ -1609,6 +1609,10 @@ impl ImposterManager {
             .persist_imposter_with(&imposter, cursors == CursorStart::Fresh)
             .await
         {
+            self.probe(Point::CreatePersistFailed {
+                port,
+                generation: imposter.generation,
+            });
             self.imposters.remove(port);
             // No file to clean up: a failed persist leaves `{port}.json` exactly as it was (issue
             // #1158). The unlink that used to be here, for a truncated file, also deleted a reload's

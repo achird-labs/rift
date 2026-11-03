@@ -40,8 +40,10 @@ pub enum Point {
     /// The datadir write succeeded, or was skipped for a generation no longer registered
     /// (`CreatePersistWrite`).
     CreatePersisted { port: u16, generation: Generation },
-    /// The datadir write failed and the create removed and cancelled its generation
-    /// (`CreateRollback`).
+    /// The datadir write failed; the rollback has not run yet (`CreatePersistWrite`, the failing
+    /// branch).
+    CreatePersistFailed { port: u16, generation: Generation },
+    /// The create removed and cancelled its generation after a failed write (`CreateRollback`).
     CreateRolledBack { port: u16, generation: Generation },
     /// A delete took `persist_lock` (`DeleteLock`).
     DeleteLocked { port: u16 },

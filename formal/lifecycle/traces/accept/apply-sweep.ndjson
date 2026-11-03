@@ -1,0 +1,15 @@
+{"generation":1,"point":"CreateBound","port":63596,"seq":0}
+{"floor":null,"generation":1,"point":"CreateFloorRead","port":63596,"seq":1}
+{"generation":1,"point":"CreateAccepting","port":63596,"seq":2}
+{"generation":1,"point":"CreateClaimed","port":63596,"seq":3}
+{"generation":1,"point":"CreatePersisted","port":63596,"seq":4}
+{"generation":1,"point":"Served","port":63596,"seq":5,"stamp":1793744823}
+{"point":"ApplySwept","seq":6,"swept":1}
+{"point":"DeleteLocked","port":63596,"seq":7}
+{"generation":1,"point":"DeleteLookedUp","port":63596,"seq":8}
+{"generation":1,"point":"DeleteUnlinked","port":63596,"seq":9}
+{"floor":1793744823,"generation":1,"point":"DeleteFloorRecorded","port":63596,"seq":10}
+{"generation":1,"point":"DeleteRemoved","port":63596,"seq":11}
+{"generation":1,"point":"DeleteCancelled","port":63596,"seq":12}
+{"generation":1,"point":"DeleteDrained","port":63596,"seq":13,"timedOut":false}
+{"generation":1,"point":"DeleteReturned","port":63596,"seq":14}
