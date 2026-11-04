@@ -146,6 +146,7 @@ ClientSend ==
 ClientWriteBody ==
     /\ version = "h1"
     /\ current > 0 /\ script[current] = "refuse"
+    /\ reading = "Body" \/ served[current] = "refuse"
     /\ bodyLeft > 0
     /\ ~On("rst", wire)
     /\ phase # "closed"
@@ -154,6 +155,21 @@ ClientWriteBody ==
     /\ UNCHANGED <<script, https, version, timing, pipelines, hasStub, sent, current, svc, reading,
                    writing, wbuf, tlsBuf, cell, linger, trip, phase, soLinger, sendq, wire, served,
                    streams, ghost>>
+
+\* The client closes an idle connection instead of sending the rest; both counters jump, as nothing
+\* more will be sent or read.  hyper reads EOF with no message started (dispatch.rs:343) and closes
+\* both sides (`maybe_notify`, conn.rs:548).
+ClientCloses ==
+    /\ version = "h1" /\ phase = "serving"
+    /\ reading = "Init" /\ writing = "Init" /\ svc = "idle"
+    /\ current = sent
+    /\ sent' = MaxReqs
+    /\ current' = MaxReqs
+    /\ reading' = "Closed"
+    /\ writing' = "Closed"
+    /\ UNCHANGED <<script, https, version, timing, pipelines, hasStub, svc, wbuf, tlsBuf, cell,
+                   linger, trip, phase, soLinger, sendq, wire, unread, bodyLeft, served, streams,
+                   ghost>>
 
 (***************************************************************************)
 (* hyper's HTTP/1 dispatcher.                                              *)
@@ -471,7 +487,7 @@ H2Write(r) ==
                    writing, wbuf, tlsBuf, linger, trip, sendq, wire, unread, bodyLeft, served>>
 
 Next ==
-    \/ AddFaultStub \/ ClientSend \/ ClientWriteBody
+    \/ AddFaultStub \/ ClientSend \/ ClientWriteBody \/ ClientCloses
     \/ ReadHead \/ ServiceDone \/ WriteHead \/ DropBody
     \/ HttpWrite \/ TlsTakePayload \/ TlsSeal \/ TlsPayloadSeal \/ TlsRecordWrite \/ TlsTripped
     \/ FlushDone \/ PlainShutdown \/ LingerShutWrite \/ DrainRead \/ DrainEnds \/ Close \/ Deliver
