@@ -155,4 +155,6 @@ nav:
       - Scala 3: sdk/scala.md
       - Node / TypeScript: sdk/node.md
       - Go: sdk/go.md
+  - Design:
+      - Formal Verification: design/formal-verification.md
   - Changelog: changelog.md

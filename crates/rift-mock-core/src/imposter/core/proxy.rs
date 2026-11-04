@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::imposter::behavior_pipeline::{BehaviorOutcome, BehaviorRun, ServedParts};
+use crate::imposter::probe::{Point, fire};
 use crate::imposter::types::{UpstreamTarget, upstream_url};
 use crate::recording::{ClaimToken, ProxyStoreError, StubPlacement, StubPublication};
 // The predicate-generator keys this engine reads (issue #1327). Any other key is accepted and
@@ -1401,7 +1402,17 @@ impl Imposter {
         let claim = if transparent || generation_failed {
             None
         } else {
-            let outcome = match self.proxy_store.try_claim_as(port, &signature, mode) {
+            let claimed = self.proxy_store.try_claim_as(port, &signature, mode);
+            if let Ok(outcome) = &claimed {
+                fire(
+                    &self.probe,
+                    Point::ProxyClaim {
+                        port,
+                        outcome: *outcome,
+                    },
+                );
+            }
+            let outcome = match claimed {
                 // A recording only behind the stub that answered did not answer this request: it
                 // missed, so it is forwarded and recorded in front of this stub, as Mountebank's
                 // `proxyAndRecord` does (issue #1705). Forget the shadowed recording and claim
@@ -1411,8 +1422,22 @@ impl Imposter {
                         && mode_is_once
                         && self.recording_is_shadowed(answering, &signature) =>
                 {
+                    fire(&self.probe, Point::ProxyShadowed { port });
                     match self.proxy_store.forget_recorded(port, &signature) {
-                        Ok(()) => self.proxy_store.try_claim_as(port, &signature, mode),
+                        Ok(()) => {
+                            fire(&self.probe, Point::ProxyShadowForgot { port });
+                            let again = self.proxy_store.try_claim_as(port, &signature, mode);
+                            if let Ok(outcome) = &again {
+                                fire(
+                                    &self.probe,
+                                    Point::ProxyClaim {
+                                        port,
+                                        outcome: *outcome,
+                                    },
+                                );
+                            }
+                            again
+                        }
                         // Terminal fallback, logged: replaying the recording is the behaviour
                         // before #1705, still a correct `proxyOnce` answer, just not Mountebank's.
                         Err(e) => {
@@ -1429,7 +1454,9 @@ impl Imposter {
             };
             match outcome {
                 Ok(ClaimOutcome::AlreadyRecorded) => {
+                    fire(&self.probe, Point::ProxyLookingUp { port });
                     if let Some(recorded) = self.proxy_store.lookup(port, &signature) {
+                        fire(&self.probe, Point::ProxyReplayed { port });
                         debug!("Returning recorded proxy response (proxyOnce mode)");
                         return Ok(ProxyOutcome::Served(ProxiedResponse {
                             status: recorded.status,
@@ -1442,6 +1469,7 @@ impl Imposter {
                     // recording forgotten because its stub was just deleted, #1386) or a
                     // misbehaving backend. Forward without recording rather than fail; the next
                     // request claims and records it.
+                    fire(&self.probe, Point::ProxyNothingToReplay { port });
                     warn!(
                         "Proxy store reported AlreadyRecorded but lookup found nothing; forwarding without recording"
                     );
@@ -1476,6 +1504,7 @@ impl Imposter {
         // Forward the request. Isolated so a failure returns early, dropping (releasing) the claim
         // (issue #315): a proxyOnce signature must stay retryable, not wedge because the upstream
         // call errored.
+        fire(&self.probe, Point::ProxyForwarding { port });
         let start = Instant::now();
         let forwarded: anyhow::Result<ForwardedResponse> = async {
             // Forward the method verbatim, as Mountebank does (issue #1380).
@@ -1640,6 +1669,7 @@ impl Imposter {
                             }),
                         };
                         claim.settle(resp, Some(&publication));
+                        fire(&self.probe, Point::ProxySettled { port });
                         true
                     } else {
                         false
@@ -1669,6 +1699,8 @@ impl Imposter {
                             answering,
                             (settled && mode_is_once).then(|| signature.clone()),
                         );
+                        let claimed = settled && mode_is_once;
+                        fire(&self.probe, Point::ProxyInserted { port, claimed });
                     }
                     debug!(
                         "Generated stub from proxy response for path {} (mode: {})",
@@ -1695,6 +1727,7 @@ impl Imposter {
         // is nothing to publish and the claim settles through `record` exactly as before.
         if let Some((claim, resp)) = recording {
             claim.settle(resp, None);
+            fire(&self.probe, Point::ProxySettled { port });
         }
 
         Ok(ProxyOutcome::Served(ProxiedResponse {

@@ -1,0 +1,123 @@
+name: Formal models
+
+# Issue #1771 (epic #1761): TLC checks the TLA+ models of the engine's concurrent protocols
+# (formal/README.md). On a pull request that touches a model or the code it describes: each model's
+# small cfg, its witness.py, and trace validation's fixtures. On master, nightly and on demand: the
+# full cfgs and mutants.py as well, which puts each fixed bug back into the model and requires its
+# named invariant to catch it.
+#
+# A pull request that changes a modelled file without changing formal/ says why in its description,
+# on a line starting `formal:`. Without that line the model silently stops describing the code.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    paths:
+      - 'formal/**'
+      - '.github/workflows/formal.yml'
+      - 'crates/rift-mock-core/src/imposter/probe.rs'
+      - 'crates/rift-mock-core/src/imposter/manager.rs'
+      - 'crates/rift-mock-core/src/imposter/handler.rs'
+      - 'crates/rift-mock-core/src/imposter/fault_io.rs'
+      - 'crates/rift-mock-core/src/imposter/core/**'
+      - 'crates/rift-mock-core/src/recording/proxy_store.rs'
+      - 'crates/rift-mock-core/src/scripting/js_engine.rs'
+      - 'crates/rift-mock-core/src/scripting/mod.rs'
+      - 'crates/rift-mock-core/src/extensions/flow_state.rs'
+      - 'crates/rift-mock-core/tests/*_interleavings.rs'
+  push:
+    branches: [master]
+    paths:
+      - 'formal/**'
+      - '.github/workflows/formal.yml'
+      - 'crates/rift-mock-core/src/imposter/probe.rs'
+      - 'crates/rift-mock-core/src/imposter/manager.rs'
+      - 'crates/rift-mock-core/src/imposter/handler.rs'
+      - 'crates/rift-mock-core/src/imposter/fault_io.rs'
+      - 'crates/rift-mock-core/src/imposter/core/**'
+      - 'crates/rift-mock-core/src/recording/proxy_store.rs'
+      - 'crates/rift-mock-core/src/scripting/js_engine.rs'
+      - 'crates/rift-mock-core/src/scripting/mod.rs'
+      - 'crates/rift-mock-core/src/extensions/flow_state.rs'
+      - 'crates/rift-mock-core/tests/*_interleavings.rs'
+  schedule:
+    - cron: "23 3 * * *" # nightly 03:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TLA_TOOLS_VERSION: v1.7.4
+  TLA_TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+
+jobs:
+  model-or-reason:
+    name: model or reason
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: A change to modelled code changes the model, or says why not
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=$(git diff --name-only "$BASE" HEAD)
+          if ! echo "$changed" | grep -qE '^crates/rift-mock-core/src/'; then
+            echo "No engine source changed."
+            exit 0
+          fi
+          if echo "$changed" | grep -q '^formal/'; then
+            echo "The change touches formal/."
+            exit 0
+          fi
+          if printf '%s\n' "$BODY" | grep -qE '^formal: .+'; then
+            echo "The description says why the models are unaffected."
+            exit 0
+          fi
+          echo "::error::This changes modelled code without touching formal/. Change the model, or add a line 'formal: <why it is unaffected>' to the description."
+          exit 1
+
+  tlc:
+    name: TLC (${{ matrix.model }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [lifecycle, proxyonce, scenario, scripting, faultio]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download TLC
+        run: |
+          curl -sSfL -o tla2tools.jar \
+            "https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_VERSION}/tla2tools.jar"
+          echo "${TLA_TOOLS_SHA256}  tla2tools.jar" | sha256sum -c -
+
+      - name: The pull-request cfg
+        run: python3 formal/check.py tla2tools.jar ${{ matrix.model }} pr
+
+      - name: Witnesses
+        run: python3 formal/${{ matrix.model }}/witness.py "$PWD/tla2tools.jar"
+
+      - name: The checker's own fixtures
+        if: hashFiles(format('formal/{0}/validate.py', matrix.model)) != ''
+        working-directory: formal/${{ matrix.model }}
+        run: python3 validate.py "$GITHUB_WORKSPACE/tla2tools.jar" --selftest traces
+
+      - name: The full cfgs
+        if: github.event_name != 'pull_request'
+        run: python3 formal/check.py tla2tools.jar ${{ matrix.model }} full
+
+      - name: Mutants
+        if: github.event_name != 'pull_request'
+        run: python3 formal/${{ matrix.model }}/mutants.py "$PWD/tla2tools.jar"

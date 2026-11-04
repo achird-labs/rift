@@ -321,3 +321,9 @@ lerna-debug.log*
 # MkDocs build output (mkdocs build / the Docs Links CI job)
 /site/
 /_site/
+
+# TLC and Python leftovers under formal/
+formal/**/__pycache__/
+formal/**/states/
+formal/**/*_TTrace_*
+formal/tla2tools.jar

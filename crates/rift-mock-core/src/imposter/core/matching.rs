@@ -10,6 +10,7 @@ use crate::extensions::flow_state::CasOutcome;
 use crate::imposter::predicates::RequestHeaders;
 #[cfg(test)]
 use crate::imposter::predicates::stub_matches_inner;
+use crate::imposter::probe::{Point, fire};
 use crate::imposter::types::{MAX_TRIED_STUBS, MatchOutcome, TriedStub, TriedWhy};
 
 /// The accumulating form of [`MatchOutcome`]'s `tried`/`triedOmitted`, built during the stub scan.
@@ -179,7 +180,12 @@ impl Imposter {
             // (flow_id, scenario) state equals it.
             if let Some(required) = &stub.required_scenario_state {
                 let scenario = stub.scenario_name.as_deref().unwrap_or("");
-                if self.scenario_state(&flow_id, scenario)? != *required {
+                let state = self.scenario_state(&flow_id, scenario)?;
+                self.probe_at(|port| Point::GateRead {
+                    port,
+                    stub_index: stub_idx,
+                });
+                if state != *required {
                     if let Some(trace) = trace.as_mut() {
                         trace.reject(stub_idx, stub, TriedWhy::SkippedScenarioState);
                     }
@@ -532,6 +538,7 @@ impl Imposter {
             && self
                 .scenario_state(flow_id, scenario)
                 .map_or(true, |current| current != state);
+        self.probe_at(|port| Point::ScenarioChangeRead { port, changed });
         self.flow_store.set(
             flow_id,
             scenario,
@@ -549,6 +556,7 @@ impl Imposter {
             && self
                 .scenario_state(flow_id, scenario)
                 .map_or(true, |current| current != INITIAL_SCENARIO_STATE);
+        self.probe_at(|port| Point::ScenarioChangeRead { port, changed });
         self.flow_store.delete(flow_id, scenario)?;
         if changed {
             self.stamp_scenario_transition(scenario);
@@ -567,11 +575,22 @@ impl Imposter {
     /// `304` for the new one.
     fn stamp_scenario_transition(&self, scenario: &str) {
         let at = self.load_clock.next();
+        let stamp = at.timestamp();
+        self.probe_at(|port| Point::TransitionStampIssued { port, stamp });
         self.scenario_transitions.rcu(|current| {
             let mut next = HashMap::clone(current);
             next.insert(scenario.to_string(), at);
             next
         });
+        self.probe_at(|port| Point::TransitionStamped { port, stamp });
+    }
+
+    /// Fire the probe point `point` builds from this imposter's port, when a probe is installed.
+    #[inline]
+    pub(crate) fn probe_at(&self, point: impl FnOnce(u16) -> Point) {
+        if self.probe.is_some() {
+            fire(&self.probe, point(self.config.port.unwrap_or(0)));
+        }
     }
 
     /// The scenario transition stamps, copied before matching (issue #1307) — see
@@ -590,6 +609,24 @@ impl Imposter {
     /// matching. The matched stub's own gate is added explicitly, so a concurrent stub edit that
     /// shifts indices cannot drop it.
     pub(crate) fn served_load_stamp(
+        &self,
+        stub_state: &StubState,
+        stub_index: usize,
+        transitions: &HashMap<String, chrono::DateTime<chrono::Utc>>,
+    ) -> chrono::DateTime<chrono::Utc> {
+        let stamp = self.served_load_stamp_unprobed(stub_state, stub_index, transitions);
+        crate::imposter::probe::fire(
+            &self.probe,
+            crate::imposter::probe::Point::Served {
+                port: self.config.port.unwrap_or(0),
+                generation: self.generation,
+                stamp: stamp.timestamp(),
+            },
+        );
+        stamp
+    }
+
+    fn served_load_stamp_unprobed(
         &self,
         stub_state: &StubState,
         stub_index: usize,
@@ -637,6 +674,7 @@ impl Imposter {
         // Leaving a state for itself is not a transition (issue #1307).
         let changes = required != next && self.is_conditional_gate(scenario);
         let applied = || {
+            self.probe_at(|port| Point::CasApplied { port });
             if changes {
                 self.stamp_scenario_transition(scenario);
             }
@@ -658,12 +696,14 @@ impl Imposter {
                 {
                     CasOutcome::Applied => applied(),
                     CasOutcome::Conflict(current) => {
+                        self.probe_at(|port| Point::CasConflict { port });
                         Self::log_dropped_transition(flow_id, scenario, required, next, &current);
                         Ok(())
                     }
                 }
             }
             CasOutcome::Conflict(current) => {
+                self.probe_at(|port| Point::CasConflict { port });
                 Self::log_dropped_transition(flow_id, scenario, required, next, &current);
                 Ok(())
             }
@@ -913,6 +953,10 @@ impl<I: std::ops::Deref<Target = Imposter>> ScenarioStampingStore<I> {
         write: impl FnOnce() -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
         let stamp = self.imposter.is_conditional_gate(key) && changed();
+        self.imposter.probe_at(|port| Point::ScenarioChangeRead {
+            port,
+            changed: stamp,
+        });
         let result = write()?;
         if stamp {
             self.imposter.stamp_scenario_transition(key);

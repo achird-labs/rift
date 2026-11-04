@@ -67,16 +67,41 @@ pub(crate) type ScriptStateCell =
 /// object built from the cell and saved back to it as each run ends (issue #1678): they interleave
 /// at `await`s as in Mountebank, a synchronous section never interleaves with another, and no
 /// update is lost (issue #477). The cell's lock is held only to seed and save the live object.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ScriptScope {
     pub port: u16,
     #[cfg_attr(not(feature = "javascript"), allow(dead_code))]
     pub(crate) state: ScriptStateCell,
+    /// The state cell's probe (`formal/scripting`), `None` in production. It rides the scope since
+    /// the MB script pool is process-global: a run belongs to no manager the pool could ask.
+    #[cfg_attr(not(feature = "javascript"), allow(dead_code))]
+    pub(crate) probe: crate::imposter::probe::ProbeHandle,
+}
+
+impl std::fmt::Debug for ScriptScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptScope")
+            .field("port", &self.port)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ScriptScope {
     pub(crate) fn new(port: u16, state: ScriptStateCell) -> Self {
-        Self { port, state }
+        Self {
+            port,
+            state,
+            probe: None,
+        }
+    }
+
+    /// This scope with a state cell probe (`formal/scripting/README.md`). For tests: nothing
+    /// installs one in production.
+    #[must_use]
+    pub fn with_probe(mut self, probe: std::sync::Arc<dyn crate::imposter::Probe>) -> Self {
+        self.probe = Some(probe);
+        self
     }
 
     /// A scope with its own empty state, for a run no imposter owns, such as a test.

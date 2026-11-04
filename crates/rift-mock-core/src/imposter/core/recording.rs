@@ -184,6 +184,12 @@ impl Imposter {
     /// which also restarts a sequencer's cursors, and announces and persists a changed stub set.
     pub fn clear_proxy_responses(&self) -> ClearedProxyResponses {
         self.proxy_store.clear(self.journal_port());
+        crate::imposter::probe::fire(
+            &self.probe,
+            crate::imposter::probe::Point::ProxyStoreCleared {
+                port: self.journal_port(),
+            },
+        );
         // One mutation for the filter and the overwrite, so a recording racing the clear is either
         // cleared or kept, never lost between a read and a write.
         self.mutate_stubs(|stubs| {
