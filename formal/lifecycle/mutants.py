@@ -87,8 +87,7 @@ mutants = {
         ("IN /\\ ghost' = ghost\n", "IN /\\ ghost' = [ghost EXCEPT !.removedOther = @ \\/ (slot[p] # NoGen /\\ slot[p] # g)]\n"),
         ("/\\ slot' = IF slot[p] = g THEN [slot EXCEPT ![p] = NoGen] ELSE slot", "/\\ slot' = [slot EXCEPT ![p] = NoGen]")],
         [('Creators = {c1}', 'Creators = {c1, c2}'), ('Preloaded = TRUE', 'Preloaded = FALSE'),
-         ('PersistFails = FALSE', 'PersistFails = TRUE'), ('    LoserNeverAnswers\n', ''),
-         ('    FloorMonotone\n', '')]),
+         ('PersistFails = FALSE', 'PersistFails = TRUE'), ('    FloorMonotone\n', '')]),
     # #1773: the rollback waits for no lock, so it can take the imposter out from under a delete that
     # has looked it up, whose failed unlink then says "still serving" of an imposter already gone.
     'the rollback does not take persist_lock (#1773)': ('ErrDeleteStillServing', [
@@ -101,8 +100,11 @@ mutants = {
     'try_claim without the mutations lock': ('OneClaimant', [
         (CLAIM_ATOMIC, '''            THEN /\\ op' = [op EXCEPT ![o].pc = "cStore"]
                  /\\ UNCHANGED <<slot, phase, req, ghost>>''')],
-        [('Creators = {c1}', 'Creators = {c1, c2}'), ('Preloaded = TRUE', 'Preloaded = FALSE'),
-         ('    LoserNeverAnswers\n', '')]),
+        [('Creators = {c1}', 'Creators = {c1, c2}'), ('Preloaded = TRUE', 'Preloaded = FALSE')]),
+    # #1764: the accept loops served as soon as they were spawned, before the claim.
+    'the accept loops answer before the claim (#1764)': ('LoserNeverAnswers', [
+        ('Serving == {"claimed"}', 'Serving == {"accepting", "claimed"}')],
+        [('Creators = {c1}', 'Creators = {c1, c2}'), ('Preloaded = TRUE', 'Preloaded = FALSE')]),
 }
 failed = False
 # A drain that never ends: the delete cannot return, so progress fails under fairness.

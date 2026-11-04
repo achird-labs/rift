@@ -13,6 +13,12 @@ record.
 
 ### Fixed
 
+- **A create that loses the race for a port no longer answers requests** (#1764): two creates on one
+  port can both bind, and the one that lost the claim answered with its own config until it found
+  out, then returned `PortInUse` as if nothing had run. Its requests also landed in the port's shared
+  journal. Accept loops now wait for the claim before their first accept. A connection the kernel had
+  already queued on the loser's socket is closed unanswered, so a client racing two creates can see a
+  closed connection or a timeout, never the loser's response.
 - **A delete no longer wipes the imposter that took the port** (#1763): with a shared journal,
   sequencer or proxy store, a delete cleared the port's entries up to 5 seconds after freeing the port,
   so a same-port create lost its recorded requests, response cycles and recordings. The clears now run

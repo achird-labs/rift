@@ -37,8 +37,6 @@ cases = [
     ('two creates pass the bind check and both bind; the claim decides',
      only(known_cfg, 'BindCheckSuffices'), 'BindCheckSuffices'),
     # Filed findings, reachable until fixed (README.md, "Findings").
-    ('a create that loses the claim has answered requests', only(known_cfg, 'LoserNeverAnswers'),
-     'LoserNeverAnswers'),
     ('a same-port create misses the load floor a concurrent delete records', only(known_cfg, 'FloorMonotone'),
      'FloorMonotone'),
     ('an apply sweep reports a concurrent delete as failed (#1774)',

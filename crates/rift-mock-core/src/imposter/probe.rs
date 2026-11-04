@@ -47,7 +47,7 @@ pub enum Point {
         generation: Generation,
         floor: Option<i64>,
     },
-    /// The accept loops are running; the imposter answers from here (`CreateSpawnAccept`).
+    /// The accept loops are running but accept nothing until the claim is won (`CreateSpawnAccept`).
     CreateAccepting { port: u16, generation: Generation },
     /// `PortTable::try_claim` stored the generation (`CreateTryClaim`, the winner).
     CreateClaimed { port: u16, generation: Generation },
