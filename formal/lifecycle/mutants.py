@@ -88,6 +88,14 @@ mutants = {
          ('    LoserNeverAnswers\n', '')]),
 }
 failed = False
+# A drain that never ends: the delete cannot return, so progress fails under fairness.
+verdict, trace, out = tlc(jar, 'Lifecycle', edit(spec, [(DRAIN, '    /\\ FALSE\n')], 'stuck drain'),
+                          read(os.path.join(here, 'Liveness.cfg')))
+if verdict == 'OpsFinish':
+    print(f'a drain that never ends: caught by {verdict}')
+else:
+    print(f'a drain that never ends: expected OpsFinish, got {verdict}\n{out}')
+    failed = True
 for name, (expected, spec_edits, cfg_edits) in mutants.items():
     verdict, trace, out = tlc(jar, 'Lifecycle', edit(spec, spec_edits, name), edit(cfg, cfg_edits, name))
     if verdict == expected:

@@ -19,8 +19,9 @@ python3 validate.py "$JAR" --selftest traces
 Run TLC on a copy in a scratch directory, or it leaves `states/` here.
 
 TLC's deadlock check is off (`-deadlock` disables it). Finished operations are terminal states, and
-`Terminating` makes them stutter. That a stuck operation can never finish is what `OpsFinish` under
-`FairSpec` would catch; no cfg checks it yet (#1766).
+`Terminating` makes them stutter. `Liveness.cfg` covers a stuck operation instead: `OpsFinish` under
+`FairSpec` says every operation returns. It holds at 64,326 distinct states, and a drain that never
+ends fails it.
 
 ## The clock
 
@@ -139,6 +140,7 @@ controls. `mutants.py` puts fixed bugs back:
 | The floor is not carried to the next generation (#1301) | `FloorMonotone`, on the model with the #1762 fix applied |
 | A failed persist leaves the imposter running (#563) | `ErrCreateNotRunning` |
 | `try_claim` without the `mutations` lock | `OneClaimant` |
+| A drain that never ends | `OpsFinish`, on `Liveness.cfg` |
 
 ## Trace validation
 
