@@ -425,7 +425,7 @@ DeleteReturn(o) ==
     /\ op[o].pc \in {"dDone", "dNotFound", "dErr"}
     /\ ghost' = [ghost EXCEPT !.phantomFail =
           @ \/ (op[o].pc = "dNotFound" /\ op[o].kind \in {"apply", "applyOne"}
-                  /\ op[o].ret # "rCreate")]
+                  /\ op[o].ret \notin {"rCreate", "aSweep"})]
     /\ op' = [op EXCEPT ![o].pc = op[o].ret, ![o].ok = (op[o].pc = "dDone")]
     /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, clock, nreq, req,
                    deleteReturned, lastStamp, shared>>

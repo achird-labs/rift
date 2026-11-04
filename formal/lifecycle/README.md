@@ -82,7 +82,7 @@ names here are the stable reference.
 |:--|:--|:--|
 | `LifecyclePR.cfg` | two creates, one delete | |
 | `Lifecycle.cfg` | two creates, two deletes, failing writes and unlinks | |
-| `LifecycleApply.cfg` | an apply sweep, a `delete_all`, a delete, a create | `ApplyReportsTruth` |
+| `LifecycleApply.cfg` | an apply sweep, a `delete_all`, a delete, a create | |
 | `LifecycleReplace.cfg` | an `apply_one` replace, a delete, a create | |
 | `Mutants.cfg` | one create, two deletes: where a mutant's violation is its own | |
 
@@ -100,16 +100,10 @@ ran into the generation bound, and `CreateClaimStore`, which only the mutant rea
 
 ## Findings
 
-Each was reproduced on the engine by an `#[ignore = "#n"]` test in
-`crates/rift-mock-core/tests/lifecycle_interleavings.rs`, which holds the engine at a probe point to
-force the order. Run them with `--ignored`. A fix removes the attribute and moves the invariant back
-into the cfgs.
-
-| Issue | Invariant | Defect |
-|:--|:--|:--|
-| #1774 | `ApplyReportsTruth` | An apply sweep reports a concurrent delete as failed |
-
-`witness.py` requires each of these to stay reachable.
+None open. The model found #1762, #1763, #1764, #1773 and #1774, all fixed; each has a test in
+`crates/rift-mock-core/tests/lifecycle_interleavings.rs` that holds the engine at a probe point to force
+the order, and a mutant below. A new finding gets an `#[ignore = "#n"]` test and a `witness.py` row, and
+stays out of the cfgs until its fix lands.
 
 ## Known limits, not filed
 
@@ -135,7 +129,7 @@ into the cfgs.
 
 ## Witnesses and mutants
 
-`witness.py` runs 5 cases, each requiring an exact verdict: the limits and findings above, plus two
+`witness.py` runs 4 cases, each requiring an exact verdict: the limits and findings above, plus two
 controls. `mutants.py` puts fixed bugs back:
 
 | Bug put back | Caught by |
@@ -154,6 +148,7 @@ controls. `mutants.py` puts fixed bugs back:
 | A failed persist leaves the imposter running (#563) | `ErrCreateNotRunning` |
 | The rollback removes whoever holds the port (#1773) | `RemoveOnlyOwn` |
 | The rollback does not take `persist_lock` (#1773) | `ErrDeleteStillServing` |
+| An apply sweep reports a concurrent delete as failed (#1774) | `ApplyReportsTruth` |
 | `try_claim` without the `mutations` lock | `OneClaimant` |
 | A drain that never ends | `OpsFinish`, on `Liveness.cfg` |
 

@@ -943,7 +943,6 @@ async fn a_failed_create_leaves_nothing_registered_or_answering() {
 /// #1774: an apply sweep reports a port a concurrent delete already removed as a failure, where
 /// `delete_all` treats the same `NotFound` as "already gone, which is what was asked".
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1774"]
 async fn an_apply_sweep_tolerates_a_concurrent_delete() {
     let recorder = Arc::new(Recorder::default());
     let manager = Arc::new(with_probe(&recorder));
@@ -966,4 +965,12 @@ async fn an_apply_sweep_tolerates_a_concurrent_delete() {
 
     let report = apply.await.expect("apply task").expect("apply_config");
     assert!(report.failed.is_empty(), "{report:?}");
+    assert!(
+        report.deleted.is_empty(),
+        "this apply did not delete it: {report:?}"
+    );
+    assert!(
+        manager.get_imposter(port).is_err(),
+        "the port stays vacant, as the apply asked"
+    );
 }
