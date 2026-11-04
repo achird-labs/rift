@@ -210,7 +210,6 @@ async fn a_stalled_stamp_does_not_take_the_scenario_back() {
 /// writes, a gated transition moves the state and stamps, and the setter's write moves it back
 /// under no stamp at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1780"]
 async fn a_set_that_decided_no_change_still_stamps_what_it_moved() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
@@ -252,7 +251,6 @@ async fn a_set_that_decided_no_change_still_stamps_what_it_moved() {
 /// The same window through the admin door: `flow_delete` decides "no change" on an absent key, a
 /// gated transition moves the state and stamps, and the delete returns it to `Started` unstamped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1780"]
 async fn a_delete_that_decided_no_change_still_stamps_what_it_moved() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
@@ -267,11 +265,11 @@ async fn a_delete_that_decided_no_change_still_stamps_what_it_moved() {
     .await;
     let imposter = manager.get_imposter(port).expect("imposter");
 
-    let latch = recorder.hold(|p| matches!(p, Point::ScenarioChangeRead { changed: false, .. }));
+    let latch = recorder.hold(|p| matches!(p, Point::ScenarioWriteNext { .. }));
     let flow = port.to_string();
     let delete = tokio::spawn(async move { imposter.flow_delete(&flow, "S") });
     recorder
-        .reached(|p| matches!(p, Point::ScenarioChangeRead { changed: false, .. }))
+        .reached(|p| matches!(p, Point::ScenarioWriteNext { .. }))
         .await;
 
     assert_eq!(get(port, "/go", None).await.body, "moved");
@@ -287,6 +285,129 @@ async fn a_delete_that_decided_no_change_still_stamps_what_it_moved() {
         (now.status, now.body.as_str()),
         (200, "started"),
         "the client holding `a` under {since} is told the scenario was reset"
+    );
+    manager.delete_all().await;
+}
+
+/// The same window through `delete_scenario_state`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scenario_reset_about_to_write_still_stamps_what_it_moved() {
+    let recorder = Arc::new(Recorder::default());
+    let manager = manager(&recorder);
+    let port = create(
+        &manager,
+        json!([
+            stub("/go", Some("Started"), Some("A"), "moved"),
+            stub("/read", Some("Started"), None, "started"),
+            stub("/read", Some("A"), None, "a"),
+        ]),
+    )
+    .await;
+    let imposter = manager.get_imposter(port).expect("imposter");
+
+    let latch = recorder.hold(|p| matches!(p, Point::ScenarioWriteNext { .. }));
+    let flow = port.to_string();
+    let reset = tokio::spawn(async move { imposter.delete_scenario_state(&flow, "S") });
+    recorder
+        .reached(|p| matches!(p, Point::ScenarioWriteNext { .. }))
+        .await;
+
+    assert_eq!(get(port, "/go", None).await.body, "moved");
+    let held = get(port, "/read", None).await;
+    assert_eq!(held.body, "a");
+    let since = held.last_modified.expect("a conditional stub's stamp");
+
+    latch.open();
+    reset.await.expect("task").expect("reset");
+
+    let now = get(port, "/read", Some(&since)).await;
+    assert_eq!(
+        (now.status, now.body.as_str()),
+        (200, "started"),
+        "the client holding `a` under {since} is told the scenario was reset"
+    );
+    manager.delete_all().await;
+}
+
+/// The same window through `flow_clear`, which reports nothing about what it removed, so it finds
+/// the transition in the stamp map.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clear_about_to_write_still_stamps_what_it_moved() {
+    let recorder = Arc::new(Recorder::default());
+    let manager = manager(&recorder);
+    let port = create(
+        &manager,
+        json!([
+            stub("/go", Some("Started"), Some("A"), "moved"),
+            stub("/read", Some("Started"), None, "started"),
+            stub("/read", Some("A"), None, "a"),
+        ]),
+    )
+    .await;
+    let imposter = manager.get_imposter(port).expect("imposter");
+
+    let latch = recorder.hold(|p| matches!(p, Point::ScenarioWriteNext { .. }));
+    let flow = port.to_string();
+    let clear = tokio::spawn(async move { imposter.flow_clear(&flow) });
+    recorder
+        .reached(|p| matches!(p, Point::ScenarioWriteNext { .. }))
+        .await;
+
+    assert_eq!(get(port, "/go", None).await.body, "moved");
+    let held = get(port, "/read", None).await;
+    assert_eq!(held.body, "a");
+    let since = held.last_modified.expect("a conditional stub's stamp");
+
+    latch.open();
+    clear.await.expect("task").expect("clear");
+
+    let now = get(port, "/read", Some(&since)).await;
+    assert_eq!(
+        (now.status, now.body.as_str()),
+        (200, "started"),
+        "the client holding `a` under {since} is told the flow was cleared"
+    );
+    manager.delete_all().await;
+}
+
+/// The same window through `flow_set`: it decides "no change" while the state is what it writes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flow_set_that_decided_no_change_still_stamps_what_it_moved() {
+    let recorder = Arc::new(Recorder::default());
+    let manager = manager(&recorder);
+    let port = create(
+        &manager,
+        json!([
+            stub("/set", None, Some("B"), "set"),
+            stub("/go", Some("B"), Some("C"), "moved"),
+            stub("/read", Some("B"), None, "b"),
+            stub("/read", Some("C"), None, "c"),
+        ]),
+    )
+    .await;
+    assert_eq!(get(port, "/set", None).await.body, "set");
+    let imposter = manager.get_imposter(port).expect("imposter");
+
+    let latch = recorder.hold(|p| matches!(p, Point::ScenarioChangeRead { changed: false, .. }));
+    let flow = port.to_string();
+    let set = tokio::spawn(async move { imposter.flow_set(&flow, "S", json!("B")) });
+    recorder
+        .reached(|p| matches!(p, Point::ScenarioChangeRead { changed: false, .. }))
+        .await;
+
+    assert_eq!(get(port, "/go", None).await.body, "moved");
+    let held = get(port, "/read", None).await;
+    assert_eq!(held.body, "c");
+    let since = held.last_modified.expect("a conditional stub's stamp");
+
+    latch.open();
+    set.await.expect("task").expect("set");
+
+    let now = get(port, "/read", Some(&since)).await;
+    assert_eq!(
+        (now.status, now.body.as_str()),
+        (200, "b"),
+        "the client holding `c` under {since} is told the state went back to `B`"
     );
     manager.delete_all().await;
 }

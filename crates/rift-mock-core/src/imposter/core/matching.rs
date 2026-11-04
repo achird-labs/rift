@@ -55,6 +55,10 @@ impl MatchTrace {
 /// A matching pass's result and, when one was requested, the trace of the candidates it visited.
 type TracedMatch = (Option<(Arc<StubState>, usize)>, Option<MatchTrace>);
 
+/// How many times a write to a gating key decides again after its compare-and-set lost, before it
+/// writes anyway. The bound keeps a key under constant writes from holding a request.
+const MAX_SET_ATTEMPTS: usize = 16;
+
 /// `current` with `scenario` stamped `at`. Keeps the higher stamp: nothing orders two transitions'
 /// publishes, and a stalled one going back to a lower stamp would leave a client holding the higher
 /// one on `304` until the next transition (issue #1779).
@@ -546,34 +550,82 @@ impl Imposter {
         scenario: &str,
         state: &str,
     ) -> anyhow::Result<()> {
+        let new = serde_json::Value::String(state.to_string());
         // Read the current state only when a transition could matter to a conditional response.
-        // An unreadable value (a non-string written out-of-band) is what this write repairs, so it
-        // must not block it: count it as a change, which at worst costs a poller one extra `200`.
-        let changed = self.is_conditional_gate(scenario)
-            && self
-                .scenario_state(flow_id, scenario)
-                .map_or(true, |current| current != state);
-        self.probe_at(|port| Point::ScenarioChangeRead { port, changed });
-        self.flow_store.set(
-            flow_id,
-            scenario,
-            serde_json::Value::String(state.to_string()),
-        )?;
-        if changed {
+        if !self.is_conditional_gate(scenario) {
+            self.probe_at(|port| Point::ScenarioChangeRead {
+                port,
+                changed: false,
+            });
+            return self.flow_store.set(flow_id, scenario, new);
+        }
+        // Absence reads as the initial state. An unreadable value (a non-string written
+        // out-of-band) is what this write repairs, so it must not block it: count it as a change,
+        // which at worst costs a poller one extra `200`.
+        let moves = |current: Option<&serde_json::Value>| match current {
+            None => state != INITIAL_SCENARIO_STATE,
+            Some(value) => value.as_str() != Some(state),
+        };
+        if self.set_deciding_move(flow_id, scenario, new, moves)? {
             self.stamp_scenario_transition(scenario);
         }
         Ok(())
     }
 
+    /// Write `new` to `key`, and report whether the write moved it, decided against the value it
+    /// actually replaced: one read before a plain write could stamp nothing for a state it put back
+    /// (issue #1780). The loop is bounded, and an unreadable value or a key that keeps moving is
+    /// written anyway and counted as moved, which at worst costs a poller one extra `200`.
+    ///
+    /// Only for a conditional gate: any other key keeps a plain `set`, with no extra read.
+    fn set_deciding_move(
+        &self,
+        flow_id: &str,
+        key: &str,
+        new: serde_json::Value,
+        moves: impl Fn(Option<&serde_json::Value>) -> bool,
+    ) -> anyhow::Result<bool> {
+        if let Ok(mut current) = self.flow_store.get(flow_id, key) {
+            for _ in 0..MAX_SET_ATTEMPTS {
+                let changed = moves(current.as_ref());
+                self.probe_at(|port| Point::ScenarioChangeRead { port, changed });
+                match self.flow_store.compare_and_set(
+                    flow_id,
+                    key,
+                    current.as_ref(),
+                    new.clone(),
+                )? {
+                    CasOutcome::Applied => return Ok(changed),
+                    CasOutcome::Conflict(now) => current = now,
+                }
+            }
+        }
+        self.flow_store.set(flow_id, key, new)?;
+        Ok(true)
+    }
+
+    /// Delete `key`, and report whether there was a key to delete, decided with the delete (issue
+    /// #1780). `set_key_ttl` with a zero TTL does both in one step. A store that keeps its fail-loud
+    /// default is deleted from plainly and counts as moved, so it does not start failing deletes,
+    /// and a store that is really down still fails on the `delete`.
+    fn delete_deciding_move(&self, flow_id: &str, key: &str) -> anyhow::Result<bool> {
+        self.probe_at(|port| Point::ScenarioWriteNext { port });
+        match self.flow_store.set_key_ttl(flow_id, key, 0) {
+            Ok(existed) => Ok(existed),
+            Err(e) => {
+                debug!("set_key_ttl unavailable for a scenario delete: {e}");
+                self.flow_store.delete(flow_id, key)?;
+                Ok(true)
+            }
+        }
+    }
+
     /// Delete a scenario's state for a flow (so it reads back as the initial state).
     pub fn delete_scenario_state(&self, flow_id: &str, scenario: &str) -> anyhow::Result<()> {
-        let changed = self.is_conditional_gate(scenario)
-            && self
-                .scenario_state(flow_id, scenario)
-                .map_or(true, |current| current != INITIAL_SCENARIO_STATE);
-        self.probe_at(|port| Point::ScenarioChangeRead { port, changed });
-        self.flow_store.delete(flow_id, scenario)?;
-        if changed {
+        if !self.is_conditional_gate(scenario) {
+            return self.flow_store.delete(flow_id, scenario);
+        }
+        if self.delete_deciding_move(flow_id, scenario)? {
             self.stamp_scenario_transition(scenario);
         }
         Ok(())
@@ -942,29 +994,37 @@ impl<I: std::ops::Deref<Target = Imposter>> ScenarioStampingStore<I> {
         flow_id: &str,
         clear: impl FnOnce() -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        let gates: std::collections::BTreeSet<String> = self
-            .imposter
-            .snapshot()
-            .conditional_gates_through(usize::MAX)
+        // The clear reports nothing, so a transition between the reads and the clear is found in
+        // the stamp map: a state moved since the reads is one the clear moved back (issue #1780).
+        // Loaded before the reads, so nothing falls between them.
+        let before = self.imposter.scenario_transitions();
+        let snapshot = self.imposter.snapshot();
+        let gates: std::collections::BTreeSet<&str> =
+            snapshot.conditional_gates_through(usize::MAX).collect();
+        let held: std::collections::BTreeSet<&str> = gates
+            .iter()
+            .copied()
             .filter(|scenario| self.imposter.would_change(flow_id, scenario, None))
-            .map(str::to_string)
             .collect();
+        self.imposter
+            .probe_at(|port| Point::ScenarioWriteNext { port });
         clear()?;
-        for scenario in &gates {
-            self.imposter.stamp_scenario_transition(scenario);
+        let after = self.imposter.scenario_transitions();
+        for scenario in gates {
+            if held.contains(scenario) || before.get(scenario) != after.get(scenario) {
+                self.imposter.stamp_scenario_transition(scenario);
+            }
         }
         Ok(())
     }
 
-    /// Run `write`, then stamp `key` when it gates a conditional stub and `changed` says the write
-    /// moved it. `changed` is asked before the write, which is when the old value is readable.
+    /// Run `write`, which always moves `key`, then stamp `key` when it gates a conditional stub.
     fn stamped<T>(
         &self,
         key: &str,
-        changed: impl FnOnce() -> bool,
         write: impl FnOnce() -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        let stamp = self.imposter.is_conditional_gate(key) && changed();
+        let stamp = self.imposter.is_conditional_gate(key);
         self.imposter.probe_at(|port| Point::ScenarioChangeRead {
             port,
             changed: stamp,
@@ -983,10 +1043,14 @@ impl<I: std::ops::Deref<Target = Imposter> + Send + Sync> FlowStore for Scenario
     }
 
     fn set(&self, flow_id: &str, key: &str, value: serde_json::Value) -> anyhow::Result<()> {
-        let changed = || self.imposter.would_change(flow_id, key, Some(&value));
-        let stamp = self.imposter.is_conditional_gate(key) && changed();
-        self.store().set(flow_id, key, value)?;
-        if stamp {
+        if !self.imposter.is_conditional_gate(key) {
+            return self.store().set(flow_id, key, value);
+        }
+        let moves = |current: Option<&serde_json::Value>| current != Some(&value);
+        if self
+            .imposter
+            .set_deciding_move(flow_id, key, value.clone(), moves)?
+        {
             self.imposter.stamp_scenario_transition(key);
         }
         Ok(())
@@ -997,11 +1061,13 @@ impl<I: std::ops::Deref<Target = Imposter> + Send + Sync> FlowStore for Scenario
     }
 
     fn delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
-        self.stamped(
-            key,
-            || self.imposter.would_change(flow_id, key, None),
-            || self.store().delete(flow_id, key),
-        )
+        if !self.imposter.is_conditional_gate(key) {
+            return self.store().delete(flow_id, key);
+        }
+        if self.imposter.delete_deciding_move(flow_id, key)? {
+            self.imposter.stamp_scenario_transition(key);
+        }
+        Ok(())
     }
 
     fn is_blocking(&self) -> bool {
@@ -1011,11 +1077,11 @@ impl<I: std::ops::Deref<Target = Imposter> + Send + Sync> FlowStore for Scenario
     // A number is never a scenario state (`scenario_state` refuses one), so an increment of a
     // scenario's key always moves it.
     fn increment(&self, flow_id: &str, key: &str) -> anyhow::Result<i64> {
-        self.stamped(key, || true, || self.store().increment(flow_id, key))
+        self.stamped(key, || self.store().increment(flow_id, key))
     }
 
     fn increment_by(&self, flow_id: &str, key: &str, by: i64) -> anyhow::Result<i64> {
-        self.stamped(key, || true, || self.store().increment_by(flow_id, key, by))
+        self.stamped(key, || self.store().increment_by(flow_id, key, by))
     }
 
     // A TTL of zero or less drops the flow at once: a clear.
@@ -1031,10 +1097,9 @@ impl<I: std::ops::Deref<Target = Imposter> + Send + Sync> FlowStore for Scenario
         if ttl_seconds > 0 {
             return self.store().set_key_ttl(flow_id, key, ttl_seconds);
         }
-        let stamp = self.imposter.is_conditional_gate(key)
-            && self.imposter.would_change(flow_id, key, None);
+        let gate = self.imposter.is_conditional_gate(key);
         let deleted = self.store().set_key_ttl(flow_id, key, ttl_seconds)?;
-        if stamp && deleted {
+        if gate && deleted {
             self.imposter.stamp_scenario_transition(key);
         }
         Ok(deleted)
@@ -2058,6 +2123,159 @@ mod scenario_stamping_tests {
 
     fn stamped(imp: &Imposter) -> bool {
         imp.scenario_transitions().contains_key("S1")
+    }
+
+    // Absence reads as the initial state, so writing `Started` over nothing moves nothing.
+    #[test]
+    fn setting_the_initial_state_over_an_absent_key_is_not_a_transition() {
+        let imp = imposter();
+        imp.set_scenario_state("f", "S1", INITIAL_SCENARIO_STATE)
+            .expect("set");
+        assert!(!stamped(&imp));
+    }
+
+    #[test]
+    fn setting_the_state_a_scenario_has_is_not_a_transition() {
+        let imp = imposter();
+        imp.set_scenario_state("f", "S1", "A").expect("set");
+        assert!(stamped(&imp), "absent to `A` moved");
+        let first = imp.scenario_transitions();
+        imp.set_scenario_state("f", "S1", "A").expect("set");
+        assert_eq!(imp.scenario_transitions().get("S1"), first.get("S1"));
+    }
+
+    // A non-string state is what the write repairs, as `set_scenario_state` has always counted it.
+    #[test]
+    fn setting_over_an_unreadable_state_is_a_transition() {
+        let imp = imposter();
+        imp.flow_store.set("f", "S1", json!(7)).expect("seed");
+        imp.set_scenario_state("f", "S1", "A").expect("set");
+        assert!(stamped(&imp));
+    }
+
+    /// A store whose `set_key_ttl` keeps the trait's fail-loud default.
+    #[derive(Default)]
+    struct NoKeyTtl {
+        keys: parking_lot::Mutex<HashMap<(String, String), serde_json::Value>>,
+    }
+
+    impl FlowStore for NoKeyTtl {
+        fn get(&self, flow: &str, key: &str) -> anyhow::Result<Option<serde_json::Value>> {
+            Ok(self.keys.lock().get(&(flow.into(), key.into())).cloned())
+        }
+        fn set(&self, flow: &str, key: &str, value: serde_json::Value) -> anyhow::Result<()> {
+            self.keys.lock().insert((flow.into(), key.into()), value);
+            Ok(())
+        }
+        fn exists(&self, flow: &str, key: &str) -> anyhow::Result<bool> {
+            Ok(self.keys.lock().contains_key(&(flow.into(), key.into())))
+        }
+        fn delete(&self, flow: &str, key: &str) -> anyhow::Result<()> {
+            self.keys.lock().remove(&(flow.into(), key.into()));
+            Ok(())
+        }
+        fn increment(&self, _: &str, _: &str) -> anyhow::Result<i64> {
+            Ok(0)
+        }
+        fn set_ttl(&self, _: &str, _: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    // A third-party store must not start failing deletes: it deletes, and over-approximates.
+    #[test]
+    fn a_delete_on_a_store_without_key_ttl_still_deletes_and_stamps() {
+        let mut imp = imposter();
+        let store = Arc::new(NoKeyTtl::default());
+        store.set("f", "S1", json!("A")).expect("seed");
+        imp.flow_store = store.clone();
+        imp.delete_scenario_state("f", "S1").expect("delete");
+        assert!(!store.exists("f", "S1").expect("exists"));
+        assert!(stamped(&imp));
+    }
+
+    /// A store whose reads fail, or whose compare-and-set always loses.
+    #[derive(Default)]
+    struct Stubborn {
+        inner: NoKeyTtl,
+        unreadable: bool,
+        cas_tries: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FlowStore for Stubborn {
+        fn get(&self, flow: &str, key: &str) -> anyhow::Result<Option<serde_json::Value>> {
+            if self.unreadable {
+                anyhow::bail!("unreadable");
+            }
+            self.inner.get(flow, key)
+        }
+        fn set(&self, flow: &str, key: &str, value: serde_json::Value) -> anyhow::Result<()> {
+            self.inner.set(flow, key, value)
+        }
+        fn exists(&self, flow: &str, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(flow, key)
+        }
+        fn delete(&self, flow: &str, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(flow, key)
+        }
+        fn increment(&self, _: &str, _: &str) -> anyhow::Result<i64> {
+            Ok(0)
+        }
+        fn set_ttl(&self, _: &str, _: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compare_and_set(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&serde_json::Value>,
+            _: serde_json::Value,
+        ) -> anyhow::Result<CasOutcome> {
+            self.cas_tries
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(CasOutcome::Conflict(Some(json!("A"))))
+        }
+    }
+
+    // A key that keeps moving is written anyway, and counted as moved, after a bounded number of tries.
+    #[test]
+    fn a_set_that_keeps_losing_writes_and_stamps_after_its_cap() {
+        let mut imp = imposter();
+        let store = Arc::new(Stubborn::default());
+        imp.flow_store = store.clone();
+        imp.set_scenario_state("f", "S1", "A").expect("set");
+        assert_eq!(
+            store.cas_tries.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_SET_ATTEMPTS
+        );
+        assert_eq!(store.get("f", "S1").expect("get"), Some(json!("A")));
+        assert!(stamped(&imp));
+    }
+
+    // An unreadable value is what the write repairs, so it must not block it.
+    #[test]
+    fn a_set_over_an_unreadable_store_writes_and_stamps() {
+        let mut imp = imposter();
+        let store = Arc::new(Stubborn {
+            unreadable: true,
+            ..Stubborn::default()
+        });
+        imp.flow_store = store.clone();
+        imp.set_scenario_state("f", "S1", "A").expect("set");
+        assert_eq!(store.cas_tries.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(store.inner.get("f", "S1").expect("get"), Some(json!("A")));
+        assert!(stamped(&imp));
+    }
+
+    // A delete that found nothing moved nothing.
+    #[test]
+    fn deleting_an_absent_key_is_not_a_transition() {
+        let imp = imposter();
+        imp.delete_scenario_state("f", "S1").expect("delete");
+        ScenarioStampingStore::new(&imp)
+            .delete("f", "S1")
+            .expect("delete");
+        assert!(!stamped(&imp));
     }
 
     #[test]

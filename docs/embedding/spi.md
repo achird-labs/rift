@@ -53,6 +53,10 @@ A provider hands back an `Arc<dyn FlowStore>` (`rift_mock_core::flow_state::Flow
 implementation keeps compiling: `is_blocking`, `increment_by`, `set_key_ttl`, `clear_flow`, `compare_and_set` (a non-atomic get-then-set; a real backend should override it),
 `flow_ids`, `entry_count`.
 
+- **Exact `Last-Modified` stamps** depend on an atomic `compare_and_set` and on `set_key_ttl` with a TTL
+  of zero or less reporting atomically whether the key existed (issue #1780). A store without them still
+  works, but can add a stamp, which costs a poller one extra `200`, or miss one, which leaves a client on
+  `If-Modified-Since` on `304` until the scenario's next transition.
 - **`is_blocking()`** (default `false`): return `true` if calls do network or disk I/O. The request
   path then runs flow-store calls on `spawn_blocking` so a slow backend cannot stall a tokio worker.
   Annotations your store records there reach the `ResponseDecorator` (#987 fixed them being

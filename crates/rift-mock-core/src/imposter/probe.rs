@@ -156,9 +156,11 @@ pub enum Point {
     CasApplied { port: u16 },
     /// A gated transition lost its compare-and-set and is dropped (`CasCompare`, the lost branch).
     CasConflict { port: u16 },
-    /// A write to a scenario's key decided, before writing, whether it moves the state
-    /// (`SetRead`, `DelRead`).
+    /// A set of a scenario's key decided whether it moves the state, and its compare-and-set is next
+    /// (`SetRead`, and `SetWrite` after a conflict).
     ScenarioChangeRead { port: u16, changed: bool },
+    /// A delete or a clear of a scenario's key is about to write (`DelWrite`, `ClearWipe`).
+    ScenarioWriteNext { port: u16 },
     /// A transition took its stamp from the load clock, not yet published (`Issue`).
     TransitionStampIssued { port: u16, stamp: i64 },
     /// A transition's stamp reached the stamp map (`Publish`).

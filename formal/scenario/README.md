@@ -39,8 +39,9 @@ threads run in parallel, so one request's step can land between any two of anoth
 | `Issue` | `load_clock.next()`, `:577`; one atomic update, `core/mod.rs:169` | `TransitionStampIssued` |
 | `Publish` | `scenario_transitions.rcu`, `:580-584`; retries until it lands, then the entry is the stamp `Issue` took | `TransitionStamped` |
 | `Serve` | `served_load_stamp_unprobed`, `:629-650`, from `handler.rs:2065` and `:2415`, over the copy | `Served` |
-| `SetRead`, `SetWrite` | `set_scenario_state`: `changed` at `:537-540`, the plain write at `:542`, the stamp at `:547` | `ScenarioChangeRead` |
-| `DelRead`, `DelWrite` | `flow_delete` through `ScenarioStampingStore::stamped`: `would_change` at `:990`, `:778`, decided at `:955`, the write at `:960`, the stamp at `:961` | `ScenarioChangeRead` |
+| `SetRead`, `SetWrite` | `set_deciding_move`: the read, then the compare-and-set, deciding again from what a conflict returns | `ScenarioChangeRead` |
+| `DelWrite` | `delete_deciding_move`: `set_key_ttl` with a zero TTL deletes and reports in one step | `ScenarioWriteNext` |
+| `ClearBefore`, `ClearHeld`, `ClearWipe`, `ClearAfter` | `ScenarioStampingStore::clearing`: the stamp map, the reads, the clear, the stamp map again | `ScenarioWriteNext` before `ClearWipe` |
 
 ## What it checks
 
@@ -49,7 +50,7 @@ threads run in parallel, so one request's step can land between any two of anoth
 | `NeverOldAnswerUnderNewStamp` | PR, full | holds | An answer's stamp is below the stamp of any later write that moved away from it (#1307). It rests on the clock being strictly increasing and on the copy coming before the gate read. |
 | `TransitionsAreCas` | PR, full | holds | A gated transition never writes over a value it did not expect (#311). |
 | `StampMonotone` | PR, full, Mutants | holds | The stamp map's entry never falls (#1779). |
-| `NoStaleAnswerAtRest` | Known | violated, #1780 | With no stamp in flight, a client holding another answer is told so: its stamp is below the current one. The window between a write and its publish is excluded on purpose: there a client gets `304` until the publish, which ends it. |
+| `NoStaleAnswerAtRest` | PR, full | holds | With no stamp in flight, a client holding another answer is told so: its stamp is below the current one. The window between a write and its publish is excluded on purpose: there a client gets `304` until the publish, which ends it. |
 | `NoMatchOnlyWhenUncovered` | Known | violated, #1781 | Every state has a stub in this table, so a scan never matches nothing. |
 
 ## Witnesses
@@ -83,14 +84,13 @@ interleaving. None was observed without it, and how often each occurs under load
 
 | Issue | Defect | Test in `scenario_interleavings.rs` |
 |:--|:--|:--|
-| #1780 | A set or delete that decided "no change" can still move the state, unstamped, with the same result. Reproduced for `set_scenario_state` and `flow_delete`; four more sites of the same shape are traced in the source only, and the issue lists them | `a_set_that_decided_no_change_still_stamps_what_it_moved`, `a_delete_that_decided_no_change_still_stamps_what_it_moved` |
 | #1781 | A scan reads the state once per gate, so a transition during it gives a no-match though every state has a stub | `a_scan_of_covered_states_finds_a_stub_while_the_state_moves` |
 
 `If-None-Match` takes precedence over `If-Modified-Since` (`conditional.rs:155`) and compares the bytes, so a client
 sending an ETag does not see the stale `304`s.
 
 On fixing one, remove its `#[ignore]`, move its invariant from `Known.cfg` to `ScenarioPR.cfg` and `Scenario.cfg`, and
-delete its row from `witness.py`. #1779 is fixed; its mutant stays.
+delete its row from `witness.py`. #1779 and #1780 are fixed; their mutants stay.
 
 ### Not filed
 
@@ -119,16 +119,14 @@ delete its row from `witness.py`. #1779 is fixed; its mutant stays.
 ## Runs
 
 Measured on this model with TLC from `tla2tools.jar` in the VS Code extension 2026.11.21657, on a laptop shared with other
-jobs. Times are wall clock. Bounds are written gated, pollers, setters, admin deletes.
+jobs. Times are wall clock. Bounds are written gated, pollers, setters, admin deletes; only `Coverage.cfg` adds a clear.
 
 | Run | Bounds | Start | Verdict | Generated | Distinct | Depth | Time |
 |:--|:--|:--|:--|--:|--:|--:|--:|
-| `ScenarioPR.cfg` | 2, 1, 1, 1 | `B` | no error | 8,372,091 | 3,075,039 | 30 | 48s |
-| `Scenario.cfg` | 3, 1, 1, 0 | absent | no error | 9,478,703 | 3,185,556 | 32 | 1m 40s |
+| `ScenarioPR.cfg` | 2, 1, 1, 1 | `B` | no error | 4,460,347 | 1,490,384 | 29 | 6s |
+| `Scenario.cfg` | 3, 1, 1, 0 | absent | no error | 4,482,693 | 1,423,695 | 32 | 7s |
 | `Mutants.cfg` | 2, 1, 0, 0 | `B` | no error | 2,536 | 1,215 | | not timed, with `-coverage 1` |
 | `Coverage.cfg`, `AtomicCas = FALSE` | 2, 0, 1, 1 | absent | no error (`TypeInv` only) | 624,911 | 285,025 | 27 | 12s, with `-coverage 1` |
-| `Known.cfg`, `StampMonotone` | 3, 1, 1, 1 | `B` | violated | 11,226 | 4,168 | 11 | 6.2s |
-| `Known.cfg`, `NoStaleAnswerAtRest` | 3, 1, 1, 1 | `B` | violated | 27,503 | 10,222 | 12 | 8.9s |
 | `Known.cfg`, `NoMatchOnlyWhenUncovered` | 3, 1, 1, 1 | `B` | violated | 956 | 350 | 7 | 8.3s |
 | `Witness.cfg`, `NeverDroppedTransition` | 2, 0, 0, 0 | `B` | violated | 136 | 92 | 15 | 6.3s |
 | `Witness.cfg`, `TransitionsAreCas`, `AtomicCas = FALSE` | 2, 0, 0, 0 | `B` | violated | 175 | 116 | 17 | 8.0s |
@@ -139,6 +137,6 @@ Bounds 3, 1, 1, 1 with no violated invariant did not finish: from absence, TLC h
 2,748,248 on its queue after five minutes when it ran out of disk. So no run covers three transitions and an admin delete
 together with the invariants that hold. Violations on those bounds, in `Known.cfg`, stop early.
 
-`-coverage 1`, on `Coverage.cfg` and `Mutants.cfg` together, gives every action a non-zero count. `Coverage.cfg` hits all
-eleven, `CasSet` included. Its only zero-count lines are the five of `Commit` as called from `CasCompare`'s atomic branch,
-which `Mutants.cfg` hits. `Mutants.cfg` has zeros for `CasSet` and the setter and delete actions, by its bounds.
+`-coverage 1`, on `Coverage.cfg` and `Mutants.cfg` together, gives every action a non-zero count. `Coverage.cfg` hits all of
+them, `CasSet` and the clear's included. Its only zero-count lines are the five of `Commit` as called from `CasCompare`'s atomic branch,
+which `Mutants.cfg` hits. `Mutants.cfg` has zeros for `CasSet` and the setter, delete and clear actions, by its bounds. A clear is checked on its own small bounds, in `witness.py` and `mutants.py`, and the larger cfgs leave it out.
