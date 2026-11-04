@@ -59,6 +59,11 @@ record.
   two transitions' stamps as they landed, so a stalled one could put a lower stamp over a higher one. A
   client revalidating with `If-Modified-Since` alone then stayed on `304` until the next transition. A
   scenario's stamp now only rises.
+- **A TCP fault on an open HTTP/2 connection resets only its own stream** (#1782): a fault stub added
+  under a connection already on HTTP/2 aborted the whole connection, killing every other stream on it.
+  It now resets the one stream, as on the admin and front-door listeners. A delete that cuts off an
+  HTTP/2 request also resets that stream now, where it aborted the connection, and the connection ends
+  through the shutdown already under way.
 - **A job left behind by a finished script no longer fails another request** (#1786): when a run
   answered with another run of its imposter in flight, what it left queued passed to that run, and a
   throw in it failed that unrelated request with the other script's error. The throw is now logged and

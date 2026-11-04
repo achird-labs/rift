@@ -112,9 +112,9 @@ pub(crate) enum BehaviorOutcome {
 /// The response for a request its imposter's delete cut off (issues #1616, #1643): a
 /// `TcpFaultKind::Empty` carrier, so the listener closes the connection without writing a byte,
 /// the one mechanism that already aborts a connection from a response. Over HTTP/1 the client sees the connection close before a
-/// response, as when Mountebank destroys an imposter's sockets; over HTTP/2 the imposter's
-/// listener aborts the whole connection, whose streams all belong to the deleted imposter, and
-/// the `/__rift/` gateway and the front door reset the one stream. An in-process caller sees the
+/// response, as when Mountebank destroys an imposter's sockets; over HTTP/2 the stream resets, on
+/// every listener, and the connection ends through the shutdown already under way. An in-process
+/// caller sees the
 /// carrier, which [`tcp_fault_carrier`](super::fault_io::tcp_fault_carrier) names
 /// `EMPTY_RESPONSE`.
 pub(crate) fn aborted_response() -> Response<Full<Bytes>> {

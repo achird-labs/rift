@@ -46,9 +46,9 @@ RANDOM_DATA_THEN_CLOSE: N whole, then 10 of 10 payload bytes
 
 **But a reset can still destroy bytes already handed to the kernel.** That is accepted as what a reset means (#1783).
 
-HTTP/2 does not use this ordering. `apply_tcp_fault` (`rift-http-proxy/src/gateway.rs:38`) never arms the cell on h2: the
-service errs and hyper resets that stream (`proto/h2/server.rs:465`). The imposter's own listener has no such check and
-relies on serving a faulting imposter HTTP/1-only, decided once at accept, which is #1782.
+HTTP/2 does not use this ordering. `apply_tcp_fault` (`fault_io.rs`) never arms the cell on h2: the
+service errs and hyper resets that stream (`proto/h2/server.rs:465`). The imposter's own listener
+applies the same rule since #1782, so a stub added under a connection already on h2 stays on its stream.
 
 ## Actions and the code
 
@@ -80,7 +80,7 @@ relies on serving a faulting imposter HTTP/1-only, decided once at accept, which
 | `FaultBeforeResponseBytes` | No byte of a fault's carrier reaches the kernel | PR, full |
 | `FaultNeverTripsEarlierBytes` | A fault never takes the connection with an earlier response's bytes in the process | PR, full |
 | `LingerDeliversResponse` | A reset under a refusal comes after the refusal and its FIN (#1460) | PR, full |
-| `H2FaultStaysOnStream` | One h2 stream's fault takes no other stream | Known (#1782) |
+| `H2FaultStaysOnStream` | One h2 stream's fault takes no other stream | PR, full (#1782) |
 | `RstDiscardsNothing` | A close that sends RST discards nothing the kernel still holds | Violated by design, witness (#1783) |
 
 ## Run table
@@ -89,9 +89,8 @@ TLC 2026.11.02, 10 workers, Apple silicon, 2026-11-03. Wall times vary with what
 
 | Cfg | Bounds | Result | Generated | Distinct | Depth | Time |
 |:--|:--|:--|:--:|:--:|:--:|:--:|
-| `FaultIoPR.cfg` | 2 requests, 1 body unit | no error | 88,930 | 42,894 | 30 | 2 s |
-| `FaultIo.cfg` | 3 requests, 2 body units | no error | 1,708,808 | 721,960 | 43 | 8 s |
-| `Known.cfg` | as PR | `H2FaultStaysOnStream` violated, depth 8 | | | | under 2 s |
+| `FaultIoPR.cfg` | 2 requests, 1 body unit | no error | 85,930 | 40,234 | 30 | 2 s |
+| `FaultIo.cfg` | 3 requests, 2 body units | no error | 1,569,112 | 608,132 | 43 | 8 s |
 
 `-coverage 1` on `FaultIoPR.cfg`: all 25 actions hit, the least being `TlsPayloadSeal` at 99 distinct states. The first
 run showed `PlainShutdown` at zero: nothing closed a connection except a refusal, so the model gained `ClientCloses`.
@@ -110,8 +109,6 @@ run showed `PlainShutdown` at zero: nothing closed a connection except a refusal
 | Bytes pipelined past a graceful fault | `GracefulFaultEndsInFin` violated |
 | A full socket under a payload fault over http | `PayloadAlwaysWritten` violated |
 | `DrainOutrunsDelivery = TRUE` | `LingerDeliversResponse` violated |
-| `ImposterArmsOnH2 = FALSE`, `apply_tcp_fault`'s rule (control for #1782) | no error |
-| `Known.cfg` | `H2FaultStaysOnStream` violated |
 | `witness.py` | `RstDiscardsNothing` violated, by design |
 | `FaultIoPR.cfg` (control) | no error |
 
@@ -128,6 +125,7 @@ with that one removed, so each is caught by its invariant only:
 | `take_payload` reads instead of taking: `FaultIo` beneath fires the fault again | `FaultFiresAtMostOnce` |
 | The write goes out before the fault | `FaultBeforeResponseBytes` |
 | hyper reads the next head with the last response unflushed (http, no refusal) | `FaultNeverTripsEarlierBytes` |
+| The imposter listener arms on HTTP/2 (#1782), on the PR bounds | `H2FaultStaysOnStream` |
 
 The last one is restricted because, with TLS or a refusal in the script, it also violates `PayloadAboveTlsOnHttps` or
 `LingerDeliversResponse`: earlier records in rustls make `FaultIo` the first layer to see a payload kind, and a fault
@@ -136,12 +134,8 @@ its own.
 
 ## Findings
 
-| Issue | What | How it was verified |
-|:--|:--|:--|
-| #1782 | A fault stub added under an open h2 connection aborts every stream on it | Reproduced: `a_fault_stub_added_under_an_open_h2_connection_resets_only_its_stream` (`#[ignore]`) fails with the other stream at `BrokenPipe`, probe `armed [Empty], taken [(Empty, RawSocket)]` |
-
-It is in `Known.cfg`; its fix moves the invariant to `FaultIoPR.cfg` and `FaultIo.cfg`, removes the `#[ignore]` and
-deletes its row in `witness.py`.
+None open. The model found #1782, fixed: a fault stub added under an open h2 connection aborted every stream on it. A
+test in `crates/rift-mock-core/tests/faultio_interleavings.rs` forces it, and a mutant above puts it back.
 
 ## Documented limits, reproduced or read
 

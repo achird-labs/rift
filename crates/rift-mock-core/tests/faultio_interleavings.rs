@@ -572,12 +572,61 @@ async fn h2_status(
     Ok(status)
 }
 
+/// The same over TLS, where the client came to HTTP/2 through ALPN: the door issue #1782 names for a
+/// client's pool that outlives a stub change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fault_stub_added_under_an_alpn_h2_connection_resets_only_its_stream() {
+    let stubs = vec![path_stub("/ok", json!({ "is": { "body": "ok" } }))];
+    let (manager, port, recorder) = serve("https", stubs, None).await;
+
+    let mut config = (*tls_config()).clone();
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("name");
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(name, connect(port).await)
+        .await
+        .expect("handshake");
+    assert_eq!(
+        tls.get_ref().1.alpn_protocol(),
+        Some(&b"h2"[..]),
+        "an imposter with no fault stub offers h2"
+    );
+    let (mut sender, conn) = hyper::client::conn::http2::handshake(
+        hyper_util::rt::TokioExecutor::new(),
+        hyper_util::rt::TokioIo::new(tls),
+    )
+    .await
+    .expect("h2 handshake");
+    let driver = tokio::spawn(conn);
+    assert_eq!(h2_status(&mut sender, port, "/ok").await, Ok(200));
+
+    let stub = serde_json::from_value(path_stub("/fault", json!({ "fault": "EMPTY_RESPONSE" })))
+        .expect("stub");
+    manager
+        .add_stub(port, stub, Some(0))
+        .await
+        .expect("add stub");
+
+    let faulted = h2_status(&mut sender, port, "/fault").await;
+    assert!(
+        format!("{faulted:?}").contains("INTERNAL_ERROR"),
+        "the faulted stream ends in a reset: {faulted:?}"
+    );
+    assert_eq!(
+        h2_status(&mut sender, port, "/ok").await,
+        Ok(200),
+        "the connection stays open"
+    );
+    assert!(recorder.armed().is_empty(), "h2 must not arm the cell");
+    driver.abort();
+    let _ = manager.delete_imposter(port).await;
+}
+
 /// A connection is served HTTP/1-only when the imposter can fault at accept time
 /// (`manager.rs`, `http1_only`); a fault stub added afterwards reaches an HTTP/2 connection already
 /// open. The fault of one stream must then reset that stream, as `apply_tcp_fault` does on the
 /// other listeners, and leave the connection's other streams running.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "#1782"]
 async fn a_fault_stub_added_under_an_open_h2_connection_resets_only_its_stream() {
     let stubs = vec![
         path_stub("/ok", json!({ "is": { "body": "ok" } })),
@@ -610,7 +659,7 @@ async fn a_fault_stub_added_under_an_open_h2_connection_resets_only_its_stream()
 
     let faulted = h2_status(&mut sender, port, "/fault").await;
     assert!(
-        faulted.is_err(),
+        format!("{faulted:?}").contains("INTERNAL_ERROR"),
         "the faulted stream ends in a reset: {faulted:?}"
     );
     let slow = slow.await.expect("task");

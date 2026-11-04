@@ -9,42 +9,9 @@ use crate::imposter::{ImposterManager, handle_imposter_request};
 use crate::response::error_response;
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
-use hyper::{Request, Response, StatusCode, Version};
-use rift_mock_core::{FaultCell, InjectedFault, TcpFaultKind};
+use hyper::{Request, Response, StatusCode};
 
-/// Apply a TCP-fault carrier on the connection it is about to be written to (issue #1234).
-///
-/// For an ordinary response this returns it unchanged. For a carrier (see
-/// [`tcp_fault_carrier`](crate::tcp_fault_carrier)):
-///
-/// - **HTTP/1**: arms `cell` and hands the carrier back. The listener must have wrapped the
-///   connection in [`FaultIo::new`](crate::FaultIo::new) with this `cell`; `FaultIo` then performs
-///   the fault on hyper's write of the carrier, exactly as on the imposter's own port.
-/// - **HTTP/2**: returns `Err`, and the service returns it, so hyper resets that one stream
-///   (`RST_STREAM`, `INTERNAL_ERROR`) for every fault kind. The cell is never armed: the next write
-///   may belong to another stream, and a socket abort would kill every stream on the connection.
-///
-/// `version` is the request's, read before the request is consumed. Never return the `Err` on
-/// HTTP/1 instead: hyper would close without writing, `FaultIo` would never trip, and every kind
-/// would degrade to an empty close.
-pub fn apply_tcp_fault<B>(
-    response: Response<B>,
-    version: Version,
-    cell: &FaultCell,
-) -> Result<Response<B>, InjectedFault> {
-    let Some(kind) = response.extensions().get::<TcpFaultKind>().copied() else {
-        return Ok(response);
-    };
-    if matches!(
-        version,
-        Version::HTTP_09 | Version::HTTP_10 | Version::HTTP_11
-    ) {
-        cell.arm(kind);
-        Ok(response)
-    } else {
-        Err(InjectedFault(kind))
-    }
-}
+pub use rift_mock_core::apply_tcp_fault;
 
 /// Dispatch `req` to the imposter on `port`, exactly as if it had arrived on the
 /// imposter's own port. The request URI must already be imposter-relative (path + query
@@ -124,6 +91,8 @@ pub async fn dispatch_gateway_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyper::Version;
+    use rift_mock_core::{FaultCell, InjectedFault, TcpFaultKind};
 
     fn carrier(kind: TcpFaultKind) -> Response<()> {
         let mut response = Response::new(());

@@ -5,7 +5,7 @@
 
 use super::core::Imposter;
 use super::datadir_file;
-use super::fault_io::{FaultCell, FaultIo, TcpFaultKind, TlsPayloadFault};
+use super::fault_io::{FaultCell, FaultIo, TlsPayloadFault};
 use super::handler::handle_imposter_request_decorated;
 use super::probe::{Point, ProbeHandle};
 use super::reconcile::{
@@ -204,12 +204,15 @@ where
                 return Ok(tunnel_established());
             }
             let response =
-                handle_imposter_request_decorated(req, imposter, addr, port, decorator).await?;
-            if let Some(kind) = response.extensions().get::<TcpFaultKind>().copied() {
-                fault_cell.arm(kind);
-            }
+                match handle_imposter_request_decorated(req, imposter, addr, port, decorator).await
+                {
+                    Ok(response) => response,
+                    Err(never) => match never {},
+                };
             super::fault_io::arm_linger_if_requested(&response, version, &fault_cell);
-            Ok::<_, std::convert::Infallible>(response)
+            // A stub added under an open HTTP/2 connection can fault here too, though `http1_only`
+            // was decided at accept: only that stream resets (issue #1782).
+            super::fault_io::apply_tcp_fault(response, version, &fault_cell)
         }
     });
 
@@ -2026,6 +2029,14 @@ impl ImposterManager {
                                 drop(stream);
                                 continue;
                             }
+                            // A delete cancels before it signals shutdown, so a connection accepted
+                            // after the cancel may subscribe too late to hear the signal, and a
+                            // request's reset would no longer end it (issue #1782). Closed here, as
+                            // Mountebank's deleted server no longer holds it.
+                            if imposter_clone.cancel.is_cancelled() {
+                                drop(stream);
+                                continue;
+                            }
                             crate::proxy::network::apply_stream_tuning(&stream, &socket_tuning);
                             let imposter = Arc::clone(&imposter_clone);
                             // Each connection watches the shutdown signal so existing
@@ -2365,8 +2376,8 @@ impl ImposterManager {
         }
         // Drain in-flight connections within a bound. Each reacts to the signal above with a hyper
         // graceful shutdown (finish writing a response already produced, then close), and a
-        // request still being computed was cut off by the cancel with its connection closed (issue
-        // #1643), so this is normally sub-millisecond; a client too slow to read a produced
+        // request still being computed was cut off by the cancel, its connection closed or its h2
+        // stream reset (issue #1643), so this is normally sub-millisecond; a client too slow to read a produced
         // response is capped rather than hanging the delete.
         imposter.conn_tracker.close();
         let timed_out = tokio::time::timeout(self.conn_drain, imposter.conn_tracker.wait())
@@ -5145,9 +5156,39 @@ mod tests {
         );
     }
 
-    // Issue #1616, over HTTP/2 prior knowledge: the `TcpFaultKind::Empty` carrier aborts the whole
-    // connection beneath hyper, so the waiting stream fails instead of being answered. Every stream
-    // on it belongs to the deleted imposter, so nothing else is lost.
+    // A connection accepted after a delete's cancel may subscribe too late to hear its shutdown
+    // signal, and a request's reset would not end it, so it closes at once (issue #1782). The cancel
+    // alone stands in for that window: a delete signals right after it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_accepted_after_the_cancel_is_closed() {
+        use tokio::io::AsyncReadExt;
+
+        let manager = ImposterManager::new();
+        let port = manager
+            .create_imposter(long_wait_config(None, "ok"))
+            .await
+            .expect("create");
+        manager
+            .get_imposter(port)
+            .expect("imposter")
+            .cancel
+            .cancel();
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        let mut byte = [0u8; 1];
+        let read =
+            tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut byte)).await;
+        manager.delete_imposter(port).await.expect("delete");
+        assert!(
+            matches!(read, Ok(Ok(0) | Err(_))),
+            "the connection stays open: {read:?}"
+        );
+    }
+
+    // Issue #1616, over HTTP/2 prior knowledge: the waiting stream fails instead of being answered,
+    // with a reset of that stream (issue #1782).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_aborts_an_inflight_wait_over_http2() {
         use http_body_util::Empty;
@@ -5190,14 +5231,15 @@ mod tests {
             .await
             .expect("the stream ends within 1s")
             .expect("request task");
-        assert!(
-            answer.is_err(),
-            "the waiting h2 stream must fail, not be answered: {:?}",
-            answer.map(|r| r.status())
-        );
-        // Probed (issue #1616): the server sends its graceful-shutdown GOAWAY, then the carrier
-        // aborts the socket, so the stream fails with a closed connection (`BrokenPipe`), not a
-        // per-stream RST_STREAM, and the client's connection task ends cleanly.
+        match answer {
+            Ok(response) => panic!("the waiting h2 stream was answered: {}", response.status()),
+            Err(e) => assert!(
+                format!("{e:?}").contains("INTERNAL_ERROR"),
+                "the waiting h2 stream resets: {e:?}"
+            ),
+        }
+        // The server sends its graceful-shutdown GOAWAY and resets the stream (issue #1782), and the
+        // client's connection task ends cleanly.
         let ended = tokio::time::timeout(std::time::Duration::from_secs(1), conn).await;
         assert!(ended.is_ok(), "the h2 connection is closed, not left open");
     }
