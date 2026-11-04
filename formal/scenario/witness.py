@@ -75,16 +75,16 @@ WRITE_REPORTS_CHANGE = [
 
 cases = [
     # The race the protocol depends on, and the documented limit of the trait's default.
-    ('a compare-and-set can lose (matching.rs:684)', [], witness_cfg, 'NeverDroppedTransition'),
+    ('a compare-and-set can lose (matching.rs:705)', [], witness_cfg, 'NeverDroppedTransition'),
     ('the default compare_and_set overwrites a state it did not expect (flow_state.rs:100)', [],
      edit(only('TransitionsAreCas', witness_cfg), [('AtomicCas = TRUE', 'AtomicCas = FALSE')], 'Witness.cfg'),
      'TransitionsAreCas'),
     ('the same, with an atomic compare_and_set (control)', [], only('TransitionsAreCas', witness_cfg), 'ok'),
     # Filed findings, reachable until fixed (README.md, "Findings").
-    ('a late rcu puts a lower stamp over a higher one (#FIND_REGRESS)', [], only('StampMonotone'), 'StampMonotone'),
-    ('a client can hold an answer it is never told changed (#FIND_REGRESS, #FIND_UNSTAMPED)', [],
+    ('a late rcu puts a lower stamp over a higher one (#1779)', [], only('StampMonotone'), 'StampMonotone'),
+    ('a client can hold an answer it is never told changed (#1779, #1780)', [],
      only('NoStaleAnswerAtRest'), 'NoStaleAnswerAtRest'),
-    ('a scan of covered states matches nothing (#FIND_TORN)', [], only('NoMatchOnlyWhenUncovered'),
+    ('a scan of covered states matches nothing (#1781)', [], only('NoMatchOnlyWhenUncovered'),
      'NoMatchOnlyWhenUncovered'),
     # Each finding alone, then under its proposed fix.
     ('the regression alone: three transitions, nothing else', [],

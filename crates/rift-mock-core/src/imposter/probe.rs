@@ -87,6 +87,21 @@ pub enum Point {
         generation: Generation,
         stamp: i64,
     },
+    /// A request copied the scenario stamps, before any gate read (`formal/scenario`: `Copy`).
+    TransitionsCopied { port: u16 },
+    /// A request read the scenario state for the gate of the stub at `stub_index` (`GateRead`).
+    GateRead { port: u16, stub_index: usize },
+    /// A gated transition's compare-and-set wrote (`CasCompare`, the applied branch).
+    CasApplied { port: u16 },
+    /// A gated transition lost its compare-and-set and is dropped (`CasCompare`, the lost branch).
+    CasConflict { port: u16 },
+    /// A write to a scenario's key decided, before writing, whether it moves the state
+    /// (`SetRead`, `DelRead`).
+    ScenarioChangeRead { port: u16, changed: bool },
+    /// A transition took its stamp from the load clock, not yet published (`Issue`).
+    TransitionStampIssued { port: u16, stamp: i64 },
+    /// A transition's stamp reached the stamp map (`Publish`).
+    TransitionStamped { port: u16, stamp: i64 },
 }
 
 /// What the engine calls at each [`Point`]. Implementations must be cheap and must not block:

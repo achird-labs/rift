@@ -8,7 +8,7 @@
 (* another task can run.  Nothing here holds a lock across steps: the flow *)
 (* store takes its lock per call (`backends/inmemory.rs:294`), the load    *)
 (* clock is one atomic update (`core/mod.rs:169`) and the stamp map one    *)
-(* `ArcSwap::rcu` (`core/matching.rs:570`), and the worker threads run in  *)
+(* `ArcSwap::rcu` (`core/matching.rs:580`), and the worker threads run in  *)
 (* parallel, so any step of one request can land between two of another.  *)
 (* README.md has the table of actions and lines.                           *)
 (*                                                                         *)
@@ -24,7 +24,7 @@ CONSTANTS
     Gated,      \* requests matching the gated stubs, each with a `newScenarioState`
     Pollers,    \* requests matching read-only stubs under the same gates
     Setters,    \* requests matching an ungated stub with `newScenarioState = SetTo`
-    Resetters,  \* admin deletes of the scenario's key (`flow_delete`, matching.rs:724)
+    Resetters,  \* admin deletes of the scenario's key (`flow_delete`, matching.rs:746)
     Start,      \* what the store holds at the start: a state, or NoVal (absent)
     SetTo,      \* the state a setter writes
     AtomicCas,  \* TRUE: `compare_and_set` is one step, as every shipped backend's.
@@ -46,7 +46,7 @@ ASSUME /\ Start \in States \cup {NoVal}
        /\ Gated \cap Pollers = {} /\ Gated \cap Setters = {} /\ Gated \cap Resetters = {}
        /\ Pollers \cap Setters = {} /\ Pollers \cap Resetters = {} /\ Setters \cap Resetters = {}
 
-\* `scenario_state` (matching.rs:506): the initial state is normally stored as absence.
+\* `scenario_state` (matching.rs:512): the initial state is normally stored as absence.
 Logical(v) == IF v = NoVal THEN "S" ELSE v
 Max(a, b) == IF a >= b THEN a ELSE b
 
@@ -97,8 +97,8 @@ Copy(r) ==
     /\ req' = [req EXCEPT ![r].copy = map, ![r].pc = "gate"]
     /\ UNCHANGED <<store, map, clock, ver, writes, served, maxPub, casBroken, dropped, noMatch>>
 
-\* matching.rs:180-188: one store read per gated candidate, each a separate `get`.  A match at
-\* :215 ends the scan; running out of candidates is `Ok((None, trace))` at :224.
+\* matching.rs:181-194: one store read per gated candidate, each a separate `get`.  A match at
+\* :221 ends the scan; running out of candidates is `Ok((None, trace))` at :230.
 GateRead(r) ==
     /\ req[r].pc = "gate"
     /\ LET st == Logical(store)
@@ -115,7 +115,7 @@ GateRead(r) ==
                     /\ UNCHANGED noMatch
     /\ UNCHANGED <<store, map, clock, ver, writes, served, maxPub, casBroken, dropped>>
 
-\* The write a compare-and-set commits.  `exp` is what the caller expects (matching.rs:666, :675).
+\* The write a compare-and-set commits.  `exp` is what the caller expects (matching.rs:686, :695).
 Commit(r) ==
     /\ store' = req[r].to
     /\ ver' = ver + 1
@@ -124,7 +124,7 @@ Commit(r) ==
     /\ UNCHANGED dropped
 
 \* A compare that failed: retry once expecting absence when the gate was the initial state
-\* (matching.rs:672), else the transition is dropped (:684) and the answer still goes out.
+\* (matching.rs:692), else the transition is dropped (:705) and the answer still goes out.
 Lost(r) ==
     /\ IF store = NoVal /\ req[r].answer = "S"
        THEN /\ req' = [req EXCEPT ![r].exp = NoVal, ![r].pc = "cas"]
@@ -151,7 +151,7 @@ CasSet(r) ==
     /\ Commit(r)
     /\ UNCHANGED <<map, clock, writes, served, maxPub, noMatch>>
 
-\* matching.rs:569 `load_clock.next()`.  One atomic step, so every stamp is new.
+\* matching.rs:577 `load_clock.next()`.  One atomic step, so every stamp is new.
 Issue(r) ==
     /\ req[r].pc = "issue"
     /\ clock' = clock + 1
@@ -159,7 +159,7 @@ Issue(r) ==
     /\ req' = [req EXCEPT ![r].at = clock + 1, ![r].pc = "publish"]
     /\ UNCHANGED <<store, map, ver, served, maxPub, casBroken, dropped, noMatch>>
 
-\* matching.rs:570-574: the `rcu` retries until it lands, and inserts the stamp issued above,
+\* matching.rs:580-584: the `rcu` retries until it lands, and inserts the stamp issued above,
 \* whatever the map holds by then.
 Publish(r) ==
     /\ req[r].pc = "publish"
@@ -168,7 +168,7 @@ Publish(r) ==
     /\ req' = [req EXCEPT ![r] = IF r \in Gated THEN [@ EXCEPT !.pc = "serve"] ELSE Locals("done")]
     /\ UNCHANGED <<store, clock, ver, writes, served, casBroken, dropped, noMatch>>
 
-\* matching.rs:610-631, from handler.rs:2065 and :2415: the stub's own stamp or the copy, whichever
+\* matching.rs:629-650, from handler.rs:2066 and :2416: the stub's own stamp or the copy, whichever
 \* is later.  Stubs load before any transition here, so the copy decides.
 Serve(r) ==
     /\ req[r].pc = "serve"
@@ -177,14 +177,14 @@ Serve(r) ==
     /\ req' = [req EXCEPT ![r] = Locals("done")]
     /\ UNCHANGED <<store, map, clock, ver, writes, maxPub, casBroken, dropped, noMatch>>
 
-\* matching.rs:531-534: `set_scenario_state` asks whether the write would change the state.
+\* matching.rs:537-540: `set_scenario_state` asks whether the write would change the state.
 SetRead(r) ==
     /\ req[r].pc = "setRead"
     /\ req' = [req EXCEPT ![r].changed = (Logical(store) # SetTo), ![r].to = SetTo,
                           ![r].pc = "setWrite"]
     /\ UNCHANGED <<store, map, clock, ver, writes, served, maxPub, casBroken, dropped, noMatch>>
 
-\* matching.rs:535-541: the plain write, stamped only when that earlier answer said so.  An
+\* matching.rs:542-549: the plain write, stamped only when that earlier answer said so.  An
 \* ungated stub's answer does not depend on the state, so its serve is not modelled.
 SetWrite(r) ==
     /\ req[r].pc = "setWrite"
@@ -195,13 +195,13 @@ SetWrite(r) ==
                                   ELSE Locals("done")]
     /\ UNCHANGED <<map, clock, writes, served, maxPub, casBroken, dropped, noMatch>>
 
-\* matching.rs:933, :964 and :756: `ScenarioStampingStore::delete` asks `would_change`.
+\* matching.rs:955, :990 and :778: `ScenarioStampingStore::delete` asks `would_change`.
 DelRead(r) ==
     /\ req[r].pc = "delRead"
     /\ req' = [req EXCEPT ![r].changed = (store # NoVal), ![r].to = "S", ![r].pc = "delWrite"]
     /\ UNCHANGED <<store, map, clock, ver, writes, served, maxPub, casBroken, dropped, noMatch>>
 
-\* matching.rs:934-937: the delete, stamped only when that earlier answer said so.
+\* matching.rs:960-963: the delete, stamped only when that earlier answer said so.
 DelWrite(r) ==
     /\ req[r].pc = "delWrite"
     /\ store' = NoVal
@@ -260,7 +260,7 @@ NoStaleAnswerAtRest ==
 \* Every state has a stub in this table, so a scan that matched none read a state that moved.
 NoMatchOnlyWhenUncovered == ~noMatch
 
-\* Witness: must be violated.  A lost compare-and-set is normal concurrency (matching.rs:640).
+\* Witness: must be violated.  A lost compare-and-set is normal concurrency (matching.rs:659).
 NeverDroppedTransition == ~dropped
 
 =============================================================================
