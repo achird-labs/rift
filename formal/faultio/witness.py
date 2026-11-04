@@ -15,7 +15,6 @@ from tlacheck import edit, jar_from_argv, read, tlc  # noqa: E402
 here = os.path.dirname(os.path.abspath(__file__))
 spec = read(os.path.join(here, 'FaultIo.tla'))
 pr_cfg = read(os.path.join(here, 'FaultIoPR.cfg'))
-known_cfg = read(os.path.join(here, 'Known.cfg'))
 witness_cfg = read(os.path.join(here, 'Witness.cfg'))
 jar = jar_from_argv()
 
@@ -50,16 +49,10 @@ cases = [
     # after the first error (dispatch.rs:451, :128).  The read matters above TLS (mutants.py).
     ('take as a read on the raw socket changes nothing, since hyper aborts on the first error',
      None, 'ok'),
-    # The rule the other listeners apply (gateway.rs:38) keeps the fault on its stream: the fix.
-    ('apply_tcp_fault\'s version check on the imposter listener (control for #1782)',
-     edit(only(known_cfg, 'H2FaultStaysOnStream'), [('ImposterArmsOnH2 = TRUE', 'ImposterArmsOnH2 = FALSE')], 'Known.cfg'), 'ok'),
-    # Filed findings, reachable until fixed (README.md, "Findings").
-    ('one stream\'s fault takes the other streams of an HTTP/2 connection (#1782)',
-     only(known_cfg, 'H2FaultStaysOnStream'), 'H2FaultStaysOnStream'),
     # Accepted as what a reset means (#1783, closed): it stays reachable, and documented.
     ('a close that sends RST discards what the kernel still holds',
-     only(known_cfg, 'RstDiscardsNothing'), 'RstDiscardsNothing'),
-    # The PR gate is green with #1782 in Known.cfg.
+     only(pr_cfg, 'RstDiscardsNothing'), 'RstDiscardsNothing'),
+    # The PR gate is green.
     ('FaultIoPR.cfg (control)', pr_cfg, 'ok'),
 ]
 TAKE = "    /\\ cell' = None     \\* FaultCell::take\n"

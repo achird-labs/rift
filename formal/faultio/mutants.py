@@ -70,6 +70,16 @@ mutants = {
          ('"ok", "refuse", "reset"', '"ok", "reset"')]),
 }
 failed = False
+# #1782: the imposter listener armed the connection's cell on HTTP/2, so one stream's fault aborted
+# every stream on it.  Mutants.cfg has no stub write under an open connection, so this one takes the
+# PR bounds.
+verdict, trace, out = tlc(jar, 'FaultIo', spec, edit(read(os.path.join(here, 'FaultIoPR.cfg')), [
+    ('ImposterArmsOnH2 = FALSE', 'ImposterArmsOnH2 = TRUE')], 'FaultIoPR.cfg'))
+if verdict == 'H2FaultStaysOnStream':
+    print(f'the imposter listener arms on HTTP/2 (#1782): caught by {verdict}')
+else:
+    print(f'the imposter listener arms on HTTP/2 (#1782): expected H2FaultStaysOnStream, got {verdict}\n{out}')
+    failed = True
 for name, (expected, spec_edits, *cfg_edits) in mutants.items():
     mutated = edit(spec, spec_edits, name)
     cfg = edit(base_cfg, cfg_edits[0] if cfg_edits else [], name)

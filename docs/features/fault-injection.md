@@ -265,7 +265,9 @@ HTTPS client completes the handshake, decrypts the bytes and then fails to parse
 Mountebank. Because a connection-level fault aborts the whole socket, an imposter that uses any TCP
 fault is **advertised and served** over HTTP/1 only (HTTP/2 multiplexing is incompatible with
 mid-stream connection aborts). On HTTPS that means the TLS handshake offers only `http/1.1`, so an
-h2-capable client is never led to commit to a protocol the imposter will not speak.
+h2-capable client is never led to commit to a protocol the imposter will not speak. That choice is made per
+connection, when it is accepted: on an HTTP/2 connection already open when a fault stub is added, the
+fault resets only its own stream, as on the admin and front-door listeners.
 
 The same faults fire through the [single-port gateway](gateway.md) (`/__rift/{port}/…` on the admin
 port) and the [front door](front-door.md). Over **HTTP/1** the client sees exactly what the
@@ -314,7 +316,8 @@ no `x-rift-fault` header. Rift warns when the imposter loads, and `rift-lint` re
 Like `_rift.fault.tcp`, a bare top-level `fault` also forces the whole imposter onto **HTTP/1
 only**: it is a connection-level event, and aborting a socket mid-stream is incompatible with
 HTTP/2 multiplexing — so an imposter with even one stub returning a top-level `fault` never
-negotiates HTTP/2, regardless of what its other stubs do.
+negotiates HTTP/2 on a new connection, regardless of what its other stubs do. On an HTTP/2 connection
+already open when the stub is added, the fault resets its own stream.
 
 ### Detecting a fault in-process (embedders)
 

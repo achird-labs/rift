@@ -326,7 +326,7 @@ the new imposter, never the deleted one's state.
 
 A request still being answered — in a `wait` behavior, on a proxy upstream, in a `shellTransform` or
 in an `inject` — is cut off, as in Mountebank: its connection closes without a response (over
-HTTP/2, the whole connection closes), so the delete does not wait for it and the deleted imposter
+HTTP/2, its stream resets and the connection then closes), so the delete does not wait for it and the deleted imposter
 never answers it. This holds whichever way the request arrived, including the `/__rift/:port/`
 gateway, and for a request that arrived just before the delete. A response already being written is
 still finished. Mountebank never kills a running `shellTransform` command or an upstream request

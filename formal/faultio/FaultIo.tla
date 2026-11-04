@@ -27,7 +27,7 @@ CONSTANTS
     ClientPipelines,    \* {TRUE, FALSE}: the client sends before it has read the last response
     BodyUnits,          \* units of request body a refused request still has to write
     PipelineFlush,      \* hyper's `pipeline_flush` option.  FALSE: Rift never sets it (io.rs:279)
-    ImposterArmsOnH2,   \* TRUE: `run_http1` arms for any version (manager.rs:208).  FALSE:
+    ImposterArmsOnH2,   \* TRUE: `run_http1` arms for any version, before #1782.  FALSE:
                         \* `apply_tcp_fault`'s rule, as on the admin and front-door listeners
     DrainOutrunsDelivery \* TRUE: the drain's 2 s bound may end before the kernel delivered its queue
 
@@ -449,9 +449,9 @@ H2Dispatch(r) ==
                    writing, wbuf, tlsBuf, cell, linger, trip, phase, soLinger, sendq, wire, unread,
                    bodyLeft, served, ghost>>
 
-\* `run_http1`'s service arms the connection's cell whatever the version (manager.rs:208).  The
-\* other listeners go through `apply_tcp_fault` (gateway.rs:38): the service errs, and hyper's h2
-\* server resets that stream alone (hyper proto/h2/server.rs:465).
+\* Every listener goes through `apply_tcp_fault`: the service errs, and hyper's h2 server resets that
+\* stream alone (hyper proto/h2/server.rs:465).  Before #1782 `run_http1` armed the connection's cell
+\* whatever the version, which `ImposterArmsOnH2` puts back.
 H2ServiceDone(r) ==
     /\ version = "h2" /\ phase = "serving"
     /\ streams[r] = "computing"
@@ -527,7 +527,7 @@ LingerDeliversResponse ==
         /\ On("fin", wire)
         /\ \A r \in Reqs : served[r] = "refuse" => Whole(r)
 
-\* The fault of one HTTP/2 stream takes no other stream (fault_io.rs:183, gateway.rs:25).  #1782.
+\* The fault of one HTTP/2 stream takes no other stream (fault_io.rs, `apply_tcp_fault`).  #1782.
 H2FaultStaysOnStream == ~ghost.collateral
 
 \* A close that sends RST discards nothing the kernel has not delivered yet.  Violated by design: a

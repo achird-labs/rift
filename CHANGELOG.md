@@ -63,6 +63,11 @@ record.
   two transitions' stamps as they landed, so a stalled one could put a lower stamp over a higher one. A
   client revalidating with `If-Modified-Since` alone then stayed on `304` until the next transition. A
   scenario's stamp now only rises.
+- **A TCP fault on an open HTTP/2 connection resets only its own stream** (#1782): a fault stub added
+  under a connection already on HTTP/2 aborted the whole connection, killing every other stream on it.
+  It now resets the one stream, as on the admin and front-door listeners. A delete that cuts off an
+  HTTP/2 request also resets that stream now, where it aborted the connection, and the connection ends
+  through the shutdown already under way.
 - **A state write from a getter on a script's answer is no longer lost** (#1785): the state was saved
   before the answer was read out of its JS object, so a getter on the answer, on a thrown value's
   `message` or on a decorate's `config.response` wrote to a state nobody would read again, unless another

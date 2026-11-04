@@ -38,8 +38,8 @@ pub use extensions::template;
 // `is_injected_fault` let a listener other than the serve loop apply that abort itself (#1234);
 // `LingerOnClose`/`arm_linger_if_requested` let it close a refused connection cleanly (#1460).
 pub use imposter::fault_io::{
-    FaultCell, FaultIo, InjectedFault, LingerOnClose, TcpFaultKind, arm_linger_if_requested,
-    is_injected_fault, tcp_fault_carrier,
+    FaultCell, FaultIo, InjectedFault, LingerOnClose, TcpFaultKind, apply_tcp_fault,
+    arm_linger_if_requested, is_injected_fault, tcp_fault_carrier,
 };
 
 // Shared utilities
