@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use crate::recording::ClaimOutcome;
 use super::fault_io::TcpFaultKind;
+use crate::recording::ClaimOutcome;
 
 /// A generation: the n-th imposter this manager created, whichever port. Two imposters on one
 /// port over time are two generations; the model names them `<<port, n>>`.
@@ -140,6 +140,21 @@ pub enum Point {
     LingerFinSent,
     /// The lingering close stopped discarding what the client sends (`DrainEnds`).
     LingerDrained { discarded: usize },
+    /// A request read the scenario state for the gate of the stub at `stub_index`
+    /// (`formal/scenario`: `GateRead`). This and the points below fire only for a scenario, so a
+    /// run of an imposter without one records what `formal/lifecycle` covers and nothing else.
+    GateRead { port: u16, stub_index: usize },
+    /// A gated transition's compare-and-set wrote (`CasCompare`, the applied branch).
+    CasApplied { port: u16 },
+    /// A gated transition lost its compare-and-set and is dropped (`CasCompare`, the lost branch).
+    CasConflict { port: u16 },
+    /// A write to a scenario's key decided, before writing, whether it moves the state
+    /// (`SetRead`, `DelRead`).
+    ScenarioChangeRead { port: u16, changed: bool },
+    /// A transition took its stamp from the load clock, not yet published (`Issue`).
+    TransitionStampIssued { port: u16, stamp: i64 },
+    /// A transition's stamp reached the stamp map (`Publish`).
+    TransitionStamped { port: u16, stamp: i64 },
 }
 
 /// What the engine calls at each [`Point`]. Implementations must be cheap and must not block:
