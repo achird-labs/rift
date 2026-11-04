@@ -3,7 +3,7 @@
 //! Each test drives a real imposter, proxying to a second one, with a `Probe` that records every
 //! claim-protocol point in the order the engine took it, and can hold the engine at a point
 //! (`Recorder::hold`), which forces an interleaving instead of hoping the scheduler finds it. With
-//! `RIFT_TRACE_DIR` set, a test writes its run as ndjson there, and `formal/proxyonce/validate.py`
+//! `FORMAL_TRACE_DIR` set, a test writes its run as ndjson there, and `formal/proxyonce/validate.py`
 //! asks TLC whether `ProxyOnce.tla` allows that order.
 //!
 //! A test marked `#[ignore = "#n"]` states the correct behaviour and fails today: it reproduces the
@@ -111,11 +111,11 @@ impl Recorder {
         self.points.lock().clear();
     }
 
-    /// Write the run to `$RIFT_TRACE_DIR/<name>.ndjson`, when the variable is set.
+    /// Write the run to `$FORMAL_TRACE_DIR/<name>.ndjson`, when the variable is set.
     ///
     /// The `Start` line says whether the run starts with a recording made before `restart`.
     fn write(&self, name: &str, preloaded: bool) {
-        let Ok(dir) = std::env::var("RIFT_TRACE_DIR") else {
+        let Ok(dir) = std::env::var("FORMAL_TRACE_DIR") else {
             return;
         };
         let mut lines = json!({"point": "Start", "preloaded": preloaded}).to_string();
@@ -148,7 +148,9 @@ fn to_json(point: Point) -> Value {
         Point::ProxyNothingToReplay { .. } => json!({"point": "ProxyNothingToReplay"}),
         Point::ProxyForwarding { .. } => json!({"point": "ProxyForwarding"}),
         Point::ProxySettled { .. } => json!({"point": "ProxySettled"}),
-        Point::ProxyInserted { claimed, .. } => json!({"point": "ProxyInserted", "claimed": claimed}),
+        Point::ProxyInserted { claimed, .. } => {
+            json!({"point": "ProxyInserted", "claimed": claimed})
+        }
         Point::ProxyOrphanFound { .. } => json!({"point": "ProxyOrphanFound"}),
         Point::ProxyOrphanForgotten { .. } => json!({"point": "ProxyOrphanForgotten"}),
         Point::ProxyStoreCleared { .. } => json!({"point": "ProxyStoreCleared"}),
@@ -214,7 +216,9 @@ impl Rig {
             recorder,
             store,
             imposter: manager.get_imposter(port).expect("proxy imposter"),
-            upstream: manager.get_imposter(upstream_port).expect("upstream imposter"),
+            upstream: manager
+                .get_imposter(upstream_port)
+                .expect("upstream imposter"),
             _manager: manager,
             port,
         }
@@ -316,7 +320,8 @@ async fn a_recording_answers_the_next_request_from_its_stub() {
     assert_eq!(rig.layout(), ["recording", "proxy"]);
     assert_eq!(rig.upstream_hits(), 1);
     assert!(rig.store_has_recording());
-    rig.recorder.write("record_then_answer_from_the_stub", false);
+    rig.recorder
+        .write("record_then_answer_from_the_stub", false);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -435,7 +440,11 @@ async fn a_late_shadow_forget_leaves_the_new_recording_alone() {
         "one identity, one recording ahead of the proxy: {:?}",
         rig.layout()
     );
-    assert_eq!(rig.upstream_hits(), 2, "the late request had a recording to replay");
+    assert_eq!(
+        rig.upstream_hits(),
+        2,
+        "the late request had a recording to replay"
+    );
 }
 
 /// A request that finds a recording settled and not yet inserted, with the old carrier still behind
@@ -455,14 +464,19 @@ async fn a_new_recording_is_not_taken_for_the_shadowed_one() {
 
     held.open();
     first.await.expect("first");
-    rig.recorder.write("defect_1776_new_recording_taken_for_shadowed", true);
+    rig.recorder
+        .write("defect_1776_new_recording_taken_for_shadowed", true);
     assert_eq!(
         rig.ahead_of_the_proxy(),
         1,
         "one identity, one recording ahead of the proxy: {:?}",
         rig.layout()
     );
-    assert_eq!(rig.upstream_hits(), 2, "the second request had a recording to replay");
+    assert_eq!(
+        rig.upstream_hits(),
+        2,
+        "the second request had a recording to replay"
+    );
 }
 
 /// An edit removes the old carrier of a shadowed recording while a new recording is on its way. Its
@@ -545,7 +559,8 @@ async fn forwarding_with_nothing_to_replay_records_nothing() {
 
     held_request.open();
     assert_eq!(request.await.expect("request"), "up");
-    rig.recorder.write("defect_1778_nothing_to_replay_inserts", true);
+    rig.recorder
+        .write("defect_1778_nothing_to_replay_inserts", true);
     assert!(
         !rig.inserted_without_a_claim(),
         "points: {:?}",

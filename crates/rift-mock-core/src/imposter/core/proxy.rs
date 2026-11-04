@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::imposter::behavior_pipeline::{BehaviorOutcome, BehaviorRun, ServedParts};
-use crate::imposter::types::{UpstreamTarget, upstream_url};
 use crate::imposter::probe::{Point, fire};
+use crate::imposter::types::{UpstreamTarget, upstream_url};
 use crate::recording::{ClaimToken, ProxyStoreError, StubPlacement, StubPublication};
 // The predicate-generator keys this engine reads (issue #1327). Any other key is accepted and
 // reported as unread, never refused: Mountebank configs carry keys Rift may not implement yet.
@@ -1404,7 +1404,13 @@ impl Imposter {
         } else {
             let claimed = self.proxy_store.try_claim_as(port, &signature, mode);
             if let Ok(outcome) = &claimed {
-                fire(&self.probe, Point::ProxyClaim { port, outcome: *outcome });
+                fire(
+                    &self.probe,
+                    Point::ProxyClaim {
+                        port,
+                        outcome: *outcome,
+                    },
+                );
             }
             let outcome = match claimed {
                 // A recording only behind the stub that answered did not answer this request: it
@@ -1422,7 +1428,13 @@ impl Imposter {
                             fire(&self.probe, Point::ProxyShadowForgot { port });
                             let again = self.proxy_store.try_claim_as(port, &signature, mode);
                             if let Ok(outcome) = &again {
-                                fire(&self.probe, Point::ProxyClaim { port, outcome: *outcome });
+                                fire(
+                                    &self.probe,
+                                    Point::ProxyClaim {
+                                        port,
+                                        outcome: *outcome,
+                                    },
+                                );
                             }
                             again
                         }
