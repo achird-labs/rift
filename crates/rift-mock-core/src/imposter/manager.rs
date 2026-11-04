@@ -2598,6 +2598,11 @@ impl ImposterManager {
                     report.deleted.push(port);
                     self.emit(ImposterEvent::Deleted(port));
                 }
+                // A concurrent delete got there first: already gone, which is what was asked, and
+                // not this apply's deletion to report.
+                Err(ImposterError::NotFound(_)) => {
+                    debug!("apply: imposter on port {port} was already gone");
+                }
                 Err(e) => report.failed.push((port, e)),
             }
         }

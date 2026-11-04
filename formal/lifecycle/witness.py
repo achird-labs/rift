@@ -16,7 +16,6 @@ here = os.path.dirname(os.path.abspath(__file__))
 spec = read(os.path.join(here, 'Lifecycle.tla'))
 pr_cfg = read(os.path.join(here, 'LifecyclePR.cfg'))
 mutants_cfg = read(os.path.join(here, 'Mutants.cfg'))
-apply_cfg = read(os.path.join(here, 'LifecycleApply.cfg'))
 jar = jar_from_argv()
 
 
@@ -35,10 +34,6 @@ cases = [
     ('the same, with the drain waiting (control)', only(mutants_cfg, 'NoServeAfterDeleteReturns'), 'ok'),
     ('two creates pass the bind check and both bind; the claim decides',
      only(pr_cfg, 'BindCheckSuffices'), 'BindCheckSuffices'),
-    # Filed findings, reachable until fixed (README.md, "Findings").
-    ('an apply sweep reports a concurrent delete as failed (#1774)',
-     only(apply_cfg, 'ApplyReportsTruth'), 'ApplyReportsTruth'),
-    # Documented limits.
     # The PR gate is green.
     ('LifecyclePR.cfg (control)', pr_cfg, 'ok'),
 ]

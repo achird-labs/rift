@@ -76,7 +76,7 @@ source, and each issue says which. A fixed one says so in the table.
 | #1763 | lifecycle | A delete clears the shared journal of the imposter that took the port. Fixed |
 | #1764 | lifecycle | A create that loses the port claim has already answered requests (observed on macOS only). Fixed |
 | #1773 | lifecycle | A failed create's rollback removes the current imposter and leaves its listener running. Fixed |
-| #1774 | lifecycle | An apply sweep reports a concurrent delete as failed |
+| #1774 | lifecycle | An apply sweep reports a concurrent delete as failed. Fixed |
 | #1776 | proxyonce | A forget removes a newer recording than the one it decided about |
 | #1777 | proxyonce | A settle that wrote no recording still inserts a stub carrying the claim |
 | #1778 | proxyonce | An `AlreadyRecorded` with nothing to replay inserts a stub with no claim. Fixed |

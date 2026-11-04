@@ -97,6 +97,10 @@ mutants = {
 """, """    /\\ op[o].pc = "cRollback"
 """)],
         [('PersistFails = FALSE', 'PersistFails = TRUE'), ('UnlinkFails = FALSE', 'UnlinkFails = TRUE')]),
+    # #1774: an apply sweep reported a port a concurrent delete had removed as failed.
+    'an apply sweep reports a concurrent delete as failed (#1774)': ('ApplyReportsTruth', [
+        ('op[o].ret \\notin {"rCreate", "aSweep"}', 'op[o].ret # "rCreate"')],
+        [('Appliers = {}', 'Appliers = {a1}'), ('Deleters = {d1, d2}', 'Deleters = {d1}')]),
     # No `mutations` lock: two creates see the slot empty and both store.
     'try_claim without the mutations lock': ('OneClaimant', [
         (CLAIM_ATOMIC, '''            THEN /\\ op' = [op EXCEPT ![o].pc = "cStore"]
