@@ -8,7 +8,7 @@ Usage: python3 validate.py <tla2tools.jar> <trace dir or files...>
 under `traces/reject` rejected (runs the model forbids, written by hand from recorded ones).
 
 Each trace (ndjson of probe points, written by crates/rift-mock-core/tests/lifecycle_interleavings.rs
-under RIFT_TRACE_DIR) is turned into model action labels (trace_labels.py) and into a `Trace`
+under FORMAL_TRACE_DIR) is turned into model action labels (trace_labels.py) and into a `Trace`
 module, then TLC searches TraceValidation.tla for a behaviour of Lifecycle that takes those steps
 in that order.  Exits non-zero when a trace is rejected, when no trace was checked, or when a
 trace cannot be read.  A trace TLC cannot decide within TRACE_TIMEOUT_SECS (default 300) is

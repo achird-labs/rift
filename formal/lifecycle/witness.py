@@ -17,6 +17,9 @@ spec = read(os.path.join(here, 'Lifecycle.tla'))
 pr_cfg = read(os.path.join(here, 'LifecyclePR.cfg'))
 known_cfg = read(os.path.join(here, 'Known.cfg'))
 mutants_cfg = read(os.path.join(here, 'Mutants.cfg'))
+full_cfg = read(os.path.join(here, 'Lifecycle.cfg'))
+apply_cfg = read(os.path.join(here, 'LifecycleApply.cfg'))
+replace_cfg = read(os.path.join(here, 'LifecycleReplace.cfg'))
 jar = jar_from_argv()
 
 
@@ -28,12 +31,12 @@ def only(cfg, invariant):
 
 cases = [
     # Documented limits.
-    ('a client too slow to read its response is answered after the delete returned (manager.rs:2171)',
+    ('a client too slow to read its response is answered after the delete returned',
      edit(only(mutants_cfg, 'NoServeAfterDeleteReturns'), [('DrainTimesOut = FALSE', 'DrainTimesOut = TRUE')],
           'Mutants.cfg'),
      'NoServeAfterDeleteReturns'),
     ('the same, with the drain waiting (control)', only(mutants_cfg, 'NoServeAfterDeleteReturns'), 'ok'),
-    ('two creates pass the bind check and both bind; the claim decides (manager.rs:1540)',
+    ('two creates pass the bind check and both bind; the claim decides',
      only(known_cfg, 'BindCheckSuffices'), 'BindCheckSuffices'),
     # Filed findings, reachable until fixed (README.md, "Findings").
     ('a content change between record_load_floor and the cancel is above the recorded floor (#1762)',
@@ -44,7 +47,16 @@ cases = [
      'FloorMonotone'),
     ('a delete clears the shared state of the generation that took the port meanwhile',
      only(known_cfg, 'SharedStateBelongsToCurrent'), 'SharedStateBelongsToCurrent'),
-    # The PR gate is green with those three in Known.cfg.
+    ('the rollback of a failed create removes the generation that took the port (#1773)',
+     only(full_cfg, 'RemoveOnlyOwn'), 'RemoveOnlyOwn'),
+    ('an apply sweep reports a concurrent delete as failed (#1774)',
+     only(apply_cfg, 'ApplyReportsTruth'), 'ApplyReportsTruth'),
+    # Documented limits that need two failures at once, or read as a legal order.
+    ('a delete fails its unlink after a rollback already removed the imposter',
+     only(full_cfg, 'ErrDeleteStillServing'), 'ErrDeleteStillServing'),
+    ('a replace takes whichever generation holds the port', only(replace_cfg, 'ReplaceTakesItsOwn'),
+     'ReplaceTakesItsOwn'),
+    # The PR gate is green with the findings in Known.cfg.
     ('LifecyclePR.cfg (control)', pr_cfg, 'ok'),
 ]
 failed = False

@@ -1,7 +1,7 @@
 //! Runs of the imposter lifecycle under a recording probe (`formal/lifecycle`).
 //!
 //! Each test drives the real `ImposterManager` with a `Probe` that records every lifecycle point in
-//! the order the engine took it. With `RIFT_TRACE_DIR` set, a test writes its run as ndjson there,
+//! the order the engine took it. With `FORMAL_TRACE_DIR` set, a test writes its run as ndjson there,
 //! and `formal/lifecycle/validate.py` asks TLC whether `Lifecycle.tla` allows that order.
 //!
 //! The probe can also hold the engine at a point (`Recorder::hold`), which forces an interleaving
@@ -118,9 +118,9 @@ impl Recorder {
         lines
     }
 
-    /// Write the run to `$RIFT_TRACE_DIR/<name>.ndjson`, when the variable is set.
+    /// Write the run to `$FORMAL_TRACE_DIR/<name>.ndjson`, when the variable is set.
     fn write(&self, name: &str) {
-        let Ok(dir) = std::env::var("RIFT_TRACE_DIR") else {
+        let Ok(dir) = std::env::var("FORMAL_TRACE_DIR") else {
             return;
         };
         std::fs::create_dir_all(&dir).expect("trace dir");
