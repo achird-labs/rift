@@ -22,6 +22,8 @@ use tokio::net::TcpStream;
 use tokio::time::{Instant, Sleep};
 use tracing::debug;
 
+use super::probe::{FaultLayer, Point, ProbeHandle, fire};
+
 // Lingering-close bounds (issue #1460): total drain time, the longest silence between reads, and
 // the most a client may send before the listener stops discarding it. Time, not size, is the real
 // bound: draining costs bandwidth, never memory.
@@ -142,10 +144,22 @@ pub fn tcp_fault_carrier<B>(response: &Response<B>) -> Option<&'static str> {
 #[derive(Clone, Debug, Default)]
 pub struct FaultCell(Arc<CellState>);
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct CellState {
     fault: Mutex<Option<TcpFaultKind>>,
     linger: AtomicBool,
+    /// `formal/faultio`'s probe, `None` in production. It fires only where a fault or a linger is
+    /// actually armed or taken, so an unarmed connection never reads it.
+    probe: ProbeHandle,
+}
+
+impl std::fmt::Debug for CellState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CellState")
+            .field("fault", &self.fault)
+            .field("linger", &self.linger)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FaultCell {
@@ -155,6 +169,14 @@ impl FaultCell {
         Self::default()
     }
 
+    /// An empty slot that reports to `probe` (`formal/faultio/README.md`).
+    pub(crate) fn probed(probe: ProbeHandle) -> Self {
+        Self(Arc::new(CellState {
+            probe,
+            ..CellState::default()
+        }))
+    }
+
     /// Arm the slot: the connection's next write performs `kind` instead of writing.
     ///
     /// Only meaningful on an HTTP/1 connection, where the next write is this request's response.
@@ -162,6 +184,7 @@ impl FaultCell {
     /// stream on the connection.
     pub fn arm(&self, kind: TcpFaultKind) {
         *self.0.fault.lock() = Some(kind);
+        fire(&self.0.probe, Point::FaultArmed { kind });
     }
 
     /// Ask for a lingering close: when hyper shuts this connection down, [`FaultIo`] shuts the
@@ -178,6 +201,7 @@ impl FaultCell {
     /// this response; [`arm_linger_if_requested`] makes that decision from the response.
     pub fn arm_linger(&self) {
         self.0.linger.store(true, Ordering::Relaxed);
+        fire(&self.0.probe, Point::LingerArmed);
     }
 
     fn linger_armed(&self) -> bool {
@@ -186,7 +210,12 @@ impl FaultCell {
 
     /// Take (not just read) the armed fault so it fires exactly once. `FaultIo` only.
     fn take(&self) -> Option<TcpFaultKind> {
-        self.0.fault.lock().take()
+        let taken = self.0.fault.lock().take();
+        if let Some(kind) = taken {
+            let layer = FaultLayer::RawSocket;
+            fire(&self.0.probe, Point::FaultTaken { kind, layer });
+        }
+        taken
     }
 
     /// Take the armed fault only if it is a payload kind (random data, malformed chunk), leaving a
@@ -196,8 +225,10 @@ impl FaultCell {
     pub(crate) fn take_payload(&self) -> Option<(TcpFaultKind, &'static [u8])> {
         let mut slot = self.0.fault.lock();
         let armed = (*slot).and_then(|kind| payload(kind).map(|bytes| (kind, bytes)));
-        if armed.is_some() {
+        if let Some((kind, _)) = armed {
             *slot = None;
+            let layer = FaultLayer::AboveTls;
+            fire(&self.0.probe, Point::FaultTaken { kind, layer });
         }
         armed
     }
@@ -436,10 +467,13 @@ impl AsyncWrite for FaultIo {
             match &mut this.linger {
                 Linger::NotStarted | Linger::ShuttingWrite => {
                     ready!(Pin::new(&mut this.inner).poll_shutdown(cx))?;
+                    fire(&this.fault.0.probe, Point::LingerFinSent);
                     this.linger = Linger::Draining(Box::new(Drain::new()));
                 }
                 Linger::Draining(drain) => {
                     ready!(drain.poll(&mut this.inner, cx));
+                    let discarded = drain.discarded;
+                    fire(&this.fault.0.probe, Point::LingerDrained { discarded });
                     this.linger = Linger::Done;
                 }
                 Linger::Done => return Poll::Ready(Ok(())),
