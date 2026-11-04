@@ -148,8 +148,8 @@ pub enum Point {
     LingerFinSent,
     /// The lingering close stopped discarding what the client sends (`DrainEnds`).
     LingerDrained { discarded: usize },
-    /// A request read the scenario state for the gate of the stub at `stub_index`
-    /// (`formal/scenario`: `GateRead`). This and the points below fire only for a scenario, so a
+    /// A request judged the gate of the stub at `stub_index` against the state its scan read, the
+    /// first time it met that scenario (`formal/scenario`: `GateRead`). This and the points below fire only for a scenario, so a
     /// run of an imposter without one records what `formal/lifecycle` covers and nothing else.
     GateRead { port: u16, stub_index: usize },
     /// A gated transition's compare-and-set wrote (`CasCompare`, the applied branch).

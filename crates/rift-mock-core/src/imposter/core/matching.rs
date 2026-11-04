@@ -149,6 +149,7 @@ impl Imposter {
         H: RequestHeaders,
     {
         let mut trace = want_trace.then(MatchTrace::default);
+        let mut gate_states: HashMap<&str, String> = HashMap::new();
         // Stage 1 (issues #292, #707): one wait-free load yields the stubs and the index built over
         // those exact stubs, so they are consistent by construction. Every dimension over-
         // approximates (stubs it can't index sit in its always-bits), so `candidates` is a superset
@@ -199,12 +200,19 @@ impl Imposter {
             // (flow_id, scenario) state equals it.
             if let Some(required) = &stub.required_scenario_state {
                 let scenario = stub.scenario_name.as_deref().unwrap_or("");
-                let state = self.scenario_state(&flow_id, scenario)?;
+                // One read per scenario per scan, so every stub is judged against one state: a
+                // transition during the scan must not make it miss every stub (issue #1781).
+                let state = match gate_states.entry(scenario) {
+                    std::collections::hash_map::Entry::Occupied(known) => known.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(first) => {
+                        first.insert(self.scenario_state(&flow_id, scenario)?)
+                    }
+                };
                 self.probe_at(|port| Point::GateRead {
                     port,
                     stub_index: stub_idx,
                 });
-                if state != *required {
+                if *state != *required {
                     if let Some(trace) = trace.as_mut() {
                         trace.reject(stub_idx, stub, TriedWhy::SkippedScenarioState);
                     }
@@ -1161,6 +1169,71 @@ mod bounded_matching_tests {
 
     fn no_headers() -> HashMap<String, String> {
         HashMap::new()
+    }
+
+    /// The in-memory store, counting its reads.
+    struct CountingReads {
+        inner: crate::backends::InMemoryFlowStore,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FlowStore for CountingReads {
+        fn get(&self, flow: &str, key: &str) -> anyhow::Result<Option<serde_json::Value>> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.get(flow, key)
+        }
+        fn set(&self, flow: &str, key: &str, value: serde_json::Value) -> anyhow::Result<()> {
+            self.inner.set(flow, key, value)
+        }
+        fn exists(&self, flow: &str, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(flow, key)
+        }
+        fn delete(&self, flow: &str, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(flow, key)
+        }
+        fn increment(&self, flow: &str, key: &str) -> anyhow::Result<i64> {
+            self.inner.increment(flow, key)
+        }
+        fn set_ttl(&self, flow: &str, ttl_seconds: i64) -> anyhow::Result<()> {
+            self.inner.set_ttl(flow, ttl_seconds)
+        }
+    }
+
+    fn reads_of_one_scan(stubs: serde_json::Value) -> usize {
+        let cfg = serde_json::from_value(json!({ "port": 0, "protocol": "http", "stubs": stubs }))
+            .expect("valid imposter config");
+        let mut imp = Imposter::new(cfg).expect("test imposter");
+        let store = Arc::new(CountingReads {
+            inner: crate::backends::InMemoryFlowStore::new(300),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        imp.flow_store = store.clone();
+        let matched = imp
+            .find_matching_stub_with_client("GET", "/", &no_headers(), None, None, None, None)
+            .expect("scan");
+        assert!(matched.is_none(), "no stub is meant to match");
+        store.reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn gated(scenario: &str, state: &str) -> serde_json::Value {
+        json!({
+            "scenarioName": scenario,
+            "requiredScenarioState": state,
+            "responses": [{ "is": { "body": "x" } }]
+        })
+    }
+
+    // Issue #1781: every gate of a scenario in a scan reads one state.
+    #[test]
+    fn a_scan_reads_each_scenario_once() {
+        assert_eq!(
+            reads_of_one_scan(json!([gated("S", "A"), gated("S", "B"), gated("S", "C")])),
+            1
+        );
+        assert_eq!(
+            reads_of_one_scan(json!([gated("S", "A"), gated("T", "A"), gated("S", "B")])),
+            2
+        );
     }
 
     // Issue #611: an undecodable percent-sequence in a form body must pass through raw rather than
