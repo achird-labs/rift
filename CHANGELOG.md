@@ -40,6 +40,10 @@ record.
   journal. Accept loops now wait for the claim before their first accept. A connection the kernel had
   already queued on the loser's socket is closed unanswered, so a client racing two creates can see a
   closed connection or a timeout, never the loser's response.
+- **A stalled scenario transition no longer takes `Last-Modified` backwards** (#1779): nothing ordered
+  two transitions' stamps as they landed, so a stalled one could put a lower stamp over a higher one. A
+  client revalidating with `If-Modified-Since` alone then stayed on `304` until the next transition. A
+  scenario's stamp now only rises.
 - **A delete no longer wipes the imposter that took the port** (#1763): with a shared journal,
   sequencer or proxy store, a delete cleared the port's entries up to 5 seconds after freeing the port,
   so a same-port create lost its recorded requests, response cycles and recordings. The clears now run

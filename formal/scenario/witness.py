@@ -49,7 +49,6 @@ INVARIANTS
 
 
 # The fix each finding proposes, as an edit of the model.
-MONOTONE_PUBLISH = [("/\\ map' = req[r].at\n", "/\\ map' = Max(map, req[r].at)\n")]
 # A scan reads each scenario once, so every stub is judged against one state.
 ONE_READ_SCAN = [('IN IF st = Order[i]\n', 'IN IF TRUE\n')]
 # The store reports the value it replaced, so "did this move it" is decided with the write.
@@ -81,17 +80,11 @@ cases = [
      'TransitionsAreCas'),
     ('the same, with an atomic compare_and_set (control)', [], only('TransitionsAreCas', witness_cfg), 'ok'),
     # Filed findings, reachable until fixed (README.md, "Findings").
-    ('a late rcu puts a lower stamp over a higher one (#1779)', [], only('StampMonotone'), 'StampMonotone'),
-    ('a client can hold an answer it is never told changed (#1779, #1780)', [],
+    ('a client can hold an answer it is never told changed (#1780)', [],
      only('NoStaleAnswerAtRest'), 'NoStaleAnswerAtRest'),
     ('a scan of covered states matches nothing (#1781)', [], only('NoMatchOnlyWhenUncovered'),
      'NoMatchOnlyWhenUncovered'),
     # Each finding alone, then under its proposed fix.
-    ('the regression alone: three transitions, nothing else', [],
-     bounds('NoStaleAnswerAtRest', 'g1, g2, g3', '', '', ''), 'NoStaleAnswerAtRest'),
-    ('the same, publishing the higher stamp', MONOTONE_PUBLISH,
-     bounds('NoStaleAnswerAtRest', 'g1, g2, g3', '', '', ''), 'ok'),
-    ('the same, StampMonotone', MONOTONE_PUBLISH, bounds('StampMonotone', 'g1, g2, g3', '', '', ''), 'ok'),
     ('the unstamped set alone: a transition, a poller, a setter', [],
      bounds('NoStaleAnswerAtRest', 'g1', 'p1', 's1', ''), 'NoStaleAnswerAtRest'),
     ('the same, the write deciding the change', WRITE_REPORTS_CHANGE,
@@ -104,7 +97,7 @@ cases = [
      bounds('NoMatchOnlyWhenUncovered', 'g1', 'p1', '', ''), 'NoMatchOnlyWhenUncovered'),
     ('the same, one read per scan', ONE_READ_SCAN,
      bounds('NoMatchOnlyWhenUncovered', 'g1', 'p1', '', ''), 'ok'),
-    # The PR gate is green with those three in Known.cfg.
+    # The PR gate is green with those two in Known.cfg.
     ('ScenarioPR.cfg (control)', [], pr_cfg, 'ok'),
 ]
 failed = False

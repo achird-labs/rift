@@ -165,7 +165,6 @@ async fn get(port: u16, path: &str, since: Option<&str>) -> Answer {
 /// and stalls before publishing it; the other two run to the end, one of them serving its answer
 /// under the second stamp; then the first publishes, and the map goes back to the lowest stamp.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1779"]
 async fn a_stalled_stamp_does_not_take_the_scenario_back() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);

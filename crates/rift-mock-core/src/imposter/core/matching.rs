@@ -55,6 +55,21 @@ impl MatchTrace {
 /// A matching pass's result and, when one was requested, the trace of the candidates it visited.
 type TracedMatch = (Option<(Arc<StubState>, usize)>, Option<MatchTrace>);
 
+/// `current` with `scenario` stamped `at`. Keeps the higher stamp: nothing orders two transitions'
+/// publishes, and a stalled one going back to a lower stamp would leave a client holding the higher
+/// one on `304` until the next transition (issue #1779).
+fn transitions_with(
+    current: &HashMap<String, chrono::DateTime<chrono::Utc>>,
+    scenario: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> HashMap<String, chrono::DateTime<chrono::Utc>> {
+    let mut next = HashMap::clone(current);
+    next.entry(scenario.to_string())
+        .and_modify(|stamp| *stamp = (*stamp).max(at))
+        .or_insert(at);
+    next
+}
+
 impl Imposter {
     /// Find a matching stub for a request and return a cloned copy with its index.
     /// `Err` means a backend consulted during matching failed (issue #318) — the caller
@@ -577,11 +592,8 @@ impl Imposter {
         let at = self.load_clock.next();
         let stamp = at.timestamp();
         self.probe_at(|port| Point::TransitionStampIssued { port, stamp });
-        self.scenario_transitions.rcu(|current| {
-            let mut next = HashMap::clone(current);
-            next.insert(scenario.to_string(), at);
-            next
-        });
+        self.scenario_transitions
+            .rcu(|current| transitions_with(current, scenario, at));
         self.probe_at(|port| Point::TransitionStamped { port, stamp });
     }
 
@@ -1062,6 +1074,19 @@ mod bounded_matching_tests {
     use super::*;
     use serde_json::json;
     use std::time::Duration;
+
+    #[test]
+    fn a_transition_stamp_never_goes_back() {
+        let at = |secs| chrono::DateTime::from_timestamp(secs, 0).expect("in range");
+        let first = transitions_with(&HashMap::new(), "S", at(10));
+        assert_eq!(first["S"], at(10));
+        let later = transitions_with(&first, "S", at(20));
+        assert_eq!(later["S"], at(20));
+        let stalled = transitions_with(&later, "S", at(15));
+        assert_eq!(stalled["S"], at(20), "a late lower stamp stays out");
+        let other = transitions_with(&stalled, "T", at(15));
+        assert_eq!((other["S"], other["T"]), (at(20), at(15)));
+    }
 
     fn imposter(stubs: serde_json::Value) -> Arc<Imposter> {
         let cfg = serde_json::from_value(json!({ "port": 0, "protocol": "http", "stubs": stubs }))

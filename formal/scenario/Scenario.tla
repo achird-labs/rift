@@ -159,11 +159,11 @@ Issue(r) ==
     /\ req' = [req EXCEPT ![r].at = clock + 1, ![r].pc = "publish"]
     /\ UNCHANGED <<store, map, ver, served, maxPub, casBroken, dropped, noMatch>>
 
-\* matching.rs:580-584: the `rcu` retries until it lands, and inserts the stamp issued above,
-\* whatever the map holds by then.
+\* transitions_with: the `rcu` retries until it lands, and keeps the higher of the stamp issued above
+\* and what the map holds by then (#1779).
 Publish(r) ==
     /\ req[r].pc = "publish"
-    /\ map' = req[r].at
+    /\ map' = Max(map, req[r].at)
     /\ maxPub' = Max(maxPub, req[r].at)
     /\ req' = [req EXCEPT ![r] = IF r \in Gated THEN [@ EXCEPT !.pc = "serve"] ELSE Locals("done")]
     /\ UNCHANGED <<store, clock, ver, writes, served, casBroken, dropped, noMatch>>
