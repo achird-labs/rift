@@ -72,8 +72,8 @@ source, and each issue says which. A fixed one says so in the table.
 
 | Issue | Model | Defect |
 |:--|:--|:--|
-| #1762 | lifecycle | A same-port re-create can answer `304` for new content, by two routes |
-| #1763 | lifecycle | A delete clears the shared journal of the imposter that took the port |
+| #1762 | lifecycle | A same-port re-create can answer `304` for new content. One route closed by #1763 |
+| #1763 | lifecycle | A delete clears the shared journal of the imposter that took the port. Fixed |
 | #1764 | lifecycle | A create that loses the port claim has already answered requests (observed on macOS only) |
 | #1773 | lifecycle | A failed create's rollback removes the current imposter and leaves its listener running. Fixed |
 | #1774 | lifecycle | An apply sweep reports a concurrent delete as failed |
@@ -122,7 +122,7 @@ rift-cluster. Each model's README lists its own.
 
 | Model | Small cfg, distinct states | Larger cfgs, distinct states | Mutants |
 |:--|--:|--:|--:|
-| lifecycle | 326,386 | 940,042 / 3,185,440 / 4,156,101, liveness 64,326 | 10 |
+| lifecycle | 131,818 | 299,508 / 715,180 / 1,128,480, liveness 27,212 | 12 |
 | proxyonce | 65,543 | 1,871,961 / 854,867 | 7 |
 | scenario | 3,075,039 | 3,185,556 | 3 |
 | scripting | 760,890 | 18,563,719, liveness 192,992 | 8 |

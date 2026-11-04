@@ -137,6 +137,14 @@ Note that `clear` and `clear_flow` are **fallible** (`anyhow::Result<()>`): clea
 operation whose postcondition ("the data is gone") a remote backend can fail to guarantee, so the
 failure propagates rather than being swallowed. Inject with `.with_request_journal(Arc<dyn RequestJournal>)`.
 
+**Clears run while the imposter still owns the port** (issue #1763). A delete calls
+`RequestJournal::clear`, `ResponseSequencer::reset_scope` and `ProxyRecordingStore::clear` after it
+has cancelled the imposter's requests and before it frees the port, so they do not hit a later
+imposter's state. They run under the manager's persist lock, so an implementation must not call back
+into the manager from them and must not block for long: a slow clear stalls every datadir write and
+delete. A request already past its cancel check can still write one late entry after the clear, and
+the next imposter on the port inherits it.
+
 ## `ProxyRecordingStore` — custom proxy-recording store
 
 Backs [proxy record/replay](../mountebank/proxy.md): claims the right to record a

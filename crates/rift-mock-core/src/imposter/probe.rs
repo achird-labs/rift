@@ -67,7 +67,7 @@ pub enum Point {
     /// A delete or replace looked its generation up (`DeleteLookup`, `ReplaceLookup`).
     DeleteLookedUp { port: u16, generation: Generation },
     /// The port has no imposter: the delete returns `NotFound` (`DeleteLookup`,
-    /// `DeleteRemoveIfSame`, `ReplaceLookup`, `ReplaceRemove`).
+    /// `DeleteRemoveIfSame`, `ReplaceLookup`).
     DeleteNotFound { port: u16 },
     /// `{port}.json` is gone (`DeleteUnlink`).
     DeleteUnlinked { port: u16, generation: Generation },
@@ -80,10 +80,12 @@ pub enum Point {
         generation: Generation,
         floor: i64,
     },
-    /// The slot was vacated (`DeleteRemoveIfSame`, `ReplaceRemove`).
+    /// The slot was vacated (`DeleteRemoveIfSame`).
     DeleteRemoved { port: u16, generation: Generation },
     /// The generation's cancel token fired (`DeleteCancel`).
     DeleteCancelled { port: u16, generation: Generation },
+    /// The port's shared state was cleared (`DeleteClearShared`).
+    DeleteCleared { port: u16, generation: Generation },
     /// The accept loops are joined and the connections drained, or the drain's bound elapsed
     /// (`DeleteDrain`).
     DeleteDrained {
@@ -91,7 +93,7 @@ pub enum Point {
         generation: Generation,
         timed_out: bool,
     },
-    /// The port's shared state was cleared and the delete returns (`DeleteClearShared`).
+    /// The delete returns (`DeleteFinish`).
     DeleteReturned { port: u16, generation: Generation },
     /// An `apply_config` took its `ports()` snapshot; `swept` ports are not desired and will be
     /// deleted (`ApplySnapshot`).

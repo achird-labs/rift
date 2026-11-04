@@ -17,6 +17,7 @@ use std::sync::{Arc, Condvar};
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use rift_mock_core::behaviors::LocalSequencer;
 use rift_mock_core::imposter::journal::LocalJournal;
 use rift_mock_core::imposter::{ImposterConfig, ImposterError, ImposterManager, Point, Probe};
 use serde_json::{Value, json};
@@ -165,6 +166,7 @@ fn to_json(point: Point) -> Value {
         ),
         Point::DeleteRemoved { port, generation } => ("DeleteRemoved", id(port, generation)),
         Point::DeleteCancelled { port, generation } => ("DeleteCancelled", id(port, generation)),
+        Point::DeleteCleared { port, generation } => ("DeleteCleared", id(port, generation)),
         Point::DeleteDrained {
             port,
             generation,
@@ -379,9 +381,10 @@ async fn create_request_delete_in_order() {
             "DeleteLocked",
             "DeleteLookedUp",
             "DeleteUnlinked",
+            "DeleteCancelled",
+            "DeleteCleared",
             "DeleteFloorRecorded",
             "DeleteRemoved",
-            "DeleteCancelled",
             "DeleteDrained",
             "DeleteReturned",
         ]
@@ -454,11 +457,10 @@ async fn a_create_racing_a_delete_still_carries_the_floor() {
     );
 }
 
-/// #1762, a stamp after the record: a scenario transition stamps after the delete recorded the floor, so the
-/// clock has moved past what the next imposter inherits.
+/// #1762, a stamp during the delete: a scenario transition stamps after the delete has begun and
+/// before its cancel. The floor is recorded after the cancel, so the next imposter stamps above it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1762"]
-async fn a_stamp_issued_after_the_floor_was_recorded_still_counts() {
+async fn a_stamp_issued_during_a_delete_still_counts() {
     let recorder = Arc::new(Recorder::default());
     let manager = Arc::new(with_probe(&recorder));
     let port = free_port();
@@ -467,13 +469,13 @@ async fn a_stamp_issued_after_the_floor_was_recorded_still_counts() {
         .await
         .expect("create");
 
-    let held = recorder.hold(|p| matches!(p, Point::DeleteFloorRecorded { .. }));
+    let held = recorder.hold(|p| matches!(p, Point::DeleteUnlinked { .. }));
     let delete = tokio::spawn({
         let manager = Arc::clone(&manager);
         async move { manager.delete_imposter(port).await.map(|_| ()) }
     });
     recorder
-        .reached(|p| matches!(p, Point::DeleteFloorRecorded { .. }))
+        .reached(|p| matches!(p, Point::DeleteUnlinked { .. }))
         .await;
 
     assert_eq!(get(port, None).await.expect("answered").body, "one");
@@ -497,10 +499,9 @@ async fn a_stamp_issued_after_the_floor_was_recorded_still_counts() {
     );
 }
 
-/// #1763: a delete past its removal clears the shared journal by port, and by then the port may
-/// belong to a new imposter.
+/// #1763: a delete clears the shared journal by port, so it must do so before freeing the port. Held
+/// after the removal, the next imposter records; the delete finishing must leave that alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1763"]
 async fn a_delete_leaves_the_next_imposters_recorded_requests_alone() {
     let recorder = Arc::new(Recorder::default());
     let manager =
@@ -592,6 +593,125 @@ async fn a_create_that_loses_the_claim_answers_nobody() {
         !bodies.iter().any(|b| b == "loser"),
         "a create that returned PortInUse answered requests: {bodies:?}, {unanswered} unanswered"
     );
+}
+
+/// A replace that loses to a concurrent delete still lands its config: a vacant port is what its
+/// delete was for, and reporting a failure would drop what was asked for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replace_that_loses_to_a_delete_still_creates() {
+    let recorder = Arc::new(Recorder::default());
+    let manager = Arc::new(with_probe(&recorder));
+    let port = free_port();
+    manager
+        .create_imposter(answering(port, "old"))
+        .await
+        .expect("create");
+
+    let held = recorder.hold(|p| matches!(p, Point::DeleteUnlinked { .. }));
+    let delete = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.delete_imposter(port).await.map(|_| ()) }
+    });
+    recorder
+        .reached(|p| matches!(p, Point::DeleteUnlinked { .. }))
+        .await;
+
+    // Decides to replace, since the imposter is still registered, then waits for the lock. A
+    // different `defaultResponse` is an imposter-level change, so it replaces rather than patches.
+    let mut changed = answering(port, "new");
+    changed.default_response =
+        Some(serde_json::from_value(json!({ "statusCode": 404 })).expect("default response"));
+    let apply = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.apply_one(changed).await }
+    });
+    // Give it time to reach the lock: holding `apply` proves nothing, as it fires no point before.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    held.open();
+    delete.await.expect("delete task").expect("delete");
+    let report = apply.await.expect("apply task").expect("apply_one");
+    let answer = get(port, None).await.map(|a| a.body);
+    let _ = manager.delete_all().await;
+
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(answer.as_deref(), Some("new"));
+}
+
+/// #1763, for the sequencer: the same clear by port, the same imposter that took the port.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_leaves_the_next_imposters_response_cycle_alone() {
+    let cycling = |port: u16| {
+        imposter_with(
+            port,
+            json!([{ "responses": [
+                { "is": { "statusCode": 200, "body": "first" } },
+                { "is": { "statusCode": 200, "body": "second" } }
+            ] }]),
+        )
+    };
+    let recorder = Arc::new(Recorder::default());
+    let manager =
+        Arc::new(with_probe(&recorder).with_sequencer(Arc::new(LocalSequencer::default())));
+    let port = free_port();
+    manager
+        .create_imposter(cycling(port))
+        .await
+        .expect("create");
+
+    let held = recorder.hold(|p| matches!(p, Point::DeleteDrained { .. }));
+    let delete = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.delete_imposter(port).await.map(|_| ()) }
+    });
+    recorder
+        .reached(|p| matches!(p, Point::DeleteDrained { .. }))
+        .await;
+
+    manager
+        .create_imposter(cycling(port))
+        .await
+        .expect("the port is free once the slot is vacated");
+    assert_eq!(get(port, None).await.expect("answered").body, "first");
+
+    held.open();
+    delete.await.expect("delete task").expect("delete");
+    let next = get(port, None).await.expect("answered").body;
+    let _ = manager.delete_all().await;
+    assert_eq!(
+        next, "second",
+        "the earlier delete restarted the new imposter's cycle"
+    );
+}
+
+/// `Err` from a delete means "not deleted": the clears come after the unlink's error return, so a
+/// failed unlink leaves the imposter serving with everything it had.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_whose_unlink_fails_loses_nothing() {
+    let datadir = tempfile::tempdir().expect("datadir").keep();
+    let manager = ImposterManager::with_datadir(Some(datadir.clone()))
+        .with_request_journal(Arc::new(LocalJournal::default()));
+    let port = free_port();
+    manager
+        .create_imposter(answering(port, "still here"))
+        .await
+        .expect("create");
+    assert_eq!(get(port, None).await.expect("answered").body, "still here");
+
+    make_read_only(&datadir);
+    let deleted = manager.delete_imposter(port).await;
+    make_writable(&datadir);
+
+    assert!(deleted.is_err(), "the file cannot go, so the delete fails");
+    let imposter = manager.get_imposter(port).expect("still registered");
+    assert_eq!(
+        imposter.get_recorded_requests().len(),
+        1,
+        "the journal is intact"
+    );
+    assert_eq!(get(port, None).await.expect("answered").body, "still here");
+    manager.delete_imposter(port).await.expect("delete");
 }
 
 /// #1773: a failed datadir write rolls back, and by then a delete and a new create may have run.

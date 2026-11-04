@@ -20,7 +20,7 @@ jar = jar_from_argv()
 DRAIN = '    /\\ req[op[o].look] # "writing" \\/ DrainTimesOut\n'
 CANCEL_CUT = '''       IN /\\ phase' = [phase EXCEPT ![g] = "cancelled"]
           /\\ req' = [req EXCEPT ![g] = Cut(@)]
-    /\\ op' = [op EXCEPT ![o].pc = "dDrain"]'''
+    /\\ op' = [op EXCEPT ![o].pc = "dClear"]'''
 COMPUTE_GUARD = '''ReqCompute(g) ==
     /\\ phase[g] \\in Serving
     /\\ req[g] = "computing"'''
@@ -28,7 +28,7 @@ LOOKUP_KEEPS_LOCK = '''            ELSE /\\ op' = [op EXCEPT ![o].pc = "dUnlink"
                  /\\ UNCHANGED persistLock'''
 REMOVE_IF_SAME = '       IN IF slot[p] = op[o].look\n            THEN /\\ ghost\' = [ghost EXCEPT !.removedOther'
 UNLINK_OK = '''       IN \\/ /\\ file' = [file EXCEPT ![p] = NoGen]
-             /\\ op' = [op EXCEPT ![o].pc = "dFloor"]
+             /\\ op' = [op EXCEPT ![o].pc = "dCancel"]
              /\\ UNCHANGED <<slot, persistLock, ghost>>
           \\/ /\\ UnlinkFails
              /\\ persistLock' = NoOp
@@ -36,18 +36,6 @@ UNLINK_OK = '''       IN \\/ /\\ file' = [file EXCEPT ![p] = NoGen]
 FLOOR_READ = "           f == floor[op[o].port]\n"
 PERSIST_FAIL = '''                 \\/ /\\ PersistFails
                     /\\ op' = [op EXCEPT ![o].pc = "cRollback"]'''
-FLOOR_RECORD = "    /\\ floor' = [floor EXCEPT ![op[o].port] = Max(@, clock[op[o].look].last)]\n"
-CANCEL_TAIL = '''    /\\ op' = [op EXCEPT ![o].pc = "dDrain"]
-    /\\ UNCHANGED <<slot, file, floor, nextGen, persistLock, clock, nreq, deleteReturned,'''
-# The proposed fix of the one-create floor race: record the floor once the cancel has cut every
-# request that could still stamp, not before the removal.
-FLOOR_FIXED = [
-    (FLOOR_RECORD, "    /\\ UNCHANGED floor\n"),
-    (CANCEL_TAIL, CANCEL_TAIL.replace(
-        '    /\\ UNCHANGED <<slot, file, floor, nextGen,',
-        "    /\\ floor' = [floor EXCEPT ![op[o].port] = Max(@, clock[op[o].look].last)]\n"
-        '    /\\ UNCHANGED <<slot, file, nextGen,')),
-]
 CLAIM_ATOMIC = '''            THEN /\\ slot' = [slot EXCEPT ![p] = g]
                  /\\ phase' = [phase EXCEPT ![g] = "claimed"]
                  /\\ op' = [op EXCEPT ![o].pc = "cPersist"]
@@ -64,18 +52,32 @@ mutants = {
     # #1124: the delete looked the imposter up, then removed whatever held the port, outside a lock.
     'delete removes whoever holds the port (#1124)': ('RemoveOnlyOwn', [
         (LOOKUP_KEEPS_LOCK, LOOKUP_KEEPS_LOCK.replace('UNCHANGED persistLock', "persistLock' = NoOp")),
-        (REMOVE_IF_SAME, REMOVE_IF_SAME.replace('IF slot[p] = op[o].look', 'IF slot[p] # NoGen'))], []),
+        (REMOVE_IF_SAME, REMOVE_IF_SAME.replace('IF slot[p] = op[o].look', 'IF slot[p] # NoGen'))],
+        [('    SharedStateBelongsToCurrent\n', '')]),
     # #1124: the imposter left the table before its file went, so a failed unlink left it unregistered.
     'the file goes after the imposter (#1124)': ('ErrDeleteStillServing', [
         (UNLINK_OK, UNLINK_OK.replace("/\\ UNCHANGED <<slot, file>>", "/\\ slot' = [slot EXCEPT ![p] = NoGen]\n             /\\ UNCHANGED file"))],
         [('UnlinkFails = FALSE', 'UnlinkFails = TRUE')]),
     # #1301: a new generation started its load clock from zero, below the stamps the deleted one served.
-    # Checked on the model with the proposed fix of the one-create floor race applied (FLOOR_FIXED:
-    # the floor is recorded at the cancel, when no further stamp can be issued), since the unfixed
-    # model violates FloorMonotone on these bounds by itself (README.md, "Findings").
-    'the load floor is not carried to the next generation (#1301)': ('FloorMonotone', FLOOR_FIXED + [
-        (FLOOR_READ, "           f == 0\n")],
-        [('    TypeInv\n', '    TypeInv\n    FloorMonotone\n')]),
+    'the load floor is not carried to the next generation (#1301)': ('FloorMonotone', [
+        (FLOOR_READ, "           f == 0\n")], []),
+    # #1763: the shared state was cleared after the slot was vacated, when it could be the next
+    # generation's.
+    'the clear runs after the slot is vacated (#1763)': ('SharedStateBelongsToCurrent', [
+        (CANCEL_CUT, CANCEL_CUT.replace('"dClear"', '"dFloor"')),
+        ('''          /\\ op' = [op EXCEPT ![o].pc = "dFloor"]
+    /\\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, clock, nreq, req,''',
+         '''          /\\ op' = [op EXCEPT ![o].pc = "dDrain"]
+    /\\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, clock, nreq, req,'''),
+        ('''                 /\\ op' = [op EXCEPT ![o].pc = "dDrain"]''', '''                 /\\ op' = [op EXCEPT ![o].pc = "dClear"]''')], []),
+    # #1762: the floor was recorded before the cancel, so a stamp could still land above it.
+    'the floor is recorded before the cancel (#1762)': ('FloorMonotone', [
+        (UNLINK_OK, UNLINK_OK.replace('"dCancel"', '"dFloor"')),
+        ('''    /\\ op' = [op EXCEPT ![o].pc = "dRemove"]''', '''    /\\ op' = [op EXCEPT ![o].pc = "dCancel"]'''),
+        ('''          /\\ op' = [op EXCEPT ![o].pc = "dFloor"]
+    /\\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, clock, nreq, req,''',
+         '''          /\\ op' = [op EXCEPT ![o].pc = "dRemove"]
+    /\\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, clock, nreq, req,''')], []),
     # #563: a failed persist returned Err with the imposter still registered and serving.
     'a failed persist leaves the imposter running (#563)': ('ErrCreateNotRunning', [
         (PERSIST_FAIL, PERSIST_FAIL.replace('![o].pc = "cRollback"', '![o].pc = op[o].ret, ![o].fail = "persist"'))],
@@ -85,7 +87,8 @@ mutants = {
         ("IN /\\ ghost' = ghost\n", "IN /\\ ghost' = [ghost EXCEPT !.removedOther = @ \\/ (slot[p] # NoGen /\\ slot[p] # g)]\n"),
         ("/\\ slot' = IF slot[p] = g THEN [slot EXCEPT ![p] = NoGen] ELSE slot", "/\\ slot' = [slot EXCEPT ![p] = NoGen]")],
         [('Creators = {c1}', 'Creators = {c1, c2}'), ('Preloaded = TRUE', 'Preloaded = FALSE'),
-         ('PersistFails = FALSE', 'PersistFails = TRUE'), ('    LoserNeverAnswers\n', '')]),
+         ('PersistFails = FALSE', 'PersistFails = TRUE'), ('    LoserNeverAnswers\n', ''),
+         ('    FloorMonotone\n', '')]),
     # #1773: the rollback waits for no lock, so it can take the imposter out from under a delete that
     # has looked it up, whose failed unlink then says "still serving" of an imposter already gone.
     'the rollback does not take persist_lock (#1773)': ('ErrDeleteStillServing', [

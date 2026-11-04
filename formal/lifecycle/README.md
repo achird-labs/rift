@@ -20,7 +20,7 @@ Run TLC on a copy in a scratch directory, or it leaves `states/` here.
 
 TLC's deadlock check is off (`-deadlock` disables it). Finished operations are terminal states, and
 `Terminating` makes them stutter. `Liveness.cfg` covers a stuck operation instead: `OpsFinish` under
-`FairSpec` says every operation returns. It holds at 64,326 distinct states, and a drain that never
+`FairSpec` says every operation returns. It holds at 27,212 distinct states, and a drain that never
 ends fails it.
 
 ## The clock
@@ -47,12 +47,13 @@ names here are the stable reference.
 | `CreatePersistLock`, `CreatePersistWrite` | `persist_imposter_with`: `persist_lock`, the `is_current` check, the write |
 | `CreateRollback` | the failed-persist branch: `remove_if_same` under `persist_lock`, then cancel |
 | `DeleteLock`, `DeleteLookup`, `DeleteUnlink` | `delete_imposter_inner`, the unlink path, under `persist_lock` |
-| `DeleteRecordFloor` | `record_load_floor` |
-| `DeleteRemoveIfSame` | `PortTable::remove_if_same`; `persist_lock` is released after it |
-| `ReplaceLookup`, `ReplaceRemove` | `delete_imposter_inner`, the path a replace takes: no lock, a plain `remove` |
+| `ReplaceLock`, `ReplaceLookup` | `delete_imposter_inner`, the path a replace takes: the same lock, no unlink |
 | `DeleteCancel` | `cancel.cancel()`: cuts requests still computing (#1643) |
+| `DeleteClearShared` | `clear_shared_state`: `reset_scope`, `journal.clear`, `proxy_store.clear`, all by port, before the slot is freed (#1763) |
+| `DeleteRecordFloor` | `record_load_floor`, after the cancel (#1762) |
+| `DeleteRemoveIfSame` | `PortTable::remove_if_same`; `persist_lock` is released after it |
 | `DeleteDrain` | joins the accept loops, drains connections within `conn_drain` |
-| `DeleteClearShared` | `reset_scope`, `journal.clear`, `proxy_store.clear`, all by port |
+| `DeleteFinish` | the delete returns |
 | `ApplySnapshot`, `ApplySweep` | `apply_entries` and `delete_all`: the `ports()` snapshot, one delete per port |
 | `ApplyEntry`, `ReplaceAfterDelete`, `ReplaceAfterCreate` | `apply_entry`, `replace_imposter` |
 | `ReqStart`, `ReqCompute`, `ReqWrite` | a request: accepted, answered under its stamp and journalled, written |
@@ -78,19 +79,19 @@ names here are the stable reference.
 
 | Config | What races | Invariants left out |
 |:--|:--|:--|
-| `LifecyclePR.cfg` | two creates, one delete | the three in `Known.cfg` |
-| `Lifecycle.cfg` | two creates, two deletes, failing writes and unlinks | the three |
-| `LifecycleApply.cfg` | an apply sweep, a `delete_all`, a delete, a create | the three, plus `ApplyReportsTruth` |
-| `LifecycleReplace.cfg` | an `apply_one` replace, a delete, a create | the three, plus `ApplyReportsTruth` |
+| `LifecyclePR.cfg` | two creates, one delete | the two in `Known.cfg` |
+| `Lifecycle.cfg` | two creates, two deletes, failing writes and unlinks | the two |
+| `LifecycleApply.cfg` | an apply sweep, a `delete_all`, a delete, a create | the two, plus `ApplyReportsTruth` |
+| `LifecycleReplace.cfg` | an `apply_one` replace, a delete, a create | the two |
 | `Known.cfg` | the PR bounds, holding what open defects violate | |
-| `Mutants.cfg` | one create, two deletes: where a mutant's violation is its own | `FloorMonotone`, `SharedStateBelongsToCurrent` |
+| `Mutants.cfg` | one create, two deletes: where a mutant's violation is its own | |
 
 | Config | Distinct states | Depth | Wall time |
 |:--|--:|--:|--:|
-| `LifecyclePR.cfg` | 326,386 | 36 | 11 s |
-| `Lifecycle.cfg` | 940,042 | 42 | 12 s |
-| `LifecycleApply.cfg` | 3,185,440 | 44 | 62 s |
-| `LifecycleReplace.cfg` | 4,156,101 | 45 | 219 s |
+| `LifecyclePR.cfg` | 131,818 | 35 | 4 s |
+| `Lifecycle.cfg` | 299,508 | 42 | 4 s |
+| `LifecycleApply.cfg` | 715,180 | 44 | 6 s |
+| `LifecycleReplace.cfg` | 1,128,480 | 46 | 8 s |
 
 Times are from a laptop shared with other builds, so read them as an order of magnitude.
 
@@ -106,8 +107,7 @@ into the cfgs.
 
 | Issue | Invariant | Defect |
 |:--|:--|:--|
-| #1762 | `FloorMonotone` | A same-port re-create can be told `304` for new content, by two routes |
-| #1763 | `SharedStateBelongsToCurrent` | A delete clears the journal of the imposter that took the port. Only the journal path was reproduced |
+| #1762 | `FloorMonotone` | A same-port re-create can be told `304` for new content, when a create reads the floor before a delete records it |
 | #1764 | `LoserNeverAnswers` | A create that loses the claim has already answered requests. Reproduced on macOS; Linux not observed |
 | #1774 | `ApplyReportsTruth` | An apply sweep reports a concurrent delete as failed |
 
@@ -115,19 +115,21 @@ into the cfgs.
 
 ## Known limits, not filed
 
+- **One late write after a clear.** A request already past its cancel check can still write to a shared
+  journal, sequencer or store after `clear_shared_state`, or stamp after the floor is recorded, and the
+  next imposter inherits it. `ReqCompute` is atomic against the cancel, so the model cannot see this.
+  `with_request_journal` documents it.
+- **A dropped create's rollback.** If its admin request is dropped while the rollback waits for
+  `persist_lock`, it vacates the slot without the lock, so a delete already past its lookup could clear
+  a newer imposter's state. It needs five things to coincide, and the model does not cover the drop:
+  `DeleteRemoveIfSame`'s else-branch is reachable only this way.
 - **A client too slow to read.** With `DrainTimesOut`, a response is written after the delete returned.
   The drain's bound is deliberate.
 - **Two creates both bind.** `BindCheckSuffices` is violated by design: the claim decides.
-- **A replace takes whichever generation holds the port** (`ReplaceTakesItsOwn`). The table ends up
-  as create-then-replace would leave it. One side effect is unconfirmed: the floor it records is the
-  generation it looked up, not the one it removed.
-- **`ErrDeleteStillServing` against a replace.** A replace's delete takes no lock, so it can remove an
-  imposter a delete has looked up. If that delete's unlink then fails, its caller gets `Err` for an
-  imposter already gone. `LifecycleReplace.cfg` keeps unlinks succeeding, so this is a witness.
 
 ## Witnesses and mutants
 
-`witness.py` runs 11 cases, each requiring an exact verdict: the limits and findings above, plus two
+`witness.py` runs 7 cases, each requiring an exact verdict: the limits and findings above, plus two
 controls. `mutants.py` puts fixed bugs back:
 
 | Bug put back | Caught by |
@@ -136,7 +138,9 @@ controls. `mutants.py` puts fixed bugs back:
 | The cancel leaves computing requests running (#1643) | `NoServeAfterDeleteReturns` |
 | A delete removes whoever holds the port (#1124) | `RemoveOnlyOwn` |
 | The file goes after the imposter (#1124) | `ErrDeleteStillServing` |
-| The floor is not carried to the next generation (#1301) | `FloorMonotone`, on the model with the #1762 fix applied |
+| The clear runs after the slot is vacated (#1763) | `SharedStateBelongsToCurrent` |
+| The floor is recorded before the cancel (#1762) | `FloorMonotone` |
+| The floor is not carried to the next generation (#1301) | `FloorMonotone` |
 | A failed persist leaves the imposter running (#563) | `ErrCreateNotRunning` |
 | The rollback removes whoever holds the port (#1773) | `RemoveOnlyOwn` |
 | The rollback does not take `persist_lock` (#1773) | `ErrDeleteStillServing` |

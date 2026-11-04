@@ -13,6 +13,12 @@ record.
 
 ### Fixed
 
+- **A delete no longer wipes the imposter that took the port** (#1763): with a shared journal,
+  sequencer or proxy store, a delete cleared the port's entries up to 5 seconds after freeing the port,
+  so a same-port create lost its recorded requests, response cycles and recordings. The clears now run
+  before the port is freed, and a replace's delete takes the same lock. A scenario transition during a
+  delete no longer repeats its stamp on the next imposter (part of #1762), and a replace that loses to
+  a concurrent delete now creates its config rather than reporting a failure.
 - **A failed create no longer removes the imposter that took its port** (#1773): when a create's
   datadir write failed, the rollback removed whichever imposter held the port by then. That one
   left the port table with its listener still answering, unreachable by any delete until a restart.

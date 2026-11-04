@@ -546,17 +546,6 @@ impl PortTable {
         previous
     }
 
-    /// Vacate a slot, returning what was there (if anything).
-    fn remove(&self, port: u16) -> Option<Arc<Imposter>> {
-        let _guard = self.mutations.lock();
-        let previous = self.slots[port as usize].swap(None);
-        if previous.is_some() {
-            self.count
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        previous
-    }
-
     /// Live-entry count.
     fn len(&self) -> usize {
         self.count.load(std::sync::atomic::Ordering::Relaxed)
@@ -618,8 +607,9 @@ pub struct ImposterManager {
     /// Optional data directory for persistence write-through
     datadir: Option<Arc<PathBuf>>,
     /// Serializes datadir writes against a delete's unlink-then-remove (issue #1124), so a write
-    /// cannot land between the two and bring back the file of an imposter being deleted. Taken only
-    /// by admin mutations that persist, never by request handling.
+    /// cannot land between the two and bring back the file of an imposter being deleted. Also held
+    /// by whatever vacates a slot, so a delete's lookup, clears and removal are atomic against each
+    /// other (issue #1763). Taken only by admin mutations, never by request handling.
     ///
     /// `Arc` so a write can hand an owned guard to its blocking thread: the lock is then held until
     /// the write's rename is done, even when the admin request that started it is dropped mid-write
@@ -1014,8 +1004,9 @@ impl ImposterManager {
     /// a byte budget (see [`Self::with_journal_max_bytes`]) and clear-resets-count semantics. Imposter deletion clears the
     /// port's slice so stale entries never resurrect on a later imposter reusing the port.
     ///
-    /// Caveat: deletion lets in-flight requests drain naturally, so a request completing
-    /// after the port clear can write one late entry into the shared journal (the private
+    /// Caveat: a delete clears the port while the imposter still owns it (issue #1763), after
+    /// cancelling its requests. A request already past its cancel check by then can still write one
+    /// late entry into the shared journal, which the next imposter on the port inherits (the private
     /// default is immune — its storage dies with the imposter).
     #[must_use]
     pub fn with_request_journal(mut self, journal: Arc<dyn RequestJournal>) -> Self {
@@ -1645,10 +1636,10 @@ impl ImposterManager {
             // #1158). The unlink that used to be here, for a truncated file, also deleted a reload's
             // own input file, and could delete a concurrent create's freshly persisted one.
             //
-            // Under the lock a delete that unlinks holds from its lookup to its removal (issue
-            // #1773), so this cannot pull the imposter out from under one. A replace's delete takes
-            // no lock. Armed before the wait, so an admin request dropped while waiting still rolls
-            // back, as `Err` promises, only then without the lock.
+            // Under the lock a delete holds from its lookup to its removal (issue #1773), so this
+            // cannot pull the imposter out from under one. Armed before the wait, so an admin
+            // request dropped while waiting still rolls back, as `Err` promises, only then without
+            // the lock.
             let rollback = FailedCreateRollback {
                 table: &self.imposters,
                 imposter: &imposter,
@@ -2207,19 +2198,43 @@ impl ImposterManager {
         });
     }
 
+    /// Clear what the sequencer, a shared journal and a shared proxy store hold for `port`. They are
+    /// keyed by port, not by imposter, so the caller must still own the port. Script state needs no
+    /// clearing: it belongs to the imposter and goes with it (issue #1726).
+    fn clear_shared_state(&self, port: u16) {
+        if let Some(sequencer) = &self.sequencer {
+            sequencer.reset_scope(port, None);
+        }
+        if let Some(journal) = &self.request_journal {
+            // GC clear is best-effort: a failed backend clear must not fail the delete, but it
+            // is logged rather than dropped (issue #330).
+            if let Err(e) = journal.clear(port) {
+                warn!("failed to clear request journal for deleted imposter on port {port}: {e:#}");
+            }
+        }
+        // Reclaim the shared proxy store's port slice so a later imposter reusing the port
+        // doesn't inherit stale recordings (issue #315). The private default dies with the
+        // imposter, so it needs no explicit clear.
+        if let Some(store) = &self.proxy_store {
+            store.clear(port);
+        }
+    }
+
     async fn delete_imposter_inner(
         &self,
         port: u16,
         unlink_file: bool,
     ) -> Result<Arc<Imposter>, ImposterError> {
-        // The file goes first (issue #1124): a delete that cannot remove it fails with the imposter
-        // still registered and serving, so `Err` keeps meaning "not deleted". Removing the imposter
-        // first would leave nothing to fall back to, and the file would bring it back on restart.
-        let imposter = if unlink_file {
-            // Held until the imposter is out of the map, so no write can recreate its file between
-            // the unlink and the removal.
+        // One critical section against everything else that vacates a slot: the lookup, the clears
+        // and the removal cannot interleave with another delete, a replace or a create's rollback.
+        // The one exception is a rollback whose request was dropped while waiting for this lock,
+        // which vacates without it (see `FailedCreateRollback`).
+        let imposter = {
+            // Also keeps a write from recreating the file between the unlink and the removal.
             let _persist = self.persist_lock.lock().await;
-            self.probe(Point::DeleteLocked { port });
+            if unlink_file {
+                self.probe(Point::DeleteLocked { port });
+            }
             let imposter = self
                 .get_imposter(port)
                 .inspect_err(|_| self.probe(Point::DeleteNotFound { port }))?;
@@ -2228,22 +2243,52 @@ impl ImposterManager {
                 generation: imposter.generation,
             });
             // Before the unlink, so a scoped clear or a flush cannot write its recorded requests
-            // back after it (issue #1608); undone if the imposter stays.
+            // back after it (issue #1608), and before a replace's create on the port removes the
+            // file; undone if the imposter stays.
             detach_journal(&imposter);
-            if let Err(e) = self.remove_persisted_imposter(&imposter).await {
-                if let Some(file) = &imposter.journal_file {
-                    file.reattach();
+            // The file goes first (issue #1124): a delete that cannot remove it fails with the
+            // imposter still registered, serving and with its state, so `Err` keeps meaning "not
+            // deleted". Removing the imposter first would leave nothing to fall back to, and the
+            // file would bring it back on restart.
+            if unlink_file {
+                if let Err(e) = self.remove_persisted_imposter(&imposter).await {
+                    if let Some(file) = &imposter.journal_file {
+                        file.reattach();
+                    }
+                    self.probe(Point::DeleteUnlinkFailed {
+                        port,
+                        generation: imposter.generation,
+                    });
+                    return Err(e);
                 }
-                self.probe(Point::DeleteUnlinkFailed {
+                self.probe(Point::DeleteUnlinked {
                     port,
                     generation: imposter.generation,
                 });
-                return Err(e);
             }
-            self.probe(Point::DeleteUnlinked {
+            // Signal the accept loop and every live connection to stop (issue #207). The cancel
+            // cuts off every request this generation is still computing, through every door (issue
+            // #1643), so nothing below races new state from it, beyond a request already past its
+            // cancel check (see `with_request_journal`).
+            imposter.cancel.cancel();
+            if let Some(ref tx) = imposter.shutdown_tx {
+                let _ = tx.send(());
+            }
+            self.probe(Point::DeleteCancelled {
                 port,
                 generation: imposter.generation,
             });
+            // While the port is still this imposter's: these are keyed by port, so once the slot is
+            // empty a clear could only hit the next imposter's state (issue #1763).
+            self.clear_shared_state(port);
+            self.probe(Point::DeleteCleared {
+                port,
+                generation: imposter.generation,
+            });
+            // After the cancel, so a stamp from before it is in the floor (issue #1762). A request
+            // already past its cancel check can still stamp later, the same bounded window as the
+            // journal's (see `with_request_journal`). Before the removal, so a create that wins the
+            // freed slot sees it.
             self.record_load_floor(port, &imposter);
             let removed = self
                 .imposters
@@ -2255,44 +2300,12 @@ impl ImposterManager {
                 generation: removed.generation,
             });
             removed
-        } else {
-            let looked_up = self
-                .get_imposter(port)
-                .inspect_err(|_| self.probe(Point::DeleteNotFound { port }))?;
-            self.probe(Point::DeleteLookedUp {
-                port,
-                generation: looked_up.generation,
-            });
-            self.record_load_floor(port, &looked_up);
-            let imposter = self
-                .imposters
-                .remove(port)
-                .ok_or(ImposterError::NotFound(port))
-                .inspect_err(|_| self.probe(Point::DeleteNotFound { port }))?;
-            self.probe(Point::DeleteRemoved {
-                port,
-                generation: imposter.generation,
-            });
-            // Before a replace's create on the port removes the file (issue #1608).
-            detach_journal(&imposter);
-            imposter
         };
 
-        // Signal the accept loop and every live connection to stop (issue #207), then **await** the
-        // teardown so this delete does not return until the old generation can no longer serve
-        // (issue #596): otherwise a same-port re-create races a still-bound listener / still-open
-        // keep-alive connection and can be answered by the previous generation's state.
+        // **Await** the teardown so this delete does not return until the old generation can no
+        // longer serve (issue #596): otherwise a same-port re-create races a still-bound listener /
+        // still-open keep-alive connection and can be answered by the previous generation's state.
         //
-        // The cancel cuts off every request this generation is still computing, through every door
-        // (issue #1643), so the drain below only waits for responses already being written.
-        imposter.cancel.cancel();
-        if let Some(ref tx) = imposter.shutdown_tx {
-            let _ = tx.send(());
-        }
-        self.probe(Point::DeleteCancelled {
-            port,
-            generation: imposter.generation,
-        });
         // Await the accept loop: its `select!` breaks on the signal and drops the listener, so the
         // bind is released by the time this resolves. A `JoinError` (loop task panicked) is
         // irrelevant here — we only need it stopped — but is surfaced as a warning rather than swallowed.
@@ -2325,24 +2338,6 @@ impl ImposterManager {
             generation: imposter.generation,
             timed_out,
         });
-
-        // No script state to clear: it belongs to this instance and goes with it (issue #1726).
-        if let Some(sequencer) = &self.sequencer {
-            sequencer.reset_scope(port, None);
-        }
-        if let Some(journal) = &self.request_journal {
-            // GC clear is best-effort: a failed backend clear must not fail the delete, but it
-            // is logged rather than dropped (issue #330).
-            if let Err(e) = journal.clear(port) {
-                warn!("failed to clear request journal for deleted imposter on port {port}: {e:#}");
-            }
-        }
-        // Reclaim the shared proxy store's port slice so a later imposter reusing the port
-        // doesn't inherit stale recordings (issue #315). The private default dies with the
-        // imposter, so it needs no explicit clear.
-        if let Some(store) = &self.proxy_store {
-            store.clear(port);
-        }
 
         info!("Imposter on port {} deleted", port);
         self.probe(Point::DeleteReturned {
@@ -2806,9 +2801,17 @@ impl ImposterManager {
     ) {
         // `false`: the re-create overwrites `{port}.json`, so unlinking it first only opens a window
         // in which a failed re-create loses the file — the operator's own file, on a datadir reload.
-        if let Err(e) = self.delete_imposter_inner(port, false).await {
-            report.failed.push((port, e));
-            return;
+        match self.delete_imposter_inner(port, false).await {
+            Ok(_) => {}
+            // A concurrent delete got there first: a vacant port is what this delete was for, and
+            // the desired config still has to land.
+            Err(ImposterError::NotFound(_)) => {
+                debug!("replace: imposter on port {port} was already gone");
+            }
+            Err(e) => {
+                report.failed.push((port, e));
+                return;
+            }
         }
         // A replace resets every cycle (its doc), so the replaced imposter's cursors go with it.
         match self
@@ -3761,18 +3764,18 @@ mod port_table_tests {
         );
     }
 
-    // Remove frees the slot (a re-claim then succeeds) and returns the removed imposter; removing
-    // an empty slot is None.
+    // Removing frees the slot (a re-claim then succeeds) and returns the removed imposter; removing
+    // from an empty slot is None.
     #[test]
-    fn remove_frees_the_slot() {
+    fn remove_if_same_frees_the_slot() {
         let table = PortTable::new();
         let imp = imposter(4000);
         table.try_claim(4000, Arc::clone(&imp)).expect("claim");
-        let removed = table.remove(4000).expect("removed");
+        let removed = table.remove_if_same(4000, &imp).expect("removed");
         assert!(Arc::ptr_eq(&removed, &imp));
         assert!(table.get(4000).is_none(), "slot is empty after remove");
         assert!(
-            table.remove(4000).is_none(),
+            table.remove_if_same(4000, &imp).is_none(),
             "removing an empty slot is None"
         );
         // The slot is reusable.
@@ -3784,13 +3787,14 @@ mod port_table_tests {
     fn count_tracks_live_entries() {
         let table = PortTable::new();
         assert_eq!(table.len(), 0);
-        table.try_claim(1, imposter(1)).expect("claim");
+        let one = imposter(1);
+        table.try_claim(1, Arc::clone(&one)).expect("claim");
         table.try_claim(2, imposter(2)).expect("claim");
         assert_eq!(table.len(), 2);
         // A rejected duplicate must not inflate the count.
         assert!(table.try_claim(1, imposter(1)).is_err());
         assert_eq!(table.len(), 2, "a rejected claim does not change the count");
-        table.remove(1).expect("removed");
+        table.remove_if_same(1, &one).expect("removed");
         assert_eq!(table.len(), 1);
     }
 

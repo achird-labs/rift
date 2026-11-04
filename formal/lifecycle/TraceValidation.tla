@@ -44,15 +44,16 @@ TraceNext ==
         \/ Lib("DeleteLock", o, DeleteLock(o))
         \/ Lib("DeleteLookup", o, DeleteLookup(o) /\ (op'[o].pc = "dUnlink") = Step.ok
                                   /\ (Step.ok => op'[o].look = StepGen))
-        \/ Lib("DeleteUnlink", o, DeleteUnlink(o) /\ (op'[o].pc = "dFloor") = Step.ok)
+        \/ Lib("DeleteUnlink", o, DeleteUnlink(o) /\ (op'[o].pc = "dCancel") = Step.ok)
         \/ Lib("DeleteRecordFloor", o, DeleteRecordFloor(o))
-        \/ Lib("DeleteRemoveIfSame", o, DeleteRemoveIfSame(o) /\ (op'[o].pc = "dCancel") = Step.ok)
-        \/ Lib("ReplaceLookup", o, ReplaceLookup(o) /\ (op'[o].pc = "rFloor") = Step.ok
+        \/ Lib("DeleteRemoveIfSame", o, DeleteRemoveIfSame(o) /\ (op'[o].pc = "dDrain") = Step.ok)
+        \/ Lib("ReplaceLookup", o, ReplaceLookup(o) /\ (op'[o].pc = "dCancel") = Step.ok
                                    /\ (Step.ok => op'[o].look = StepGen))
-        \/ Lib("ReplaceRemove", o, ReplaceRemove(o) /\ (op'[o].pc = "dCancel") = Step.ok)
         \/ Lib("DeleteCancel", o, DeleteCancel(o))
         \/ Lib("DeleteDrain", o, DeleteDrain(o))
         \/ Lib("DeleteClearShared", o, DeleteClearShared(o))
+        \/ Lib("DeleteFinish", o, DeleteFinish(o))
+        \/ Env(ReplaceLock(o))
         \/ Env(DeleteReturn(o))
         \* Sweeps.
         \/ Lib("ApplySnapshot", o, ApplySnapshot(o) /\ Cardinality(op'[o].plan) = Step.n)
