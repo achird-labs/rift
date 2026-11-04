@@ -529,9 +529,25 @@ jobs:
 
       # AC4: the flavor exists to have nothing for a scanner to report. Fail on ANY OS-package
       # vulnerability — there are no OS packages, so the only correct result is zero.
+      # Issue #1788: the action's own setup downloads from get.trivy.dev, which no longer resolves,
+      # so the scanner comes from the GitHub release, pinned by checksum.
+      - name: Install Trivy
+        env:
+          TRIVY_VERSION: "0.70.0"
+          TRIVY_SHA256: 8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9
+        run: |
+          tarball="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfL --retry 3 -o "$tarball" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${tarball}"
+          echo "${TRIVY_SHA256}  ${tarball}" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "$tarball" -C "$HOME/.local/bin" trivy
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Scan for OS-level CVEs
         uses: aquasecurity/trivy-action@v0.36.0
         with:
+          skip-setup-trivy: true
           image-ref: rift-static:ci
           format: table
           exit-code: '1'
