@@ -59,6 +59,11 @@ record.
   two transitions' stamps as they landed, so a stalled one could put a lower stamp over a higher one. A
   client revalidating with `If-Modified-Since` alone then stayed on `304` until the next transition. A
   scenario's stamp now only rises.
+- **A state write from a getter on a script's answer is no longer lost** (#1785): the state was saved
+  before the answer was read out of its JS object, so a getter on the answer, on a thrown value's
+  `message` or on a decorate's `config.response` wrote to a state nobody would read again, unless another
+  request happened to be in flight. The answer is now read first, then the state saved, then the answer
+  sent.
 - **A job left behind by a finished script no longer fails another request** (#1786): when a run
   answered with another run of its imposter in flight, what it left queued passed to that run, and a
   throw in it failed that unrelated request with the other script's error. The throw is now logged and

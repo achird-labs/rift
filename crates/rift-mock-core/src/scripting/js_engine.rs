@@ -681,15 +681,22 @@ impl MbRealm {
         let bequeaths = matches!(end, RunEnd::Finished | RunEnd::Idle) && hook.bequeaths();
         {
             let _active = run.activate(&mut self.context);
-            // Saved before the answer goes out, so a caller holding the answer finds the cell
-            // current.
+            // Reading the answer out of its JS object runs any getter on it, and that is script: it
+            // goes before the save, or its writes are lost (issue #1785). The answer goes out after
+            // the save, so a caller holding it finds the cell current.
+            let send = match end {
+                RunEnd::Abandoned => {
+                    drop(hook);
+                    None
+                }
+                end => Some(hook.finish(&mut self.context, end)),
+            };
             if let Some(scope) = &scope {
                 self.save_state(scope, name);
                 fire_script_point(scope, |port, key| Point::ScriptSaved { port, key });
             }
-            match end {
-                RunEnd::Abandoned => drop(hook),
-                end => hook.finish(&mut self.context, end),
+            if let Some(send) = send {
+                send();
             }
             if let Some(scope) = &scope {
                 fire_script_point(scope, |port, key| Point::ScriptFinished { port, key });
@@ -772,7 +779,8 @@ trait MbHook {
     /// cancelled (issue #1643).
     fn abandoned(&self) -> bool;
     fn answered(&self, context: &mut Context) -> bool;
-    fn finish(self: Box<Self>, context: &mut Context, end: RunEnd);
+    /// Build the answer, running any script that takes, and return what sends it.
+    fn finish(self: Box<Self>, context: &mut Context, end: RunEnd) -> Box<dyn FnOnce()>;
     /// Whether what the run leaves queued when it answers may pass to another run of its imposter
     /// ([`MbRealm::end`]).
     fn bequeaths(&self) -> bool {
@@ -2893,9 +2901,10 @@ impl MbHook for InjectHook {
                 .is_ok_and(|v| is_pending_promise(&v))
     }
 
-    fn finish(self: Box<Self>, context: &mut Context, end: RunEnd) {
+    fn finish(self: Box<Self>, context: &mut Context, end: RunEnd) -> Box<dyn FnOnce()> {
         let answer = self.answer(context, end);
-        self.reply.send(answer);
+        let reply = self.reply;
+        Box::new(move || reply.send(answer))
     }
 }
 
@@ -3227,7 +3236,7 @@ impl MbHook for PredicateHook {
     /// `Ok(true)`/`Ok(false)` for a match/non-match. The function throwing is an `Err`
     /// (issue #440), as Mountebank fails the request rather than treating an injection error as
     /// "did not match".
-    fn finish(self: Box<Self>, context: &mut Context, end: RunEnd) {
+    fn finish(self: Box<Self>, context: &mut Context, end: RunEnd) -> Box<dyn FnOnce()> {
         let answer = match end {
             RunEnd::Failed(e) => Err(e),
             RunEnd::Threw(e) => {
@@ -3242,7 +3251,8 @@ impl MbHook for PredicateHook {
                 Ok(self.result)
             }
         };
-        self.reply.send(answer);
+        let reply = self.reply;
+        Box::new(move || reply.send(answer))
     }
 }
 
@@ -4380,9 +4390,10 @@ impl MbHook for DecorateHook {
             .is_some_and(|called| !is_pending_promise(&called.returned))
     }
 
-    fn finish(self: Box<Self>, context: &mut Context, end: RunEnd) {
+    fn finish(self: Box<Self>, context: &mut Context, end: RunEnd) -> Box<dyn FnOnce()> {
         let answer = self.answer(context, end);
-        self.reply.send(answer);
+        let reply = self.reply;
+        Box::new(move || reply.send(answer))
     }
 }
 
