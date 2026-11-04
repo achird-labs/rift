@@ -398,7 +398,6 @@ async fn a_write_made_while_the_answer_is_read_is_not_lost() {
 /// that throws ends the run it is tagged with (`MbRealm::step`): so a timer left by one request
 /// fails another request that has nothing to do with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1786"]
 async fn a_job_left_behind_does_not_fail_the_run_that_inherited_it() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
