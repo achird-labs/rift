@@ -327,11 +327,7 @@ async fn a_start_in_another_realm_waits_for_the_imposters_run_in_flight() {
     assert_eq!(get(port, "/read").await.1, "2");
     assert_eq!(slow.await.expect("slow").1, "2");
     assert_eq!(
-        recorder
-            .seen()
-            .iter()
-            .filter(|s| seeded(&s.point))
-            .count(),
+        recorder.seen().iter().filter(|s| seeded(&s.point)).count(),
         2,
         "the deferred run seeds anew from the cell, in its own realm"
     );
@@ -343,7 +339,7 @@ async fn a_start_in_another_realm_waits_for_the_imposters_run_in_flight() {
 /// One request's predicate inject and response inject take a scope each, so a restart between them
 /// splits the request across two cells, and the inject does not see what the predicate wrote.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#finding-request-cell"]
+#[ignore = "#1784"]
 async fn a_request_keeps_one_state_across_a_restart() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
@@ -366,13 +362,16 @@ async fn a_request_keeps_one_state_across_a_restart() {
     let (status, body) = request.await.expect("request");
     let _ = manager.delete_all().await;
     assert_eq!(status, 200);
-    assert_eq!(body, "seen", "the inject ran on another cell than the predicate");
+    assert_eq!(
+        body, "seen",
+        "the inject ran on another cell than the predicate"
+    );
 }
 
 /// A getter on the answer runs in `hook.finish`, after the save. With no other run in flight the
 /// live state goes with the save, so the getter writes to an object nobody will read again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#finding-answer-getter"]
+#[ignore = "#1785"]
 async fn a_write_made_while_the_answer_is_read_is_not_lost() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
@@ -389,14 +388,17 @@ async fn a_write_made_while_the_answer_is_read_is_not_lost() {
     let second = get(port, "/").await;
     let _ = manager.delete_all().await;
     assert_eq!(first.1, "undefined");
-    assert_eq!(second.1, "1", "the getter's write did not reach the next run");
+    assert_eq!(
+        second.1, "1",
+        "the getter's write did not reach the next run"
+    );
 }
 
 /// What a finished run left passes to a run of its imposter in flight (`MbRealm::end`), and a job
 /// that throws ends the run it is tagged with (`MbRealm::step`): so a timer left by one request
 /// fails another request that has nothing to do with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#finding-heir-throw"]
+#[ignore = "#1786"]
 async fn a_job_left_behind_does_not_fail_the_run_that_inherited_it() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
