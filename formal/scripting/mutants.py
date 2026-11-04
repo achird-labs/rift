@@ -24,8 +24,7 @@ NEXT = '''Next ==
 SAVE_GUARD = '''EndSave(r) ==
     /\\ run[r].pc = "save"
 '''
-SAVE_NEXT = '''    /\\ run' = [run EXCEPT ![r].pc = "finish"]
-'''
+SAVE_NEXT = '''run' = [run EXCEPT ![r].pc = "finish",'''
 ANSWER_GUARD = '''FinishAnswered(r) ==
     /\\ run[r].pc = "finish"
 '''
@@ -47,6 +46,9 @@ mutants = {
           /\\ busy' = [busy EXCEPT ![run[r].worker] = r]
           /\\ heirFailed' = heirFailed \\cup {r}
 """)], []),
+    # #1785: the answer was read after the save, so a getter on it wrote to a state nobody reads again.
+    'the getter runs after the save (#1785)': ('NoLostUpdate', [
+        ("cell' = [cell EXCEPT ![c] = after]", "cell' = [cell EXCEPT ![c] = live[k]]")], []),
     # #1678's first cut: the answer went out, then the state was saved.
     'the answer goes out before the save (#1678)': ('CellCurrentBeforeAnswer', [
         (SAVE_GUARD, SAVE_GUARD.replace('"save"', '"finish"')),
@@ -55,7 +57,7 @@ mutants = {
         (ANSWER_NEXT, ANSWER_NEXT.replace('"release"', '"finish"'))], []),
     # #1726: the state belonged to the port, so a run across a restart wrote into its successor's.
     'a run saves to the imposter\'s current cell (#1726)': ('OldRunSavesToOldCell', [
-        ("cell' = [cell EXCEPT ![c] = live[k]]", "cell' = [cell EXCEPT ![current] = live[k]]")], []),
+        ("cell' = [cell EXCEPT ![c] = after]", "cell' = [cell EXCEPT ![current] = after]")], []),
     # MbRealm::end's "the run's jobs go before its claim", and the save before both.
     'the claim is released before the save': ('OneLiveStatePerKey', ADD_ACTION(
         '''EarlyRelease(r) ==

@@ -46,10 +46,6 @@ cases = [
     # Filed findings, reachable until fixed (README.md, "Findings").
     ('a restart between two hooks of a request splits it across two cells',
      only(known_cfg, 'RequestKeepsOneCell'), 'RequestKeepsOneCell'),
-    ('a getter on the answer writes after the save: the answer goes out with the cell behind',
-     only(known_cfg, 'CellCurrentBeforeAnswer'), 'CellCurrentBeforeAnswer'),
-    ('a getter on the answer of the last run writes to a state nobody reads again',
-     only(known_cfg, 'NoLostUpdate'), 'NoLostUpdate'),
     # The gates are green.
     ('StateCellPR.cfg (control; includes NeverTwoWorkersOneKey)', pr_cfg, 'ok'),
     ('Witness.cfg: every failure on, and affinity, one live state and the cells still hold (control)',
