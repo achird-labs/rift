@@ -1,0 +1,5 @@
+{"point": "Start", "preloaded": false}
+{"point": "ProxyClaim", "outcome": "Claimed"}
+{"point": "ProxyForwarding"}
+{"point": "ProxyInserted", "claimed": true}
+{"point": "ProxySettled"}

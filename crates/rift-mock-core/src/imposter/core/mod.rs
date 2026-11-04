@@ -922,9 +922,17 @@ impl Imposter {
             .filter_map(|s| s.recorded_claim.as_deref())
             .filter(|sig| !kept.contains(sig))
         {
+            crate::imposter::probe::fire(
+                &self.probe,
+                crate::imposter::probe::Point::ProxyOrphanFound { port },
+            );
             if let Err(e) = self.proxy_store.forget_recorded(port, sig) {
                 error!(port, path = %sig.path, "Failed to forget a deleted proxy recording: {e}");
             }
+            crate::imposter::probe::fire(
+                &self.probe,
+                crate::imposter::probe::Point::ProxyOrphanForgotten { port },
+            );
         }
     }
 

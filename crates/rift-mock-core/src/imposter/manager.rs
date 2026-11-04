@@ -3077,6 +3077,7 @@ impl ImposterManager {
             .clear_recorded_requests()
             .map_err(ImposterError::Backend)?;
         imposter.proxy_store.clear(port);
+        self.probe(Point::ProxyStoreCleared { port });
         // A fresh cell, not a cleared one: a script run in flight, and a run already submitted,
         // finish on the old cell's live state and save into the old cell (#1726, #1678); the
         // imposter's next runs start from the new one.

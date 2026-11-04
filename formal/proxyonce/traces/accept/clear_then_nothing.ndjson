@@ -1,0 +1,4 @@
+{"point":"Start","preloaded":true}
+{"point":"ProxyStoreCleared","seq":0}
+{"point":"ProxyOrphanFound","seq":1}
+{"point":"ProxyOrphanForgotten","seq":2}

@@ -13,6 +13,8 @@
 
 use std::sync::Arc;
 
+use crate::recording::ClaimOutcome;
+
 /// A generation: the n-th imposter this manager created, whichever port. Two imposters on one
 /// port over time are two generations; the model names them `<<port, n>>`.
 pub type Generation = u64;
@@ -87,6 +89,32 @@ pub enum Point {
         generation: Generation,
         stamp: i64,
     },
+    /// A `try_claim_as` answered (`formal/proxyonce/ProxyOnce.tla`: `Claim`, `Reclaim`).
+    ProxyClaim { port: u16, outcome: ClaimOutcome },
+    /// The recording is shadowed; the request is about to forget it (`ShadowCheck`).
+    ProxyShadowed { port: u16 },
+    /// The request forgot the shadowed recording (`ShadowForget`).
+    ProxyShadowForgot { port: u16 },
+    /// An `AlreadyRecorded` is about to look its recording up (before `Lookup`).
+    ProxyLookingUp { port: u16 },
+    /// The lookup found the recording, which replays (`Lookup`).
+    ProxyReplayed { port: u16 },
+    /// The lookup found nothing, and the request goes on to forward (`Lookup`).
+    ProxyNothingToReplay { port: u16 },
+    /// The request is about to call the upstream (`Forward`).
+    ProxyForwarding { port: u16 },
+    /// `HeldClaim::settle` returned (`Settle`, `SettleFail`). It returns nothing, so this says
+    /// neither whether the store failed nor whether it dropped a stale token.
+    ProxySettled { port: u16 },
+    /// A recorded stub went into the list (`Insert`); `claimed` is whether it carries the claim.
+    ProxyInserted { port: u16, claimed: bool },
+    /// A stub edit's swap left a claim with no carrier; it is about to be forgotten (`EditSwap`,
+    /// `ClearSwap`).
+    ProxyOrphanFound { port: u16 },
+    /// That claim was forgotten (`EditForget`, `ClearForget`).
+    ProxyOrphanForgotten { port: u16 },
+    /// `ProxyRecordingStore::clear` ran for the port (`ClearStore`, `RestartClear`).
+    ProxyStoreCleared { port: u16 },
 }
 
 /// What the engine calls at each [`Point`]. Implementations must be cheap and must not block:

@@ -1,0 +1,15 @@
+{"point":"Start","preloaded":true}
+{"outcome":"AlreadyRecorded","point":"ProxyClaim","seq":0,"token":null}
+{"point":"ProxyShadowed","seq":1}
+{"outcome":"AlreadyRecorded","point":"ProxyClaim","seq":2,"token":null}
+{"point":"ProxyShadowed","seq":3}
+{"point":"ProxyShadowForgot","seq":4}
+{"outcome":"Claimed","point":"ProxyClaim","seq":5,"token":1}
+{"point":"ProxyForwarding","seq":6}
+{"point":"ProxySettled","seq":7}
+{"claimed":true,"point":"ProxyInserted","seq":8}
+{"point":"ProxyShadowForgot","seq":9}
+{"outcome":"Claimed","point":"ProxyClaim","seq":10,"token":2}
+{"point":"ProxyForwarding","seq":11}
+{"point":"ProxySettled","seq":12}
+{"claimed":true,"point":"ProxyInserted","seq":13}

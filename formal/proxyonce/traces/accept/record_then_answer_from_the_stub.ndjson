@@ -1,0 +1,15 @@
+{"point":"Start","preloaded":false}
+{"debug":"CreateBound { port: 59502, generation: 1 }","point":"Other","seq":0}
+{"debug":"CreateFloorRead { port: 59502, generation: 1, floor: None }","point":"Other","seq":1}
+{"debug":"CreateAccepting { port: 59502, generation: 1 }","point":"Other","seq":2}
+{"debug":"CreateClaimed { port: 59502, generation: 1 }","point":"Other","seq":3}
+{"debug":"CreatePersisted { port: 59502, generation: 1 }","point":"Other","seq":4}
+{"debug":"CreateBound { port: 59521, generation: 2 }","point":"Other","seq":5}
+{"debug":"CreateFloorRead { port: 59521, generation: 2, floor: None }","point":"Other","seq":6}
+{"debug":"CreateAccepting { port: 59521, generation: 2 }","point":"Other","seq":7}
+{"debug":"CreateClaimed { port: 59521, generation: 2 }","point":"Other","seq":8}
+{"debug":"CreatePersisted { port: 59521, generation: 2 }","point":"Other","seq":9}
+{"outcome":"Claimed","point":"ProxyClaim","seq":10,"token":0}
+{"point":"ProxyForwarding","seq":11}
+{"point":"ProxySettled","seq":12}
+{"claimed":true,"point":"ProxyInserted","seq":13}
