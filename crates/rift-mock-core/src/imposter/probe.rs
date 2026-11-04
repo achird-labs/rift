@@ -10,6 +10,9 @@
 //!
 //! A point is where the model's action commits, never before: a point that fires and then fails
 //! would record a step the engine did not take.
+//!
+//! The `Script*` points are the script state cell's (`formal/scripting/StateCell.tla`): they ride
+//! the run's `ScriptScope`, because the MB script pool is process-global and belongs to no manager.
 
 use std::sync::Arc;
 
@@ -87,6 +90,15 @@ pub enum Point {
         generation: Generation,
         stamp: i64,
     },
+    /// A script run built its imposter's live state from the cell (`Start`, with none live). `key`
+    /// names the cell, as the pool's routes do.
+    ScriptSeeded { port: u16, key: usize },
+    /// A script run's end saved the live state to the cell (`EndSave`).
+    ScriptSaved { port: u16, key: usize },
+    /// A script run's end gave its answer, or dropped it for a caller gone (`EndFinish`).
+    ScriptFinished { port: u16, key: usize },
+    /// A script run's end let go of its jobs and its claim on the worker (`EndRelease`).
+    ScriptReleased { port: u16, key: usize },
 }
 
 /// What the engine calls at each [`Point`]. Implementations must be cheap and must not block:
