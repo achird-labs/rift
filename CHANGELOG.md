@@ -69,6 +69,10 @@ record.
   throw in it failed that unrelated request with the other script's error. The throw is now logged and
   dropped. A request waiting on a promise only that job would have resolved fails as a promise that never
   settled, about 30 ms later, rather than with the throw's message.
+- **A request keeps one script state across a restart** (#1784): each hook loaded the imposter's state
+  on its own, so a `PUT /imposters` between two hooks of a request split it, and a response `inject` did
+  not see what its predicate had written. A request now runs every hook on the state it started with,
+  and a restart takes effect from the next request.
 - **A delete no longer wipes the imposter that took the port** (#1763): with a shared journal,
   sequencer or proxy store, a delete cleared the port's entries up to 5 seconds after freeing the port,
   so a same-port create lost its recorded requests, response cycles and recordings. The clears now run

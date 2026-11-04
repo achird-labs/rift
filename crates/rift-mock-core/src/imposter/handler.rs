@@ -1357,6 +1357,11 @@ async fn handle_request_inner(
     // Before the scenario gates are read, so a transition landing mid-request cannot stamp the
     // answer it replaced (issue #1307).
     let scenario_transitions = imposter.scenario_transitions();
+    // One state cell for the whole request, every hook on it: a restart mid-request takes effect
+    // from the next request (issue #1784). Loaded here, not earlier, so a slow upload across a
+    // `PUT /imposters` starts on the new cell. `script_file_access` stays per site on purpose: a
+    // stub write narrows it for a request about to run a script (#1645).
+    let script_scope = imposter.script_scope();
     let (mut matched, mut trace) = match imposter
         .find_matching_stub_with_client_bounded_inner(
             method_str,
@@ -1368,6 +1373,7 @@ async fn handle_request_inner(
             Some(&client_ip),
             script_timeout,
             want_trace,
+            script_scope.clone(),
         )
         .await
     {
@@ -1408,6 +1414,7 @@ async fn handle_request_inner(
                     Some(&client_ip),
                     script_timeout,
                     want_trace,
+                    script_scope.clone(),
                 )
                 .await
             {
@@ -1486,7 +1493,7 @@ async fn handle_request_inner(
                     request_body: body_string.as_deref(),
                     request_body_undefined: body_undefined,
                     client_addr: Some(client_addr),
-                    script_scope: imposter.script_scope(),
+                    script_scope: script_scope.clone(),
                     script_files: imposter.script_file_access(),
                     stub: stub_ref(&imposter, stub_index, &stub_state.stub),
                     csv_cache: csv_cache(),
@@ -1586,7 +1593,7 @@ async fn handle_request_inner(
             match execute_mountebank_inject_bounded(
                 inject_fn.clone(),
                 mb_request,
-                imposter.script_scope(),
+                script_scope.clone(),
                 stub_state.stub.id.clone(),
                 imposter.script_file_access(),
                 script_timeout,
@@ -1629,7 +1636,7 @@ async fn handle_request_inner(
                             request_body: body_string.as_deref(),
                             request_body_undefined: body_undefined,
                             client_addr: Some(client_addr),
-                            script_scope: imposter.script_scope(),
+                            script_scope: script_scope.clone(),
                             script_files: imposter.script_file_access(),
                             stub: stub_ref(&imposter, stub_index, &stub_state.stub),
                             csv_cache: csv_cache(),
@@ -2270,7 +2277,7 @@ async fn handle_request_inner(
                         request_body: body_string.as_deref(),
                         request_body_undefined: body_undefined,
                         client_addr: Some(client_addr),
-                        script_scope: imposter.script_scope(),
+                        script_scope: script_scope.clone(),
                         script_files: imposter.script_file_access(),
                         stub: stub_ref(&imposter, stub_index, &stub_state.stub),
                         csv_cache: csv_cache(),

@@ -637,6 +637,7 @@ Each of these is described where the feature is:
 - A `wait` range `{"min", "max"}` is a Rift extension — [Behaviors](behaviors.md).
 - String predicate operators fold ASCII case only; `matches` folds Unicode — [Predicates](predicates.md).
 - An unreachable proxy upstream answers `502` — [Proxy](proxy.md).
+- `PUT /imposters` lets a request in flight on a kept port finish and answer, where Mountebank destroys its socket, so the client sees a closed connection there.
 - An unknown proxy `mode` is refused; Mountebank treats it as `proxyOnce` — [Proxy](proxy.md#proxy-modes).
 - A `proxyOnce` request in flight across a clear of saved proxy responses leaves no stub, where Mountebank's would land, so the next request forwards once more — [Proxy](proxy.md#where-recordings-go).
 - `protocol` is optional and defaults to `http` — [Imposters](imposters.md).
