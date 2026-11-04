@@ -539,10 +539,11 @@ async fn a_delete_leaves_the_next_imposters_recorded_requests_alone() {
     );
 }
 
-/// #1764: a create that loses the claim has been accepting on the shared port since before the
-/// claim, and is then told `PortInUse`.
+/// #1764: a create that loses the claim must not have answered anyone by the time it is told
+/// `PortInUse`, and the winner must have the port to itself afterwards. A connection the kernel
+/// queued on the loser's socket stays unanswered, which is why a timeout is allowed in the window
+/// and never a "loser" body.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1764"]
 async fn a_create_that_loses_the_claim_answers_nobody() {
     let recorder = Arc::new(Recorder::default());
     let manager = Arc::new(with_probe(&recorder));
@@ -583,6 +584,20 @@ async fn a_create_that_loses_the_claim_answers_nobody() {
     }
     hold_loser.open();
     let lost = loser.await.expect("create task");
+
+    // The loser's listener closes when its loop sees the shutdown, so a connection can still land
+    // on it just after `PortInUse`. Five answers in a row is the winner having the port alone.
+    let mut in_a_row = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while in_a_row < 5 && tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(1), get(port, None)).await {
+            Ok(Some(answer)) => {
+                in_a_row += 1;
+                bodies.push(answer.body);
+            }
+            _ => in_a_row = 0,
+        }
+    }
     let _ = manager.delete_all().await;
 
     assert!(
@@ -592,6 +607,14 @@ async fn a_create_that_loses_the_claim_answers_nobody() {
     assert!(
         !bodies.iter().any(|b| b == "loser"),
         "a create that returned PortInUse answered requests: {bodies:?}, {unanswered} unanswered"
+    );
+    assert_eq!(
+        in_a_row, 5,
+        "the winner must answer once the loser has gone: {bodies:?}"
+    );
+    assert!(
+        bodies.iter().all(|b| b == "winner"),
+        "every answer comes from the winner: {bodies:?}"
     );
 }
 

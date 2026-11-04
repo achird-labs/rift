@@ -55,8 +55,9 @@ PortOf(g) == g[1]
 Max(a, b) == IF a >= b THEN a ELSE b
 Min(S) == CHOOSE q \in S : \A r \in S : q <= r
 
-\* A generation whose accept loops run and whose cancel token is untouched answers requests.
-Serving == {"accepting", "claimed"}
+\* A generation answers requests once it holds the port and its cancel token is untouched.  An
+\* "accepting" generation's loops run behind a closed gate (#1764).
+Serving == {"claimed"}
 
 VARIABLES
     slot,           \* [Ports -> GenIds \cup {NoGen}]: `PortTable` (manager.rs:476)
@@ -190,8 +191,9 @@ CreateReadFloor(o) ==
     /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, nreq, req,
                    deleteReturned, lastStamp, shared, ghost>>
 
-\* spawn_accept_loops (manager.rs:1527-1534): the listener accepts and the imposter answers from
-\* here on, before it is in the table.
+\* spawn_accept_loops: the loops run, but wait for the claim before their first accept (#1764).  The
+\* code opens the gate in a statement after the claim; opening it in CreateTryClaim allows requests
+\* no later than the code does.
 CreateSpawnAccept(o) ==
     /\ op[o].pc = "cAccept"
     /\ phase' = [phase EXCEPT ![op[o].gen] = "accepting"]
@@ -199,8 +201,8 @@ CreateSpawnAccept(o) ==
     /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, clock, nreq, req,
                    deleteReturned, lastStamp, shared, ghost>>
 
-\* PortTable::try_claim (manager.rs:1546; 517): check and store under `mutations`.  The loser
-\* cancels and stops its listener and returns PortInUse (manager.rs:1551-1554).
+\* PortTable::try_claim: check and store under `mutations`.  The loser cancels and stops its
+\* listener and returns PortInUse.
 CreateTryClaim(o) ==
     /\ op[o].pc = "cClaim"
     /\ LET p == op[o].port

@@ -1583,6 +1583,11 @@ impl ImposterManager {
         // Stored unconditionally: this imposter is not in the map yet, so nothing else can reach it
         // and there is no rebind to race. The handles land here BEFORE `try_claim` below, which is
         // what makes `is_bound()` trustworthy for every imposter reachable through the map.
+        //
+        // The loops wait behind `admit` until the claim is won (issue #1764): two creates for one
+        // port can both be bound here, and the kernel gives connections to either. Those that
+        // arrive meanwhile wait in the backlog, and a loser's close with its listener unanswered.
+        let (admit, admitted) = tokio::sync::watch::channel(false);
         if let Some(listeners) = listeners {
             *imposter.serve_handles.lock() = self.spawn_accept_loops(
                 &imposter,
@@ -1590,6 +1595,7 @@ impl ImposterManager {
                 &shutdown_tx,
                 tls_acceptors.as_ref(),
                 port,
+                Some(&admitted),
             );
         }
         self.probe(Point::CreateAccepting {
@@ -1600,8 +1606,8 @@ impl ImposterManager {
         // Store imposter. `try_claim`'s internal mutex closes the same TOCTOU the old write lock
         // did between the earlier read-only check and the bind: with SO_REUSEADDR/REUSEPORT two
         // concurrent creates for the same explicit port can both bind, so the loser of the claim
-        // race must stop the listener it just started rather than leave an orphan accepting on
-        // the shared port.
+        // race must stop the listener it just started rather than leave an orphan on the shared
+        // port.
         if self
             .imposters
             .try_claim(port, Arc::clone(&imposter))
@@ -1619,6 +1625,7 @@ impl ImposterManager {
             port,
             generation: imposter.generation,
         });
+        admit.send_replace(true);
 
         // Persist synchronously and surface the result: a create that can't be durably recorded
         // must fail loudly rather than return a success that vanishes on restart (issue #563).
@@ -1788,6 +1795,7 @@ impl ImposterManager {
         shutdown_tx: &broadcast::Sender<()>,
         tls_acceptors: Option<&crate::proxy::tls::TlsAcceptors>,
         port: u16,
+        admission: Option<&tokio::sync::watch::Receiver<bool>>,
     ) -> Vec<tokio::task::JoinHandle<()>> {
         let response_decorator = self.response_decorator.clone();
         // Read socket/HTTP tuning once per imposter, not per accepted connection.
@@ -1824,6 +1832,7 @@ impl ImposterManager {
                 port,
                 accept_counter,
                 peer_check,
+                admission.cloned(),
             );
             serve_handles.push(match &self.accept_runtimes {
                 Some(runtimes) => runtimes[index].spawn(loop_future),
@@ -1873,12 +1882,14 @@ impl ImposterManager {
             .local_addr()
             .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?;
         let listeners = self.bind_listener_group(addr, Some(probe))?;
+        // No gate: this imposter already holds the port.
         let handles = self.spawn_accept_loops(
             imposter,
             listeners,
             &shutdown_tx,
             tls_acceptors.as_ref(),
             port,
+            None,
         );
 
         // Install only if nobody else already did. Unlike the create path, this imposter is
@@ -1926,7 +1937,19 @@ impl ImposterManager {
         port: u16,
         accept_counter: prometheus::Counter,
         mut peer_check: PeerCheck,
+        admission: Option<tokio::sync::watch::Receiver<bool>>,
     ) {
+        // A closed channel means the create never won the claim, so nothing is ever admitted.
+        if let Some(mut admission) = admission {
+            tokio::select! {
+                admitted = admission.wait_for(|open| *open) => {
+                    if admitted.is_err() {
+                        return;
+                    }
+                }
+                _ = shutdown_rx.recv() => return,
+            }
+        }
         // Per-loop, unshared: N loops on one port degrade independently, and cross-loop
         // coordination would add a shared cache line to the accept path for no behavioral gain
         // (issue #750).

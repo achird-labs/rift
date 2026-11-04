@@ -41,7 +41,7 @@ names here are the stable reference.
 | `CreateBindBusy`, `CreateBindOk` | `bind_for_create`: the `contains` check, then the bind |
 | `CreateBindBound` | not code: the model's generation bound refusing a create |
 | `CreateReadFloor` | `create_imposter_staged`: `load_floors`, then `continue_load_clock` |
-| `CreateSpawnAccept` | `spawn_accept_loops`: the imposter answers from here, before it is registered |
+| `CreateSpawnAccept` | `spawn_accept_loops`: the loops run but accept nothing until the claim is won (#1764) |
 | `CreateTryClaim` | `PortTable::try_claim`; the loser cancels and returns `PortInUse` |
 | `CreateClaimStore` | not code: reachable only in the "no `mutations` lock" mutant |
 | `CreatePersistLock`, `CreatePersistWrite` | `persist_imposter_with`: `persist_lock`, the `is_current` check, the write |
@@ -108,7 +108,6 @@ into the cfgs.
 | Issue | Invariant | Defect |
 |:--|:--|:--|
 | #1762 | `FloorMonotone` | A same-port re-create can be told `304` for new content, when a create reads the floor before a delete records it |
-| #1764 | `LoserNeverAnswers` | A create that loses the claim has already answered requests. Reproduced on macOS; Linux not observed |
 | #1774 | `ApplyReportsTruth` | An apply sweep reports a concurrent delete as failed |
 
 `witness.py` requires each of these to stay reachable.
