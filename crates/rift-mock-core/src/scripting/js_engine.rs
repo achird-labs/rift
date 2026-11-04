@@ -1,4 +1,5 @@
 use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result};
+use crate::imposter::probe::Point;
 use crate::imposter::{ResponseMode, ScriptFileAccess};
 use crate::scripting::{
     FaultDecision, PredicateGeneratorError, ScriptCtxExtras, ScriptCtxInput, ScriptRequest,
@@ -532,6 +533,7 @@ impl MbRealm {
         let seed = scope.state.lock().clone();
         let state = json_to_js(&mut self.context, &Value::Object(seed))?;
         self.live_state.insert(key, state.clone());
+        fire_script_point(scope, |port, key| Point::ScriptSeeded { port, key });
         Ok(state)
     }
 
@@ -670,10 +672,14 @@ impl MbRealm {
             // current.
             if let Some(scope) = &scope {
                 self.save_state(scope, name);
+                fire_script_point(scope, |port, key| Point::ScriptSaved { port, key });
             }
             match end {
                 RunEnd::Abandoned => drop(hook),
                 end => hook.finish(&mut self.context, end),
+            }
+            if let Some(scope) = &scope {
+                fire_script_point(scope, |port, key| Point::ScriptFinished { port, key });
             }
         }
         let key = scope.as_ref().map(state_key);
@@ -689,6 +695,9 @@ impl MbRealm {
         // The run's jobs go before its claim (see above).
         drop(run);
         drop(claim);
+        if let Some(scope) = &scope {
+            fire_script_point(scope, |port, key| Point::ScriptReleased { port, key });
+        }
     }
 
     fn next_wake(&self) -> Option<std::time::Instant> {
@@ -788,6 +797,11 @@ type StateKey = usize;
 
 fn state_key(scope: &ScriptScope) -> StateKey {
     Arc::as_ptr(&scope.state).addr()
+}
+
+/// Fire a state cell probe point (`formal/scripting`) when `scope` carries a probe.
+fn fire_script_point(scope: &ScriptScope, point: impl FnOnce(u16, StateKey) -> Point) {
+    crate::imposter::probe::fire(&scope.probe, point(scope.port, state_key(scope)));
 }
 
 /// Script-source → parsed-`Script` cache for one worker's MB context.

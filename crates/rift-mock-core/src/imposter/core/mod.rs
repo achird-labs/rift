@@ -1193,7 +1193,10 @@ impl Imposter {
     /// total. Centralised here so the invariant has one greppable home rather than a scattered
     /// magic `config.port.unwrap_or(0)` at every script call site.
     pub(crate) fn script_scope(&self) -> crate::scripting::ScriptScope {
-        crate::scripting::ScriptScope::new(self.bound_port(), self.script_state.load_full())
+        let mut scope =
+            crate::scripting::ScriptScope::new(self.bound_port(), self.script_state.load_full());
+        scope.probe.clone_from(&self.probe);
+        scope
     }
 
     /// This imposter's bound listener port, carrying the same invariant [`Self::script_scope`]
