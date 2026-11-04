@@ -32,13 +32,13 @@ threads run in parallel, so one request's step can land between any two of anoth
 
 | Action | Code | Probe point |
 |:--|:--|:--|
-| `Copy` | `imposter.scenario_transitions()`, `handler.rs:1359`, before any gate is read | `TransitionsCopied` |
+| `Copy` | `imposter.scenario_transitions()`, `handler.rs:1359`, before any gate is read | none: it would fire on every request and break `formal/lifecycle`'s traces, which have no such point |
 | `GateRead` | one `flow_store.get` per gated candidate, `:181-194`; a match ends the scan at `:221`, none is `:230` | `GateRead` |
 | `CasCompare` | `compare_and_set` expecting the gate's state, `:686`; on `Conflict(None)` for the initial state, again expecting absence, `:692-695`; else dropped, `:698`, `:705`. One step when `AtomicCas`: `backends/inmemory.rs:287`, under the store's write lock from `:294`. Otherwise the default's `get` and compare, `extensions/flow_state.rs:107-108` | `CasApplied`, `CasConflict` |
 | `CasSet` | the default's `set`, `extensions/flow_state.rs:109`; only when `AtomicCas = FALSE` | |
 | `Issue` | `load_clock.next()`, `:577`; one atomic update, `core/mod.rs:169` | `TransitionStampIssued` |
 | `Publish` | `scenario_transitions.rcu`, `:580-584`; retries until it lands, then the entry is the stamp `Issue` took | `TransitionStamped` |
-| `Serve` | `served_load_stamp_unprobed`, `:629-650`, from `handler.rs:2066` and `:2416`, over the copy | `Served` |
+| `Serve` | `served_load_stamp_unprobed`, `:629-650`, from `handler.rs:2065` and `:2415`, over the copy | `Served` |
 | `SetRead`, `SetWrite` | `set_scenario_state`: `changed` at `:537-540`, the plain write at `:542`, the stamp at `:547` | `ScenarioChangeRead` |
 | `DelRead`, `DelWrite` | `flow_delete` through `ScenarioStampingStore::stamped`: `would_change` at `:990`, `:778`, decided at `:955`, the write at `:960`, the stamp at `:961` | `ScenarioChangeRead` |
 
@@ -119,6 +119,27 @@ delete its row from `witness.py`. `NoStaleAnswerAtRest` moves once both #1779 an
 
 ## Runs
 
-Measured on this model, on a laptop shared with other jobs. Times are wall clock.
+Measured on this model with TLC from `tla2tools.jar` in the VS Code extension 2026.11.21657, on a laptop shared with other
+jobs. Times are wall clock. Bounds are written gated, pollers, setters, admin deletes.
 
-RUNTABLE
+| Run | Bounds | Start | Verdict | Generated | Distinct | Depth | Time |
+|:--|:--|:--|:--|--:|--:|--:|--:|
+| `ScenarioPR.cfg` | 2, 1, 1, 1 | `B` | no error | 8,372,091 | 3,075,039 | 30 | 48s |
+| `Scenario.cfg` | 3, 1, 1, 0 | absent | no error | 9,478,703 | 3,185,556 | 32 | 1m 40s |
+| `Mutants.cfg` | 2, 1, 0, 0 | `B` | no error | 2,536 | 1,215 | | not timed, with `-coverage 1` |
+| `Coverage.cfg`, `AtomicCas = FALSE` | 2, 0, 1, 1 | absent | no error (`TypeInv` only) | 624,911 | 285,025 | 27 | 12s, with `-coverage 1` |
+| `Known.cfg`, `StampMonotone` | 3, 1, 1, 1 | `B` | violated | 11,226 | 4,168 | 11 | 6.2s |
+| `Known.cfg`, `NoStaleAnswerAtRest` | 3, 1, 1, 1 | `B` | violated | 27,503 | 10,222 | 12 | 8.9s |
+| `Known.cfg`, `NoMatchOnlyWhenUncovered` | 3, 1, 1, 1 | `B` | violated | 956 | 350 | 7 | 8.3s |
+| `Witness.cfg`, `NeverDroppedTransition` | 2, 0, 0, 0 | `B` | violated | 136 | 92 | 15 | 6.3s |
+| `Witness.cfg`, `TransitionsAreCas`, `AtomicCas = FALSE` | 2, 0, 0, 0 | `B` | violated | 175 | 116 | 17 | 8.0s |
+| `mutants.py` | | | exit 0 | | | | 16s |
+| `witness.py` | | | exit 0 | | | | 57s |
+
+Bounds 3, 1, 1, 1 with no violated invariant did not finish: from absence, TLC had found 6,189,088 distinct states with
+2,748,248 on its queue after five minutes when it ran out of disk. So no run covers three transitions and an admin delete
+together with the invariants that hold. Violations on those bounds, in `Known.cfg`, stop early.
+
+`-coverage 1`, on `Coverage.cfg` and `Mutants.cfg` together, gives every action a non-zero count. `Coverage.cfg` hits all
+eleven, `CasSet` included. Its only zero-count lines are the five of `Commit` as called from `CasCompare`'s atomic branch,
+which `Mutants.cfg` hits. `Mutants.cfg` has zeros for `CasSet` and the setter and delete actions, by its bounds.

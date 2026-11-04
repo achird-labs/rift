@@ -168,7 +168,7 @@ Publish(r) ==
     /\ req' = [req EXCEPT ![r] = IF r \in Gated THEN [@ EXCEPT !.pc = "serve"] ELSE Locals("done")]
     /\ UNCHANGED <<store, clock, ver, writes, served, casBroken, dropped, noMatch>>
 
-\* matching.rs:629-650, from handler.rs:2066 and :2416: the stub's own stamp or the copy, whichever
+\* matching.rs:629-650, from handler.rs:2065 and :2415: the stub's own stamp or the copy, whichever
 \* is later.  Stubs load before any transition here, so the copy decides.
 Serve(r) ==
     /\ req[r].pc = "serve"

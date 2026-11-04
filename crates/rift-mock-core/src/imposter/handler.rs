@@ -1357,7 +1357,6 @@ async fn handle_request_inner(
     // Before the scenario gates are read, so a transition landing mid-request cannot stamp the
     // answer it replaced (issue #1307).
     let scenario_transitions = imposter.scenario_transitions();
-    imposter.probe_at(|port| super::probe::Point::TransitionsCopied { port });
     let (mut matched, mut trace) = match imposter
         .find_matching_stub_with_client_bounded_inner(
             method_str,

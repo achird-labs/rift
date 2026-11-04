@@ -87,9 +87,9 @@ pub enum Point {
         generation: Generation,
         stamp: i64,
     },
-    /// A request copied the scenario stamps, before any gate read (`formal/scenario`: `Copy`).
-    TransitionsCopied { port: u16 },
-    /// A request read the scenario state for the gate of the stub at `stub_index` (`GateRead`).
+    /// A request read the scenario state for the gate of the stub at `stub_index`
+    /// (`formal/scenario`: `GateRead`). This and the points below fire only for a scenario, so a
+    /// run of an imposter without one records what `formal/lifecycle` covers and nothing else.
     GateRead { port: u16, stub_index: usize },
     /// A gated transition's compare-and-set wrote (`CasCompare`, the applied branch).
     CasApplied { port: u16 },
