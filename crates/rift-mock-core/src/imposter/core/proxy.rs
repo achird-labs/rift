@@ -1388,7 +1388,7 @@ impl Imposter {
 
         // Consult the proxy-recording gate. `AlreadyRecorded` replays; `Claimed` grants the
         // right to record; `InFlight` (a concurrent proxyOnce loser) and an unavailable
-        // store proxy upstream without recording.
+        // store proxy upstream with nothing recorded in the store.
         // The claim carries this response's own mode (issue #1387), so a `proxyAlways` stub never
         // replays what a `proxyOnce` one recorded. A `proxyTransparent` response — or a
         // `defaultForward` — records nothing and takes no claim at all (issue #1314).
@@ -1397,22 +1397,26 @@ impl Imposter {
         // request's recording, without the `x-rift-generator-error` the client should see.
         let generation_failed = matches!(generation, Some(Err(_))) || runtime_failure.is_some();
         // A concurrent proxyOnce loser forwards, but the winner records the identity: inserting
-        // its stub too would stack a duplicate per loser.
+        // its stub too would stack a duplicate per loser. A request holding no claim for a store
+        // that keeps saying `AlreadyRecorded` with nothing behind it takes the same path.
         let mut lost_race = false;
         let claim = if transparent || generation_failed {
             None
         } else {
-            let claimed = self.proxy_store.try_claim_as(port, &signature, mode);
-            if let Ok(outcome) = &claimed {
-                fire(
-                    &self.probe,
-                    Point::ProxyClaim {
-                        port,
-                        outcome: *outcome,
-                    },
-                );
-            }
-            let outcome = match claimed {
+            let claim_now = || {
+                let claimed = self.proxy_store.try_claim_as(port, &signature, mode);
+                if let Ok(outcome) = &claimed {
+                    fire(
+                        &self.probe,
+                        Point::ProxyClaim {
+                            port,
+                            outcome: *outcome,
+                        },
+                    );
+                }
+                claimed
+            };
+            let mut outcome = match claim_now() {
                 // A recording only behind the stub that answered did not answer this request: it
                 // missed, so it is forwarded and recorded in front of this stub, as Mountebank's
                 // `proxyAndRecord` does (issue #1705). Forget the shadowed recording and claim
@@ -1426,17 +1430,7 @@ impl Imposter {
                     match self.proxy_store.forget_recorded(port, &signature) {
                         Ok(()) => {
                             fire(&self.probe, Point::ProxyShadowForgot { port });
-                            let again = self.proxy_store.try_claim_as(port, &signature, mode);
-                            if let Ok(outcome) = &again {
-                                fire(
-                                    &self.probe,
-                                    Point::ProxyClaim {
-                                        port,
-                                        outcome: *outcome,
-                                    },
-                                );
-                            }
-                            again
+                            claim_now()
                         }
                         // Terminal fallback, logged: replaying the recording is the behaviour
                         // before #1705, still a correct `proxyOnce` answer, just not Mountebank's.
@@ -1452,52 +1446,65 @@ impl Imposter {
                 }
                 outcome => outcome,
             };
-            match outcome {
-                Ok(ClaimOutcome::AlreadyRecorded) => {
-                    fire(&self.probe, Point::ProxyLookingUp { port });
-                    if let Some(recorded) = self.proxy_store.lookup(port, &signature) {
-                        fire(&self.probe, Point::ProxyReplayed { port });
-                        debug!("Returning recorded proxy response (proxyOnce mode)");
-                        return Ok(ProxyOutcome::Served(ProxiedResponse {
-                            status: recorded.status,
-                            headers: recorded.headers,
-                            body: recorded.body,
-                            latency_ms: recorded.latency_ms,
-                        }));
+            let mut claimed_again = false;
+            loop {
+                break match outcome {
+                    Ok(ClaimOutcome::AlreadyRecorded) => {
+                        fire(&self.probe, Point::ProxyLookingUp { port });
+                        if let Some(recorded) = self.proxy_store.lookup(port, &signature) {
+                            fire(&self.probe, Point::ProxyReplayed { port });
+                            debug!("Returning recorded proxy response (proxyOnce mode)");
+                            return Ok(ProxyOutcome::Served(ProxiedResponse {
+                                status: recorded.status,
+                                headers: recorded.headers,
+                                body: recorded.body,
+                                latency_ms: recorded.latency_ms,
+                            }));
+                        }
+                        // AlreadyRecorded but nothing to replay: a race (a concurrent clear, or the
+                        // recording forgotten because its stub was just deleted, #1386) or a
+                        // misbehaving backend. Claim once more, so this request records with a claim
+                        // rather than leave a stub the store cannot see (issue #1778). Only once: a
+                        // store that keeps saying this has nothing behind its answer, so forward with
+                        // no stub rather than spin.
+                        fire(&self.probe, Point::ProxyNothingToReplay { port });
+                        if !claimed_again {
+                            claimed_again = true;
+                            outcome = claim_now();
+                            continue;
+                        }
+                        warn!(
+                            "Proxy store reported AlreadyRecorded twice but lookup found nothing; forwarding without a stub"
+                        );
+                        lost_race = true;
+                        None
                     }
-                    // AlreadyRecorded but nothing to replay: a race (a concurrent clear, or the
-                    // recording forgotten because its stub was just deleted, #1386) or a
-                    // misbehaving backend. Forward without recording rather than fail; the next
-                    // request claims and records it.
-                    fire(&self.probe, Point::ProxyNothingToReplay { port });
-                    warn!(
-                        "Proxy store reported AlreadyRecorded but lookup found nothing; forwarding without recording"
-                    );
-                    None
-                }
-                Ok(ClaimOutcome::InFlight) => {
-                    lost_race = true;
-                    None
-                }
-                Ok(ClaimOutcome::Claimed(token)) => Some(HeldClaim::new(
-                    self.proxy_store.as_ref(),
-                    port,
-                    &signature,
-                    token,
-                )),
-                // The store arbitrates exactly-once and could not answer: fail the request rather
-                // than forward it. Forwarding here would call the upstream while *nothing* is
-                // serializing claims, so the duplicate is bounded by the outage, not by one racing
-                // window — the outcome `proxyOnce` exists to prevent. The `BackendUnavailable` rides
-                // the chain so the response boundary can answer 503 through the #318 door.
-                Err(ProxyStoreError::Refused(cause)) => {
-                    return Err(anyhow::Error::new(cause)
-                        .context("proxyOnce claim refused; request not forwarded"));
-                }
-                Err(e) => {
-                    warn!("Proxy recording store unavailable; forwarding without recording: {e}");
-                    None
-                }
+                    Ok(ClaimOutcome::InFlight) => {
+                        lost_race = true;
+                        None
+                    }
+                    Ok(ClaimOutcome::Claimed(token)) => Some(HeldClaim::new(
+                        self.proxy_store.as_ref(),
+                        port,
+                        &signature,
+                        token,
+                    )),
+                    // The store arbitrates exactly-once and could not answer: fail the request rather
+                    // than forward it. Forwarding here would call the upstream while *nothing* is
+                    // serializing claims, so the duplicate is bounded by the outage, not by one racing
+                    // window — the outcome `proxyOnce` exists to prevent. The `BackendUnavailable` rides
+                    // the chain so the response boundary can answer 503 through the #318 door.
+                    Err(ProxyStoreError::Refused(cause)) => {
+                        return Err(anyhow::Error::new(cause)
+                            .context("proxyOnce claim refused; request not forwarded"));
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Proxy recording store unavailable; forwarding with nothing recorded in the store: {e}"
+                        );
+                        None
+                    }
+                };
             }
         };
 
@@ -1687,8 +1694,7 @@ impl Imposter {
                         );
                     } else if lost_race {
                         debug!(
-                            "Skipping local stub insertion for path {} (a concurrent request holds \
-                             the claim and records it)",
+                            "Skipping local stub insertion for path {} (this request won no claim)",
                             uri.path()
                         );
                     } else {

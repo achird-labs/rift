@@ -62,7 +62,8 @@ edits; see "Runs" for why not both.
 | `ForgetRemovesWhatItSaw` | The swap-to-forget window: a forget removes the recording it decided about | violated, #1776, `Known.cfg` |
 | `CarrierHasRecording` | A carrier ahead of the proxy stub has its recording, outside a clear and after a restart | violated, #1776 #1777, `Known.cfg` |
 | `CarrierMeansRecorded` | A stub carries a claim only if its recording landed | violated, #1777, `Known.cfg` |
-| `OnlyClaimHolderInserts` | Only a request holding a claim inserts a stub | violated, #1778, `Known.cfg` |
+| `OnlyClaimHolderInserts` | Only a request holding a claim inserts a stub | holds |
+| `ForwardUnrecordedOnlyWhenLost` | Only a request that lost the race forwards with no claim | holds |
 
 `witness.py` requires each of these verdicts:
 
@@ -70,10 +71,8 @@ edits; see "Runs" for why not both.
 |:--|:--|
 | `NeverTwoForwards` | violated: two requests reach the upstream, which the loser path depends on |
 | `NeverForgetWhileClaimed` | violated: a forget runs with a claim in flight, which `forget_recorded`'s contract allows |
-| `ForwardUnrecordedOnlyWhenLost` | violated: the documented limit, see below |
 | `ForgetRemovesWhatItSaw`, `AtMostOneCarrier`, `CarrierHasRecording`, with no clear in the run | violated: #1776 needs only requests and an edit |
 | `CarrierMeansRecorded` | violated: #1777 |
-| `OnlyClaimHolderInserts` | violated: #1778 |
 | A proxy that generates no stub (control) | no error |
 | `ProxyOncePR.cfg` (control) | no error |
 
@@ -90,6 +89,7 @@ delete its row.
 | `try_claim` reads `responses` and claims in two steps (#171/#118) | `ClaimExcludesRecording` |
 | `record` does not check the token | `RecordedOnce` |
 | A failed settle keeps the claim (#315) | `NoWedgedClaim` |
+| An empty lookup forwards with no claim and is not lost (#1778) | `ForwardUnrecordedOnlyWhenLost` |
 | A loser inserts its stub | `LoserNeverRecords` |
 
 The #171/#118 mutant was expected to fall to `RecordedOnce`. A recording lands between the read and the
@@ -107,7 +107,6 @@ fails today, one test per shape.
 |:--|:--|:--|
 | #1776 | `forget_recorded` is keyed by signature, and both callers decide a step earlier. A forget removes a newer recording: a late shadow forget, a settled recording taken for the shadowed one, and an edit's forget. | Reproduced, three tests |
 | #1777 | `settle` returns nothing, so a settle that wrote no recording still inserts a carrier. A request in flight across a clear stacks a second recording. | Stale token reproduced. A failed settle is traced through the source and reached by TLC with `SettleCanFail`, not run on the engine. A full store (`proxy_store.rs:453`) is read in the source only and is not in the model |
-| #1778 | An `AlreadyRecorded` with nothing to replay forwards "without recording" and inserts a stub with no claim. | Reproduced, one test |
 
 None of them returns a wrong body or wedges a signature, and each window is short; the cost is a second
 upstream call and a duplicate stub.
@@ -118,8 +117,6 @@ upstream call and a duplicate stub.
   carrier and before its forget replays the removed recording. This is the "stronger" reading the plan
   asked to confirm at the lookup. It does happen (`the_window_between_an_edit_and_its_forget_replays_the_recording`
   passes), but the window ends with the forget and nothing persists. Recorded as a limit.
-- **`ForwardUnrecordedOnlyWhenLost`.** Forwarding with nothing to replay is what the comment at
-  `proxy.rs:1456` documents. Only the insert that follows is the defect, #1778. Kept in `witness.py`.
 - **`ShadowedRecordingForwards` violated, first version of the model.** Refuted: the ghost was wrong. A
   request whose forget was followed by another request's settle replays that newer recording, which is the
   concurrent-first-request behaviour. The invariant now compares against the recording it first saw.
@@ -172,9 +169,9 @@ in `ProxyOncePR.cfg` and `ProxyOnce.cfg` under `-coverage 1`.
 
 | Cfg | Bounds | Result | Generated | Distinct | Depth | Time |
 |:--|:--|:--|--:|--:|--:|--:|
-| `ProxyOncePR.cfg` | 2 requests, 1 edit, clear, restart, failing settle | no error | 163,234 | 65,543 | 23 | 9 s |
-| `ProxyOnce.cfg` | 3 requests, 1 edit, clear, restart, failing settle | no error | 5,654,163 | 1,871,961 | 31 | 56 s |
-| `ProxyOnceTwoEdits.cfg` | 2 requests, 2 edits, clear, restart, failing settle | no error | 2,297,790 | 854,867 | 25 | 27 s |
+| `ProxyOncePR.cfg` | 2 requests, 1 edit, clear, restart, failing settle | no error | 241,691 | 99,091 | 24 | 9 s |
+| `ProxyOnce.cfg` | 3 requests, 1 edit, clear, restart, failing settle | no error | 11,041,878 | 3,807,705 | 34 | 56 s |
+| `ProxyOnceTwoEdits.cfg` | 2 requests, 2 edits, clear, restart, failing settle | no error | 3,736,936 | 1,437,765 | 26 | 27 s |
 
 3 requests with 2 edits, a clear, a restart and a failing settle was stopped at 13,029,204 generated and
 4,712,697 distinct after 7 minutes, the queue still growing, on a nearly full disk. That combination is
@@ -189,8 +186,6 @@ a clear; a run stops at its first violation, so the counts vary a little between
 | `ForgetRemovesWhatItSaw` | 1,156 | 698 | 8 |
 | `CarrierHasRecording` | 2,205 | 1,301 | 10 |
 | `CarrierMeansRecorded` | 1,522 | 913 | 9 |
-| `OnlyClaimHolderInserts` | 1,714 | 996 | 9 |
-| `ForwardUnrecordedOnlyWhenLost` | 1,301 | 812 | 7 |
 
 `witness.py` and `mutants.py` exit 0. `validate.py --selftest traces` exits 0: 12 recorded runs accepted,
 4 hand-written runs rejected.

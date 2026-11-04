@@ -223,7 +223,7 @@ can still be answered with another identity's recording.
 
 | Variant | Engine response |
 |:--|:--|
-| `Unavailable(String)` | **Degrade**: forward upstream without recording. Use it when the store only helps persistence and the engine still enforces exactly-once itself. |
+| `Unavailable(String)` | **Degrade**: forward upstream with nothing recorded in the store. A `proxyOnce` proxy that generates stubs, on a store that does not publish them, still inserts one locally, so later requests stop forwarding. Use it when the store only helps persistence and the engine still enforces exactly-once itself. |
 | `Refused(BackendUnavailable)` (issue #990) | **Fail the request without calling the upstream.** Use it when the store *is* the exactly-once arbiter (shared or clustered) and could not decide. Forwarding would let every request during the outage reach the upstream. Both the stub `proxy` and `defaultForward` answer `503` through `backend_error_response` (see [Backend errors](#backend-errors-and-annotations)). |
 
 `ClaimOutcome::InFlight` is unaffected: a claim was serialized, so that request still forwards.

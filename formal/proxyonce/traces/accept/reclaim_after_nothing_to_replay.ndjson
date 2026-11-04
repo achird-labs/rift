@@ -4,5 +4,7 @@
 {"point":"ProxyLookingUp","seq":2}
 {"point":"ProxyOrphanForgotten","seq":3}
 {"point":"ProxyNothingToReplay","seq":4}
-{"point":"ProxyForwarding","seq":5}
-{"claimed":false,"point":"ProxyInserted","seq":6}
+{"outcome":"Claimed","point":"ProxyClaim","seq":5,"token":1}
+{"point":"ProxyForwarding","seq":6}
+{"point":"ProxySettled","seq":7}
+{"claimed":true,"point":"ProxyInserted","seq":8}
