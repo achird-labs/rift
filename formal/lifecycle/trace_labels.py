@@ -15,7 +15,8 @@ the delete_all or apply_config sweep that is open and still owes deletes, else t
 (d1, d2, ...).  Two sweeps open at once, or a deleter racing an open sweep, cannot be told apart
 from the points alone, so a run with two sweeps is not covered either.  `persist_lock` serialises
 every delete sequence from DeleteLocked to its DeleteRemoved/DeleteNotFound, which is what lets the
-points of one sequence be paired without a task id.
+points of one sequence be paired without a task id. A replace takes the lock but fires no
+DeleteLocked, so its lookup marks the run as not covered.
 
 The mapping (formal/lifecycle/README.md, "Trace validation"):
   CreateBound                   -> CreateBindOk
@@ -27,11 +28,12 @@ The mapping (formal/lifecycle/README.md, "Trace validation"):
   DeleteLocked                  -> DeleteLock
   DeleteLookedUp / NotFound     -> DeleteLookup, ok = found
   DeleteUnlinked / UnlinkFailed -> DeleteUnlink, ok = unlinked
+  DeleteCancelled               -> DeleteCancel
+  DeleteCleared                 -> DeleteClearShared
   DeleteFloorRecorded           -> DeleteRecordFloor
   DeleteRemoved / NotFound      -> DeleteRemoveIfSame, ok = removed
-  DeleteCancelled               -> DeleteCancel
   DeleteDrained                 -> DeleteDrain
-  DeleteReturned                -> DeleteClearShared
+  DeleteReturned                -> DeleteFinish
   ApplySwept / DeleteAllSwept   -> ApplySnapshot, n = ports swept
   Served                        -> ReqCompute of that generation (free ReqStart/ReqWrite around it)
 """
@@ -115,7 +117,7 @@ def labels(records):
             out.append({"action": "DeleteLock", "op": o, "port": r["port"], "n": 0, "ok": True})
         elif p == "DeleteLookedUp":
             if in_delete is None:
-                return None  # a replace's lookup (no lock): not modelled yet
+                return None  # a replace's lookup (it fires no DeleteLocked): not attributed
             port, n = gen_fields(r)
             in_delete[2] = r["generation"]
             out.append({"action": "DeleteLookup", "op": in_delete[0], "port": port, "n": n, "ok": True})
@@ -132,22 +134,25 @@ def labels(records):
                         "ok": p == "DeleteUnlinked"})
             if p == "DeleteUnlinkFailed":
                 in_delete = None
-        elif p == "DeleteFloorRecorded":
+        elif p in ("DeleteCancelled", "DeleteCleared", "DeleteFloorRecorded"):
+            if in_delete is None:
+                raise ValueError(f"{p} outside a delete holding persist_lock")
             port, n = gen_fields(r)
-            out.append({"action": "DeleteRecordFloor", "op": in_delete[0], "port": port, "n": n, "ok": True})
+            action = {"DeleteCancelled": "DeleteCancel", "DeleteCleared": "DeleteClearShared",
+                      "DeleteFloorRecorded": "DeleteRecordFloor"}[p]
+            out.append({"action": action, "op": in_delete[0], "port": port, "n": n, "ok": True})
         elif p == "DeleteRemoved":
             port, n = gen_fields(r)
             o = in_delete[0]
             draining[r["generation"]] = o
             in_delete = None
             out.append({"action": "DeleteRemoveIfSame", "op": o, "port": port, "n": n, "ok": True})
-        elif p in ("DeleteCancelled", "DeleteDrained", "DeleteReturned"):
+        elif p in ("DeleteDrained", "DeleteReturned"):
             port, n = gen_fields(r)
             if r["generation"] not in draining:
                 raise ValueError(f"{p} for generation {r['generation']} before its DeleteRemoved")
             o = draining[r["generation"]]
-            action = {"DeleteCancelled": "DeleteCancel", "DeleteDrained": "DeleteDrain",
-                      "DeleteReturned": "DeleteClearShared"}[p]
+            action = {"DeleteDrained": "DeleteDrain", "DeleteReturned": "DeleteFinish"}[p]
             out.append({"action": action, "op": o, "port": port, "n": n, "ok": True})
         elif p == "Served":
             port, n = gen_fields(r)

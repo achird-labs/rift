@@ -18,7 +18,6 @@ pr_cfg = read(os.path.join(here, 'LifecyclePR.cfg'))
 known_cfg = read(os.path.join(here, 'Known.cfg'))
 mutants_cfg = read(os.path.join(here, 'Mutants.cfg'))
 apply_cfg = read(os.path.join(here, 'LifecycleApply.cfg'))
-replace_cfg = read(os.path.join(here, 'LifecycleReplace.cfg'))
 jar = jar_from_argv()
 
 
@@ -38,23 +37,13 @@ cases = [
     ('two creates pass the bind check and both bind; the claim decides',
      only(known_cfg, 'BindCheckSuffices'), 'BindCheckSuffices'),
     # Filed findings, reachable until fixed (README.md, "Findings").
-    ('a content change between record_load_floor and the cancel is above the recorded floor (#1762)',
-     only(mutants_cfg, 'FloorMonotone'), 'FloorMonotone'),
     ('a create that loses the claim has answered requests', only(known_cfg, 'LoserNeverAnswers'),
      'LoserNeverAnswers'),
     ('a same-port create misses the load floor a concurrent delete records', only(known_cfg, 'FloorMonotone'),
      'FloorMonotone'),
-    ('a delete clears the shared state of the generation that took the port meanwhile',
-     only(known_cfg, 'SharedStateBelongsToCurrent'), 'SharedStateBelongsToCurrent'),
     ('an apply sweep reports a concurrent delete as failed (#1774)',
      only(apply_cfg, 'ApplyReportsTruth'), 'ApplyReportsTruth'),
     # Documented limits.
-    ('a delete fails its unlink after a replace already removed the imposter',
-     edit(only(replace_cfg, 'ErrDeleteStillServing'), [('UnlinkFails = FALSE', 'UnlinkFails = TRUE')],
-          'LifecycleReplace.cfg'),
-     'ErrDeleteStillServing'),
-    ('a replace takes whichever generation holds the port', only(replace_cfg, 'ReplaceTakesItsOwn'),
-     'ReplaceTakesItsOwn'),
     # The PR gate is green with the findings in Known.cfg.
     ('LifecyclePR.cfg (control)', pr_cfg, 'ok'),
 ]

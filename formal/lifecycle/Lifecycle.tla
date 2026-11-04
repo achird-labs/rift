@@ -109,7 +109,6 @@ Quiescent == /\ \A o \in Ops : op[o].pc = "done"
              /\ \A g \in GenIds : req[g] = "none"
 
 NoGhost == [stale |-> FALSE, wiped |-> FALSE, lateAnswer |-> FALSE, removedOther |-> FALSE,
-            replaceTookOther |-> FALSE,
             lostClaim |-> FALSE, phantomFail |-> FALSE, errDeleteGone |-> FALSE,
             loserAnswered |-> FALSE]
 
@@ -277,7 +276,7 @@ CreateRollback(o) ==
 (***************************************************************************)
 (* Delete: delete_imposter_inner (manager.rs:2107).  Entered at "dLock" by *)
 (* a deleter and by an apply's or delete_all's sweep (unlink = TRUE), and  *)
-(* at "rLookup" by replace_imposter (unlink = FALSE, manager.rs:2654).     *)
+(* at "rLock" by replace_imposter (unlink = FALSE).                        *)
 (***************************************************************************)
 
 \* Take `persist_lock` (manager.rs:2117).
@@ -301,14 +300,14 @@ DeleteLookup(o) ==
     /\ UNCHANGED <<slot, file, floor, nextGen, phase, clock, nreq, req, deleteReturned,
                    lastStamp, shared, ghost>>
 
-\* remove_persisted_imposter (manager.rs:2122): the file goes first (issue #1124).  A failed
-\* unlink leaves the imposter registered and serving, and `Err` means "not deleted".
+\* remove_persisted_imposter: the file goes first (issue #1124).  A failed unlink leaves the
+\* imposter registered and serving, and `Err` means "not deleted".
 DeleteUnlink(o) ==
     /\ op[o].pc = "dUnlink"
     /\ LET p == op[o].port
            g == op[o].look
        IN \/ /\ file' = [file EXCEPT ![p] = NoGen]
-             /\ op' = [op EXCEPT ![o].pc = "dFloor"]
+             /\ op' = [op EXCEPT ![o].pc = "dCancel"]
              /\ UNCHANGED <<slot, persistLock, ghost>>
           \/ /\ UnlinkFails
              /\ persistLock' = NoOp
@@ -318,75 +317,39 @@ DeleteUnlink(o) ==
              /\ op' = [op EXCEPT ![o].pc = "dErr"]
     /\ UNCHANGED <<floor, nextGen, phase, clock, nreq, req, deleteReturned, lastStamp, shared>>
 
-\* record_load_floor (manager.rs:2129 and 2135): keep the generation's clock for the next one.
-DeleteRecordFloor(o) ==
-    /\ op[o].pc \in {"dFloor", "rFloor"}
-    /\ floor' = [floor EXCEPT ![op[o].port] = Max(@, clock[op[o].look].last)]
-    /\ op' = [op EXCEPT ![o].pc = IF op[o].pc = "dFloor" THEN "dRemove" ELSE "rRemove"]
-    /\ UNCHANGED <<slot, file, nextGen, persistLock, phase, clock, nreq, req, deleteReturned,
+\* A replace's delete takes `persist_lock` too, and unlinks nothing: its create overwrites the file.
+ReplaceLock(o) ==
+    /\ op[o].pc = "rLock"
+    /\ persistLock = NoOp
+    /\ persistLock' = o
+    /\ op' = [op EXCEPT ![o].pc = "rLookup"]
+    /\ UNCHANGED <<slot, file, floor, nextGen, phase, clock, nreq, req, deleteReturned,
                    lastStamp, shared, ghost>>
 
-\* PortTable::remove_if_same (manager.rs:2131; 532): vacate the slot only if it still holds the
-\* looked-up generation.  The lock is released when the block ends.
-DeleteRemoveIfSame(o) ==
-    /\ op[o].pc = "dRemove"
-    /\ persistLock' = NoOp
-    /\ LET p == op[o].port
-       IN IF slot[p] = op[o].look
-            THEN /\ ghost' = [ghost EXCEPT !.removedOther = @ \/ slot[p] # op[o].look]
-                 /\ slot' = [slot EXCEPT ![p] = NoGen]
-                 /\ op' = [op EXCEPT ![o].pc = "dCancel"]
-            ELSE /\ op' = [op EXCEPT ![o].pc = "dNotFound"]
-                 /\ UNCHANGED <<slot, ghost>>
-    /\ UNCHANGED <<file, floor, nextGen, phase, clock, nreq, req, deleteReturned,
-                   lastStamp, shared>>
-
-\* The replace's delete (manager.rs:2135-2139): get_imposter, record its floor, then a plain
-\* `remove(port)`, with no lock and no identity check.
 ReplaceLookup(o) ==
     /\ op[o].pc = "rLookup"
     /\ LET p == op[o].port
        IN IF slot[p] = NoGen
-            THEN op' = [op EXCEPT ![o].pc = "dNotFound"]
-            ELSE op' = [op EXCEPT ![o].pc = "rFloor", ![o].look = slot[p]]
-    /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, clock, nreq, req,
-                   deleteReturned, lastStamp, shared, ghost>>
+            THEN /\ persistLock' = NoOp
+                 /\ op' = [op EXCEPT ![o].pc = "dNotFound"]
+            ELSE /\ op' = [op EXCEPT ![o].pc = "dCancel", ![o].look = slot[p]]
+                 /\ UNCHANGED persistLock
+    /\ UNCHANGED <<slot, file, floor, nextGen, phase, clock, nreq, req, deleteReturned,
+                   lastStamp, shared, ghost>>
 
-ReplaceRemove(o) ==
-    /\ op[o].pc = "rRemove"
-    /\ LET p == op[o].port
-       IN IF slot[p] = NoGen
-            THEN /\ op' = [op EXCEPT ![o].pc = "dNotFound"]
-                 /\ UNCHANGED <<slot, ghost>>
-            ELSE /\ ghost' = [ghost EXCEPT !.replaceTookOther = @ \/ slot[p] # op[o].look]
-                 /\ op' = [op EXCEPT ![o].pc = "dCancel", ![o].look = slot[p]]
-                 /\ slot' = [slot EXCEPT ![p] = NoGen]
-    /\ UNCHANGED <<file, floor, nextGen, persistLock, phase, clock, nreq, req,
-                   deleteReturned, lastStamp, shared>>
-
-\* cancel.cancel() and the shutdown signal (manager.rs:2148-2151): every request still computing
-\* is cut off (issue #1643); one already writing finishes under hyper's graceful shutdown.
+\* cancel.cancel() and the shutdown signal: every request still computing is cut off (issue
+\* #1643); one already writing finishes under hyper's graceful shutdown.
 DeleteCancel(o) ==
     /\ op[o].pc = "dCancel"
     /\ LET g == op[o].look
        IN /\ phase' = [phase EXCEPT ![g] = "cancelled"]
           /\ req' = [req EXCEPT ![g] = Cut(@)]
-    /\ op' = [op EXCEPT ![o].pc = "dDrain"]
+    /\ op' = [op EXCEPT ![o].pc = "dClear"]
     /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, clock, nreq, deleteReturned,
                    lastStamp, shared, ghost>>
 
-\* Await the accept loops, then drain the connections within `conn_drain`
-\* (manager.rs:2155-2176).  A response still being written is waited for, or, when the bound
-\* elapses, left to finish after the delete returns.
-DeleteDrain(o) ==
-    /\ op[o].pc = "dDrain"
-    /\ req[op[o].look] # "writing" \/ DrainTimesOut
-    /\ op' = [op EXCEPT ![o].pc = "dClear"]
-    /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, clock, nreq, req,
-                   deleteReturned, lastStamp, shared, ghost>>
-
-\* Clear the port's shared state: sequencer scope, journal, shared proxy store
-\* (manager.rs:2187-2197), keyed by port, after the slot was vacated.  Then return Ok.
+\* clear_shared_state: sequencer scope, journal, shared proxy store, keyed by port, while the slot
+\* still holds this generation (issue #1763).
 DeleteClearShared(o) ==
     /\ op[o].pc = "dClear"
     /\ LET p == op[o].port
@@ -394,17 +357,59 @@ DeleteClearShared(o) ==
        IN /\ ghost' = [ghost EXCEPT !.wiped =
                  @ \/ (shared[p] # NoGen /\ shared[p] # g /\ shared[p] = slot[p])]
           /\ shared' = [shared EXCEPT ![p] = NoGen]
-          /\ phase' = [phase EXCEPT ![g] = "dead"]
+          /\ op' = [op EXCEPT ![o].pc = "dFloor"]
+    /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, clock, nreq, req,
+                   deleteReturned, lastStamp>>
+
+\* record_load_floor: keep the generation's clock for the next one.  After the cancel, so no stamp
+\* can land above it (issue #1762).
+DeleteRecordFloor(o) ==
+    /\ op[o].pc = "dFloor"
+    /\ floor' = [floor EXCEPT ![op[o].port] = Max(@, clock[op[o].look].last)]
+    /\ op' = [op EXCEPT ![o].pc = "dRemove"]
+    /\ UNCHANGED <<slot, file, nextGen, persistLock, phase, clock, nreq, req, deleteReturned,
+                   lastStamp, shared, ghost>>
+
+\* PortTable::remove_if_same: vacate the slot only if it still holds the looked-up generation.
+\* The lock is released when the block ends.
+DeleteRemoveIfSame(o) ==
+    /\ op[o].pc = "dRemove"
+    /\ persistLock' = NoOp
+    /\ LET p == op[o].port
+       IN IF slot[p] = op[o].look
+            THEN /\ ghost' = [ghost EXCEPT !.removedOther = @ \/ slot[p] # op[o].look]
+                 /\ slot' = [slot EXCEPT ![p] = NoGen]
+                 /\ op' = [op EXCEPT ![o].pc = "dDrain"]
+            ELSE /\ op' = [op EXCEPT ![o].pc = "dNotFound"]
+                 /\ UNCHANGED <<slot, ghost>>
+    /\ UNCHANGED <<file, floor, nextGen, phase, clock, nreq, req, deleteReturned,
+                   lastStamp, shared>>
+
+\* Await the accept loops, then drain the connections within `conn_drain`.  A response still being
+\* written is waited for, or, when the bound elapses, left to finish after the delete returns.
+DeleteDrain(o) ==
+    /\ op[o].pc = "dDrain"
+    /\ req[op[o].look] # "writing" \/ DrainTimesOut
+    /\ op' = [op EXCEPT ![o].pc = "dFinish"]
+    /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, clock, nreq, req,
+                   deleteReturned, lastStamp, shared, ghost>>
+
+DeleteFinish(o) ==
+    /\ op[o].pc = "dFinish"
+    /\ LET g == op[o].look
+       IN /\ phase' = [phase EXCEPT ![g] = "dead"]
           /\ deleteReturned' = [deleteReturned EXCEPT ![g] = TRUE]
           /\ op' = [op EXCEPT ![o].pc = "dDone"]
-    /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, clock, nreq, req, lastStamp>>
+    /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, clock, nreq, req, lastStamp, shared,
+                   ghost>>
 
 \* The delete's three outcomes return to the op.  An apply reports NotFound as a failure
 \* (manager.rs:2401, 2655); delete_all tolerates it (manager.rs:2228); a deleter just returns it.
 DeleteReturn(o) ==
     /\ op[o].pc \in {"dDone", "dNotFound", "dErr"}
     /\ ghost' = [ghost EXCEPT !.phantomFail =
-          @ \/ (op[o].pc = "dNotFound" /\ op[o].kind \in {"apply", "applyOne"})]
+          @ \/ (op[o].pc = "dNotFound" /\ op[o].kind \in {"apply", "applyOne"}
+                  /\ op[o].ret # "rCreate")]
     /\ op' = [op EXCEPT ![o].pc = op[o].ret, ![o].ok = (op[o].pc = "dDone")]
     /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, clock, nreq, req,
                    deleteReturned, lastStamp, shared>>
@@ -448,19 +453,17 @@ ApplyEntry(o) ==
                    THEN op' = [op EXCEPT ![o].pc = "cBind", ![o].ret = "aEntry", ![o].port = q,
                                          ![o].todo = @ \ {q}]
                    ELSE \/ op' = [op EXCEPT ![o].todo = @ \ {q}]
-                        \/ op' = [op EXCEPT ![o].pc = "rLookup", ![o].ret = "rCreate",
+                        \/ op' = [op EXCEPT ![o].pc = "rLock", ![o].ret = "rCreate",
                                             ![o].port = q, ![o].todo = @ \ {q},
                                             ![o].unlink = FALSE]
     /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, clock, nreq, req,
                    deleteReturned, lastStamp, shared, ghost>>
 
-\* replace_imposter after its delete (manager.rs:2654-2660): a failed delete is reported and the
-\* create is skipped; else create on the port.
+\* replace_imposter after its delete: create on the port.  A delete that found the port empty lost
+\* to a concurrent one, and a vacant port is what it was for.
 ReplaceAfterDelete(o) ==
     /\ op[o].pc = "rCreate"
-    /\ IF op[o].ok
-         THEN op' = [op EXCEPT ![o].pc = "cBind", ![o].ret = "rAfter"]
-         ELSE op' = [op EXCEPT ![o].pc = "aEntry"]
+    /\ op' = [op EXCEPT ![o].pc = "cBind", ![o].ret = "rAfter"]
     /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, clock, nreq, req,
                    deleteReturned, lastStamp, shared, ghost>>
 
@@ -513,7 +516,7 @@ ReqCompute(g) ==
 
 \* A stub write or a gated scenario transition on a conditional stub (stamp_scenario_transition,
 \* core/matching.rs:568): the one step that advances a generation's clock.  It needs no lock a
-\* delete holds, and it can land after the delete recorded the floor.
+\* delete holds, so it can land during a delete, until the cancel.
 ContentChange(g) ==
     /\ phase[g] \in Serving
     /\ clock[g].changes < MaxChanges
@@ -541,8 +544,8 @@ OpStep(o) ==
     \/ CreateTryClaim(o) \/ CreateClaimStore(o) \/ CreatePersistLock(o) \/ CreatePersistWrite(o)
     \/ CreateRollback(o)
     \/ DeleteLock(o) \/ DeleteLookup(o) \/ DeleteUnlink(o) \/ DeleteRecordFloor(o)
-    \/ DeleteRemoveIfSame(o) \/ ReplaceLookup(o) \/ ReplaceRemove(o) \/ DeleteCancel(o)
-    \/ DeleteDrain(o) \/ DeleteClearShared(o) \/ DeleteReturn(o)
+    \/ DeleteRemoveIfSame(o) \/ ReplaceLock(o) \/ ReplaceLookup(o) \/ DeleteCancel(o)
+    \/ DeleteDrain(o) \/ DeleteClearShared(o) \/ DeleteFinish(o) \/ DeleteReturn(o)
     \/ ApplySnapshot(o) \/ ApplySweep(o) \/ ApplyEntry(o) \/ ReplaceAfterDelete(o)
     \/ ReplaceAfterCreate(o)
 
@@ -613,12 +616,8 @@ ApplyReportsTruth == ~ghost.phantomFail
 \* When nothing runs, the datadir and the table name the same generation on every port.
 TableFileAgree == Quiescent => \A p \in Ports : file[p] = slot[p]
 
-\* Every registered generation serves, and every slot holds a generation that claimed it.
-TableHoldsLive == \A p \in Ports : slot[p] # NoGen => phase[slot[p]] = "claimed"
-
-\* Witness (witness.py): a replace's lock-free remove takes whichever generation holds the port.
-\* Violated by design as far as the table goes: it reads as create-then-replace.
-ReplaceTakesItsOwn == ~ghost.replaceTookOther
+\* Every slot holds a generation that claimed it: serving, or being deleted under `persist_lock`.
+TableHoldsLive == \A p \in Ports : slot[p] # NoGen => phase[slot[p]] \in {"claimed", "cancelled"}
 
 \* Witness (witness.py): PortInUse comes only from the bind check, never from the claim.  Violated
 \* by design: two creates pass the check and both bind under SO_REUSEPORT (manager.rs:1540), and
