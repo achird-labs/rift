@@ -417,7 +417,6 @@ async fn a_flow_set_that_decided_no_change_still_stamps_what_it_moved() {
 /// state to `Started`; the gate of `B` then fails too. Every state has a stub, and the request
 /// matched none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1781"]
 async fn a_scan_of_covered_states_finds_a_stub_while_the_state_moves() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);

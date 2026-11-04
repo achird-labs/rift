@@ -339,7 +339,6 @@ async fn a_start_in_another_realm_waits_for_the_imposters_run_in_flight() {
 /// One request's predicate inject and response inject take a scope each, so a restart between them
 /// splits the request across two cells, and the inject does not see what the predicate wrote.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1784"]
 async fn a_request_keeps_one_state_across_a_restart() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
@@ -368,10 +367,95 @@ async fn a_request_keeps_one_state_across_a_restart() {
     );
 }
 
-/// A getter on the answer runs in `hook.finish`, after the save. With no other run in flight the
-/// live state goes with the save, so the getter writes to an object nobody will read again.
+/// As above from an inject to its decorate: the inject's whole await is in the same window.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1785"]
+async fn an_inject_and_its_decorate_keep_one_state_across_a_restart() {
+    let recorder = Arc::new(Recorder::default());
+    let manager = manager(&recorder);
+    let port = manager
+        .create_imposter(imposter(json!([{
+            "responses": [{
+                "inject": "config => { config.state.mark = 'seen'; return { body: 'x' }; }",
+                "behaviors": [{ "decorate":
+                    "config => { config.response.body = String(config.state.mark); }"
+                }]
+            }]
+        }])))
+        .await
+        .expect("create");
+
+    let latch = recorder.hold(saved);
+    let request = spawn_get(port, "/");
+    recorder.reached(saved).await;
+    manager.restart_runtime_state(port).expect("restart");
+    latch.open();
+
+    let (status, body) = request.await.expect("request");
+    let _ = manager.delete_all().await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body, "seen",
+        "the decorate ran on another cell than the inject"
+    );
+}
+
+/// As above from a predicate to the decorate of an `is` response, the other door a later hook takes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_predicate_and_an_is_decorate_keep_one_state_across_a_restart() {
+    let recorder = Arc::new(Recorder::default());
+    let manager = manager(&recorder);
+    let port = manager
+        .create_imposter(imposter(json!([{
+            "predicates": [{ "inject": "config => { config.state.mark = 'seen'; return true; }" }],
+            "responses": [{
+                "is": { "body": "x" },
+                "behaviors": [{ "decorate":
+                    "config => { config.response.body = String(config.state.mark); }"
+                }]
+            }]
+        }])))
+        .await
+        .expect("create");
+
+    let latch = recorder.hold(saved);
+    let request = spawn_get(port, "/");
+    recorder.reached(saved).await;
+    manager.restart_runtime_state(port).expect("restart");
+    latch.open();
+
+    let (status, body) = request.await.expect("request");
+    let _ = manager.delete_all().await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body, "seen",
+        "the decorate ran on another cell than the predicate"
+    );
+}
+
+/// The request after a restart does start on the new cell.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_request_after_a_restart_starts_on_the_new_cell() {
+    let recorder = Arc::new(Recorder::default());
+    let manager = manager(&recorder);
+    let port = manager
+        .create_imposter(imposter(json!([inject_on(
+            "/",
+            "config => { const was = config.state.mark; config.state.mark = 'seen'; \
+             return { body: String(was) }; }"
+        )])))
+        .await
+        .expect("create");
+
+    assert_eq!(get(port, "/").await.1, "undefined");
+    assert_eq!(get(port, "/").await.1, "seen");
+    manager.restart_runtime_state(port).expect("restart");
+    assert_eq!(get(port, "/").await.1, "undefined");
+    let _ = manager.delete_all().await;
+}
+
+/// Reading the answer out of its JS object runs any getter on it. That is script, so it comes before
+/// the save, or its write goes to a live state nobody reads again (issue #1785).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_write_made_while_the_answer_is_read_is_not_lost() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
@@ -392,6 +476,85 @@ async fn a_write_made_while_the_answer_is_read_is_not_lost() {
         second.1, "1",
         "the getter's write did not reach the next run"
     );
+}
+
+/// As above for a thrown object: reading its `message` runs a getter too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_made_while_a_thrown_value_is_read_is_not_lost() {
+    let recorder = Arc::new(Recorder::default());
+    let manager = manager(&recorder);
+    let port = manager
+        .create_imposter(imposter(json!([
+            inject_on(
+                "/throw",
+                "config => { throw { get message() { config.state.n = 1; return 'boom'; } }; }"
+            ),
+            inject_on("/read", "config => ({ body: String(config.state.n) })")
+        ])))
+        .await
+        .expect("create");
+
+    let (status, _) = get(port, "/throw").await;
+    let (_, read) = get(port, "/read").await;
+    let _ = manager.delete_all().await;
+    assert_eq!(status, 500, "it still fails as a throw");
+    assert_eq!(read, "1", "the getter's write did not reach the next run");
+}
+
+/// As above for a predicate that throws.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_made_while_a_predicates_thrown_value_is_read_is_not_lost() {
+    let recorder = Arc::new(Recorder::default());
+    let manager = manager(&recorder);
+    let port = manager
+        .create_imposter(imposter(json!([
+            {
+                "predicates": [
+                    { "equals": { "path": "/predicate" } },
+                    { "inject": "config => { throw { get message() { \
+                        config.state.n = 1; return 'boom'; } }; }" }
+                ],
+                "responses": [{ "is": { "body": "matched" } }]
+            },
+            inject_on("/read", "config => ({ body: String(config.state.n) })")
+        ])))
+        .await
+        .expect("create");
+
+    let _ = get(port, "/predicate").await;
+    let (_, read) = get(port, "/read").await;
+    let _ = manager.delete_all().await;
+    assert_eq!(read, "1", "the getter's write did not reach the next run");
+}
+
+/// As above for a decorate, whose response is read after it returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_made_while_a_decorated_response_is_read_is_not_lost() {
+    let recorder = Arc::new(Recorder::default());
+    let manager = manager(&recorder);
+    let port = manager
+        .create_imposter(imposter(json!([
+            {
+                "predicates": [{ "equals": { "path": "/decorate" } }],
+                "responses": [{
+                    "is": { "statusCode": 200, "body": "plain" },
+                    "behaviors": [{ "decorate":
+                        "config => { const response = config.response; \
+                         Object.defineProperty(config, 'response', { get() { \
+                         config.state.n = 1; return response; } }); }"
+                    }]
+                }]
+            },
+            inject_on("/read", "config => ({ body: String(config.state.n) })")
+        ])))
+        .await
+        .expect("create");
+
+    let (_, body) = get(port, "/decorate").await;
+    let (_, read) = get(port, "/read").await;
+    let _ = manager.delete_all().await;
+    assert_eq!(body, "plain");
+    assert_eq!(read, "1", "the getter's write did not reach the next run");
 }
 
 /// What a finished run left passes to a run of its imposter in flight (`MbRealm::end`), and a job

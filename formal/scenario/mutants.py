@@ -21,6 +21,9 @@ MATCHED = '![r].pc = IF r \\in Gated THEN "cas" ELSE "serve"]'
 
 # name: (expected invariant, spec edits)
 mutants = {
+    # #1781: each gate read the state again, so a transition mid-scan missed every stub.
+    'each gate reads the state again (#1781)': ('NoMatchOnlyWhenUncovered', [
+        ('st == IF i = 1 THEN Logical(store) ELSE req[r].seen', 'st == Logical(store)')]),
     # #1779: a stalled transition's lower stamp went over a higher one.
     'a late publish overwrites a higher stamp (#1779)': ('StampMonotone', [
         ("/\\ map' = Max(map, req[r].at)\n", "/\\ map' = req[r].at\n")]),

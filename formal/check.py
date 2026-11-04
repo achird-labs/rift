@@ -21,7 +21,8 @@ MODELS = {
     'proxyonce': ('ProxyOnce', False, ['ProxyOncePR', 'ProxyOnceCarriers'],
                   ['ProxyOnce', 'ProxyOnceTwoEdits', 'ProxyOnceCarriers']),
     'scenario': ('Scenario', False, ['ScenarioPR'], ['Scenario']),
-    'scripting': ('StateCell', True, ['StateCellPR'], ['StateCell', 'Live']),
+    'scripting': ('StateCell', True, ['StateCellPR', 'StateCellSequels'],
+                  ['StateCell', 'Live', 'StateCellSequels']),
     'faultio': ('FaultIo', False, ['FaultIoPR'], ['FaultIo']),
 }
 

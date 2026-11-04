@@ -589,6 +589,8 @@ predicate `inject`, and the `decorate` behavior — all of which run off the asy
   settles), within `timeoutMs`; what is left when the hook ends is dropped, where Node would run it.
   If another hook of the imposter is still in flight, what is left runs with it until it answers,
   and a throw there is logged and dropped: it never fails that other request.
+  A request runs every hook on one state: when a `PUT /imposters` keeps an imposter unchanged, it takes
+  effect on that imposter's state from the next request.
 
 ```json
 {

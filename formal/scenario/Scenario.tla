@@ -79,7 +79,8 @@ StartPc(r) ==
 \* A request's locals, before it starts and once it is done: nothing can read them after that, so
 \* keeping them would only split states.
 Locals(pc) == [pc |-> pc, copy |-> 0, i |-> 1, answer |-> "S", rver |-> 0, exp |-> NoVal,
-               changed |-> FALSE, wrote |-> 0, to |-> "S", at |-> 0, before |-> 0, held |-> FALSE]
+               changed |-> FALSE, wrote |-> 0, to |-> "S", at |-> 0, before |-> 0, held |-> FALSE,
+               seen |-> "S"]
 
 Init ==
     /\ store = Start
@@ -100,21 +101,22 @@ Copy(r) ==
     /\ req' = [req EXCEPT ![r].copy = map, ![r].pc = "gate"]
     /\ UNCHANGED <<store, map, clock, ver, writes, served, maxPub, casBroken, dropped, noMatch>>
 
-\* matching.rs:181-194: one store read per gated candidate, each a separate `get`.  A match at
-\* :221 ends the scan; running out of candidates is `Ok((None, trace))` at :230.
+\* The scan reads the scenario's state at its first gate and judges every later gate against that
+\* read (#1781).  A match ends the scan; running out of candidates is a no-match.
 GateRead(r) ==
     /\ req[r].pc = "gate"
-    /\ LET st == Logical(store)
-           i == req[r].i
+    /\ LET i == req[r].i
+           st == IF i = 1 THEN Logical(store) ELSE req[r].seen
+           read == IF i = 1 THEN ver ELSE req[r].rver
        IN IF st = Order[i]
-          THEN /\ req' = [req EXCEPT ![r].answer = st, ![r].rver = ver, ![r].exp = st,
+          THEN /\ req' = [req EXCEPT ![r].answer = st, ![r].rver = read, ![r].exp = st,
                                      ![r].to = Successor(st),
                                      ![r].pc = IF r \in Gated THEN "cas" ELSE "serve"]
                /\ UNCHANGED noMatch
           ELSE IF i = Len(Order)
                THEN /\ req' = [req EXCEPT ![r] = Locals("done")]
                     /\ noMatch' = TRUE
-               ELSE /\ req' = [req EXCEPT ![r].i = i + 1]
+               ELSE /\ req' = [req EXCEPT ![r].i = i + 1, ![r].seen = st, ![r].rver = read]
                     /\ UNCHANGED noMatch
     /\ UNCHANGED <<store, map, clock, ver, writes, served, maxPub, casBroken, dropped>>
 

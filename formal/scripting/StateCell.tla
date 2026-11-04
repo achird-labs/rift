@@ -15,7 +15,7 @@ CONSTANTS
     MaxRestarts,     \* restart_runtime_state calls (imposter/manager.rs:3083)
     MaxAccessChanges,\* set_script_file_access calls (imposter/core/mod.rs:765)
     Sequels,         \* r2 is a later hook of r1's request (imposter/handler.rs:1589, core/matching.rs:148)
-    GetterWrites,    \* hook.finish runs script after the save: a getter on the answer (js_engine:679)
+    GetterWrites,    \* hook.finish runs script before the save: a getter on the answer (js_engine:679)
     SaveFails,       \* js_to_json refuses the state: a cycle, past the depth cap (js_engine:2941, #1635)
     Panics           \* a job panics: the worker rebuilds and its runs go with it (js_engine:1094-1105)
 
@@ -88,16 +88,17 @@ Released(r) ==
 
 \* ---- The caller: a request on the serving path. ----
 
-\* ImposterCore::script_scope (imposter/core/mod.rs:1187) and script_file_access: an atomic load of
-\* each, made per hook call site, separately for each hook of a request (imposter/core/matching.rs:148,
-\* imposter/handler.rs:1589, :1632, :2273).  With Sequels, r2 is such a later hook of r1's request: it
-\* runs once r1 answered.  A run's kind is set here: a predicate inject answers as soon as its function
+\* ImposterCore::script_scope and script_file_access: an atomic load of each.  A request loads the
+\* scope once, before its first match, and every hook of it runs on that cell (#1784); the file access
+\* is loaded per hook, as a stub write has to reach a request about to run a script (#1645).  With
+\* Sequels, r2 is a later hook of r1's request: it runs once r1 answered.  A run's kind is set here: a predicate inject answers as soon as its function
 \* returned, and its caller blocks on a sync channel, so it can never be abandoned.
 Capture(r) ==
     /\ run[r].pc = "idle"
     /\ Sequels /\ r = r2 => run[r1].answered
     /\ \E kind \in Kinds :
-         run' = [run EXCEPT ![r].pc = "scoped", ![r].cell = current, ![r].files = access,
+         run' = [run EXCEPT ![r].pc = "scoped", ![r].cell = IF Sequels /\ r = r2 THEN run[r1].cell ELSE current,
+                            ![r].files = access,
                             ![r].kind = kind]
     /\ UNCHANGED <<current, access, accessChanges, cell, owner, holding, live, present, busy, panics,
                    written, owed, savedToOld, heirFailed>>
@@ -243,39 +244,28 @@ EndSave(r) ==
     /\ LET k == KeyOf(r)
            c == run[r].cell
            last == Kin(r) = {}
-       IN IF k \in present
-          THEN /\ \/ /\ cell' = [cell EXCEPT ![c] = live[k]]
-                     /\ savedToOld' = (savedToOld \/ c # current)
-                  \/ /\ SaveFails
-                     /\ UNCHANGED <<cell, savedToOld>>
-               /\ present' = IF last THEN present \ {k} ELSE present
-               /\ live' = IF last THEN [live EXCEPT ![k] = {}] ELSE live
-          ELSE UNCHANGED <<cell, savedToOld, present, live>>
-    /\ run' = [run EXCEPT ![r].pc = "finish"]
-    /\ UNCHANGED <<current, access, accessChanges, owner, holding, busy, panics, written, owed,
-                   heirFailed>>
+           writes == GetterWrites /\ run[r].end \in {"finished", "idle", "threw"}
+           after == live[k] \cup (IF writes THEN {Tok(r)} ELSE {})
+       IN /\ IF k \in present
+             THEN /\ \/ /\ cell' = [cell EXCEPT ![c] = after]
+                        /\ savedToOld' = (savedToOld \/ c # current)
+                     \/ /\ SaveFails
+                        /\ UNCHANGED <<cell, savedToOld>>
+                  /\ present' = IF last THEN present \ {k} ELSE present
+                  /\ live' = IF last THEN [live EXCEPT ![k] = {}] ELSE [live EXCEPT ![k] = after]
+             ELSE UNCHANGED <<cell, savedToOld, present, live>>
+          /\ written' = IF writes THEN [written EXCEPT ![c] = @ \cup {Tok(r)}] ELSE written
+          /\ run' = [run EXCEPT ![r].pc = "finish", ![r].seq = IF writes THEN @ + 1 ELSE @]
+    /\ UNCHANGED <<current, access, accessChanges, owner, holding, busy, panics, owed, heirFailed>>
 
-\* MbRealm::end, second step (js_engine:679): hook.finish builds the answer and sends it.  Reading the
-\* answer out of its JS object runs any getter on it (parse_mountebank_response, js_engine:3601;
-\* DecorateHook::answer, :4377), which is the script running after the save.  Only the
-\* finished and idle ends read one.  An abandoned run drops its hook: no answer.
+\* MbRealm::end, after the save: the answer goes out.  An abandoned run drops its hook: no answer.
 FinishAnswered(r) ==
     /\ run[r].pc = "finish"
-    /\ LET c == run[r].cell
-           k == KeyOf(r)
-           reads == run[r].end \in {"finished", "idle"}
-           writes == GetterWrites /\ reads
-           mine(extra) == {t \in Tokens : t[1] = r /\ t[2] < run[r].seq + extra}
-       IN /\ IF writes
-             THEN /\ written' = [written EXCEPT ![c] = @ \cup {Tok(r)}]
-                  /\ live' = IF k \in present THEN [live EXCEPT ![k] = @ \cup {Tok(r)}] ELSE live
-             ELSE UNCHANGED <<written, live>>
-          /\ owed' = IF run[r].end = "abandoned" THEN owed
-                     ELSE [owed EXCEPT ![r] = mine(IF writes THEN 1 ELSE 0)]
-          /\ run' = [run EXCEPT ![r].pc = "release", ![r].answered = (run[r].end # "abandoned"),
-                                ![r].seq = IF writes THEN @ + 1 ELSE @]
+    /\ LET mine == {t \in Tokens : t[1] = r /\ t[2] < run[r].seq}
+       IN /\ owed' = IF run[r].end = "abandoned" THEN owed ELSE [owed EXCEPT ![r] = mine]
+          /\ run' = [run EXCEPT ![r].pc = "release", ![r].answered = (run[r].end # "abandoned")]
     /\ UNCHANGED <<current, access, accessChanges, cell, owner, holding, present, busy, panics,
-                   savedToOld, heirFailed>>
+                   live, written, savedToOld, heirFailed>>
 
 \* MbRealm::end, last step (js_engine:686-697): what the run left passes to a kin when it finished or
 \* went idle and the hook bequeaths, a predicate never does, else it is dropped; then the claim goes.
@@ -418,7 +408,7 @@ EndedRunsLeaveNothing ==
         /\ run[r].pc = "done" => run[r].own + run[r].inherited = 0 /\ r \notin holding
         /\ \A w \in Workers : busy[w] = r => run[r].pc \in {"save", "finish", "release"}
 
-\* ---- Findings (Known.cfg). ----
+\* ---- What the model found, all fixed. ----
 
 \* The hooks of one request run on one state, as one Mountebank imposter object's do.
 RequestKeepsOneCell ==

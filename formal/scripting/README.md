@@ -29,7 +29,7 @@ the only allowed end). Run a copy in a temp directory, so `states/` stays out of
 | `StartAbandoned`, `Defer`, `Start` | `start_inject` (`:2701`), `start_decorate` (`:4149`), `start_predicate_inject` (`:3071`): the abandoned check, `split_from` (`:416`), `live_state` (`:528`), the hook function, `admit` (`:561`) |
 | `OwnJob`, `InheritedJob` | `MbRealm::step` (`:579`), one job. It writes. A throw ends the run it is tagged with if the run queued it, and is logged and dropped if the run inherited it (#1786) |
 | `Finish`, `Deadline`, `Abandoned`, `Idle` | `MbRealm::ending` (`:612`) |
-| `EndSave`, `FinishAnswered`, `EndRelease` | `MbRealm::end` (`:659`) in its order: `save_state` (`:674`), `hook.finish` (`:679`), `retag` and drops (`:686-:697`) |
+| `EndSave`, `FinishAnswered`, `EndRelease` | `MbRealm::end` (`:659`) in its order: `hook.finish` builds the answer, `save_state`, the send, `retag` and drops |
 | `Panic` | `run_mb_worker` (`:1094-:1105`) |
 | `Restart` | `restart_runtime_state` (`imposter/manager.rs:3083`). A delete and a same-port re-create is the same step: a new cell |
 | `SetAccess` | `set_script_file_access` (`imposter/core/mod.rs:765`) |
@@ -87,6 +87,8 @@ All four are modelled.
 - **`predicateGenerators.inject`** (`with_mb_js_thread`, `:1157`): it has no state and no key, and runs on the shared queue.
 - **The `StateKey` being an address.** The model's keys are unique by construction; "Refuted" below says why the code's are.
 
+- **A predicate's thrown value.** Reading its `message` runs a getter too, before the save, but a predicate's end is always `"predicate"` here. `a_write_made_while_a_predicates_thrown_value_is_read_is_not_lost` covers it on the engine. A decorate's throw reads nothing, though `EndSave` lets it write, which only over-approximates.
+
 ## Witnesses
 
 `witness.py` requires exactly these verdicts:
@@ -110,6 +112,8 @@ All four are modelled.
 | Bug | Caught by |
 |:--|:--|
 | The answer goes out before the save (#1678) | `CellCurrentBeforeAnswer` |
+| The getter on the answer runs after the save (#1785) | `NoLostUpdate` |
+| A later hook of a request loads the cell again (#1784), on `StateCellSequels.cfg` | `RequestKeepsOneCell` |
 | A run saves to the imposter's current cell (#1726) | `OldRunSavesToOldCell` |
 | The claim is released before the save | `OneLiveStatePerKey` |
 | No deferral across realms | `OneLiveStatePerKey` |
@@ -120,13 +124,9 @@ All four are modelled.
 
 ## Findings
 
-Each was reproduced on the engine by an `#[ignore]`d test in `crates/rift-mock-core/tests/scripting_interleavings.rs`, which
-fails today and states the correct behaviour. `Known.cfg` holds the violated invariants until the fix lands.
-
-| Issue | Finding | Invariant | Verified by |
-|:--|:--|:--|:--|
-| #1784 | A restart between a request's hooks splits it across two cells: the inject does not see what the predicate wrote | `RequestKeepsOneCell` | Test: holds the predicate run at its save, restarts; body `undefined`, not `seen` |
-| #1785 | A getter on the answer runs after the save, so its write is lost with no other run in flight | `CellCurrentBeforeAnswer`, `NoLostUpdate` with `GetterWrites` | Test: second answer `undefined`, not `1`. Mountebank 2.9.5, run with the same script, answers `1` |
+None open. The model found #1784, #1785 and #1786, all fixed. Each has a test in
+`crates/rift-mock-core/tests/scripting_interleavings.rs` and a mutant above. A new finding gets an `#[ignore = "#n"]` test and a
+`witness.py` row, and stays out of the cfgs until its fix lands.
 
 Passing tests in that file put the model's other claims on the real engine: an end's order (`seeded, saved, finished,
 released`); a run held at its save keeps the imposter's next run behind it on one worker, with idle workers free; a run across

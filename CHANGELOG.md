@@ -55,6 +55,10 @@ record.
   `compare_and_set` and deletes as `set_key_ttl`, and a custom store without `set_key_ttl` records
   `set_key_ttl` `error` on each such delete, though the delete succeeds. Deleting a stored `"Started"`
   costs a poller one extra `200`.
+- **A scenario transition during a stub scan no longer gives a no-match** (#1781): a scan read the state
+  once per gated stub, so a transition mid-scan could fail every gate though every state had a stub, and
+  under `defaultForward` the request went upstream. A scan now reads each scenario once, which also
+  removes a store read per extra gate of a scenario.
 - **A stalled scenario transition no longer takes `Last-Modified` backwards** (#1779): nothing ordered
   two transitions' stamps as they landed, so a stalled one could put a lower stamp over a higher one. A
   client revalidating with `If-Modified-Since` alone then stayed on `304` until the next transition. A
@@ -64,11 +68,20 @@ record.
   It now resets the one stream, as on the admin and front-door listeners. A delete that cuts off an
   HTTP/2 request also resets that stream now, where it aborted the connection, and the connection ends
   through the shutdown already under way.
+- **A state write from a getter on a script's answer is no longer lost** (#1785): the state was saved
+  before the answer was read out of its JS object, so a getter on the answer, on a thrown value's
+  `message` or on a decorate's `config.response` wrote to a state nobody would read again, unless another
+  request happened to be in flight. The answer is now read first, then the state saved, then the answer
+  sent.
 - **A job left behind by a finished script no longer fails another request** (#1786): when a run
   answered with another run of its imposter in flight, what it left queued passed to that run, and a
   throw in it failed that unrelated request with the other script's error. The throw is now logged and
   dropped. A request waiting on a promise only that job would have resolved fails as a promise that never
   settled, about 30 ms later, rather than with the throw's message.
+- **A request keeps one script state across a restart** (#1784): each hook loaded the imposter's state
+  on its own, so a `PUT /imposters` between two hooks of a request split it, and a response `inject` did
+  not see what its predicate had written. A request now runs every hook on the state it started with,
+  and a restart takes effect from the next request.
 - **A delete no longer wipes the imposter that took the port** (#1763): with a shared journal,
   sequencer or proxy store, a delete cleared the port's entries up to 5 seconds after freeing the port,
   so a same-port create lost its recorded requests, response cycles and recordings. The clears now run
