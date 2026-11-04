@@ -18,7 +18,8 @@ from tlacheck import read, states, tlc  # noqa: E402
 # deadlock check is on or off for each.
 MODELS = {
     'lifecycle': ('Lifecycle', False, ['LifecyclePR'], ['Lifecycle', 'LifecycleApply', 'LifecycleReplace', 'Liveness']),
-    'proxyonce': ('ProxyOnce', False, ['ProxyOncePR'], ['ProxyOnce', 'ProxyOnceTwoEdits']),
+    'proxyonce': ('ProxyOnce', False, ['ProxyOncePR', 'ProxyOnceCarriers'],
+                  ['ProxyOnce', 'ProxyOnceTwoEdits', 'ProxyOnceCarriers']),
     'scenario': ('Scenario', False, ['ScenarioPR'], ['Scenario']),
     'scripting': ('StateCell', True, ['StateCellPR'], ['StateCell', 'Live']),
     'faultio': ('FaultIo', False, ['FaultIoPR'], ['FaultIo']),

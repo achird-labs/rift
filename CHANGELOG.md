@@ -13,6 +13,12 @@ record.
 
 ### Fixed
 
+- **A proxy forget no longer removes a newer recording than the one it decided about** (#1776): both
+  the shadow check and an edit decide what to forget a step before they forget, so a forget could take
+  a recording that had landed in between, costing a second upstream call and a duplicate stub, or
+  leaving a live stub the store no longer knew. A recorded stub now keeps the token of the claim that
+  settled it, and a forget names that token. A request forgets every recording behind the stub that
+  answered, and deleting an older copy of a recording keeps the newer one.
 - **A proxy settle that recorded nothing no longer leaves a stub** (#1777): a `proxyOnce` request in
   flight across a clear or restart, or one whose store failed the settle, still inserted a stub. That
   stub answered as a recording no store held and stacked beside the current one, and after a failed
@@ -62,6 +68,12 @@ record.
   keeps answering `Ok` keeps working, with that request's stub stacking as before.
 
 ### Added
+
+- **`ProxyRecordingStore::forget_recorded_by`** (#1776): forget a recording only if a given token settled
+  it, which is what the engine now calls. A custom store compiles unchanged. The default forgets by
+  signature, so it keeps the race this closes for `LocalProxyStore`, and it gains one behaviour change:
+  deleting an older copy of a recording now forgets the signature even though a newer stub holds it,
+  so override it if the store does not publish stubs.
 
 - **`rift_http_proxy::admin_api::admin_path` is public** (#1746): the normalisation the admin
   listener applies before it routes (one trailing `/` dropped, route words spelled as in

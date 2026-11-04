@@ -22,8 +22,8 @@ DROP_RELEASE = """    /\\ req[r].pc \\in {"forward", "settle"}
     /\\ pending' = IF req[r].token # NoToken /\\ pending = req[r].token THEN NoToken ELSE pending
 """
 EDIT_FORGET = """    /\\ edit[e].pc = "forget"
-    /\\ responses' = NoRec
-    /\\ ghost' = ForgetGhost(edit[e].saw)
+    /\\ ForgetStore(edit[e].forgets)
+    /\\ ghost' = ForgetGhost(edit[e].forgets)
 """
 SHADOW_CHECK = 'IF Shadowed(stubs, req[r].answering) THEN "forget" ELSE "lookup"'
 SETTLE_GUARD = 'LET lands == req[r].token # NoToken /\\ pending = req[r].token'
@@ -84,6 +84,10 @@ mutants = {
     # is the earlier symptom, a step before the insert OnlyClaimHolderInserts catches.
     'an empty lookup forwards with no claim and is not lost': ('ForwardUnrecordedOnlyWhenLost', [
         ('''req' = [req EXCEPT ![r].pc = "reclaim", ![r].again = TRUE]''', '''req' = [req EXCEPT ![r].pc = "forward"]''')]),
+    # #1776: a forget removed whichever recording held the signature when it ran.
+    'a forget ignores the token (#1776)': ('ForgetRemovesWhatItSaw', [
+        ("ForgetStore(tokens) == responses' = IF responses \\in tokens THEN NoRec ELSE responses",
+         "ForgetStore(tokens) == responses' = NoRec")]),
     # #1777: a settle that wrote nothing still inserted a stub carrying the claim.
     'a stale settle inserts a stub carrying the claim (#1777)': ('CarrierMeansRecorded', [
         ('IF req[r].token # NoToken /\\ ~lands THEN "done" ELSE AfterSettle(r)', 'AfterSettle(r)')]),
@@ -97,6 +101,17 @@ mutants = {
         (AFTER_SETTLE, 'AfterSettle(r) == IF GeneratesStub THEN "insert" ELSE "done"')]),
 }
 failed = False
+# #1776: forgetting only the first carrier leaves `[proxy, T1, T2]` replaying `T2`.  It takes two edits
+# to reach that list, which the PR cfg does not make.
+verdict, trace, out = tlc(jar, 'ProxyOnce', edit(spec, [(
+    "![r].forgets = BehindTokens(stubs, req[r].answering)]",
+    "![r].forgets = IF FirstCarrier(stubs) = 0 THEN {} ELSE {stubs[FirstCarrier(stubs)].claim}]")], 'first carrier'),
+    read(os.path.join(here, 'ProxyOnceTwoEdits.cfg')))
+if verdict == 'ShadowedRecordingForwards':
+    print(f'only the first carrier is forgotten (#1776): caught by {verdict}')
+else:
+    print(f'only the first carrier is forgotten (#1776): expected ShadowedRecordingForwards, got {verdict}\n{out}')
+    failed = True
 for name, (expected, spec_edits) in mutants.items():
     verdict, trace, out = tlc(jar, 'ProxyOnce', edit(spec, spec_edits, name), cfg)
     if verdict == expected:

@@ -30,8 +30,8 @@ load, not only an `.await`. Line numbers are of the commit that added this model
 |:--|:--|:--|
 | `Match` | `handler.rs:1502`; snapshot load `core/mod.rs:789` | One wait-free load. A recorded stub answers from the snapshot and never reaches the store |
 | `Claim`, `Reclaim` | `try_claim_as`, `proxy_store.rs:375-391`; called at `proxy.rs:1405`, `:1423` | The `responses` read guard is held across the `pending` lock (#171/#118) |
-| `ShadowCheck` | `recording_is_shadowed`, `proxy.rs:1077-1095` | Its own snapshot load, after the claim |
-| `ShadowForget` | `forget_recorded`, `proxy.rs:1420`, `proxy_store.rs:481` | One write lock; keyed by signature, leaves `pending` alone |
+| `ShadowCheck` | `shadowed_recordings`, `core/proxy.rs` | Its own snapshot load, after the claim; the tokens of every carrier behind the answering stub |
+| `ShadowForget` | `forget_recorded_by`, `core/proxy.rs`, `proxy_store.rs` | One write lock; removes the entry only if one of those tokens settled it, leaves `pending` alone |
 | `Lookup` | `proxy.rs:1446`, nothing found `:1456-1464` | One read lock, after the claim |
 | `Forward` | `proxy.rs:1527-1530` | An await |
 | `Settle` | `HeldClaim::settle`, `proxy.rs:104`; `record`, `proxy_store.rs:413-464` | Under the write lock and the pending lock. A stale token changes nothing and answers `StaleClaim` |
@@ -58,9 +58,10 @@ edits; see "Runs" for why not both.
 | `RecordedOnce` | At most one recording lands between two removals of the entry | holds |
 | `LoserNeverRecords` | An `InFlight` request inserts nothing | holds |
 | `ClaimExcludesRecording` | A pending claim and a recording never coexist | holds |
-| `AtMostOneCarrier` | At most one carrier ahead of the proxy stub | violated, #1776, `Known.cfg` |
-| `ForgetRemovesWhatItSaw` | The swap-to-forget window: a forget removes the recording it decided about | violated, #1776, `Known.cfg` |
-| `CarrierHasRecording` | A carrier ahead of the proxy stub has its recording, outside a clear and after a restart | violated, #1776, `Known.cfg` |
+| `AtMostOneCarrier` | At most one carrier ahead of the proxy stub | holds with no clear, restart or `deleteProxy`, `ProxyOnceCarriers.cfg` |
+| `ForgetRemovesWhatItSaw` | A forget removes only a recording it decided about | holds |
+| `RecordingHasItsOwnCarrier` | The entry's own recording has a stub, outside the windows; a carrier of an older one does not count | holds |
+| `CarrierHasRecording` | A carrier ahead of the proxy stub has its recording, outside a clear and after a restart | holds with no clear, restart or `deleteProxy`, `ProxyOnceCarriers.cfg` |
 | `CarrierMeansRecorded` | A stub carries a claim only if its recording landed | holds |
 | `OnlyClaimHolderInserts` | Only a request holding a claim inserts a stub | holds |
 | `ForwardUnrecordedOnlyWhenLost` | Only a request that lost the race forwards with no claim | holds |
@@ -71,7 +72,7 @@ edits; see "Runs" for why not both.
 |:--|:--|
 | `NeverTwoForwards` | violated: two requests reach the upstream, which the loser path depends on |
 | `NeverForgetWhileClaimed` | violated: a forget runs with a claim in flight, which `forget_recorded`'s contract allows |
-| `ForgetRemovesWhatItSaw`, `AtMostOneCarrier`, `CarrierHasRecording`, with no clear in the run | violated: #1776 needs only requests and an edit |
+| `AtMostOneCarrier`, `CarrierHasRecording`, on `ProxyOncePR.cfg` | violated: a clear or a restart, the limits below |
 | A proxy that generates no stub (control) | no error |
 | `ProxyOncePR.cfg` (control) | no error |
 
@@ -91,6 +92,8 @@ delete its row.
 | An empty lookup forwards with no claim and is not lost (#1778) | `ForwardUnrecordedOnlyWhenLost` |
 | A stale settle inserts a stub carrying the claim (#1777) | `CarrierMeansRecorded` |
 | A failed settle inserts a stub carrying the claim (#1777) | `CarrierMeansRecorded` |
+| A forget ignores the token (#1776) | `ForgetRemovesWhatItSaw` |
+| Only the first carrier is forgotten (#1776), on `ProxyOnceTwoEdits.cfg` | `ShadowedRecordingForwards` |
 | A loser inserts its stub | `LoserNeverRecords` |
 
 The #171/#118 mutant was expected to fall to `RecordedOnce`. A recording lands between the read and the
@@ -99,17 +102,11 @@ record.
 
 ## Findings
 
-Each is reproduced on the engine by an `#[ignore = "#n"]` test in
-`crates/rift-mock-core/tests/proxyonce_interleavings.rs`, which holds the engine at a probe point and
-states the correct behaviour. `cargo test -p rift-mock-core --all-features --test proxyonce_interleavings -- --ignored`
-fails today, one test per shape.
-
-| Issue | Finding | Verified by |
-|:--|:--|:--|
-| #1776 | `forget_recorded` is keyed by signature, and both callers decide a step earlier. A forget removes a newer recording: a late shadow forget, a settled recording taken for the shadowed one, and an edit's forget. | Reproduced, three tests |
-
-None of them returns a wrong body or wedges a signature, and each window is short; the cost is a second
-upstream call and a duplicate stub.
+None open. The model found #1776, #1777 and #1778, all fixed. None returned a wrong body or wedged a
+signature, and each window was short; the cost was a second upstream call and a duplicate stub. Each has
+a test in `crates/rift-mock-core/tests/proxyonce_interleavings.rs` that holds the engine at a probe point to
+force the order, and a mutant above. A new finding gets an `#[ignore = "#n"]` test and a `witness.py` row,
+and stays out of the cfgs until its fix lands.
 
 ### Not filed
 
@@ -123,7 +120,16 @@ upstream call and a duplicate stub.
 - **Two carriers after the proxy stub is deleted.** With `deleteProxy`, an in-flight request inserts at the
   end of the list, as the doc comment on `insert_or_append_proxy_stub` says, so `AtMostOneCarrier` falls
   with no race in the protocol.
-  The second never answers. Refuted as a defect. `Known.cfg` leaves `deleteProxy` out for this reason.
+  The second never answers. Refuted as a defect. `ProxyOnceCarriers.cfg` leaves `deleteProxy` out for this reason.
+- **A recording that lands before a clear gets its stub after it.** `Settle(r1) -> ClearStore(c1) ->
+  ClearSwap(c1) -> Insert(r1)`. The gap has no `.await` in it, and Mountebank's in-flight insert does the
+  same. Settling and inserting under `stubs_write` would close it, but holds that lock across a custom
+  store's call for a gap of a few instructions, against the reason `forget_orphaned_claims` runs outside it.
+- **A restart keeps its stubs.** A request that matched before a stub landed can claim and stack beside it.
+  Why `AtMostOneCarrier` falls on `ProxyOncePR.cfg`; `witness.py` keeps it reachable.
+- **A store that keeps `forget_recorded_by`'s default** forgets by signature, so it keeps the race #1776
+  closed for `LocalProxyStore`, and a delete of an older carrier forgets a newer recording. The model is
+  `LocalProxyStore`'s.
 - **Two carriers between `ClearStore` and `ClearSwap`.** A request recording in that window stacks a
   carrier, and the swap removes both. Transient, no finding of its own.
 - **A carrier with no recording after a restart.** `restart_runtime_state` keeps the stubs on purpose, so
@@ -140,9 +146,9 @@ takes each step, and a run is accepted when some choice reaches its end. A step 
 not pin which edit ran. `ProxyOrphanFound` and `ProxyLookingUp` exist to hold the engine at, and take no
 step in the model.
 
-`traces/accept` holds runs recorded from `proxyonce_interleavings.rs`, including `defect_*` runs of the
-filed defects: the model predicted those orders. `traces/reject` holds runs written by hand that it must
-refuse. A fix to a finding changes its `defect_*` run, so record it again with
+`traces/accept` holds runs recorded from `proxyonce_interleavings.rs`, including the orders the
+model predicted when it found its defects. `traces/reject` holds runs written by hand that it must
+refuse. A change to the protocol changes these runs, so record them again with
 `FORMAL_TRACE_DIR=traces/accept cargo test -p rift-mock-core --all-features --test proxyonce_interleavings -- --include-ignored`.
 
 ## Limits
@@ -151,7 +157,7 @@ refuse. A fix to a finding changes its `defect_*` run, so record it again with
   contended beyond their locks.
 - `proxyAlways` and `proxyTransparent` are not modelled: they take ungated tokens and never replay
   (`proxy_store.rs:394`).
-- A store that publishes stubs is not modelled: it has no local carrier, and `recording_is_shadowed` is
+- A store that publishes stubs is not modelled: it has no local carrier, and `shadowed_recordings` is
   false for it.
 - `MAX_TOTAL_SIGNATURES` is not modelled.
 - `Unavailable` and `Refused` from `try_claim_as` are not modelled.
@@ -168,22 +174,13 @@ in `ProxyOncePR.cfg` and `ProxyOnce.cfg` under `-coverage 1`.
 
 | Cfg | Bounds | Result | Generated | Distinct | Depth | Time |
 |:--|:--|:--|--:|--:|--:|--:|
-| `ProxyOncePR.cfg` | 2 requests, 1 edit, clear, restart, failing settle | no error | 177,686 | 71,169 | 24 | 9 s |
-| `ProxyOnce.cfg` | 3 requests, 1 edit, clear, restart, failing settle | no error | 6,894,192 | 2,325,378 | 34 | 56 s |
-| `ProxyOnceTwoEdits.cfg` | 2 requests, 2 edits, clear, restart, failing settle | no error | 2,731,641 | 1,041,256 | 26 | 27 s |
+| `ProxyOncePR.cfg` | 2 requests, 1 edit, clear, restart, failing settle | no error | 112,246 | 40,948 | 24 | 9 s |
+| `ProxyOnce.cfg` | 3 requests, 1 edit, clear, restart, failing settle | no error | 2,945,217 | 917,953 | 34 | 56 s |
+| `ProxyOnceTwoEdits.cfg` | 2 requests, 2 edits, clear, restart, failing settle | no error | 1,012,092 | 332,258 | 26 | 27 s |
 
 3 requests with 2 edits, a clear, a restart and a failing settle was stopped at 13,029,204 generated and
 4,712,697 distinct after 7 minutes, the queue still growing, on a nearly full disk. That combination is
 unchecked.
-
-Time to the first violation, on `Known.cfg`'s bounds (2 requests, 1 edit of `move`, `delete` or `replace`,
-a clear; a run stops at its first violation, so the counts vary a little between runs):
-
-| Invariant | Generated | Distinct | Trace steps |
-|:--|--:|--:|--:|
-| `AtMostOneCarrier` | 12,983 | 6,834 | 13 |
-| `ForgetRemovesWhatItSaw` | 1,156 | 698 | 8 |
-| `CarrierHasRecording` | 2,205 | 1,301 | 10 |
 
 `witness.py` and `mutants.py` exit 0. `validate.py --selftest traces` exits 0: 12 recorded runs accepted,
 4 hand-written runs rejected.

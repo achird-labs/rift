@@ -6,7 +6,9 @@ use super::*;
 use crate::imposter::behavior_pipeline::{BehaviorOutcome, BehaviorRun, ServedParts};
 use crate::imposter::probe::{Point, fire};
 use crate::imposter::types::{UpstreamTarget, upstream_url};
-use crate::recording::{ClaimToken, ProxyStoreError, StubPlacement, StubPublication};
+use crate::recording::{
+    ClaimToken, ProxyStoreError, RecordedClaim, StubPlacement, StubPublication,
+};
 // The predicate-generator keys this engine reads (issue #1327). Any other key is accepted and
 // reported as unread, never refused: Mountebank configs carry keys Rift may not implement yet.
 // Shared with `rift-lint` and the JSON Schema through `rift-types` (issue #1342).
@@ -1080,41 +1082,56 @@ impl Imposter {
     /// `proxy_to`. With neither, a `proxyOnce` recording goes last and a `proxyAlways` one merges
     /// from the top of the list.
     ///
-    /// Whether the `proxyOnce` recording under `sig` is *shadowed* (issue #1705): the stub at slot
-    /// `answering` answered the request, and every stub recorded under `sig` sits behind it, so
-    /// none of them answered. A carrier in front of the answering stub is the concurrent first
-    /// request (it matched a snapshot taken before the winner's stub landed), and no carrier at
-    /// all is a store that publishes stubs or has not delivered them yet: both replay, keeping
-    /// `proxyOnce` exactly-once (#171/#118).
-    fn recording_is_shadowed(&self, answering: Option<u64>, sig: &RequestSignature) -> bool {
+    /// The tokens of the `proxyOnce` recordings under `sig` that are *shadowed* (issue #1705): the
+    /// stub at slot `answering` answered the request, and every stub recorded under `sig` sits
+    /// behind it, so none of them answered. Empty otherwise. A carrier in front of the answering
+    /// stub is the concurrent first request (it matched a snapshot taken before the winner's stub
+    /// landed), and no carrier at all is a store that publishes stubs or has not delivered them
+    /// yet: both replay, keeping `proxyOnce` exactly-once (#171/#118).
+    ///
+    /// All of them, not only the first: with `[proxy, T1, T2]` the store's entry is `T2`, and
+    /// forgetting `T1` alone would replay a shadowed recording forever (issue #1776).
+    fn shadowed_recordings(
+        &self,
+        answering: Option<u64>,
+        sig: &RequestSignature,
+    ) -> Vec<ClaimToken> {
         // A publishing store's stubs carry no claim locally, so there is nothing to compare.
         if self.proxy_store.publishes_stubs() {
-            return false;
+            return Vec::new();
         }
         let Some(slot) = answering else {
-            return false;
+            return Vec::new();
         };
         let snapshot = self.snapshot();
         let stubs = snapshot.stubs();
         let Some(at) = stubs.iter().position(|s| s.slot == slot) else {
-            return false;
+            return Vec::new();
+        };
+        let carriers = || {
+            stubs.iter().enumerate().filter_map(|(i, s)| {
+                s.recorded_claim
+                    .as_deref()
+                    .filter(|claim| claim.signature == *sig)
+                    .map(|claim| (i, claim.token))
+            })
         };
         // The first carrier is the frontmost: every carrier is behind iff it is.
-        stubs
-            .iter()
-            .position(|s| s.recorded_claim.as_deref() == Some(sig))
-            .is_some_and(|first| first > at)
+        if carriers().next().is_none_or(|(first, _)| first <= at) {
+            return Vec::new();
+        }
+        carriers().map(|(_, token)| token).collect()
     }
 
-    /// `claim` is the `proxyOnce` signature the recording settled under: the new stub carries it,
-    /// so a later edit that removes the stub forgets the claim too (issue #1386).
+    /// `claim` is the `proxyOnce` recording this stub was settled as: the new stub carries it, so a
+    /// later edit that removes the stub forgets that recording too (issues #1386, #1776).
     pub fn insert_or_append_proxy_stub(
         &self,
         stub: Stub,
         proxy_to: &str,
         proxy_mode: &str,
         answering: Option<u64>,
-        claim: Option<RequestSignature>,
+        claim: Option<RecordedClaim>,
     ) {
         let placement = Self::placement_for_mode(proxy_mode);
         self.mutate_stubs(|stubs| {
@@ -1428,18 +1445,28 @@ impl Imposter {
                 }
                 claimed
             };
-            let mut outcome = match claim_now() {
+            let claimed = claim_now();
+            let shadowed = if generates_stub
+                && mode_is_once
+                && matches!(claimed, Ok(ClaimOutcome::AlreadyRecorded))
+            {
+                self.shadowed_recordings(answering, &signature)
+            } else {
+                Vec::new()
+            };
+            let mut outcome = match claimed {
                 // A recording only behind the stub that answered did not answer this request: it
                 // missed, so it is forwarded and recorded in front of this stub, as Mountebank's
-                // `proxyAndRecord` does (issue #1705). Forget the shadowed recording and claim
-                // again; the outcome then runs through the same match as a first claim.
-                Ok(ClaimOutcome::AlreadyRecorded)
-                    if generates_stub
-                        && mode_is_once
-                        && self.recording_is_shadowed(answering, &signature) =>
-                {
+                // `proxyAndRecord` does (issue #1705). Forget the shadowed recordings and claim
+                // again; the outcome then runs through the same match as a first claim. A recording
+                // landed since is not among them, stays, and replays (issue #1776).
+                Ok(ClaimOutcome::AlreadyRecorded) if !shadowed.is_empty() => {
                     fire(&self.probe, Point::ProxyShadowed { port });
-                    match self.proxy_store.forget_recorded(port, &signature) {
+                    let forgotten = shadowed.iter().try_for_each(|token| {
+                        self.proxy_store
+                            .forget_recorded_by(port, &signature, *token)
+                    });
+                    match forgotten {
                         Ok(()) => {
                             fire(&self.probe, Point::ProxyShadowForgot { port });
                             claim_now()
@@ -1690,9 +1717,9 @@ impl Imposter {
                         };
                         let settled = claim.settle(resp, Some(&publication));
                         fire(&self.probe, Point::ProxySettled { port });
-                        settled.is_some()
+                        settled
                     } else {
-                        false
+                        None
                     };
 
                     // A store that publishes stubs is the only publisher; inserting locally too
@@ -1702,15 +1729,16 @@ impl Imposter {
                     if self.proxy_store.publishes_stubs() {
                         debug!(
                             "Skipping local stub insertion for path {} (proxy store publishes \
-                             stubs; handed over: {settled})",
-                            uri.path()
+                             stubs; handed over: {})",
+                            uri.path(),
+                            settled.is_some()
                         );
                     } else if lost_race {
                         debug!(
                             "Skipping local stub insertion for path {} (this request won no claim)",
                             uri.path()
                         );
-                    } else if mode_is_once && held_claim && !settled {
+                    } else if mode_is_once && held_claim && settled.is_none() {
                         // A stale or failed settle: a stub would answer as a recording that is not
                         // there, stack beside the current one, and stop the signature retrying.
                         debug!(
@@ -1718,14 +1746,18 @@ impl Imposter {
                             uri.path()
                         );
                     } else {
+                        let claim = settled.filter(|_| mode_is_once).map(|token| RecordedClaim {
+                            signature: signature.clone(),
+                            token,
+                        });
+                        let claimed = claim.is_some();
                         self.insert_or_append_proxy_stub(
                             new_stub,
                             &proxy_config.to,
                             mode,
                             answering,
-                            (settled && mode_is_once).then(|| signature.clone()),
+                            claim,
                         );
-                        let claimed = settled && mode_is_once;
                         fire(&self.probe, Point::ProxyInserted { port, claimed });
                     }
                     debug!(
@@ -2920,7 +2952,10 @@ mod claim_tests {
             "http://up",
             "proxyOnce",
             None,
-            Some(sig.clone()),
+            Some(RecordedClaim {
+                signature: sig.clone(),
+                token,
+            }),
         );
         sig
     }
@@ -2985,25 +3020,28 @@ mod claim_tests {
         let sig = record(&imp);
         let proxy = slot_at(&imp, 1);
         assert!(
-            !imp.recording_is_shadowed(Some(proxy), &sig),
+            imp.shadowed_recordings(Some(proxy), &sig).is_empty(),
             "carrier in front"
         );
 
         imp.move_stub(0, 1)
             .expect("move the recording behind the proxy");
         assert!(
-            imp.recording_is_shadowed(Some(proxy), &sig),
+            !imp.shadowed_recordings(Some(proxy), &sig).is_empty(),
             "carrier behind"
         );
 
         let other = RequestSignature::new("GET", "/elsewhere", None, &[]);
         assert!(
-            !imp.recording_is_shadowed(Some(proxy), &other),
+            imp.shadowed_recordings(Some(proxy), &other).is_empty(),
             "no carrier"
         );
-        assert!(!imp.recording_is_shadowed(None, &sig), "no answering stub");
         assert!(
-            !imp.recording_is_shadowed(Some(u64::MAX), &sig),
+            imp.shadowed_recordings(None, &sig).is_empty(),
+            "no answering stub"
+        );
+        assert!(
+            imp.shadowed_recordings(Some(u64::MAX), &sig).is_empty(),
             "the answering stub is gone"
         );
     }

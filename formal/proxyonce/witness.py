@@ -16,7 +16,6 @@ from tlacheck import edit, jar_from_argv, read, tlc  # noqa: E402
 here = os.path.dirname(os.path.abspath(__file__))
 spec = read(os.path.join(here, 'ProxyOnce.tla'))
 pr_cfg = read(os.path.join(here, 'ProxyOncePR.cfg'))
-known_cfg = read(os.path.join(here, 'Known.cfg'))
 jar = jar_from_argv()
 
 
@@ -26,30 +25,23 @@ def only(cfg, invariant):
     return f'{head}INVARIANTS\n    {invariant}\n'
 
 
-def no_clear(cfg):
-    return edit(cfg, [('Clearers = {c1}', 'Clearers = {}')], 'Known.cfg')
-
 
 cases = [
     # The races: a model where these stayed false would check nothing.
     ('two requests reach the upstream', only(pr_cfg, 'NeverTwoForwards'), 'NeverTwoForwards'),
     ('a forget runs while a claim is in flight (proxy_store.rs:273)', only(pr_cfg, 'NeverForgetWhileClaimed'),
      'NeverForgetWhileClaimed'),
-    # Filed findings, reachable until fixed (README.md, "Findings").
-    ('a forget removes a recording newer than the one it decided about (#1776)',
-     only(no_clear(known_cfg), 'ForgetRemovesWhatItSaw'), 'ForgetRemovesWhatItSaw'),
-    ('that leaves two recordings ahead of the proxy, with no clear in the run (#1776)',
-     only(no_clear(known_cfg), 'AtMostOneCarrier'), 'AtMostOneCarrier'),
-    ('that leaves a live stub with no recording, with no clear in the run (#1776)',
-     only(no_clear(known_cfg), 'CarrierHasRecording'), 'CarrierHasRecording'),
+    # Documented limits: a clear or a restart can leave what these invariants rule out.
+    ('a clear or a restart can leave a second carrier ahead of the proxy',
+     only(pr_cfg, 'AtMostOneCarrier'), 'AtMostOneCarrier'),
+    ('a clear or a restart can leave a carrier with no recording',
+     only(pr_cfg, 'CarrierHasRecording'), 'CarrierHasRecording'),
     # A proxy that generates no stub: no carrier, no shadow, no forget from an edit.
     ('no stub generated: every invariant holds (control)',
-     edit(known_cfg, [('GeneratesStub = TRUE', 'GeneratesStub = FALSE'), ('Preloaded = TRUE', 'Preloaded = FALSE'),
-                      ('    AtMostOneCarrier\n    ForgetRemovesWhatItSaw\n    CarrierHasRecording\n',
-                       '    AtMostOneCarrier\n    NoWedgedClaim\n    ClaimExcludesRecording\n    RecordedOnce\n'
-                       '    ForgetRemovesWhatItSaw\n    OnlyClaimHolderInserts\n')], 'Known.cfg'),
+     edit(pr_cfg, [('GeneratesStub = TRUE', 'GeneratesStub = FALSE'), ('Preloaded = TRUE', 'Preloaded = FALSE')],
+          'ProxyOncePR.cfg') + '    AtMostOneCarrier\n',
      'ok'),
-    # The PR gate is green with the findings in Known.cfg.
+    # The PR gate is green.
     ('ProxyOncePR.cfg (control)', pr_cfg, 'ok'),
 ]
 failed = False

@@ -8,8 +8,7 @@
 {"outcome":"AlreadyRecorded","point":"ProxyClaim","seq":6,"token":null}
 {"point":"ProxyShadowed","seq":7}
 {"point":"ProxyShadowForgot","seq":8}
-{"outcome":"Claimed","point":"ProxyClaim","seq":9,"token":2}
-{"point":"ProxyForwarding","seq":10}
-{"point":"ProxySettled","seq":11}
+{"outcome":"AlreadyRecorded","point":"ProxyClaim","seq":9,"token":null}
+{"point":"ProxyLookingUp","seq":10}
+{"point":"ProxyReplayed","seq":11}
 {"claimed":true,"point":"ProxyInserted","seq":12}
-{"claimed":true,"point":"ProxyInserted","seq":13}

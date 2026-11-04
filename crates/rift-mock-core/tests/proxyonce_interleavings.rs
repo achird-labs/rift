@@ -414,12 +414,11 @@ async fn the_window_between_an_edit_and_its_forget_replays_the_recording() {
     rig.recorder.write("replay_in_the_forget_window", true);
 }
 
-// Defects: each states the correct behaviour and fails today.
+// Each of these reproduced a filed defect, now fixed.
 
 /// Two requests miss a shadowed recording together. The first forgets it and records anew; the
 /// second, which decided before that, forgets the *new* recording and records again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1776"]
 async fn a_late_shadow_forget_leaves_the_new_recording_alone() {
     let rig = Rig::new().await;
     rig.shadowed().await;
@@ -434,7 +433,8 @@ async fn a_late_shadow_forget_leaves_the_new_recording_alone() {
 
     held.open();
     late.await.expect("late");
-    rig.recorder.write("defect_1776_late_shadow_forget", true);
+    rig.recorder
+        .write("late_shadow_forget_leaves_the_new_recording", true);
     assert_eq!(
         rig.ahead_of_the_proxy(),
         1,
@@ -451,7 +451,6 @@ async fn a_late_shadow_forget_leaves_the_new_recording_alone() {
 /// A request that finds a recording settled and not yet inserted, with the old carrier still behind
 /// the proxy, takes the new recording for the shadowed one and forgets it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1776"]
 async fn a_new_recording_is_not_taken_for_the_shadowed_one() {
     let rig = Rig::new().await;
     rig.shadowed().await;
@@ -466,7 +465,7 @@ async fn a_new_recording_is_not_taken_for_the_shadowed_one() {
     held.open();
     first.await.expect("first");
     rig.recorder
-        .write("defect_1776_new_recording_taken_for_shadowed", true);
+        .write("new_recording_not_taken_for_shadowed", true);
     assert_eq!(
         rig.ahead_of_the_proxy(),
         1,
@@ -483,7 +482,6 @@ async fn a_new_recording_is_not_taken_for_the_shadowed_one() {
 /// An edit removes the old carrier of a shadowed recording while a new recording is on its way. Its
 /// forget, decided from the list it swapped, removes the new recording, whose stub is live.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1776"]
 async fn an_edits_forget_leaves_a_recording_with_a_live_stub_alone() {
     let rig = Rig::new().await;
     rig.shadowed().await;
@@ -503,7 +501,8 @@ async fn an_edits_forget_leaves_a_recording_with_a_live_stub_alone() {
 
     held_edit.open();
     edit.await.expect("edit").expect("delete");
-    rig.recorder.write("defect_1776_edit_forget", true);
+    rig.recorder
+        .write("edit_forget_leaves_the_live_recording", true);
     assert!(
         rig.store_has_recording(),
         "the recording's stub is in the list, so the recording stays"
@@ -511,6 +510,55 @@ async fn an_edits_forget_leaves_a_recording_with_a_live_stub_alone() {
 }
 
 /// A request in flight across a savedProxyResponses clear holds a token the store has forgotten.
+/// `[proxy, T1, T2]` with the entry at `T2`: every recording is behind the proxy stub, so the request
+/// must forward. Forgetting only `T1`, the first carrier, would be a no-op and the request would
+/// replay a shadowed recording forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recording_behind_an_older_carrier_is_still_forwarded_past() {
+    let rig = Rig::new().await;
+    rig.shadowed().await;
+    assert_eq!(get(rig.port).await, "up");
+    assert_eq!(rig.layout(), ["recording", "proxy", "recording"]);
+    assert_eq!(rig.upstream_hits(), 2);
+    rig.imposter.move_stub(0, 2).expect("move");
+    assert_eq!(rig.layout(), ["proxy", "recording", "recording"]);
+
+    assert_eq!(get(rig.port).await, "up");
+    assert_eq!(rig.upstream_hits(), 3, "it forwarded rather than replayed");
+    assert_eq!(
+        rig.layout(),
+        ["recording", "proxy", "recording", "recording"]
+    );
+}
+
+/// `[T2, proxy, T1]` with the entry at `T2`: deleting `T1` removes a recording the store no longer
+/// holds, and must leave `T2`'s entry alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_the_older_carrier_keeps_the_newer_recording() {
+    let rig = Rig::new().await;
+    rig.shadowed().await;
+    get(rig.port).await;
+    assert_eq!(rig.layout(), ["recording", "proxy", "recording"]);
+
+    rig.imposter.delete_stub(2).expect("delete");
+    assert!(rig.store_has_recording(), "T2's entry stays");
+    assert_eq!(get(rig.port).await, "up");
+    assert_eq!(rig.upstream_hits(), 2, "T2 answers");
+}
+
+/// `[T2, proxy, T1]` with the entry at `T2`: deleting `T2` deletes the recording the store holds, so
+/// the identity records anew, though `T1` still carries the same signature.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_the_newer_carrier_forgets_its_recording_despite_an_older_one() {
+    let rig = Rig::new().await;
+    rig.shadowed().await;
+    get(rig.port).await;
+    assert_eq!(rig.layout(), ["recording", "proxy", "recording"]);
+
+    rig.imposter.delete_stub(0).expect("delete");
+    assert!(!rig.store_has_recording(), "T2's entry went with its stub");
+}
+
 /// A clear stales the request's claim, so the store drops its recording. It must leave no stub
 /// either, or the stub would stack next to the recording a later request made.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
