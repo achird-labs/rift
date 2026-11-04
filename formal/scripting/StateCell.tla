@@ -202,19 +202,15 @@ OwnJob(r) ==
     /\ UNCHANGED <<current, access, accessChanges, cell, owner, holding, present, panics, owed,
                    savedToOld, heirFailed>>
 
-\* A job another run left this one (MbJobExecutor::retag): it runs as this run, so its throw ends this
-\* run too (js_engine:596).
+\* A job another run left this one (MbJobExecutor::retag): it runs as this run, but a throw is logged
+\* and dropped, as the job is not this run's (#1786).
 InheritedJob(r) ==
     /\ run[r].pc = "flight"
     /\ run[r].inherited > 0
     /\ Free(r)
     /\ JobWrites(r, run[r].cell)
-    /\ \/ /\ run' = [run EXCEPT ![r].inherited = @ - 1, ![r].seq = @ + 1]
-          /\ UNCHANGED <<busy, heirFailed>>
-       \/ /\ run' = [run EXCEPT ![r].inherited = @ - 1, ![r].seq = @ + 1, ![r].pc = "save",
-                                ![r].end = "threw"]
-          /\ busy' = [busy EXCEPT ![run[r].worker] = r]
-          /\ heirFailed' = heirFailed \cup {r}
+    /\ run' = [run EXCEPT ![r].inherited = @ - 1, ![r].seq = @ + 1]
+    /\ UNCHANGED <<busy, heirFailed>>
     /\ UNCHANGED <<current, access, accessChanges, cell, owner, holding, present, panics, owed,
                    savedToOld>>
 

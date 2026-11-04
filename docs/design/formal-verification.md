@@ -86,7 +86,7 @@ source, and each issue says which. A fixed one says so in the table.
 | #1782 | faultio | A fault stub added under an open HTTP/2 connection aborts every stream on it |
 | #1784 | scripting | A restart between a request's hooks splits it across two state cells |
 | #1785 | scripting | A getter on the answer runs after the save, so its write is lost |
-| #1786 | scripting | A job a finished run left fails the run that inherited it |
+| #1786 | scripting | A job a finished run left fails the run that inherited it. Fixed |
 
 Most need a narrow window, and none was observed without a hold, so how often they occur in production is not
 measured.

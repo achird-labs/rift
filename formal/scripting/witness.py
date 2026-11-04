@@ -50,10 +50,6 @@ cases = [
      only(known_cfg, 'CellCurrentBeforeAnswer'), 'CellCurrentBeforeAnswer'),
     ('a getter on the answer of the last run writes to a state nobody reads again',
      only(known_cfg, 'NoLostUpdate'), 'NoLostUpdate'),
-    ('a job a finished run left fails the run that inherited it',
-     # Sequels off: an heir needs two runs in flight, and a request's hooks run one after the other.
-     edit(only(known_cfg, 'HeirFailsOnlyByItsOwnJob'), [('Sequels = TRUE', 'Sequels = FALSE')], 'Known.cfg'),
-     'HeirFailsOnlyByItsOwnJob'),
     # The gates are green.
     ('StateCellPR.cfg (control; includes NeverTwoWorkersOneKey)', pr_cfg, 'ok'),
     ('Witness.cfg: every failure on, and affinity, one live state and the cells still hold (control)',

@@ -592,6 +592,19 @@ impl MbRealm {
                 self.jobs.set_expiry(previous);
                 ran
             };
+            // A job left by a finished run ran as this one, but its throw is not this run's: it
+            // must not fail a request that had nothing to do with it (issue #1786).
+            let ran = match ran {
+                Err(e) if tag.expiry.is_some() => {
+                    tracing::warn!(
+                        target: "rift::script",
+                        port = ?self.runs[i].scope.as_ref().map(|scope| scope.port),
+                        "a job left behind by an earlier run threw and was dropped: {e}"
+                    );
+                    Ok(())
+                }
+                other => other,
+            };
             match ran {
                 Err(e) => self.end(i, RunEnd::Threw(e)),
                 Ok(()) if self.answered(i) => self.end(i, RunEnd::Finished),
@@ -8279,6 +8292,79 @@ function respond(ctx) {
             .expect_err("its timer threw");
         assert!(err.to_string().contains("tick-1678"), "{err:#}");
         assert_eq!(answer_body(&waiter), "fine");
+    }
+
+    // A job left behind throws in the run that inherited it: logged, and that run still answers.
+    // The heir's own job, queued after, still ends it.
+    #[test]
+    fn a_left_behind_throw_spares_the_heir_but_its_own_does_not() {
+        let mut thread = MbJsThread::new();
+        let scope = ScriptScope::detached(test_port());
+        let heir = start_inject_on(
+            &mut thread,
+            "config => new Promise(r => setTimeout(() => r({ body: 'heir' }), 60))",
+            &scope,
+            &trusted_files(),
+        );
+        let leaver = start_inject_on(
+            &mut thread,
+            "config => { setTimeout(() => { throw new Error('left-1786'); }, 10); \
+             return { body: 'left' }; }",
+            &scope,
+            &trusted_files(),
+        );
+        thread.drive();
+        assert_eq!(answer_body(&leaver), "left");
+        assert_eq!(answer_body(&heir), "heir");
+
+        let own = start_inject_on(
+            &mut thread,
+            "config => new Promise(() => setTimeout(() => { throw new Error('own-1786'); }, 10))",
+            &scope,
+            &trusted_files(),
+        );
+        let leaver = start_inject_on(
+            &mut thread,
+            "config => { setTimeout(() => { throw new Error('left-1786'); }, 40); \
+             return { body: 'left' }; }",
+            &scope,
+            &trusted_files(),
+        );
+        thread.drive();
+        assert_eq!(answer_body(&leaver), "left");
+        let err = own
+            .try_recv()
+            .expect("answered")
+            .expect_err("its timer threw");
+        assert!(err.to_string().contains("own-1786"), "{err:#}");
+    }
+
+    // A heir waiting on a promise only the thrown job would have resolved does not hang: it fails
+    // as a promise that never settled. It used to get the throw's message.
+    #[test]
+    fn a_heir_waiting_on_the_job_that_threw_fails_as_never_settled() {
+        let mut thread = MbJsThread::new();
+        let scope = ScriptScope::detached(test_port());
+        let heir = start_inject_on(
+            &mut thread,
+            "config => new Promise(r => { globalThis.__wake1786 = r; })",
+            &scope,
+            &trusted_files(),
+        );
+        let leaver = start_inject_on(
+            &mut thread,
+            "config => { setTimeout(() => { throw new Error('before-1786'); __wake1786({ body: 'no' }); }, 10); \
+             return { body: 'left' }; }",
+            &scope,
+            &trusted_files(),
+        );
+        thread.drive();
+        assert_eq!(answer_body(&leaver), "left");
+        let err = heir
+            .try_recv()
+            .expect("answered")
+            .expect_err("never settled");
+        assert!(err.to_string().contains("never settled"), "{err:#}");
     }
 
     // A `require` a run keeps answers in that run's own timer, even after another run of the realm

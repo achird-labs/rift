@@ -587,6 +587,8 @@ predicate `inject`, and the `decorate` behavior — all of which run off the asy
   Per-imposter `state` isolation is unaffected. A hook's promise jobs and timers run only while its
   answer is awaited (an `inject` until it answers, an `async` `decorate` until its promise
   settles), within `timeoutMs`; what is left when the hook ends is dropped, where Node would run it.
+  If another hook of the imposter is still in flight, what is left runs with it until it answers,
+  and a throw there is logged and dropped: it never fails that other request.
 
 ```json
 {

@@ -50,6 +50,11 @@ record.
   two transitions' stamps as they landed, so a stalled one could put a lower stamp over a higher one. A
   client revalidating with `If-Modified-Since` alone then stayed on `304` until the next transition. A
   scenario's stamp now only rises.
+- **A job left behind by a finished script no longer fails another request** (#1786): when a run
+  answered with another run of its imposter in flight, what it left queued passed to that run, and a
+  throw in it failed that unrelated request with the other script's error. The throw is now logged and
+  dropped. A request waiting on a promise only that job would have resolved fails as a promise that never
+  settled, about 30 ms later, rather than with the throw's message.
 - **A delete no longer wipes the imposter that took the port** (#1763): with a shared journal,
   sequencer or proxy store, a delete cleared the port's entries up to 5 seconds after freeing the port,
   so a same-port create lost its recorded requests, response cycles and recordings. The clears now run

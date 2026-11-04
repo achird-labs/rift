@@ -27,7 +27,7 @@ the only allowed end). Run a copy in a temp directory, so `states/` stays out of
 | `Submit` | `submit_mb_job` (`:1119`), `MbPool::claim` (`:965`): the key's worker while it has a claim, else any |
 | `CallerLeaves` | the caller's `tokio::time::timeout` (`:2570`) or its cancellation drops the oneshot: `Reply::abandoned` |
 | `StartAbandoned`, `Defer`, `Start` | `start_inject` (`:2701`), `start_decorate` (`:4149`), `start_predicate_inject` (`:3071`): the abandoned check, `split_from` (`:416`), `live_state` (`:528`), the hook function, `admit` (`:561`) |
-| `OwnJob`, `InheritedJob` | `MbRealm::step` (`:579`), one job. It writes, and a throw ends the run it is tagged with (`:596`) |
+| `OwnJob`, `InheritedJob` | `MbRealm::step` (`:579`), one job. It writes. A throw ends the run it is tagged with if the run queued it, and is logged and dropped if the run inherited it (#1786) |
 | `Finish`, `Deadline`, `Abandoned`, `Idle` | `MbRealm::ending` (`:612`) |
 | `EndSave`, `FinishAnswered`, `EndRelease` | `MbRealm::end` (`:659`) in its order: `save_state` (`:674`), `hook.finish` (`:679`), `retag` and drops (`:686-:697`) |
 | `Panic` | `run_mb_worker` (`:1094-:1105`) |
@@ -127,7 +127,6 @@ fails today and states the correct behaviour. `Known.cfg` holds the violated inv
 |:--|:--|:--|:--|
 | #1784 | A restart between a request's hooks splits it across two cells: the inject does not see what the predicate wrote | `RequestKeepsOneCell` | Test: holds the predicate run at its save, restarts; body `undefined`, not `seen` |
 | #1785 | A getter on the answer runs after the save, so its write is lost with no other run in flight | `CellCurrentBeforeAnswer`, `NoLostUpdate` with `GetterWrites` | Test: second answer `undefined`, not `1`. Mountebank 2.9.5, run with the same script, answers `1` |
-| #1786 | A job left by a finished run throws, and fails the unrelated run that inherited it | `HeirFailsOnlyByItsOwnJob` | Test: 500 `left behind`, not 200 `waited`. On 2.9.5 the same throw ends the process, so that is no guide |
 
 Passing tests in that file put the model's other claims on the real engine: an end's order (`seeded, saved, finished,
 released`); a run held at its save keeps the imposter's next run behind it on one worker, with idle workers free; a run across

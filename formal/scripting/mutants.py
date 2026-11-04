@@ -36,6 +36,17 @@ ADD_ACTION = lambda action, name: [
 
 # name: (expected verdict, spec edits, cfg edits)
 mutants = {
+    # #1786: a left-behind job's throw ended the run that inherited it.
+    'an inherited job\'s throw ends the heir (#1786)': ('HeirFailsOnlyByItsOwnJob', [
+        ("""    /\\ run' = [run EXCEPT ![r].inherited = @ - 1, ![r].seq = @ + 1]
+    /\\ UNCHANGED <<busy, heirFailed>>
+""", """    /\\ \\/ /\\ run' = [run EXCEPT ![r].inherited = @ - 1, ![r].seq = @ + 1]
+          /\\ UNCHANGED <<busy, heirFailed>>
+       \\/ /\\ run' = [run EXCEPT ![r].inherited = @ - 1, ![r].seq = @ + 1, ![r].pc = "save",
+                                ![r].end = "threw"]
+          /\\ busy' = [busy EXCEPT ![run[r].worker] = r]
+          /\\ heirFailed' = heirFailed \\cup {r}
+""")], []),
     # #1678's first cut: the answer went out, then the state was saved.
     'the answer goes out before the save (#1678)': ('CellCurrentBeforeAnswer', [
         (SAVE_GUARD, SAVE_GUARD.replace('"save"', '"finish"')),
