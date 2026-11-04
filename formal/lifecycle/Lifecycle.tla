@@ -259,14 +259,15 @@ CreatePersistWrite(o) ==
     /\ UNCHANGED <<slot, floor, nextGen, phase, clock, nreq, req, deleteReturned,
                    lastStamp, shared, ghost>>
 
-\* The rollback of a failed persist (manager.rs:1565-1571): a plain `remove(port)`, not
-\* `remove_if_same`, then cancel.  The slot's holder may no longer be this generation.
+\* The rollback of a failed persist (create_imposter_staged): `remove_if_same` under `persist_lock`,
+\* then cancel.  The slot's holder may no longer be this generation (issue #1773).
 CreateRollback(o) ==
     /\ op[o].pc = "cRollback"
+    /\ persistLock = NoOp
     /\ LET p == op[o].port
            g == op[o].gen
-       IN /\ ghost' = [ghost EXCEPT !.removedOther = @ \/ (slot[p] # NoGen /\ slot[p] # g)]
-          /\ slot' = [slot EXCEPT ![p] = NoGen]
+       IN /\ ghost' = ghost
+          /\ slot' = IF slot[p] = g THEN [slot EXCEPT ![p] = NoGen] ELSE slot
           /\ phase' = [phase EXCEPT ![g] = "cancelled"]
           /\ req' = [req EXCEPT ![g] = Cut(@)]
           /\ op' = [op EXCEPT ![o].pc = op[o].ret, ![o].fail = "persist"]

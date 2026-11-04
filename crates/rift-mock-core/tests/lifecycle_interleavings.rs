@@ -298,6 +298,26 @@ fn names(points: &[Point]) -> Vec<String> {
         .collect()
 }
 
+/// Make `dir` read-only, so a datadir write fails. Root ignores the mode bits, and the tests that
+/// rely on this would then fail with a misleading message, so say so here.
+#[cfg(unix)]
+fn make_read_only(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).expect("chmod datadir");
+    assert!(
+        std::fs::write(dir.join("write-probe"), b"").is_err(),
+        "this test needs a read-only directory to fail writes: run it as a non-root user"
+    );
+}
+
+#[cfg(unix)]
+fn make_writable(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).expect("chmod datadir");
+}
+
 fn floor_read(p: &Point) -> bool {
     matches!(p, Point::CreateFloorRead { .. })
 }
@@ -574,14 +594,12 @@ async fn a_create_that_loses_the_claim_answers_nobody() {
     );
 }
 
-/// #1773: a failed datadir write rolls back with a plain `remove(port)`. By then a delete and a new create
-/// may have run, and the rollback then removes the new imposter from the table.
+/// #1773: a failed datadir write rolls back, and by then a delete and a new create may have run.
+/// The rollback must remove only its own imposter, or the new one loses its table entry and its
+/// listener can never be stopped.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1773"]
 async fn a_failed_create_rolls_back_only_itself() {
-    use std::os::unix::fs::PermissionsExt;
-
     let recorder = Arc::new(Recorder::default());
     let datadir = tempfile::tempdir().expect("datadir").keep();
     let manager = Arc::new(
@@ -589,12 +607,8 @@ async fn a_failed_create_rolls_back_only_itself() {
             .with_probe(Arc::clone(&recorder) as Arc<dyn Probe>),
     );
     let port = free_port();
-    let set_mode = |mode| {
-        std::fs::set_permissions(&datadir, std::fs::Permissions::from_mode(mode))
-            .expect("chmod datadir");
-    };
 
-    set_mode(0o555);
+    make_read_only(&datadir);
     let held = recorder.hold(|p| matches!(p, Point::CreatePersistFailed { .. }));
     let failing = tokio::spawn({
         let manager = Arc::clone(&manager);
@@ -605,7 +619,7 @@ async fn a_failed_create_rolls_back_only_itself() {
         .await;
 
     manager.delete_imposter(port).await.expect("delete");
-    set_mode(0o755);
+    make_writable(&datadir);
     manager
         .create_imposter(answering(port, "current"))
         .await
@@ -615,11 +629,93 @@ async fn a_failed_create_rolls_back_only_itself() {
     assert!(failing.await.expect("create task").is_err());
     let registered = manager.get_imposter(port).is_ok();
     let answer = get(port, None).await.map(|a| a.body);
-    let _ = manager.delete_all().await;
+    let report = manager.delete_all().await;
     assert!(
         registered,
         "the rollback removed the current imposter from the table; its listener still answers: {answer:?}"
     );
+    assert_eq!(answer.as_deref(), Some("current"));
+    assert_eq!(
+        report.deleted.len(),
+        1,
+        "a delete still reaches it: {report:?}"
+    );
+    assert!(
+        get(port, None).await.is_none(),
+        "nothing answers once the current imposter is deleted"
+    );
+}
+
+/// The rollback waits for `persist_lock`. A create dropped during that wait, as an admin request
+/// whose client went away is, must still roll back: `Err` or nothing, it is not running.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_create_dropped_while_its_rollback_waits_still_rolls_back() {
+    let recorder = Arc::new(Recorder::default());
+    let datadir = tempfile::tempdir().expect("datadir").keep();
+    let manager = Arc::new(
+        ImposterManager::with_datadir(Some(datadir.clone()))
+            .with_probe(Arc::clone(&recorder) as Arc<dyn Probe>),
+    );
+    let other = manager
+        .create_imposter(answering(0, "other"))
+        .await
+        .expect("create");
+    let port = free_port();
+
+    make_read_only(&datadir);
+    let write_failed = recorder.hold(|p| matches!(p, Point::CreatePersistFailed { .. }));
+    let failing = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.create_imposter(answering(port, "failing")).await }
+    });
+    recorder
+        .reached(|p| matches!(p, Point::CreatePersistFailed { .. }))
+        .await;
+
+    // A delete elsewhere takes the one `persist_lock` and keeps it.
+    let lock_held = recorder.hold(|p| matches!(p, Point::DeleteLocked { .. }));
+    let delete = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.delete_imposter(other).await.map(|_| ()) }
+    });
+    recorder
+        .reached(|p| matches!(p, Point::DeleteLocked { .. }))
+        .await;
+
+    write_failed.open();
+    // An abort lands at the task's next await, which is the wait for the lock.
+    failing.abort();
+    assert!(
+        failing.await.is_err_and(|e| e.is_cancelled()),
+        "the create was dropped, not finished"
+    );
+
+    let registered = manager.get_imposter(port).is_ok();
+    let answer = get(port, None).await.map(|a| a.body);
+    lock_held.open();
+    make_writable(&datadir);
+    delete.await.expect("delete task").expect("delete");
+
+    assert!(!registered, "a dropped create left its imposter registered");
+    assert_eq!(answer, None, "a dropped create left its imposter answering");
+}
+
+/// The rollback with nothing racing it: the failed create leaves no imposter behind.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_create_leaves_nothing_registered_or_answering() {
+    let datadir = tempfile::tempdir().expect("datadir").keep();
+    let manager = ImposterManager::with_datadir(Some(datadir.clone()));
+    let port = free_port();
+
+    make_read_only(&datadir);
+    let created = manager.create_imposter(answering(port, "failing")).await;
+    make_writable(&datadir);
+
+    assert!(created.is_err(), "the write fails: {created:?}");
+    assert!(manager.get_imposter(port).is_err(), "not registered");
+    assert!(get(port, None).await.is_none(), "not answering");
 }
 
 /// #1774: an apply sweep reports a port a concurrent delete already removed as a failure, where

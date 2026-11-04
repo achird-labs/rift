@@ -45,7 +45,7 @@ names here are the stable reference.
 | `CreateTryClaim` | `PortTable::try_claim`; the loser cancels and returns `PortInUse` |
 | `CreateClaimStore` | not code: reachable only in the "no `mutations` lock" mutant |
 | `CreatePersistLock`, `CreatePersistWrite` | `persist_imposter_with`: `persist_lock`, the `is_current` check, the write |
-| `CreateRollback` | the failed-persist branch: a plain `remove(port)`, then cancel |
+| `CreateRollback` | the failed-persist branch: `remove_if_same` under `persist_lock`, then cancel |
 | `DeleteLock`, `DeleteLookup`, `DeleteUnlink` | `delete_imposter_inner`, the unlink path, under `persist_lock` |
 | `DeleteRecordFloor` | `record_load_floor` |
 | `DeleteRemoveIfSame` | `PortTable::remove_if_same`; `persist_lock` is released after it |
@@ -79,7 +79,7 @@ names here are the stable reference.
 | Config | What races | Invariants left out |
 |:--|:--|:--|
 | `LifecyclePR.cfg` | two creates, one delete | the three in `Known.cfg` |
-| `Lifecycle.cfg` | two creates, two deletes, failing writes and unlinks | the three, plus `RemoveOnlyOwn`, `TableFileAgree`, `ErrDeleteStillServing` |
+| `Lifecycle.cfg` | two creates, two deletes, failing writes and unlinks | the three |
 | `LifecycleApply.cfg` | an apply sweep, a `delete_all`, a delete, a create | the three, plus `ApplyReportsTruth` |
 | `LifecycleReplace.cfg` | an `apply_one` replace, a delete, a create | the three, plus `ApplyReportsTruth` |
 | `Known.cfg` | the PR bounds, holding what open defects violate | |
@@ -88,7 +88,7 @@ names here are the stable reference.
 | Config | Distinct states | Depth | Wall time |
 |:--|--:|--:|--:|
 | `LifecyclePR.cfg` | 326,386 | 36 | 11 s |
-| `Lifecycle.cfg` | 1,174,452 | 42 | 42 s |
+| `Lifecycle.cfg` | 940,042 | 42 | 12 s |
 | `LifecycleApply.cfg` | 3,185,440 | 44 | 62 s |
 | `LifecycleReplace.cfg` | 4,156,101 | 45 | 219 s |
 
@@ -109,11 +109,9 @@ into the cfgs.
 | #1762 | `FloorMonotone` | A same-port re-create can be told `304` for new content, by two routes |
 | #1763 | `SharedStateBelongsToCurrent` | A delete clears the journal of the imposter that took the port. Only the journal path was reproduced |
 | #1764 | `LoserNeverAnswers` | A create that loses the claim has already answered requests. Reproduced on macOS; Linux not observed |
-| #1773 | `RemoveOnlyOwn`, `TableFileAgree` | A failed create's rollback removes the current imposter and leaves its listener running |
 | #1774 | `ApplyReportsTruth` | An apply sweep reports a concurrent delete as failed |
 
-`witness.py` requires each of these to stay reachable, except `TableFileAgree`, which takes about
-8 minutes to reach and follows from #1773.
+`witness.py` requires each of these to stay reachable.
 
 ## Known limits, not filed
 
@@ -123,12 +121,13 @@ into the cfgs.
 - **A replace takes whichever generation holds the port** (`ReplaceTakesItsOwn`). The table ends up
   as create-then-replace would leave it. One side effect is unconfirmed: the floor it records is the
   generation it looked up, not the one it removed.
-- **`ErrDeleteStillServing`.** It needs a failed datadir write and a failed unlink at once, and the
-  caller is then told a delete failed for an imposter already gone.
+- **`ErrDeleteStillServing` against a replace.** A replace's delete takes no lock, so it can remove an
+  imposter a delete has looked up. If that delete's unlink then fails, its caller gets `Err` for an
+  imposter already gone. `LifecycleReplace.cfg` keeps unlinks succeeding, so this is a witness.
 
 ## Witnesses and mutants
 
-`witness.py` runs 12 cases, each requiring an exact verdict: the limits and findings above, plus two
+`witness.py` runs 11 cases, each requiring an exact verdict: the limits and findings above, plus two
 controls. `mutants.py` puts fixed bugs back:
 
 | Bug put back | Caught by |
@@ -139,6 +138,8 @@ controls. `mutants.py` puts fixed bugs back:
 | The file goes after the imposter (#1124) | `ErrDeleteStillServing` |
 | The floor is not carried to the next generation (#1301) | `FloorMonotone`, on the model with the #1762 fix applied |
 | A failed persist leaves the imposter running (#563) | `ErrCreateNotRunning` |
+| The rollback removes whoever holds the port (#1773) | `RemoveOnlyOwn` |
+| The rollback does not take `persist_lock` (#1773) | `ErrDeleteStillServing` |
 | `try_claim` without the `mutations` lock | `OneClaimant` |
 | A drain that never ends | `OpsFinish`, on `Liveness.cfg` |
 

@@ -80,6 +80,20 @@ mutants = {
     'a failed persist leaves the imposter running (#563)': ('ErrCreateNotRunning', [
         (PERSIST_FAIL, PERSIST_FAIL.replace('![o].pc = "cRollback"', '![o].pc = op[o].ret, ![o].fail = "persist"'))],
         [('PersistFails = FALSE', 'PersistFails = TRUE')]),
+    # #1773: a failed create's rollback removed whichever generation held the port.
+    'the rollback removes whoever holds the port (#1773)': ('RemoveOnlyOwn', [
+        ("IN /\\ ghost' = ghost\n", "IN /\\ ghost' = [ghost EXCEPT !.removedOther = @ \\/ (slot[p] # NoGen /\\ slot[p] # g)]\n"),
+        ("/\\ slot' = IF slot[p] = g THEN [slot EXCEPT ![p] = NoGen] ELSE slot", "/\\ slot' = [slot EXCEPT ![p] = NoGen]")],
+        [('Creators = {c1}', 'Creators = {c1, c2}'), ('Preloaded = TRUE', 'Preloaded = FALSE'),
+         ('PersistFails = FALSE', 'PersistFails = TRUE'), ('    LoserNeverAnswers\n', '')]),
+    # #1773: the rollback waits for no lock, so it can take the imposter out from under a delete that
+    # has looked it up, whose failed unlink then says "still serving" of an imposter already gone.
+    'the rollback does not take persist_lock (#1773)': ('ErrDeleteStillServing', [
+        ("""    /\\ op[o].pc = "cRollback"
+    /\\ persistLock = NoOp
+""", """    /\\ op[o].pc = "cRollback"
+""")],
+        [('PersistFails = FALSE', 'PersistFails = TRUE'), ('UnlinkFails = FALSE', 'UnlinkFails = TRUE')]),
     # No `mutations` lock: two creates see the slot empty and both store.
     'try_claim without the mutations lock': ('OneClaimant', [
         (CLAIM_ATOMIC, '''            THEN /\\ op' = [op EXCEPT ![o].pc = "cStore"]
