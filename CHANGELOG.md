@@ -13,6 +13,10 @@ record.
 
 ### Fixed
 
+- **An apply no longer fails over a port a concurrent delete already removed** (#1774): a `PUT
+  /imposters` or reload sweep took the port's `NotFound` as a failure, so the whole request could
+  answer `500` when the port was exactly as asked. The port is now counted in neither `failed` nor
+  `deleted`, since this apply did not delete it, which is what `delete_all` already does.
 - **A same-port re-create is no longer told `304` for new content by a racing delete or a failed
   create** (#1762, completing #1301): a create that read the port's load floor before a delete
   recorded it could claim the freed port with a clock that never saw that floor, and a create whose
