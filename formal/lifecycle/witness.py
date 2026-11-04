@@ -17,7 +17,6 @@ spec = read(os.path.join(here, 'Lifecycle.tla'))
 pr_cfg = read(os.path.join(here, 'LifecyclePR.cfg'))
 known_cfg = read(os.path.join(here, 'Known.cfg'))
 mutants_cfg = read(os.path.join(here, 'Mutants.cfg'))
-full_cfg = read(os.path.join(here, 'Lifecycle.cfg'))
 apply_cfg = read(os.path.join(here, 'LifecycleApply.cfg'))
 replace_cfg = read(os.path.join(here, 'LifecycleReplace.cfg'))
 jar = jar_from_argv()
@@ -47,13 +46,13 @@ cases = [
      'FloorMonotone'),
     ('a delete clears the shared state of the generation that took the port meanwhile',
      only(known_cfg, 'SharedStateBelongsToCurrent'), 'SharedStateBelongsToCurrent'),
-    ('the rollback of a failed create removes the generation that took the port (#1773)',
-     only(full_cfg, 'RemoveOnlyOwn'), 'RemoveOnlyOwn'),
     ('an apply sweep reports a concurrent delete as failed (#1774)',
      only(apply_cfg, 'ApplyReportsTruth'), 'ApplyReportsTruth'),
-    # Documented limits that need two failures at once, or read as a legal order.
-    ('a delete fails its unlink after a rollback already removed the imposter',
-     only(full_cfg, 'ErrDeleteStillServing'), 'ErrDeleteStillServing'),
+    # Documented limits.
+    ('a delete fails its unlink after a replace already removed the imposter',
+     edit(only(replace_cfg, 'ErrDeleteStillServing'), [('UnlinkFails = FALSE', 'UnlinkFails = TRUE')],
+          'LifecycleReplace.cfg'),
+     'ErrDeleteStillServing'),
     ('a replace takes whichever generation holds the port', only(replace_cfg, 'ReplaceTakesItsOwn'),
      'ReplaceTakesItsOwn'),
     # The PR gate is green with the findings in Known.cfg.

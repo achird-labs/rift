@@ -582,6 +582,34 @@ impl PortTable {
 }
 
 /// Manages the lifecycle of multiple imposters
+/// Takes a create whose datadir write failed out of service when dropped, which is what lets the
+/// rollback survive its own future being dropped. Only this imposter: a delete and a new create may
+/// have run since the write failed, and removing the new one would orphan its listener (issue
+/// #1773).
+struct FailedCreateRollback<'a> {
+    table: &'a PortTable,
+    imposter: &'a Arc<Imposter>,
+    shutdown_tx: &'a broadcast::Sender<()>,
+    port: u16,
+}
+
+impl Drop for FailedCreateRollback<'_> {
+    fn drop(&mut self) {
+        if self
+            .table
+            .remove_if_same(self.port, self.imposter)
+            .is_none()
+        {
+            debug!(
+                port = self.port,
+                "a failed create's imposter was already gone; the port is left as it is"
+            );
+        }
+        self.imposter.cancel.cancel();
+        let _ = self.shutdown_tx.send(());
+    }
+}
+
 pub struct ImposterManager {
     /// Active imposters by port, one wait-free slot per possible `u16` port (issue #713).
     imposters: PortTable,
@@ -1613,12 +1641,22 @@ impl ImposterManager {
                 port,
                 generation: imposter.generation,
             });
-            self.imposters.remove(port);
             // No file to clean up: a failed persist leaves `{port}.json` exactly as it was (issue
             // #1158). The unlink that used to be here, for a truncated file, also deleted a reload's
             // own input file, and could delete a concurrent create's freshly persisted one.
-            imposter.cancel.cancel();
-            let _ = shutdown_tx.send(());
+            //
+            // Under the lock a delete that unlinks holds from its lookup to its removal (issue
+            // #1773), so this cannot pull the imposter out from under one. A replace's delete takes
+            // no lock. Armed before the wait, so an admin request dropped while waiting still rolls
+            // back, as `Err` promises, only then without the lock.
+            let rollback = FailedCreateRollback {
+                table: &self.imposters,
+                imposter: &imposter,
+                shutdown_tx: &shutdown_tx,
+                port,
+            };
+            let _persist = self.persist_lock.lock().await;
+            drop(rollback);
             self.probe(Point::CreateRolledBack {
                 port,
                 generation: imposter.generation,

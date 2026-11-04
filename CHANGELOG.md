@@ -11,6 +11,13 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failed create no longer removes the imposter that took its port** (#1773): when a create's
+  datadir write failed, the rollback removed whichever imposter held the port by then. That one
+  left the port table with its listener still answering, unreachable by any delete until a restart.
+  The rollback now removes only its own imposter, under the lock a delete that unlinks holds.
+
 ### Added
 
 - **`rift_http_proxy::admin_api::admin_path` is public** (#1746): the normalisation the admin
