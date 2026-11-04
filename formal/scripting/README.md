@@ -113,6 +113,7 @@ All four are modelled.
 |:--|:--|
 | The answer goes out before the save (#1678) | `CellCurrentBeforeAnswer` |
 | The getter on the answer runs after the save (#1785) | `NoLostUpdate` |
+| A later hook of a request loads the cell again (#1784), on `StateCellSequels.cfg` | `RequestKeepsOneCell` |
 | A run saves to the imposter's current cell (#1726) | `OldRunSavesToOldCell` |
 | The claim is released before the save | `OneLiveStatePerKey` |
 | No deferral across realms | `OneLiveStatePerKey` |
@@ -123,12 +124,9 @@ All four are modelled.
 
 ## Findings
 
-Each was reproduced on the engine by an `#[ignore]`d test in `crates/rift-mock-core/tests/scripting_interleavings.rs`, which
-fails today and states the correct behaviour. `Known.cfg` holds the violated invariants until the fix lands.
-
-| Issue | Finding | Invariant | Verified by |
-|:--|:--|:--|:--|
-| #1784 | A restart between a request's hooks splits it across two cells: the inject does not see what the predicate wrote | `RequestKeepsOneCell` | Test: holds the predicate run at its save, restarts; body `undefined`, not `seen` |
+None open. The model found #1784, #1785 and #1786, all fixed. Each has a test in
+`crates/rift-mock-core/tests/scripting_interleavings.rs` and a mutant above. A new finding gets an `#[ignore = "#n"]` test and a
+`witness.py` row, and stays out of the cfgs until its fix lands.
 
 Passing tests in that file put the model's other claims on the real engine: an end's order (`seeded, saved, finished,
 released`); a run held at its save keeps the imposter's next run behind it on one worker, with idle workers free; a run across

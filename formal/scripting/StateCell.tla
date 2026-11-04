@@ -88,16 +88,17 @@ Released(r) ==
 
 \* ---- The caller: a request on the serving path. ----
 
-\* ImposterCore::script_scope (imposter/core/mod.rs:1187) and script_file_access: an atomic load of
-\* each, made per hook call site, separately for each hook of a request (imposter/core/matching.rs:148,
-\* imposter/handler.rs:1589, :1632, :2273).  With Sequels, r2 is such a later hook of r1's request: it
-\* runs once r1 answered.  A run's kind is set here: a predicate inject answers as soon as its function
+\* ImposterCore::script_scope and script_file_access: an atomic load of each.  A request loads the
+\* scope once, before its first match, and every hook of it runs on that cell (#1784); the file access
+\* is loaded per hook, as a stub write has to reach a request about to run a script (#1645).  With
+\* Sequels, r2 is a later hook of r1's request: it runs once r1 answered.  A run's kind is set here: a predicate inject answers as soon as its function
 \* returned, and its caller blocks on a sync channel, so it can never be abandoned.
 Capture(r) ==
     /\ run[r].pc = "idle"
     /\ Sequels /\ r = r2 => run[r1].answered
     /\ \E kind \in Kinds :
-         run' = [run EXCEPT ![r].pc = "scoped", ![r].cell = current, ![r].files = access,
+         run' = [run EXCEPT ![r].pc = "scoped", ![r].cell = IF Sequels /\ r = r2 THEN run[r1].cell ELSE current,
+                            ![r].files = access,
                             ![r].kind = kind]
     /\ UNCHANGED <<current, access, accessChanges, cell, owner, holding, live, present, busy, panics,
                    written, owed, savedToOld, heirFailed>>
@@ -407,7 +408,7 @@ EndedRunsLeaveNothing ==
         /\ run[r].pc = "done" => run[r].own + run[r].inherited = 0 /\ r \notin holding
         /\ \A w \in Workers : busy[w] = r => run[r].pc \in {"save", "finish", "release"}
 
-\* ---- Findings (Known.cfg). ----
+\* ---- What the model found, all fixed. ----
 
 \* The hooks of one request run on one state, as one Mountebank imposter object's do.
 RequestKeepsOneCell ==

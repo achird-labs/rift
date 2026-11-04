@@ -98,6 +98,16 @@ mutants = {
                    owed, savedToOld, heirFailed>>''', 'Reenter'), []),
 }
 failed = False
+# #1784: a later hook of a request loaded the cell again, so a restart between them split the request.
+# It takes Sequels, which the base cfg leaves out.
+verdict, trace, out = tlc(jar, 'StateCell', edit(spec, [(
+    'IF Sequels /\\ r = r2 THEN run[r1].cell ELSE current', 'current')], 'one load per hook'),
+    read(os.path.join(here, 'StateCellSequels.cfg')))
+if verdict == 'RequestKeepsOneCell':
+    print(f'a later hook of a request loads the cell again (#1784): caught by {verdict}')
+else:
+    print(f'a later hook of a request loads the cell again (#1784): expected RequestKeepsOneCell, got {verdict}\n{out}')
+    failed = True
 for name, (expected, spec_edits, cfg_edits) in mutants.items():
     verdict, trace, out = tlc(jar, 'StateCell', edit(spec, spec_edits, name), edit(cfg, cfg_edits, name),
                               deadlock=False)

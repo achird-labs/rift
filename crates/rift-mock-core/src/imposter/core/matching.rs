@@ -123,6 +123,7 @@ impl Imposter {
                 request_from,
                 client_ip,
                 false,
+                self.script_scope(),
             )?
             .0)
     }
@@ -144,6 +145,7 @@ impl Imposter {
         request_from: Option<&str>,
         client_ip: Option<&str>,
         want_trace: bool,
+        script_scope: crate::scripting::ScriptScope,
     ) -> anyhow::Result<TracedMatch>
     where
         H: RequestHeaders,
@@ -165,7 +167,6 @@ impl Imposter {
         // Parse form data if Content-Type is application/x-www-form-urlencoded
         let form = Self::parse_form_data(headers_map, body);
 
-        let script_scope = self.script_scope();
         let script_files = self.script_file_access();
         let flow_id = self.resolve_flow_id(headers_map);
         // The request body as JSON, parsed at most once per request and shared across every stub's
@@ -286,6 +287,7 @@ impl Imposter {
                 client_ip,
                 timeout,
                 false,
+                self.script_scope(),
             )
             .await?
             .0)
@@ -309,6 +311,7 @@ impl Imposter {
         client_ip: Option<&str>,
         timeout: std::time::Duration,
         want_trace: bool,
+        script_scope: crate::scripting::ScriptScope,
     ) -> anyhow::Result<TracedMatch>
     where
         H: RequestHeaders + Clone + Send + 'static,
@@ -331,6 +334,7 @@ impl Imposter {
                 request_from,
                 client_ip,
                 want_trace,
+                script_scope,
             );
         }
 
@@ -354,6 +358,7 @@ impl Imposter {
                 request_from.as_deref(),
                 client_ip.as_deref(),
                 want_trace,
+                script_scope,
             )
         });
         // The wall-clock deadline exists to bound a runaway inject *script*. A blocking flow-store

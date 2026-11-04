@@ -3,7 +3,7 @@
 found stay reachable until fixed: each case runs TLC with one cfg and requires exactly the expected verdict.
 
 Usage: python3 witness.py <path to tla2tools.jar>.  A witness that holds means the model lost a race the
-README describes; a finding that holds means its fix landed, and Known.cfg and README.md change with it.
+README describes; a finding that holds means its fix landed, and README.md changes with it.
 """
 import os
 import sys
@@ -14,7 +14,6 @@ from tlacheck import edit, jar_from_argv, read, tlc  # noqa: E402
 here = os.path.dirname(os.path.abspath(__file__))
 spec = read(os.path.join(here, 'StateCell.tla'))
 pr_cfg = read(os.path.join(here, 'StateCellPR.cfg'))
-known_cfg = read(os.path.join(here, 'Known.cfg'))
 witness_cfg = read(os.path.join(here, 'Witness.cfg'))
 jar = jar_from_argv()
 
@@ -44,8 +43,6 @@ cases = [
     ('a panicking job loses its worker\'s unsaved writes (js_engine run_mb_worker)',
      flag(only(pr_cfg, 'NoLostUpdate'), 'Panics', 'TRUE'), 'NoLostUpdate'),
     # Filed findings, reachable until fixed (README.md, "Findings").
-    ('a restart between two hooks of a request splits it across two cells',
-     only(known_cfg, 'RequestKeepsOneCell'), 'RequestKeepsOneCell'),
     # The gates are green.
     ('StateCellPR.cfg (control; includes NeverTwoWorkersOneKey)', pr_cfg, 'ok'),
     ('Witness.cfg: every failure on, and affinity, one live state and the cells still hold (control)',
