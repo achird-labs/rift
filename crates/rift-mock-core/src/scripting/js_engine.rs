@@ -8493,9 +8493,16 @@ function respond(ctx) {
             trusted_files(),
             std::time::Duration::from_secs(60),
         ));
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Bounded, not fixed: under load the worker can take far longer than the interval to run it.
+        let waiting = std::time::Instant::now();
+        while ticks() == 0 {
+            assert!(
+                waiting.elapsed() < std::time::Duration::from_secs(10),
+                "precondition: its interval fires"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert!(owned(key), "precondition: the run is in flight");
-        assert!(ticks() > 0, "precondition: its interval fires");
         caller.abort();
         let started = std::time::Instant::now();
         while owned(key) {
