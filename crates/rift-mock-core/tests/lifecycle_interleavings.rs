@@ -144,6 +144,9 @@ fn to_json(point: Point) -> Value {
         Point::CreateAccepting { port, generation } => ("CreateAccepting", id(port, generation)),
         Point::CreateClaimed { port, generation } => ("CreateClaimed", id(port, generation)),
         Point::CreateClaimLost { port, generation } => ("CreateClaimLost", id(port, generation)),
+        Point::CreateFloorReread { port, generation } => {
+            ("CreateFloorReread", id(port, generation))
+        }
         Point::CreatePersisted { port, generation } => ("CreatePersisted", id(port, generation)),
         Point::CreatePersistFailed { port, generation } => {
             ("CreatePersistFailed", id(port, generation))
@@ -376,6 +379,7 @@ async fn create_request_delete_in_order() {
             "CreateFloorRead",
             "CreateAccepting",
             "CreateClaimed",
+            "CreateFloorReread",
             "CreatePersisted",
             "Served",
             "DeleteLocked",
@@ -440,7 +444,6 @@ async fn delete_all_deletes_what_it_saw() {
 /// #1762, two creates: a create reads the floor before a delete records it, then claims the freed
 /// port. A client holding the deleted imposter's stamp must not be told `304` for new content.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1762"]
 async fn a_create_racing_a_delete_still_carries_the_floor() {
     let recorder = Arc::new(Recorder::default());
     let manager = Arc::new(with_probe(&recorder));
@@ -454,6 +457,82 @@ async fn a_create_racing_a_delete_still_carries_the_floor() {
         answer.status, 200,
         "new content under a stamp at or below the deleted imposter's floor {floor}: {:?}",
         answer.last_modified
+    );
+}
+
+/// #1762: the re-read after the claim only helps if nothing is answered before it. Held there, the
+/// imposter holds the port and has not been told the floor yet, so a request must wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_create_answers_nothing_until_it_has_re_read_the_floor() {
+    let recorder = Arc::new(Recorder::default());
+    let manager = Arc::new(with_probe(&recorder));
+    let port = free_port();
+
+    let held = recorder.hold(|p| matches!(p, Point::CreateFloorReread { .. }));
+    let create = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.create_imposter(answering(port, "new")).await }
+    });
+    recorder
+        .reached(|p| matches!(p, Point::CreateFloorReread { .. }))
+        .await;
+
+    let early = tokio::time::timeout(Duration::from_millis(500), get(port, None)).await;
+    held.open();
+    create.await.expect("create task").expect("create");
+    let answer = get(port, None).await.map(|a| a.body);
+    let _ = manager.delete_all().await;
+
+    assert!(
+        early.is_err(),
+        "answered before the floor was re-read: {:?}",
+        early.map(|a| a.map(|a| a.body))
+    );
+    assert_eq!(answer.as_deref(), Some("new"));
+}
+
+/// #1762, a rollback: a create can answer between its claim and a failed datadir write. Those
+/// stamps must carry to the next imposter on the port, as a delete's do.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rolled_back_create_still_carries_the_floor() {
+    let recorder = Arc::new(Recorder::default());
+    let datadir = tempfile::tempdir().expect("datadir").keep();
+    let manager = Arc::new(
+        ImposterManager::with_datadir(Some(datadir.clone()))
+            .with_probe(Arc::clone(&recorder) as Arc<dyn Probe>),
+    );
+    let port = free_port();
+
+    make_read_only(&datadir);
+    let held = recorder.hold(|p| matches!(p, Point::CreatePersistFailed { .. }));
+    let failing = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.create_imposter(scenario_imposter(port)).await }
+    });
+    recorder
+        .reached(|p| matches!(p, Point::CreatePersistFailed { .. }))
+        .await;
+
+    assert_eq!(get(port, None).await.expect("answered").body, "one");
+    let after_transition = get(port, None).await.expect("answered");
+    assert_eq!(after_transition.body, "two");
+    let stamp = after_transition.last_modified.expect("a stamp");
+
+    held.open();
+    assert!(failing.await.expect("create task").is_err());
+    make_writable(&datadir);
+    manager
+        .create_imposter(scenario_imposter(port))
+        .await
+        .expect("re-create");
+
+    let answer = get(port, Some(&stamp)).await.expect("answered");
+    let _ = manager.delete_all().await;
+    assert_eq!(
+        (answer.status, answer.body.as_str()),
+        (200, "one"),
+        "the new imposter's answer differs, so a client holding {stamp} must not get 304"
     );
 }
 

@@ -23,6 +23,7 @@ The mapping (formal/lifecycle/README.md, "Trace validation"):
   CreateFloorRead               -> CreateReadFloor
   CreateAccepting               -> CreateSpawnAccept
   CreateClaimed / ClaimLost     -> CreateTryClaim, ok = won
+  CreateFloorReread             -> CreateReread
   CreatePersisted / PersistFailed -> CreatePersistWrite, ok = persisted
   CreateRolledBack              -> CreateRollback
   DeleteLocked                  -> DeleteLock
@@ -82,9 +83,10 @@ def labels(records):
             creator_of[r["generation"]] = o
             port, n = gen_fields(r)
             out.append({"action": "CreateBindOk", "op": o, "port": port, "n": n, "ok": True})
-        elif p in ("CreateFloorRead", "CreateAccepting"):
+        elif p in ("CreateFloorRead", "CreateAccepting", "CreateFloorReread"):
             port, n = gen_fields(r)
-            out.append({"action": {"CreateFloorRead": "CreateReadFloor", "CreateAccepting": "CreateSpawnAccept"}[p],
+            out.append({"action": {"CreateFloorRead": "CreateReadFloor", "CreateAccepting": "CreateSpawnAccept",
+                                   "CreateFloorReread": "CreateReread"}[p],
                         "op": creator_of[r["generation"]], "port": port, "n": n, "ok": True})
         elif p in ("CreateClaimed", "CreateClaimLost"):
             port, n = gen_fields(r)

@@ -2,14 +2,15 @@
 {"floor": null, "generation": 1, "point": "CreateFloorRead", "port": 57885, "seq": 1}
 {"generation": 1, "point": "CreateAccepting", "port": 57885, "seq": 2}
 {"generation": 1, "point": "CreateClaimed", "port": 57885, "seq": 3}
-{"generation": 1, "point": "CreatePersisted", "port": 57885, "seq": 4}
-{"generation": 1, "point": "Served", "port": 57885, "seq": 5, "stamp": 1793768751}
-{"point": "DeleteLocked", "port": 57885, "seq": 6}
-{"generation": 1, "point": "DeleteLookedUp", "port": 57885, "seq": 7}
-{"generation": 1, "point": "DeleteUnlinked", "port": 57885, "seq": 8}
-{"generation": 1, "point": "DeleteCancelled", "port": 57885, "seq": 9}
-{"generation": 1, "point": "DeleteCleared", "port": 57885, "seq": 10}
-{"floor": 1793768751, "generation": 1, "point": "DeleteFloorRecorded", "port": 57885, "seq": 11}
-{"generation": 1, "point": "DeleteRemoved", "port": 57885, "seq": 12}
-{"generation": 1, "point": "DeleteReturned", "port": 57885, "seq": 13}
-{"generation": 1, "point": "DeleteDrained", "port": 57885, "seq": 14, "timedOut": false}
+{"generation": 1, "point": "CreateFloorReread", "port": 57885, "seq": 4}
+{"generation": 1, "point": "CreatePersisted", "port": 57885, "seq": 5}
+{"generation": 1, "point": "Served", "port": 57885, "seq": 6, "stamp": 1793768751}
+{"point": "DeleteLocked", "port": 57885, "seq": 7}
+{"generation": 1, "point": "DeleteLookedUp", "port": 57885, "seq": 8}
+{"generation": 1, "point": "DeleteUnlinked", "port": 57885, "seq": 9}
+{"generation": 1, "point": "DeleteCancelled", "port": 57885, "seq": 10}
+{"generation": 1, "point": "DeleteCleared", "port": 57885, "seq": 11}
+{"floor": 1793768751, "generation": 1, "point": "DeleteFloorRecorded", "port": 57885, "seq": 12}
+{"generation": 1, "point": "DeleteRemoved", "port": 57885, "seq": 13}
+{"generation": 1, "point": "DeleteReturned", "port": 57885, "seq": 14}
+{"generation": 1, "point": "DeleteDrained", "port": 57885, "seq": 15, "timedOut": false}

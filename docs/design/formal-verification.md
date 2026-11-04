@@ -72,7 +72,7 @@ source, and each issue says which. A fixed one says so in the table.
 
 | Issue | Model | Defect |
 |:--|:--|:--|
-| #1762 | lifecycle | A same-port re-create can answer `304` for new content. One route closed by #1763 |
+| #1762 | lifecycle | A same-port re-create can answer `304` for new content. Fixed; #1763 closed one route |
 | #1763 | lifecycle | A delete clears the shared journal of the imposter that took the port. Fixed |
 | #1764 | lifecycle | A create that loses the port claim has already answered requests (observed on macOS only). Fixed |
 | #1773 | lifecycle | A failed create's rollback removes the current imposter and leaves its listener running. Fixed |
