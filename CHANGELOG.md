@@ -13,6 +13,11 @@ record.
 
 ### Fixed
 
+- **A same-port re-create is no longer told `304` for new content by a racing delete or a failed
+  create** (#1762, completing #1301): a create that read the port's load floor before a delete
+  recorded it could claim the freed port with a clock that never saw that floor, and a create whose
+  datadir write failed left no floor for the stamps it had served. A create now reads the floor again
+  after its claim, before it answers anyone, and a rollback records its floor.
 - **A create that loses the race for a port no longer answers requests** (#1764): two creates on one
   port can both bind, and the one that lost the claim answered with its own config until it found
   out, then returned `PortInUse` as if nothing had run. Its requests also landed in the port's shared

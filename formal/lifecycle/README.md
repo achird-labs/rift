@@ -42,6 +42,7 @@ names here are the stable reference.
 | `CreateBindBound` | not code: the model's generation bound refusing a create |
 | `CreateReadFloor` | `create_imposter_staged`: `load_floors`, then `continue_load_clock` |
 | `CreateSpawnAccept` | `spawn_accept_loops`: the loops run but accept nothing until the claim is won (#1764) |
+| `CreateReread` | the winner re-reads `load_floors`, then `admit` opens the loops (#1762) |
 | `CreateTryClaim` | `PortTable::try_claim`; the loser cancels and returns `PortInUse` |
 | `CreateClaimStore` | not code: reachable only in the "no `mutations` lock" mutant |
 | `CreatePersistLock`, `CreatePersistWrite` | `persist_imposter_with`: `persist_lock`, the `is_current` check, the write |
@@ -79,19 +80,18 @@ names here are the stable reference.
 
 | Config | What races | Invariants left out |
 |:--|:--|:--|
-| `LifecyclePR.cfg` | two creates, one delete | the two in `Known.cfg` |
-| `Lifecycle.cfg` | two creates, two deletes, failing writes and unlinks | the two |
-| `LifecycleApply.cfg` | an apply sweep, a `delete_all`, a delete, a create | the two, plus `ApplyReportsTruth` |
-| `LifecycleReplace.cfg` | an `apply_one` replace, a delete, a create | the two |
-| `Known.cfg` | the PR bounds, holding what open defects violate | |
+| `LifecyclePR.cfg` | two creates, one delete | |
+| `Lifecycle.cfg` | two creates, two deletes, failing writes and unlinks | |
+| `LifecycleApply.cfg` | an apply sweep, a `delete_all`, a delete, a create | `ApplyReportsTruth` |
+| `LifecycleReplace.cfg` | an `apply_one` replace, a delete, a create | |
 | `Mutants.cfg` | one create, two deletes: where a mutant's violation is its own | |
 
 | Config | Distinct states | Depth | Wall time |
 |:--|--:|--:|--:|
-| `LifecyclePR.cfg` | 131,818 | 35 | 4 s |
-| `Lifecycle.cfg` | 299,508 | 42 | 4 s |
-| `LifecycleApply.cfg` | 715,180 | 44 | 6 s |
-| `LifecycleReplace.cfg` | 1,128,480 | 46 | 8 s |
+| `LifecyclePR.cfg` | 18,582 | 37 | 1 s |
+| `Lifecycle.cfg` | 111,170 | 43 | 2 s |
+| `LifecycleApply.cfg` | 567,048 | 45 | 4 s |
+| `LifecycleReplace.cfg` | 252,034 | 46 | 2 s |
 
 Times are from a laptop shared with other builds, so read them as an order of magnitude.
 
@@ -107,7 +107,6 @@ into the cfgs.
 
 | Issue | Invariant | Defect |
 |:--|:--|:--|
-| #1762 | `FloorMonotone` | A same-port re-create can be told `304` for new content, when a create reads the floor before a delete records it |
 | #1774 | `ApplyReportsTruth` | An apply sweep reports a concurrent delete as failed |
 
 `witness.py` requires each of these to stay reachable.
@@ -124,11 +123,19 @@ into the cfgs.
   `DeleteRemoveIfSame`'s else-branch is reachable only this way.
 - **A client too slow to read.** With `DrainTimesOut`, a response is written after the delete returned.
   The drain's bound is deliberate.
+- **A stamp between the cancel and the end of the drain.** A request already past its cancel check can
+  stamp after the floor was recorded and the next generation can reuse it. Holding a request at
+  `Point::CasApplied` through a delete and a re-create delivered no response, because after the cancel
+  a stamp reaches a client only if its response finishes in a poll that began before the cancel. That
+  is one forced run, not a proof. The model cannot see it, and raising the next generation after the
+  drain would neither close it in the model nor have a test that fails without it (#1762).
+- **An in-process door during a create.** The `/__rift/` gateway and the front door reach an imposter
+  through the table, not its gate, so between the claim and `CreateReread` they can serve the old stamp.
 - **Two creates both bind.** `BindCheckSuffices` is violated by design: the claim decides.
 
 ## Witnesses and mutants
 
-`witness.py` runs 7 cases, each requiring an exact verdict: the limits and findings above, plus two
+`witness.py` runs 5 cases, each requiring an exact verdict: the limits and findings above, plus two
 controls. `mutants.py` puts fixed bugs back:
 
 | Bug put back | Caught by |
@@ -140,6 +147,10 @@ controls. `mutants.py` puts fixed bugs back:
 | The clear runs after the slot is vacated (#1763) | `SharedStateBelongsToCurrent` |
 | The floor is recorded before the cancel (#1762) | `FloorMonotone` |
 | The floor is not carried to the next generation (#1301) | `FloorMonotone` |
+| The floor is not re-read after the claim (#1762) | `FloorMonotone` |
+| The gate opens before the floor is re-read (#1762) | `FloorMonotone` |
+| A rollback records no floor (#1762) | `FloorMonotone` |
+| The accept loops answer before the claim (#1764) | `LoserNeverAnswers` |
 | A failed persist leaves the imposter running (#563) | `ErrCreateNotRunning` |
 | The rollback removes whoever holds the port (#1773) | `RemoveOnlyOwn` |
 | The rollback does not take `persist_lock` (#1773) | `ErrDeleteStillServing` |

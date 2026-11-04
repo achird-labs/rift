@@ -576,7 +576,7 @@ impl PortTable {
 /// have run since the write failed, and removing the new one would orphan its listener (issue
 /// #1773).
 struct FailedCreateRollback<'a> {
-    table: &'a PortTable,
+    manager: &'a ImposterManager,
     imposter: &'a Arc<Imposter>,
     shutdown_tx: &'a broadcast::Sender<()>,
     port: u16,
@@ -584,8 +584,13 @@ struct FailedCreateRollback<'a> {
 
 impl Drop for FailedCreateRollback<'_> {
     fn drop(&mut self) {
+        // It may have answered between its claim and the failed write, so the next imposter on the
+        // port continues its clock (issue #1762). Cancelled first, so no stamp lands above the floor.
+        self.imposter.cancel.cancel();
+        self.manager.keep_load_floor(self.port, self.imposter);
         if self
-            .table
+            .manager
+            .imposters
             .remove_if_same(self.port, self.imposter)
             .is_none()
         {
@@ -594,7 +599,6 @@ impl Drop for FailedCreateRollback<'_> {
                 "a failed create's imposter was already gone; the port is left as it is"
             );
         }
-        self.imposter.cancel.cancel();
         let _ = self.shutdown_tx.send(());
     }
 }
@@ -1625,6 +1629,19 @@ impl ImposterManager {
             port,
             generation: imposter.generation,
         });
+        // A delete vacates only after recording its floor, so a claim sees every floor recorded
+        // before it, including one recorded since the read above (issue #1762). Before the gate
+        // opens, so no connection is answered under a stamp the deleted imposter already served.
+        // The in-process doors reach the imposter through the table, and can serve the old stamp
+        // in the moment before this.
+        let floor = self.load_floors.lock().get(&port).copied();
+        if let Some(floor) = floor {
+            imposter.continue_load_clock(floor);
+        }
+        self.probe(Point::CreateFloorReread {
+            port,
+            generation: imposter.generation,
+        });
         admit.send_replace(true);
 
         // Persist synchronously and surface the result: a create that can't be durably recorded
@@ -1648,7 +1665,7 @@ impl ImposterManager {
             // request dropped while waiting still rolls back, as `Err` promises, only then without
             // the lock.
             let rollback = FailedCreateRollback {
-                table: &self.imposters,
+                manager: self,
                 imposter: &imposter,
                 shutdown_tx: &shutdown_tx,
                 port,
@@ -2208,17 +2225,23 @@ impl ImposterManager {
     /// the imposter leaves the map, so a same-port create that wins the freed slot already sees it;
     /// a delete that then fails leaves a floor behind, which is harmless — floors only rise.
     fn record_load_floor(&self, port: u16, imposter: &Imposter) {
+        let floor = self.keep_load_floor(port, imposter);
+        self.probe(Point::DeleteFloorRecorded {
+            port,
+            generation: imposter.generation,
+            floor,
+        });
+    }
+
+    /// Raise `port`'s floor to `imposter`'s load clock, and return the clock's reading.
+    fn keep_load_floor(&self, port: u16, imposter: &Imposter) -> i64 {
         let floor = imposter.load_clock.floor_secs();
         self.load_floors
             .lock()
             .entry(port)
             .and_modify(|f| *f = (*f).max(floor))
             .or_insert(floor);
-        self.probe(Point::DeleteFloorRecorded {
-            port,
-            generation: imposter.generation,
-            floor,
-        });
+        floor
     }
 
     /// Clear what the sequencer, a shared journal and a shared proxy store hold for `port`. They are

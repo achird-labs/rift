@@ -55,8 +55,8 @@ PortOf(g) == g[1]
 Max(a, b) == IF a >= b THEN a ELSE b
 Min(S) == CHOOSE q \in S : \A r \in S : q <= r
 
-\* A generation answers requests once it holds the port and its cancel token is untouched.  An
-\* "accepting" generation's loops run behind a closed gate (#1764).
+\* A generation answers requests once it holds the port, has re-read the floor, and its cancel token
+\* is untouched.  "accepting" and "admitting" generations' loops wait behind a closed gate (#1764).
 Serving == {"claimed"}
 
 VARIABLES
@@ -65,7 +65,7 @@ VARIABLES
     floor,          \* [Ports -> Nat]: `load_floors` (manager.rs:2095); 0 = none recorded
     nextGen,        \* [Ports -> Nat]: the next generation number per port
     persistLock,    \* Ops \cup {NoOp}: `persist_lock` (a tokio Mutex)
-    phase,          \* [GenIds -> {"unborn", "accepting", "claimed", "cancelled", "dead"}]
+    phase,          \* [GenIds -> {"unborn", "accepting", "admitting", "claimed", "cancelled", "dead"}]
     clock,          \* [GenIds -> [last, stamp, changes]]: `last` is the generation's `LoadClock`
                     \*   (core/mod.rs:155), `stamp` the stamp its content is served under
     nreq,           \* [GenIds -> Nat]: requests this generation has started (a bound)
@@ -191,9 +191,7 @@ CreateReadFloor(o) ==
     /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, nreq, req,
                    deleteReturned, lastStamp, shared, ghost>>
 
-\* spawn_accept_loops: the loops run, but wait for the claim before their first accept (#1764).  The
-\* code opens the gate in a statement after the claim; opening it in CreateTryClaim allows requests
-\* no later than the code does.
+\* spawn_accept_loops: the loops run, but wait for the claim before their first accept (#1764).
 CreateSpawnAccept(o) ==
     /\ op[o].pc = "cAccept"
     /\ phase' = [phase EXCEPT ![op[o].gen] = "accepting"]
@@ -209,8 +207,8 @@ CreateTryClaim(o) ==
            g == op[o].gen
        IN IF slot[p] = NoGen
             THEN /\ slot' = [slot EXCEPT ![p] = g]
-                 /\ phase' = [phase EXCEPT ![g] = "claimed"]
-                 /\ op' = [op EXCEPT ![o].pc = "cPersist"]
+                 /\ phase' = [phase EXCEPT ![g] = "admitting"]
+                 /\ op' = [op EXCEPT ![o].pc = "cReread"]
                  /\ UNCHANGED <<req, ghost>>
             ELSE /\ phase' = [phase EXCEPT ![g] = "cancelled"]
                  /\ req' = [req EXCEPT ![g] = Cut(@)]
@@ -228,10 +226,25 @@ CreateClaimStore(o) ==
            g == op[o].gen
        IN /\ ghost' = [ghost EXCEPT !.lostClaim = @ \/ slot[p] # NoGen]
           /\ slot' = [slot EXCEPT ![p] = g]
-          /\ phase' = [phase EXCEPT ![g] = "claimed"]
-          /\ op' = [op EXCEPT ![o].pc = "cPersist"]
+          /\ phase' = [phase EXCEPT ![g] = "admitting"]
+          /\ op' = [op EXCEPT ![o].pc = "cReread"]
     /\ UNCHANGED <<file, floor, nextGen, persistLock, clock, nreq, req, deleteReturned,
                    lastStamp, shared>>
+
+\* After the claim: re-read the floor, which a delete may have recorded since CreateReadFloor, then
+\* open the gate (#1762).  A delete may already have cancelled this generation, which stays cancelled.
+CreateReread(o) ==
+    /\ op[o].pc = "cReread"
+    /\ LET g == op[o].gen
+           again == floor[op[o].port]
+           raised == Max(clock[g].last, again)
+       IN /\ clock' = [clock EXCEPT ![g] =
+                 IF @.stamp > again THEN [@ EXCEPT !.last = raised]
+                                    ELSE [@ EXCEPT !.last = raised + 1, !.stamp = raised + 1]]
+          /\ phase' = IF phase[g] = "admitting" THEN [phase EXCEPT ![g] = "claimed"] ELSE phase
+    /\ op' = [op EXCEPT ![o].pc = "cPersist"]
+    /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, nreq, req, deleteReturned, lastStamp,
+                   shared, ghost>>
 
 \* persist_imposter_with takes `persist_lock` (manager.rs:3080).
 CreatePersistLock(o) ==
@@ -270,9 +283,10 @@ CreateRollback(o) ==
        IN /\ ghost' = ghost
           /\ slot' = IF slot[p] = g THEN [slot EXCEPT ![p] = NoGen] ELSE slot
           /\ phase' = [phase EXCEPT ![g] = "cancelled"]
+          /\ floor' = [floor EXCEPT ![p] = Max(@, clock[g].last)]
           /\ req' = [req EXCEPT ![g] = Cut(@)]
           /\ op' = [op EXCEPT ![o].pc = op[o].ret, ![o].fail = "persist"]
-    /\ UNCHANGED <<file, floor, nextGen, persistLock, clock, nreq, deleteReturned,
+    /\ UNCHANGED <<file, nextGen, persistLock, clock, nreq, deleteReturned,
                    lastStamp, shared>>
 
 (***************************************************************************)
@@ -315,7 +329,7 @@ DeleteUnlink(o) ==
              /\ persistLock' = NoOp
              /\ UNCHANGED <<slot, file>>
              /\ ghost' = [ghost EXCEPT !.errDeleteGone =
-                    @ \/ slot'[p] # g \/ phase[g] \notin Serving]
+                    @ \/ slot'[p] # g \/ phase[g] \notin Serving \cup {"admitting"}]
              /\ op' = [op EXCEPT ![o].pc = "dErr"]
     /\ UNCHANGED <<floor, nextGen, phase, clock, nreq, req, deleteReturned, lastStamp, shared>>
 
@@ -543,7 +557,7 @@ ReqWrite(g) ==
 OpStep(o) ==
     \/ CreateBindBusy(o) \/ CreateBindBound(o) \/ CreateBindOk(o) \/ CreateReadFloor(o)
     \/ CreateSpawnAccept(o)
-    \/ CreateTryClaim(o) \/ CreateClaimStore(o) \/ CreatePersistLock(o) \/ CreatePersistWrite(o)
+    \/ CreateTryClaim(o) \/ CreateClaimStore(o) \/ CreateReread(o) \/ CreatePersistLock(o) \/ CreatePersistWrite(o)
     \/ CreateRollback(o)
     \/ DeleteLock(o) \/ DeleteLookup(o) \/ DeleteUnlink(o) \/ DeleteRecordFloor(o)
     \/ DeleteRemoveIfSame(o) \/ ReplaceLock(o) \/ ReplaceLookup(o) \/ DeleteCancel(o)
@@ -576,7 +590,7 @@ TypeInv ==
     /\ file \in [Ports -> GenIds \cup {NoGen}]
     /\ floor \in [Ports -> Nat]
     /\ persistLock \in Ops \cup {NoOp}
-    /\ phase \in [GenIds -> {"unborn", "accepting", "claimed", "cancelled", "dead"}]
+    /\ phase \in [GenIds -> {"unborn", "accepting", "admitting", "claimed", "cancelled", "dead"}]
     /\ req \in [GenIds -> {"none", "computing", "writing"}]
     /\ \A g \in GenIds : nreq[g] <= MaxReqs /\ clock[g].changes <= MaxChanges
 
@@ -619,7 +633,7 @@ ApplyReportsTruth == ~ghost.phantomFail
 TableFileAgree == Quiescent => \A p \in Ports : file[p] = slot[p]
 
 \* Every slot holds a generation that claimed it: serving, or being deleted under `persist_lock`.
-TableHoldsLive == \A p \in Ports : slot[p] # NoGen => phase[slot[p]] \in {"claimed", "cancelled"}
+TableHoldsLive == \A p \in Ports : slot[p] # NoGen => phase[slot[p]] \in {"admitting", "claimed", "cancelled"}
 
 \* Witness (witness.py): PortInUse comes only from the bind check, never from the claim.  Violated
 \* by design: two creates pass the check and both bind under SO_REUSEPORT (manager.rs:1540), and

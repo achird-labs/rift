@@ -54,6 +54,9 @@ pub enum Point {
     /// `PortTable::try_claim` found the slot held; the create fails with `PortInUse`
     /// (`CreateTryClaim`, the loser).
     CreateClaimLost { port: u16, generation: Generation },
+    /// The claim's winner re-read the load floor, which a delete may have recorded since
+    /// `CreateFloorRead`; its accept loops open next (`CreateReread`).
+    CreateFloorReread { port: u16, generation: Generation },
     /// The datadir write succeeded, or was skipped for a generation no longer registered
     /// (`CreatePersistWrite`).
     CreatePersisted { port: u16, generation: Generation },

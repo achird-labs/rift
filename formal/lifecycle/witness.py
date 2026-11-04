@@ -15,7 +15,6 @@ from tlacheck import edit, jar_from_argv, read, tlc  # noqa: E402
 here = os.path.dirname(os.path.abspath(__file__))
 spec = read(os.path.join(here, 'Lifecycle.tla'))
 pr_cfg = read(os.path.join(here, 'LifecyclePR.cfg'))
-known_cfg = read(os.path.join(here, 'Known.cfg'))
 mutants_cfg = read(os.path.join(here, 'Mutants.cfg'))
 apply_cfg = read(os.path.join(here, 'LifecycleApply.cfg'))
 jar = jar_from_argv()
@@ -35,14 +34,12 @@ cases = [
      'NoServeAfterDeleteReturns'),
     ('the same, with the drain waiting (control)', only(mutants_cfg, 'NoServeAfterDeleteReturns'), 'ok'),
     ('two creates pass the bind check and both bind; the claim decides',
-     only(known_cfg, 'BindCheckSuffices'), 'BindCheckSuffices'),
+     only(pr_cfg, 'BindCheckSuffices'), 'BindCheckSuffices'),
     # Filed findings, reachable until fixed (README.md, "Findings").
-    ('a same-port create misses the load floor a concurrent delete records', only(known_cfg, 'FloorMonotone'),
-     'FloorMonotone'),
     ('an apply sweep reports a concurrent delete as failed (#1774)',
      only(apply_cfg, 'ApplyReportsTruth'), 'ApplyReportsTruth'),
     # Documented limits.
-    # The PR gate is green with the findings in Known.cfg.
+    # The PR gate is green.
     ('LifecyclePR.cfg (control)', pr_cfg, 'ok'),
 ]
 failed = False

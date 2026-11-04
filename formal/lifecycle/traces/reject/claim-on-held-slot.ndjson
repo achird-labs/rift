@@ -2,9 +2,11 @@
 {"floor": null, "generation": 1, "point": "CreateFloorRead", "port": 57885, "seq": 1}
 {"generation": 1, "point": "CreateAccepting", "port": 57885, "seq": 2}
 {"generation": 1, "point": "CreateClaimed", "port": 57885, "seq": 3}
-{"generation": 1, "point": "CreatePersisted", "port": 57885, "seq": 4}
-{"generation": 2, "point": "CreateBound", "port": 57885, "seq": 5}
-{"floor": null, "generation": 2, "point": "CreateFloorRead", "port": 57885, "seq": 6}
-{"generation": 2, "point": "CreateAccepting", "port": 57885, "seq": 7}
-{"generation": 2, "point": "CreateClaimed", "port": 57885, "seq": 8}
-{"generation": 2, "point": "CreatePersisted", "port": 57885, "seq": 9}
+{"generation": 1, "point": "CreateFloorReread", "port": 57885, "seq": 4}
+{"generation": 1, "point": "CreatePersisted", "port": 57885, "seq": 5}
+{"generation": 2, "point": "CreateBound", "port": 57885, "seq": 6}
+{"floor": null, "generation": 2, "point": "CreateFloorRead", "port": 57885, "seq": 7}
+{"generation": 2, "point": "CreateAccepting", "port": 57885, "seq": 8}
+{"generation": 2, "point": "CreateClaimed", "port": 57885, "seq": 9}
+{"generation": 2, "point": "CreateFloorReread", "port": 57885, "seq": 10}
+{"generation": 2, "point": "CreatePersisted", "port": 57885, "seq": 11}
