@@ -56,9 +56,10 @@ cases = [
     # Filed findings, reachable until fixed (README.md, "Findings").
     ('one stream\'s fault takes the other streams of an HTTP/2 connection (#1782)',
      only(known_cfg, 'H2FaultStaysOnStream'), 'H2FaultStaysOnStream'),
-    ('a close that sends RST discards what the kernel still holds (#1783)',
+    # Accepted as what a reset means (#1783, closed): it stays reachable, and documented.
+    ('a close that sends RST discards what the kernel still holds',
      only(known_cfg, 'RstDiscardsNothing'), 'RstDiscardsNothing'),
-    # The PR gate is green with those two in Known.cfg.
+    # The PR gate is green with #1782 in Known.cfg.
     ('FaultIoPR.cfg (control)', pr_cfg, 'ok'),
 ]
 TAKE = "    /\\ cell' = None     \\* FaultCell::take\n"

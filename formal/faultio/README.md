@@ -44,7 +44,7 @@ MALFORMED_RESPONSE_CHUNK: N whole, then 77 of 77 payload bytes
 RANDOM_DATA_THEN_CLOSE: N whole, then 10 of 10 payload bytes
 ```
 
-**But a reset can still destroy bytes already handed to the kernel**, which is #1783.
+**But a reset can still destroy bytes already handed to the kernel.** That is accepted as what a reset means (#1783).
 
 HTTP/2 does not use this ordering. `apply_tcp_fault` (`rift-http-proxy/src/gateway.rs:38`) never arms the cell on h2: the
 service errs and hyper resets that stream (`proto/h2/server.rs:465`). The imposter's own listener has no such check and
@@ -81,7 +81,7 @@ relies on serving a faulting imposter HTTP/1-only, decided once at accept, which
 | `FaultNeverTripsEarlierBytes` | A fault never takes the connection with an earlier response's bytes in the process | PR, full |
 | `LingerDeliversResponse` | A reset under a refusal comes after the refusal and its FIN (#1460) | PR, full |
 | `H2FaultStaysOnStream` | One h2 stream's fault takes no other stream | Known (#1782) |
-| `RstDiscardsNothing` | A close that sends RST discards nothing the kernel still holds | Known (#1783) |
+| `RstDiscardsNothing` | A close that sends RST discards nothing the kernel still holds | Violated by design, witness (#1783) |
 
 ## Run table
 
@@ -111,7 +111,8 @@ run showed `PlainShutdown` at zero: nothing closed a connection except a refusal
 | A full socket under a payload fault over http | `PayloadAlwaysWritten` violated |
 | `DrainOutrunsDelivery = TRUE` | `LingerDeliversResponse` violated |
 | `ImposterArmsOnH2 = FALSE`, `apply_tcp_fault`'s rule (control for #1782) | no error |
-| `Known.cfg`, one invariant at a time | `H2FaultStaysOnStream`, `RstDiscardsNothing` violated |
+| `Known.cfg` | `H2FaultStaysOnStream` violated |
+| `witness.py` | `RstDiscardsNothing` violated, by design |
 | `FaultIoPR.cfg` (control) | no error |
 
 ## Mutants
@@ -138,16 +139,18 @@ its own.
 | Issue | What | How it was verified |
 |:--|:--|:--|
 | #1782 | A fault stub added under an open h2 connection aborts every stream on it | Reproduced: `a_fault_stub_added_under_an_open_h2_connection_resets_only_its_stream` (`#[ignore]`) fails with the other stream at `BrokenPipe`, probe `armed [Empty], taken [(Empty, RawSocket)]` |
-| #1783 | A reset for pipelined N+1 can discard N's tail from the kernel's send queue | Reproduced on macOS loopback: `a_reset_for_a_pipelined_response_leaves_the_earlier_response_whole` (`#[ignore]`), `33386923 of 33554432 bytes`, then `ConnectionReset`. It may be accepted as what a reset means; the issue asks that to be decided |
 
-Each is in `Known.cfg`; its fix moves the invariant to `FaultIoPR.cfg` and `FaultIo.cfg`, removes the `#[ignore]` and
+It is in `Known.cfg`; its fix moves the invariant to `FaultIoPR.cfg` and `FaultIo.cfg`, removes the `#[ignore]` and
 deletes its row in `witness.py`.
 
 ## Documented limits, reproduced or read
 
+- **A reset discards what the kernel still holds.** With a slow reader, a reset for pipelined N+1 delivered 33,385,511 of
+  N's 33,554,432 bytes on macOS loopback. The owner accepted this as what a reset means (#1783, closed), and
+  `docs/features/fault-injection.md` says so.
 - **Unread bytes turn a graceful close into a reset.** Reproduced: `unread_pipelined_bytes_turn_an_empty_close_into_a_reset`
   gets `ConnectionReset` from `EMPTY_RESPONSE` with 2 MiB pipelined behind the request. The kernel decides that, and the
-  class is noted on #1783. Not filed apart.
+  class is noted on #1783 and in `docs/features/fault-injection.md`.
 - **A payload over http is best-effort.** `FaultIo::trip` uses `try_write` and logs a failure (`fault_io.rs:419`), as its
   comment says. `PayloadAlwaysWritten` shows the model reaches it. The pipelined run still delivered every byte (above),
   so it is **read from the source, not reproduced**. `Trip` above TLS waits instead.

@@ -275,6 +275,11 @@ keep negotiating **HTTP/2**; there a TCP fault **resets that one stream** (`RST_
 `INTERNAL_ERROR`, for every fault kind) and leaves the connection and its other streams working.
 Aborting the socket would take down every request multiplexed on it.
 
+A reset is abrupt, and that includes data still on its way. A client that pipelines a request past a
+faulted one and reads slowly can lose the tail of the *earlier* response: `SO_LINGER(0)` discards what
+the kernel has not yet sent. An empty response behaves similarly: bytes the client pipelined behind the
+faulted request are left unread, so the kernel may turn the close into a reset.
+
 With `recordRequests: true` the faulted request is journaled with its `matchOutcome` but without
 `status` or `latencyMs`, since no response was sent. This holds for every TCP fault: `_rift.fault.tcp`,
 a top-level `fault` and a script's `reset()`, and for every door the request came through.

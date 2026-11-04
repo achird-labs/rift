@@ -438,15 +438,6 @@ async fn a_reset_for_a_pipelined_response_adds_nothing_to_the_earlier_one() {
     assert!(bytes_of_n_before_a_reset().await <= BIG);
 }
 
-/// `RstDiscardsNothing`: hyper hands N to the kernel before N+1 runs, but `SO_LINGER(0)` discards
-/// what the kernel has not sent yet, so a client that pipelines past a slow read loses N's tail.
-/// Depends on the kernel's buffers; reproduced on macOS loopback.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "#1783"]
-async fn a_reset_for_a_pipelined_response_leaves_the_earlier_response_whole() {
-    assert_eq!(bytes_of_n_before_a_reset().await, BIG);
-}
-
 /// The documented limit `GracefulFaultEndsInFin`: bytes the client pipelined past the faulted
 /// request sit unread in the kernel when the socket closes, so a graceful fault reaches the client
 /// as a reset. The kernel decides that, as it did for the refusals #1460 lingers on.

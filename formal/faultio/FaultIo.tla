@@ -530,7 +530,8 @@ LingerDeliversResponse ==
 \* The fault of one HTTP/2 stream takes no other stream (fault_io.rs:183, gateway.rs:25).  #1782.
 H2FaultStaysOnStream == ~ghost.collateral
 
-\* A close that sends RST discards nothing the kernel has not delivered yet.  #1783.
+\* A close that sends RST discards nothing the kernel has not delivered yet.  Violated by design: a
+\* reset is abrupt (#1783, docs/features/fault-injection.md).
 RstDiscardsNothing == ~ghost.discarded
 
 (***************************************************************************)

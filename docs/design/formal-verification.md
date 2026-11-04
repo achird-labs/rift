@@ -67,7 +67,7 @@ one direction model checking alone cannot.
 
 ## What it found
 
-Sixteen defects, each reproduced by a failing test on the engine. Parts of some were only traced through the
+Fifteen defects, each reproduced by a failing test on the engine. Parts of some were only traced through the
 source, and each issue says which. None is fixed yet, and all are held for triage.
 
 | Issue | Model | Defect |
@@ -84,7 +84,6 @@ source, and each issue says which. None is fixed yet, and all are held for triag
 | #1780 | scenario | A set or delete that decided "no change" can still move the state, unstamped |
 | #1781 | scenario | A stub scan reads state once per gate, so a transition mid-scan gives a no-match |
 | #1782 | faultio | A fault stub added under an open HTTP/2 connection aborts every stream on it |
-| #1783 | faultio | A reset for a pipelined response can discard an earlier response's tail from the kernel's queue. Whether this is a defect is the owner's call |
 | #1784 | scripting | A restart between a request's hooks splits it across two state cells |
 | #1785 | scripting | A getter on the answer runs after the save, so its write is lost |
 | #1786 | scripting | A job a finished run left fails the run that inherited it |
@@ -97,7 +96,7 @@ measured.
 Some suspicions did not survive, and the record is as useful as the findings:
 
 - **A reentrant script run losing updates.** It would, as a mutant shows, but no native a script can call reaches a run entry point.
-- **A fault for pipelined response N+1 tripping on N's bytes in the process.** hyper reads the next head only after the buffer flushed. Only the kernel-level form remains, as #1783.
+- **A fault for pipelined response N+1 tripping on N's bytes in the process.** hyper reads the next head only after the buffer flushed. Only the kernel-level form remains, accepted as #1783.
 - **The non-atomic default `FlowStore::compare_and_set`.** No shipped path reaches it, so only a third-party store can. It stays a documented limit.
 - **`ShadowedRecordingForwards` in `proxyonce`.** Its first violation was a wrong ghost variable in the model.
 
@@ -105,6 +104,7 @@ Some suspicions did not survive, and the record is as useful as the findings:
 
 - **Defects are filed, not fixed, under this work.** Engine changes here are probe points only.
 - **A probe point is where its step commits.** A point that fires and then fails would record a step the engine did not take.
+- **A reset discards what the kernel still holds** (#1783, closed). It can take the tail of an earlier pipelined response. That is what a reset means, so it is documented in the fault injection page and kept reachable as a witness.
 - **The drain timeout is accepted.** A client too slow to read can be answered after a delete returned; the bound is deliberate.
 - **Line numbers in specs rot.** READMEs name functions, and spec comments' lines are as of the commit that wrote them.
 
