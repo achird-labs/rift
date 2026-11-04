@@ -42,13 +42,10 @@ cases = [
      only(no_clear(known_cfg), 'AtMostOneCarrier'), 'AtMostOneCarrier'),
     ('that leaves a live stub with no recording, with no clear in the run (#1776)',
      only(no_clear(known_cfg), 'CarrierHasRecording'), 'CarrierHasRecording'),
-    ('a stale token still inserts a stub carrying the claim (#1777)',
-     only(known_cfg, 'CarrierMeansRecorded'), 'CarrierMeansRecorded'),
     # A proxy that generates no stub: no carrier, no shadow, no forget from an edit.
     ('no stub generated: every invariant holds (control)',
      edit(known_cfg, [('GeneratesStub = TRUE', 'GeneratesStub = FALSE'), ('Preloaded = TRUE', 'Preloaded = FALSE'),
-                      ('    AtMostOneCarrier\n    ForgetRemovesWhatItSaw\n    CarrierHasRecording\n'
-                       '    CarrierMeansRecorded\n',
+                      ('    AtMostOneCarrier\n    ForgetRemovesWhatItSaw\n    CarrierHasRecording\n',
                        '    AtMostOneCarrier\n    NoWedgedClaim\n    ClaimExcludesRecording\n    RecordedOnce\n'
                        '    ForgetRemovesWhatItSaw\n    OnlyClaimHolderInserts\n')], 'Known.cfg'),
      'ok'),

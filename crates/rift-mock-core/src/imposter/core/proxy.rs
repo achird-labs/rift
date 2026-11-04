@@ -100,11 +100,14 @@ impl<'a> HeldClaim<'a> {
     /// A failed settle releases the claim so the signature stays retryable instead of wedging as
     /// Recorded with nothing behind it (issue #315, and the publication-failure case of #910).
     /// The caller keeps its upstream response either way: the upstream call succeeded, only
-    /// recording failed.
-    fn settle(mut self, resp: RecordedResponse, publication: Option<&StubPublication<'_>>) {
-        let Some(token) = self.token.take() else {
-            return;
-        };
+    /// recording failed. Returns the token when the store accepted the settle; `None` means no
+    /// recording is behind this request, so a `proxyOnce` stub must not go in (issue #1777).
+    fn settle(
+        mut self,
+        resp: RecordedResponse,
+        publication: Option<&StubPublication<'_>>,
+    ) -> Option<ClaimToken> {
+        let token = self.token.take()?;
         // The path is named in the warn below: for a publishing store a `complete` failure is a
         // failed *publication*, which an operator has to correlate differently from a plain
         // recording failure.
@@ -120,12 +123,21 @@ impl<'a> HeldClaim<'a> {
                     .record(self.port, self.signature.clone(), token, resp),
             ),
         };
-        if let Err(e) = settled {
-            warn!(
-                "Failed to settle proxy recording via {path}(), releasing claim so it stays \
-                 retryable: {e}"
-            );
-            self.store.release_claim(self.port, self.signature, token);
+        match settled {
+            Ok(()) => Some(token),
+            // The claim is gone already, and may be someone else's by now: nothing to release.
+            Err(ProxyStoreError::StaleClaim) => {
+                debug!("Stale proxy claim at {path}(); this request recorded nothing");
+                None
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to settle proxy recording via {path}(), releasing claim so it stays \
+                     retryable: {e}"
+                );
+                self.store.release_claim(self.port, self.signature, token);
+                None
+            }
         }
     }
 }
@@ -1666,6 +1678,7 @@ impl Imposter {
 
                     // Settle the claim now that the stub exists, and before it is published, so a
                     // publishing store can refuse to commit "Recorded" if publication fails.
+                    let held_claim = recording.is_some();
                     let settled = if let Some((claim, resp)) = recording.take() {
                         let publication = StubPublication {
                             stub: &new_stub,
@@ -1675,9 +1688,9 @@ impl Imposter {
                                 self.snapshot().stubs().iter().position(|s| s.slot == slot)
                             }),
                         };
-                        claim.settle(resp, Some(&publication));
+                        let settled = claim.settle(resp, Some(&publication));
                         fire(&self.probe, Point::ProxySettled { port });
-                        true
+                        settled.is_some()
                     } else {
                         false
                     };
@@ -1695,6 +1708,13 @@ impl Imposter {
                     } else if lost_race {
                         debug!(
                             "Skipping local stub insertion for path {} (this request won no claim)",
+                            uri.path()
+                        );
+                    } else if mode_is_once && held_claim && !settled {
+                        // A stale or failed settle: a stub would answer as a recording that is not
+                        // there, stack beside the current one, and stop the signature retrying.
+                        debug!(
+                            "Skipping local stub insertion for path {} (nothing was recorded)",
                             uri.path()
                         );
                     } else {

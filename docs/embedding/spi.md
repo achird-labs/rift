@@ -160,7 +160,7 @@ pub trait ProxyRecordingStore: Send + Sync {
         -> Result<ClaimOutcome> { /* -> try_claim */ }
     /// Release a claim the engine will not settle, so the signature is retryable.
     fn release_claim(&self, port: u16, sig: &RequestSignature, token: ClaimToken);
-    fn record(&self, /* port, sig, response, token */) -> Result<()>;
+    fn record(&self, /* port, sig, token, resp */) -> Result<()>;
     /// Settle the claim once the generated stub exists, before it is published.
     /// Defaults to `record`, so implementing it is optional.
     fn complete(&self, /* port, sig, token, response */
@@ -223,8 +223,9 @@ can still be answered with another identity's recording.
 
 | Variant | Engine response |
 |:--|:--|
-| `Unavailable(String)` | **Degrade**: forward upstream with nothing recorded in the store. A `proxyOnce` proxy that generates stubs, on a store that does not publish them, still inserts one locally, so later requests stop forwarding. Use it when the store only helps persistence and the engine still enforces exactly-once itself. |
+| `Unavailable(String)` | **Degrade**: forward upstream with nothing recorded in the store. When `try_claim` answers it, a `proxyOnce` proxy that generates stubs, on a store that does not publish them, still inserts one locally, so later requests stop forwarding. When `record` or `complete` answers it, the claim is released and no stub goes in, so the next request forwards and tries again. Use it when the store only helps persistence and the engine still enforces exactly-once itself. |
 | `Refused(BackendUnavailable)` (issue #990) | **Fail the request without calling the upstream.** Use it when the store *is* the exactly-once arbiter (shared or clustered) and could not decide. Forwarding would let every request during the outage reach the upstream. Both the stub `proxy` and `defaultForward` answer `503` through `backend_error_response` (see [Backend errors](#backend-errors-and-annotations)). |
+| `StaleClaim` (issue #1777) | **Record nothing and release nothing**: the token no longer names the claim, because a clear or a restart took it. Under `proxyOnce` the engine inserts no stub. A store that answers `Ok` here keeps working, with that request's stub stacking beside the current one. |
 
 `ClaimOutcome::InFlight` is unaffected: a claim was serialized, so that request still forwards.
 

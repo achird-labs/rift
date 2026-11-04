@@ -13,6 +13,12 @@ record.
 
 ### Fixed
 
+- **A proxy settle that recorded nothing no longer leaves a stub** (#1777): a `proxyOnce` request in
+  flight across a clear or restart, or one whose store failed the settle, still inserted a stub. That
+  stub answered as a recording no store held and stacked beside the current one, and after a failed
+  settle it stopped the signature retrying. A store at its signature cap still gets the stub, and
+  `proxyAlways` still appends. A request in flight across a clear now leaves no stub where Mountebank's
+  would land, so the next request forwards once more.
 - **A proxy recording forgotten mid-request no longer leaves a stub the store cannot see** (#1778): when
   an edit forgot a recording between a request's claim and its lookup, the request recorded a stub
   with no claim, so later bookkeeping missed it and a second request could stack another. The request
@@ -44,6 +50,12 @@ record.
   datadir write failed, the rollback removed whichever imposter held the port by then. That one
   left the port table with its listener still answering, unreachable by any delete until a restart.
   The rollback now removes only its own imposter, under the lock a delete that unlinks holds.
+
+### Changed
+
+- **`LocalProxyStore::record` answers `Err(ProxyStoreError::StaleClaim)` for a stale token** (#1777),
+  where it answered `Ok(())`. This is a new variant of a `#[non_exhaustive]` error. A custom store that
+  keeps answering `Ok` keeps working, with that request's stub stacking as before.
 
 ### Added
 

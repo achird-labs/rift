@@ -27,7 +27,7 @@ EDIT_FORGET = """    /\\ edit[e].pc = "forget"
 """
 SHADOW_CHECK = 'IF Shadowed(stubs, req[r].answering) THEN "forget" ELSE "lookup"'
 SETTLE_GUARD = 'LET lands == req[r].token # NoToken /\\ pending = req[r].token'
-SETTLE_FAIL_RELEASE = """    /\\ req' = [req EXCEPT ![r].pc = AfterSettle(r)]
+SETTLE_FAIL_RELEASE = """    /\\ req' = [req EXCEPT ![r].pc = "done"]
     /\\ pending' = IF pending = req[r].token THEN NoToken ELSE pending
     /\\ UNCHANGED <<responses, nextToken,"""
 AFTER_SETTLE = 'AfterSettle(r) == IF GeneratesStub /\\ ~req[r].lost THEN "insert" ELSE "done"'
@@ -84,6 +84,15 @@ mutants = {
     # is the earlier symptom, a step before the insert OnlyClaimHolderInserts catches.
     'an empty lookup forwards with no claim and is not lost': ('ForwardUnrecordedOnlyWhenLost', [
         ('''req' = [req EXCEPT ![r].pc = "reclaim", ![r].again = TRUE]''', '''req' = [req EXCEPT ![r].pc = "forward"]''')]),
+    # #1777: a settle that wrote nothing still inserted a stub carrying the claim.
+    'a stale settle inserts a stub carrying the claim (#1777)': ('CarrierMeansRecorded', [
+        ('IF req[r].token # NoToken /\\ ~lands THEN "done" ELSE AfterSettle(r)', 'AfterSettle(r)')]),
+    'a failed settle inserts a stub carrying the claim (#1777)': ('CarrierMeansRecorded', [
+        ('''    /\\ req[r].token # NoToken
+    /\\ req' = [req EXCEPT ![r].pc = "done"]
+''', '''    /\\ req[r].token # NoToken
+    /\\ req' = [req EXCEPT ![r].pc = AfterSettle(r)]
+''')]),
     'a loser inserts its stub': ('LoserNeverRecords', [
         (AFTER_SETTLE, 'AfterSettle(r) == IF GeneratesStub THEN "insert" ELSE "done"')]),
 }

@@ -128,6 +128,9 @@ As in Mountebank, a recorded stub is placed relative to the proxy stub that answ
     splits that run for good: `[A×2, B]` that has served one `A` cycles `A B A U` from then on. Any
     later edit of the stub returns it to list order, from the response that was due next.
 
+A `proxyOnce` request still in flight when the saved responses are cleared records nothing and leaves
+no stub, so the next request forwards once more. Mountebank's request would land its stub.
+
 Each recorded response carries `_proxyResponseTime` in its `is`, the upstream round trip in
 milliseconds, as in Mountebank. It is the mark `DELETE /imposters/{port}/savedProxyResponses` reads:
 every response carrying a numeric one is removed, a stub left empty goes, and every remaining stub

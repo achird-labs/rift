@@ -34,7 +34,7 @@ load, not only an `.await`. Line numbers are of the commit that added this model
 | `ShadowForget` | `forget_recorded`, `proxy.rs:1420`, `proxy_store.rs:481` | One write lock; keyed by signature, leaves `pending` alone |
 | `Lookup` | `proxy.rs:1446`, nothing found `:1456-1464` | One read lock, after the claim |
 | `Forward` | `proxy.rs:1527-1530` | An await |
-| `Settle` | `HeldClaim::settle`, `proxy.rs:104`; `record`, `proxy_store.rs:413-464` | Under the write lock and the pending lock. A stale token changes nothing and answers `Ok` |
+| `Settle` | `HeldClaim::settle`, `proxy.rs:104`; `record`, `proxy_store.rs:413-464` | Under the write lock and the pending lock. A stale token changes nothing and answers `StaleClaim` |
 | `SettleFail` | `proxy.rs:123-129` | The failing call commits nothing, so the release is the only commit |
 | `Insert` | `insert_or_append_proxy_stub`, `proxy.rs:1148-1156`, called at `:1683` | Under `stubs_write`. Runs after the settle with no await in between |
 | `DropRequest` | `HeldClaim::drop`, `proxy.rs:133-139`; `release_claim`, `proxy_store.rs:400-411` | A dropped future or an `Err` return. Only from the awaits: `forward` and `settle` |
@@ -58,10 +58,10 @@ edits; see "Runs" for why not both.
 | `RecordedOnce` | At most one recording lands between two removals of the entry | holds |
 | `LoserNeverRecords` | An `InFlight` request inserts nothing | holds |
 | `ClaimExcludesRecording` | A pending claim and a recording never coexist | holds |
-| `AtMostOneCarrier` | At most one carrier ahead of the proxy stub | violated, #1776 #1777, `Known.cfg` |
+| `AtMostOneCarrier` | At most one carrier ahead of the proxy stub | violated, #1776, `Known.cfg` |
 | `ForgetRemovesWhatItSaw` | The swap-to-forget window: a forget removes the recording it decided about | violated, #1776, `Known.cfg` |
-| `CarrierHasRecording` | A carrier ahead of the proxy stub has its recording, outside a clear and after a restart | violated, #1776 #1777, `Known.cfg` |
-| `CarrierMeansRecorded` | A stub carries a claim only if its recording landed | violated, #1777, `Known.cfg` |
+| `CarrierHasRecording` | A carrier ahead of the proxy stub has its recording, outside a clear and after a restart | violated, #1776, `Known.cfg` |
+| `CarrierMeansRecorded` | A stub carries a claim only if its recording landed | holds |
 | `OnlyClaimHolderInserts` | Only a request holding a claim inserts a stub | holds |
 | `ForwardUnrecordedOnlyWhenLost` | Only a request that lost the race forwards with no claim | holds |
 
@@ -72,7 +72,6 @@ edits; see "Runs" for why not both.
 | `NeverTwoForwards` | violated: two requests reach the upstream, which the loser path depends on |
 | `NeverForgetWhileClaimed` | violated: a forget runs with a claim in flight, which `forget_recorded`'s contract allows |
 | `ForgetRemovesWhatItSaw`, `AtMostOneCarrier`, `CarrierHasRecording`, with no clear in the run | violated: #1776 needs only requests and an edit |
-| `CarrierMeansRecorded` | violated: #1777 |
 | A proxy that generates no stub (control) | no error |
 | `ProxyOncePR.cfg` (control) | no error |
 
@@ -90,6 +89,8 @@ delete its row.
 | `record` does not check the token | `RecordedOnce` |
 | A failed settle keeps the claim (#315) | `NoWedgedClaim` |
 | An empty lookup forwards with no claim and is not lost (#1778) | `ForwardUnrecordedOnlyWhenLost` |
+| A stale settle inserts a stub carrying the claim (#1777) | `CarrierMeansRecorded` |
+| A failed settle inserts a stub carrying the claim (#1777) | `CarrierMeansRecorded` |
 | A loser inserts its stub | `LoserNeverRecords` |
 
 The #171/#118 mutant was expected to fall to `RecordedOnce`. A recording lands between the read and the
@@ -106,7 +107,6 @@ fails today, one test per shape.
 | Issue | Finding | Verified by |
 |:--|:--|:--|
 | #1776 | `forget_recorded` is keyed by signature, and both callers decide a step earlier. A forget removes a newer recording: a late shadow forget, a settled recording taken for the shadowed one, and an edit's forget. | Reproduced, three tests |
-| #1777 | `settle` returns nothing, so a settle that wrote no recording still inserts a carrier. A request in flight across a clear stacks a second recording. | Stale token reproduced. A failed settle is traced through the source and reached by TLC with `SettleCanFail`, not run on the engine. A full store (`proxy_store.rs:453`) is read in the source only and is not in the model |
 
 None of them returns a wrong body or wedges a signature, and each window is short; the cost is a second
 upstream call and a duplicate stub.
@@ -125,8 +125,7 @@ upstream call and a duplicate stub.
   with no race in the protocol.
   The second never answers. Refuted as a defect. `Known.cfg` leaves `deleteProxy` out for this reason.
 - **Two carriers between `ClearStore` and `ClearSwap`.** A request recording in that window stacks a
-  carrier, and the swap removes both. Transient, no finding of its own; the stale token of #1777 is the
-  shape that outlives the clear.
+  carrier, and the swap removes both. Transient, no finding of its own.
 - **A carrier with no recording after a restart.** `restart_runtime_state` keeps the stubs on purpose, so
   `CarrierHasRecording` excepts it.
 
@@ -169,9 +168,9 @@ in `ProxyOncePR.cfg` and `ProxyOnce.cfg` under `-coverage 1`.
 
 | Cfg | Bounds | Result | Generated | Distinct | Depth | Time |
 |:--|:--|:--|--:|--:|--:|--:|
-| `ProxyOncePR.cfg` | 2 requests, 1 edit, clear, restart, failing settle | no error | 241,691 | 99,091 | 24 | 9 s |
-| `ProxyOnce.cfg` | 3 requests, 1 edit, clear, restart, failing settle | no error | 11,041,878 | 3,807,705 | 34 | 56 s |
-| `ProxyOnceTwoEdits.cfg` | 2 requests, 2 edits, clear, restart, failing settle | no error | 3,736,936 | 1,437,765 | 26 | 27 s |
+| `ProxyOncePR.cfg` | 2 requests, 1 edit, clear, restart, failing settle | no error | 177,686 | 71,169 | 24 | 9 s |
+| `ProxyOnce.cfg` | 3 requests, 1 edit, clear, restart, failing settle | no error | 6,894,192 | 2,325,378 | 34 | 56 s |
+| `ProxyOnceTwoEdits.cfg` | 2 requests, 2 edits, clear, restart, failing settle | no error | 2,731,641 | 1,041,256 | 26 | 27 s |
 
 3 requests with 2 edits, a clear, a restart and a failing settle was stopped at 13,029,204 generated and
 4,712,697 distinct after 7 minutes, the queue still growing, on a nearly full disk. That combination is
@@ -185,7 +184,6 @@ a clear; a run stops at its first violation, so the counts vary a little between
 | `AtMostOneCarrier` | 12,983 | 6,834 | 13 |
 | `ForgetRemovesWhatItSaw` | 1,156 | 698 | 8 |
 | `CarrierHasRecording` | 2,205 | 1,301 | 10 |
-| `CarrierMeansRecorded` | 1,522 | 913 | 9 |
 
 `witness.py` and `mutants.py` exit 0. `validate.py --selftest traces` exits 0: 12 recorded runs accepted,
 4 hand-written runs rejected.

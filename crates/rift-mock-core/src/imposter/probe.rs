@@ -123,8 +123,8 @@ pub enum Point {
     ProxyNothingToReplay { port: u16 },
     /// The request is about to call the upstream (`Forward`).
     ProxyForwarding { port: u16 },
-    /// `HeldClaim::settle` returned (`Settle`, `SettleFail`). It returns nothing, so this says
-    /// neither whether the store failed nor whether it dropped a stale token.
+    /// `HeldClaim::settle` returned (`Settle`, `SettleFail`). This does not say whether the store
+    /// failed or refused a stale token; `ProxyInserted` following it says a stub went in anyway.
     ProxySettled { port: u16 },
     /// A recorded stub went into the list (`Insert`); `claimed` is whether it carries the claim.
     ProxyInserted { port: u16, claimed: bool },
