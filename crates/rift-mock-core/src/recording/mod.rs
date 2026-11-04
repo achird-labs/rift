@@ -22,7 +22,7 @@ mod types;
 // Re-export main types
 pub use mode::ProxyMode;
 pub use proxy_store::{
-    ClaimOutcome, ClaimToken, LocalProxyStore, ProxyRecordingStore, ProxyStoreError, StubPlacement,
-    StubPublication,
+    ClaimOutcome, ClaimToken, LocalProxyStore, ProxyRecordingStore, ProxyStoreError, RecordedClaim,
+    StubPlacement, StubPublication,
 };
 pub use types::{RecordedResponse, RequestSignature};

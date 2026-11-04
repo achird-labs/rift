@@ -18,7 +18,7 @@ use crate::backends::InMemoryFlowStore;
 use crate::behaviors::{HasRepeatBehavior, RuleCycler};
 use crate::extensions::flow_state::FlowStore;
 use crate::recording::{
-    ClaimOutcome, LocalProxyStore, ProxyMode, ProxyRecordingStore, RecordedResponse,
+    ClaimOutcome, LocalProxyStore, ProxyMode, ProxyRecordingStore, RecordedClaim, RecordedResponse,
     RequestSignature,
 };
 use anyhow::Context;
@@ -276,7 +276,7 @@ pub struct StubState {
     /// The `proxyOnce` claim this stub was recorded under (issue #1386). Kept while the state is
     /// (a move, a restamp, a reconcile that keeps it) and gone with any new content, so the claim
     /// lives exactly as long as the recording; see [`Imposter::forget_orphaned_claims`].
-    pub(crate) recorded_claim: Option<Arc<RequestSignature>>,
+    pub(crate) recorded_claim: Option<Arc<RecordedClaim>>,
     /// The stub's cycle once a `proxyAlways` append landed mid-cycle (issue #1513): position ->
     /// index into `stub.responses`, repeat-expanded, so the cursor counts positions with every
     /// repeat 1. `None` is the display order with `repeat`. Runtime only: not in `Stub`, the
@@ -900,7 +900,8 @@ impl Imposter {
     }
 
     /// Forget the `proxyOnce` claims of the recordings an edit removed (issue #1386): those held
-    /// by a state in `before` and by none in `after`. Called after the swap and outside
+    /// by a state in `before` and by none in `after`, by token, so a recording landed since the swap
+    /// and one with a live stub of its own stay (issue #1776). Called after the swap and outside
     /// `stubs_write`, since a store may be slow. A store error is logged, not propagated: the stub
     /// edit has already happened, and the cost is that identity replaying until the store is
     /// cleared, today's behaviour.
@@ -912,22 +913,30 @@ impl Imposter {
         if before.iter().all(|s| s.recorded_claim.is_none()) {
             return;
         }
-        let kept: std::collections::HashSet<&RequestSignature> = after
+        let kept: std::collections::HashSet<_> = after
             .iter()
             .filter_map(|s| s.recorded_claim.as_deref())
+            .map(|claim| claim.token)
             .collect();
         let port = self.journal_port();
-        for sig in before
+        for claim in before
             .iter()
             .filter_map(|s| s.recorded_claim.as_deref())
-            .filter(|sig| !kept.contains(sig))
+            .filter(|claim| !kept.contains(&claim.token))
         {
             crate::imposter::probe::fire(
                 &self.probe,
                 crate::imposter::probe::Point::ProxyOrphanFound { port },
             );
-            if let Err(e) = self.proxy_store.forget_recorded(port, sig) {
-                error!(port, path = %sig.path, "Failed to forget a deleted proxy recording: {e}");
+            if let Err(e) = self
+                .proxy_store
+                .forget_recorded_by(port, &claim.signature, claim.token)
+            {
+                error!(
+                    port,
+                    path = %claim.signature.path,
+                    "Failed to forget a deleted proxy recording: {e}"
+                );
             }
             crate::imposter::probe::fire(
                 &self.probe,

@@ -38,8 +38,17 @@ const MAX_TOTAL_SIGNATURES: usize = 10_000;
 /// and was re-taken by another caller) records nothing, so a late loser cannot clobber the winner's
 /// recording, and [`record`](ProxyRecordingStore::record) reports it with
 /// [`ProxyStoreError::StaleClaim`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClaimToken(u64);
+
+/// The recording a `proxyOnce` stub was inserted as: its signature and the claim that settled it.
+/// The token is what lets a forget name that recording rather than whichever now holds the
+/// signature (issue #1776).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedClaim {
+    pub signature: RequestSignature,
+    pub token: ClaimToken,
+}
 
 impl ClaimToken {
     /// Construct a token from a raw value. Backends implementing [`ProxyRecordingStore`] mint
@@ -287,16 +296,39 @@ pub trait ProxyRecordingStore: Send + Sync {
         Ok(())
     }
 
+    /// [`forget_recorded`](Self::forget_recorded), only if `token` settled the recording now under
+    /// `sig`. The engine decides what to forget a step before it forgets, so a recording landed in
+    /// between is not the one it decided about (issue #1776), and calls only this method. The
+    /// default forgets by signature, so a store that does not override it keeps that race, and a
+    /// delete of an older copy of a recording forgets the signature while a newer stub holds it. A
+    /// store that does not publish stubs should override it.
+    fn forget_recorded_by(
+        &self,
+        port: u16,
+        sig: &RequestSignature,
+        token: ClaimToken,
+    ) -> Result<()> {
+        let _ = token;
+        self.forget_recorded(port, sig)
+    }
+
     /// Clears all saved proxy responses for a port. Backs the DELETE endpoint for saved
     /// proxy responses and the manager's port reclaim on imposter deletion.
     fn clear(&self, port: u16);
+}
+
+/// A `proxyOnce` recording and the claim that settled it.
+#[derive(Debug)]
+struct OnceRecording {
+    token: ClaimToken,
+    response: RecordedResponse,
 }
 
 /// Per-port recording state: the responses map plus the in-flight claim gate.
 #[derive(Debug, Default)]
 struct PortState {
     /// `proxyOnce` recordings: what the gate answers `AlreadyRecorded` from.
-    responses: RwLock<HashMap<RequestSignature, Vec<RecordedResponse>>>,
+    responses: RwLock<HashMap<RequestSignature, OnceRecording>>,
     /// `proxyAlways` recordings, kept apart so a `proxyAlways` stub recording an identity never
     /// makes a `proxyOnce` stub replay it (issue #1387).
     always: RwLock<HashMap<RequestSignature, Vec<RecordedResponse>>>,
@@ -358,7 +390,13 @@ impl LocalProxyStore {
     #[cfg(test)]
     fn recordings(&self, port: u16, sig: &RequestSignature) -> Vec<RecordedResponse> {
         let state = self.slot(port);
-        let once = state.responses.read().get(sig).cloned().unwrap_or_default();
+        let once: Vec<RecordedResponse> = state
+            .responses
+            .read()
+            .get(sig)
+            .map(|recording| recording.response.clone())
+            .into_iter()
+            .collect();
         let always = state.always.read().get(sig).cloned().unwrap_or_default();
         once.into_iter().chain(always).collect()
     }
@@ -467,7 +505,10 @@ impl ProxyRecordingStore for LocalProxyStore {
             pending.remove(&sig);
             return Ok(());
         }
-        responses.entry(sig.clone()).or_insert_with(|| vec![resp]);
+        responses.entry(sig.clone()).or_insert(OnceRecording {
+            token,
+            response: resp,
+        });
         pending.remove(&sig);
         Ok(())
     }
@@ -483,13 +524,31 @@ impl ProxyRecordingStore for LocalProxyStore {
         if self.mode == ProxyMode::ProxyAlways {
             first(&state.always.read())
         } else {
-            first(&state.responses.read())
+            let responses = state.responses.read();
+            responses
+                .get(sig)
+                .map(|recording| recording.response.clone())
         }
     }
 
     fn forget_recorded(&self, port: u16, sig: &RequestSignature) -> Result<()> {
         if let Some(state) = self.ports.read().get(&port) {
             state.responses.write().remove(sig);
+        }
+        Ok(())
+    }
+
+    fn forget_recorded_by(
+        &self,
+        port: u16,
+        sig: &RequestSignature,
+        token: ClaimToken,
+    ) -> Result<()> {
+        if let Some(state) = self.ports.read().get(&port) {
+            let mut responses = state.responses.write();
+            if responses.get(sig).is_some_and(|r| r.token == token) {
+                responses.remove(sig);
+            }
         }
         Ok(())
     }
@@ -751,6 +810,56 @@ mod tests {
 
         assert_eq!(always.lookup(1, &s).unwrap().body, b"always");
         assert!(once.lookup(1, &s).is_none());
+    }
+
+    // Issue #1776: a forget names the recording it decided about, not whichever is there now.
+    #[test]
+    fn forget_recorded_by_leaves_a_newer_recording_alone() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyOnce);
+        let s = sig("/token");
+        let old = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap());
+        store.record(1, s.clone(), old, resp(200, "old")).unwrap();
+        store.forget_recorded_by(1, &s, old).unwrap();
+        assert!(store.lookup(1, &s).is_none(), "its own token forgets it");
+
+        let new = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap());
+        store.record(1, s.clone(), new, resp(200, "new")).unwrap();
+        store.forget_recorded_by(1, &s, old).unwrap();
+        assert_eq!(store.lookup(1, &s).unwrap().body, b"new");
+    }
+
+    // A store that only implements `forget_recorded` keeps forgetting through it.
+    #[test]
+    fn forget_recorded_by_defaults_to_forget_recorded() {
+        #[derive(Default)]
+        struct Forgets(Mutex<Vec<RequestSignature>>);
+        impl ProxyRecordingStore for Forgets {
+            fn try_claim(&self, _: u16, _: &RequestSignature) -> Result<ClaimOutcome> {
+                Ok(ClaimOutcome::AlreadyRecorded)
+            }
+            fn release_claim(&self, _: u16, _: &RequestSignature, _: ClaimToken) {}
+            fn record(
+                &self,
+                _: u16,
+                _: RequestSignature,
+                _: ClaimToken,
+                _: RecordedResponse,
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn lookup(&self, _: u16, _: &RequestSignature) -> Option<RecordedResponse> {
+                None
+            }
+            fn forget_recorded(&self, _: u16, sig: &RequestSignature) -> Result<()> {
+                self.0.lock().push(sig.clone());
+                Ok(())
+            }
+            fn clear(&self, _: u16) {}
+        }
+        let store = Forgets::default();
+        let s = sig("/default");
+        store.forget_recorded_by(1, &s, ClaimToken(7)).unwrap();
+        assert_eq!(*store.0.lock(), vec![s]);
     }
 
     // Issue #1386: forgetting a recording makes exactly that signature claimable again.
