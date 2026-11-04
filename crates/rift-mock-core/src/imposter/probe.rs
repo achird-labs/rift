@@ -1,5 +1,6 @@
 //! Probe points of the imposter lifecycle, for checking runs of the engine against its TLA+ model
-//! (`formal/lifecycle/Lifecycle.tla`; `formal/lifecycle/README.md`, "Trace validation").
+//! (`formal/lifecycle/Lifecycle.tla`; `formal/lifecycle/README.md`, "Trace validation"), and of
+//! connection fault injection (`formal/faultio/FaultIo.tla`).
 //!
 //! Each [`Point`] is one step the model names: the engine calls [`Probe::at`] when it takes that
 //! step, in the order it takes them. A test installs a recorder with
@@ -13,9 +14,21 @@
 
 use std::sync::Arc;
 
+use super::fault_io::TcpFaultKind;
+
 /// A generation: the n-th imposter this manager created, whichever port. Two imposters on one
 /// port over time are two generations; the model names them `<<port, n>>`.
 pub type Generation = u64;
+
+/// The layer of a connection's stream that took an armed fault (`formal/faultio/FaultIo.tla`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FaultLayer {
+    /// `FaultIo`, on the socket beneath TLS.
+    RawSocket,
+    /// `TlsPayloadFault`, above TLS.
+    AboveTls,
+}
 
 /// One step of the lifecycle, as `formal/lifecycle/Lifecycle.tla` names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +100,19 @@ pub enum Point {
         generation: Generation,
         stamp: i64,
     },
+    /// A `FaultCell` was armed: the connection's next write performs `kind` (`ServiceDone`).
+    FaultArmed { kind: TcpFaultKind },
+    /// A write took the armed fault (`FaultIoTrip`, `TlsTakePayload`).
+    FaultTaken {
+        kind: TcpFaultKind,
+        layer: FaultLayer,
+    },
+    /// A `FaultCell`'s lingering close was asked for (`ServiceDone`).
+    LingerArmed,
+    /// The lingering close shut the write side: the client sees a FIN (`LingerShutWrite`).
+    LingerFinSent,
+    /// The lingering close stopped discarding what the client sends (`DrainEnds`).
+    LingerDrained { discarded: usize },
 }
 
 /// What the engine calls at each [`Point`]. Implementations must be cheap and must not block:

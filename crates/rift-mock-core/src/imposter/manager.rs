@@ -1982,7 +1982,7 @@ impl ImposterManager {
                                 let _permit = permit;
                                 // Per-connection slot for a real transport fault (issue #239);
                                 // armed by the handler, applied by FaultIo on the response write.
-                                let fault_cell = FaultCell::new();
+                                let fault_cell = FaultCell::probed(imposter.probe.clone());
                                 // FaultIo sits beneath TLS so #239 connection faults still break
                                 // an HTTPS connection: a reset needs the raw socket. The payload
                                 // faults (random data, malformed chunk) are written above TLS by
