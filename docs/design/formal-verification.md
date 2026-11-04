@@ -78,7 +78,7 @@ source, and each issue says which. A fixed one says so in the table.
 | #1773 | lifecycle | A failed create's rollback removes the current imposter and leaves its listener running. Fixed |
 | #1774 | lifecycle | An apply sweep reports a concurrent delete as failed. Fixed |
 | #1776 | proxyonce | A forget removes a newer recording than the one it decided about |
-| #1777 | proxyonce | A settle that wrote no recording still inserts a stub carrying the claim |
+| #1777 | proxyonce | A settle that wrote no recording still inserts a stub carrying the claim. Fixed |
 | #1778 | proxyonce | An `AlreadyRecorded` with nothing to replay inserts a stub with no claim. Fixed |
 | #1779 | scenario | A stalled transition puts a lower `Last-Modified` over a higher one |
 | #1780 | scenario | A set or delete that decided "no change" can still move the state, unstamped |

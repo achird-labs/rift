@@ -511,10 +511,9 @@ async fn an_edits_forget_leaves_a_recording_with_a_live_stub_alone() {
 }
 
 /// A request in flight across a savedProxyResponses clear holds a token the store has forgotten.
-/// The store drops its recording, but the request inserts its stub all the same, next to the
-/// recording a later request made.
+/// A clear stales the request's claim, so the store drops its recording. It must leave no stub
+/// either, or the stub would stack next to the recording a later request made.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1777"]
 async fn a_recording_the_store_dropped_inserts_no_stub() {
     let rig = Rig::new().await;
 
@@ -529,7 +528,7 @@ async fn a_recording_the_store_dropped_inserts_no_stub() {
 
     held.open();
     stale.await.expect("stale");
-    rig.recorder.write("defect_1777_stale_token_inserts", false);
+    rig.recorder.write("stale_token_inserts_nothing", false);
     assert_eq!(
         rig.ahead_of_the_proxy(),
         1,
@@ -630,13 +629,12 @@ impl ProxyRecordingStore for HollowStore {
     fn clear(&self, _: u16) {}
 }
 
-/// Claiming again is bounded: a store that keeps saying `AlreadyRecorded` with nothing behind it
-/// gets two claims, the request is forwarded, and no stub lands.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_store_with_nothing_behind_its_answer_is_asked_twice() {
-    let store = Arc::new(HollowStore::default());
-    let manager =
-        ImposterManager::new().with_proxy_store(Arc::clone(&store) as Arc<dyn ProxyRecordingStore>);
+/// A manager with an upstream imposter and a generating proxy in front of it, on `store`.
+async fn proxying_through(
+    store: Arc<dyn ProxyRecordingStore>,
+    mode: &str,
+) -> (ImposterManager, u16, Arc<Imposter>) {
+    let manager = ImposterManager::new().with_proxy_store(store);
     let upstream_port = manager
         .create_imposter(config(
             0,
@@ -649,15 +647,133 @@ async fn a_store_with_nothing_behind_its_answer_is_asked_twice() {
             0,
             json!([{ "responses": [{ "proxy": {
                 "to": format!("http://127.0.0.1:{upstream_port}"),
-                "mode": "proxyOnce",
+                "mode": mode,
                 "addWaitBehavior": true,
             } }] }]),
         ))
         .await
         .expect("proxy");
+    let upstream = manager.get_imposter(upstream_port).expect("upstream");
+    (manager, port, upstream)
+}
+
+/// Claiming again is bounded: a store that keeps saying `AlreadyRecorded` with nothing behind it
+/// gets two claims, the request is forwarded, and no stub lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_store_with_nothing_behind_its_answer_is_asked_twice() {
+    let store = Arc::new(HollowStore::default());
+    let (manager, port, _) = proxying_through(
+        Arc::clone(&store) as Arc<dyn ProxyRecordingStore>,
+        "proxyOnce",
+    )
+    .await;
 
     assert_eq!(get(port).await, "up");
     assert_eq!(store.claims.load(Ordering::SeqCst), 2);
     let stubs = manager.get_imposter(port).expect("proxy").get_stubs();
     assert_eq!(stubs.len(), 1, "no stub landed: {stubs:?}");
+}
+
+/// A store that grants real claims and answers every settle with what it is told to.
+struct SettlingStore {
+    inner: LocalProxyStore,
+    fails: bool,
+}
+
+impl SettlingStore {
+    fn new(fails: bool) -> Arc<Self> {
+        Arc::new(Self {
+            inner: LocalProxyStore::new(ProxyMode::ProxyOnce),
+            fails,
+        })
+    }
+}
+
+impl ProxyRecordingStore for SettlingStore {
+    fn try_claim(
+        &self,
+        port: u16,
+        sig: &RequestSignature,
+    ) -> Result<ClaimOutcome, ProxyStoreError> {
+        self.inner.try_claim(port, sig)
+    }
+    fn try_claim_as(
+        &self,
+        port: u16,
+        sig: &RequestSignature,
+        mode: ProxyMode,
+    ) -> Result<ClaimOutcome, ProxyStoreError> {
+        self.inner.try_claim_as(port, sig, mode)
+    }
+    fn release_claim(&self, port: u16, sig: &RequestSignature, token: ClaimToken) {
+        self.inner.release_claim(port, sig, token);
+    }
+    fn record(
+        &self,
+        _: u16,
+        _: RequestSignature,
+        _: ClaimToken,
+        _: RecordedResponse,
+    ) -> Result<(), ProxyStoreError> {
+        if self.fails {
+            Err(ProxyStoreError::Unavailable("settle fails".into()))
+        } else {
+            Ok(())
+        }
+    }
+    fn lookup(&self, port: u16, sig: &RequestSignature) -> Option<RecordedResponse> {
+        self.inner.lookup(port, sig)
+    }
+    fn clear(&self, port: u16) {
+        self.inner.clear(port);
+    }
+}
+
+/// A failed settle promises the signature stays retryable (#315), which a stub answering every
+/// later request would break.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_settle_inserts_no_stub_and_the_next_request_forwards() {
+    let store = SettlingStore::new(true);
+    let (manager, port, upstream) = proxying_through(
+        Arc::clone(&store) as Arc<dyn ProxyRecordingStore>,
+        "proxyOnce",
+    )
+    .await;
+    assert_eq!(get(port).await, "up");
+    assert_eq!(get(port).await, "up");
+    let stubs = manager.get_imposter(port).expect("proxy").get_stubs();
+    assert_eq!(stubs.len(), 1, "no stub landed: {stubs:?}");
+    assert_eq!(upstream.get_recorded_requests().len(), 2);
+    // A claim still pending would answer `InFlight`, and the second request would forward too.
+    let sig = RequestSignature::new("GET", "/", None, &[]).with_body(&[]);
+    assert!(
+        matches!(store.try_claim(port, &sig), Ok(ClaimOutcome::Claimed(_))),
+        "the failed settle released its claim"
+    );
+}
+
+/// A store that answers `Ok` and keeps nothing, as `LocalProxyStore` does at its signature cap, must
+/// not cost the stub: the stub is the recording, and Mountebank has no cap. Without it, every repeat
+/// of every new identity would forward forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_store_that_keeps_nothing_on_an_ok_settle_still_gets_the_stub() {
+    let (manager, port, upstream) = proxying_through(SettlingStore::new(false), "proxyOnce").await;
+    assert_eq!(get(port).await, "up");
+    assert_eq!(get(port).await, "up");
+    let stubs = manager.get_imposter(port).expect("proxy").get_stubs();
+    assert_eq!(stubs.len(), 2, "the recording and the proxy: {stubs:?}");
+    assert_eq!(
+        upstream.get_recorded_requests().len(),
+        1,
+        "the stub answers"
+    );
+}
+
+/// `proxyAlways` appends whatever the store says: it has no exactly-once to protect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn proxy_always_appends_even_when_its_settle_fails() {
+    let (manager, port, _) = proxying_through(SettlingStore::new(true), "proxyAlways").await;
+    assert_eq!(get(port).await, "up");
+    let stubs = manager.get_imposter(port).expect("proxy").get_stubs();
+    assert_eq!(stubs.len(), 2, "the proxy and what it appended: {stubs:?}");
 }

@@ -112,8 +112,8 @@ InsertIndex(s, slot) ==
 (* shadowed:  ghost.  Every stub list since its Match shadowed the         *)
 (*            recording, so no edit or racing request gives it a reason to *)
 (*            replay.                                                      *)
-(* landed:    ghost.  Its settle wrote the recording.  The engine cannot   *)
-(*            tell: HeldClaim::settle returns nothing (proxy.rs:104).      *)
+(* landed:    its settle wrote the recording: HeldClaim::settle returned   *)
+(*            the token (#1777).                                           *)
 (***************************************************************************)
 InitReq == [pc |-> "idle", answering |-> NoSlot, token |-> NoToken, lost |-> FALSE, again |-> FALSE,
             saw |-> NoRec, shadowed |-> FALSE, landed |-> FALSE]
@@ -221,14 +221,15 @@ Forward(r) ==
 \* After the settle: a stub is inserted unless a concurrent request holds the claim (proxy.rs:1676).
 AfterSettle(r) == IF GeneratesStub /\ ~req[r].lost THEN "insert" ELSE "done"
 
-\* HeldClaim::settle (proxy.rs:104), to `complete` or `record` (proxy_store.rs:413-464), under the
-\* responses write lock and the pending lock.  A token that no longer names the pending claim
-\* changes nothing and still answers Ok (proxy_store.rs:449-452).  A request without a claim has
-\* nothing to settle; it still takes this step, on its way out of the upstream await.
+\* HeldClaim::settle, to `complete` or `record`, under the responses write lock and the pending
+\* lock.  A token that no longer names the pending claim changes nothing and answers StaleClaim, so
+\* no stub goes in (#1777).  A request without a claim has nothing to settle; it still takes this
+\* step, on its way out of the upstream await.
 Settle(r) ==
     /\ req[r].pc = "settle"
     /\ LET lands == req[r].token # NoToken /\ pending = req[r].token
-       IN /\ req' = [req EXCEPT ![r].pc = AfterSettle(r), ![r].landed = lands]
+       IN /\ req' = [req EXCEPT ![r].pc = IF req[r].token # NoToken /\ ~lands THEN "done" ELSE AfterSettle(r),
+                                 ![r].landed = lands]
           /\ IF lands
              THEN /\ responses' = IF responses = NoRec THEN req[r].token ELSE responses
                   /\ pending' = NoToken
@@ -236,14 +237,14 @@ Settle(r) ==
              ELSE UNCHANGED <<responses, pending, ghost>>
     /\ UNCHANGED <<nextToken, stubs, nextSlot, edit, clear, restart>>
 
-\* The store failed the settle: the claim is released (proxy.rs:123-129), and the caller cannot
-\* tell, so a stub is still inserted (proxy.rs:1661, 1688).  The failing call changes nothing, so
-\* the release is the only commit and this is one step.
+\* The store failed the settle: the claim is released and no stub goes in, so the signature stays
+\* retryable (#315, #1777).  The failing call changes nothing, so the release is the only commit and
+\* this is one step.
 SettleFail(r) ==
     /\ SettleCanFail
     /\ req[r].pc = "settle"
     /\ req[r].token # NoToken
-    /\ req' = [req EXCEPT ![r].pc = AfterSettle(r)]
+    /\ req' = [req EXCEPT ![r].pc = "done"]
     /\ pending' = IF pending = req[r].token THEN NoToken ELSE pending
     /\ UNCHANGED <<responses, nextToken, stubs, nextSlot, edit, clear, restart, ghost>>
 
@@ -445,9 +446,8 @@ ForwardUnrecordedOnlyWhenLost == ~ghost.unclaimedForward
 \* recording and stacks in front of the proxy like a loser's.
 OnlyClaimHolderInserts == ~ghost.unclaimedInsert
 
-\* A stub carries a claim only if its request's recording landed.  The store drops a stale token's
-\* recording and answers Ok, and fails a settle without the caller seeing it; either way the stub
-\* goes in carrying a claim, so a request from before a clear stacks up next to the current one.
+\* A stub carries a claim only if its request's recording landed (#1777).  A stale token's recording
+\* is dropped, and a settle can fail; a stub then would stack up next to the current one.
 CarrierMeansRecorded == ~ghost.carrierNotRecorded
 
 (***************************************************************************)

@@ -35,8 +35,9 @@ const MAX_TOTAL_SIGNATURES: usize = 10_000;
 /// Issued by [`ProxyRecordingStore::try_claim`] and consumed by
 /// [`record`](ProxyRecordingStore::record) / [`release_claim`](ProxyRecordingStore::release_claim).
 /// A token is only valid until the claim it names is settled; a stale token (the claim expired
-/// and was re-taken by another caller) is silently ignored so a late loser cannot clobber the
-/// winner's recording.
+/// and was re-taken by another caller) records nothing, so a late loser cannot clobber the winner's
+/// recording, and [`record`](ProxyRecordingStore::record) reports it with
+/// [`ProxyStoreError::StaleClaim`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClaimToken(u64);
 
@@ -96,6 +97,12 @@ pub enum ProxyStoreError {
     /// claim *was* serialized and the duplicate is bounded by the one racing window.
     #[error("proxy claim refused: {0}")]
     Refused(#[source] BackendUnavailable),
+    /// The token no longer names the claim, so nothing was recorded. The claim is already gone, so
+    /// the caller releases nothing, and under `proxyOnce` it inserts no stub (issue #1777). A store
+    /// that answers `Ok` here keeps working, with that request's stub stacking beside the current
+    /// one.
+    #[error("proxy claim is stale")]
+    StaleClaim,
 }
 
 /// Convenience alias for fallible proxy-store operations.
@@ -187,10 +194,11 @@ pub trait ProxyRecordingStore: Send + Sync {
     /// context. Stale tokens (the claim expired and was re-taken) are ignored.
     fn release_claim(&self, port: u16, sig: &RequestSignature, token: ClaimToken);
 
-    /// Records the proxied response against the claim named by `token`. A stale token is
-    /// ignored (the recording is dropped) so a late loser cannot overwrite the winner.
+    /// Records the proxied response against the claim named by `token`. A stale token records
+    /// nothing, so a late loser cannot overwrite the winner, and answers
+    /// [`ProxyStoreError::StaleClaim`], which the caller does not release (issue #1777).
     ///
-    /// `Err` = backend unavailable (built-ins never fail). On `Err` the caller releases the
+    /// Any other `Err` = backend unavailable. On `Err` the caller releases the
     /// claim (via [`release_claim`](Self::release_claim)), so an implementation that fails
     /// mid-record must leave the claim releasable — never hold `(port, signature)` pending
     /// after returning `Err`, or that signature wedges under `proxyOnce`.
@@ -225,7 +233,8 @@ pub trait ProxyRecordingStore: Send + Sync {
     /// unaffected.
     ///
     /// `Err` = backend unavailable, including "I could not publish the stub". As with
-    /// [`record`](Self::record) the caller then releases the claim, so the signature stays
+    /// [`record`](Self::record), [`ProxyStoreError::StaleClaim`] aside, the caller then releases
+    /// the claim, so the signature stays
     /// retryable rather than wedging as Recorded-but-stub-less; the client still receives the
     /// upstream response, because the upstream call succeeded and only recording failed.
     fn complete(
@@ -448,7 +457,7 @@ impl ProxyRecordingStore for LocalProxyStore {
         // Stale or already-settled claim: drop the recording rather than clobber.
         if pending.get(&sig).copied() != Some(token.0) {
             tracing::debug!("Stale claim token; dropping recording (claim released/re-taken)");
-            return Ok(());
+            return Err(ProxyStoreError::StaleClaim);
         }
         if responses.len() >= MAX_TOTAL_SIGNATURES && !responses.contains_key(&sig) {
             tracing::debug!(
@@ -691,9 +700,10 @@ mod tests {
         let stale = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap());
         store.release_claim(1, &s, stale);
         let _live = claim_token(store.try_claim_as(1, &s, ProxyMode::ProxyOnce).unwrap());
-        store
-            .record(1, s.clone(), stale, resp(200, "late"))
-            .unwrap();
+        assert!(matches!(
+            store.record(1, s.clone(), stale, resp(200, "late")),
+            Err(ProxyStoreError::StaleClaim)
+        ));
 
         assert_eq!(store.recorded_len(1, &s), 0);
         assert!(store.lookup(1, &s).is_none());
@@ -919,7 +929,10 @@ mod tests {
         );
 
         // Stale record must be dropped, not stored.
-        store.record(1, s.clone(), t1, resp(500, "stale")).unwrap();
+        assert!(matches!(
+            store.record(1, s.clone(), t1, resp(500, "stale")),
+            Err(ProxyStoreError::StaleClaim)
+        ));
         assert!(
             store.lookup(1, &s).is_none(),
             "stale record must be ignored"
