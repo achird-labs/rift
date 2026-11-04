@@ -24,14 +24,15 @@ CONSTANTS
     Gated,      \* requests matching the gated stubs, each with a `newScenarioState`
     Pollers,    \* requests matching read-only stubs under the same gates
     Setters,    \* requests matching an ungated stub with `newScenarioState = SetTo`
-    Resetters,  \* admin deletes of the scenario's key (`flow_delete`, matching.rs:746)
+    Resetters,  \* admin deletes of the scenario's key (`flow_delete`)
+    Clearers,   \* clears of the scenario's flow (`flow_clear`)
     Start,      \* what the store holds at the start: a state, or NoVal (absent)
     SetTo,      \* the state a setter writes
     AtomicCas,  \* TRUE: `compare_and_set` is one step, as every shipped backend's.
                 \* FALSE: the trait's default, a `get` then a `set` (flow_state.rs:100)
     NoVal       \* the key is absent from the store
 
-Requests == Gated \cup Pollers \cup Setters \cup Resetters
+Requests == Gated \cup Pollers \cup Setters \cup Resetters \cup Clearers
 
 States == {"S", "A", "B"}
 \* Stubs in scan order; the gate of each.  `S` is `INITIAL_SCENARIO_STATE`.
@@ -45,6 +46,7 @@ ASSUME /\ Start \in States \cup {NoVal}
        /\ AtomicCas \in BOOLEAN
        /\ Gated \cap Pollers = {} /\ Gated \cap Setters = {} /\ Gated \cap Resetters = {}
        /\ Pollers \cap Setters = {} /\ Pollers \cap Resetters = {} /\ Setters \cap Resetters = {}
+       /\ Clearers \cap (Gated \cup Pollers \cup Setters \cup Resetters) = {}
 
 \* `scenario_state` (matching.rs:512): the initial state is normally stored as absence.
 Logical(v) == IF v = NoVal THEN "S" ELSE v
@@ -66,17 +68,18 @@ VARIABLES
 
 vars == <<store, map, clock, req, ver, writes, served, maxPub, casBroken, dropped, noMatch>>
 
-Quiet == \A r \in Requests : req[r].pc \notin {"issue", "publish"}
+Quiet == \A r \in Requests : req[r].pc \notin {"issue", "publish", "clearAfter"}
 
 StartPc(r) ==
     IF r \in Gated \cup Pollers THEN "copy"
     ELSE IF r \in Setters THEN "setRead"
-    ELSE "delRead"
+    ELSE IF r \in Resetters THEN "delWrite"
+    ELSE "clearBefore"
 
 \* A request's locals, before it starts and once it is done: nothing can read them after that, so
 \* keeping them would only split states.
 Locals(pc) == [pc |-> pc, copy |-> 0, i |-> 1, answer |-> "S", rver |-> 0, exp |-> NoVal,
-               changed |-> FALSE, wrote |-> 0, to |-> "S", at |-> 0]
+               changed |-> FALSE, wrote |-> 0, to |-> "S", at |-> 0, before |-> 0, held |-> FALSE]
 
 Init ==
     /\ store = Start
@@ -177,52 +180,81 @@ Serve(r) ==
     /\ req' = [req EXCEPT ![r] = Locals("done")]
     /\ UNCHANGED <<store, map, clock, ver, writes, maxPub, casBroken, dropped, noMatch>>
 
-\* matching.rs:537-540: `set_scenario_state` asks whether the write would change the state.
+\* set_deciding_move: read the value, and decide against it whether the write moves the state.
 SetRead(r) ==
     /\ req[r].pc = "setRead"
-    /\ req' = [req EXCEPT ![r].changed = (Logical(store) # SetTo), ![r].to = SetTo,
+    /\ req' = [req EXCEPT ![r].exp = store, ![r].changed = (Logical(store) # SetTo), ![r].to = SetTo,
                           ![r].pc = "setWrite"]
     /\ UNCHANGED <<store, map, clock, ver, writes, served, maxPub, casBroken, dropped, noMatch>>
 
-\* matching.rs:542-549: the plain write, stamped only when that earlier answer said so.  An
-\* ungated stub's answer does not depend on the state, so its serve is not modelled.
+\* The compare-and-set.  A conflict returns the value it found, and the write decides again from that
+\* value, so what it stamps is what it replaced (#1780).  An ungated stub's answer does not depend on
+\* the state, so its serve is not modelled, and neither is the loop's bound, past which it writes
+\* plainly and counts as moved.
 SetWrite(r) ==
     /\ req[r].pc = "setWrite"
-    /\ store' = SetTo
-    /\ ver' = ver + 1
-    /\ req' = [req EXCEPT ![r] = IF @.changed
-                                  THEN [@ EXCEPT !.wrote = ver + 1, !.pc = "issue"]
-                                  ELSE Locals("done")]
+    /\ IF req[r].exp = store
+       THEN /\ store' = SetTo
+            /\ ver' = ver + 1
+            /\ req' = [req EXCEPT ![r] = IF @.changed
+                                          THEN [@ EXCEPT !.wrote = ver + 1, !.pc = "issue"]
+                                          ELSE Locals("done")]
+       ELSE /\ req' = [req EXCEPT ![r].exp = store, ![r].changed = (Logical(store) # SetTo)]
+            /\ UNCHANGED <<store, ver>>
     /\ UNCHANGED <<map, clock, writes, served, maxPub, casBroken, dropped, noMatch>>
 
-\* matching.rs:955, :990 and :778: `ScenarioStampingStore::delete` asks `would_change`.
-DelRead(r) ==
-    /\ req[r].pc = "delRead"
-    /\ req' = [req EXCEPT ![r].changed = (store # NoVal), ![r].to = "S", ![r].pc = "delWrite"]
-    /\ UNCHANGED <<store, map, clock, ver, writes, served, maxPub, casBroken, dropped, noMatch>>
-
-\* matching.rs:960-963: the delete, stamped only when that earlier answer said so.
+\* delete_deciding_move: `set_key_ttl` with a zero TTL deletes and reports whether the key existed, in
+\* one step, so what it stamps is what it removed (#1780).
 DelWrite(r) ==
     /\ req[r].pc = "delWrite"
+    /\ IF store # NoVal
+       THEN /\ store' = NoVal
+            /\ ver' = ver + 1
+            /\ req' = [req EXCEPT ![r].wrote = ver + 1, ![r].to = "S", ![r].pc = "issue"]
+       ELSE /\ req' = [req EXCEPT ![r] = Locals("done")]
+            /\ UNCHANGED <<store, ver>>
+    /\ UNCHANGED <<map, clock, writes, served, maxPub, casBroken, dropped, noMatch>>
+
+\* ScenarioStampingStore::clearing.  The clear reports nothing, so it loads the stamp map before its
+\* reads, reads, clears, and loads the map again: a gate it held, or one whose stamp moved since, is
+\* stamped (#1780).
+ClearBefore(r) ==
+    /\ req[r].pc = "clearBefore"
+    /\ req' = [req EXCEPT ![r].before = map, ![r].pc = "clearHeld"]
+    /\ UNCHANGED <<store, map, clock, ver, writes, served, maxPub, casBroken, dropped, noMatch>>
+
+ClearHeld(r) ==
+    /\ req[r].pc = "clearHeld"
+    /\ req' = [req EXCEPT ![r].held = (store # NoVal), ![r].pc = "clearWipe"]
+    /\ UNCHANGED <<store, map, clock, ver, writes, served, maxPub, casBroken, dropped, noMatch>>
+
+ClearWipe(r) ==
+    /\ req[r].pc = "clearWipe"
     /\ store' = NoVal
     /\ ver' = ver + 1
-    /\ req' = [req EXCEPT ![r] = IF @.changed
-                                  THEN [@ EXCEPT !.wrote = ver + 1, !.pc = "issue"]
-                                  ELSE Locals("done")]
+    /\ req' = [req EXCEPT ![r].wrote = ver + 1, ![r].to = "S", ![r].pc = "clearAfter"]
     /\ UNCHANGED <<map, clock, writes, served, maxPub, casBroken, dropped, noMatch>>
+
+ClearAfter(r) ==
+    /\ req[r].pc = "clearAfter"
+    /\ req' = [req EXCEPT ![r] = IF @.held \/ map # @.before
+                                  THEN [@ EXCEPT !.pc = "issue"]
+                                  ELSE Locals("done")]
+    /\ UNCHANGED <<store, map, clock, ver, writes, served, maxPub, casBroken, dropped, noMatch>>
 
 Next ==
     \E r \in Requests :
         \/ Copy(r) \/ GateRead(r) \/ CasCompare(r) \/ CasSet(r) \/ Issue(r) \/ Publish(r)
-        \/ Serve(r) \/ SetRead(r) \/ SetWrite(r) \/ DelRead(r) \/ DelWrite(r)
+        \/ Serve(r) \/ SetRead(r) \/ SetWrite(r) \/ DelWrite(r)
+        \/ ClearBefore(r) \/ ClearHeld(r) \/ ClearWipe(r) \/ ClearAfter(r)
 
 Spec == Init /\ [][Next]_vars
 
 Symmetry == Permutations(Gated) \cup Permutations(Pollers)
-            \cup Permutations(Setters) \cup Permutations(Resetters)
+            \cup Permutations(Setters) \cup Permutations(Resetters) \cup Permutations(Clearers)
 
 Pcs == {"copy", "gate", "cas", "casSet", "issue", "publish", "serve", "setRead", "setWrite",
-        "delRead", "delWrite", "done"}
+        "delWrite", "clearBefore", "clearHeld", "clearWipe", "clearAfter", "done"}
 
 TypeInv ==
     /\ store \in States \cup {NoVal}

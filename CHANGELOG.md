@@ -46,6 +46,15 @@ record.
   journal. Accept loops now wait for the claim before their first accept. A connection the kernel had
   already queued on the loser's socket is closed unanswered, so a client racing two creates can see a
   closed connection or a timeout, never the loser's response.
+- **A scenario write that decided "no change" no longer moves the state unstamped** (#1780): a set,
+  delete or clear of a key gating a conditional stub decided whether it moved the state a step before
+  it wrote, so it could put back a state a racing transition had just left with no stamp. A client on
+  `If-Modified-Since` alone then stayed on `304`. A set now decides against the value its
+  compare-and-set replaced, a delete uses `set_key_ttl` with a zero TTL to delete and report in one step,
+  and a clear re-checks the stamp map. On these keys only, `rift_flow_state_ops_total` now counts sets as
+  `compare_and_set` and deletes as `set_key_ttl`, and a custom store without `set_key_ttl` records
+  `set_key_ttl` `error` on each such delete, though the delete succeeds. Deleting a stored `"Started"`
+  costs a poller one extra `200`.
 - **A stalled scenario transition no longer takes `Last-Modified` backwards** (#1779): nothing ordered
   two transitions' stamps as they landed, so a stalled one could put a lower stamp over a higher one. A
   client revalidating with `If-Modified-Since` alone then stayed on `304` until the next transition. A

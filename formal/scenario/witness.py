@@ -26,13 +26,14 @@ def only(invariant, cfg=known_cfg):
     return f'{cfg.split("INVARIANTS")[0]}INVARIANTS\n    {invariant}\n'
 
 
-def bounds(invariant, gated, pollers, setters, resetters, start='"B"'):
+def bounds(invariant, gated, pollers, setters, resetters, start='"B"', clearers=''):
     """`invariant` alone, on the named requests, so one finding is isolated from the others."""
     cfg = f'''CONSTANTS
     Gated = {{{gated}}}
     Pollers = {{{pollers}}}
     Setters = {{{setters}}}
     Resetters = {{{resetters}}}
+    Clearers = {{{clearers}}}
     Start = {start}
     SetTo = "B"
     AtomicCas = TRUE
@@ -51,27 +52,6 @@ INVARIANTS
 # The fix each finding proposes, as an edit of the model.
 # A scan reads each scenario once, so every stub is judged against one state.
 ONE_READ_SCAN = [('IN IF st = Order[i]\n', 'IN IF TRUE\n')]
-# The store reports the value it replaced, so "did this move it" is decided with the write.
-WRITE_REPORTS_CHANGE = [
-    ('''    /\\ req' = [req EXCEPT ![r].changed = (Logical(store) # SetTo), ![r].to = SetTo,
-                          ![r].pc = "setWrite"]
-    /\\ UNCHANGED <<store, map, clock, ver, writes, served, maxPub, casBroken, dropped, noMatch>>''',
-     '''    /\\ req' = [req EXCEPT ![r].changed = (Logical(store) # SetTo), ![r].to = SetTo,
-                          ![r].wrote = ver + 1,
-                          ![r].pc = IF Logical(store) # SetTo THEN "issue" ELSE "done"]
-    /\\ store' = SetTo
-    /\\ ver' = ver + 1
-    /\\ UNCHANGED <<map, clock, writes, served, maxPub, casBroken, dropped, noMatch>>'''),
-    ('''    /\\ req' = [req EXCEPT ![r].changed = (store # NoVal), ![r].to = "S", ![r].pc = "delWrite"]
-    /\\ UNCHANGED <<store, map, clock, ver, writes, served, maxPub, casBroken, dropped, noMatch>>''',
-     '''    /\\ req' = [req EXCEPT ![r].changed = (store # NoVal), ![r].to = "S",
-                          ![r].wrote = ver + 1,
-                          ![r].pc = IF store # NoVal THEN "issue" ELSE "done"]
-    /\\ store' = NoVal
-    /\\ ver' = ver + 1
-    /\\ UNCHANGED <<map, clock, writes, served, maxPub, casBroken, dropped, noMatch>>'''),
-]
-
 cases = [
     # The race the protocol depends on, and the documented limit of the trait's default.
     ('a compare-and-set can lose (matching.rs:705)', [], witness_cfg, 'NeverDroppedTransition'),
@@ -80,24 +60,17 @@ cases = [
      'TransitionsAreCas'),
     ('the same, with an atomic compare_and_set (control)', [], only('TransitionsAreCas', witness_cfg), 'ok'),
     # Filed findings, reachable until fixed (README.md, "Findings").
-    ('a client can hold an answer it is never told changed (#1780)', [],
-     only('NoStaleAnswerAtRest'), 'NoStaleAnswerAtRest'),
     ('a scan of covered states matches nothing (#1781)', [], only('NoMatchOnlyWhenUncovered'),
      'NoMatchOnlyWhenUncovered'),
     # Each finding alone, then under its proposed fix.
-    ('the unstamped set alone: a transition, a poller, a setter', [],
-     bounds('NoStaleAnswerAtRest', 'g1', 'p1', 's1', ''), 'NoStaleAnswerAtRest'),
-    ('the same, the write deciding the change', WRITE_REPORTS_CHANGE,
-     bounds('NoStaleAnswerAtRest', 'g1', 'p1', 's1', ''), 'ok'),
-    ('the unstamped delete alone: a transition, a poller, an admin delete', [],
-     bounds('NoStaleAnswerAtRest', 'g1', 'p1', '', 'd1', 'NoVal'), 'NoStaleAnswerAtRest'),
-    ('the same, the write deciding the change', WRITE_REPORTS_CHANGE,
-     bounds('NoStaleAnswerAtRest', 'g1', 'p1', '', 'd1', 'NoVal'), 'ok'),
     ('the torn scan alone: a transition and a poller', [],
      bounds('NoMatchOnlyWhenUncovered', 'g1', 'p1', '', ''), 'NoMatchOnlyWhenUncovered'),
     ('the same, one read per scan', ONE_READ_SCAN,
      bounds('NoMatchOnlyWhenUncovered', 'g1', 'p1', '', ''), 'ok'),
-    # The PR gate is green with those two in Known.cfg.
+    # A clear racing a transition, which the larger cfgs leave out.
+    ('a clear racing a transition stamps what it moved (control)', [],
+     bounds('NoStaleAnswerAtRest', 'g1', 'p1', '', '', 'NoVal', 'c1'), 'ok'),
+    # The PR gate is green with the one left in Known.cfg.
     ('ScenarioPR.cfg (control)', [], pr_cfg, 'ok'),
 ]
 failed = False

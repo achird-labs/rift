@@ -81,7 +81,7 @@ source, and each issue says which. A fixed one says so in the table.
 | #1777 | proxyonce | A settle that wrote no recording still inserts a stub carrying the claim. Fixed |
 | #1778 | proxyonce | An `AlreadyRecorded` with nothing to replay inserts a stub with no claim. Fixed |
 | #1779 | scenario | A stalled transition puts a lower `Last-Modified` over a higher one. Fixed |
-| #1780 | scenario | A set or delete that decided "no change" can still move the state, unstamped |
+| #1780 | scenario | A set or delete that decided "no change" can still move the state, unstamped. Fixed |
 | #1781 | scenario | A stub scan reads state once per gate, so a transition mid-scan gives a no-match |
 | #1782 | faultio | A fault stub added under an open HTTP/2 connection aborts every stream on it |
 | #1784 | scripting | A restart between a request's hooks splits it across two state cells |
