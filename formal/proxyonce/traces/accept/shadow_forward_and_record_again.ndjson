@@ -1,0 +1,8 @@
+{"point":"Start","preloaded":true}
+{"outcome":"AlreadyRecorded","point":"ProxyClaim","seq":0,"token":null}
+{"point":"ProxyShadowed","seq":1}
+{"point":"ProxyShadowForgot","seq":2}
+{"outcome":"Claimed","point":"ProxyClaim","seq":3,"token":1}
+{"point":"ProxyForwarding","seq":4}
+{"point":"ProxySettled","seq":5}
+{"claimed":true,"point":"ProxyInserted","seq":6}

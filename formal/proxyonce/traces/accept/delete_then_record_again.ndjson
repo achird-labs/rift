@@ -1,0 +1,7 @@
+{"point":"Start","preloaded":true}
+{"point":"ProxyOrphanFound","seq":0}
+{"point":"ProxyOrphanForgotten","seq":1}
+{"outcome":"Claimed","point":"ProxyClaim","seq":2,"token":1}
+{"point":"ProxyForwarding","seq":3}
+{"point":"ProxySettled","seq":4}
+{"claimed":true,"point":"ProxyInserted","seq":5}

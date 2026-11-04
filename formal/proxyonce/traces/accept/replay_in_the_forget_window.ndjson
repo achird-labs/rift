@@ -1,0 +1,6 @@
+{"point":"Start","preloaded":true}
+{"point":"ProxyOrphanFound","seq":0}
+{"outcome":"AlreadyRecorded","point":"ProxyClaim","seq":1,"token":null}
+{"point":"ProxyLookingUp","seq":2}
+{"point":"ProxyReplayed","seq":3}
+{"point":"ProxyOrphanForgotten","seq":4}

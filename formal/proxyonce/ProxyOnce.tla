@@ -27,7 +27,7 @@ CONSTANTS
     EditKinds,      \* the kinds of edit they may make, see Edits
     Clearers,       \* DELETE /imposters/:port/savedProxyResponses (recording.rs:185)
     Restarters,     \* restart_runtime_state, PUT /imposters on a running imposter (manager.rs:3070)
-    GeneratesStub,  \* predicateGenerators, addWaitBehavior or addDecorateBehavior is set (proxy.rs:1325)
+    GeneratesStub,  \* predicateGenerators, addWaitBehavior or addDecorateBehavior is set (proxy.rs:1326)
     SettleCanFail,  \* the store may fail `record`/`complete`; LocalProxyStore never does (proxy_store.rs:193)
     Preloaded       \* TRUE: starts recorded, with its carrier in front of the proxy
 
@@ -86,15 +86,15 @@ FrontCarriers(s) ==
 
 SlotIndex(s, slot) == FirstWhere(s, LAMBDA e : IsProxy(e) /\ e.slot = slot)
 
-\* recording_is_shadowed (proxy.rs:1076-1094): `answering` is in the list, and the first carrier
+\* recording_is_shadowed (proxy.rs:1077-1095): `answering` is in the list, and the first carrier
 \* is behind it.  No carrier, or the answering stub gone, is not shadowed.
 Shadowed(s, slot) ==
     /\ slot # NoSlot
     /\ SlotIndex(s, slot) # 0
     /\ FirstCarrier(s) > SlotIndex(s, slot)
 
-\* The anchor of insert_or_append_proxy_stub (proxy.rs:1108-1110): the answering stub, else the
-\* first proxy stub, else the end of the list (proxy.rs:1148).
+\* The anchor of insert_or_append_proxy_stub (proxy.rs:1109-1111): the answering stub, else the
+\* first proxy stub, else the end of the list (proxy.rs:1149).
 InsertIndex(s, slot) ==
     IF SlotIndex(s, slot) # 0 THEN SlotIndex(s, slot)
     ELSE IF FirstProxy(s) # 0 THEN FirstProxy(s)
@@ -106,20 +106,23 @@ InsertIndex(s, slot) ==
 (* pc:        where the request is.                                        *)
 (* answering: the proxy stub's slot it matched (handler.rs:1510).          *)
 (* token:     the claim its HeldClaim holds, NoToken when none.            *)
-(* lost:      `lost_race` (proxy.rs:1400): its claim came back InFlight.   *)
+(* lost:      `lost_race` (proxy.rs:1401): its claim came back InFlight.   *)
 (* saw:       the recording its AlreadyRecorded was about.                 *)
 (* shadowed:  ghost.  Every stub list since its Match shadowed the         *)
 (*            recording, so no edit or racing request gives it a reason to *)
 (*            replay.                                                      *)
+(* landed:    ghost.  Its settle wrote the recording.  The engine cannot   *)
+(*            tell: HeldClaim::settle returns nothing (proxy.rs:104).      *)
 (***************************************************************************)
 InitReq == [pc |-> "idle", answering |-> NoSlot, token |-> NoToken, lost |-> FALSE,
-            saw |-> NoRec, shadowed |-> FALSE]
+            saw |-> NoRec, shadowed |-> FALSE, landed |-> FALSE]
 
 \* A stub-list change is seen by the ghost of every request still on its way.
 Reshadow(r, s) == [x \in DOMAIN r |-> [r[x] EXCEPT !.shadowed = @ /\ Shadowed(s, r[x].answering)]]
 
 NoGhost == [hits |-> 0, recorded |-> 0, forgotWhileClaimed |-> FALSE, forgotOther |-> FALSE,
-            replayedShadowed |-> FALSE, unclaimedForward |-> FALSE, unclaimedInsert |-> FALSE]
+            replayedShadowed |-> FALSE, unclaimedForward |-> FALSE, unclaimedInsert |-> FALSE,
+            carrierNotRecorded |-> FALSE]
 
 Init ==
     /\ responses = IF Preloaded THEN 1 ELSE NoRec
@@ -153,8 +156,8 @@ Match(r) ==
 
 \* try_claim_as for proxyOnce (proxy_store.rs:375-391): the responses read guard is held across
 \* the pending lock, so the two reads and the insert are one step (the #171/#118 fix).
-\* `onRecorded` is where an AlreadyRecorded goes: the shadow check on the first claim (proxy.rs:1409,
-\* only for a request that generates a stub), the lookup on the second (proxy.rs:1415, 1431).
+\* `onRecorded` is where an AlreadyRecorded goes: the shadow check on the first claim (proxy.rs:1414,
+\* only for a request that generates a stub), the lookup on the second (proxy.rs:1423, 1444).
 TryClaim(r, onRecorded) ==
     /\ IF responses # NoRec
        THEN /\ req' = [req EXCEPT ![r].pc = onRecorded,
@@ -172,13 +175,13 @@ Claim(r) ==
     /\ req[r].pc = "claim"
     /\ TryClaim(r, IF GeneratesStub THEN "shadow" ELSE "lookup")
 
-\* recording_is_shadowed (proxy.rs:1076), its own snapshot load (proxy.rs:1084).
+\* recording_is_shadowed (proxy.rs:1077), its own snapshot load (proxy.rs:1085).
 ShadowCheck(r) ==
     /\ req[r].pc = "shadow"
     /\ req' = [req EXCEPT ![r].pc = IF Shadowed(stubs, req[r].answering) THEN "forget" ELSE "lookup"]
     /\ UNCHANGED <<responses, pending, nextToken, stubs, nextSlot, edit, clear, restart, ghost>>
 
-\* forget_recorded on the request path (proxy.rs:1414).
+\* forget_recorded on the request path (proxy.rs:1420).
 ShadowForget(r) ==
     /\ req[r].pc = "forget"
     /\ responses' = NoRec
@@ -186,13 +189,13 @@ ShadowForget(r) ==
     /\ req' = [req EXCEPT ![r].pc = "reclaim"]
     /\ UNCHANGED <<pending, nextToken, stubs, nextSlot, edit, clear, restart>>
 
-\* The second try_claim_as (proxy.rs:1415); its outcome runs through the match at proxy.rs:1430.
+\* The second try_claim_as (proxy.rs:1423); its outcome runs through the match at proxy.rs:1443.
 Reclaim(r) ==
     /\ req[r].pc = "reclaim"
     /\ TryClaim(r, "lookup")
 
-\* `lookup` (proxy.rs:1432; proxy_store.rs:466).  A recording replays and the request is done.
-\* None is the "AlreadyRecorded but nothing to replay" arm (proxy.rs:1441-1448): the request goes
+\* `lookup` (proxy.rs:1446; proxy_store.rs:466).  A recording replays and the request is done.
+\* None is the "AlreadyRecorded but nothing to replay" arm (proxy.rs:1456-1464): the request goes
 \* on holding no claim and with `lost_race` false.
 Lookup(r) ==
     /\ req[r].pc = "lookup"
@@ -203,7 +206,7 @@ Lookup(r) ==
             /\ UNCHANGED ghost
     /\ UNCHANGED <<responses, pending, nextToken, stubs, nextSlot, edit, clear, restart>>
 
-\* The upstream call (proxy.rs:1510-1513), which is awaited.
+\* The upstream call (proxy.rs:1527-1530), which is awaited.
 Forward(r) ==
     /\ req[r].pc = "forward"
     /\ req' = [req EXCEPT ![r].pc = "settle"]
@@ -211,25 +214,26 @@ Forward(r) ==
                               !.unclaimedForward = @ \/ (req[r].token = NoToken /\ ~req[r].lost)]
     /\ UNCHANGED <<responses, pending, nextToken, stubs, nextSlot, edit, clear, restart>>
 
-\* After the settle: a stub is inserted unless a concurrent request holds the claim (proxy.rs:1658).
+\* After the settle: a stub is inserted unless a concurrent request holds the claim (proxy.rs:1676).
 AfterSettle(r) == IF GeneratesStub /\ ~req[r].lost THEN "insert" ELSE "done"
 
-\* HeldClaim::settle (proxy.rs:103), to `complete` or `record` (proxy_store.rs:413-464), under the
+\* HeldClaim::settle (proxy.rs:104), to `complete` or `record` (proxy_store.rs:413-464), under the
 \* responses write lock and the pending lock.  A token that no longer names the pending claim
 \* changes nothing and still answers Ok (proxy_store.rs:449-452).  A request without a claim has
 \* nothing to settle; it still takes this step, on its way out of the upstream await.
 Settle(r) ==
     /\ req[r].pc = "settle"
-    /\ req' = [req EXCEPT ![r].pc = AfterSettle(r)]
-    /\ IF req[r].token # NoToken /\ pending = req[r].token
-       THEN /\ responses' = IF responses = NoRec THEN req[r].token ELSE responses
-            /\ pending' = NoToken
-            /\ ghost' = [ghost EXCEPT !.recorded = @ + 1]
-       ELSE UNCHANGED <<responses, pending, ghost>>
+    /\ LET lands == req[r].token # NoToken /\ pending = req[r].token
+       IN /\ req' = [req EXCEPT ![r].pc = AfterSettle(r), ![r].landed = lands]
+          /\ IF lands
+             THEN /\ responses' = IF responses = NoRec THEN req[r].token ELSE responses
+                  /\ pending' = NoToken
+                  /\ ghost' = [ghost EXCEPT !.recorded = @ + 1]
+             ELSE UNCHANGED <<responses, pending, ghost>>
     /\ UNCHANGED <<nextToken, stubs, nextSlot, edit, clear, restart>>
 
-\* The store failed the settle: the claim is released (proxy.rs:122-128), and the caller cannot
-\* tell, so a stub is still inserted (proxy.rs:1643, 1670).  The failing call changes nothing, so
+\* The store failed the settle: the claim is released (proxy.rs:123-129), and the caller cannot
+\* tell, so a stub is still inserted (proxy.rs:1661, 1688).  The failing call changes nothing, so
 \* the release is the only commit and this is one step.
 SettleFail(r) ==
     /\ SettleCanFail
@@ -239,19 +243,20 @@ SettleFail(r) ==
     /\ pending' = IF pending = req[r].token THEN NoToken ELSE pending
     /\ UNCHANGED <<responses, nextToken, stubs, nextSlot, edit, clear, restart, ghost>>
 
-\* insert_or_append_proxy_stub for proxyOnce (proxy.rs:1147-1155), under `stubs_write`.  The stub
-\* carries the claim when the request held one (`settled`, proxy.rs:1670).  Its
+\* insert_or_append_proxy_stub for proxyOnce (proxy.rs:1148-1156), under `stubs_write`.  The stub
+\* carries the claim when the request held one (`settled`, proxy.rs:1688).  Its
 \* forget_orphaned_claims finds nothing: the insert removes no carrier.
 Insert(r) ==
     /\ req[r].pc = "insert"
     /\ LET s == InsertAt(stubs, InsertIndex(stubs, req[r].answering), Rec(req[r].token # NoToken))
        IN /\ stubs' = s
           /\ req' = Reshadow([req EXCEPT ![r].pc = "done"], s)
-    /\ ghost' = [ghost EXCEPT !.unclaimedInsert = @ \/ req[r].token = NoToken]
+    /\ ghost' = [ghost EXCEPT !.unclaimedInsert = @ \/ req[r].token = NoToken,
+                              !.carrierNotRecorded = @ \/ (req[r].token # NoToken /\ ~req[r].landed)]
     /\ UNCHANGED <<responses, pending, nextToken, nextSlot, edit, clear, restart>>
 
 \* The request's future is dropped, or the forward or a behavior failed and it returned Err: either
-\* way HeldClaim::drop releases the claim, token-checked (proxy.rs:132-138; proxy_store.rs:400-411).
+\* way HeldClaim::drop releases the claim, token-checked (proxy.rs:133-139; proxy_store.rs:400-411).
 \* Only at the awaits: nothing between the settle and the insert can drop the future.
 DropRequest(r) ==
     /\ req[r].pc \in {"forward", "settle"}
@@ -297,7 +302,7 @@ EditSwap(e) ==
         /\ req' = Reshadow(req, s)
     /\ UNCHANGED <<responses, pending, nextToken, clear, restart, ghost>>
 
-\* forget_orphaned_claims' store call (core/mod.rs:925), after the swap and outside the lock.
+\* forget_orphaned_claims' store call (core/mod.rs:929), after the swap and outside the lock.
 EditForget(e) ==
     /\ edit[e].pc = "forget"
     /\ responses' = NoRec
@@ -320,7 +325,7 @@ ClearStore(c) ==
     /\ clear' = [clear EXCEPT ![c].pc = "swap"]
     /\ UNCHANGED <<nextToken, stubs, nextSlot, req, edit, restart>>
 
-\* Step two (recording.rs:189-209): every recorded stub goes, and overwrite_all gives every stub
+\* Step two (recording.rs:195-215): every recorded stub goes, and overwrite_all gives every stub
 \* left a new slot (core/mod.rs:993-1005), so the proxy stub's slot changes.
 ClearSwap(c) ==
     /\ clear[c].pc = "swap"
@@ -340,7 +345,7 @@ ClearForget(c) ==
     /\ clear' = [clear EXCEPT ![c].pc = "done"]
     /\ UNCHANGED <<pending, nextToken, stubs, nextSlot, req, edit, restart>>
 
-\* restart_runtime_state (manager.rs:3070-3087): restart_cycles keeps every state's claim
+\* restart_runtime_state (manager.rs:3070-3088): restart_cycles keeps every state's claim
 \* (lifecycle.rs:249), and the store is cleared with the stubs left in place.
 RestartClear(u) ==
     /\ restart[u] = "idle"
@@ -388,7 +393,7 @@ NoWedgedClaim ==
         \E r \in Requests : req[r].token = pending /\ req[r].pc \in {"forward", "settle"}
 
 \* The windows in which a recording legitimately has no carrier: the winner settled and has not
-\* inserted (proxy.rs:1642, 1665), or an edit or clear swapped and has not forgotten yet.
+\* inserted (proxy.rs:1659, 1683), or an edit or clear swapped and has not forgotten yet.
 RecordingWindow ==
     \/ \E r \in Requests : req[r].pc = "insert" /\ req[r].token # NoToken
     \/ \E e \in Editors : edit[e].pc = "forget"
@@ -418,7 +423,7 @@ ShadowedRecordingForwards == ~ghost.replayedShadowed
 RecordedOnce == ghost.recorded <= 1
 
 \* A concurrent loser forwards but never records: inserting its stub too would stack a duplicate
-\* per loser (proxy.rs:1398).
+\* per loser (proxy.rs:1399).
 LoserNeverRecords == \A r \in Requests : req[r].lost => req[r].pc # "insert"
 
 \* The store's two maps exclude each other for one signature: try_claim_as only claims with no
@@ -429,12 +434,17 @@ ClaimExcludesRecording == pending # NoToken => responses = NoRec
 \* about one recording removes whichever is there when it runs.
 ForgetRemovesWhatItSaw == ~ghost.forgotOther
 
-\* Only a request that lost the race forwards with no claim.  The arm at proxy.rs:1441 is the other.
+\* Only a request that lost the race forwards with no claim.  The arm at proxy.rs:1456 is the other.
 ForwardUnrecordedOnlyWhenLost == ~ghost.unclaimedForward
 
 \* Only a request holding a claim inserts a stub: a stub without a claim is not forgotten with its
 \* recording and stacks in front of the proxy like a loser's.
 OnlyClaimHolderInserts == ~ghost.unclaimedInsert
+
+\* A stub carries a claim only if its request's recording landed.  The store drops a stale token's
+\* recording and answers Ok, and fails a settle without the caller seeing it; either way the stub
+\* goes in carrying a claim, so a request from before a clear stacks up next to the current one.
+CarrierMeansRecorded == ~ghost.carrierNotRecorded
 
 (***************************************************************************)
 (* Witnesses: the races the properties depend on stay reachable.           *)
