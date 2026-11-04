@@ -5,7 +5,7 @@ Usage from a model directory:
     from tlacheck import edit, tlc, jar_from_argv
     verdict, trace, out = tlc(jar, 'Lifecycle', spec_text, cfg_text)
 
-`verdict` is the name of the violated invariant or property, 'deadlock', 'ok' (model checking completed with no
+`verdict` is the name of the violated invariant or property ('temporal' when TLC does not name it), 'deadlock', 'ok' (model checking completed with no
 error), or 'error' (TLC failed; `out` says why).  `trace` is the counterexample as a list of
 "Action(args)" strings, empty when there is none.
 """
@@ -61,6 +61,9 @@ def tlc(jar, module, spec, cfg, extra_modules=None, workers='auto', timeout=None
     found = re.findall(r'Invariant (\w+) is violated|Temporal propert(?:y|ies) (\w+) was violated|(Deadlock) reached',
                        out)
     names = [x.lower() if x == 'Deadlock' else x for t in found for x in t if x]
+    # TLC 1.7.4, which CI pins, does not name the temporal property it reports.
+    if not names and 'Temporal properties were violated' in out:
+        names = ['temporal']
     trace = re.findall(r'^State \d+: <(\w+)(\([^)]*\))? line', out, re.M)
     trace = [a + (args or '') for a, args in trace]
     if names:

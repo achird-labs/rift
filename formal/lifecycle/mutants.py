@@ -91,7 +91,7 @@ failed = False
 # A drain that never ends: the delete cannot return, so progress fails under fairness.
 verdict, trace, out = tlc(jar, 'Lifecycle', edit(spec, [(DRAIN, '    /\\ FALSE\n')], 'stuck drain'),
                           read(os.path.join(here, 'Liveness.cfg')))
-if verdict == 'OpsFinish':
+if verdict in ('OpsFinish', 'temporal'):
     print(f'a drain that never ends: caught by {verdict}')
 else:
     print(f'a drain that never ends: expected OpsFinish, got {verdict}\n{out}')
