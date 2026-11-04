@@ -511,7 +511,8 @@ pub struct Imposter {
     pub(crate) generation: crate::imposter::probe::Generation,
     /// The lifecycle probe the manager installed, `None` in production.
     pub(crate) probe: crate::imposter::probe::ProbeHandle,
-    /// When each scenario last changed state, by scenario name (issue #1307). A transition changes
+    /// When each scenario last changed state, by scenario name (issue #1307). An entry never
+    /// decreases (issue #1779). A transition changes
     /// which stub answers with no stub changing, so the served `Last-Modified` folds in the
     /// transitions of every scenario gating the answering stub or a stub ahead of it. Keyed by name,
     /// not by flow: config-bounded, where flows are unbounded.

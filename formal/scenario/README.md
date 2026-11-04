@@ -48,8 +48,8 @@ threads run in parallel, so one request's step can land between any two of anoth
 |:--|:--|:--|:--|
 | `NeverOldAnswerUnderNewStamp` | PR, full | holds | An answer's stamp is below the stamp of any later write that moved away from it (#1307). It rests on the clock being strictly increasing and on the copy coming before the gate read. |
 | `TransitionsAreCas` | PR, full | holds | A gated transition never writes over a value it did not expect (#311). |
-| `StampMonotone` | Known | violated, #1779 | The stamp map's entry never falls. |
-| `NoStaleAnswerAtRest` | Known | violated, #1779, #1780 | With no stamp in flight, a client holding another answer is told so: its stamp is below the current one. The window between a write and its publish is excluded on purpose: there a client gets `304` until the publish, which ends it. |
+| `StampMonotone` | PR, full, Mutants | holds | The stamp map's entry never falls (#1779). |
+| `NoStaleAnswerAtRest` | Known | violated, #1780 | With no stamp in flight, a client holding another answer is told so: its stamp is below the current one. The window between a write and its publish is excluded on purpose: there a client gets `304` until the publish, which ends it. |
 | `NoMatchOnlyWhenUncovered` | Known | violated, #1781 | Every state has a stub in this table, so a scan never matches nothing. |
 
 ## Witnesses
@@ -83,7 +83,6 @@ interleaving. None was observed without it, and how often each occurs under load
 
 | Issue | Defect | Test in `scenario_interleavings.rs` |
 |:--|:--|:--|
-| #1779 | A transition stalled between `Issue` and `Publish` puts a lower stamp over a higher one. A client on `If-Modified-Since` stays on `304`, until the next transition | `a_stalled_stamp_does_not_take_the_scenario_back` |
 | #1780 | A set or delete that decided "no change" can still move the state, unstamped, with the same result. Reproduced for `set_scenario_state` and `flow_delete`; four more sites of the same shape are traced in the source only, and the issue lists them | `a_set_that_decided_no_change_still_stamps_what_it_moved`, `a_delete_that_decided_no_change_still_stamps_what_it_moved` |
 | #1781 | A scan reads the state once per gate, so a transition during it gives a no-match though every state has a stub | `a_scan_of_covered_states_finds_a_stub_while_the_state_moves` |
 
@@ -91,7 +90,7 @@ interleaving. None was observed without it, and how often each occurs under load
 sending an ETag does not see the stale `304`s.
 
 On fixing one, remove its `#[ignore]`, move its invariant from `Known.cfg` to `ScenarioPR.cfg` and `Scenario.cfg`, and
-delete its row from `witness.py`. `NoStaleAnswerAtRest` moves once both #1779 and #1780 are fixed.
+delete its row from `witness.py`. #1779 is fixed; its mutant stays.
 
 ### Not filed
 

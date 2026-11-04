@@ -21,6 +21,9 @@ MATCHED = '![r].pc = IF r \\in Gated THEN "cas" ELSE "serve"]'
 
 # name: (expected invariant, spec edits)
 mutants = {
+    # #1779: a stalled transition's lower stamp went over a higher one.
+    'a late publish overwrites a higher stamp (#1779)': ('StampMonotone', [
+        ("/\\ map' = Max(map, req[r].at)\n", "/\\ map' = req[r].at\n")]),
     # #1307: the stamp went out before the store write, so a request could copy it, read the old
     # state and serve the old answer under it.  Issue records the write it is about to make.
     'stamp before the store write (#1307)': ('NeverOldAnswerUnderNewStamp', [
