@@ -16,12 +16,11 @@ from tlacheck import edit, jar_from_argv, read, tlc  # noqa: E402
 here = os.path.dirname(os.path.abspath(__file__))
 spec = read(os.path.join(here, 'Scenario.tla'))
 pr_cfg = read(os.path.join(here, 'ScenarioPR.cfg'))
-known_cfg = read(os.path.join(here, 'Known.cfg'))
 witness_cfg = read(os.path.join(here, 'Witness.cfg'))
 jar = jar_from_argv()
 
 
-def only(invariant, cfg=known_cfg):
+def only(invariant, cfg):
     """`cfg` with `invariant` as its only invariant."""
     return f'{cfg.split("INVARIANTS")[0]}INVARIANTS\n    {invariant}\n'
 
@@ -50,8 +49,6 @@ INVARIANTS
 
 
 # The fix each finding proposes, as an edit of the model.
-# A scan reads each scenario once, so every stub is judged against one state.
-ONE_READ_SCAN = [('IN IF st = Order[i]\n', 'IN IF TRUE\n')]
 cases = [
     # The race the protocol depends on, and the documented limit of the trait's default.
     ('a compare-and-set can lose (matching.rs:705)', [], witness_cfg, 'NeverDroppedTransition'),
@@ -59,18 +56,10 @@ cases = [
      edit(only('TransitionsAreCas', witness_cfg), [('AtomicCas = TRUE', 'AtomicCas = FALSE')], 'Witness.cfg'),
      'TransitionsAreCas'),
     ('the same, with an atomic compare_and_set (control)', [], only('TransitionsAreCas', witness_cfg), 'ok'),
-    # Filed findings, reachable until fixed (README.md, "Findings").
-    ('a scan of covered states matches nothing (#1781)', [], only('NoMatchOnlyWhenUncovered'),
-     'NoMatchOnlyWhenUncovered'),
-    # Each finding alone, then under its proposed fix.
-    ('the torn scan alone: a transition and a poller', [],
-     bounds('NoMatchOnlyWhenUncovered', 'g1', 'p1', '', ''), 'NoMatchOnlyWhenUncovered'),
-    ('the same, one read per scan', ONE_READ_SCAN,
-     bounds('NoMatchOnlyWhenUncovered', 'g1', 'p1', '', ''), 'ok'),
     # A clear racing a transition, which the larger cfgs leave out.
     ('a clear racing a transition stamps what it moved (control)', [],
      bounds('NoStaleAnswerAtRest', 'g1', 'p1', '', '', 'NoVal', 'c1'), 'ok'),
-    # The PR gate is green with the one left in Known.cfg.
+    # The PR gate is green.
     ('ScenarioPR.cfg (control)', [], pr_cfg, 'ok'),
 ]
 failed = False

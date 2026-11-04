@@ -55,6 +55,10 @@ record.
   `compare_and_set` and deletes as `set_key_ttl`, and a custom store without `set_key_ttl` records
   `set_key_ttl` `error` on each such delete, though the delete succeeds. Deleting a stored `"Started"`
   costs a poller one extra `200`.
+- **A scenario transition during a stub scan no longer gives a no-match** (#1781): a scan read the state
+  once per gated stub, so a transition mid-scan could fail every gate though every state had a stub, and
+  under `defaultForward` the request went upstream. A scan now reads each scenario once, which also
+  removes a store read per extra gate of a scenario.
 - **A stalled scenario transition no longer takes `Last-Modified` backwards** (#1779): nothing ordered
   two transitions' stamps as they landed, so a stalled one could put a lower stamp over a higher one. A
   client revalidating with `If-Modified-Since` alone then stayed on `304` until the next transition. A

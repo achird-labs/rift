@@ -33,7 +33,7 @@ threads run in parallel, so one request's step can land between any two of anoth
 | Action | Code | Probe point |
 |:--|:--|:--|
 | `Copy` | `imposter.scenario_transitions()`, `handler.rs:1359`, before any gate is read | none: it would fire on every request and break `formal/lifecycle`'s traces, which have no such point |
-| `GateRead` | one `flow_store.get` per gated candidate, `:181-194`; a match ends the scan at `:221`, none is `:230` | `GateRead` |
+| `GateRead` | the first gate of a scenario reads the store, and later gates use that read; a match ends the scan | `GateRead` |
 | `CasCompare` | `compare_and_set` expecting the gate's state, `:686`; on `Conflict(None)` for the initial state, again expecting absence, `:692-695`; else dropped, `:698`, `:705`. One step when `AtomicCas`: `backends/inmemory.rs:287`, under the store's write lock from `:294`. Otherwise the default's `get` and compare, `extensions/flow_state.rs:107-108` | `CasApplied`, `CasConflict` |
 | `CasSet` | the default's `set`, `extensions/flow_state.rs:109`; only when `AtomicCas = FALSE` | |
 | `Issue` | `load_clock.next()`, `:577`; one atomic update, `core/mod.rs:169` | `TransitionStampIssued` |
@@ -51,7 +51,7 @@ threads run in parallel, so one request's step can land between any two of anoth
 | `TransitionsAreCas` | PR, full | holds | A gated transition never writes over a value it did not expect (#311). |
 | `StampMonotone` | PR, full, Mutants | holds | The stamp map's entry never falls (#1779). |
 | `NoStaleAnswerAtRest` | PR, full | holds | With no stamp in flight, a client holding another answer is told so: its stamp is below the current one. The window between a write and its publish is excluded on purpose: there a client gets `304` until the publish, which ends it. |
-| `NoMatchOnlyWhenUncovered` | Known | violated, #1781 | Every state has a stub in this table, so a scan never matches nothing. |
+| `NoMatchOnlyWhenUncovered` | PR, full, Mutants | holds | Every state has a stub in this table, so a scan never matches nothing. |
 
 ## Witnesses
 
@@ -62,7 +62,6 @@ threads run in parallel, so one request's step can land between any two of anoth
 | `Witness.cfg`: two transitions racing | `NeverDroppedTransition` violated: a lost compare-and-set is normal concurrency, and the properties above would be vacuous without it |
 | The same with `AtomicCas = FALSE` | `TransitionsAreCas` violated: the trait's default overwrites a state it did not expect |
 | The same with `AtomicCas = TRUE` (control) | no error |
-| `Known.cfg`, each invariant alone | violated |
 | Each finding alone, on the fewest requests that show it | violated |
 | The same, under the fix its issue proposes | no error |
 | `ScenarioPR.cfg` (control) | no error |
@@ -79,18 +78,13 @@ threads run in parallel, so one request's step can land between any two of anoth
 
 ## Findings
 
-Each was reproduced on the real engine by a test holding it at a probe point, on the in-memory store. The hold forces the
-interleaving. None was observed without it, and how often each occurs under load was not measured.
-
-| Issue | Defect | Test in `scenario_interleavings.rs` |
-|:--|:--|:--|
-| #1781 | A scan reads the state once per gate, so a transition during it gives a no-match though every state has a stub | `a_scan_of_covered_states_finds_a_stub_while_the_state_moves` |
+None open. The model found #1779, #1780 and #1781, all fixed. Each was reproduced on the real engine by a test
+holding it at a probe point, on the in-memory store. The hold forces the interleaving: none was observed without it,
+and how often each occurred under load was not measured. Each has a mutant in `mutants.py`. A new finding gets an
+`#[ignore = "#n"]` test and a `witness.py` row, and stays out of the cfgs until its fix lands.
 
 `If-None-Match` takes precedence over `If-Modified-Since` (`conditional.rs:155`) and compares the bytes, so a client
-sending an ETag does not see the stale `304`s.
-
-On fixing one, remove its `#[ignore]`, move its invariant from `Known.cfg` to `ScenarioPR.cfg` and `Scenario.cfg`, and
-delete its row from `witness.py`. #1779 and #1780 are fixed; their mutants stay.
+sending an ETag never saw the stale `304`s.
 
 ### Not filed
 
@@ -123,11 +117,10 @@ jobs. Times are wall clock. Bounds are written gated, pollers, setters, admin de
 
 | Run | Bounds | Start | Verdict | Generated | Distinct | Depth | Time |
 |:--|:--|:--|:--|--:|--:|--:|--:|
-| `ScenarioPR.cfg` | 2, 1, 1, 1 | `B` | no error | 4,460,347 | 1,490,384 | 29 | 6s |
-| `Scenario.cfg` | 3, 1, 1, 0 | absent | no error | 4,482,693 | 1,423,695 | 32 | 7s |
+| `ScenarioPR.cfg` | 2, 1, 1, 1 | `B` | no error | 4,978,908 | 1,621,291 | 30 | 22s |
+| `Scenario.cfg` | 3, 1, 1, 0 | absent | no error | 4,955,988 | 1,543,371 | 32 | 15s |
 | `Mutants.cfg` | 2, 1, 0, 0 | `B` | no error | 2,536 | 1,215 | | not timed, with `-coverage 1` |
 | `Coverage.cfg`, `AtomicCas = FALSE` | 2, 0, 1, 1 | absent | no error (`TypeInv` only) | 624,911 | 285,025 | 27 | 12s, with `-coverage 1` |
-| `Known.cfg`, `NoMatchOnlyWhenUncovered` | 3, 1, 1, 1 | `B` | violated | 956 | 350 | 7 | 8.3s |
 | `Witness.cfg`, `NeverDroppedTransition` | 2, 0, 0, 0 | `B` | violated | 136 | 92 | 15 | 6.3s |
 | `Witness.cfg`, `TransitionsAreCas`, `AtomicCas = FALSE` | 2, 0, 0, 0 | `B` | violated | 175 | 116 | 17 | 8.0s |
 | `mutants.py` | | | exit 0 | | | | 16s |
@@ -135,7 +128,7 @@ jobs. Times are wall clock. Bounds are written gated, pollers, setters, admin de
 
 Bounds 3, 1, 1, 1 with no violated invariant did not finish: from absence, TLC had found 6,189,088 distinct states with
 2,748,248 on its queue after five minutes when it ran out of disk. So no run covers three transitions and an admin delete
-together with the invariants that hold. Violations on those bounds, in `Known.cfg`, stop early.
+together with the invariants that hold.
 
 `-coverage 1`, on `Coverage.cfg` and `Mutants.cfg` together, gives every action a non-zero count. `Coverage.cfg` hits all of
 them, `CasSet` and the clear's included. Its only zero-count lines are the five of `Commit` as called from `CasCompare`'s atomic branch,
