@@ -80,6 +80,10 @@ mutants = {
             "    /\\ UNCHANGED <<responses, nextToken,",
             "    /\\ UNCHANGED <<pending, responses, nextToken,"))]),
     # A loser inserted its stub too, one duplicate per loser.
+    # #1778: an empty lookup forwarded with no claim and inserted a stub carrying none. The forward
+    # is the earlier symptom, a step before the insert OnlyClaimHolderInserts catches.
+    'an empty lookup forwards with no claim and is not lost': ('ForwardUnrecordedOnlyWhenLost', [
+        ('''req' = [req EXCEPT ![r].pc = "reclaim", ![r].again = TRUE]''', '''req' = [req EXCEPT ![r].pc = "forward"]''')]),
     'a loser inserts its stub': ('LoserNeverRecords', [
         (AFTER_SETTLE, 'AfterSettle(r) == IF GeneratesStub THEN "insert" ELSE "done"')]),
 }

@@ -106,7 +106,8 @@ InsertIndex(s, slot) ==
 (* pc:        where the request is.                                        *)
 (* answering: the proxy stub's slot it matched (handler.rs:1510).          *)
 (* token:     the claim its HeldClaim holds, NoToken when none.            *)
-(* lost:      `lost_race` (proxy.rs:1401): its claim came back InFlight.   *)
+(* lost:      `lost_race` (proxy.rs:1401): no claim, so no local stub.     *)
+(* again:     it has already claimed again after an empty lookup (#1778).  *)
 (* saw:       the recording its AlreadyRecorded was about.                 *)
 (* shadowed:  ghost.  Every stub list since its Match shadowed the         *)
 (*            recording, so no edit or racing request gives it a reason to *)
@@ -114,7 +115,7 @@ InsertIndex(s, slot) ==
 (* landed:    ghost.  Its settle wrote the recording.  The engine cannot   *)
 (*            tell: HeldClaim::settle returns nothing (proxy.rs:104).      *)
 (***************************************************************************)
-InitReq == [pc |-> "idle", answering |-> NoSlot, token |-> NoToken, lost |-> FALSE,
+InitReq == [pc |-> "idle", answering |-> NoSlot, token |-> NoToken, lost |-> FALSE, again |-> FALSE,
             saw |-> NoRec, shadowed |-> FALSE, landed |-> FALSE]
 
 \* A stub-list change is seen by the ghost of every request still on its way.
@@ -195,14 +196,17 @@ Reclaim(r) ==
     /\ TryClaim(r, "lookup")
 
 \* `lookup` (proxy.rs:1446; proxy_store.rs:466).  A recording replays and the request is done.
-\* None is the "AlreadyRecorded but nothing to replay" arm (proxy.rs:1456-1464): the request goes
-\* on holding no claim and with `lost_race` false.
+\* None is the "AlreadyRecorded but nothing to replay" arm: the request claims once more, and a
+\* second miss forwards with `lost_race` set, so no stub (#1778).
 Lookup(r) ==
     /\ req[r].pc = "lookup"
     /\ IF responses # NoRec
        THEN /\ req' = [req EXCEPT ![r].pc = "done"]
             /\ ghost' = [ghost EXCEPT !.replayedShadowed = @ \/ (req[r].shadowed /\ responses = req[r].saw)]
-       ELSE /\ req' = [req EXCEPT ![r].pc = "forward"]
+       ELSE IF req[r].again
+       THEN /\ req' = [req EXCEPT ![r].pc = "forward", ![r].lost = TRUE]
+            /\ UNCHANGED ghost
+       ELSE /\ req' = [req EXCEPT ![r].pc = "reclaim", ![r].again = TRUE]
             /\ UNCHANGED ghost
     /\ UNCHANGED <<responses, pending, nextToken, stubs, nextSlot, edit, clear, restart>>
 
@@ -434,7 +438,7 @@ ClaimExcludesRecording == pending # NoToken => responses = NoRec
 \* about one recording removes whichever is there when it runs.
 ForgetRemovesWhatItSaw == ~ghost.forgotOther
 
-\* Only a request that lost the race forwards with no claim.  The arm at proxy.rs:1456 is the other.
+\* Only a request that lost the race forwards with no claim (#1778).
 ForwardUnrecordedOnlyWhenLost == ~ghost.unclaimedForward
 
 \* Only a request holding a claim inserts a stub: a stub without a claim is not forgotten with its

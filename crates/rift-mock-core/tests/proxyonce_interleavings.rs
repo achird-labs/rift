@@ -17,7 +17,8 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use rift_mock_core::imposter::{Imposter, ImposterConfig, ImposterManager, Point, Probe};
 use rift_mock_core::recording::{
-    ClaimOutcome, LocalProxyStore, ProxyMode, ProxyRecordingStore, RequestSignature,
+    ClaimOutcome, ClaimToken, LocalProxyStore, ProxyMode, ProxyRecordingStore, ProxyStoreError,
+    RecordedResponse, RequestSignature,
 };
 use serde_json::{Value, json};
 
@@ -537,11 +538,11 @@ async fn a_recording_the_store_dropped_inserts_no_stub() {
     );
 }
 
-/// A request's `AlreadyRecorded` is followed by an edit's forget, so its lookup finds nothing. The
-/// arm's comment says it forwards "without recording"; it inserts a stub with no claim.
+/// A request's `AlreadyRecorded` is followed by an edit's forget, so its lookup finds nothing. It
+/// claims again and records with that claim: a stub with no claim would be invisible to the store's
+/// bookkeeping, and a second request would stack another on top of it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#1778"]
-async fn forwarding_with_nothing_to_replay_records_nothing() {
+async fn an_empty_lookup_claims_again_and_records() {
     let rig = Rig::new().await;
     rig.recorded().await;
 
@@ -559,12 +560,104 @@ async fn forwarding_with_nothing_to_replay_records_nothing() {
 
     held_request.open();
     assert_eq!(request.await.expect("request"), "up");
-    rig.recorder
-        .write("defect_1778_nothing_to_replay_inserts", true);
+    rig.recorder.write("reclaim_after_nothing_to_replay", true);
     assert!(
         !rig.inserted_without_a_claim(),
         "points: {:?}",
         rig.recorder.points()
     );
-    assert_eq!(rig.layout(), ["proxy"], "nothing was recorded");
+    assert_eq!(rig.layout(), ["recording", "proxy"]);
+    assert!(rig.store_has_recording(), "the claim's recording landed");
+    assert_eq!(rig.upstream_hits(), 2, "the first request and this one");
+    assert_eq!(get(rig.port).await, "up");
+    assert_eq!(rig.upstream_hits(), 2, "the next request replays");
+}
+
+/// As above, but another request holds the claim when this one tries again: it lost the race, so it
+/// forwards and leaves the recording to the holder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_lookup_that_finds_the_claim_taken_inserts_no_stub() {
+    let rig = Rig::new().await;
+    rig.recorded().await;
+
+    let held_edit = rig.recorder.hold(orphan_found);
+    let imposter = Arc::clone(&rig.imposter);
+    let edit = tokio::spawn(async move { imposter.delete_stub(0) });
+    rig.recorder.reached(orphan_found).await;
+
+    let held_request = rig.recorder.hold(looking_up);
+    let request = rig.spawn_get();
+    rig.recorder.reached(looking_up).await;
+
+    held_edit.open();
+    edit.await.expect("edit").expect("delete");
+    let sig = RequestSignature::new("GET", "/", None, &[]).with_body(&[]);
+    assert!(matches!(
+        rig.store.try_claim_as(rig.port, &sig, ProxyMode::ProxyOnce),
+        Ok(ClaimOutcome::Claimed(_))
+    ));
+
+    held_request.open();
+    assert_eq!(request.await.expect("request"), "up");
+    assert_eq!(rig.layout(), ["proxy"], "the claim's holder records");
+    assert_eq!(rig.upstream_hits(), 2, "it still forwarded");
+}
+
+/// A store that answers `AlreadyRecorded` and then has nothing to replay, whatever it is asked.
+#[derive(Default)]
+struct HollowStore {
+    claims: AtomicU64,
+}
+
+impl ProxyRecordingStore for HollowStore {
+    fn try_claim(&self, _: u16, _: &RequestSignature) -> Result<ClaimOutcome, ProxyStoreError> {
+        self.claims.fetch_add(1, Ordering::SeqCst);
+        Ok(ClaimOutcome::AlreadyRecorded)
+    }
+    fn release_claim(&self, _: u16, _: &RequestSignature, _: ClaimToken) {}
+    fn record(
+        &self,
+        _: u16,
+        _: RequestSignature,
+        _: ClaimToken,
+        _: RecordedResponse,
+    ) -> Result<(), ProxyStoreError> {
+        Ok(())
+    }
+    fn lookup(&self, _: u16, _: &RequestSignature) -> Option<RecordedResponse> {
+        None
+    }
+    fn clear(&self, _: u16) {}
+}
+
+/// Claiming again is bounded: a store that keeps saying `AlreadyRecorded` with nothing behind it
+/// gets two claims, the request is forwarded, and no stub lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_store_with_nothing_behind_its_answer_is_asked_twice() {
+    let store = Arc::new(HollowStore::default());
+    let manager =
+        ImposterManager::new().with_proxy_store(Arc::clone(&store) as Arc<dyn ProxyRecordingStore>);
+    let upstream_port = manager
+        .create_imposter(config(
+            0,
+            json!([{ "responses": [{ "is": { "statusCode": 200, "body": "up" } }] }]),
+        ))
+        .await
+        .expect("upstream");
+    let port = manager
+        .create_imposter(config(
+            0,
+            json!([{ "responses": [{ "proxy": {
+                "to": format!("http://127.0.0.1:{upstream_port}"),
+                "mode": "proxyOnce",
+                "addWaitBehavior": true,
+            } }] }]),
+        ))
+        .await
+        .expect("proxy");
+
+    assert_eq!(get(port).await, "up");
+    assert_eq!(store.claims.load(Ordering::SeqCst), 2);
+    let stubs = manager.get_imposter(port).expect("proxy").get_stubs();
+    assert_eq!(stubs.len(), 1, "no stub landed: {stubs:?}");
 }

@@ -41,7 +41,7 @@ TraceNext ==
         \/ Env(ShadowCheck(r) /\ req'[r].pc = "lookup")
         \/ Lib("ProxyShadowForgot", ShadowForget(r))
         \/ Lib("ProxyReplayed", Lookup(r) /\ req'[r].pc = "done")
-        \/ Lib("ProxyNothingToReplay", Lookup(r) /\ req'[r].pc = "forward")
+        \/ Lib("ProxyNothingToReplay", Lookup(r) /\ req'[r].pc \in {"reclaim", "forward"})
         \/ Lib("ProxyForwarding", Forward(r))
         \/ Lib("ProxySettled", Settle(r) /\ req[r].token # NoToken)
         \/ Env(Settle(r) /\ req[r].token = NoToken)

@@ -35,9 +35,6 @@ cases = [
     ('two requests reach the upstream', only(pr_cfg, 'NeverTwoForwards'), 'NeverTwoForwards'),
     ('a forget runs while a claim is in flight (proxy_store.rs:273)', only(pr_cfg, 'NeverForgetWhileClaimed'),
      'NeverForgetWhileClaimed'),
-    # Documented limit: a request can find its recording gone between the claim and the lookup.
-    ('an AlreadyRecorded finds nothing to replay and forwards (proxy.rs:1456)',
-     only(known_cfg, 'ForwardUnrecordedOnlyWhenLost'), 'ForwardUnrecordedOnlyWhenLost'),
     # Filed findings, reachable until fixed (README.md, "Findings").
     ('a forget removes a recording newer than the one it decided about (#1776)',
      only(no_clear(known_cfg), 'ForgetRemovesWhatItSaw'), 'ForgetRemovesWhatItSaw'),
@@ -47,13 +44,11 @@ cases = [
      only(no_clear(known_cfg), 'CarrierHasRecording'), 'CarrierHasRecording'),
     ('a stale token still inserts a stub carrying the claim (#1777)',
      only(known_cfg, 'CarrierMeansRecorded'), 'CarrierMeansRecorded'),
-    ('the nothing-to-replay arm inserts a stub with no claim (#1778)',
-     only(known_cfg, 'OnlyClaimHolderInserts'), 'OnlyClaimHolderInserts'),
     # A proxy that generates no stub: no carrier, no shadow, no forget from an edit.
     ('no stub generated: every invariant holds (control)',
      edit(known_cfg, [('GeneratesStub = TRUE', 'GeneratesStub = FALSE'), ('Preloaded = TRUE', 'Preloaded = FALSE'),
                       ('    AtMostOneCarrier\n    ForgetRemovesWhatItSaw\n    CarrierHasRecording\n'
-                       '    OnlyClaimHolderInserts\n    CarrierMeansRecorded\n',
+                       '    CarrierMeansRecorded\n',
                        '    AtMostOneCarrier\n    NoWedgedClaim\n    ClaimExcludesRecording\n    RecordedOnce\n'
                        '    ForgetRemovesWhatItSaw\n    OnlyClaimHolderInserts\n')], 'Known.cfg'),
      'ok'),

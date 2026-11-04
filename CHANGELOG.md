@@ -13,6 +13,12 @@ record.
 
 ### Fixed
 
+- **A proxy recording forgotten mid-request no longer leaves a stub the store cannot see** (#1778): when
+  an edit forgot a recording between a request's claim and its lookup, the request recorded a stub
+  with no claim, so later bookkeeping missed it and a second request could stack another. The request
+  now claims once more and records with that claim. If another request holds the claim, it forwards and
+  leaves the recording to the holder. A custom store that keeps answering `AlreadyRecorded` with nothing
+  to look up now forwards each request with no stub, where before one unclaimed stub stopped forwarding.
 - **An apply no longer fails over a port a concurrent delete already removed** (#1774): a `PUT
   /imposters` or reload sweep took the port's `NotFound` as a failure, so the whole request could
   answer `500` when the port was exactly as asked. The port is now counted in neither `failed` nor
