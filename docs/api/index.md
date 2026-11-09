@@ -215,12 +215,15 @@ imposter at its position; `GET /imposters` lists them by ascending port.
 
 After a successful apply, every imposter in the body starts with fresh runtime state, as in
 Mountebank: response cycles, recorded requests and `numberOfRequests`, injection state, scenario
-and flow state, and saved `proxyOnce` responses. Its listener stays bound. A flow store supplied by
-an embedder's `FlowStoreProvider` is left alone.
+and flow state, and saved `proxyOnce` responses. Its listener stays bound. A request it is still
+answering is cut off, as on [`DELETE /imposters/{port}`](#delete-imposters-port): its connection
+closes without a response (over HTTP/2, only its stream resets), as Mountebank's recreate destroys
+it. A flow store supplied by an
+embedder's `FlowStoreProvider` is left alone.
 
 `PUT /imposters?reconcile=true` keeps the runtime state of imposters whose config is unchanged (and
 of unchanged stubs in a stub-patched one), the same reconcile as `POST /admin/reload` and
-`rift_apply_config`. `reconcile=false` is the default; any other value is a `400`. An engine older
+`rift_apply_config`, and lets their in-flight requests finish. `reconcile=false` is the default; any other value is a `400`. An engine older
 than this parameter ignores it and reconciles, so a client may send it unconditionally.
 
 **Request Body:**
