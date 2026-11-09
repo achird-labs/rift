@@ -29,6 +29,8 @@ CONSTANTS
     Appliers,       \* ops that each run `apply_config` once toward `ApplyDesired` (manager.rs:2377)
     ApplyOnes,      \* ops that each run `apply_one` once on some port (manager.rs:2448)
     DeleteAlls,     \* ops that each run `delete_all` once (manager.rs:2222)
+    Writers,        \* ops that each run one admin write that clears the port's shared state once:
+                    \*   a stub write, a restart, a saved-requests clear (`write_owning`, issue #1803)
     ApplyDesired,   \* the ports an `apply_config` keeps (its desired set); every other port is swept
     MaxGens,        \* generations per port, counting a preloaded one
     MaxReqs,        \* requests served per generation
@@ -40,13 +42,13 @@ CONSTANTS
     NoGen,          \* the empty slot / file / shared-state value
     NoOp            \* nobody holds `persist_lock`
 
-Ops == Creators \cup Deleters \cup Appliers \cup ApplyOnes \cup DeleteAlls
+Ops == Creators \cup Deleters \cup Appliers \cup ApplyOnes \cup DeleteAlls \cup Writers
 
 ASSUME /\ Ports # {}
        /\ MaxGens >= 1 /\ MaxReqs >= 1
        /\ ApplyDesired \subseteq Ports
-       /\ \A s \in {Creators, Deleters, Appliers, ApplyOnes, DeleteAlls} :
-            \A t \in {Creators, Deleters, Appliers, ApplyOnes, DeleteAlls} :
+       /\ \A s \in {Creators, Deleters, Appliers, ApplyOnes, DeleteAlls, Writers} :
+            \A t \in {Creators, Deleters, Appliers, ApplyOnes, DeleteAlls, Writers} :
               s # t => s \cap t = {}
 
 GenIds == Ports \X (1..MaxGens)
@@ -94,12 +96,14 @@ KindOf(o) == CASE o \in Creators   -> "create"
                [] o \in Appliers   -> "apply"
                [] o \in ApplyOnes  -> "applyOne"
                [] o \in DeleteAlls -> "deleteAll"
+               [] o \in Writers    -> "write"
 
 InitPc(o) == CASE KindOf(o) = "create"    -> "cBind"
                [] KindOf(o) = "delete"    -> "dLock"
                [] KindOf(o) = "apply"     -> "aSnap"
                [] KindOf(o) = "applyOne"  -> "aEntry"
                [] KindOf(o) = "deleteAll" -> "aSnap"
+               [] KindOf(o) = "write"     -> "wLock"
 
 InitOp(o, p) == [kind |-> KindOf(o), pc |-> InitPc(o), ret |-> "done", port |-> p,
                  gen |-> NoGen, look |-> NoGen,
@@ -288,6 +292,56 @@ CreateRollback(o) ==
           /\ op' = [op EXCEPT ![o].pc = op[o].ret, ![o].fail = "persist"]
     /\ UNCHANGED <<file, nextGen, persistLock, clock, nreq, deleteReturned,
                    lastStamp, shared>>
+
+(***************************************************************************)
+(* Write: write_owning (issue #1803).  An admin write that resets or       *)
+(* clears the port's shared state (stub writes, restart_runtime_state, a   *)
+(* saved-requests or proxy-responses clear, a space teardown) looks the    *)
+(* imposter up and clears by port under `persist_lock`, so no delete and   *)
+(* re-create can vacate the slot in between.  It cancels and removes       *)
+(* nothing.                                                                *)
+(***************************************************************************)
+
+WriteLock(o) ==
+    /\ op[o].pc = "wLock"
+    /\ persistLock = NoOp
+    /\ persistLock' = o
+    /\ op' = [op EXCEPT ![o].pc = "wLookup"]
+    /\ UNCHANGED <<slot, file, floor, nextGen, phase, clock, nreq, req, deleteReturned,
+                   lastStamp, shared, ghost>>
+
+\* get_imposter: NotFound releases the lock and returns.
+WriteLookup(o) ==
+    /\ op[o].pc = "wLookup"
+    /\ LET p == op[o].port
+       IN IF slot[p] = NoGen
+            THEN /\ persistLock' = NoOp
+                 /\ op' = [op EXCEPT ![o].pc = "done"]
+            ELSE /\ op' = [op EXCEPT ![o].pc = "wClear", ![o].look = slot[p]]
+                 /\ UNCHANGED persistLock
+    /\ UNCHANGED <<slot, file, floor, nextGen, phase, clock, nreq, req, deleteReturned,
+                   lastStamp, shared, ghost>>
+
+\* The by-port reset or clear (`reset_scope`, `journal.clear`, `proxy_store.clear`): it wipes
+\* whatever the port's shared state holds, so it must still be the looked-up generation's.
+WriteClear(o) ==
+    /\ op[o].pc = "wClear"
+    /\ LET p == op[o].port
+           g == op[o].look
+       IN /\ ghost' = [ghost EXCEPT !.wiped =
+                 @ \/ (shared[p] # NoGen /\ shared[p] # g /\ shared[p] = slot[p])]
+          /\ shared' = [shared EXCEPT ![p] = NoGen]
+          /\ op' = [op EXCEPT ![o].pc = "wUnlock"]
+    /\ UNCHANGED <<slot, file, floor, nextGen, persistLock, phase, clock, nreq, req,
+                   deleteReturned, lastStamp>>
+
+\* The lock is released when the helper returns; the caller persists after that.
+WriteUnlock(o) ==
+    /\ op[o].pc = "wUnlock"
+    /\ persistLock' = NoOp
+    /\ op' = [op EXCEPT ![o].pc = "done"]
+    /\ UNCHANGED <<slot, file, floor, nextGen, phase, clock, nreq, req, deleteReturned,
+                   lastStamp, shared, ghost>>
 
 (***************************************************************************)
 (* Delete: delete_imposter_inner (manager.rs:2107).  Entered at "dLock" by *)
@@ -564,6 +618,7 @@ OpStep(o) ==
     \/ DeleteDrain(o) \/ DeleteClearShared(o) \/ DeleteFinish(o) \/ DeleteReturn(o)
     \/ ApplySnapshot(o) \/ ApplySweep(o) \/ ApplyEntry(o) \/ ReplaceAfterDelete(o)
     \/ ReplaceAfterCreate(o)
+    \/ WriteLock(o) \/ WriteLookup(o) \/ WriteClear(o) \/ WriteUnlock(o)
 
 ReqStep(g) == ReqStart(g) \/ ReqCompute(g) \/ ReqWrite(g)
 
@@ -622,8 +677,8 @@ LoserNeverAnswers == ~ghost.loserAnswered
 \* Only one generation ever claims a slot (PortTable::try_claim under `mutations`).
 OneClaimant == ~ghost.lostClaim
 
-\* The clear a delete runs after vacating the slot never wipes the shared state the port's
-\* current generation wrote.
+\* No clear of a port's shared state, by a delete or by a write, wipes what the port's current
+\* generation wrote (issues #1763, #1803).
 SharedStateBelongsToCurrent == ~ghost.wiped
 
 \* An apply never reports as failed a port that is already in the state it asked for.

@@ -420,14 +420,18 @@ fn reconcile_param(query: Option<&str>) -> Result<bool, String> {
 /// running (issue #1518): Mountebank recreates each one, so none keeps its cycles, journal or
 /// state. A created or replaced port is already fresh, and a failed one is left as the report
 /// describes it. A reset that fails joins `failed`.
-fn restart_kept_imposters(manager: &ImposterManager, ports: &[u16], report: &mut ApplyReport) {
+async fn restart_kept_imposters(
+    manager: &ImposterManager,
+    ports: &[u16],
+    report: &mut ApplyReport,
+) {
     for &port in ports {
         let fresh = report.created.contains(&port) || report.replaced.contains(&port);
         let failed = report.failed.iter().any(|(p, _)| *p == port);
         if fresh || failed {
             continue;
         }
-        if let Err(e) = manager.restart_runtime_state(port) {
+        if let Err(e) = manager.restart_runtime_state(port).await {
             report.failed.push((port, e));
         }
     }
@@ -541,7 +545,7 @@ async fn replace_all_from_bytes(
         }
     };
     if !reconcile {
-        restart_kept_imposters(&manager, &explicit_ports, &mut report);
+        restart_kept_imposters(&manager, &explicit_ports, &mut report).await;
     }
 
     // The report rides beside `imposters` (Mountebank clients read `imposters`; the port lists
@@ -1007,18 +1011,21 @@ pub async fn handle_clear_requests(
         Ok(c) => c,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
-    match manager.get_imposter(port) {
-        Ok(imposter) => {
-            if clauses.is_empty() {
-                if let Err(e) = imposter.clear_recorded_requests() {
-                    return backend_error_response(&e);
-                }
-            } else {
-                let source = flow_id_source(&imposter);
-                imposter.retain_recorded_requests(|r| !request_matches(r, &clauses, &source, port));
-            }
-            handle_get(port, None, base_url, manager).await
-        }
+    // Through the manager, which holds the port while it clears: on a shared journal the clear is
+    // by port, and must not land on a later imposter there (issue #1803).
+    let cleared = if clauses.is_empty() {
+        manager.clear_recorded_requests(port).await
+    } else {
+        manager
+            .retain_recorded_requests(port, |imposter| {
+                let source = flow_id_source(imposter);
+                move |r: &RecordedRequest| !request_matches(r, &clauses, &source, port)
+            })
+            .await
+    };
+    match cleared {
+        Ok(()) => handle_get(port, None, base_url, manager).await,
+        Err(ImposterError::Backend(e)) => backend_error_response(&e),
         Err(e) => e.into(),
     }
 }

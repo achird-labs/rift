@@ -13,6 +13,15 @@ record.
 
 ### Fixed
 
+- **With a shared journal, sequencer or proxy store, a write racing a delete and same-port re-create no
+  longer wipes the new imposter's state** (#1803): a stub replace, delete or patch, a `PUT /imposters`
+  restart, `DELETE …/savedRequests`, `DELETE …/savedProxyResponses` or a space teardown looked the
+  imposter up and then cleared the backend by port, so a delete and re-create in between lost the new
+  imposter's recorded requests, response cycles or recordings. The lookup and the clear now run under
+  the manager's persist lock, as a delete's do. The private default backends were never affected. An
+  apply that loses its imposter to a concurrent delete now reports the port as failed (`NotFound`)
+  instead of patching the deleted imposter and reporting `stubPatched`.
+
 - **A proxy forget no longer removes a newer recording than the one it decided about** (#1776): both
   the shadow check and an edit decide what to forget a step before they forget, so a forget could take
   a recording that had landed in between, costing a second upstream call and a duplicate stub, or
@@ -94,6 +103,10 @@ record.
   The rollback now removes only its own imposter, under the lock a delete that unlinks holds.
 
 ### Changed
+
+- **`ImposterManager::restart_runtime_state` is now `async`** (#1803), since it takes the persist lock.
+  New `ImposterManager::clear_recorded_requests` and `retain_recorded_requests` hold the port while they
+  clear; prefer them to the `Imposter` methods on a shared journal.
 
 - **`LocalProxyStore::record` answers `Err(ProxyStoreError::StaleClaim)` for a stale token** (#1777),
   where it answered `Ok(())`. This is a new variant of a `#[non_exhaustive]` error. A custom store that

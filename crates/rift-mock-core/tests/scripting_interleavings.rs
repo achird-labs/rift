@@ -271,7 +271,7 @@ async fn a_run_in_flight_across_a_restart_saves_to_its_old_cell() {
 
     let slow = spawn_get(port, "/slow");
     let old = recorder.reached(seeded).await;
-    manager.restart_runtime_state(port).expect("restart");
+    manager.restart_runtime_state(port).await.expect("restart");
 
     assert_eq!(get(port, "/read").await.1, "undefined");
     assert_eq!(slow.await.expect("slow").1, "2");
@@ -355,7 +355,7 @@ async fn a_request_keeps_one_state_across_a_restart() {
     let latch = recorder.hold(saved);
     let request = spawn_get(port, "/");
     recorder.reached(saved).await;
-    manager.restart_runtime_state(port).expect("restart");
+    manager.restart_runtime_state(port).await.expect("restart");
     latch.open();
 
     let (status, body) = request.await.expect("request");
@@ -387,7 +387,7 @@ async fn an_inject_and_its_decorate_keep_one_state_across_a_restart() {
     let latch = recorder.hold(saved);
     let request = spawn_get(port, "/");
     recorder.reached(saved).await;
-    manager.restart_runtime_state(port).expect("restart");
+    manager.restart_runtime_state(port).await.expect("restart");
     latch.open();
 
     let (status, body) = request.await.expect("request");
@@ -420,7 +420,7 @@ async fn a_predicate_and_an_is_decorate_keep_one_state_across_a_restart() {
     let latch = recorder.hold(saved);
     let request = spawn_get(port, "/");
     recorder.reached(saved).await;
-    manager.restart_runtime_state(port).expect("restart");
+    manager.restart_runtime_state(port).await.expect("restart");
     latch.open();
 
     let (status, body) = request.await.expect("request");
@@ -448,7 +448,7 @@ async fn the_request_after_a_restart_starts_on_the_new_cell() {
 
     assert_eq!(get(port, "/").await.1, "undefined");
     assert_eq!(get(port, "/").await.1, "seen");
-    manager.restart_runtime_state(port).expect("restart");
+    manager.restart_runtime_state(port).await.expect("restart");
     assert_eq!(get(port, "/").await.1, "undefined");
     let _ = manager.delete_all().await;
 }
