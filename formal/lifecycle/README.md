@@ -46,7 +46,7 @@ names here are the stable reference.
 | `CreateTryClaim` | `PortTable::try_claim`; the loser cancels and returns `PortInUse` |
 | `CreateClaimStore` | not code: reachable only in the "no `mutations` lock" mutant |
 | `CreatePersistLock`, `CreatePersistWrite` | `persist_imposter_with`: `persist_lock`, the `is_current` check, the write |
-| `CreateRollback` | the failed-persist branch: `remove_if_same` under `persist_lock`, then cancel |
+| `CreateRollback` | the failed-persist branch: `remove_if_same` under `persist_lock`, then cancel; with the port vacant, `{port}.json` goes too (#1800) |
 | `DeleteLock`, `DeleteLookup`, `DeleteUnlink` | `delete_imposter_inner`, the unlink path, under `persist_lock` |
 | `ReplaceLock`, `ReplaceLookup` | `delete_imposter_inner`, the path a replace takes: the same lock, no unlink |
 | `DeleteCancel` | `cancel.cancel()`: cuts requests still computing (#1643) |
@@ -85,6 +85,7 @@ names here are the stable reference.
 | `Lifecycle.cfg` | two creates, two deletes, one write, failing writes and unlinks | |
 | `LifecycleApply.cfg` | an apply sweep, a `delete_all`, a delete, a create | |
 | `LifecycleReplace.cfg` | an `apply_one` replace, a delete, a create | |
+| `LifecycleReplaceFail.cfg` | the same, with failing datadir writes (#1800) | |
 | `Mutants.cfg` | one create, two deletes: where a mutant's violation is its own | |
 
 | Config | Distinct states | Depth | Wall time |
@@ -93,6 +94,7 @@ names here are the stable reference.
 | `Lifecycle.cfg` | 700,834 | 47 | 16 s |
 | `LifecycleApply.cfg` | 567,048 | 45 | 4 s |
 | `LifecycleReplace.cfg` | 252,034 | 46 | 2 s |
+| `LifecycleReplaceFail.cfg` | 924,056 | 49 | 6 s |
 
 Times are from a laptop shared with other builds, so read them as an order of magnitude.
 
@@ -151,6 +153,7 @@ controls. `mutants.py` puts fixed bugs back:
 | The rollback does not take `persist_lock` (#1773) | `ErrDeleteStillServing` |
 | An apply sweep reports a concurrent delete as failed (#1774) | `ApplyReportsTruth` |
 | A stub write clears without the lock (#1803) | `SharedStateBelongsToCurrent` |
+| A failed create's rollback leaves a replaced imposter's file (#1800) | `TableFileAgree`, on `LifecycleReplaceFail.cfg` |
 | `try_claim` without the `mutations` lock | `OneClaimant` |
 | A drain that never ends | `OpsFinish`, on `Liveness.cfg` |
 

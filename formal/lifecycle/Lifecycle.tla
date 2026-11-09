@@ -290,7 +290,12 @@ CreateRollback(o) ==
           /\ floor' = [floor EXCEPT ![p] = Max(@, clock[g].last)]
           /\ req' = [req EXCEPT ![g] = Cut(@)]
           /\ op' = [op EXCEPT ![o].pc = op[o].ret, ![o].fail = "persist"]
-    /\ UNCHANGED <<file, nextGen, persistLock, clock, nreq, deleteReturned,
+          \* With the port vacant, the file left is a replaced imposter's that this create was to
+          \* overwrite (issue #1800).  Every create in the model is a runtime one (apply ops model
+          \* `PUT /imposters`, not a datadir reload): `RollbackFile::Keep`, for a datadir load or
+          \* reload, is not modelled, and lifecycle_interleavings.rs pins it instead.
+          /\ file' = IF slot'[p] = NoGen THEN [file EXCEPT ![p] = NoGen] ELSE file
+    /\ UNCHANGED <<nextGen, persistLock, clock, nreq, deleteReturned,
                    lastStamp, shared>>
 
 (***************************************************************************)
