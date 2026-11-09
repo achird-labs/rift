@@ -216,7 +216,7 @@ imposter at its position; `GET /imposters` lists them by ascending port.
 After a successful apply, every imposter in the body starts with fresh runtime state, as in
 Mountebank: response cycles, recorded requests and `numberOfRequests`, injection state, scenario
 and flow state, and saved `proxyOnce` responses. Its listener stays bound. A request it is still
-answering is cut off, as on [`DELETE /imposters/{port}`](#delete-imposters-port): its connection
+answering is cut off, as on [`DELETE /imposters/{port}`](#delete-impostersport): its connection
 closes without a response (over HTTP/2, only its stream resets), as Mountebank's recreate destroys
 it. A flow store supplied by an
 embedder's `FlowStoreProvider` is left alone.
