@@ -693,7 +693,8 @@ pub async fn handle_imposter_request(
         &mut inspection,
     );
     /*
-     * Issue #1643: a delete or replace cancels the generation, and every request it is still
+     * Issue #1643: a delete or replace cancels the generation (and a plain `PUT /imposters` the
+     * runtime generation of an imposter it keeps, #1799), and every request it is still
      * computing — in a `wait`, on a proxy upstream, in a `shellTransform`, in an inject — is cut
      * off here, at the one funnel every door shares, as Mountebank destroys every socket of a
      * deleted imposter. Dropping `inner` drops the upstream request, the `shellTransform` join
@@ -705,9 +706,12 @@ pub async fn handle_imposter_request(
      * not offered to the exchange inspector: a `Reject` verdict would make the deleted imposter
      * answer after all.
      */
+    // Loaded once: a request that loads it before a runtime restart swaps it is cut by that restart
+    // (issue #1799); one that loads it after belongs to the new generation.
+    let in_flight = imposter.in_flight.load_full();
     let computed = tokio::select! {
         biased;
-        () = imposter.cancel.cancelled() => None,
+        () = in_flight.cancelled() => None,
         response = inner => Some(response?),
     };
     let mut response = match computed {
@@ -1358,8 +1362,8 @@ async fn handle_request_inner(
     // answer it replaced (issue #1307).
     let scenario_transitions = imposter.scenario_transitions();
     // One state cell for the whole request, every hook on it: a restart mid-request takes effect
-    // from the next request (issue #1784). Loaded here, not earlier, so a slow upload across a
-    // `PUT /imposters` starts on the new cell. `script_file_access` stays per site on purpose: a
+    // from the next request (issue #1784). A plain `PUT /imposters` also cuts this request off
+    // (issue #1799), so on the engine this holds even for a request the cut misses. `script_file_access` stays per site on purpose: a
     // stub write narrows it for a request about to run a script (#1645).
     let script_scope = imposter.script_scope();
     let (mut matched, mut trace) = match imposter

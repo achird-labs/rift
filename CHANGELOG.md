@@ -106,7 +106,8 @@ record.
 - **A request keeps one script state across a restart** (#1784): each hook loaded the imposter's state
   on its own, so a `PUT /imposters` between two hooks of a request split it, and a response `inject` did
   not see what its predicate had written. A request now runs every hook on the state it started with,
-  and a restart takes effect from the next request.
+  and a restart takes effect from the next request. Since #1799 a plain `PUT /imposters` also cuts
+  such a request off.
 - **A delete no longer wipes the imposter that took the port** (#1763): with a shared journal,
   sequencer or proxy store, a delete cleared the port's entries up to 5 seconds after freeing the port,
   so a same-port create lost its recorded requests, response cycles and recordings. The clears now run
@@ -119,6 +120,13 @@ record.
   The rollback now removes only its own imposter, under the lock a delete that unlinks holds.
 
 ### Changed
+
+- **A plain `PUT /imposters` cuts off the requests an imposter it keeps is still answering** (#1799),
+  as Mountebank's recreate destroys their sockets: the connection closes without a response (over
+  HTTP/2 only its stream resets), as on `DELETE /imposters/{port}`. Before, such a request was
+  answered after the reset. The listener and idle keep-alive connections stay. `?reconcile=true` and
+  `POST /admin/reload` cut nothing on the imposters they keep unchanged.
+  `ImposterManager::restart_runtime_state` does the cut, so an embedder calling it gets it too.
 
 - **`ImposterManager::restart_runtime_state` is now `async`** (#1803), since it takes the persist lock.
   New `ImposterManager::clear_recorded_requests` and `retain_recorded_requests` hold the port while they

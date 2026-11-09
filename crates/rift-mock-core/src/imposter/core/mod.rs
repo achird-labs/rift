@@ -587,6 +587,13 @@ pub struct Imposter {
     /// Level-triggered, unlike `shutdown_tx`, so a request that arrives just before the delete
     /// still sees it. Never cancelled for an imposter no manager started.
     pub(crate) cancel: tokio_util::sync::CancellationToken,
+    /// The token every request of the current runtime generation races in
+    /// [`handle_imposter_request`](super::handler::handle_imposter_request). A child of `cancel`,
+    /// so a delete still cuts everything; swapped and cancelled by
+    /// [`restart_runtime_state`](crate::imposter::ImposterManager::restart_runtime_state), so a
+    /// plain `PUT /imposters` cuts a kept imposter's in-flight requests, as Mountebank's recreate
+    /// destroys their sockets (issue #1799).
+    pub(crate) in_flight: arc_swap::ArcSwap<tokio_util::sync::CancellationToken>,
     /// This imposter's Mountebank script `state` (issue #1726), owned by this instance as
     /// Mountebank's `imposterState` is owned by its imposter object. A run that outlives the delete
     /// writes into this cell, not into the one a same-port re-create starts with. Swapped, never
@@ -714,6 +721,7 @@ impl Imposter {
             ));
 
         let enabled = config.enabled;
+        let cancel = tokio_util::sync::CancellationToken::new();
         Ok(Self {
             config,
             stubs_snapshot: ArcSwap::from_pointee(StubSnapshot::build(stubs)),
@@ -740,7 +748,8 @@ impl Imposter {
             shutdown_tx: None,
             serve_handles: Mutex::new(Vec::new()),
             conn_tracker: tokio_util::task::TaskTracker::new(),
-            cancel: tokio_util::sync::CancellationToken::new(),
+            in_flight: arc_swap::ArcSwap::from_pointee(cancel.child_token()),
+            cancel,
             script_state: arc_swap::ArcSwap::default(),
             flow_store,
             flow_store_is_default,

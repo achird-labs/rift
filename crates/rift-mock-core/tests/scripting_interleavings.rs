@@ -174,6 +174,21 @@ async fn get(port: u16, path: &str) -> (u16, String) {
     (status, response.text().await.expect("a body"))
 }
 
+/// A request that may be cut off: `None` when the connection closed with no response.
+async fn try_get(port: u16, path: &str) -> Option<(u16, String)> {
+    let response = reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("client")
+        .get(format!("http://127.0.0.1:{port}{path}"))
+        .send()
+        .await
+        .ok()?;
+    let status = response.status().as_u16();
+    Some((status, response.text().await.ok()?))
+}
+
 /// Spawn a request, so the test can act while the engine is held on it.
 fn spawn_get(port: u16, path: &'static str) -> tokio::task::JoinHandle<(u16, String)> {
     tokio::spawn(async move { get(port, path).await })
@@ -254,8 +269,9 @@ async fn a_run_held_at_its_save_keeps_the_imposters_next_run_behind_it() {
     let _ = manager.delete_all().await;
 }
 
-/// The witness `NeverSaveToOldCell` (#1726): a run in flight across a restart saves to the cell it
-/// started on, and the imposter's next runs start from the new one.
+/// The witness `NeverSaveToOldCell` (#1726): a run in flight across a restart never saves into the
+/// new cell, and the imposter's next runs start from it. Its request is cut off by the restart, as
+/// Mountebank's `PUT /imposters` destroys it (issue #1799).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_run_in_flight_across_a_restart_saves_to_its_old_cell() {
     let recorder = Arc::new(Recorder::default());
@@ -273,20 +289,25 @@ async fn a_run_in_flight_across_a_restart_saves_to_its_old_cell() {
         .await
         .expect("create");
 
-    let slow = spawn_get(port, "/slow");
+    let slow = tokio::spawn(async move { try_get(port, "/slow").await });
     let old = recorder.reached(seeded).await;
     manager.restart_runtime_state(port).await.expect("restart");
 
     assert_eq!(get(port, "/read").await.1, "undefined");
-    assert_eq!(slow.await.expect("slow").1, "2");
+    assert_eq!(
+        slow.await.expect("slow"),
+        None,
+        "the request in flight across the restart was answered"
+    );
+    // Long enough for the old run's timer to fire and its end to save, if it does.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     let seen = recorder.seen();
     let old_key = key_of(&old.point);
-    let last_save = seen
-        .iter()
-        .rfind(|s| saved(&s.point))
-        .expect("a save")
-        .clone();
-    assert_eq!(key_of(&last_save.point), old_key);
+    assert!(
+        seen.iter()
+            .any(|s| saved(&s.point) && key_of(&s.point) == old_key),
+        "the cut run never saved to its old cell: {seen:?}"
+    );
     assert!(
         seen.iter()
             .any(|s| saved(&s.point) && key_of(&s.point) != old_key),
@@ -343,7 +364,7 @@ async fn a_start_in_another_realm_waits_for_the_imposters_run_in_flight() {
 /// One request's predicate inject and response inject take a scope each, so a restart between them
 /// splits the request across two cells, and the inject does not see what the predicate wrote.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_request_keeps_one_state_across_a_restart() {
+async fn a_request_held_between_its_hooks_is_cut_by_a_restart() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
     let port = manager
@@ -357,23 +378,24 @@ async fn a_request_keeps_one_state_across_a_restart() {
     // Held in the predicate run's end, after its save: the request is past its scope for the match
     // and has not taken the one for the inject.
     let latch = recorder.hold(saved);
-    let request = spawn_get(port, "/");
+    let request = tokio::spawn(async move { try_get(port, "/").await });
     recorder.reached(saved).await;
     manager.restart_runtime_state(port).await.expect("restart");
     latch.open();
 
-    let (status, body) = request.await.expect("request");
+    // Cut off by the restart (issue #1799): its later hooks never run, so it cannot answer from
+    // a second cell.
+    let answered = request.await.expect("request");
     let _ = manager.delete_all().await;
-    assert_eq!(status, 200);
     assert_eq!(
-        body, "seen",
+        answered, None,
         "the inject ran on another cell than the predicate"
     );
 }
 
 /// As above from an inject to its decorate: the inject's whole await is in the same window.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_inject_and_its_decorate_keep_one_state_across_a_restart() {
+async fn a_request_held_between_its_inject_and_decorate_is_cut_by_a_restart() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
     let port = manager
@@ -389,23 +411,24 @@ async fn an_inject_and_its_decorate_keep_one_state_across_a_restart() {
         .expect("create");
 
     let latch = recorder.hold(saved);
-    let request = spawn_get(port, "/");
+    let request = tokio::spawn(async move { try_get(port, "/").await });
     recorder.reached(saved).await;
     manager.restart_runtime_state(port).await.expect("restart");
     latch.open();
 
-    let (status, body) = request.await.expect("request");
+    // Cut off by the restart (issue #1799): its later hooks never run, so it cannot answer from
+    // a second cell.
+    let answered = request.await.expect("request");
     let _ = manager.delete_all().await;
-    assert_eq!(status, 200);
     assert_eq!(
-        body, "seen",
+        answered, None,
         "the decorate ran on another cell than the inject"
     );
 }
 
 /// As above from a predicate to the decorate of an `is` response, the other door a later hook takes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_predicate_and_an_is_decorate_keep_one_state_across_a_restart() {
+async fn a_request_held_between_its_predicate_and_decorate_is_cut_by_a_restart() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
     let port = manager
@@ -422,16 +445,17 @@ async fn a_predicate_and_an_is_decorate_keep_one_state_across_a_restart() {
         .expect("create");
 
     let latch = recorder.hold(saved);
-    let request = spawn_get(port, "/");
+    let request = tokio::spawn(async move { try_get(port, "/").await });
     recorder.reached(saved).await;
     manager.restart_runtime_state(port).await.expect("restart");
     latch.open();
 
-    let (status, body) = request.await.expect("request");
+    // Cut off by the restart (issue #1799): its later hooks never run, so it cannot answer from
+    // a second cell.
+    let answered = request.await.expect("request");
     let _ = manager.delete_all().await;
-    assert_eq!(status, 200);
     assert_eq!(
-        body, "seen",
+        answered, None,
         "the decorate ran on another cell than the predicate"
     );
 }

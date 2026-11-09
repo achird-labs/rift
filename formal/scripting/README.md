@@ -125,12 +125,15 @@ All four are modelled.
 ## Findings
 
 None open. The model found #1784, #1785 and #1786, all fixed. Each has a test in
-`crates/rift-mock-core/tests/scripting_interleavings.rs` and a mutant above. A new finding gets an `#[ignore = "#n"]` test and a
+`crates/rift-mock-core/tests/scripting_interleavings.rs` and a mutant above. Since #1799 a runtime restart cuts off every
+request that started before it finished, so on the engine no request can reach a second cell, and the tests held across a
+restart now show the request cut. The #1784 fix (one cell per request) stays as defence in depth; the model's
+`RequestKeepsOneCell` and its mutant pin it. A new finding gets an `#[ignore = "#n"]` test and a
 `witness.py` row, and stays out of the cfgs until its fix lands.
 
 Passing tests in that file put the model's other claims on the real engine: an end's order (`seeded, saved, finished,
 released`); a run held at its save keeps the imposter's next run behind it on one worker, with idle workers free; a run across
-a restart saves to its old cell and the next run does not see it; a start in another realm waits and sees what was saved.
+a restart (its request now cut, #1799) never saves into the new cell, and the next run does not see it; a start in another realm waits and sees what was saved.
 
 ## Refuted
 

@@ -3289,6 +3289,8 @@ impl ImposterManager {
     /// requests and `numberOfRequests`, saved `proxyOnce` responses, injection state, and the flow
     /// and scenario state of the built-in flow store. A
     /// [`FlowStoreProvider`](crate::extensions::flow_state::FlowStoreProvider)'s store is left alone.
+    /// Requests still being computed are cut off with no response, as on a delete (issue #1799):
+    /// a recreate has none in flight. Idle keep-alive connections stay open.
     ///
     /// Writes no datadir file and emits no event: the config did not change. Runs under the
     /// manager's persist lock, so a delete and re-create of the port cannot slip in between the
@@ -3305,13 +3307,21 @@ impl ImposterManager {
                     .map_err(ImposterError::Backend)?;
                 imposter.proxy_store.clear(port);
                 self.probe(Point::ProxyStoreCleared { port });
-                // A fresh cell, not a cleared one: a script run in flight, and a run already
-                // submitted, finish on the old cell's live state and save into the old cell
-                // (#1726, #1678); the imposter's next runs start from the new one.
+                // A fresh cell, not a cleared one: a script run already submitted finishes on the
+                // old cell's live state and saves into the old cell (#1726, #1678), its request cut
+                // below; the imposter's next runs start from the new one.
                 imposter.script_state.store(std::sync::Arc::default());
-                imposter
+                let flow = imposter
                     .restart_flow_state()
-                    .map_err(ImposterError::Backend)
+                    .map_err(ImposterError::Backend);
+                // Last, so a request that holds the new token sees only the reset state: every
+                // request that started before this point, on the old state or on a partly reset
+                // one, ends with no response, as on a delete (issue #1799).
+                imposter
+                    .in_flight
+                    .swap(Arc::new(imposter.cancel.child_token()))
+                    .cancel();
+                flow
             })
             .await?;
         restarted
@@ -7888,6 +7898,36 @@ mod tests {
             assert!(recorder.resets.lock().contains(&(port, None)));
             assert_eq!(cycle_bodies(port, 3).await, ["one", "one", "two"]);
             manager.delete_all().await;
+        }
+
+        // #1799: a runtime restart cuts the requests of the generation it ends, not the next one's,
+        // and a delete still cuts both, since each in-flight token is a child of the imposter's.
+        #[tokio::test]
+        async fn a_restart_rotates_the_in_flight_token() {
+            let (_recorder, manager) = manager_with_recorder();
+            let port = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "stubs": [cycling_stub_json()]
+                })))
+                .await
+                .expect("create");
+            let imposter = manager.get_imposter(port).expect("registered");
+            let before = imposter.in_flight.load_full();
+            manager.restart_runtime_state(port).await.expect("restart");
+            let after = imposter.in_flight.load_full();
+            assert!(
+                before.is_cancelled(),
+                "the restart left an in-flight request running"
+            );
+            assert!(
+                !after.is_cancelled(),
+                "the restart cut the next generation's requests"
+            );
+            manager.delete_imposter(port).await.expect("delete");
+            assert!(
+                after.is_cancelled(),
+                "a delete left a restarted imposter's request running"
+            );
         }
 
         // #1803: a write on a port with no imposter answers `NotFound` and leaves the persist lock
