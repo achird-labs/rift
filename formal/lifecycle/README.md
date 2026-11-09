@@ -177,6 +177,12 @@ them as skipped.
 - One request per generation at a time: `req` holds one in-flight request.
 - The serve-unbound path, HTTPS and rebinds.
 - The reload's route and intercept swaps, and two ports' interaction beyond a sweep's snapshot.
+- The `Ephemeral` store: every modelled imposter is a `Datadir` one, so `TableFileAgree` says nothing
+  about a port whose holder is ephemeral, which should have no runtime `{port}.json` (#1821). The
+  tests `a_replace_that_loses_its_port_to_an_ephemeral_create_leaves_no_file`,
+  `a_replace_into_the_ephemeral_store_removes_the_runtime_file` and
+  `a_retag_to_ephemeral_in_place_removes_the_runtime_file` in `lifecycle_interleavings.rs` pin it
+  instead. Modelling it needs a per-generation store, an ephemeral apply op and an in-place retag.
 - A write's in-memory stub mutation, persist and event: `WriteClear` models only its by-port clear of
   the shared state. Trace validation does not cover writes: `trace_labels.py` returns `None` for a run
   with a `WriteLookedUp` or `WriteDone` point.

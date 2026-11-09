@@ -1410,3 +1410,223 @@ async fn a_failed_create_with_no_file_reports_its_write_error() {
     assert!(manager.get_imposter(port).is_err());
     assert!(!datadir.join(format!("{port}.json")).exists());
 }
+
+fn ephemeral(config: ImposterConfig) -> rift_mock_core::imposter::DesiredImposter {
+    rift_mock_core::imposter::DesiredImposter {
+        config,
+        persistence: rift_mock_core::imposter::Persistence::Ephemeral,
+        // The manager's default, so an unchanged entry widens nothing and applies in place.
+        script_files: rift_mock_core::imposter::ScriptFileAccess::Refused,
+    }
+}
+
+fn datadir_manager(recorder: &Arc<Recorder>) -> (Arc<ImposterManager>, std::path::PathBuf) {
+    let datadir = tempfile::tempdir().expect("datadir").keep();
+    let manager = Arc::new(
+        ImposterManager::with_datadir(Some(datadir.clone()))
+            .with_probe(Arc::clone(recorder) as Arc<dyn Probe>),
+    );
+    (manager, datadir)
+}
+
+/// #1821 (a): a replace that loses its port to an `Ephemeral` apply entry kept `{port}.json` for its
+/// own create to overwrite. The ephemeral winner never writes, so the replaced imposter's file stayed
+/// and would load again once the source stopped declaring the port.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replace_that_loses_its_port_to_an_ephemeral_create_leaves_no_file() {
+    let recorder = Arc::new(Recorder::default());
+    let (manager, datadir) = datadir_manager(&recorder);
+    let port = free_port();
+    manager
+        .create_imposter(answering(port, "old"))
+        .await
+        .expect("create");
+    let file = datadir.join(format!("{port}.json"));
+    assert!(file.exists());
+
+    let mut renamed = answering(port, "replaced");
+    renamed.name = Some("renamed".to_owned());
+    let held = recorder.hold(|p| matches!(p, Point::DeleteDrained { .. }));
+    let replace = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.apply_one(renamed).await }
+    });
+    recorder
+        .reached(|p| matches!(p, Point::DeleteDrained { .. }))
+        .await;
+    let report = manager
+        .apply_desired(vec![ephemeral(answering(port, "ephemeral"))])
+        .await
+        .expect("apply");
+    assert!(report.failed.is_empty(), "{report:?}");
+    held.open();
+    let replaced = replace.await.expect("replace task").expect("apply");
+    assert!(
+        replaced
+            .failed
+            .iter()
+            .any(|(p, e)| *p == port && matches!(e, ImposterError::PortInUse(_))),
+        "{replaced:?}"
+    );
+
+    assert_eq!(get(port, None).await.expect("answered").body, "ephemeral");
+    let left = file.exists();
+    let _ = manager.delete_all().await;
+    assert!(
+        !left,
+        "the replaced imposter's file survived under an ephemeral holder"
+    );
+}
+
+/// #1821 (b): a replace into the `Ephemeral` store keeps the file for an overwrite that never comes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replace_into_the_ephemeral_store_removes_the_runtime_file() {
+    let recorder = Arc::new(Recorder::default());
+    let (manager, datadir) = datadir_manager(&recorder);
+    let port = free_port();
+    manager
+        .create_imposter(answering(port, "old"))
+        .await
+        .expect("create");
+    let mut renamed = answering(port, "source");
+    renamed.name = Some("renamed".to_owned());
+
+    let report = manager
+        .apply_desired(vec![ephemeral(renamed)])
+        .await
+        .expect("apply");
+    assert_eq!(report.replaced, vec![port], "{report:?}");
+    let left = datadir.join(format!("{port}.json")).exists();
+    let _ = manager.delete_all().await;
+    assert!(
+        !left,
+        "a replace into the ephemeral store left the runtime file"
+    );
+}
+
+/// #1821 (c): a retag from `Datadir` to `Ephemeral` in place left the file, and from then on not even
+/// a delete removed it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retag_to_ephemeral_in_place_removes_the_runtime_file() {
+    let recorder = Arc::new(Recorder::default());
+    let (manager, datadir) = datadir_manager(&recorder);
+    let port = free_port();
+    manager
+        .create_imposter(answering(port, "old"))
+        .await
+        .expect("create");
+    let same = manager
+        .get_imposter(port)
+        .expect("registered")
+        .config
+        .clone();
+
+    let report = manager
+        .apply_desired(vec![ephemeral(same)])
+        .await
+        .expect("apply");
+    assert!(
+        report.replaced.is_empty() && report.created.is_empty() && report.failed.is_empty(),
+        "the retag was meant to apply in place: {report:?}"
+    );
+    let file = datadir.join(format!("{port}.json"));
+    assert!(!file.exists(), "a retag to ephemeral left the runtime file");
+    manager.delete_imposter(port).await.expect("delete");
+    assert!(!file.exists());
+}
+
+/// #1821, over-fix guard: an `Ephemeral` create outside an apply (a startup source) leaves a colliding
+/// `{port}.json` alone: at startup that file is the operator's datadir input, skipped and named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ephemeral_create_outside_apply_keeps_a_colliding_file() {
+    let recorder = Arc::new(Recorder::default());
+    let (manager, datadir) = datadir_manager(&recorder);
+    let port = free_port();
+    let file = datadir.join(format!("{port}.json"));
+    std::fs::write(&file, b"{}").expect("seed");
+    manager
+        .create_imposter_as(
+            answering(port, "source"),
+            rift_mock_core::imposter::Persistence::Ephemeral,
+        )
+        .await
+        .expect("create");
+    let kept = std::fs::read(&file).ok();
+    let _ = manager.delete_all().await;
+    assert_eq!(kept.as_deref(), Some(&b"{}"[..]));
+}
+
+/// #1821, over-fix guard: an `Ephemeral` entry that loses its port to a `Datadir` create leaves that
+/// create's file alone: the clear runs only while the holder is ephemeral.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ephemeral_entry_that_loses_its_port_to_a_datadir_create_keeps_that_file() {
+    let recorder = Arc::new(Recorder::default());
+    let (manager, datadir) = datadir_manager(&recorder);
+    let port = free_port();
+
+    let held = recorder.hold(floor_read);
+    let entry = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move {
+            manager
+                .apply_desired(vec![ephemeral(answering(port, "ephemeral"))])
+                .await
+        }
+    });
+    recorder.reached(floor_read).await;
+    manager
+        .create_imposter(answering(port, "datadir"))
+        .await
+        .expect("the datadir create takes the port");
+    held.open();
+    let report = entry.await.expect("entry task").expect("apply");
+    assert!(
+        report
+            .failed
+            .iter()
+            .any(|(p, e)| *p == port && matches!(e, ImposterError::PortInUse(_))),
+        "{report:?}"
+    );
+
+    let file = datadir.join(format!("{port}.json"));
+    let content = std::fs::read_to_string(&file).ok();
+    let _ = manager.delete_all().await;
+    assert!(
+        content.as_deref().is_some_and(|c| c.contains("datadir")),
+        "the losing ephemeral entry removed the datadir holder's file: {content:?}"
+    );
+}
+
+/// #1821, with the replace's own re-create failing: an ephemeral entry's replace kept the file for an
+/// overwrite, then nothing held the port for the clear, so the imposter the report calls deleted
+/// stayed on disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_replace_into_the_ephemeral_store_removes_the_runtime_file() {
+    let recorder = Arc::new(Recorder::default());
+    let (manager, datadir) = datadir_manager(&recorder);
+    let port = free_port();
+    manager
+        .create_imposter(answering(port, "old"))
+        .await
+        .expect("create");
+    // An address no local interface holds (TEST-NET-3), so the re-create cannot bind.
+    let mut unbindable = answering(port, "source");
+    unbindable.host = Some("203.0.113.1".to_owned());
+
+    let report = manager
+        .apply_desired(vec![ephemeral(unbindable)])
+        .await
+        .expect("apply");
+    assert_eq!(report.deleted, vec![port], "{report:?}");
+    assert!(
+        report
+            .failed
+            .iter()
+            .any(|(p, e)| *p == port && !matches!(e, ImposterError::PortInUse(_))),
+        "{report:?}"
+    );
+    assert!(
+        !datadir.join(format!("{port}.json")).exists(),
+        "the replaced imposter's file survived a failed replace into the ephemeral store"
+    );
+}
