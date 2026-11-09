@@ -13,6 +13,14 @@ record.
 
 ### Fixed
 
+- **A replaced imposter no longer comes back on restart after its port went to a failed create**
+  (#1800): a `PUT /imposters` replace keeps `{port}.json` for its own create to overwrite. When a
+  concurrent create took the port and then failed its datadir write, the port was left vacant with the
+  replaced imposter's file still there, and the next start loaded it. Now the failed create's rollback
+  removes the file when the port is still vacant. A create from a datadir load or reload still never
+  touches its own input file. A create whose admin request is dropped while its rollback waits still
+  leaves the file (#1801).
+
 - **With a shared journal, sequencer or proxy store, a write racing a delete and same-port re-create no
   longer wipes the new imposter's state** (#1803): a stub replace, delete or patch, a `PUT /imposters`
   restart, `DELETE …/savedRequests`, `DELETE …/savedProxyResponses` or a space teardown looked the

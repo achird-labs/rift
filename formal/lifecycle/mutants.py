@@ -129,8 +129,8 @@ mutants = {
     # #1762: a rollback dropped the stamps its generation served after the claim.
     'a rollback records no floor (#1762)': ('FloorMonotone', [
         ("          /\\ floor' = [floor EXCEPT ![p] = Max(@, clock[g].last)]\n", ''),
-        ('''    /\\ UNCHANGED <<file, nextGen, persistLock, clock, nreq, deleteReturned,
-''', '''    /\\ UNCHANGED <<file, floor, nextGen, persistLock, clock, nreq, deleteReturned,
+        ('''    /\\ UNCHANGED <<nextGen, persistLock, clock, nreq, deleteReturned,
+''', '''    /\\ UNCHANGED <<floor, nextGen, persistLock, clock, nreq, deleteReturned,
 ''')],
         [('Creators = {c1}', 'Creators = {c1, c2}'), ('Preloaded = TRUE', 'Preloaded = FALSE'),
          ('PersistFails = FALSE', 'PersistFails = TRUE')]),
@@ -147,6 +147,20 @@ if verdict in ('OpsFinish', 'temporal'):
     print(f'a drain that never ends: caught by {verdict}')
 else:
     print(f'a drain that never ends: expected OpsFinish, got {verdict}\n{out}')
+    failed = True
+# #1800: a failed create's rollback left the file a replace that lost the port to it had kept, so a
+# restart brought the replaced imposter back.  Needs a replace and failing writes together.
+ROLLBACK_FILE = "          /\\ file' = IF slot'[p] = NoGen THEN [file EXCEPT ![p] = NoGen] ELSE file\n"
+name = "a failed create's rollback leaves a replaced imposter's file (#1800)"
+verdict, trace, out = tlc(jar, 'Lifecycle', edit(spec, [
+    (ROLLBACK_FILE, ''),
+    ('''    /\\ UNCHANGED <<nextGen, persistLock, clock, nreq, deleteReturned,
+                   lastStamp, shared>>''', '''    /\\ UNCHANGED <<file, nextGen, persistLock, clock, nreq, deleteReturned,
+                   lastStamp, shared>>''')], name), read(os.path.join(here, 'LifecycleReplaceFail.cfg')))
+if verdict == 'TableFileAgree':
+    print(f'{name}: caught by {verdict}')
+else:
+    print(f'{name}: expected TableFileAgree, got {verdict}\n  {" -> ".join(trace)}\n{out}')
     failed = True
 for name, (expected, spec_edits, cfg_edits) in mutants.items():
     verdict, trace, out = tlc(jar, 'Lifecycle', edit(spec, spec_edits, name), edit(cfg, cfg_edits, name))

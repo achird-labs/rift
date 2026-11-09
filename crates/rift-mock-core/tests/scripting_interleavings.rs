@@ -195,6 +195,10 @@ async fn a_run_saves_then_answers_then_lets_go_of_its_claim() {
 
     let (status, body) = get(port, "/").await;
     assert_eq!((status, body.as_str()), (200, "x"));
+    // The answer is sent before `ScriptFinished` fires, so the client can have it first.
+    recorder
+        .reached(|p| matches!(p, Point::ScriptReleased { .. }))
+        .await;
 
     let order: Vec<&'static str> = recorder
         .seen()

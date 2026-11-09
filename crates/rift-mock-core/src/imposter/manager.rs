@@ -575,6 +575,30 @@ impl PortTable {
     }
 }
 
+/// What a failed create's rollback does with `{port}.json` once the port is vacant (issue #1800).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RollbackFile {
+    /// The file is this create's own input (a datadir load or reload): never unlink it (#1158).
+    Keep,
+    /// The file, if any, is a runtime copy of an imposter already reported deleted: a replace that
+    /// lost its port to this create left it for this create to overwrite. Unlink it if the port is
+    /// still vacant. A file on the port that no imposter loaded goes too, as a successful create
+    /// would have overwritten it.
+    RemoveIfVacant,
+}
+
+impl RollbackFile {
+    /// An apply entry's choice: `requested` is `Some` when the file is the apply's input (a reload),
+    /// `None` when it is only a copy of runtime state (`PUT /imposters`).
+    fn for_apply(requested: Option<Persistence>) -> Self {
+        if requested.is_some() {
+            Self::Keep
+        } else {
+            Self::RemoveIfVacant
+        }
+    }
+}
+
 /// Manages the lifecycle of multiple imposters
 /// Takes a create whose datadir write failed out of service when dropped, which is what lets the
 /// rollback survive its own future being dropped. Only this imposter: a delete and a new create may
@@ -1358,7 +1382,14 @@ impl ImposterManager {
         // `false`: the direct-create contract is all-or-nothing whatever `serve_unbound` says
         // (issue #143) — `Err` here means "the imposter does not exist" to every caller.
         let (port, _) = self
-            .create_imposter_staged(config, false, persistence, script_files, CursorStart::Fresh)
+            .create_imposter_staged(
+                config,
+                false,
+                persistence,
+                script_files,
+                CursorStart::Fresh,
+                RollbackFile::RemoveIfVacant,
+            )
             .await?;
         self.emit(ImposterEvent::Created(port));
         Ok(port)
@@ -1386,6 +1417,7 @@ impl ImposterManager {
                 Persistence::Datadir,
                 script_files,
                 CursorStart::Resume,
+                RollbackFile::Keep,
             )
             .await?;
         self.emit(ImposterEvent::Created(port));
@@ -1406,6 +1438,7 @@ impl ImposterManager {
         persistence: Persistence,
         script_files: ScriptFileAccess,
         cursors: CursorStart,
+        rollback_file: RollbackFile,
     ) -> Result<(u16, Option<ImposterError>), ImposterError> {
         // Validate protocol first
         match config.protocol.as_str() {
@@ -1677,6 +1710,25 @@ impl ImposterManager {
             };
             let _persist = self.persist_lock.lock().await;
             drop(rollback);
+            // A replace that lost this port to this create left the replaced imposter's file for it
+            // to overwrite (issue #1800); with the write failed and the port vacant, nothing else
+            // will remove it, and a restart would bring that imposter back. Under the lock every
+            // writer holds, so a create that claims the port after this check writes after it.
+            //
+            // Not on the path above where the request was dropped while waiting: `Drop` cannot await
+            // an unlink, so a create dropped there leaves the file.
+            if rollback_file == RollbackFile::RemoveIfVacant && self.imposters.get(port).is_none() {
+                // As a delete does before it unlinks, so a flush cannot write this imposter's
+                // recorded requests back after the unlink.
+                detach_journal(&imposter);
+                if let Err(cleanup) = self.remove_persisted_file(port).await {
+                    error!(
+                        port,
+                        "a failed create could not remove the file it was to overwrite; a restart \
+                         may load the imposter it replaced: {cleanup}"
+                    );
+                }
+            }
             self.probe(Point::CreateRolledBack {
                 port,
                 generation: imposter.generation,
@@ -2625,11 +2677,10 @@ impl ImposterManager {
             let Some(port) = config.explicit_port() else {
                 // No explicit port (absent or `0`) → nothing to reconcile against; always an
                 // auto-assigned create.
-                let persistence = requested.unwrap_or(Persistence::Datadir);
                 self.create_for_apply(
                     config,
                     0,
-                    persistence,
+                    requested,
                     script_files,
                     CursorStart::Fresh,
                     &mut report,
@@ -2709,7 +2760,6 @@ impl ImposterManager {
         report: &mut ApplyReport,
     ) {
         let Ok(existing) = self.get_imposter(port) else {
-            let persistence = requested.unwrap_or(Persistence::Datadir);
             // A new imposter read from its datadir file resumes where that file's imposter stopped
             // (issue #1603): `POST /admin/reload` is a load of the datadir, like startup.
             let cursors = if requested == Some(Persistence::Datadir) {
@@ -2717,7 +2767,7 @@ impl ImposterManager {
             } else {
                 CursorStart::Fresh
             };
-            self.create_for_apply(config, port, persistence, script_files, cursors, report)
+            self.create_for_apply(config, port, requested, script_files, cursors, report)
                 .await;
             return;
         };
@@ -2842,11 +2892,13 @@ impl ImposterManager {
         &self,
         config: ImposterConfig,
         fail_port: u16,
-        persistence: Persistence,
+        requested: Option<Persistence>,
         script_files: ScriptFileAccess,
         cursors: CursorStart,
         report: &mut ApplyReport,
     ) {
+        let persistence = requested.unwrap_or(Persistence::Datadir);
+        let rollback_file = RollbackFile::for_apply(requested);
         match self
             .create_imposter_staged(
                 config,
@@ -2854,6 +2906,7 @@ impl ImposterManager {
                 persistence,
                 script_files,
                 cursors,
+                rollback_file,
             )
             .await
         {
@@ -2911,6 +2964,7 @@ impl ImposterManager {
                 persistence,
                 script_files,
                 CursorStart::Fresh,
+                RollbackFile::for_apply(requested),
             )
             .await
         {
@@ -2926,8 +2980,9 @@ impl ImposterManager {
             }
             Err(e) => {
                 // Reported deleted, so a runtime copy must go too, or a restart would bring back the
-                // imposter this apply replaced. A file that was the apply's input stays, and so does
-                // one a concurrent create on this port has just written (`PortInUse`).
+                // imposter this apply replaced. A file that was the apply's input stays. On
+                // `PortInUse` a concurrent create took the port: a datadir create overwrites the
+                // file, or removes it when its own write fails (issue #1800).
                 if requested.is_none()
                     && persistence == Persistence::Datadir
                     && !matches!(e, ImposterError::PortInUse(_))
@@ -3755,7 +3810,7 @@ impl ImposterManager {
 
     /// `remove_persisted_file`, unless the port has been taken again by the time the lock is held.
     ///
-    /// For a rollback after a failed create: the failed imposter is already out of the map, so a
+    /// For a replace whose own create failed: the replaced imposter is already out of the map, so a
     /// concurrent create on the same port can have persisted its own `{port}.json` since — and an
     /// unlocked, unconditional unlink would then delete it, silently.
     async fn remove_persisted_file_if_vacant(&self, port: u16) -> Result<(), ImposterError> {

@@ -1256,3 +1256,157 @@ async fn an_apply_whose_imposter_was_deleted_reports_it_not_found() {
     );
     assert!(manager.get_imposter(port).is_err());
 }
+
+/// #1800: a replace that loses its port to a concurrent create leaves `{port}.json` for that create
+/// to overwrite. When the create's own write fails and it rolls back, the port is vacant and the file
+/// still holds the imposter the replace reported deleted, so a restart would bring it back. The
+/// create that took the port owns the file: its rollback removes it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replace_that_loses_its_port_to_a_failed_create_leaves_no_file() {
+    let recorder = Arc::new(Recorder::default());
+    let datadir = tempfile::tempdir().expect("datadir").keep();
+    let manager = Arc::new(
+        ImposterManager::with_datadir(Some(datadir.clone()))
+            .with_probe(Arc::clone(&recorder) as Arc<dyn Probe>),
+    );
+    let port = free_port();
+    manager
+        .create_imposter(answering(port, "old"))
+        .await
+        .expect("create");
+    let file = datadir.join(format!("{port}.json"));
+    assert!(file.exists());
+
+    make_read_only(&datadir);
+    // An imposter-level change, so the apply replaces: delete without unlinking, then create.
+    let mut renamed = answering(port, "replaced");
+    renamed.name = Some("renamed".to_owned());
+    // Held after the slot is vacated and `persist_lock` released, before its own create.
+    let replace_held = recorder.hold(|p| matches!(p, Point::DeleteDrained { .. }));
+    let replace = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.apply_one(renamed).await }
+    });
+    recorder
+        .reached(|p| matches!(p, Point::DeleteDrained { .. }))
+        .await;
+
+    let create_held = recorder.hold(|p| matches!(p, Point::CreatePersistFailed { .. }));
+    let create = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.create_imposter(answering(port, "c2")).await }
+    });
+    recorder
+        .reached(|p| matches!(p, Point::CreatePersistFailed { .. }))
+        .await;
+
+    replace_held.open();
+    let report = replace.await.expect("replace task").expect("apply");
+    assert!(report.deleted.contains(&port), "{report:?}");
+    assert!(
+        report
+            .failed
+            .iter()
+            .any(|(p, e)| *p == port && matches!(e, ImposterError::PortInUse(_))),
+        "{report:?}"
+    );
+
+    make_writable(&datadir);
+    create_held.open();
+    assert!(create.await.expect("create task").is_err());
+    assert!(manager.get_imposter(port).is_err());
+    assert!(
+        !file.exists(),
+        "the replaced imposter's file survived with the port vacant, so a restart brings it back"
+    );
+}
+
+/// #1800, over-fix guard: a create from a datadir file is that file's own load, and a failed write
+/// must leave the file as it was (#1158). The datadir is made writable again before the rollback, so
+/// an unlink there would succeed: only `RollbackFile::Keep` keeps the file.
+#[cfg(unix)]
+async fn a_datadir_create_whose_write_fails_keeps_its_file(reload: bool) {
+    let recorder = Arc::new(Recorder::default());
+    let datadir = tempfile::tempdir().expect("datadir").keep();
+    let manager = Arc::new(
+        ImposterManager::with_datadir(Some(datadir.clone()))
+            .with_probe(Arc::clone(&recorder) as Arc<dyn Probe>),
+    );
+    let port = free_port();
+    let file = datadir.join(format!("{port}.json"));
+    std::fs::write(&file, b"{}").expect("seed the file");
+
+    make_read_only(&datadir);
+    let held = recorder.hold(|p| matches!(p, Point::CreatePersistFailed { .. }));
+    let load = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        let scripts = rift_mock_core::imposter::ScriptFileAccess::Confined(std::env::temp_dir());
+        async move {
+            let config = answering(port, "loaded");
+            if reload {
+                let report = manager
+                    .apply_desired(vec![rift_mock_core::imposter::DesiredImposter {
+                        config,
+                        persistence: rift_mock_core::imposter::Persistence::Datadir,
+                        script_files: scripts,
+                    }])
+                    .await
+                    .expect("apply");
+                assert!(report.created.is_empty(), "{report:?}");
+            } else {
+                assert!(
+                    manager
+                        .create_imposter_resuming(config, scripts)
+                        .await
+                        .is_err()
+                );
+            }
+        }
+    });
+    recorder
+        .reached(|p| matches!(p, Point::CreatePersistFailed { .. }))
+        .await;
+    make_writable(&datadir);
+    held.open();
+    load.await.expect("load task");
+
+    assert!(manager.get_imposter(port).is_err());
+    assert_eq!(
+        std::fs::read(&file).ok().as_deref(),
+        Some(&b"{}"[..]),
+        "a datadir load's rollback removed its own input file"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_startup_load_whose_write_fails_keeps_its_file() {
+    a_datadir_create_whose_write_fails_keeps_its_file(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reload_whose_write_fails_keeps_its_file() {
+    a_datadir_create_whose_write_fails_keeps_its_file(true).await;
+}
+
+/// #1800: a create whose write fails on a port with no file rolls back with its own write error,
+/// not a cleanup error.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_create_with_no_file_reports_its_write_error() {
+    let datadir = tempfile::tempdir().expect("datadir").keep();
+    let manager = ImposterManager::with_datadir(Some(datadir.clone()));
+    let port = free_port();
+    make_read_only(&datadir);
+    let created = manager.create_imposter(answering(port, "fails")).await;
+    make_writable(&datadir);
+    // The write's own error, not the cleanup's (`Failed to remove imposter …`).
+    assert!(
+        matches!(&created, Err(ImposterError::PersistError(e)) if !format!("{e:#}").contains("Failed to remove")),
+        "{created:?}"
+    );
+    assert!(manager.get_imposter(port).is_err());
+    assert!(!datadir.join(format!("{port}.json")).exists());
+}

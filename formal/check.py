@@ -17,7 +17,7 @@ from tlacheck import read, states, tlc  # noqa: E402
 # model: (spec, whether TLC's deadlock check stays on, PR cfgs, full cfgs). The READMEs say why the
 # deadlock check is on or off for each.
 MODELS = {
-    'lifecycle': ('Lifecycle', False, ['LifecyclePR'], ['Lifecycle', 'LifecycleApply', 'LifecycleReplace', 'Liveness']),
+    'lifecycle': ('Lifecycle', False, ['LifecyclePR'], ['Lifecycle', 'LifecycleApply', 'LifecycleReplace', 'LifecycleReplaceFail', 'Liveness']),
     'proxyonce': ('ProxyOnce', False, ['ProxyOncePR', 'ProxyOnceCarriers'],
                   ['ProxyOnce', 'ProxyOnceTwoEdits', 'ProxyOnceCarriers']),
     'scenario': ('Scenario', False, ['ScenarioPR'], ['Scenario']),

@@ -67,7 +67,7 @@ one direction model checking alone cannot.
 
 ## What it found
 
-Fifteen defects, each reproduced by a failing test on the engine. Parts of some were only traced through the
+Sixteen defects, each reproduced by a failing test on the engine. Parts of some were only traced through the
 source, and each issue says which. A fixed one says so in the table.
 
 | Issue | Model | Defect |
@@ -87,6 +87,7 @@ source, and each issue says which. A fixed one says so in the table.
 | #1784 | scripting | A restart between a request's hooks splits it across two state cells. Fixed |
 | #1785 | scripting | A getter on the answer runs after the save, so its write is lost. Fixed |
 | #1786 | scripting | A job a finished run left fails the run that inherited it. Fixed |
+| #1800 | lifecycle | A replace that loses its port to a create whose write fails leaves the replaced imposter's file, so a restart brings it back. Fixed |
 
 Most need a narrow window, and none was observed without a hold, so how often they occur in production is not
 measured.
