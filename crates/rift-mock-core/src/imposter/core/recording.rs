@@ -126,6 +126,10 @@ impl Imposter {
     ///
     /// With `--datadir`, `{port}.requests.jsonl` is removed first (issue #1608); one that cannot
     /// be removed fails the clear with the requests still recorded.
+    ///
+    /// On a shared journal this clears by port. An embedder should prefer
+    /// [`ImposterManager::clear_recorded_requests`](crate::imposter::ImposterManager::clear_recorded_requests),
+    /// which holds the port while it clears (issue #1803).
     pub fn clear_recorded_requests(&self) -> anyhow::Result<()> {
         let clear = || self.journal.clear(self.journal_port());
         match &self.journal_file {
@@ -159,6 +163,10 @@ impl Imposter {
     /// With `--datadir` the file is rewritten from what is kept (issue #1608). A rewrite that fails
     /// is logged at error level and retried by the next flush; until then a restart could bring
     /// back what this removed.
+    ///
+    /// On a shared journal this filters by port. An embedder should prefer
+    /// [`ImposterManager::retain_recorded_requests`](crate::imposter::ImposterManager::retain_recorded_requests),
+    /// which holds the port while it filters (issue #1803).
     pub fn retain_recorded_requests<F: Fn(&RecordedRequest) -> bool>(&self, keep: F) {
         let ((), written) =
             self.delete_recorded(|| self.journal.retain(self.journal_port(), &keep));

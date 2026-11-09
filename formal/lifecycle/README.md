@@ -55,6 +55,7 @@ names here are the stable reference.
 | `DeleteRemoveIfSame` | `PortTable::remove_if_same`; `persist_lock` is released after it |
 | `DeleteDrain` | joins the accept loops, drains connections within `conn_drain` |
 | `DeleteFinish` | the delete returns |
+| `WriteLock`, `WriteLookup`, `WriteClear`, `WriteUnlock` | `write_owning`: a stub write, `restart_runtime_state`, a saved-requests or proxy-responses clear, a space teardown; the lookup and the by-port clears under `persist_lock` (#1803) |
 | `ApplySnapshot`, `ApplySweep` | `apply_entries` and `delete_all`: the `ports()` snapshot, one delete per port |
 | `ApplyEntry`, `ReplaceAfterDelete`, `ReplaceAfterCreate` | `apply_entry`, `replace_imposter` |
 | `ReqStart`, `ReqCompute`, `ReqWrite` | a request: accepted, answered under its stamp and journalled, written |
@@ -80,16 +81,16 @@ names here are the stable reference.
 
 | Config | What races | Invariants left out |
 |:--|:--|:--|
-| `LifecyclePR.cfg` | two creates, one delete | |
-| `Lifecycle.cfg` | two creates, two deletes, failing writes and unlinks | |
+| `LifecyclePR.cfg` | two creates, one delete, one write | |
+| `Lifecycle.cfg` | two creates, two deletes, one write, failing writes and unlinks | |
 | `LifecycleApply.cfg` | an apply sweep, a `delete_all`, a delete, a create | |
 | `LifecycleReplace.cfg` | an `apply_one` replace, a delete, a create | |
 | `Mutants.cfg` | one create, two deletes: where a mutant's violation is its own | |
 
 | Config | Distinct states | Depth | Wall time |
 |:--|--:|--:|--:|
-| `LifecyclePR.cfg` | 18,582 | 37 | 1 s |
-| `Lifecycle.cfg` | 111,170 | 43 | 2 s |
+| `LifecyclePR.cfg` | 106,849 | 41 | 5 s |
+| `Lifecycle.cfg` | 700,834 | 47 | 16 s |
 | `LifecycleApply.cfg` | 567,048 | 45 | 4 s |
 | `LifecycleReplace.cfg` | 252,034 | 46 | 2 s |
 
@@ -149,6 +150,7 @@ controls. `mutants.py` puts fixed bugs back:
 | The rollback removes whoever holds the port (#1773) | `RemoveOnlyOwn` |
 | The rollback does not take `persist_lock` (#1773) | `ErrDeleteStillServing` |
 | An apply sweep reports a concurrent delete as failed (#1774) | `ApplyReportsTruth` |
+| A stub write clears without the lock (#1803) | `SharedStateBelongsToCurrent` |
 | `try_claim` without the `mutations` lock | `OneClaimant` |
 | A drain that never ends | `OpsFinish`, on `Liveness.cfg` |
 
@@ -171,5 +173,7 @@ them as skipped.
 - Time, beyond the frozen wall clock. A real re-create more than a second later has no floor problem.
 - One request per generation at a time: `req` holds one in-flight request.
 - The serve-unbound path, HTTPS and rebinds.
-- `restart_runtime_state`, the reload's route and intercept swaps, and two ports' interaction beyond
-  a sweep's snapshot.
+- The reload's route and intercept swaps, and two ports' interaction beyond a sweep's snapshot.
+- A write's in-memory stub mutation, persist and event: `WriteClear` models only its by-port clear of
+  the shared state. Trace validation does not cover writes: `trace_labels.py` returns `None` for a run
+  with a `WriteLookedUp` or `WriteDone` point.

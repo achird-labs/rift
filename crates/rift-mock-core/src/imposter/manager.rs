@@ -13,7 +13,9 @@ use super::reconcile::{
     ImposterEventListener, Persistence, StubReconcile,
 };
 use super::script_resolve::ScriptFileAccess;
-use super::types::{ImposterConfig, ImposterError, Stub, StubResponse, UnresolvableHost};
+use super::types::{
+    ImposterConfig, ImposterError, RecordedRequest, Stub, StubResponse, UnresolvableHost,
+};
 use crate::behaviors::ResponseSequencer;
 use crate::extensions::decorate::ResponseDecorator;
 use crate::extensions::exchange_inspector::ExchangeInspectorProvider;
@@ -2761,7 +2763,40 @@ impl ImposterManager {
 
         // The imposter's scripts become this door's in the same critical section as the stub
         // patch (issues #1611, #1645), and only if that widens nothing; a wider door replaces it.
-        match existing.reconcile_stubs_from(&config.stubs, &script_files) {
+        // Under the persist lock with the removed keys' cursor resets, and only while `existing`
+        // still owns the port, so a reset cannot land on a later imposter (issue #1803).
+        let reconciled = self
+            .write_owning(port, |current| {
+                if !Arc::ptr_eq(current, &existing) {
+                    return None;
+                }
+                let reconciled = existing.reconcile_stubs_from(&config.stubs, &script_files);
+                // apply_config removals are stub deletes: fire the sequencer GC hook per removed
+                // stub, same as delete_stub (issue #313).
+                if let StubReconcile::Patched { removed_keys } = &reconciled
+                    && let Some(sequencer) = &self.sequencer
+                {
+                    for key in removed_keys {
+                        sequencer.reset_scope(port, Some(key));
+                    }
+                }
+                Some(reconciled)
+            })
+            .await;
+        let reconciled = match reconciled {
+            Ok((_, Some(reconciled))) => reconciled,
+            // Deleted, and possibly re-created, since the lookup above: the imposter this apply
+            // compared against is gone.
+            Ok((_, None)) => {
+                report.failed.push((port, ImposterError::NotFound(port)));
+                return;
+            }
+            Err(e) => {
+                report.failed.push((port, e));
+                return;
+            }
+        };
+        match reconciled {
             StubReconcile::Unchanged => {
                 if retagged
                     && persistence == Persistence::Datadir
@@ -2770,14 +2805,7 @@ impl ImposterManager {
                     report.failed.push((port, e));
                 }
             }
-            StubReconcile::Patched { removed_keys } => {
-                // apply_config removals are stub deletes: fire the sequencer GC hook
-                // per removed stub, same as delete_stub (issue #313).
-                if let Some(sequencer) = &self.sequencer {
-                    for key in &removed_keys {
-                        sequencer.reset_scope(port, Some(key));
-                    }
-                }
+            StubReconcile::Patched { .. } => {
                 report.stub_patched.push(port);
                 self.emit(ImposterEvent::StubsChanged(port));
                 // The in-memory patch stands either way; a datadir write failure must
@@ -2976,10 +3004,16 @@ impl ImposterManager {
         index: Option<usize>,
         door: Option<&ScriptFileAccess>,
     ) -> Result<(), ImposterError> {
-        let imposter = self.get_imposter(port)?;
         // Reject a duplicate `id` atomically (issue #202); stubs without an id are unaffected.
         let id = stub.id.clone();
-        if !imposter.add_stub_unique_from(door, stub, index) {
+        // Under the persist lock: a stub edit can restart a reordered stub's cursor by port
+        // (`restart_reordered_sequences`), which must not land on a later imposter (issue #1803).
+        let (imposter, added) = self
+            .write_owning(port, |imposter| {
+                imposter.add_stub_unique_from(door, stub, index)
+            })
+            .await?;
+        if !added {
             return Err(ImposterError::StubIdConflict(id.unwrap_or_default()));
         }
         self.emit(ImposterEvent::StubsChanged(port));
@@ -3017,8 +3051,12 @@ impl ImposterManager {
         stub: Stub,
         door: Option<&ScriptFileAccess>,
     ) -> Result<(), ImposterError> {
-        let imposter = self.get_imposter(port)?;
-        if !imposter.replace_stub_by_id_from(door, id, stub) {
+        let (imposter, replaced) = self
+            .write_owning(port, |imposter| {
+                imposter.replace_stub_by_id_from(door, id, stub)
+            })
+            .await?;
+        if !replaced {
             return Err(ImposterError::StubNotFound(id.to_string()));
         }
         self.emit(ImposterEvent::StubsChanged(port));
@@ -3039,8 +3077,12 @@ impl ImposterManager {
         id: &str,
         responses: Vec<StubResponse>,
     ) -> Result<(), ImposterError> {
-        let imposter = self.get_imposter(port)?;
-        if !imposter.append_stub_responses_by_id(id, responses) {
+        let (imposter, appended) = self
+            .write_owning(port, |imposter| {
+                imposter.append_stub_responses_by_id(id, responses)
+            })
+            .await?;
+        if !appended {
             return Err(ImposterError::StubNotFound(id.to_string()));
         }
         self.emit(ImposterEvent::StubsChanged(port));
@@ -3049,12 +3091,17 @@ impl ImposterManager {
 
     /// Delete the stub addressed by `id` (issue #202).
     pub async fn delete_stub_by_id(&self, port: u16, id: &str) -> Result<(), ImposterError> {
-        let imposter = self.get_imposter(port)?;
-        if !imposter.delete_stub_by_id(id) {
+        let (imposter, deleted) = self
+            .write_owning(port, |imposter| {
+                let deleted = imposter.delete_stub_by_id(id);
+                if deleted && let Some(sequencer) = &self.sequencer {
+                    sequencer.reset_scope(port, Some(id));
+                }
+                deleted
+            })
+            .await?;
+        if !deleted {
             return Err(ImposterError::StubNotFound(id.to_string()));
-        }
-        if let Some(sequencer) = &self.sequencer {
-            sequencer.reset_scope(port, Some(id));
         }
         self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
@@ -3071,10 +3118,10 @@ impl ImposterManager {
     /// Tear down a correlation space (issue #223): remove its scoped stubs, recorded requests,
     /// and scenario state, then persist the updated stub set.
     pub async fn teardown_space(&self, port: u16, space: &str) -> Result<(), ImposterError> {
-        let imposter = self.get_imposter(port)?;
-        imposter
-            .teardown_space(space)
-            .map_err(ImposterError::Backend)?;
+        let (imposter, torn_down) = self
+            .write_owning(port, |imposter| imposter.teardown_space(space))
+            .await?;
+        torn_down.map_err(ImposterError::Backend)?;
         self.persist_imposter_checked(&imposter).await
     }
 
@@ -3108,39 +3155,49 @@ impl ImposterManager {
         stub: Stub,
         door: Option<&ScriptFileAccess>,
     ) -> Result<(), ImposterError> {
-        let imposter = self.get_imposter(port)?;
-        // An index-addressed replace restarts the stub's cycle, as Mountebank's
-        // `overwriteAtIndex` does (#1515); the old key's cursor goes with it, as on a delete.
-        let replaced_key = if self.sequencer.is_some() {
-            imposter
-                .get_stub(index)
-                .map(|stub| crate::imposter::reconcile::stub_key(&stub, 0))
-        } else {
-            None
-        };
-        imposter.replace_stub_from(door, index, stub)?;
-        if let (Some(sequencer), Some(key)) = (&self.sequencer, replaced_key) {
-            sequencer.reset_scope(port, Some(&key));
-        }
+        let (imposter, replaced) = self
+            .write_owning(port, |imposter| {
+                // An index-addressed replace restarts the stub's cycle, as Mountebank's
+                // `overwriteAtIndex` does (#1515); the old key's cursor goes with it, as on a delete.
+                let replaced_key = if self.sequencer.is_some() {
+                    imposter
+                        .get_stub(index)
+                        .map(|stub| crate::imposter::reconcile::stub_key(&stub, 0))
+                } else {
+                    None
+                };
+                imposter.replace_stub_from(door, index, stub)?;
+                if let (Some(sequencer), Some(key)) = (&self.sequencer, replaced_key) {
+                    sequencer.reset_scope(port, Some(&key));
+                }
+                Ok::<(), ImposterError>(())
+            })
+            .await?;
+        replaced?;
         self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
 
     /// Delete a stub
     pub async fn delete_stub(&self, port: u16, index: usize) -> Result<(), ImposterError> {
-        let imposter = self.get_imposter(port)?;
-        // Resolve the stub's stable key before it is gone, for the sequencer GC hook.
-        let deleted_key = if self.sequencer.is_some() {
-            imposter
-                .get_stub(index)
-                .map(|stub| crate::imposter::reconcile::stub_key(&stub, 0))
-        } else {
-            None
-        };
-        imposter.delete_stub(index)?;
-        if let (Some(sequencer), Some(key)) = (&self.sequencer, deleted_key) {
-            sequencer.reset_scope(port, Some(&key));
-        }
+        let (imposter, deleted) = self
+            .write_owning(port, |imposter| {
+                // Resolve the stub's stable key before it is gone, for the sequencer GC hook.
+                let deleted_key = if self.sequencer.is_some() {
+                    imposter
+                        .get_stub(index)
+                        .map(|stub| crate::imposter::reconcile::stub_key(&stub, 0))
+                } else {
+                    None
+                };
+                imposter.delete_stub(index)?;
+                if let (Some(sequencer), Some(key)) = (&self.sequencer, deleted_key) {
+                    sequencer.reset_scope(port, Some(&key));
+                }
+                Ok::<(), ImposterError>(())
+            })
+            .await?;
+        deleted?;
         self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
@@ -3150,11 +3207,15 @@ impl ImposterManager {
     /// cursors are reset for the whole port, as a bulk replace resets them. Only a changed stub set
     /// is announced and persisted: a cursor restart alone is not a config change.
     pub async fn clear_proxy_responses(&self, port: u16) -> Result<(), ImposterError> {
-        let imposter = self.get_imposter(port)?;
-        let cleared = imposter.clear_proxy_responses();
-        if let Some(sequencer) = &self.sequencer {
-            sequencer.reset_scope(port, None);
-        }
+        let (imposter, cleared) = self
+            .write_owning(port, |imposter| {
+                let cleared = imposter.clear_proxy_responses();
+                if let Some(sequencer) = &self.sequencer {
+                    sequencer.reset_scope(port, None);
+                }
+                cleared
+            })
+            .await?;
         if !cleared.changed {
             return Ok(());
         }
@@ -3169,25 +3230,62 @@ impl ImposterManager {
     /// and scenario state of the built-in flow store. A
     /// [`FlowStoreProvider`](crate::extensions::flow_state::FlowStoreProvider)'s store is left alone.
     ///
-    /// Writes no datadir file and emits no event: the config did not change.
-    pub fn restart_runtime_state(&self, port: u16) -> Result<(), ImposterError> {
-        let imposter = self.get_imposter(port)?;
-        imposter.restart_cycles();
-        if let Some(sequencer) = &self.sequencer {
-            sequencer.reset_scope(port, None);
-        }
-        imposter
-            .clear_recorded_requests()
-            .map_err(ImposterError::Backend)?;
-        imposter.proxy_store.clear(port);
-        self.probe(Point::ProxyStoreCleared { port });
-        // A fresh cell, not a cleared one: a script run in flight, and a run already submitted,
-        // finish on the old cell's live state and save into the old cell (#1726, #1678); the
-        // imposter's next runs start from the new one.
-        imposter.script_state.store(std::sync::Arc::default());
-        imposter
-            .restart_flow_state()
-            .map_err(ImposterError::Backend)
+    /// Writes no datadir file and emits no event: the config did not change. Runs under the
+    /// manager's persist lock, so a delete and re-create of the port cannot slip in between the
+    /// lookup and the clears of a shared backend (issue #1803).
+    pub async fn restart_runtime_state(&self, port: u16) -> Result<(), ImposterError> {
+        let (_, restarted) = self
+            .write_owning(port, |imposter| {
+                imposter.restart_cycles();
+                if let Some(sequencer) = &self.sequencer {
+                    sequencer.reset_scope(port, None);
+                }
+                imposter
+                    .clear_recorded_requests()
+                    .map_err(ImposterError::Backend)?;
+                imposter.proxy_store.clear(port);
+                self.probe(Point::ProxyStoreCleared { port });
+                // A fresh cell, not a cleared one: a script run in flight, and a run already
+                // submitted, finish on the old cell's live state and save into the old cell
+                // (#1726, #1678); the imposter's next runs start from the new one.
+                imposter.script_state.store(std::sync::Arc::default());
+                imposter
+                    .restart_flow_state()
+                    .map_err(ImposterError::Backend)
+            })
+            .await?;
+        restarted
+    }
+
+    /// Clear `port`'s recorded requests and its request count (`DELETE …/savedRequests`), as
+    /// [`Imposter::clear_recorded_requests`] does, while the imposter still owns the port: on a
+    /// shared journal ([`with_request_journal`](Self::with_request_journal)) the clear is by port,
+    /// and this keeps it off a later imposter on the same port (issue #1803).
+    pub async fn clear_recorded_requests(&self, port: u16) -> Result<(), ImposterError> {
+        let (_, cleared) = self
+            .write_owning(port, |imposter| imposter.clear_recorded_requests())
+            .await?;
+        cleared.map_err(ImposterError::Backend)
+    }
+
+    /// Keep only the recorded requests on `port` that the predicate `keep` builds for the
+    /// imposter accepts, as [`Imposter::retain_recorded_requests`] does, while the imposter still
+    /// owns the port (issue #1803). `keep` is built from the imposter found under the lock, so a
+    /// predicate that reads its config reads the one whose journal it filters.
+    pub async fn retain_recorded_requests<K>(
+        &self,
+        port: u16,
+        keep: impl FnOnce(&Imposter) -> K,
+    ) -> Result<(), ImposterError>
+    where
+        K: Fn(&RecordedRequest) -> bool,
+    {
+        self.write_owning(port, |imposter| {
+            let keep = keep(imposter);
+            imposter.retain_recorded_requests(keep);
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Replace all stubs for an imposter.
@@ -3219,11 +3317,14 @@ impl ImposterManager {
         stubs: Vec<Stub>,
         door: Option<&ScriptFileAccess>,
     ) -> Result<(), ImposterError> {
-        let imposter = self.get_imposter(port)?;
-        imposter.replace_stubs_from(door, stubs);
-        if let Some(sequencer) = &self.sequencer {
-            sequencer.reset_scope(port, None);
-        }
+        let (imposter, ()) = self
+            .write_owning(port, |imposter| {
+                imposter.replace_stubs_from(door, stubs);
+                if let Some(sequencer) = &self.sequencer {
+                    sequencer.reset_scope(port, None);
+                }
+            })
+            .await?;
         self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
@@ -3231,8 +3332,10 @@ impl ImposterManager {
     /// Move the stub at `from` to position `to` (issue #316), preserving the slot's
     /// cycling state. Stub order is match priority.
     pub async fn move_stub(&self, port: u16, from: usize, to: usize) -> Result<(), ImposterError> {
-        let imposter = self.get_imposter(port)?;
-        imposter.move_stub(from, to)?;
+        let (imposter, moved) = self
+            .write_owning(port, |imposter| imposter.move_stub(from, to))
+            .await?;
+        moved?;
         self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
@@ -3269,6 +3372,32 @@ impl ImposterManager {
         for (port, e) in &report.failed {
             error!("shutdown: imposter on port {port} could not be deleted: {e}");
         }
+    }
+
+    /// Look `port` up and run `write` on its imposter under `persist_lock`. Everything that vacates
+    /// a slot holds that lock (issue #1763), so the port stays this imposter's for as long as
+    /// `write` runs, and a by-port call into a shared backend inside it cannot land on a later
+    /// imposter (issue #1803). `write` must not take the lock again (no persist inside it) and must
+    /// not block for long: it stalls every datadir write and delete. The imposter comes back so the
+    /// caller can emit and persist after the lock is released, with `write`'s own result, which a
+    /// fallible write's caller checks with a second `?`.
+    ///
+    /// Not covered: a request of this generation already past its cancel check can still write one
+    /// late entry (see [`with_request_journal`](Self::with_request_journal)), and a
+    /// `FailedCreateRollback` whose admin request was dropped vacates without the lock, as the
+    /// delete path documents.
+    async fn write_owning<T>(
+        &self,
+        port: u16,
+        write: impl FnOnce(&Arc<Imposter>) -> T,
+    ) -> Result<(Arc<Imposter>, T), ImposterError> {
+        let _persist = self.persist_lock.lock().await;
+        let imposter = self.get_imposter(port)?;
+        let generation = imposter.generation;
+        self.probe(Point::WriteLookedUp { port, generation });
+        let written = write(&imposter);
+        self.probe(Point::WriteDone { port, generation });
+        Ok((imposter, written))
     }
 
     /// Persist an imposter's current config to datadir (if configured).
@@ -6553,6 +6682,53 @@ mod tests {
         }
     }
 
+    // #1803: a write that fails inside the persist lock answers its own error, announces nothing,
+    // and leaves the lock free for the next delete.
+    #[tokio::test]
+    async fn a_failed_write_under_the_lock_announces_nothing_and_releases_it() {
+        let listener = Arc::new(RecordingListener::default());
+        let manager = ImposterManager::new().with_event_listener(listener.clone());
+        let port = manager
+            .create_imposter(imposter_cfg(json!({
+                "protocol": "http", "stubs": [stub_json("a")]
+            })))
+            .await
+            .expect("create");
+        let stub: Stub = serde_json::from_value(stub_json("b")).unwrap();
+
+        assert!(matches!(
+            manager.replace_stub(port, 9, stub.clone()).await,
+            Err(ImposterError::StubIndexOutOfBounds(9))
+        ));
+        assert!(matches!(
+            manager.delete_stub(port, 9).await,
+            Err(ImposterError::StubIndexOutOfBounds(9))
+        ));
+        assert!(matches!(
+            manager.move_stub(port, 9, 0).await,
+            Err(ImposterError::StubIndexOutOfBounds(9))
+        ));
+        assert!(matches!(
+            manager.delete_stub_by_id(port, "missing").await,
+            Err(ImposterError::StubNotFound(id)) if id == "missing"
+        ));
+        assert!(matches!(
+            manager.replace_stub_by_id(port, "missing", stub).await,
+            Err(ImposterError::StubNotFound(id)) if id == "missing"
+        ));
+        let deleted =
+            tokio::time::timeout(Duration::from_secs(5), manager.delete_imposter(port)).await;
+        assert!(
+            matches!(deleted, Ok(Ok(_))),
+            "the delete waited on a held lock"
+        );
+
+        assert_eq!(
+            listener.0.lock().clone(),
+            vec![ImposterEvent::Created(port), ImposterEvent::Deleted(port)]
+        );
+    }
+
     // AC4: events fired per mutation kind.
     #[tokio::test]
     async fn events_fired_per_mutation_kind() {
@@ -7208,7 +7384,7 @@ mod tests {
                 .expect("create");
             let imposter = manager.get_imposter(port).expect("imposter");
             imposter.flow_set("f", "order", json!("paid")).expect("set");
-            manager.restart_runtime_state(port).expect("restart");
+            manager.restart_runtime_state(port).await.expect("restart");
             assert_eq!(
                 imposter.flow_get("f", "order").expect("get"),
                 Some(json!("paid"))
@@ -7225,7 +7401,7 @@ mod tests {
             let imposter = manager.get_imposter(port).expect("imposter");
             imposter.flow_set("f", "order", json!("paid")).expect("set");
             imposter.flow_set("g", "k", json!(1)).expect("set");
-            manager.restart_runtime_state(port).expect("restart");
+            manager.restart_runtime_state(port).await.expect("restart");
             assert_eq!(imposter.flow_get("f", "order").expect("get"), None);
             assert_eq!(imposter.flow_get("g", "k").expect("get"), None);
             manager.delete_all().await;
@@ -7648,10 +7824,25 @@ mod tests {
                 .await
                 .expect("create");
             assert_eq!(cycle_bodies(port, 3).await, ["one", "one", "two"]);
-            manager.restart_runtime_state(port).expect("restart");
+            manager.restart_runtime_state(port).await.expect("restart");
             assert!(recorder.resets.lock().contains(&(port, None)));
             assert_eq!(cycle_bodies(port, 3).await, ["one", "one", "two"]);
             manager.delete_all().await;
+        }
+
+        // #1803: a write on a port with no imposter answers `NotFound` and leaves the persist lock
+        // free, so the next delete and write are not stuck behind it.
+        #[tokio::test]
+        async fn a_write_on_an_empty_port_releases_the_lock() {
+            let (_recorder, manager) = manager_with_recorder();
+            let port = 1;
+            let bound = Duration::from_secs(5);
+            let restarted = tokio::time::timeout(bound, manager.restart_runtime_state(port)).await;
+            assert!(matches!(restarted, Ok(Err(ImposterError::NotFound(1)))));
+            let cleared = tokio::time::timeout(bound, manager.clear_recorded_requests(port)).await;
+            assert!(matches!(cleared, Ok(Err(ImposterError::NotFound(1)))));
+            let deleted = tokio::time::timeout(bound, manager.delete_imposter(port)).await;
+            assert!(matches!(deleted, Ok(Err(ImposterError::NotFound(1)))));
         }
 
         #[tokio::test]

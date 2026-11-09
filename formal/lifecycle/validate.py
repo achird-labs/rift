@@ -56,6 +56,7 @@ def trace_cfg(s):
     Appliers = {q(s["appliers"])}
     ApplyOnes = {{}}
     DeleteAlls = {q(s["delete_alls"])}
+    Writers = {{}}
     ApplyDesired = {{}}
     MaxGens = {s["max_gens"]}
     MaxReqs = {s["max_reqs"]}

@@ -98,6 +98,12 @@ pub enum Point {
     },
     /// The delete returns (`DeleteFinish`).
     DeleteReturned { port: u16, generation: Generation },
+    /// A write that clears or resets the port's shared state (a stub write, a restart, a clear of
+    /// saved requests or proxy responses, a space teardown) took `persist_lock` and looked its
+    /// generation up (`WriteLookup`).
+    WriteLookedUp { port: u16, generation: Generation },
+    /// That write is done and is about to release `persist_lock` (`WriteClear`, `WriteUnlock`).
+    WriteDone { port: u16, generation: Generation },
     /// An `apply_config` took its `ports()` snapshot; `swept` ports are not desired and will be
     /// deleted (`ApplySnapshot`).
     ApplySwept { swept: usize },

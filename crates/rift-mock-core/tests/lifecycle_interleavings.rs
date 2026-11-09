@@ -20,6 +20,9 @@ use parking_lot::Mutex;
 use rift_mock_core::behaviors::LocalSequencer;
 use rift_mock_core::imposter::journal::LocalJournal;
 use rift_mock_core::imposter::{ImposterConfig, ImposterError, ImposterManager, Point, Probe};
+use rift_mock_core::recording::{
+    ClaimOutcome, LocalProxyStore, ProxyMode, ProxyRecordingStore, RequestSignature,
+};
 use serde_json::{Value, json};
 
 /// A door the engine waits at until the test opens it. Bounded, so a broken test fails rather than
@@ -179,6 +182,8 @@ fn to_json(point: Point) -> Value {
             json!({"port": port, "generation": generation, "timedOut": timed_out}),
         ),
         Point::DeleteReturned { port, generation } => ("DeleteReturned", id(port, generation)),
+        Point::WriteLookedUp { port, generation } => ("WriteLookedUp", id(port, generation)),
+        Point::WriteDone { port, generation } => ("WriteDone", id(port, generation)),
         Point::ApplySwept { swept } => ("ApplySwept", json!({"swept": swept})),
         Point::DeleteAllSwept { swept } => ("DeleteAllSwept", json!({"swept": swept})),
         Point::Served {
@@ -973,4 +978,281 @@ async fn an_apply_sweep_tolerates_a_concurrent_delete() {
         manager.get_imposter(port).is_err(),
         "the port stays vacant, as the apply asked"
     );
+}
+
+/// A stub that answers `a`, then `b`, then `a` again.
+fn cycling(port: u16) -> ImposterConfig {
+    imposter_with(
+        port,
+        json!([{
+            "responses": [
+                { "is": { "statusCode": 200, "body": "a" } },
+                { "is": { "statusCode": 200, "body": "b" } }
+            ]
+        }]),
+    )
+}
+
+fn write_looked_up(p: &Point) -> bool {
+    matches!(p, Point::WriteLookedUp { .. })
+}
+
+/// #1803: hold `writer` between its lookup and its write, and meanwhile delete the port. Unguarded,
+/// the delete runs through during the hold, and `fresh` is created and `prime`d before the writer
+/// resumes, so the writer's by-port clear lands on it. Guarded, the delete waits for the writer,
+/// and `fresh` is created and primed after both. Either way the caller then checks what `prime`
+/// left on `fresh`. Asserts the delete took the lock only after the write was done.
+async fn stall_a_write_across_a_recreate<W, P>(
+    recorder: &Arc<Recorder>,
+    manager: &Arc<ImposterManager>,
+    fresh: ImposterConfig,
+    writer: W,
+    prime: P,
+) where
+    W: std::future::Future<Output = Result<(), ImposterError>> + Send + 'static,
+    P: AsyncFn(),
+{
+    let port = fresh.port.expect("explicit port");
+    let held = recorder.hold(write_looked_up);
+    let write = tokio::spawn(writer);
+    recorder.reached(write_looked_up).await;
+    let delete = tokio::spawn({
+        let manager = Arc::clone(manager);
+        async move { manager.delete_imposter(port).await.map(|_| ()) }
+    });
+    // Long enough for a delete that does not wait on the writer to run through.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let raced = delete.is_finished();
+    if raced {
+        manager
+            .create_imposter(fresh.clone())
+            .await
+            .expect("re-create during the hold");
+        prime().await;
+    }
+    held.open();
+    write.await.expect("write task").expect("write");
+    delete.await.expect("delete task").expect("delete");
+    if !raced {
+        manager
+            .create_imposter(fresh)
+            .await
+            .expect("re-create after the delete");
+        prime().await;
+    }
+
+    let points = names(&recorder.points());
+    let done = points.iter().position(|p| p == "WriteDone");
+    let locked = points.iter().position(|p| p == "DeleteLocked");
+    assert!(
+        matches!((done, locked), (Some(done), Some(locked)) if done < locked),
+        "the delete took the lock while a write held the port: {points:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_restart_leaves_the_next_imposters_recorded_requests_alone() {
+    let recorder = Arc::new(Recorder::default());
+    let manager =
+        Arc::new(with_probe(&recorder).with_request_journal(Arc::new(LocalJournal::default())));
+    let port = free_port();
+    manager
+        .create_imposter(answering(port, "first"))
+        .await
+        .expect("create");
+
+    let writer = {
+        let manager = Arc::clone(&manager);
+        async move { manager.restart_runtime_state(port).await }
+    };
+    stall_a_write_across_a_recreate(
+        &recorder,
+        &manager,
+        answering(port, "second"),
+        writer,
+        async || {
+            assert_eq!(get(port, None).await.expect("answered").body, "second");
+        },
+    )
+    .await;
+
+    let recorded = manager
+        .get_imposter(port)
+        .expect("registered")
+        .get_recorded_requests()
+        .len();
+    let _ = manager.delete_all().await;
+    assert_eq!(
+        recorded, 1,
+        "the restart wiped the new imposter's recorded requests"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_saved_requests_clear_leaves_the_next_imposter_alone() {
+    let recorder = Arc::new(Recorder::default());
+    let manager =
+        Arc::new(with_probe(&recorder).with_request_journal(Arc::new(LocalJournal::default())));
+    let port = free_port();
+    manager
+        .create_imposter(answering(port, "first"))
+        .await
+        .expect("create");
+
+    let writer = {
+        let manager = Arc::clone(&manager);
+        async move { manager.clear_recorded_requests(port).await }
+    };
+    stall_a_write_across_a_recreate(
+        &recorder,
+        &manager,
+        answering(port, "second"),
+        writer,
+        async || {
+            assert_eq!(get(port, None).await.expect("answered").body, "second");
+        },
+    )
+    .await;
+
+    let recorded = manager
+        .get_imposter(port)
+        .expect("registered")
+        .get_recorded_requests()
+        .len();
+    let _ = manager.delete_all().await;
+    assert_eq!(
+        recorded, 1,
+        "the clear wiped the new imposter's recorded requests"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_replace_leaves_the_next_imposters_cursors_alone() {
+    let recorder = Arc::new(Recorder::default());
+    let manager =
+        Arc::new(with_probe(&recorder).with_sequencer(Arc::new(LocalSequencer::default())));
+    let port = free_port();
+    manager
+        .create_imposter(answering(port, "first"))
+        .await
+        .expect("create");
+
+    let stubs = answering(port, "replaced").stubs;
+    let writer = {
+        let manager = Arc::clone(&manager);
+        async move { manager.replace_stubs(port, stubs).await }
+    };
+    stall_a_write_across_a_recreate(&recorder, &manager, cycling(port), writer, async || {
+        assert_eq!(get(port, None).await.expect("answered").body, "a");
+    })
+    .await;
+
+    let next = get(port, None).await.expect("answered").body;
+    let _ = manager.delete_all().await;
+    assert_eq!(next, "b", "the replace restarted the new imposter's cycle");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_stub_delete_leaves_the_next_imposters_cursor_alone() {
+    let recorder = Arc::new(Recorder::default());
+    let manager =
+        Arc::new(with_probe(&recorder).with_sequencer(Arc::new(LocalSequencer::default())));
+    let port = free_port();
+    // The same stub on both generations, so both key its cursor the same.
+    manager
+        .create_imposter(cycling(port))
+        .await
+        .expect("create");
+
+    let writer = {
+        let manager = Arc::clone(&manager);
+        async move { manager.delete_stub(port, 0).await }
+    };
+    stall_a_write_across_a_recreate(&recorder, &manager, cycling(port), writer, async || {
+        assert_eq!(get(port, None).await.expect("answered").body, "a");
+    })
+    .await;
+
+    let next = get(port, None).await.expect("answered").body;
+    let _ = manager.delete_all().await;
+    assert_eq!(next, "b", "the stub delete reset the new imposter's cursor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_proxy_clear_leaves_the_next_imposters_recordings_alone() {
+    let recorder = Arc::new(Recorder::default());
+    let store = Arc::new(LocalProxyStore::new(ProxyMode::ProxyOnce));
+    let manager = Arc::new(
+        with_probe(&recorder).with_proxy_store(Arc::clone(&store) as Arc<dyn ProxyRecordingStore>),
+    );
+    let port = free_port();
+    manager
+        .create_imposter(answering(port, "first"))
+        .await
+        .expect("create");
+
+    let signature = RequestSignature::new("GET", "/recorded", None, &[]);
+    let writer = {
+        let manager = Arc::clone(&manager);
+        async move { manager.clear_proxy_responses(port).await }
+    };
+    stall_a_write_across_a_recreate(
+        &recorder,
+        &manager,
+        answering(port, "second"),
+        writer,
+        async || {
+            // The new imposter's proxy takes a claim in the shared store.
+            assert!(matches!(
+                store.try_claim(port, &signature).expect("claim"),
+                ClaimOutcome::Claimed(_)
+            ));
+        },
+    )
+    .await;
+
+    let again = store.try_claim(port, &signature).expect("claim");
+    let _ = manager.delete_all().await;
+    assert!(
+        matches!(again, ClaimOutcome::InFlight),
+        "the proxy clear wiped the new imposter's claim: {again:?}"
+    );
+}
+
+/// #1803: an apply that looked the imposter up before a delete must not patch it, or reset the port's
+/// cursors, once the delete has vacated the port: it reports the port as not found.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_apply_whose_imposter_was_deleted_reports_it_not_found() {
+    let recorder = Arc::new(Recorder::default());
+    let manager = Arc::new(with_probe(&recorder));
+    let port = free_port();
+    manager
+        .create_imposter(answering(port, "first"))
+        .await
+        .expect("create");
+
+    let held = recorder.hold(|p| matches!(p, Point::DeleteLocked { .. }));
+    let delete = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.delete_imposter(port).await.map(|_| ()) }
+    });
+    recorder
+        .reached(|p| matches!(p, Point::DeleteLocked { .. }))
+        .await;
+    // Only the stubs differ, so the apply takes the in-place patch and waits on the delete's lock.
+    let apply = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.apply_one(answering(port, "patched")).await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    held.open();
+    delete.await.expect("delete task").expect("delete");
+    let report = apply.await.expect("apply task").expect("apply");
+
+    assert!(report.stub_patched.is_empty(), "{report:?}");
+    assert!(
+        matches!(report.failed.as_slice(), [(p, ImposterError::NotFound(q))] if *p == port && *q == port),
+        "{report:?}"
+    );
+    assert!(manager.get_imposter(port).is_err());
 }

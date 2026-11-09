@@ -101,6 +101,17 @@ mutants = {
     'an apply sweep reports a concurrent delete as failed (#1774)': ('ApplyReportsTruth', [
         ('op[o].ret \\notin {"rCreate", "aSweep"}', 'op[o].ret # "rCreate"')],
         [('Appliers = {}', 'Appliers = {a1}'), ('Deleters = {d1, d2}', 'Deleters = {d1}')]),
+    # #1803: a stub write or a restart looked the imposter up and cleared by port with no lock, so a
+    # delete and re-create could run in between and its clear wiped the next generation's state.
+    'a stub write clears without the lock (#1803)': ('SharedStateBelongsToCurrent', [
+        ('[] KindOf(o) = "write"     -> "wLock"', '[] KindOf(o) = "write"     -> "wLookup"'),
+        ('''            THEN /\\ persistLock' = NoOp
+                 /\\ op' = [op EXCEPT ![o].pc = "done"]''', '''            THEN /\\ UNCHANGED persistLock
+                 /\\ op' = [op EXCEPT ![o].pc = "done"]'''),
+        ('''    /\\ persistLock' = NoOp
+    /\\ op' = [op EXCEPT ![o].pc = "done"]''', '''    /\\ UNCHANGED persistLock
+    /\\ op' = [op EXCEPT ![o].pc = "done"]''')],
+        [('Writers = {}', 'Writers = {w1}'), ('Deleters = {d1, d2}', 'Deleters = {d1}')]),
     # No `mutations` lock: two creates see the slot empty and both store.
     'try_claim without the mutations lock': ('OneClaimant', [
         (CLAIM_ATOMIC, '''            THEN /\\ op' = [op EXCEPT ![o].pc = "cStore"]

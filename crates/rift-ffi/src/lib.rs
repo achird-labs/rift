@@ -47,8 +47,8 @@ use rift_http_proxy::intercept_control::{
 use rift_http_proxy::intercept_rules::InterceptRule;
 use rift_http_proxy::server::{RunningMetrics, bind_metrics_server};
 use rift_mock_core::imposter::{
-    ApplyReport, Imposter, ImposterConfig, ImposterManager, IsResponse, PortReservation,
-    RecordedRequest, ServerListener, Stub, VerifyOptions,
+    ApplyReport, Imposter, ImposterConfig, ImposterError, ImposterManager, IsResponse,
+    PortReservation, RecordedRequest, ServerListener, Stub, VerifyOptions,
 };
 use rift_mock_core::proxy::truststore::{TrustStorePassword, ca_pem, export_jks, export_pkcs12};
 use serde_json::{Value, json};
@@ -1041,18 +1041,19 @@ pub unsafe extern "C" fn rift_clear_recorded(h: *mut RiftHandle, port: u16) -> i
             set_last_error("rift_clear_recorded: null handle");
             return -1;
         };
-        let imposter = match handle.manager.get_imposter(port) {
-            Ok(i) => i,
-            Err(e) => {
-                set_last_error(format!("rift_clear_recorded: {e}"));
-                return -1;
-            }
-        };
-        match imposter.clear_recorded_requests() {
+        // Through the manager, which holds the port while it clears (issue #1803).
+        match handle
+            .runtime
+            .block_on(handle.manager.clear_recorded_requests(port))
+        {
             Ok(()) => 0,
-            Err(e) => {
+            Err(ImposterError::Backend(e)) => {
                 set_last_error(format!("rift_clear_recorded: {e}"));
                 warn_anyhow_failure(&e, port, "rift_clear_recorded failed");
+                -1
+            }
+            Err(e) => {
+                set_last_error(format!("rift_clear_recorded: {e}"));
                 -1
             }
         }
