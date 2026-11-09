@@ -88,3 +88,7 @@ async fn main() -> anyhow::Result<()> {
 
 See [Embeddable Server](server.md) for injecting a custom
 `ImposterManager`, binding to ephemeral ports, and graceful shutdown.
+
+`ImposterManager`'s mutating methods are not cancel-safe: dropping a `create_imposter`,
+`apply_config`, `delete_imposter` or stub-write future mid-await can leave the change half made.
+Await them to completion, or run them on a task of their own, as the admin API does (issue #1801).

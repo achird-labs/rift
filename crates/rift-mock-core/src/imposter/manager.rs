@@ -2,6 +2,11 @@
 //!
 //! This module handles creating, deleting, and managing multiple imposters,
 //! each running on its own port.
+//!
+//! The mutating methods are not cancel-safe. A caller that drops `create_imposter`, `apply_config`,
+//! `delete_imposter` or a stub write mid-await can leave the change half made: an imposter serving
+//! with no file written, a sweep applied to some ports only. The admin door runs each request on
+//! its own task for this reason (issue #1801); an embedder that cancels owns the consequences.
 
 use super::core::Imposter;
 use super::datadir_file;

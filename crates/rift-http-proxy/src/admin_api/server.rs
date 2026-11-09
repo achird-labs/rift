@@ -6,7 +6,7 @@ use crate::admin_api::log_ring::LogRing;
 use crate::admin_api::router::{self, route_request};
 use crate::admin_api::types::{ADMIN_JSON_CONTENT_TYPE, error_response};
 use crate::config_loader::ConfigSource;
-use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
+use crate::extensions::decorate::{ResponsePhase, annotate, with_annotation_scope};
 use crate::front_door::FrontDoorRoutes;
 use crate::gateway::apply_tcp_fault;
 use crate::imposter::{ImposterManager, PeerPolicy, ServerListener};
@@ -757,6 +757,7 @@ async fn accept_loop(
         let scripts_dir = scripts_dir.clone();
         let config_snapshot = config_snapshot.clone();
         let conn_cancel = cancel.clone();
+        let request_tracker = tracker.clone();
 
         tracker.spawn(async move {
             // Held for the connection's lifetime; released to the semaphore when this task ends.
@@ -778,6 +779,7 @@ async fn accept_loop(
                 let scripts_dir = scripts_dir.clone();
                 let config_snapshot = config_snapshot.clone();
                 let stream_cancel = stream_cancel.clone();
+                let request_tracker = request_tracker.clone();
                 async move {
                     // Read before the request is consumed: an HTTP/2 carrier resets its stream
                     // instead of arming the connection-wide fault (`apply_tcp_fault`).
@@ -896,7 +898,7 @@ async fn accept_loop(
                         }
                         // Only the router mutates, so the attribution scope wraps just this call —
                         // the SSE stream above is read-only and returns before it (issue #855).
-                        with_principal_scope(
+                        let route = with_principal_scope(
                             principal,
                             route_request(
                                 req,
@@ -908,9 +910,36 @@ async fn accept_loop(
                                 scripts_dir,
                                 config_snapshot,
                             ),
-                        )
-                        .await
-                        .map(box_full)
+                        );
+                        // The gateway is data-plane traffic and behaves as on the imposter's own
+                        // port: a client that hangs up cancels its request, which is what lets an
+                        // inject shed abandoned work and a slow response stop.
+                        if is_gateway {
+                            return route.await.map(box_full);
+                        }
+                        // An admin request runs on its own task (issue #1801): hyper drops this
+                        // future when the client disconnects (HTTP/1 EOF mid-message, HTTP/2
+                        // `RST_STREAM`), and a change must finish once its body is read, as
+                        // Mountebank's handlers do; the connection only waits for it. Task-locals
+                        // do not cross a spawn, so the annotation scope is set up inside it and its
+                        // annotations are replayed here. On the server's tracker, so a shutdown
+                        // waits for a change nobody is reading.
+                        match request_tracker.spawn(with_annotation_scope(route)).await {
+                            Ok((routed, annotations)) => {
+                                for (key, value) in annotations {
+                                    annotate(key, value);
+                                }
+                                routed.map(box_full)
+                            }
+                            // A panic in a handler: answered, where it used to end the connection.
+                            Err(join) => {
+                                error!("admin request handler failed: {join}");
+                                Ok(box_full(error_response(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "the admin request handler failed",
+                                )))
+                            }
+                        }
                     })
                     .await;
                     let response = result.map_err(AdminServiceError::Hyper)?;

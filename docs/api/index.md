@@ -6,6 +6,9 @@ title: API Reference
 
 Rift provides a Mountebank-compatible REST API for managing imposters.
 
+Once a request's body has been read, its change completes even if the client disconnects, as in
+Mountebank; the response is simply not delivered.
+
 ---
 
 ## Base URL
