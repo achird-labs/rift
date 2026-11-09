@@ -13,6 +13,14 @@ record.
 
 ### Fixed
 
+- **An admin change finishes when its client disconnects** (#1801): hyper drops a connection's
+  handler when the peer goes away, so a client that hung up after sending its request stopped the
+  change at its next wait. A `PUT /imposters` could be applied to only some ports, and a delete could
+  leave its imposter serving with its file already removed. Every admin request now runs on its own
+  task once authorized, as Mountebank's handlers run to completion; only the response is lost. An
+  admin handler that panics now answers `500` instead of resetting the connection. `/__rift/` gateway
+  traffic is unchanged: a client that hangs up still cancels its request, as on the imposter's port.
+
 - **A replaced imposter no longer comes back on restart after its port went to a failed create**
   (#1800): a `PUT /imposters` replace keeps `{port}.json` for its own create to overwrite. When a
   concurrent create took the port and then failed its datadir write, the port was left vacant with the
