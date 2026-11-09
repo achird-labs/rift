@@ -13,6 +13,15 @@ record.
 
 ### Fixed
 
+- **An imposter source that takes over a datadir imposter's port removes the file that imposter left**
+  (#1821): an apply entry tagged ephemeral (a `--configfile` imposter on `POST /admin/reload`, or an
+  embedder's `apply_desired`) could take over a port without removing the runtime `{port}.json` of the
+  datadir imposter it replaced or retagged. On a reload this needs an admin write to the port after
+  the reload's datadir scan, or a concurrent `PUT /imposters` replace that loses the port to it. That
+  file made every later reload fail with "declared by both stores", and brought the old imposter back
+  once the source stopped declaring the port. A reload still refuses a port whose file was already in
+  the datadir, and a startup source still leaves a colliding file alone: it is skipped and named.
+
 - **An admin change finishes when its client disconnects** (#1801): hyper drops a connection's
   handler when the peer goes away, so a client that hung up after sending its request stopped the
   change at its next wait. A `PUT /imposters` could be applied to only some ports, and a delete could

@@ -2619,7 +2619,8 @@ impl ImposterManager {
     ///
     /// A running imposter whose store changed is retagged in place, keeping its runtime state; one
     /// moving to [`Persistence::Datadir`] is written at once, and one moving to
-    /// [`Persistence::Ephemeral`] is no longer written (its file, if any, is left alone).
+    /// [`Persistence::Ephemeral`] is no longer written, and its runtime file is removed (issue
+    /// #1821): it would otherwise load again once the source stopped declaring the port.
     pub async fn apply_desired(
         &self,
         desired: Vec<DesiredImposter>,
@@ -2757,6 +2758,23 @@ impl ImposterManager {
     /// [`apply_one`](Self::apply_one), so the two cannot diverge. `config` is already validated and
     /// `port` is its explicit port.
     async fn apply_entry(
+        &self,
+        port: u16,
+        config: ImposterConfig,
+        requested: Option<Persistence>,
+        script_files: ScriptFileAccess,
+        report: &mut ApplyReport,
+    ) {
+        self.apply_entry_to(port, config, requested, script_files, report)
+            .await;
+        // Whichever arm ran (a create, a replace, an in-place retag), an entry tagged `Ephemeral`
+        // leaves no runtime file behind it (issue #1821).
+        if requested == Some(Persistence::Ephemeral) {
+            self.clear_file_under_ephemeral_holder(port, report).await;
+        }
+    }
+
+    async fn apply_entry_to(
         &self,
         port: u16,
         mut config: ImposterConfig,
@@ -2921,6 +2939,12 @@ impl ImposterManager {
                     Some(e) => report.failed.push((assigned, e)),
                 }
                 self.emit(ImposterEvent::Created(assigned));
+                // An auto-assigned port can carry a file too (issue #1821). An explicit one is
+                // `apply_entry`'s to clear, so a failure is reported once.
+                if fail_port == 0 && requested == Some(Persistence::Ephemeral) {
+                    self.clear_file_under_ephemeral_holder(assigned, report)
+                        .await;
+                }
             }
             Err(e) => report.failed.push((fail_port, e)),
         }
@@ -2987,9 +3011,13 @@ impl ImposterManager {
                 // Reported deleted, so a runtime copy must go too, or a restart would bring back the
                 // imposter this apply replaced. A file that was the apply's input stays. On
                 // `PortInUse` a concurrent create took the port: a datadir create overwrites the
-                // file, or removes it when its own write fails (issue #1800).
-                if requested.is_none()
-                    && persistence == Persistence::Datadir
+                // file, or removes it when its own write fails (issue #1800), and an ephemeral one
+                // removes it once it holds the port (issue #1821).
+                // An ephemeral entry's input is its source, never the file, so the copy goes too
+                // (issue #1821): nothing holds the port for `apply_entry` to clear under.
+                let runtime_copy = (requested.is_none() && persistence == Persistence::Datadir)
+                    || requested == Some(Persistence::Ephemeral);
+                if runtime_copy
                     && !matches!(e, ImposterError::PortInUse(_))
                     && let Err(cleanup) = self.remove_persisted_file_if_vacant(port).await
                 {
@@ -3823,6 +3851,31 @@ impl ImposterManager {
         Ok(())
     }
 
+    /// After an apply entry tagged `Ephemeral` lands on `port` (issue #1821): a runtime `{port}.json`
+    /// left by the `Datadir` imposter it took over from (a replace that kept it for an overwrite, or
+    /// an in-place retag) would load again once the source stopped declaring the port. Under the
+    /// lock every writer holds, and only while the holder is still `Ephemeral`: a `Datadir` holder
+    /// writes its own file, and a vacant port is the replace's or the rollback's to clean (#1800).
+    /// A removal that fails is reported for the port; the imposter keeps serving.
+    async fn clear_file_under_ephemeral_holder(&self, port: u16, report: &mut ApplyReport) {
+        let cleared = {
+            let _persist = self.persist_lock.lock().await;
+            match self.imposters.get(port) {
+                Some(holder) if holder.persistence() == Persistence::Ephemeral => {
+                    self.remove_persisted_file(port).await
+                }
+                _ => Ok(()),
+            }
+        };
+        if let Err(e) = cleared {
+            error!(
+                port,
+                "could not remove the datadir file an ephemeral imposter took over: {e}"
+            );
+            report.failed.push((port, e));
+        }
+    }
+
     /// `remove_persisted_file`, unless the port has been taken again by the time the lock is held.
     ///
     /// For a replace whose own create failed: the replaced imposter is already out of the map, so a
@@ -4610,12 +4663,10 @@ mod tests {
             .add_stub(port_0, one_stub(), None)
             .await
             .expect("add_stub");
-        let after: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&file).expect("file")).expect("json");
-        assert_eq!(
-            after["stubs"],
-            serde_json::json!([]),
-            "an ephemeral imposter's stub edit must not be written"
+        // The retag removed the runtime file (issue #1821), and the edit writes none back.
+        assert!(
+            !file.exists(),
+            "an ephemeral imposter's file is gone and its stub edit must not write one"
         );
 
         manager.delete_all().await;
@@ -4797,12 +4848,10 @@ mod tests {
             .expect("apply");
         assert_eq!(report.stub_patched, vec![port_0], "{report:?}");
 
-        let persisted: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&file).expect("file")).expect("json");
-        assert_eq!(
-            persisted["stubs"].as_array().map(Vec::len),
-            Some(3),
-            "the patch was applied as ephemeral and must not reach the file"
+        // Ephemeral now, so the old runtime file goes (issue #1821) and the patch writes none.
+        assert!(
+            !file.exists(),
+            "the patch was applied as ephemeral and must not reach a file"
         );
 
         manager.delete_all().await;

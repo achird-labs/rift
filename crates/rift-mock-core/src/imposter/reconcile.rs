@@ -16,7 +16,8 @@ use tracing::error;
 pub enum Persistence {
     /// Written to `{port}.json` on create and on every config change.
     Datadir,
-    /// Never written to the datadir.
+    /// Never written to the datadir. An apply entry with this store also removes a runtime
+    /// `{port}.json` left by the `Datadir` imposter it took over from (issue #1821).
     Ephemeral,
 }
 
