@@ -155,22 +155,25 @@ fn validate_rift_script(
     stub_id: &str,
     response_index: usize,
 ) -> Option<StubValidationError> {
-    match engine {
-        "rhai" => validate_with_validator(
+    use super::{EngineNameError, ScriptEngineKind};
+    let refused = |engine: &str, message: String| {
+        Some(StubValidationError {
+            stub_id: stub_id.to_string(),
+            response_index,
+            engine: engine.to_string(),
+            message,
+        })
+    };
+    match ScriptEngineKind::parse(engine) {
+        Ok(ScriptEngineKind::Rhai) => validate_with_validator(
             &super::RhaiValidator::new(),
             code,
             "rhai",
             stub_id,
             response_index,
         ),
-        "lua" => Some(StubValidationError {
-            stub_id: stub_id.to_string(),
-            response_index,
-            engine: "lua".to_string(),
-            message: "the Lua scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\"".to_string(),
-        }),
         #[cfg(feature = "javascript")]
-        "javascript" | "js" => validate_with_validator(
+        Ok(ScriptEngineKind::JavaScript) => validate_with_validator(
             &super::JsValidator::new(),
             code,
             "javascript",
@@ -178,18 +181,16 @@ fn validate_rift_script(
             response_index,
         ),
         #[cfg(not(feature = "javascript"))]
-        "javascript" | "js" => Some(StubValidationError {
-            stub_id: stub_id.to_string(),
-            response_index,
-            engine: "javascript".to_string(),
-            message: "JavaScript engine is not enabled (requires 'javascript' feature)".to_string(),
-        }),
-        other => Some(StubValidationError {
-            stub_id: stub_id.to_string(),
-            response_index,
-            engine: other.to_string(),
-            message: format!("Unknown script engine type: '{other}'"),
-        }),
+        Ok(ScriptEngineKind::JavaScript) => refused(
+            "javascript",
+            "JavaScript engine is not enabled (requires 'javascript' feature)".to_string(),
+        ),
+        Ok(ScriptEngineKind::Wasm) => refused("wasm", super::WASM_UNAVAILABLE.to_string()),
+        Err(removed @ EngineNameError::Removed) => refused("lua", removed.to_string()),
+        Err(EngineNameError::Unknown(other)) => {
+            let message = format!("Unknown script engine type: '{other}'");
+            refused(&other, message)
+        }
     }
 }
 

@@ -217,15 +217,15 @@ fn run_should_inject_with_abort(
     // Start each execution with a clean last-flow-error slot so `flow_store.last_error()` can't
     // observe a stale error left by a previous script on this reused worker thread (issue #322).
     crate::extensions::flow_state::clear_last_flow_error();
-    match engine_type {
-        "rhai" => super::rhai_engine::run_should_inject_with_abort_rhai(
+    // Only Rhai takes the abort flag; every other kind, and every bad name, goes through
+    // `ScriptEngine::new` for its engine or its error.
+    if super::ScriptEngineKind::parse(engine_type) == Ok(super::ScriptEngineKind::Rhai) {
+        return super::rhai_engine::run_should_inject_with_abort_rhai(
             code, rule_id, request, flow_store, abort, ctx_extra,
-        ),
-        other => {
-            let engine = ScriptEngine::new(other, code, rule_id)?;
-            engine.should_inject_fault_with_ctx(request, flow_store, ctx_extra)
-        }
+        );
     }
+    let engine = ScriptEngine::new(engine_type, code, rule_id)?;
+    engine.should_inject_fault_with_ctx(request, flow_store, ctx_extra)
 }
 
 #[cfg(test)]

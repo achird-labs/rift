@@ -1242,7 +1242,7 @@
           ]
         },
         "engine": {
-          "description": "Script engine: \"rhai\" or \"javascript\". When absent, the resolver infers it from\n`file`'s extension (`.rhai`/`.js`; a `.lua` file still resolves to the now-removed \"lua\"\nengine so it is rejected with a clear error rather than silently mis-run), falling back to\n\"rhai\" — the legacy default — when neither `engine` nor an inferable extension is present.",
+          "description": "Script engine: \"rhai\", \"javascript\" or \"wasm\" (\"wasm\" is refused until a build carries\nit). When absent, the resolver infers it from `file`'s extension (`.rhai`/`.js`/`.wasm`; a\n`.lua` file still resolves to the now-removed \"lua\"\nengine so it is rejected with a clear error rather than silently mis-run), falling back to\n\"rhai\" — the legacy default — when neither `engine` nor an inferable extension is present.",
           "type": [
             "string",
             "null"
@@ -1271,7 +1271,7 @@
       "properties": {
         "defaultEngine": {
           "default": "rhai",
-          "description": "Engine for a script that names none and has no `.rhai`/`.js`/`.lua` file extension:\n\"rhai\" or \"javascript\" (issue #1159). See [`ImposterConfig::default_script_engine`].",
+          "description": "Engine for a script that names none and has no `.rhai`/`.js`/`.wasm`/`.lua` file\nextension: \"rhai\", \"javascript\" or \"wasm\" (issues #1159, #1750; \"wasm\" is refused until a\nbuild carries it). See [`ImposterConfig::default_script_engine`].",
           "type": "string"
         },
         "timeoutMs": {

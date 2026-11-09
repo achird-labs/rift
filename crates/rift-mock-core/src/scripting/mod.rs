@@ -29,8 +29,6 @@ pub(crate) fn rift_rhai_engine() -> rhai::Engine {
 }
 
 // Script pool for optimized execution
-mod script_pool;
-pub use script_pool::{CompiledScript, ScriptPool, ScriptPoolConfig};
 
 #[cfg(feature = "javascript")]
 mod js_engine;
@@ -416,6 +414,68 @@ pub mod entrypoints {
     pub const RESPOND: &str = "respond";
 }
 
+/// A script engine as `_rift.script.engine`, `defaultEngine`, a `file:` extension or
+/// `rift script --engine` names it, parsed once here so every site shares one allowlist and one
+/// set of messages (issue #1750). The wire type stays a string: an unknown engine still decodes and
+/// fails at admission or when served, so stored configs keep replaying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptEngineKind {
+    Rhai,
+    JavaScript,
+    Wasm,
+}
+
+/// Why an engine name names no engine.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EngineNameError {
+    /// `lua`, an engine Rift had and removed.
+    #[error(
+        "the Lua scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\""
+    )]
+    Removed,
+    /// Any other name.
+    #[error("Unknown script engine type: {0}")]
+    Unknown(String),
+}
+
+impl ScriptEngineKind {
+    /// The engine `name` names: `rhai`, `javascript` (or its alias `js`) or `wasm`.
+    pub fn parse(name: &str) -> Result<Self, EngineNameError> {
+        match name {
+            "rhai" => Ok(Self::Rhai),
+            "javascript" | "js" => Ok(Self::JavaScript),
+            "wasm" => Ok(Self::Wasm),
+            "lua" => Err(EngineNameError::Removed),
+            other => Err(EngineNameError::Unknown(other.to_owned())),
+        }
+    }
+
+    /// The canonical name, `javascript` for the `js` alias.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rhai => "rhai",
+            Self::JavaScript => "javascript",
+            Self::Wasm => "wasm",
+        }
+    }
+
+    /// The engine a script file's extension names: `None` for an extension that names none, and
+    /// `Removed` for `.lua`.
+    pub fn from_extension(ext: &str) -> Option<Result<Self, EngineNameError>> {
+        match ext {
+            "rhai" => Some(Ok(Self::Rhai)),
+            "js" => Some(Ok(Self::JavaScript)),
+            "wasm" => Some(Ok(Self::Wasm)),
+            "lua" => Some(Err(EngineNameError::Removed)),
+            _ => None,
+        }
+    }
+}
+
+/// The message `wasm` gets until a build carries that engine (issue #1751).
+pub(crate) const WASM_UNAVAILABLE: &str = "engine \"wasm\" is not available in this build";
+
 /// Unified script engine that supports Rhai and JavaScript
 #[derive(Clone)]
 
@@ -428,18 +488,17 @@ pub enum ScriptEngine {
 impl ScriptEngine {
     /// Create a new script engine based on the engine type
     pub fn new(engine_type: &str, script: &str, rule_id: &str) -> Result<Self> {
-        match engine_type {
-            "rhai" => Ok(ScriptEngine::Rhai(RhaiEngine::new(script, rule_id)?)),
-            "lua" => Err(anyhow!(
-                "the Lua scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\""
-            )),
+        match ScriptEngineKind::parse(engine_type)? {
+            ScriptEngineKind::Rhai => Ok(ScriptEngine::Rhai(RhaiEngine::new(script, rule_id)?)),
             #[cfg(feature = "javascript")]
-            "javascript" | "js" => Ok(ScriptEngine::JavaScript(JsEngine::new(script, rule_id)?)),
+            ScriptEngineKind::JavaScript => {
+                Ok(ScriptEngine::JavaScript(JsEngine::new(script, rule_id)?))
+            }
             #[cfg(not(feature = "javascript"))]
-            "javascript" | "js" => Err(anyhow!(
+            ScriptEngineKind::JavaScript => Err(anyhow!(
                 "JavaScript engine is not enabled. Enable the 'javascript' feature flag"
             )),
-            other => Err(anyhow!("Unknown script engine type: {other}")),
+            ScriptEngineKind::Wasm => Err(anyhow!(WASM_UNAVAILABLE)),
         }
     }
 
@@ -702,6 +761,75 @@ impl ScriptFlowStore {
 
 #[cfg(test)]
 mod tests {
+    // #1750: one parse for every engine name.
+    #[test]
+    fn engine_names_parse_once() {
+        use super::{EngineNameError, ScriptEngineKind};
+        assert_eq!(ScriptEngineKind::parse("rhai"), Ok(ScriptEngineKind::Rhai));
+        assert_eq!(
+            ScriptEngineKind::parse("javascript"),
+            Ok(ScriptEngineKind::JavaScript)
+        );
+        assert_eq!(
+            ScriptEngineKind::parse("js"),
+            Ok(ScriptEngineKind::JavaScript)
+        );
+        assert_eq!(ScriptEngineKind::parse("wasm"), Ok(ScriptEngineKind::Wasm));
+        assert_eq!(
+            ScriptEngineKind::parse("lua"),
+            Err(EngineNameError::Removed)
+        );
+        assert_eq!(
+            ScriptEngineKind::parse("cobol"),
+            Err(EngineNameError::Unknown("cobol".to_owned()))
+        );
+        assert_eq!(ScriptEngineKind::JavaScript.as_str(), "javascript");
+        assert_eq!(ScriptEngineKind::Rhai.as_str(), "rhai");
+        assert_eq!(ScriptEngineKind::Wasm.as_str(), "wasm");
+        assert_eq!(
+            EngineNameError::Removed.to_string(),
+            "the Lua scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\""
+        );
+        assert_eq!(
+            EngineNameError::Unknown("cobol".to_owned()).to_string(),
+            "Unknown script engine type: cobol"
+        );
+    }
+
+    #[test]
+    fn engine_names_from_extensions() {
+        use super::{EngineNameError, ScriptEngineKind};
+        assert_eq!(
+            ScriptEngineKind::from_extension("rhai"),
+            Some(Ok(ScriptEngineKind::Rhai))
+        );
+        assert_eq!(
+            ScriptEngineKind::from_extension("js"),
+            Some(Ok(ScriptEngineKind::JavaScript))
+        );
+        assert_eq!(
+            ScriptEngineKind::from_extension("wasm"),
+            Some(Ok(ScriptEngineKind::Wasm))
+        );
+        assert_eq!(
+            ScriptEngineKind::from_extension("lua"),
+            Some(Err(EngineNameError::Removed))
+        );
+        assert_eq!(ScriptEngineKind::from_extension("txt"), None);
+    }
+
+    // Until #1751, `wasm` parses and is refused with its own message, not as an unknown engine.
+    #[test]
+    fn wasm_is_refused_as_unavailable() {
+        let err = super::ScriptEngine::new("wasm", "x", "r")
+            .err()
+            .expect("refused");
+        assert_eq!(
+            err.to_string(),
+            "engine \"wasm\" is not available in this build"
+        );
+    }
+
     use super::*;
     use crate::extensions::flow_state::NoOpFlowStore;
     use serde_json::json;

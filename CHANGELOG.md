@@ -130,6 +130,12 @@ record.
 
 ### Changed
 
+- **Script engine names are parsed in one place** (#1750): `ScriptEngineKind` (`rhai`, `javascript`
+  or its alias `js`, `wasm`) replaces seven hand-written allowlists, with the same error messages.
+  `wasm` (and a `.wasm` file) is recognised and refused with `engine "wasm" is not available in this
+  build` until the engine lands (#1751); rift-lint's W016 accepts it. The wire field stays a string,
+  so an unknown engine still decodes and fails when admitted.
+
 - **A plain `PUT /imposters` cuts off the requests an imposter it keeps is still answering** (#1799),
   as Mountebank's recreate destroys their sockets: the connection closes without a response (over
   HTTP/2 only its stream resets), as on `DELETE /imposters/{port}`. Before, such a request was
@@ -144,6 +150,12 @@ record.
 - **`LocalProxyStore::record` answers `Err(ProxyStoreError::StaleClaim)` for a stale token** (#1777),
   where it answered `Ok(())`. This is a new variant of a `#[non_exhaustive]` error. A custom store that
   keeps answering `Ok` keeps working, with that request's stub stacking as before.
+
+### Removed
+
+- **`rift_mock_core::scripting::{ScriptPool, CompiledScript, ScriptPoolConfig}`** (#1750): public but
+  never used by the engine (scripts run on `MbPool` and `spawn_blocking`). An embedder that named them
+  must drop them.
 
 ### Added
 

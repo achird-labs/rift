@@ -3625,8 +3625,9 @@ fn default_idle_timeout() -> u64 {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftScriptEngineConfig {
-    /// Engine for a script that names none and has no `.rhai`/`.js`/`.lua` file extension:
-    /// "rhai" or "javascript" (issue #1159). See [`ImposterConfig::default_script_engine`].
+    /// Engine for a script that names none and has no `.rhai`/`.js`/`.wasm`/`.lua` file
+    /// extension: "rhai", "javascript" or "wasm" (issues #1159, #1750; "wasm" is refused until a
+    /// build carries it). See [`ImposterConfig::default_script_engine`].
     #[serde(default = "default_script_engine")]
     pub default_engine: String,
     /// Script execution timeout in milliseconds
@@ -3934,8 +3935,9 @@ fn default_error_status() -> u16 {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftScriptConfig {
-    /// Script engine: "rhai" or "javascript". When absent, the resolver infers it from
-    /// `file`'s extension (`.rhai`/`.js`; a `.lua` file still resolves to the now-removed "lua"
+    /// Script engine: "rhai", "javascript" or "wasm" ("wasm" is refused until a build carries
+    /// it). When absent, the resolver infers it from `file`'s extension (`.rhai`/`.js`/`.wasm`; a
+    /// `.lua` file still resolves to the now-removed "lua"
     /// engine so it is rejected with a clear error rather than silently mis-run), falling back to
     /// "rhai" — the legacy default — when neither `engine` nor an inferable extension is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]

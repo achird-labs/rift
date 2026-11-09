@@ -500,7 +500,9 @@ fn check_default_engine(file: &Path, imposter: &Value, result: &mut LintResult) 
     let Some(engine) = default_engine(imposter) else {
         return;
     };
-    if matches!(engine, "rhai" | "javascript" | "js") {
+    // The engine's list (`rift_mock_core::scripting::ScriptEngineKind`); rift-lint cannot depend on
+    // it, so a new engine is added in both places.
+    if matches!(engine, "rhai" | "javascript" | "js" | "wasm") {
         return;
     }
     result.add_issue(
@@ -533,7 +535,8 @@ fn apply_default_engine(imposter: &Value) -> Option<Value> {
             .and_then(Value::as_str)
             .and_then(|f| Path::new(f).extension())
             .and_then(|e| e.to_str())
-            .is_some_and(|e| matches!(e, "rhai" | "lua" | "js"));
+            // As `ScriptEngineKind::from_extension` decides it.
+            .is_some_and(|e| matches!(e, "rhai" | "lua" | "js" | "wasm"));
         if script.contains_key("engine") || script.contains_key("ref") || decided_by_extension {
             return;
         }
@@ -777,7 +780,7 @@ fn check_binary_body(file: &Path, response: &Value, location: &str, result: &mut
 }
 
 /// Infer a script's effective engine: explicit `engine`, else inferred from a `file` path's
-/// extension (`.rhai`/`.js`), else the "rhai" default — mirrors
+/// extension (`.rhai`/`.js`/`.wasm`, as `ScriptEngineKind::from_extension` decides), else the "rhai" default — mirrors
 /// `rift_mock_core::imposter::RiftScriptConfig`'s resolution rule. A `.lua`/`"lua"` engine still
 /// infers as `"lua"` here (structural checks only; rift-mock-core rejects it at validate/run time —
 /// issue #450).
@@ -792,6 +795,7 @@ fn infer_script_engine(explicit: Option<&str>, file_field: Option<&str>) -> Stri
         Some("rhai") => "rhai",
         Some("lua") => "lua",
         Some("js") => "javascript",
+        Some("wasm") => "wasm",
         _ => "rhai",
     }
     .to_string()

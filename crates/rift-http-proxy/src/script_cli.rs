@@ -6,6 +6,7 @@
 use crate::config_loader::{self, ConfigSource};
 use crate::flow_state::FlowStore;
 use crate::imposter::{RiftScriptConfig, StubResponse};
+use crate::scripting::ScriptEngineKind;
 use crate::server::ScriptAction;
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::HashMap;
@@ -81,9 +82,11 @@ enum TargetKind {
 }
 
 fn target_kind(path: &Path) -> Result<TargetKind> {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("rhai") => Ok(TargetKind::Script("rhai".to_string())),
-        Some("js") => Ok(TargetKind::Script("javascript".to_string())),
+    let ext = path.extension().and_then(|e| e.to_str());
+    if let Some(Ok(kind)) = ext.and_then(ScriptEngineKind::from_extension) {
+        return Ok(TargetKind::Script(kind.as_str().to_string()));
+    }
+    match ext {
         Some("lua") => Err(anyhow!(
             "the Lua scripting engine was removed (issue #450); rewrite {} as a .rhai or .js script",
             path.display()
@@ -266,13 +269,12 @@ fn fixture_to_script_request(fixture: RequestFixture) -> crate::scripting::Scrip
     }
 }
 
-/// Infer the script engine from `path`'s extension (`.rhai`/`.js`); `None` when it isn't
-/// one of the two recognized extensions.
+/// Infer the script engine from `path`'s extension (`.rhai`/`.js`/`.wasm`); `None` when it names
+/// no engine (`.lua`, removed, included).
 fn infer_engine_from_extension(path: &Path) -> Option<String> {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("rhai") => Some("rhai".to_string()),
-        Some("js") => Some("javascript".to_string()),
-        _ => None,
+    match ScriptEngineKind::from_extension(path.extension()?.to_str()?)? {
+        Ok(kind) => Some(kind.as_str().to_string()),
+        Err(_) => None,
     }
 }
 

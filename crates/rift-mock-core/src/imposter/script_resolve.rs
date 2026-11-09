@@ -182,18 +182,19 @@ fn resolve_leaf(
     Ok(())
 }
 
-/// Infer the engine from a `file:` path's extension; `.rhai`/`.lua`/`.js` map to their engines, and
-/// anything else (or no `file`, i.e. inline `code:`) takes `default_engine`. The extension outranks
-/// the default on purpose: a `.rhai` file under `defaultEngine: "javascript"` is still Rhai.
+/// Infer the engine from a `file:` path's extension; `.rhai`/`.js`/`.wasm` map to their engines,
+/// `.lua` to `lua` (refused later, with the removed-engine message), and anything else (or no
+/// `file`, i.e. inline `code:`) takes `default_engine`. The extension outranks the default on
+/// purpose: a `.rhai` file under `defaultEngine: "javascript"` is still Rhai.
 fn infer_engine(file: Option<&str>, default_engine: &str) -> String {
+    use crate::scripting::{EngineNameError, ScriptEngineKind};
     let ext = file
         .and_then(|f| Path::new(f).extension())
         .and_then(|e| e.to_str());
-    match ext {
-        Some("rhai") => "rhai",
-        Some("lua") => "lua",
-        Some("js") => "javascript",
-        _ => default_engine,
+    match ext.and_then(ScriptEngineKind::from_extension) {
+        Some(Ok(kind)) => kind.as_str(),
+        Some(Err(EngineNameError::Removed)) => "lua",
+        Some(Err(EngineNameError::Unknown(_))) | None => default_engine,
     }
     .to_string()
 }
