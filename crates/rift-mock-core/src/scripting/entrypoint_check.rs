@@ -100,18 +100,25 @@ fn declared_functions(
     engine_type: &str,
     script: &str,
 ) -> Result<Vec<String>, EntrypointCheckError> {
-    match engine_type {
-        "rhai" => rhai_declared_functions(script),
+    use super::{EngineNameError, ScriptEngineKind};
+    match ScriptEngineKind::parse(engine_type) {
+        Ok(ScriptEngineKind::Rhai) => rhai_declared_functions(script),
         #[cfg(feature = "javascript")]
-        "javascript" | "js" => super::js_engine::declared_functions_js(script)
+        Ok(ScriptEngineKind::JavaScript) => super::js_engine::declared_functions_js(script)
             .map_err(|e| EntrypointCheckError::Syntax(e.to_string())),
         #[cfg(not(feature = "javascript"))]
-        "javascript" | "js" => Err(EntrypointCheckError::EngineDisabled {
+        Ok(ScriptEngineKind::JavaScript) => Err(EntrypointCheckError::EngineDisabled {
             engine: "javascript".to_string(),
             feature: "javascript".to_string(),
         }),
-        "lua" => Err(EntrypointCheckError::EngineRemoved("Lua".to_string())),
-        other => Err(EntrypointCheckError::UnknownEngine(other.to_string())),
+        Ok(ScriptEngineKind::Wasm) => Err(EntrypointCheckError::EngineDisabled {
+            engine: "wasm".to_string(),
+            feature: "wasm".to_string(),
+        }),
+        Err(EngineNameError::Removed) => {
+            Err(EntrypointCheckError::EngineRemoved("Lua".to_string()))
+        }
+        Err(EngineNameError::Unknown(other)) => Err(EntrypointCheckError::UnknownEngine(other)),
     }
 }
 

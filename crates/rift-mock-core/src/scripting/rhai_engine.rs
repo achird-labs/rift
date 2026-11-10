@@ -710,19 +710,6 @@ fn build_ctx_map(input: &ScriptCtxInput, flow_store: Arc<dyn FlowStore>) -> Map 
     ctx
 }
 
-/// Public function to execute Rhai script with a reusable engine (for script pool); `ctx` gets
-/// best-effort defaults since the pool has no imposter context here.
-pub fn execute_rhai_with_engine(
-    engine: &Engine,
-    ast: &Arc<AST>,
-    request: &ScriptRequest,
-    flow_store: Arc<dyn FlowStore>,
-    rule_id: &str,
-) -> Result<FaultDecision> {
-    let ctx_input = ScriptCtxExtras::default().build_ctx_input(request);
-    call_respond(engine, ast, &ctx_input, flow_store, rule_id)
-}
-
 // Helper functions to convert between Rhai Dynamic and serde_json::Value
 
 pub(super) fn json_to_dynamic(value: Value) -> Dynamic {
@@ -1038,66 +1025,6 @@ mod tests {
 
         let decision2 = engine.should_inject_fault(&request2, store).unwrap();
         assert!(matches!(decision2, FaultDecision::None));
-    }
-
-    #[tokio::test]
-    async fn test_ast_caching_with_reusable_engine() {
-        // This test verifies that AST is wrapped in Arc and can be reused
-        // across multiple executions with a reusable engine (Day 3 feature)
-        let script = r#"
-            fn respond(ctx) {
-                if ctx.request.path == "/cache-test" {
-                    return http(429, "Rate limited");
-                }
-                pass()
-            }
-        "#;
-
-        let engine = RhaiEngine::new(script, "cache-test").unwrap();
-        let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
-
-        // Get AST reference (Arc) - this is what script pool will use
-        let ast = engine.ast();
-
-        // Create a reusable engine (simulating script pool worker)
-        let reusable_engine = RhaiEngine::create_engine();
-
-        // Execute same AST multiple times with reusable engine
-        for i in 0..10 {
-            let request = ScriptRequest {
-                mode: ResponseMode::Text,
-                raw_body: None,
-                method: "GET".to_string(),
-                path: "/cache-test".to_string(),
-                headers: crate::util::OrderedMap::default(),
-                body: json!({}),
-                query: Default::default(),
-                path_params: HashMap::new(),
-            };
-
-            let decision = execute_rhai_with_engine(
-                &reusable_engine,
-                ast,
-                &request,
-                Arc::clone(&store),
-                "cache-test",
-            )
-            .unwrap();
-
-            match decision {
-                FaultDecision::Error { status, .. } => {
-                    assert_eq!(status, 429, "Iteration {i}");
-                }
-                _ => panic!("Expected Error fault decision on iteration {i}"),
-            }
-        }
-
-        // Verify AST is actually Arc (cheap clone)
-        let ast_clone = engine.ast().clone();
-        assert!(
-            Arc::ptr_eq(ast, &ast_clone),
-            "AST should be same Arc instance"
-        );
     }
 
     // ============================================
