@@ -24,8 +24,13 @@ const SWEEP_INTERVAL: usize = 256;
 ///
 /// This implementation stores flow state in a nested HashMap with automatic TTL expiration.
 /// Useful for testing, development, and single-instance deployments.
+/// What an [`InMemoryFlowStore`] reads the time from for TTLs (issue #1754): the system clock, or
+/// an imposter's clock, which a test can freeze and step.
+pub type StoreClock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
+
 pub struct InMemoryFlowStore {
     data: Arc<RwLock<Store>>,
+    clock: StoreClock,
     default_ttl: Duration,
     /// Store-growing writes since the last sweep; drives the amortized reaper (issue #483). Only
     /// `set`/`increment_by`/applied-CAS count — the paths that can add an entry. `delete`, `set_ttl`,
@@ -36,8 +41,15 @@ pub struct InMemoryFlowStore {
 
 impl InMemoryFlowStore {
     pub fn new(default_ttl_seconds: u64) -> Self {
+        Self::with_clock(default_ttl_seconds, Arc::new(SystemTime::now))
+    }
+
+    /// A store whose TTLs read `clock` instead of the system clock (issue #1754): every expiry it
+    /// sets and every one it checks, the amortized sweep's included.
+    pub fn with_clock(default_ttl_seconds: u64, clock: StoreClock) -> Self {
         Self {
             data: Arc::new(RwLock::new(HashMap::new())),
+            clock,
             default_ttl: Duration::from_secs(default_ttl_seconds),
             writes_since_sweep: AtomicUsize::new(0),
         }
@@ -52,22 +64,26 @@ impl InMemoryFlowStore {
         match data.get(flow_id) {
             Some(flow) => flow
                 .iter()
-                .filter(|(_, (_, expiry))| !Self::is_expired(expiry))
+                .filter(|(_, (_, expiry))| !self.is_expired(expiry))
                 .map(|(key, _)| key.clone())
                 .collect(),
             None => Vec::new(),
         }
     }
 
-    fn is_expired(expiry: &Option<SystemTime>) -> bool {
-        matches!(expiry, Some(exp) if SystemTime::now() > *exp)
+    fn now(&self) -> SystemTime {
+        (self.clock)()
+    }
+
+    fn is_expired(&self, expiry: &Option<SystemTime>) -> bool {
+        matches!(expiry, Some(exp) if self.now() > *exp)
     }
 
     /// Remove a flow's entry for `key` if it has expired, so a subsequent read sees it as absent.
     /// Called with the write lock held; mirrors the pre-#483 opportunistic same-key cleanup.
-    fn remove_if_expired(flow: &mut FlowMap, key: &str) {
+    fn remove_if_expired(&self, flow: &mut FlowMap, key: &str) {
         if let Some((_, expiry)) = flow.get(key)
-            && Self::is_expired(expiry)
+            && self.is_expired(expiry)
         {
             flow.remove(key);
         }
@@ -78,15 +94,15 @@ impl InMemoryFlowStore {
     fn maybe_sweep(&self, data: &mut Store) {
         if self.writes_since_sweep.fetch_add(1, Ordering::Relaxed) + 1 >= SWEEP_INTERVAL {
             self.writes_since_sweep.store(0, Ordering::Relaxed);
-            Self::sweep_expired(data);
+            self.sweep_expired(data);
         }
     }
 
     /// Drop every expired entry across all flows, and remove any flow map left empty. O(total),
     /// but run only once per [`SWEEP_INTERVAL`] writes.
-    fn sweep_expired(data: &mut Store) {
+    fn sweep_expired(&self, data: &mut Store) {
         data.retain(|_flow_id, flow| {
-            flow.retain(|_key, (_, expiry)| !Self::is_expired(expiry));
+            flow.retain(|_key, (_, expiry)| !self.is_expired(expiry));
             !flow.is_empty()
         });
     }
@@ -111,13 +127,13 @@ impl FlowStore for InMemoryFlowStore {
         // Use read lock for concurrent read access
         let data = self.data.read();
         match data.get(flow_id).and_then(|flow| flow.get(key)) {
-            Some((value, expiry)) if !Self::is_expired(expiry) => Ok(Some(value.clone())),
+            Some((value, expiry)) if !self.is_expired(expiry) => Ok(Some(value.clone())),
             _ => Ok(None),
         }
     }
 
     fn set(&self, flow_id: &str, key: &str, value: Value) -> Result<()> {
-        let expiry = SystemTime::now() + self.default_ttl;
+        let expiry = self.now() + self.default_ttl;
         let mut data = self.data.write();
 
         data.entry(flow_id.to_string())
@@ -131,7 +147,7 @@ impl FlowStore for InMemoryFlowStore {
         // Use read lock for concurrent read access
         let data = self.data.read();
         match data.get(flow_id).and_then(|flow| flow.get(key)) {
-            Some((_, expiry)) if !Self::is_expired(expiry) => Ok(true),
+            Some((_, expiry)) if !self.is_expired(expiry) => Ok(true),
             _ => Ok(false),
         }
     }
@@ -154,12 +170,12 @@ impl FlowStore for InMemoryFlowStore {
     /// Atomic under the single write lock (issue #358), like `increment`: the read-modify-write
     /// happens with the lock held, so no interleaving window with a concurrent increment/set.
     fn increment_by(&self, flow_id: &str, key: &str, by: i64) -> Result<i64> {
-        let expiry = SystemTime::now() + self.default_ttl;
+        let expiry = self.now() + self.default_ttl;
         let mut data = self.data.write();
         let flow = data.entry(flow_id.to_string()).or_default();
 
         // Opportunistically clean up this specific key if expired, so a stale value isn't summed.
-        Self::remove_if_expired(flow, key);
+        self.remove_if_expired(flow, key);
 
         let current = match flow.get(key) {
             Some((Value::Number(n), _)) if n.is_i64() => n.as_i64().unwrap_or(0),
@@ -189,14 +205,13 @@ impl FlowStore for InMemoryFlowStore {
             return Ok(());
         }
 
-        let new_expiry =
-            SystemTime::now() + Duration::from_secs(u64::try_from(ttl_seconds).unwrap_or(0));
+        let new_expiry = self.now() + Duration::from_secs(u64::try_from(ttl_seconds).unwrap_or(0));
         // Nested keying (issue #483): touch only this flow's entries, not the whole store.
         if let Some(flow) = data.get_mut(flow_id) {
             // Drop entries already logically expired but not yet swept before re-stamping (issue
             // #537): extending an expired entry to `now + ttl` would revive it, diverging from Redis
             // (where an expired key is simply gone). Mirror `set_key_ttl`'s per-key guard.
-            flow.retain(|_key, (_, expiry)| !Self::is_expired(expiry));
+            flow.retain(|_key, (_, expiry)| !self.is_expired(expiry));
             if flow.is_empty() {
                 // Don't leave an empty flow map behind (issue #483 growth vector).
                 data.remove(flow_id);
@@ -216,7 +231,7 @@ impl FlowStore for InMemoryFlowStore {
             return Ok(false);
         };
         // An already-expired entry counts as absent: clean it up and report false.
-        Self::remove_if_expired(flow, key);
+        self.remove_if_expired(flow, key);
 
         // Non-positive TTL deletes the key immediately (Redis `EXPIRE` semantics), returning whether
         // it existed. Drop the flow map if that was its last key (issue #483's growth vector).
@@ -228,8 +243,7 @@ impl FlowStore for InMemoryFlowStore {
             return Ok(existed);
         }
 
-        let new_expiry =
-            SystemTime::now() + Duration::from_secs(u64::try_from(ttl_seconds).unwrap_or(0));
+        let new_expiry = self.now() + Duration::from_secs(u64::try_from(ttl_seconds).unwrap_or(0));
         let extended = match flow.get_mut(key) {
             Some((_, expiry)) => {
                 *expiry = Some(new_expiry);
@@ -260,7 +274,7 @@ impl FlowStore for InMemoryFlowStore {
         let data = self.data.read();
         let ids = data
             .iter()
-            .filter(|(_, flow)| flow.values().any(|(_, expiry)| !Self::is_expired(expiry)))
+            .filter(|(_, flow)| flow.values().any(|(_, expiry)| !self.is_expired(expiry)))
             .map(|(flow_id, _)| flow_id.clone())
             .collect();
         Ok(Some(ids))
@@ -275,7 +289,7 @@ impl FlowStore for InMemoryFlowStore {
             .get(flow_id)
             .map(|flow| {
                 flow.values()
-                    .filter(|(_, expiry)| !Self::is_expired(expiry))
+                    .filter(|(_, expiry)| !self.is_expired(expiry))
                     .count()
             })
             .unwrap_or(0);
@@ -293,11 +307,11 @@ impl FlowStore for InMemoryFlowStore {
     ) -> Result<CasOutcome> {
         let mut data = self.data.write();
         let flow = data.entry(flow_id.to_string()).or_default();
-        Self::remove_if_expired(flow, key);
+        self.remove_if_expired(flow, key);
 
         let current = flow.get(key).map(|(value, _)| value);
         if current == expected {
-            let expiry = SystemTime::now() + self.default_ttl;
+            let expiry = self.now() + self.default_ttl;
             flow.insert(key.to_string(), (new, Some(expiry)));
             self.maybe_sweep(&mut data);
             Ok(CasOutcome::Applied)
@@ -994,5 +1008,33 @@ mod tests {
         let store = Bare(Mutex::new(()));
         assert_eq!(store.flow_ids().unwrap(), None);
         assert_eq!(store.entry_count("f").unwrap(), None);
+    }
+
+    // Issue #1754: a store built `with_clock` sets and checks expiry on that clock, so a test steps
+    // past a TTL instead of sleeping through it.
+    #[test]
+    fn ttls_follow_the_injected_clock() {
+        let now = Arc::new(parking_lot::Mutex::new(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+        ));
+        let read = Arc::clone(&now);
+        let store = InMemoryFlowStore::with_clock(60, Arc::new(move || *read.lock()));
+        store.set("f", "k", serde_json::json!(1)).expect("set");
+        *now.lock() += Duration::from_secs(59);
+        assert_eq!(
+            store.get("f", "k").expect("get"),
+            Some(serde_json::json!(1))
+        );
+        *now.lock() += Duration::from_secs(2);
+        assert_eq!(
+            store.get("f", "k").expect("get"),
+            None,
+            "61 s later the key is gone"
+        );
+        // An explicit key TTL follows it too.
+        store.set("f", "j", serde_json::json!(2)).expect("set");
+        assert!(store.set_key_ttl("f", "j", 10).expect("ttl"));
+        *now.lock() += Duration::from_secs(11);
+        assert!(!store.exists("f", "j").expect("exists"));
     }
 }

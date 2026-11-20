@@ -159,6 +159,15 @@ record.
 
 ### Added
 
+- **Each imposter has its own clock** (#1754): `GET/PUT/DELETE /imposters/{port}/clock` freeze it
+  at an instant (`{"nowMs": …}`), step it (`{"advanceMs": …}`) and put it back on wall time, and with
+  `_rift.scriptEngine.clock: "header"` a request's `X-Rift-Now` is its own instant (a malformed one
+  is `400 bad data`). The built-in flow store's TTLs and a wasm component's `wasi:clocks` read it, so
+  a 24-hour window no longer takes 24 hours to test. Runtime state: never persisted, wall again on
+  restart and recreate. Deliberately not readers: `Last-Modified`, journal timestamps, scenario
+  stamps, proxy latency, a guest's `sleep`, and a `FlowStoreProvider`'s store. Rhai, JavaScript and
+  templates read it in #1756.
+
 - **The `wasm` feature's cost is measured, and its split recorded** (#1753): the `rift` binary and
   images ship with the engine, and `librift_ffi` does not by default (stripped release, macOS arm64:
   binary 24.9 → 38.6 MB, cdylib 22.4 → 35.0 MB with `--features wasm`). `rift_build_info().features`

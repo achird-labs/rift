@@ -116,6 +116,7 @@ Defaults for `_rift.script` execution.
 |:------|:-----|:--------|:------|
 | `defaultEngine` | string | `"rhai"` | `rhai`, `javascript` (`js`) or `wasm`. The engine for a script that omits `engine` and whose `file` extension (`.rhai`, `.js`, `.wasm`) does not name one. An explicit `engine` and a file extension both take precedence. |
 | `timeoutMs` | integer | `5000` | Per-script wall-clock timeout, also applied to `decorate`. For `wasm` it is the epoch deadline that interrupts a running component. |
+| `clock` | string | `"wall"` | `"header"` lets a request name its own instant in `X-Rift-Now` (milliseconds since the epoch), ahead of the [imposter clock](../api/index.md#imposter-clock); `"wall"` ignores the header. |
 | `wasm.fuel` | integer | unlimited | `wasm` only: a deterministic compute budget in wasmtime fuel units; a call that spends it fails with `fuel exhausted`. |
 | `wasm.maxMemoryMiB` | integer | `64` | `wasm` only: the most linear memory a call may grow to. |
 | `wasm.maxTables` | integer | `4` | `wasm` only: the most tables a call may create. |

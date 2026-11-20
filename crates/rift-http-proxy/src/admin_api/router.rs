@@ -2,7 +2,7 @@
 //!
 //! This module provides routing
 
-use crate::admin_api::handlers::{imposters, intercept, scenarios, stubs, system};
+use crate::admin_api::handlers::{clock, imposters, intercept, scenarios, stubs, system};
 use crate::admin_api::routes::ADMIN_ROUTES;
 use crate::admin_api::types::{
     error_response, express_not_found, get_base_url, json_response, not_found,
@@ -49,6 +49,8 @@ pub(crate) enum ImposterRoute {
     ScenarioState(String),
     /// POST /imposters/:port/scenarios/reset
     ScenariosReset,
+    /// GET/PUT/DELETE /imposters/:port/clock (issue #1754)
+    Clock,
     /// GET/DELETE /imposters/:port/spaces/:flowId
     Space(String),
     /// POST/GET /imposters/:port/spaces/:flowId/stubs
@@ -73,6 +75,7 @@ impl ImposterRoute {
             ["scenarios"] => Some(ImposterRoute::Scenarios),
             ["scenarios", "reset"] => Some(ImposterRoute::ScenariosReset),
             ["scenarios", name, "state"] => Some(ImposterRoute::ScenarioState((*name).to_string())),
+            ["clock"] => Some(ImposterRoute::Clock),
             ["spaces", flow_id] => Some(ImposterRoute::Space((*flow_id).to_string())),
             ["spaces", flow_id, "stubs"] => Some(ImposterRoute::SpaceStubs((*flow_id).to_string())),
             _ => None,
@@ -96,6 +99,7 @@ impl ImposterRoute {
             ImposterRoute::Scenarios => "/imposters/{port}/scenarios",
             ImposterRoute::ScenarioState(_) => "/imposters/{port}/scenarios/{scenario}/state",
             ImposterRoute::ScenariosReset => "/imposters/{port}/scenarios/reset",
+            ImposterRoute::Clock => "/imposters/{port}/clock",
             ImposterRoute::Space(_) => "/imposters/{port}/spaces/{space}",
             ImposterRoute::SpaceStubs(_) => "/imposters/{port}/spaces/{space}/stubs",
         }
@@ -686,6 +690,11 @@ async fn route_imposter(
         (&Method::POST, ImposterRoute::ScenariosReset) => {
             scenarios::handle_reset_scenarios(port, req, manager).await
         }
+
+        // /imposters/:port/clock — the imposter's clock (issue #1754)
+        (&Method::GET, ImposterRoute::Clock) => clock::handle_get(port, manager).await,
+        (&Method::PUT, ImposterRoute::Clock) => clock::handle_put(port, req, manager).await,
+        (&Method::DELETE, ImposterRoute::Clock) => clock::handle_delete(port, manager).await,
 
         // /imposters/:port/spaces/:flowId — Correlated isolation (issue #223)
         (&Method::POST, ImposterRoute::SpaceStubs(flow_id)) => {

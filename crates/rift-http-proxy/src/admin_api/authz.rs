@@ -316,6 +316,13 @@ fn classify_imposter(method: &Method, rest: &str) -> Option<AuthzTarget> {
             base(actions::IMPOSTER_WRITE).with_param("scenario", &name)
         }
 
+        // The clock steers what the imposter answers, so every verb but the read is a write: a
+        // `DELETE` resets it rather than deleting the imposter.
+        ImposterRoute::Clock => base(match *method {
+            Method::GET | Method::HEAD => actions::IMPOSTER_READ,
+            _ => actions::IMPOSTER_WRITE,
+        }),
+
         ImposterRoute::Space(flow_id) | ImposterRoute::SpaceStubs(flow_id) => {
             base(imposter_action(method)).with_space(&flow_id)
         }
@@ -654,6 +661,21 @@ mod tests {
     }
 
     #[test]
+    fn the_clock_route_is_read_on_get_and_write_otherwise() {
+        for (method, action) in [
+            (Method::GET, actions::IMPOSTER_READ),
+            (Method::PUT, actions::IMPOSTER_WRITE),
+            (Method::DELETE, actions::IMPOSTER_WRITE),
+        ] {
+            assert_eq!(
+                action_of(method.clone(), "/imposters/4545/clock"),
+                Some(action),
+                "{method}"
+            );
+        }
+    }
+
+    #[test]
     fn every_dispatchable_imposter_route_classifies() {
         // A route the router dispatches but `classify` returns None for would reach its handler
         // without ever consulting the authorizer — a silent hole. Mirrors ImposterRoute::parse.
@@ -679,6 +701,9 @@ mod tests {
             (Method::GET, "/scenarios"),
             (Method::PUT, "/scenarios/s/state"),
             (Method::POST, "/scenarios/reset"),
+            (Method::GET, "/clock"),
+            (Method::PUT, "/clock"),
+            (Method::DELETE, "/clock"),
             (Method::GET, "/spaces/f"),
             (Method::DELETE, "/spaces/f"),
             (Method::POST, "/spaces/f/stubs"),

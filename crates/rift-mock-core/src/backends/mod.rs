@@ -5,4 +5,4 @@
 
 pub mod inmemory;
 
-pub use inmemory::InMemoryFlowStore;
+pub use inmemory::{InMemoryFlowStore, StoreClock};

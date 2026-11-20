@@ -41,6 +41,7 @@ fn default_wasm_script(code: &str) -> super::WasmScript<'_> {
         export: None,
         knobs: None,
         limits: crate::imposter::WasmLimits::default(),
+        clock: None,
     }
 }
 

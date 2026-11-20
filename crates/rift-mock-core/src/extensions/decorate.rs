@@ -92,7 +92,12 @@ pub(crate) fn replay_annotations(collected: Annotations) {
 pub(crate) fn spawn_blocking_annotated<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
 ) -> tokio::task::JoinHandle<(T, Annotations)> {
-    tokio::task::spawn_blocking(move || with_sync_annotation_scope(f))
+    // The request's `X-Rift-Now` instant (issue #1754) rides along too, so a flow-store TTL read
+    // on the blocking thread sees the request's time, as one on its task does.
+    let now = crate::imposter::clock::request_override();
+    tokio::task::spawn_blocking(move || {
+        with_sync_annotation_scope(|| crate::imposter::clock::carry_request_override(now, f))
+    })
 }
 
 /// Which response surface a decorator is being invoked for.

@@ -169,6 +169,26 @@ fuel. Use it when a test needs a budget that does not depend on the machine.
 
 ---
 
+## Time
+
+A component's `wasi:clocks/wall-clock` and `monotonic-clock` read the
+[imposter clock](../api/index.md#imposter-clock): wall time, an instant a test froze or stepped it
+to, or a request's `X-Rift-Now` under `_rift.scriptEngine.clock: "header"`. They are read at every
+call, so a step taken while a component runs is seen at its next read (a request's own
+`X-Rift-Now` stays fixed for that request). Under a frozen clock the monotonic clock reads the
+frozen instant in nanoseconds; otherwise it counts from the start of the process. It never goes back
+while the clock's mode and instant do not change, but a change can move it back: unfreezing, or
+freezing at an earlier instant. A component that keeps a monotonic reading across calls and
+subtracts should allow for that.
+
+What the clock does **not** reach: guest timers. `wasi:clocks` `subscribe-duration` and
+`subscribe-instant` (a `sleep` in the guest) still wait in real time, count against `timeoutMs`,
+and are not woken by a step. A component models a delay by comparing clock reads across calls, not
+by sleeping. Nor does it reach `Last-Modified`, the request journal's timestamps, scenario
+transition stamps or proxy latency, which stay on real time.
+
+---
+
 ## Logs
 
 Whatever a component writes to stdout or stderr is logged like a Rhai or JavaScript `ctx.logger`

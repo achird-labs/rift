@@ -50,6 +50,21 @@
       },
       "type": "object"
     },
+    "ClockSource": {
+      "description": "`_rift.scriptEngine.clock`: whether a request may name its own instant (issue #1754).\n\nDecoded tolerantly: engines before #1754 admitted any value under this key and ignored it, so a\nstored config carrying one must still replay (rift-cluster's log, `--datadir`). Any other string\ndecodes as [`Self::Unrecognized`], runs as `wall`, and is logged when the imposter is built.",
+      "oneOf": [
+        {
+          "const": "wall",
+          "description": "The imposter's clock only; `X-Rift-Now` is ignored.",
+          "type": "string"
+        },
+        {
+          "const": "header",
+          "description": "A request's `X-Rift-Now: <ms since epoch>` is its own instant, ahead of the imposter's clock.",
+          "type": "string"
+        }
+      ]
+    },
     "ConditionalGet": {
       "anyOf": [
         {
@@ -1279,9 +1294,20 @@
       "additionalProperties": false,
       "description": "Global script engine configuration",
       "properties": {
+        "clock": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClockSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether a request may name its own instant in `X-Rift-Now` (issue #1754): `\"wall\"` (the\ndefault, the imposter's clock only) or `\"header\"`."
+        },
         "defaultEngine": {
           "default": "rhai",
-          "description": "Engine for a script that names none and has no `.rhai`/`.js`/`.wasm`/`.lua` file\nextension: \"rhai\", \"javascript\" or \"wasm\" (issues #1159, #1750; \"wasm\" is refused until a\nbuild carries it). See [`ImposterConfig::default_script_engine`].",
+          "description": "Engine for a script that names none and has no `.rhai`/`.js`/`.wasm`/`.lua` file\nextension: \"rhai\", \"javascript\" or \"wasm\" (issues #1159, #1750; \"wasm\" needs a build with the\n`wasm` feature). See [`ImposterConfig::default_script_engine`].",
           "type": "string"
         },
         "timeoutMs": {

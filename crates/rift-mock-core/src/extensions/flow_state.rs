@@ -156,6 +156,9 @@ pub trait FlowStore: Send + Sync {
 /// [`ImposterManager::with_flow_store_provider`](crate::imposter::ImposterManager::with_flow_store_provider).
 /// It is consulted when an imposter's flow store is constructed, before the built-in in-memory
 /// store. It is the only way to put a store other than the in-memory one behind an imposter.
+///
+/// A supplied store keeps its own clock: the imposter clock (`PUT /imposters/{port}/clock`, issue
+/// #1754) reaches only the built-in in-memory store's TTLs.
 pub trait FlowStoreProvider: Send + Sync {
     /// Return a store for this imposter, or `None` to defer to the built-in selection.
     fn provide(&self, config: &crate::imposter::ImposterConfig) -> Option<Arc<dyn FlowStore>>;

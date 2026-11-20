@@ -837,6 +837,48 @@ Reset scenarios. **Request Body:** `{ "flowId": "order-42" }` (optional; omit to
 
 ---
 
+## Imposter clock
+
+Each imposter has its own clock (issue #1754): wall time until a test freezes or steps it, so a
+test on a fake clock moves the mock's time with it. It is what the built-in flow store's TTLs and a
+wasm component's `wasi:clocks` read. It is runtime state: never persisted, and back on wall time
+after a `restart` or when the imposter is recreated. See
+[Flow State → TTL semantics](../features/flow-state.md#ttl-semantics).
+
+### GET /imposters/{port}/clock
+
+**Response:** `{"mode": "wall" | "frozen", "nowMs": 1700000000000}`, `nowMs` in milliseconds since
+the Unix epoch.
+
+### PUT /imposters/{port}/clock
+
+Exactly one of:
+
+- `{"nowMs": 1700000000000}`: freeze the clock at that instant (earlier or later than now).
+- `{"advanceMs": 86400000}`: step it forward. A frozen clock moves by that much; a wall clock
+  freezes at wall time plus that much. Must not be negative.
+
+**Response:** `200 {"mode": "frozen", "nowMs": …}`. Both keys, neither, a negative or non-integer
+value, or an instant outside years 1–9999: `400 bad data`. Unknown port: `404`.
+
+### DELETE /imposters/{port}/clock
+
+Back to wall time. **Response:** `200 {"mode": "wall", "nowMs": …}`.
+
+### A request's own instant: `X-Rift-Now`
+
+With `_rift.scriptEngine.clock: "header"`, a request carrying `X-Rift-Now: <ms since epoch>` reads
+at that instant (its TTL checks and writes, and a component's clocks), ahead of the imposter's clock,
+so parallel tests need no admin calls. A header that is not an integer within the clock's range is
+refused with `400 bad data`. Under the default `clock: "wall"` the header is ignored. An unknown
+`clock` value runs as `"wall"` and is logged.
+
+Instants are milliseconds since the Unix epoch from year 1 to year 9999
+(`-62135596800000` to `253402300799999`); `nowMs`, an `advanceMs` result or an `X-Rift-Now` outside
+that is refused, as every platform's clock can hold that range.
+
+---
+
 ## Spaces (Correlated Isolation)
 
 A "space" isolates stubs and state to a correlation id (`flowId`), so parallel test runs don't collide.
