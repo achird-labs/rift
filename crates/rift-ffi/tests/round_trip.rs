@@ -4442,3 +4442,22 @@ fn a_wasm_stub_runs_in_the_wasm_flavour_and_is_refused_in_the_default() {
         rift_stop(h);
     }
 }
+
+// Issue #1795: an `rngKey` the engine cannot use is refused at the C-ABI doors too, naming the
+// problem, rather than created to run on the imposter's stream.
+#[test]
+fn ffi_refuses_an_unusable_rng_key() {
+    unsafe {
+        let h = rift_start();
+        let bad = r#"{"protocol":"http","_rift":{"scriptEngine":{"rngKey":["path"]}},"stubs":[]}"#;
+        assert_eq!(rift_create_imposter(h, cstr(bad).as_ptr()), 0);
+        let message = take_json(rift_last_error());
+        assert!(
+            message.contains("needs _rift.scriptEngine.seed"),
+            "{message}"
+        );
+        let ok = r#"{"protocol":"http","_rift":{"scriptEngine":{"seed":1,"rngKey":["path"]}},"stubs":[]}"#;
+        assert_ne!(rift_create_imposter(h, cstr(ok).as_ptr()), 0);
+        rift_stop(h);
+    }
+}

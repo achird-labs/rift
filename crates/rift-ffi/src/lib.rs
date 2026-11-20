@@ -320,12 +320,25 @@ fn parse_imposter_configs(text: &str) -> Result<Vec<ImposterConfig>, String> {
         match serde_json::from_str::<ImpostersDocument>(text) {
             Ok(ImpostersDocument {
                 imposters: Some(imposters),
-            }) => return Ok(imposters),
+            }) => {
+                check_rng_keys(&imposters)?;
+                return Ok(imposters);
+            }
             Ok(ImpostersDocument { imposters: None }) => {}
             Err(e) => return Err(e.to_string()),
         }
     }
-    serde_json::from_str::<Vec<ImposterConfig>>(text).map_err(|e| e.to_string())
+    let configs = serde_json::from_str::<Vec<ImposterConfig>>(text).map_err(|e| e.to_string())?;
+    check_rng_keys(&configs)?;
+    Ok(configs)
+}
+
+/// `_rift.scriptEngine.rngKey` at the C-ABI doors (issue #1795), as at the admin API: a key the
+/// engine cannot use is refused, not run on the imposter's stream.
+fn check_rng_keys(configs: &[ImposterConfig]) -> Result<(), String> {
+    configs
+        .iter()
+        .try_for_each(rift_mock_core::imposter::check_imposter_rng_key)
 }
 
 /// Start the engine. Returns an opaque handle, or null if the runtime could not be created.
@@ -385,6 +398,10 @@ pub unsafe extern "C" fn rift_create_imposter(h: *mut RiftHandle, json: *const c
                 return 0;
             }
         };
+        if let Err(e) = rift_mock_core::imposter::check_imposter_rng_key(&config) {
+            set_last_error(format!("rift_create_imposter: {e}"));
+            return 0;
+        }
         match handle
             .runtime
             .block_on(handle.manager.create_imposter(config))

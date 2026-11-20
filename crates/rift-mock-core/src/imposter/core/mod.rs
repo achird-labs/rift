@@ -753,6 +753,11 @@ impl Imposter {
                 "_rift.scriptEngine.seed is not an unsigned 64-bit integer; running unseeded"
             );
         }
+        // A key admission would refuse, here only by replay (issue #1795): requests keep the
+        // imposter's stream.
+        if let Err(e) = crate::imposter::check_imposter_rng_key(&config) {
+            tracing::error!(port = ?config.port, "{e}; requests use the imposter's random stream");
+        }
         let rng = ArcSwap::from_pointee(crate::imposter::rng::ImposterRng::new(
             seed.and_then(crate::imposter::rng::Seed::value),
         ));

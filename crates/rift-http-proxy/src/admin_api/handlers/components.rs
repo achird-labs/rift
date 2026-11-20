@@ -34,7 +34,7 @@ pub(crate) const MAX_REGISTRY_BYTES: usize = 512 << 20;
 /// cannot interleave into a registry and a datadir that disagree.
 static WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn bad_data(message: &str) -> Response<Full<Bytes>> {
+pub(crate) fn bad_data(message: &str) -> Response<Full<Bytes>> {
     error_response_typed(StatusCode::BAD_REQUEST, ErrorKind::BadData, message)
 }
 

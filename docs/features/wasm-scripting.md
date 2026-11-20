@@ -302,6 +302,41 @@ are the same either way.
   `_rift.script` and in Mountebank `inject`/`decorate` functions alike
   ([Time and randomness](scripting.md#time-and-randomness)); Rhai has no random function.
 
+### Concurrent requests: `rngKey`
+
+With one stream per imposter, requests sent concurrently draw in whatever order they reach it, so
+a seed alone cannot replay a race (a retry overlapping the original, two callers on one account).
+`_rift.scriptEngine.rngKey` gives each request a stream of its own, picked by parts of the request:
+
+```json
+{ "_rift": { "scriptEngine": { "seed": 42, "rngKey": ["header:X-Rift-Rng-Key"] } } }
+```
+
+- **Parts:** `header:<name>` (case-insensitive, the first value), `query:<name>`, `method`,
+  `path`, and `body:<RFC 6901 pointer>` (a string as itself, anything else as JSON text). A test
+  that controls its requests sends a header of its own.
+- **The stream** comes from the seed, the key, and how many earlier requests had the same key since
+  the imposter was created, recreated or restarted. So the third request with key `k` draws the
+  same values every run, whenever the other keys' requests arrive.
+- **A request without the key** (every part empty: the header missing, the pointer finding
+  nothing) uses the imposter's stream. A partly missing key counts the missing part as empty.
+- **Every reader** draws from the request's stream: `wasi:random`, `_rift.fault` rolls, the
+  template `randomInt` and `uuid`, and JavaScript's `Math.random()`.
+- **Admission:** `rngKey` needs `seed`, a non-empty list, and parts Rift can read; otherwise the
+  imposter is refused with `400 bad data` naming the part. A config already stored (`--datadir`,
+  rift-cluster) still loads, logs the problem, and uses the imposter's stream.
+- **Memory:** the per-key counters grow by about 12 bytes for each distinct key, until the next
+  restart or recreate. There is no cap.
+- `rift wasm check` honours a corpus's `rngKey`.
+
+What stays order-dependent:
+
+- **Two requests in flight with the same key** race for the count. Use a key that differs between
+  concurrent requests, such as a correlation id plus an attempt number.
+- **State in the flow store** that concurrent requests write.
+- **The order responses arrive in**, which is the caller's concern.
+
+
 ---
 
 ## Logs

@@ -282,6 +282,22 @@ pub async fn run_check(opts: &CheckOptions) -> Result<CheckReport> {
         Arc::new(InMemoryFlowStore::new(300));
     let clock = Arc::new(ImposterClock::default());
     let rng = Arc::new(ImposterRng::new(seed));
+    // The corpus's `rngKey` (issue #1795), as the server applies it: each request whose key parts
+    // are present draws from its own stream. A key admission would refuse is an error here.
+    let key_parts = match engine.and_then(|e| e.get("rngKey")) {
+        None => None,
+        Some(raw) => {
+            let key: rift_mock_core::imposter::rng::RngKey = serde_json::from_value(raw.clone())
+                .context("the corpus's _rift.scriptEngine.rngKey")?;
+            let parts = key.parts().map_err(|e| anyhow!(e))?;
+            if seed.is_none() {
+                bail!(
+                    "the corpus's _rift.scriptEngine.rngKey needs a seed (--seed or scriptEngine.seed)"
+                );
+            }
+            Some(parts)
+        }
+    };
     let script_clock = ScriptClock::Imposter(Arc::clone(&clock));
     // The first recorded instant, else the start of the run; a stub without `recordedAt` keeps the
     // instant before it, so the clock never jumps forward to the run and back.
@@ -332,8 +348,31 @@ pub async fn run_check(opts: &CheckOptions) -> Result<CheckReport> {
             port: report.port.unwrap_or(0),
             ..Default::default()
         };
+        let handle = RequestRng::new(Arc::clone(&rng));
+        if let (Some(parts), Some(seed)) = (&key_parts, seed) {
+            let header = |name: &str| {
+                case.headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| v.clone())
+            };
+            let query = |name: &str| case.query_params.get(name).cloned();
+            let source = rift_mock_core::imposter::rng::KeySource {
+                method: &case.method,
+                path: &case.path,
+                header: &header,
+                query: &query,
+                body: case.body.as_deref(),
+            };
+            if let Some(digest) = rift_mock_core::imposter::rng::key_digest(parts, &source) {
+                let occurrence = rng.next_occurrence(digest);
+                handle.rekey(ImposterRng::new(Some(
+                    rift_mock_core::imposter::rng::keyed_state(seed, digest, occurrence),
+                )));
+            }
+        }
         let result = with_request_rng(
-            RequestRng::new(Arc::clone(&rng)),
+            handle,
             should_inject_wasm(
                 WasmScript {
                     code: &code,
