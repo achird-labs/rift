@@ -638,13 +638,18 @@ async fn wasi_clocks_read_the_frozen_or_fixed_instant() {
         delay_with_clock(&fixtures::wall_clock_seconds(), Some(&fixed)).await,
         1_000
     );
-    // Unfrozen: wall time.
+    // Unfrozen: wall time, read between two host readings (a second can turn over in between).
     clock.reset();
-    let wall = delay_with_clock(&fixtures::wall_clock_seconds(), Some(&imposter)).await;
-    let now = u64::try_from(crate::imposter::clock::wall_ms() / 1000).expect("positive");
-    assert!(wall + 5 >= now && wall <= now, "{wall} vs {now}");
-    let unset = delay_with_clock(&fixtures::wall_clock_seconds(), None).await;
-    assert!(unset + 5 >= now && unset <= now, "{unset} vs {now}");
+    let secs = || u64::try_from(crate::imposter::clock::wall_ms() / 1000).expect("positive");
+    for script_clock in [Some(&imposter), None] {
+        let before = secs();
+        let read = delay_with_clock(&fixtures::wall_clock_seconds(), script_clock).await;
+        let after = secs();
+        assert!(
+            (before..=after).contains(&read),
+            "{read} outside {before}..={after}"
+        );
+    }
 }
 
 // Monotonic reads never go back between calls, though each call has a fresh store.
