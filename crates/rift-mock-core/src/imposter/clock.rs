@@ -3,10 +3,11 @@
 //! A test whose code runs on a fake clock (ZIO `TestClock`, a simulation's virtual time) can move
 //! the mock's time with it: `PUT /imposters/{port}/clock` freezes it at an instant or steps it
 //! forward, and with `_rift.scriptEngine.clock: "header"` one request can name its own instant in
-//! `X-Rift-Now`. What reads it: the built-in flow store's TTLs, and a wasm component's
-//! `wasi:clocks`. What deliberately does not: `Last-Modified` and `LoadClock` (HTTP cache semantics
-//! are about real time), journal timestamps (observability), scenario transition stamps and proxy
-//! latency. Rhai, JavaScript and templates read it from #1756.
+//! `X-Rift-Now`. What reads it: the built-in flow store's TTLs, a wasm component's `wasi:clocks`,
+//! and (#1756, through `scripting::env`) Rhai's `timestamp_header()`, JavaScript's `Date` and the
+//! template `now`. What deliberately does not: `Last-Modified` and `LoadClock` (HTTP cache semantics
+//! are about real time), journal timestamps (observability), scenario transition stamps, proxy
+//! latency and timers.
 //!
 //! Runtime state, like script state: never persisted, wall again on restart and on recreate.
 
@@ -221,6 +222,51 @@ pub fn resolve_request_now(
 tokio::task_local! {
     /// The instant the request this task serves named in `X-Rift-Now`, if it named one.
     static REQUEST_NOW: i64;
+    /// The clock of the imposter serving the request on this task (issue #1756), so a script
+    /// reads it without the imposter in hand.
+    static IMPOSTER_CLOCK: std::sync::Arc<ImposterClock>;
+}
+
+std::thread_local! {
+    /// The same, for a blocking-pool thread running a request's work.
+    static THREAD_CLOCK: std::cell::RefCell<Option<std::sync::Arc<ImposterClock>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The clock of the imposter whose request is being served here, on its task or on a blocking
+/// thread running its work.
+#[must_use]
+pub fn current_imposter_clock() -> Option<std::sync::Arc<ImposterClock>> {
+    IMPOSTER_CLOCK
+        .try_with(std::sync::Arc::clone)
+        .ok()
+        .or_else(|| THREAD_CLOCK.with(|slot| slot.borrow().clone()))
+}
+
+/// Run `fut` with `clock` as its imposter's clock.
+pub async fn with_imposter_clock<F: std::future::Future>(
+    clock: std::sync::Arc<ImposterClock>,
+    fut: F,
+) -> F::Output {
+    IMPOSTER_CLOCK.scope(clock, fut).await
+}
+
+/// Run `f` on this thread with `clock` as [`current_imposter_clock`]; the thread's previous one
+/// comes back after, a panicking `f` included.
+pub fn carry_imposter_clock<T>(
+    clock: Option<std::sync::Arc<ImposterClock>>,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Option<std::sync::Arc<ImposterClock>>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                THREAD_CLOCK.with(|slot| *slot.borrow_mut() = previous);
+            }
+        }
+    }
+    let _restore = Restore(Some(THREAD_CLOCK.with(|slot| slot.replace(clock))));
+    f()
 }
 
 std::thread_local! {

@@ -297,7 +297,9 @@ are the same either way.
   component uses randomness, so adding a wasm stub to a sequence shifts the draws that follow it.
   The run still replays; it is a different run from the one without that stub.
 - **What it does not reach:** the `wait` behaviour's random range, which stays on the system's
-  entropy and only changes timing. Rhai and JavaScript scripts do not draw from it yet.
+  entropy and only changes timing. JavaScript's `Math.random()` draws from the stream, in a
+  `_rift.script` and in Mountebank `inject`/`decorate` functions alike
+  ([Time and randomness](scripting.md#time-and-randomness)); Rhai has no random function.
 
 ---
 

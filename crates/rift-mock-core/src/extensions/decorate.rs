@@ -95,12 +95,16 @@ pub(crate) fn spawn_blocking_annotated<T: Send + 'static>(
     // The request's `X-Rift-Now` instant (issue #1754) rides along too, so a flow-store TTL read
     // on the blocking thread sees the request's time, as one on its task does.
     // So does its random stream (issue #1755), for a template `randomInt` rendered there.
+    // And the imposter's clock (issue #1756), for a script's `now` read there.
     let now = crate::imposter::clock::request_override();
     let rng = crate::imposter::rng::current();
+    let clock = crate::imposter::clock::current_imposter_clock();
     tokio::task::spawn_blocking(move || {
         with_sync_annotation_scope(|| {
             crate::imposter::rng::carry_request_rng(rng, || {
-                crate::imposter::clock::carry_request_override(now, f)
+                crate::imposter::clock::carry_imposter_clock(clock, || {
+                    crate::imposter::clock::carry_request_override(now, f)
+                })
             })
         })
     })

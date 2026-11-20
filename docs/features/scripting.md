@@ -400,6 +400,27 @@ unknown `ref:` or a `file:` that can't be read is a config-time validation error
 
 ---
 
+## Time and randomness
+
+Scripts read the imposter's clock and random stream, as a wasm component does
+([Time](wasm-scripting.md#time), [Randomness](wasm-scripting.md#randomness)):
+
+| Read | Returns |
+|:-----|:--------|
+| Rhai `timestamp_header()` | The RFC 1123 date of the imposter's clock |
+| JavaScript `Date.now()`, `new Date()` | The imposter's clock, in a `_rift.script` and in Mountebank `inject`, `decorate` and `wait` functions |
+| JavaScript `Math.random()` | The next number from the imposter's random stream, seeded by `_rift.scriptEngine.seed` |
+| Template `{{now}}`, `{{NOW}}` and the `{{DAYS±N}}` family | The imposter's clock |
+
+The imposter's clock is wall time until a test freezes or steps it
+([`/imposters/{port}/clock`](../api/index.md#imposter-clock)), and a request's own `X-Rift-Now`
+comes first under `_rift.scriptEngine.clock: "header"`. With a frozen clock and a seed, a sequence
+of requests replays exactly, whichever engines answer it. Each script reads its own imposter's
+clock and stream, even when Mountebank scripts of several imposters share a worker.
+
+Timers keep real time: `setTimeout` in an `inject` waits real milliseconds, because it schedules
+work rather than reporting the time.
+
 ## `ctx` API
 
 `ctx` is built the same way, with the same field names and semantics, in every engine. It has one
