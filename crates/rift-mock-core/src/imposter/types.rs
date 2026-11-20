@@ -3663,6 +3663,11 @@ pub struct RiftScriptEngineConfig {
     /// default, the imposter's clock only) or `"header"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock: Option<crate::imposter::clock::ClockSource>,
+    /// The seed of the imposter's random stream (issue #1755): `_rift.fault` rolls, the template
+    /// `randomInt` and a wasm component's `wasi:random` draw from it. Absent: seeded from OS
+    /// entropy. Applied at every create, recreate and restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<crate::imposter::rng::Seed>,
 }
 
 /// Per-call limits on an `engine: "wasm"` script (`_rift.scriptEngine.wasm`, issue #1751). The

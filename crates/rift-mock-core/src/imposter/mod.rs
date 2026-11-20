@@ -32,6 +32,7 @@ pub(crate) mod predicates;
 pub mod probe;
 pub(crate) mod reconcile;
 mod response;
+pub mod rng;
 mod script_resolve;
 mod status;
 mod types;

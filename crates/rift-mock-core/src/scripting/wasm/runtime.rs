@@ -419,6 +419,13 @@ fn new_store(
     })?;
     let mut wasi = WasiCtxBuilder::new();
     wasi.stdout(logs.0).stderr(logs.1);
+    // `wasi:random` draws from the request's stream (issue #1755), so a seeded imposter replays.
+    // "Secure" random is deterministic under a seed too: this is a mock.
+    if let Some(mut rng) = crate::imposter::rng::current() {
+        wasi.insecure_random_seed(rng.seed_u128())
+            .secure_random(rng.clone())
+            .insecure_random(rng);
+    }
     if let Some(clock) = clock {
         wasi.wall_clock(GuestWallClock(clock.clone()))
             .monotonic_clock(GuestMonotonicClock(clock.clone()));

@@ -209,6 +209,12 @@ Apply both latency and errors:
 }
 ```
 
+**Repeatable rolls.** Every `_rift.fault` roll (latency, error, tcp, and the latency drawn
+between `minMs` and `maxMs`) draws from the imposter's random stream. Set
+`_rift.scriptEngine.seed` and a sequence of requests sent one after another fires the same faults
+on the same requests every run, after a recreate or a restart too
+([Randomness](wasm-scripting.md#randomness)).
+
 A `_rift` block on its own, as in the fragments on this page, is a complete response: it is served
 as `is: {}` — an empty `200` (completed by `defaultResponse`, if the imposter has one) — whenever
 the fault does not fire. Pair it with an `is` to set the normal answer.

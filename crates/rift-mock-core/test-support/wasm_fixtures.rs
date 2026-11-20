@@ -48,6 +48,10 @@ const EXTRA_WIT: &[(&str, &str)] = &[
          }",
     ),
     (
+        "wasi-random.wit",
+        "package wasi:random@0.2.6; interface random { get-random-u64: func() -> u64; }",
+    ),
+    (
         "fixture.wit",
         "package test:fixture;
          world mock { include rift:mock/mock@0.1.0; }
@@ -55,7 +59,8 @@ const EXTRA_WIT: &[(&str, &str)] = &[
          world http { include rift:mock/mock@0.1.0; import wasi:http/outgoing-handler@0.2.6; }
          world cli { include rift:mock/mock@0.1.0; import wasi:cli/environment@0.2.6; }
          world no-handler { import rift:mock/state@0.1.0; }
-         world clocks { include rift:mock/mock@0.1.0; import wasi:clocks/wall-clock@0.2.6; import wasi:clocks/monotonic-clock@0.2.6; }",
+         world clocks { include rift:mock/mock@0.1.0; import wasi:clocks/wall-clock@0.2.6; import wasi:clocks/monotonic-clock@0.2.6; }
+         world random { include rift:mock/mock@0.1.0; import wasi:random/random@0.2.6; }",
     ),
 ];
 
@@ -367,6 +372,38 @@ pub fn monotonic_nanos() -> Vec<u8> {
             r#"(import "wasi:clocks/monotonic-clock@0.2.6" "now" (func $now (result i64)))"#,
             r#"(data (i32.const 64) "\00") (data (i32.const 72) "\01")"#,
             "(i64.store (i32.const 80) (call $now))
+             (i32.const 64)",
+        ),
+    )
+}
+
+/// `respond` draws `wasi:random/random.get-random-u64` and answers `200` with it as an 8-byte body,
+/// each byte masked to ASCII so the body is UTF-8 (issue #1755).
+pub fn random_body() -> Vec<u8> {
+    component(
+        "random",
+        &core(
+            r#"(import "wasi:random/random@0.2.6" "get-random-u64" (func $r (result i64)))"#,
+            r#"(data (i32.const 64) "\00")
+               (data (i32.const 72) "\03")
+               (data (i32.const 80) "\c8\00")
+               (data (i32.const 84) "\00\00\00\00\00\00\00\00")
+               (data (i32.const 92) "\00\01\00\00\08\00\00\00")"#,
+            "(i64.store (i32.const 256) (i64.and (call $r) (i64.const 0x7F7F7F7F7F7F7F7F)))
+             (i32.const 64)",
+        ),
+    )
+}
+
+/// `respond` draws `wasi:random/random.get-random-u64` and answers `delay(<it>)`, so a test reads the
+/// guest's draw from the decision (issue #1755).
+pub fn random_u64() -> Vec<u8> {
+    component(
+        "random",
+        &core(
+            r#"(import "wasi:random/random@0.2.6" "get-random-u64" (func $r (result i64)))"#,
+            r#"(data (i32.const 64) "\00") (data (i32.const 72) "\01")"#,
+            "(i64.store (i32.const 80) (call $r))
              (i32.const 64)",
         ),
     )

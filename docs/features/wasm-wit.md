@@ -119,12 +119,12 @@ the host:
 | `wasi:filesystem` | No preopened directory. |
 | `wasi:io` | As needed by the others. |
 | `wasi:clocks` | **Virtualised:** the imposter's clock — the system clock unless a test froze or stepped it — or a request's `X-Rift-Now` ([Time](wasm-scripting.md#time)). |
-| `wasi:random` | The system's entropy source. |
+| `wasi:random` | **Virtualised:** the imposter's random stream, seeded by `_rift.scriptEngine.seed` or from the system's entropy ([Randomness](wasm-scripting.md#randomness)). |
 
 A host must **not** link `wasi:sockets` or `wasi:http/outgoing-handler`. A component that imports
 either is refused when it is admitted, so a component cannot reach the network from inside a mock.
-A host that drives simulated time should back `wasi:clocks` (and, for repeatable runs,
-`wasi:random`) with its own sources, as Rift does for the clock.
+A host that drives simulated time should back `wasi:clocks` and, for repeatable runs,
+`wasi:random` with its own sources, as Rift does.
 
 ## Conformance
 

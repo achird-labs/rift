@@ -76,8 +76,8 @@ taken literally; there are no escape sequences. Filters chain left to right.
 | `request.header '<Name>'` | A request header, matched case-insensitively. For a repeated header, the first value. |
 | `request.json '<path>'` | A value from the JSON request body. The path starts with `$` and uses `.key` and `[index]` segments only (`$.items[0].id`). Objects and arrays render as JSON. |
 | `now [offset='±N<unit>'] [format='<strftime>']` | The current UTC time. `offset` units are `s`, `m`, `h`, `d`; the default format is RFC 3339. |
-| `uuid` | A random UUID v4. |
-| `randomInt <a> <b>` | A random integer in `[a, b]`. |
+| `uuid` | A random UUID v4, from the imposter's random stream: repeatable under `_rift.scriptEngine.seed`. |
+| `randomInt <a> <b>` | A random integer in `[a, b]`, from the imposter's random stream: repeatable under `_rift.scriptEngine.seed` ([Randomness](wasm-scripting.md#randomness)). |
 | `state.<key>` | A [flow-state](flow-state.md) value for the request's flow id (read-only). |
 | `previousValue` | Only meaningful inside a [`_rift.stateOps`](flow-state.md) `set` value; renders empty anywhere else. |
 
