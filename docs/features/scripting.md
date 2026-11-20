@@ -47,16 +47,22 @@ script is attached — see the table below.
 | **WebAssembly** | `_rift.script` with `"engine": "wasm"` and a `.wasm` `file` | A component in any language that builds for `wasm32-wasip2`, sandboxed, with pre-emptive time, fuel and memory limits — see [WebAssembly scripting](wasm-scripting.md) |
 
 Every script surface — `inject` responses and predicates, `decorate`, `shellTransform`, a
-function `wait`, and `_rift.script` — requires `--allowInjection`, exactly as Mountebank gates
-`inject`. Without it, creating the imposter returns `400 invalid injection`. That includes a
-`_rift.script` with `"engine": "wasm"`, for now, although a component runs in a sandbox. The Lua engine was
+function `wait`, and a Rhai or JavaScript `_rift.script` — requires `--allowInjection`, exactly as
+Mountebank gates `inject`. Without it, creating the imposter returns `400 invalid injection`.
+
+A `_rift.script` with `"engine": "wasm"` is the exception: it runs a component in a sandbox (see its
+[security model](wasm-scripting.md#security-model)), and is admitted by `--allowWasm` instead, which
+is on by default. The two flags are independent: a component needs no `--allowInjection`, and
+`--allow-wasm false` refuses components with `400 invalid wasm` whatever `--allowInjection` says. A
+document carrying both a component and host code needs both flags. The Lua engine was
 removed; `"engine": "lua"` (or a `.lua` script file) is rejected with an error naming the
 replacement.
 
 !!! warning "`--allowInjection` means host code execution"
-    The code it admits runs with Rift's own privileges, and `shellTransform` runs host commands.
-    Enable it only for authors you would give a shell on the machine. Nothing below makes it a
-    sandbox.
+    The code it admits (Rhai, JavaScript, `inject`, `decorate`, `shellTransform`) runs with Rift's
+    own privileges, and `shellTransform` runs host commands. Enable it only for authors you would
+    give a shell on the machine. Nothing below makes it a sandbox. A wasm component is the one
+    script that is sandboxed, which is why `--allowWasm` admits it on its own.
 
 ### Files a script may read
 

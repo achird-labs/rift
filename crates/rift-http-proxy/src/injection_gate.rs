@@ -1,4 +1,11 @@
-//! The `--allowInjection` classifier: does a stub carry a Mountebank scripting surface?
+//! The `--allowInjection` and `--allowWasm` classifier: does a stub carry a scripting surface, and
+//! of which kind?
+//!
+//! Two kinds (issue #1752). **Host code** — inject, decorate, shellTransform, a JS-function wait,
+//! a predicate or `predicateGenerators` inject, a Rhai or JavaScript `_rift.script` — runs with
+//! Rift's own privileges and needs `--allowInjection`. A **sandboxed** surface — a `_rift.script`
+//! with `engine: "wasm"` — runs a component that can reach nothing on the host, and needs
+//! `--allowWasm`, which is on by default. A document can carry both, and then needs both flags.
 //!
 //! Extracted from the admin imposter handlers (issue #612) so every door that admits an imposter
 //! config — `POST/PUT /imposters`, `--configfile`, `--datadir`, `POST /admin/reload`, and the
@@ -27,32 +34,212 @@
 //! #657 happened because a door existed in neither, so "which doors ask the gate?" had to be
 //! re-derived from the code — and the answer was wrong.
 
-use crate::imposter::{ImposterConfig, Predicate, PredicateOperation, Stub, StubResponse};
+use crate::imposter::{
+    ImposterConfig, Predicate, PredicateOperation, RiftScriptConfig, Stub, StubResponse,
+};
 
-/// The gated surfaces, named the same way by every door (issue #612). The list only — each door
-/// appends its own clause, so this must not carry one.
+/// Which kinds of script a document carries (issue #1752): a set, not an order, so a door can name
+/// every flag it is missing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[must_use]
+pub struct ScriptSurface {
+    host_code: bool,
+    sandboxed: bool,
+}
+
+impl ScriptSurface {
+    /// No script at all.
+    pub const NONE: Self = Self {
+        host_code: false,
+        sandboxed: false,
+    };
+    const HOST_CODE: Self = Self {
+        host_code: true,
+        sandboxed: false,
+    };
+    const SANDBOXED: Self = Self {
+        host_code: false,
+        sandboxed: true,
+    };
+    const BOTH: Self = Self {
+        host_code: true,
+        sandboxed: true,
+    };
+
+    /// Carries code that runs with Rift's privileges: needs `--allowInjection`.
+    #[must_use]
+    pub fn host_code(self) -> bool {
+        self.host_code
+    }
+
+    /// Carries a sandboxed wasm component: needs `--allowWasm`.
+    #[must_use]
+    pub fn sandboxed(self) -> bool {
+        self.sandboxed
+    }
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            host_code: self.host_code || other.host_code,
+            sandboxed: self.sandboxed || other.sandboxed,
+        }
+    }
+}
+
+/// The two flags a door checks a document against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScriptGates {
+    /// `--allowInjection`: host code.
+    pub allow_injection: bool,
+    /// `--allowWasm`: sandboxed components.
+    pub allow_wasm: bool,
+}
+
+impl ScriptGates {
+    /// `--allowInjection` as given and `--allowWasm` at its default (on): what every door was
+    /// before the wasm flag, for tests written against that one flag.
+    #[cfg(test)]
+    pub(crate) fn from_injection(allow_injection: bool) -> Self {
+        Self {
+            allow_injection,
+            allow_wasm: true,
+        }
+    }
+
+    /// The flag `surface` needs and these gates lack, `None` when it is admitted. A document that
+    /// lacks both is refused for host code first, as Mountebank refuses an inject.
+    #[must_use]
+    pub fn refusal(self, surface: ScriptSurface) -> Option<GateRefusal> {
+        if surface.host_code && !self.allow_injection {
+            Some(GateRefusal::Injection)
+        } else if surface.sandboxed && !self.allow_wasm {
+            Some(GateRefusal::Wasm)
+        } else {
+            None
+        }
+    }
+}
+
+/// Which flag a refused document needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateRefusal {
+    /// `--allowInjection`.
+    Injection,
+    /// `--allowWasm`.
+    Wasm,
+}
+
+/// The message every door gives a wasm component on a server started with `--allowWasm false`.
+pub const WASM_DISALLOWED: &str = "engine \"wasm\" requires --allowWasm (disabled on this server)";
+
+/// What a `_rift.script` resolves against, so the gate classifies the engine it will actually run
+/// (issue #1752): the imposter's `_rift.scripts` registry, which a `ref` takes its engine from, and
+/// its `defaultEngine`, which an engine-less inline script takes. A stub door supplies the target
+/// imposter's.
+#[derive(Debug, Clone, Copy)]
+pub struct ScriptContext<'a> {
+    pub registry: &'a std::collections::HashMap<String, RiftScriptConfig>,
+    pub default_engine: &'a str,
+}
+
+/// The script surfaces of `config`'s stubs, resolved against its own registry and default engine.
+pub fn classify_config(config: &ImposterConfig) -> ScriptSurface {
+    static EMPTY: std::sync::LazyLock<std::collections::HashMap<String, RiftScriptConfig>> =
+        std::sync::LazyLock::new(Default::default);
+    let registry = config.rift.as_ref().map_or(&*EMPTY, |rift| &rift.scripts);
+    classify_stubs(
+        &config.stubs,
+        ScriptContext {
+            registry,
+            default_engine: config.default_script_engine(),
+        },
+    )
+}
+
+/// The script surfaces of `stubs`. Classification fails **closed**: a script whose engine cannot
+/// be known here counts as both kinds, so each flag refuses it.
+pub fn classify_stubs(stubs: &[Stub], ctx: ScriptContext<'_>) -> ScriptSurface {
+    stubs.iter().fold(ScriptSurface::NONE, |acc, stub| {
+        let predicates = if stub.predicates.iter().any(predicate_has_inject) {
+            ScriptSurface::HOST_CODE
+        } else {
+            ScriptSurface::NONE
+        };
+        stub.responses.iter().fold(acc.union(predicates), |acc, r| {
+            acc.union(response_surface(r, ctx))
+        })
+    })
+}
+
+/// The engine a `_rift.script` runs on, decided as the resolver decides it: a `ref` takes its
+/// registry entry's engine (the referencing script's own `engine` is overwritten), an explicit
+/// `engine` wins, then a file extension that names an engine, then `defaultEngine`. Both kinds when
+/// the `ref` names no entry, or the entry is itself a `ref`.
+fn script_surface(script: &RiftScriptConfig, ctx: ScriptContext<'_>) -> ScriptSurface {
+    if let Some(name) = &script.ref_name {
+        return match ctx.registry.get(name) {
+            Some(entry) if entry.ref_name.is_none() => leaf_surface(entry, ctx.default_engine),
+            _ => ScriptSurface::BOTH,
+        };
+    }
+    leaf_surface(script, ctx.default_engine)
+}
+
+fn leaf_surface(script: &RiftScriptConfig, default_engine: &str) -> ScriptSurface {
+    use crate::scripting::ScriptEngineKind;
+    let by_extension = || {
+        script
+            .file
+            .as_deref()
+            .and_then(|f| std::path::Path::new(f).extension())
+            .and_then(|e| e.to_str())
+            .and_then(ScriptEngineKind::from_extension)
+    };
+    let wasm = match script.engine.as_deref() {
+        Some(engine) => ScriptEngineKind::is_wasm(engine),
+        None => match by_extension() {
+            Some(Ok(kind)) => kind == ScriptEngineKind::Wasm,
+            Some(Err(_)) => false,
+            None => ScriptEngineKind::is_wasm(default_engine),
+        },
+    };
+    if wasm {
+        ScriptSurface::SANDBOXED
+    } else {
+        ScriptSurface::HOST_CODE
+    }
+}
+
+/// The gated host-code surfaces, named the same way by every door (issue #612). The list only —
+/// each door appends its own clause, so this must not carry one.
 pub const GATED_SCRIPT_SURFACES: &str = "inject/decorate/shellTransform/JS-function wait";
 
-/// True if `config`'s stubs carry a scripting surface gated by `--allowInjection`: an inject
-/// response, a `decorate` behavior, a `shellTransform`, a `wait` expressed as a JS function, a
-/// predicate `inject`, a `predicateGenerators.inject`, or `_rift.script`.
+/// True if `config`'s stubs carry any scripting surface: an inject response, a `decorate` behavior,
+/// a `shellTransform`, a `wait` expressed as a JS function, a predicate `inject`, a
+/// `predicateGenerators.inject`, or a `_rift.script` of any engine, wasm included. Kept with that
+/// meaning for callers outside this crate that gate on it alone; the doors here ask
+/// [`classify_config`] and [`ScriptGates::refusal`], which tell the two flags apart (issue #1752).
 ///
 /// The classifier behind every `allowInjection` door. A door calls this to decide admission and
 /// supplies its own failure semantics — this only answers the question, and answers it identically
 /// for all of them. Classification fails **closed**: a `_behaviors` block that cannot be parsed is
 /// treated as scripted rather than admitted as safe.
 pub fn config_uses_script_surface(config: &ImposterConfig) -> bool {
-    stubs_contain_script_surface(&config.stubs)
+    classify_config(config) != ScriptSurface::NONE
 }
 
-/// The explicit ports of every config in `configs` that trips [`config_uses_script_surface`], as a
-/// door would name them to a human; empty when all are admissible. Shared so the `--configfile` and
-/// FFI `configFile` doors list offenders identically — each still writes its own message, because
+/// The explicit ports of every config in `configs` that `gates` refuses for `refusal`, as a door
+/// would name them to a human; empty when none is. Shared so the `--configfile` and FFI
+/// `configFile` doors list offenders identically — each still writes its own message, because
 /// their remedies differ (`--allowInjection` vs `"allowInjection": true`).
-pub fn gated_offender_ports(configs: &[ImposterConfig]) -> Vec<String> {
+pub fn gated_offender_ports(
+    configs: &[ImposterConfig],
+    gates: ScriptGates,
+    refusal: GateRefusal,
+) -> Vec<String> {
     configs
         .iter()
-        .filter(|config| config_uses_script_surface(config))
+        .filter(|config| gates.refusal(classify_config(config)) == Some(refusal))
         .map(|config| match config.explicit_port() {
             Some(port) => port.to_string(),
             None => "<auto-assigned>".to_string(),
@@ -79,11 +266,17 @@ pub fn intercept_rule_uses_script_surface(rule: &crate::intercept_rules::Interce
 /// a `wait` behavior expressed as a JS function (which this engine now executes on Boa), a
 /// predicate `inject`, a `predicateGenerators.inject`, or `_rift.script`. Mirrors Mountebank's
 /// `allowInjection` gate.
+#[cfg(test)]
 pub(crate) fn stubs_contain_script_surface(stubs: &[Stub]) -> bool {
-    stubs.iter().any(|stub| {
-        stub.predicates.iter().any(predicate_has_inject)
-            || stub.responses.iter().any(response_has_script_surface)
-    })
+    let registry = std::collections::HashMap::new();
+    classify_stubs(
+        stubs,
+        ScriptContext {
+            registry: &registry,
+            default_engine: "rhai",
+        },
+    )
+    .host_code()
 }
 
 /// True if `predicate` (or anything nested under a `not`/`or`/`and`) is an `inject` predicate.
@@ -98,38 +291,48 @@ pub(crate) fn predicate_has_inject(predicate: &Predicate) -> bool {
     }
 }
 
-/// True if `response` uses any script surface: an inject response, a decorate behavior, a
-/// shellTransform behavior, a JS-function `wait` behavior, or `_rift.script`.
+/// The script surfaces of `response`: host code for an inject response, a decorate behavior, a
+/// shellTransform behavior, a JS-function `wait` behavior, or a Rhai/JavaScript `_rift.script`;
+/// sandboxed for a wasm `_rift.script`.
 ///
 /// A behaviors block on a `fault` or `_rift`-only response is classified too, although only its
 /// `repeat` takes effect there (issues #1181, #1188): the gate judges what a file asks for, not
 /// what this engine happens to run.
-fn response_has_script_surface(response: &StubResponse) -> bool {
+fn response_surface(response: &StubResponse, ctx: ScriptContext<'_>) -> ScriptSurface {
+    let host = |scripted: bool| {
+        if scripted {
+            ScriptSurface::HOST_CODE
+        } else {
+            ScriptSurface::NONE
+        }
+    };
+    let script = |script: Option<&RiftScriptConfig>| {
+        script.map_or(ScriptSurface::NONE, |s| script_surface(s, ctx))
+    };
     match response {
-        StubResponse::Inject { .. } => true,
+        StubResponse::Inject { .. } => ScriptSurface::HOST_CODE,
         StubResponse::RiftScript {
             rift,
             ignored_behaviors,
-        } => rift.script.is_some() || behaviors_are_scripted(ignored_behaviors.as_ref()),
+        } => script(rift.script.as_ref())
+            .union(host(behaviors_are_scripted(ignored_behaviors.as_ref()))),
         StubResponse::Is {
             behaviors, rift, ..
-        } => {
-            behaviors_are_scripted(behaviors.as_ref())
-                || rift.as_ref().is_some_and(|r| r.script.is_some())
-        }
+        } => host(behaviors_are_scripted(behaviors.as_ref()))
+            .union(script(rift.as_ref().and_then(|r| r.script.as_ref()))),
         StubResponse::Proxy {
             proxy, behaviors, ..
-        } => {
+        } => host(
             proxy.add_decorate_behavior.is_some()
                 || proxy
                     .predicate_generators
                     .iter()
                     .any(|g| g.get("inject").and_then(|v| v.as_str()).is_some())
-                || behaviors_are_scripted(behaviors.as_ref())
-        }
+                || behaviors_are_scripted(behaviors.as_ref()),
+        ),
         StubResponse::Fault {
             ignored_behaviors, ..
-        } => behaviors_are_scripted(ignored_behaviors.as_ref()),
+        } => host(behaviors_are_scripted(ignored_behaviors.as_ref())),
     }
 }
 
@@ -197,6 +400,157 @@ fn wait_is_plainly_numeric(wait: &serde_json::Value) -> bool {
 mod tests {
     use super::raw_behaviors_are_scripted;
     use serde_json::json;
+
+    fn classify(stub: serde_json::Value) -> super::ScriptSurface {
+        let stub: crate::imposter::Stub = serde_json::from_value(stub).expect("stub");
+        let registry = std::collections::HashMap::new();
+        super::classify_stubs(
+            &[stub],
+            super::ScriptContext {
+                registry: &registry,
+                default_engine: "rhai",
+            },
+        )
+    }
+
+    fn script(script: serde_json::Value) -> super::ScriptSurface {
+        classify(json!({"responses": [{"_rift": {"script": script}}]}))
+    }
+
+    // Issue #1752: a `_rift.script` is sandboxed only when its engine is provably wasm.
+    #[test]
+    fn only_a_provably_wasm_script_is_sandboxed() {
+        for wasm in [
+            json!({"engine": "wasm", "code": "AA=="}),
+            json!({"file": "twins/mapper.wasm"}),
+            json!({"engine": "wasm", "file": "twins/mapper.bin"}),
+        ] {
+            let surface = script(wasm.clone());
+            assert!(surface.sandboxed() && !surface.host_code(), "{wasm}");
+        }
+        for host in [
+            json!({"engine": "rhai", "code": "pass()"}),
+            json!({"engine": "javascript", "code": "pass()"}),
+            json!({"code": "pass()"}),
+            json!({"file": "x.rhai"}),
+            // A `.wasm` file the author named another engine for runs as that engine.
+            json!({"engine": "rhai", "file": "x.wasm"}),
+            json!({"engine": "lua", "code": "x"}),
+        ] {
+            let surface = script(host.clone());
+            assert!(surface.host_code() && !surface.sandboxed(), "{host}");
+        }
+    }
+
+    fn config_surface(config: serde_json::Value) -> super::ScriptSurface {
+        let config: crate::imposter::ImposterConfig =
+            serde_json::from_value(config).expect("config");
+        super::classify_config(&config)
+    }
+
+    // A `ref` runs its registry entry's engine: the resolver overwrites the referencing script's
+    // own `engine`, so `engine: "wasm"` beside a `ref` to JavaScript is host code. This was the
+    // bypass the first cut of #1752 had.
+    #[test]
+    fn a_ref_is_classified_by_its_registry_entry() {
+        let with_entry = |entry: serde_json::Value, script: serde_json::Value| {
+            config_surface(json!({"protocol": "http",
+                "_rift": {"scripts": {"x": entry}},
+                "stubs": [{"responses": [{"_rift": {"script": script}}]}]}))
+        };
+        let js = json!({"engine": "javascript", "code": "1"});
+        let surface = with_entry(js.clone(), json!({"engine": "wasm", "ref": "x"}));
+        assert!(surface.host_code() && !surface.sandboxed(), "{surface:?}");
+        let surface = with_entry(json!({"code": "1"}), json!({"engine": "wasm", "ref": "x"}));
+        assert!(
+            surface.host_code() && !surface.sandboxed(),
+            "engine-less entry is rhai"
+        );
+        let surface = with_entry(json!({"file": "c.wasm"}), json!({"ref": "x"}));
+        assert!(surface.sandboxed() && !surface.host_code(), "{surface:?}");
+        let surface = with_entry(
+            json!({"engine": "wasm", "code": "AA=="}),
+            json!({"ref": "x"}),
+        );
+        assert!(surface.sandboxed() && !surface.host_code(), "{surface:?}");
+        // A ref to nothing, or to another ref, is unknown: both flags refuse it.
+        let surface = with_entry(js, json!({"ref": "missing"}));
+        assert!(surface.host_code() && surface.sandboxed(), "{surface:?}");
+        let surface = with_entry(json!({"ref": "y"}), json!({"ref": "x"}));
+        assert!(surface.host_code() && surface.sandboxed(), "{surface:?}");
+    }
+
+    // An engine-less inline script runs on `defaultEngine`.
+    #[test]
+    fn an_engine_less_script_takes_the_default_engine() {
+        let surface = config_surface(json!({"protocol": "http",
+            "_rift": {"scriptEngine": {"defaultEngine": "wasm"}},
+            "stubs": [{"responses": [{"_rift": {"script": {"code": "AA=="}}}]}]}));
+        assert!(surface.sandboxed() && !surface.host_code(), "{surface:?}");
+        // A `.rhai` file outranks the default, as the resolver's extension rule does.
+        let surface = config_surface(json!({"protocol": "http",
+            "_rift": {"scriptEngine": {"defaultEngine": "wasm"}},
+            "stubs": [{"responses": [{"_rift": {"script": {"file": "a.rhai"}}}]}]}));
+        assert!(surface.host_code() && !surface.sandboxed(), "{surface:?}");
+    }
+
+    // A scripted behaviors block beside a wasm script on the same response is host code too.
+    #[test]
+    fn a_wasm_script_does_not_launder_scripted_behaviors() {
+        for response in [
+            json!({"_behaviors": {"decorate": "function (r, s) {}"},
+                   "_rift": {"script": {"engine": "wasm", "code": "AA=="}}}),
+            json!({"_behaviors": {"shellTransform": "cat"},
+                   "_rift": {"script": {"engine": "wasm", "code": "AA=="}}}),
+        ] {
+            let surface = classify(json!({"responses": [response.clone()]}));
+            assert!(surface.host_code() && surface.sandboxed(), "{response}");
+        }
+    }
+
+    #[test]
+    fn a_document_with_both_kinds_carries_both() {
+        let surface = classify(json!({
+            "predicates": [{"inject": "function () { return true; }"}],
+            "responses": [{"_rift": {"script": {"engine": "wasm", "code": "AA=="}}}]
+        }));
+        assert!(surface.host_code() && surface.sandboxed());
+        let surface = classify(json!({"responses": [{"is": {"statusCode": 200}}]}));
+        assert_eq!(surface, super::ScriptSurface::NONE);
+    }
+
+    #[test]
+    fn each_flag_answers_for_its_own_kind() {
+        use super::{GateRefusal, ScriptGates};
+        let both = classify(json!({
+            "predicates": [{"inject": "function () { return true; }"}],
+            "responses": [{"_rift": {"script": {"engine": "wasm", "code": "AA=="}}}]
+        }));
+        let wasm = script(json!({"engine": "wasm", "code": "AA=="}));
+        let gates = |allow_injection, allow_wasm| ScriptGates {
+            allow_injection,
+            allow_wasm,
+        };
+        assert_eq!(gates(false, true).refusal(wasm), None);
+        assert_eq!(gates(true, false).refusal(wasm), Some(GateRefusal::Wasm));
+        assert_eq!(
+            gates(false, false).refusal(both),
+            Some(GateRefusal::Injection)
+        );
+        assert_eq!(gates(true, false).refusal(both), Some(GateRefusal::Wasm));
+        assert_eq!(
+            gates(false, true).refusal(both),
+            Some(GateRefusal::Injection)
+        );
+        assert_eq!(gates(true, true).refusal(both), None);
+        let host = script(json!({"engine": "rhai", "code": "pass()"}));
+        assert_eq!(
+            gates(true, false).refusal(host),
+            None,
+            "wasm off leaves host code alone"
+        );
+        assert_eq!(gates(false, false).refusal(wasm), Some(GateRefusal::Wasm));
+    }
 
     /// Issue #1093: `null` deserializes to no behavior, so it is provably inert.
     #[test]

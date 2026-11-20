@@ -229,6 +229,13 @@ pub fn apply_rcfile_defaults_reporting(
                     cli.allow_injection = val.as_bool().unwrap_or(false);
                 }
             }
+            // On by default, so the rcfile can only turn it off; like every rcfile key it fills a
+            // default, so it cannot tell `--allow-wasm true` from no flag (issue #1752).
+            "allowWasm" | "allow_wasm" => {
+                if cli.allow_wasm {
+                    cli.allow_wasm = val.as_bool().unwrap_or(true);
+                }
+            }
             "localOnly" | "local_only" => {
                 if !cli.local_only {
                     cli.local_only = val.as_bool().unwrap_or(false);
@@ -324,10 +331,9 @@ fn describe_json_type(val: &serde_json::Value) -> &'static str {
 
 fn expected_rcfile_type(key: &str) -> Option<RcfileType> {
     match key {
-        "allowInjection" | "allow_injection" | "localOnly" | "local_only" | "requireAdminAuth"
-        | "require_admin_auth" | "noParse" | "no_parse" | "mock" | "debug" => {
-            Some(RcfileType::Boolean)
-        }
+        "allowInjection" | "allow_injection" | "allowWasm" | "allow_wasm" | "localOnly"
+        | "local_only" | "requireAdminAuth" | "require_admin_auth" | "noParse" | "no_parse"
+        | "mock" | "debug" => Some(RcfileType::Boolean),
         "host" | "logLevel" | "loglevel" | "datadir" | "configfile" | "apiKey" | "api_key" => {
             Some(RcfileType::String)
         }
@@ -808,6 +814,25 @@ mod tests {
         let mut cli = Cli::try_parse_from(["rift"]).expect("cli parse");
         apply_rcfile_defaults(&mut cli, &rcfile).expect("unknown keys are not fatal");
         assert!(logs_contain("unsupported key 'bogusKey'"));
+    }
+
+    // Issue #1752: `allowWasm` is an rcfile key; on by default, so an rcfile can turn it off, and a
+    // wrong type refuses the file.
+    #[test]
+    fn rcfile_allow_wasm_turns_the_default_off() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rcfile = dir.path().join("rift.rc");
+        std::fs::write(&rcfile, r#"{"allowWasm": false}"#).expect("write rcfile");
+        let mut c = cli(&[]);
+        assert!(c.allow_wasm);
+        apply_rcfile_defaults(&mut c, &rcfile).expect("applies");
+        assert!(!c.allow_wasm);
+        assert!(!c.allow_injection, "the other flag is untouched");
+
+        std::fs::write(&rcfile, r#"{"allowWasm": "no"}"#).expect("write rcfile");
+        let mut c = cli(&[]);
+        assert!(apply_rcfile_defaults(&mut c, &rcfile).is_err());
+        assert!(c.allow_wasm, "a refused rcfile changes nothing");
     }
 
     // Issue #1569: `mock` and `debug` are rcfile keys; the CLI flag wins over a `false`, and an

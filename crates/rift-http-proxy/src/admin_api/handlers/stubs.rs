@@ -51,7 +51,7 @@ pub async fn handle_add(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req, &manager.body_guard()).await {
@@ -65,9 +65,12 @@ pub async fn handle_add(
     };
 
     // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
-    if let Some(rejection) =
-        reject_stubs_if_injection_disallowed(std::slice::from_ref(&add_req.stub), allow_injection)
-    {
+    if let Some(rejection) = reject_stubs_if_injection_disallowed(
+        std::slice::from_ref(&add_req.stub),
+        &manager,
+        port,
+        gates,
+    ) {
         return rejection;
     }
     // After the gate, before anything is stored (issue #1580).
@@ -154,7 +157,7 @@ pub async fn handle_replace_all(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req, &manager.body_guard()).await {
@@ -170,7 +173,7 @@ pub async fn handle_replace_all(
 
     // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
     if let Some(rejection) =
-        reject_stubs_if_injection_disallowed(&replace_req.stubs, allow_injection)
+        reject_stubs_if_injection_disallowed(&replace_req.stubs, &manager, port, gates)
     {
         return rejection;
     }
@@ -334,7 +337,7 @@ pub async fn handle_replace(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     // The index is checked before the body is read, as Mountebank checks it (issue #1552).
@@ -355,7 +358,7 @@ pub async fn handle_replace(
 
     // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
     if let Some(rejection) =
-        reject_stubs_if_injection_disallowed(std::slice::from_ref(&stub), allow_injection)
+        reject_stubs_if_injection_disallowed(std::slice::from_ref(&stub), &manager, port, gates)
     {
         return rejection;
     }
@@ -439,7 +442,7 @@ pub async fn handle_replace_by_id(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req, &manager.body_guard()).await {
@@ -452,7 +455,7 @@ pub async fn handle_replace_by_id(
     };
     // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
     if let Some(rejection) =
-        reject_stubs_if_injection_disallowed(std::slice::from_ref(&stub), allow_injection)
+        reject_stubs_if_injection_disallowed(std::slice::from_ref(&stub), &manager, port, gates)
     {
         return rejection;
     }

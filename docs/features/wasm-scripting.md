@@ -9,7 +9,8 @@ JavaScript script. The component can be written in any language that builds for
 `wasm32-wasip2`. It runs in a sandbox under [wasmtime](https://wasmtime.dev), with limits that stop
 it mid-run: a wall-clock deadline, an optional fuel budget, and a memory cap.
 
-The `rift` binary includes this engine. An embedder linking `librift_ffi` needs the library's
+The `rift` binary includes this engine, and admits components by default (`--allowWasm`, see the
+[security model](#security-model)). An embedder linking `librift_ffi` needs the library's
 `wasm` feature.
 
 ---
@@ -209,4 +210,17 @@ What this does **not** isolate:
 - **The flow store.** A component reads and writes the same store as the imposter's other scripts
   and `stateOps`.
 
-A `_rift.script` with `"engine": "wasm"` still requires `--allowInjection`, as every script does.
+### `--allowWasm`
+
+Because a component reaches nothing on the host, it is admitted by `--allowWasm` (on by default),
+not by `--allowInjection`: an operator does not have to allow host code for everyone to let anyone
+load a component. `--allow-wasm false` (rcfile `allowWasm`, env `RIFT_ALLOW_WASM`, FFI
+`allowWasm`) refuses components at every door that checks `--allowInjection`: `400 invalid wasm`
+on the admin API and on `POST /admin/reload`, a startup error for `--configfile`, and a skipped
+file for `--datadir`. A document that also carries host code (an `inject`, a Rhai script) still
+needs `--allowInjection` for that part.
+
+What the flag promises is the table above, no more: it admits code whose only reach is the
+interfaces Rift links. It does not make a component's CPU time, compile time or flow-store writes
+free, and the limits are what bound those. `GET /config` reports it as `options.allowWasm`, and
+`features` says whether the build has the engine at all.

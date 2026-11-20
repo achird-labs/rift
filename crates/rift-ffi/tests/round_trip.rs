@@ -3153,6 +3153,7 @@ fn ffi_a_document_using_every_advertised_option_still_serves() {
                 "noParse" => serde_json::json!(false),
                 "config" => serde_json::json!({"imposters": []}),
                 "allowInjection" => serde_json::json!(true),
+                "allowWasm" => serde_json::json!(true),
                 "requireAdminAuth" => serde_json::json!(false),
                 // Mutually exclusive with `upstreamCaPem` (issue #974), the same way `configFile`
                 // is with `config`; the file spelling is covered by its own test.
@@ -4262,5 +4263,43 @@ fn ffi_apply_config_with_an_identical_config_keeps_runtime_state() {
 
         assert_eq!(rift_delete_all(h), 0);
         rift_stop(h);
+    }
+}
+
+// Issue #1752: a `configFile` carrying a wasm component needs no `allowInjection`, and is refused
+// with `"allowWasm": false` — the gate classifies the document; it never runs the component.
+#[test]
+fn ffi_serve_admin_config_file_wasm_is_gated_by_allow_wasm() {
+    unsafe {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(
+            &path,
+            r#"{"imposters":[{"protocol":"http","stubs":[{"responses":[{"_rift":{"script":{"engine":"wasm","code":"AA=="}}}]}]}]}"#,
+        )
+        .expect("write config");
+        let path_json = serde_json::json!(path.to_str().expect("utf8 path"));
+
+        let refused = rift_start();
+        assert!(
+            rift_serve_admin(
+                refused,
+                cstr(&format!(
+                    r#"{{"configFile": {path_json}, "allowWasm": false}}"#
+                ))
+                .as_ptr()
+            )
+            .is_null(),
+            "allowWasm=false refuses the component"
+        );
+        let err = rift_last_error();
+        assert!(!err.is_null(), "the refusal records last_error");
+        let message = take_json(err);
+        assert!(
+            message.contains(r#"engine "wasm" requires --allowWasm"#)
+                && message.contains(r#"Set "allowWasm": true"#),
+            "{message}"
+        );
+        rift_stop(refused);
     }
 }

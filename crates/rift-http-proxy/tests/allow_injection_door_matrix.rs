@@ -60,13 +60,6 @@ fn scripted_stubs() -> Vec<(&'static str, Value)> {
             json!({ "responses": [{ "_rift": { "script": {
                     "engine": "rhai", "code": "fn respond(ctx) { http(200, #{}) }" } } }] }),
         ),
-        // Issue #1751: a component is a `_rift.script`, gated by --allowInjection until #1752.
-        #[cfg(feature = "wasm")]
-        (
-            "_rift.script engine wasm",
-            json!({ "responses": [{ "_rift": { "script": {
-                    "engine": "wasm", "code": wasm_fixtures::b64(&wasm_fixtures::respond_ok()) } } }] }),
-        ),
         (
             "predicateGenerators.inject",
             json!({ "responses": [{ "proxy": { "to": "http://127.0.0.1:1", "mode": "proxyOnce",
@@ -222,10 +215,6 @@ async fn every_scripted_payload_is_refused_at_every_admin_door_without_the_flag(
         }
     }
     assert_eq!(checked, scripted_stubs().len() * 7);
-    assert_eq!(
-        scripted_stubs().len(),
-        if cfg!(feature = "wasm") { 9 } else { 8 }
-    );
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     server.shutdown().await;
 }
@@ -360,4 +349,227 @@ async fn every_scripted_payload_is_gated_at_the_reload_door() {
         }
         server.shutdown().await;
     }
+}
+
+// ===================================================================================================
+// Issue #1752: a wasm component is a sandboxed surface, gated by `--allowWasm` (on by default), not by
+// `--allowInjection`.
+// ===================================================================================================
+
+/// A stub whose response is a wasm component (the resolved, base64 form of a `.wasm` file).
+#[cfg(feature = "wasm")]
+fn wasm_stub() -> Value {
+    json!({ "responses": [{ "_rift": { "script": {
+            "engine": "wasm", "code": wasm_fixtures::b64(&wasm_fixtures::respond_ok()) } } }] })
+}
+
+/// Every door's answer to `stub` on a server started with `gate_on` and `extra`: `(door, status,
+/// error type, stub ids after)`.
+#[cfg(feature = "wasm")]
+async fn answers(
+    gate_on: bool,
+    extra: &[&str],
+    stub: &Value,
+) -> Vec<(String, u16, String, Vec<String>)> {
+    let (server, admin) = start(gate_on, extra).await;
+    let mut out = Vec::new();
+    for (door, method, path, body) in doors(stub) {
+        let port = clean_imposter(&admin).await;
+        let url = format!("{admin}{}", path.replace("{port}", &port.to_string()));
+        let (status, resp) = send(method, &url, &body).await;
+        // An admitted `PUT /imposters` replaces the clean imposter, so only a refusal is read back.
+        let ids = if status >= 400 {
+            stub_ids(&admin, port).await
+        } else {
+            Vec::new()
+        };
+        out.push((door.to_owned(), status, error_type(&resp).to_owned(), ids));
+    }
+    server.shutdown().await;
+    out
+}
+
+#[cfg(feature = "wasm")]
+#[tokio::test]
+async fn a_wasm_component_is_admitted_at_every_door_without_allow_injection() {
+    let answered = answers(false, &[], &wasm_stub()).await;
+    assert_eq!(answered.len(), 7);
+    for (door, status, kind, _) in answered {
+        assert!((200..300).contains(&status), "{door}: {status} {kind}");
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[tokio::test]
+async fn a_wasm_component_is_refused_at_every_door_with_allow_wasm_false() {
+    let (server, admin) = start(true, &["--allow-wasm", "false"]).await;
+    for (door, method, path, body) in doors(&wasm_stub()) {
+        let port = clean_imposter(&admin).await;
+        let url = format!("{admin}{}", path.replace("{port}", &port.to_string()));
+        let (status, resp) = send(method, &url, &body).await;
+        assert_eq!(status, 400, "{door}: {resp}");
+        assert_eq!(
+            resp["errors"][0],
+            json!({ "code": "invalid wasm", "type": "invalid wasm",
+                    "message": "engine \"wasm\" requires --allowWasm (disabled on this server)" }),
+            "{door}"
+        );
+        assert_eq!(stub_ids(&admin, port).await, ["clean"], "{door}");
+    }
+    server.shutdown().await;
+}
+
+// A document carrying both kinds needs both flags, and the refusal names the one missing.
+#[cfg(feature = "wasm")]
+#[tokio::test]
+async fn wasm_plus_inject_needs_both_flags_and_names_the_missing_one() {
+    let mut stub = wasm_stub();
+    stub["predicates"] = json!([{ "inject": INJECT_PRED }]);
+    for (gate_on, extra, want) in [
+        (false, &[][..], "invalid injection"),
+        (true, &["--allow-wasm", "false"][..], "invalid wasm"),
+        (false, &["--allow-wasm", "false"][..], "invalid injection"),
+    ] {
+        for (door, status, kind, ids) in answers(gate_on, extra, &stub).await {
+            assert_eq!(
+                (status, kind.as_str()),
+                (400, want),
+                "{door} {gate_on} {extra:?}"
+            );
+            assert_eq!(ids, ["clean"], "{door}");
+        }
+    }
+    for (door, status, kind, _) in answers(true, &[], &stub).await {
+        assert!(
+            (200..300).contains(&status),
+            "both flags, {door}: {status} {kind}"
+        );
+    }
+}
+
+// The reload door answers a wasm component the same way.
+#[cfg(feature = "wasm")]
+#[tokio::test]
+async fn a_wasm_component_is_gated_at_the_reload_door_by_allow_wasm() {
+    for (extra, want) in [(&[][..], 200), (&["--allow-wasm", "false"][..], 400)] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        let clean = json!({ "imposters": [{ "protocol": "http", "stubs": [clean_stub()] }] });
+        std::fs::write(&path, clean.to_string()).expect("write");
+        let mut args = vec!["--configfile", path.to_str().expect("utf8")];
+        args.extend_from_slice(extra);
+        let (server, admin) = start(false, &args).await;
+        let poisoned = json!({ "imposters": [{ "protocol": "http", "stubs": [wasm_stub()] }] });
+        std::fs::write(&path, poisoned.to_string()).expect("write");
+        let (status, resp) = send(
+            reqwest::Method::POST,
+            &format!("{admin}/admin/reload"),
+            &json!({}),
+        )
+        .await;
+        assert_eq!(status, want, "{extra:?}: {resp}");
+        if want == 400 {
+            assert_eq!(error_type(&resp), "invalid wasm");
+        }
+        server.shutdown().await;
+    }
+}
+
+// With `--allow-wasm false` and no `--allowInjection`, a component is refused for the flag it needs.
+#[cfg(feature = "wasm")]
+#[tokio::test]
+async fn a_wasm_component_with_both_flags_off_is_refused_as_wasm() {
+    for (door, status, kind, ids) in answers(false, &["--allow-wasm", "false"], &wasm_stub()).await
+    {
+        assert_eq!((status, kind.as_str()), (400, "invalid wasm"), "{door}");
+        assert_eq!(ids, ["clean"], "{door}");
+    }
+}
+
+// `--allow-wasm false` leaves host code to `--allowInjection`.
+#[tokio::test]
+async fn allow_wasm_false_does_not_refuse_host_code() {
+    let (server, admin) = start(true, &["--allow-wasm", "false"]).await;
+    let mut wrong = Vec::new();
+    for (payload, stub) in scripted_stubs() {
+        for (door, method, path, body) in doors(&stub) {
+            let port = clean_imposter(&admin).await;
+            let url = format!("{admin}{}", path.replace("{port}", &port.to_string()));
+            let (status, resp) = send(method, &url, &body).await;
+            if !(200..300).contains(&status) {
+                wrong.push(format!("{payload} via {door}: {status} {resp}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    server.shutdown().await;
+}
+
+// The bypass the first cut of #1752 had: `engine: "wasm"` beside a `ref` runs the registry entry's
+// engine, so a `ref` to JavaScript needs `--allowInjection`, in one document or in two steps.
+#[tokio::test]
+async fn a_wasm_engine_beside_a_ref_to_host_code_is_host_code() {
+    let (server, admin) = start(false, &[]).await;
+    let registry = json!({ "evil": { "engine": "javascript", "code": "1" } });
+    let script = json!({ "engine": "wasm", "ref": "evil" });
+    let (status, resp) = send(
+        reqwest::Method::POST,
+        &format!("{admin}/imposters"),
+        &json!({ "protocol": "http", "_rift": { "scripts": registry },
+                 "stubs": [{ "responses": [{ "_rift": { "script": script } }] }] }),
+    )
+    .await;
+    assert_eq!(
+        (status, error_type(&resp)),
+        (400, "invalid injection"),
+        "{resp}"
+    );
+
+    // Two steps: an imposter whose registry holds JavaScript (inert until referenced), then a stub.
+    let (status, created) = send(
+        reqwest::Method::POST,
+        &format!("{admin}/imposters"),
+        &json!({ "protocol": "http", "_rift": { "scripts": registry }, "stubs": [clean_stub()] }),
+    )
+    .await;
+    assert_eq!(status, 201, "{created}");
+    let port = created["port"].as_u64().expect("port");
+    let (status, resp) = send(
+        reqwest::Method::POST,
+        &format!("{admin}/imposters/{port}/stubs"),
+        &json!({ "stub": { "responses": [{ "_rift": { "script": script } }] } }),
+    )
+    .await;
+    assert_eq!(
+        (status, error_type(&resp)),
+        (400, "invalid injection"),
+        "{resp}"
+    );
+    server.shutdown().await;
+}
+
+// The reverse: a `ref` to a wasm entry, or an engine-less script under `defaultEngine: "wasm"`, is a
+// component, so `--allow-wasm false` refuses it even with `--allowInjection`.
+#[tokio::test]
+async fn a_ref_or_default_engine_that_resolves_to_wasm_needs_allow_wasm() {
+    let (server, admin) = start(true, &["--allow-wasm", "false"]).await;
+    for imposter in [
+        json!({ "protocol": "http", "_rift": { "scripts": { "c": { "engine": "wasm", "code": "AA==" } } },
+                "stubs": [{ "responses": [{ "_rift": { "script": { "ref": "c" } } }] }] }),
+        json!({ "protocol": "http", "_rift": { "scriptEngine": { "defaultEngine": "wasm" } },
+                "stubs": [{ "responses": [{ "_rift": { "script": { "code": "AA==" } } }] }] }),
+    ] {
+        let (status, resp) = send(
+            reqwest::Method::POST,
+            &format!("{admin}/imposters"),
+            &imposter,
+        )
+        .await;
+        assert_eq!(
+            (status, error_type(&resp)),
+            (400, "invalid wasm"),
+            "{imposter}: {resp}"
+        );
+    }
+    server.shutdown().await;
 }
