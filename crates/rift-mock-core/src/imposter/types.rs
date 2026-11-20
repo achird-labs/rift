@@ -873,7 +873,18 @@ where
 /// (it is never serialized), so this part cannot newly refuse a stored config.
 pub fn admission_check(config: &ImposterConfig) -> Result<(), String> {
     config.stubs.iter().try_for_each(admission_check_stub)?;
-    check_binary_mode(config)
+    check_binary_mode(config)?;
+    check_imposter_rng_key(config)
+}
+
+/// `_rift.scriptEngine.rngKey` at admission (issue #1795): see
+/// [`check_rng_key`](crate::imposter::rng::check_rng_key).
+pub fn check_imposter_rng_key(config: &ImposterConfig) -> Result<(), String> {
+    let engine = config.rift.as_ref().and_then(|r| r.script_engine.as_ref());
+    crate::imposter::rng::check_rng_key(
+        engine.and_then(|e| e.seed.as_ref()),
+        engine.and_then(|e| e.rng_key.as_ref()),
+    )
 }
 
 /// Mountebank's binary-mode refusal (issue #1578): an imposter created with `"mode": "binary"`
@@ -3695,6 +3706,10 @@ pub struct RiftScriptEngineConfig {
     /// entropy. Applied at every create, recreate and restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<crate::imposter::rng::Seed>,
+    /// Which parts of a request name its own random stream (issue #1795), so concurrent requests
+    /// draw the same values whatever order they arrive in. Needs `seed`.
+    #[serde(default, rename = "rngKey", skip_serializing_if = "Option::is_none")]
+    pub rng_key: Option<crate::imposter::rng::RngKey>,
 }
 
 /// Per-call limits on an `engine: "wasm"` script (`_rift.scriptEngine.wasm`, issue #1751). The

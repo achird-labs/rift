@@ -213,7 +213,9 @@ Apply both latency and errors:
 between `minMs` and `maxMs`) draws from the imposter's random stream. Set
 `_rift.scriptEngine.seed` and a sequence of requests sent one after another fires the same faults
 on the same requests every run, after a recreate or a restart too
-([Randomness](wasm-scripting.md#randomness)).
+([Randomness](wasm-scripting.md#randomness)). With `_rift.scriptEngine.rngKey` as well, requests
+sent concurrently fire the same faults too: each request rolls from a stream picked by its key
+([`rngKey`](wasm-scripting.md#concurrent-requests-rngkey)).
 
 A `_rift` block on its own, as in the fragments on this page, is a complete response: it is served
 as `is: {}` — an empty `200` (completed by `defaultResponse`, if the imposter has one) — whenever

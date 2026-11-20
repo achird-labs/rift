@@ -172,6 +172,13 @@ record.
 
 ### Added
 
+- **`_rift.scriptEngine.rngKey`: request-keyed random streams** (#1795). With a `seed`, each
+  request whose key parts (`header:<name>`, `query:<name>`, `method`, `path`, `body:<pointer>`) are
+  present draws from its own stream, picked by the seed, the key and how many earlier requests had
+  that key. A seeded replay therefore holds under concurrent requests, for `wasi:random`,
+  `_rift.fault`, template `randomInt`/`uuid` and JavaScript `Math.random`. A bad key or a missing
+  seed is refused at admission (`400 bad data`), never on decode. `rift wasm check` honours it.
+
 - **A `-wasm` flavour of `librift_ffi` per platform** (#1798): `librift_ffi-<classifier>-wasm.<ext>`,
   the C-ABI library with the WebAssembly engine, so an embedder runs components in-process without a
   source build. Same `.sha256`, self-contained check and `ffi-manifest.json` entry (platform

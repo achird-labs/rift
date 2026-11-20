@@ -1331,6 +1331,17 @@ async fn handle_request_inner(
         }
     }
 
+    // A request-keyed random stream (issue #1795), before anything the request runs draws and
+    // after the inspector, so a request it rejects takes no occurrence of its key.
+    rekey_request_stream(
+        &imposter,
+        &method,
+        &path,
+        &request_headers,
+        &query_str,
+        body_string.as_deref(),
+    );
+
     // Find matching stub
     let method_str = method.as_str();
     let path_str = path.as_str();
@@ -4840,4 +4851,63 @@ mod served_answer_tests {
         carrier.extensions_mut().insert(TcpFaultKind::Reset);
         assert!(!is_served_answer(&carrier));
     }
+}
+
+/// Move the request's random handle onto a stream of its own (issue #1795) when the imposter has a
+/// `seed` and an `rngKey` whose parts this request carries: the seed, the key's digest and how many
+/// earlier requests had that key pick the stream, so concurrent requests draw the same values
+/// whatever order they arrive in. Otherwise the request keeps the imposter's stream (#1755).
+fn rekey_request_stream(
+    imposter: &Imposter,
+    method: &str,
+    path: &str,
+    headers: &crate::util::OrderedMap<String, Vec<String>>,
+    query_str: &str,
+    body: Option<&str>,
+) {
+    use crate::imposter::rng::{ImposterRng, KeySource, Seed, key_digest, keyed_state};
+    let Some(engine) = imposter
+        .config
+        .rift
+        .as_ref()
+        .and_then(|r| r.script_engine.as_ref())
+    else {
+        return;
+    };
+    let (Some(seed), Some(key)) = (
+        engine.seed.as_ref().and_then(Seed::value),
+        engine.rng_key.as_ref(),
+    ) else {
+        return;
+    };
+    // A key admission would refuse reached here only by replay; it was logged when the imposter
+    // was built, and the request keeps the imposter's stream.
+    let Ok(parts) = key.parts() else {
+        return;
+    };
+    let Some(handle) = crate::imposter::rng::current() else {
+        return;
+    };
+    let query = parse_query_string(query_str);
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .and_then(|(_, v)| v.first().cloned())
+    };
+    let query_value = |name: &str| query.get(name).and_then(|v| v.first().cloned());
+    let source = KeySource {
+        method,
+        path,
+        header: &header,
+        query: &query_value,
+        body,
+    };
+    let Some(digest) = key_digest(&parts, &source) else {
+        return;
+    };
+    let occurrence = imposter.rng.load().next_occurrence(digest);
+    handle.rekey(ImposterRng::new(Some(keyed_state(
+        seed, digest, occurrence,
+    ))));
 }

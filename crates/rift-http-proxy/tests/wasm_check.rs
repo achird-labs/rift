@@ -458,3 +458,43 @@ async fn a_stateful_twin_matches_only_in_recorded_order() {
     let report = run_check(&opts).await.expect("runs");
     assert_eq!(report.drifted, 2, "{report:#?}");
 }
+
+// Issue #1795: the corpus's rngKey is honoured, so each stub's draws depend on its key, not on
+// where it sits in the replay.
+#[tokio::test]
+async fn a_keyed_corpus_draws_per_stub_whatever_the_order() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let component = write(dir.path(), "random.wasm", &wasm_fixtures::random_body());
+    let keyed = |stubs: Vec<Value>| {
+        serde_json::to_vec(&json!({ "port": 4545, "protocol": "http",
+            "_rift": { "scriptEngine": { "seed": 7, "rngKey": ["path"] } },
+            "stubs": stubs }))
+        .expect("json")
+    };
+    let stubs: Vec<Value> = ["/a", "/b", "/c"]
+        .iter()
+        .map(|p| stub(p, 200, "x"))
+        .collect();
+    let draws = |report: &rift_http_proxy::wasm_cli::CheckReport| -> std::collections::BTreeMap<String, Value> {
+        report
+            .drifts
+            .iter()
+            .map(|d| (format!("stub-{}", d.stub_index), d.mismatches[0].actual.clone()))
+            .collect()
+    };
+    let forward = write(dir.path(), "f.json", &keyed(stubs.clone()));
+    let first = run_check(&options(&component, &forward))
+        .await
+        .expect("runs");
+    let mut reversed = stubs;
+    reversed.reverse();
+    let backward = write(dir.path(), "b.json", &keyed(reversed));
+    let second = run_check(&options(&component, &backward))
+        .await
+        .expect("runs");
+    let (f, b) = (draws(&first), draws(&second));
+    // Stub 0 forward is stub 2 backward (/a), and so on.
+    assert_eq!(f["stub-0"], b["stub-2"]);
+    assert_eq!(f["stub-2"], b["stub-0"]);
+    assert_ne!(f["stub-0"], f["stub-1"]);
+}

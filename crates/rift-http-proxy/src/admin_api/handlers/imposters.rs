@@ -270,6 +270,11 @@ pub async fn handle_create(
         return rejection;
     }
 
+    // `_rift.scriptEngine.rngKey` (issue #1795): refused here, never on decode.
+    if let Err(message) = rift_mock_core::imposter::check_imposter_rng_key(&config) {
+        return crate::admin_api::handlers::components::bad_data(&message);
+    }
+
     // Validate all scripts in stubs before creating the imposter
     let validation_result = validate_stubs(&config.stubs);
     if !validation_result.is_valid() {
@@ -550,6 +555,12 @@ async fn replace_all_from_bytes(
             crate::admin_api::handlers::components::reject_dangling_in_config(config, &manager)
         {
             return rejection;
+        }
+    }
+
+    for config in &batch.imposters {
+        if let Err(message) = rift_mock_core::imposter::check_imposter_rng_key(config) {
+            return crate::admin_api::handlers::components::bad_data(&message);
         }
     }
 

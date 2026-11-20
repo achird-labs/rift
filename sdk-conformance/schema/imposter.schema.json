@@ -1317,6 +1317,17 @@
           "description": "Engine for a script that names none and has no `.rhai`/`.js`/`.wasm`/`.lua` file\nextension: \"rhai\", \"javascript\" or \"wasm\" (issues #1159, #1750; \"wasm\" needs a build with the\n`wasm` feature). See [`ImposterConfig::default_script_engine`].",
           "type": "string"
         },
+        "rngKey": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RngKey"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which parts of a request name its own random stream (issue #1795), so concurrent requests\ndraw the same values whatever order they arrive in. Needs `seed`."
+        },
         "seed": {
           "anyOf": [
             {
@@ -1434,6 +1445,18 @@
         "port"
       ],
       "type": "object"
+    },
+    "RngKey": {
+      "anyOf": [
+        {
+          "description": "The parts: `header:<name>`, `query:<name>`, `method`, `path`, `body:<RFC 6901 pointer>`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "`_rift.scriptEngine.rngKey` (issue #1795): which parts of a request name its own random\nstream, so concurrent requests draw the same values whatever order they arrive in. Decoded\ntolerantly, like [`Seed`]: engines before #1795 admitted any value here and ignored it. A value\nthat is not a list of strings, or names a part Rift cannot read, is refused at admission\n([`check_rng_key`]); replayed from storage, it is logged and the imposter's stream is used."
     },
     "Seed": {
       "anyOf": [

@@ -53,7 +53,7 @@ pub use types::{
     RiftFaultConfig, RiftFlowStateConfig, RiftLatencyFault, RiftMetricsConfig, RiftProxyConfig,
     RiftResponseExtension, RiftScriptConfig, RiftScriptEngineConfig, RiftTcpFault,
     RiftUpstreamConfig, SingleHeaders, Stub, StubResponse, TriedStub, TriedWhy, WasmLimits,
-    admission_check, admission_check_stub, deserialize_replayed,
+    admission_check, admission_check_stub, check_imposter_rng_key, deserialize_replayed,
 };
 
 #[cfg(feature = "schema")]
