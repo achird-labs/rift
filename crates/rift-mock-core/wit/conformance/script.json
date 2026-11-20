@@ -1,0 +1,62 @@
+{
+  "contract": "rift:mock@0.1.0",
+  "about": "Calls on rift:mock/state, in order, with the result Rift's in-memory flow store gives (docs/features/wasm-wit.md). Run on a store with no state for the request's flow or for flow \"conformance-other\". A present value is {\"json\": <value>}, compared as JSON; an absent one is null. {\"err\": \"<prefix>\"} matches an error starting with that prefix.",
+  "steps": [
+    { "note": "a missing key reads as none", "call": "get", "args": { "key": "a" }, "expect": { "ok": null } },
+    { "note": "a missing key does not exist", "call": "exists", "args": { "key": "a" }, "expect": { "ok": false } },
+    { "call": "set", "args": { "key": "a", "value": "{\"s\": \"x\", \"n\": 1}" }, "expect": { "ok": null } },
+    { "note": "a value reads back as equal JSON", "call": "get", "args": { "key": "a" }, "expect": { "ok": { "json": { "n": 1, "s": "x" } } } },
+    { "call": "exists", "args": { "key": "a" }, "expect": { "ok": true } },
+
+    { "note": "JSON null is a value, not absence", "call": "set", "args": { "key": "nul", "value": "null" }, "expect": { "ok": null } },
+    { "call": "get", "args": { "key": "nul" }, "expect": { "ok": { "json": null } } },
+    { "call": "exists", "args": { "key": "nul" }, "expect": { "ok": true } },
+
+    { "note": "a value that is not JSON text is refused", "call": "set", "args": { "key": "bad", "value": "not json" }, "expect": { "err": "set: value is not JSON" } },
+    { "note": "and nothing is stored", "call": "exists", "args": { "key": "bad" }, "expect": { "ok": false } },
+
+    { "note": "incr-by starts a missing key at 0", "call": "incr-by", "args": { "key": "c", "by": 5 }, "expect": { "ok": 5 } },
+    { "note": "and takes a negative step", "call": "incr-by", "args": { "key": "c", "by": -7 }, "expect": { "ok": -2 } },
+    { "call": "get", "args": { "key": "c" }, "expect": { "ok": { "json": -2 } } },
+    { "call": "set", "args": { "key": "s", "value": "\"text\"" }, "expect": { "ok": null } },
+    { "note": "a value that is not an integer counts as 0 and is overwritten", "call": "incr-by", "args": { "key": "s", "by": 3 }, "expect": { "ok": 3 } },
+    { "call": "set", "args": { "key": "f", "value": "1.5" }, "expect": { "ok": null } },
+    { "note": "a non-integer number counts as 0 too", "call": "incr-by", "args": { "key": "f", "by": 1 }, "expect": { "ok": 1 } },
+    { "call": "set", "args": { "key": "big", "value": "9223372036854775807" }, "expect": { "ok": null } },
+    { "note": "overflow is an error", "call": "incr-by", "args": { "key": "big", "by": 1 }, "expect": { "err": "incrementBy: " } },
+    { "note": "and leaves the value", "call": "get", "args": { "key": "big" }, "expect": { "ok": { "json": 9223372036854775807 } } },
+
+    { "note": "cas with expected = none applies when the key is absent", "call": "cas", "args": { "key": "k", "new": "1" }, "expect": { "ok": "applied" } },
+    { "note": "and conflicts with the current value when it is present", "call": "cas", "args": { "key": "k", "new": "2" }, "expect": { "ok": { "conflict": { "json": 1 } } } },
+    { "call": "cas", "args": { "key": "k", "expected": "1", "new": "2" }, "expect": { "ok": "applied" } },
+    { "note": "expected is compared as JSON, not as text", "call": "cas", "args": { "key": "a", "expected": "{\"n\":1,\"s\":\"x\"}", "new": "true" }, "expect": { "ok": "applied" } },
+    { "note": "a stale expected conflicts with the winner", "call": "cas", "args": { "key": "k", "expected": "1", "new": "3" }, "expect": { "ok": { "conflict": { "json": 2 } } } },
+    { "note": "a conflict on an absent key carries none", "call": "cas", "args": { "key": "gone", "expected": "1", "new": "3" }, "expect": { "ok": { "conflict": null } } },
+    { "call": "cas", "args": { "key": "k", "expected": "2", "new": "not json" }, "expect": { "err": "cas: value is not JSON" } },
+    { "call": "get", "args": { "key": "k" }, "expect": { "ok": { "json": 2 } } },
+
+    { "note": "flow = some(id) is another flow", "call": "set", "args": { "key": "x", "value": "1", "flow": "conformance-other" }, "expect": { "ok": null } },
+    { "call": "get", "args": { "key": "x" }, "expect": { "ok": null } },
+    { "call": "get", "args": { "key": "x", "flow": "conformance-other" }, "expect": { "ok": { "json": 1 } } },
+
+    { "note": "key-ttl on a missing key is false", "call": "key-ttl", "args": { "key": "missing", "seconds": 10 }, "expect": { "ok": false } },
+    { "note": "key-ttl on a present key is true", "call": "key-ttl", "args": { "key": "c", "seconds": 10 }, "expect": { "ok": true } },
+    { "call": "get", "args": { "key": "c" }, "expect": { "ok": { "json": -2 } } },
+    { "note": "key-ttl with seconds <= 0 deletes the key and says whether it existed", "call": "key-ttl", "args": { "key": "c", "seconds": 0 }, "expect": { "ok": true } },
+    { "call": "exists", "args": { "key": "c" }, "expect": { "ok": false } },
+    { "call": "key-ttl", "args": { "key": "c", "seconds": -1 }, "expect": { "ok": false } },
+
+    { "note": "deleting a missing key succeeds", "call": "delete", "args": { "key": "missing" }, "expect": { "ok": null } },
+    { "call": "delete", "args": { "key": "k" }, "expect": { "ok": null } },
+    { "call": "exists", "args": { "key": "k" }, "expect": { "ok": false } },
+
+    { "note": "ttl with seconds > 0 keeps the flow's keys", "call": "ttl", "args": { "seconds": 60 }, "expect": { "ok": null } },
+    { "call": "get", "args": { "key": "nul" }, "expect": { "ok": { "json": null } } },
+    { "note": "clear empties the request's flow only", "call": "clear", "args": {}, "expect": { "ok": null } },
+    { "call": "exists", "args": { "key": "nul" }, "expect": { "ok": false } },
+    { "call": "get", "args": { "key": "x", "flow": "conformance-other" }, "expect": { "ok": { "json": 1 } } },
+    { "note": "clearing an empty flow succeeds", "call": "clear", "args": {}, "expect": { "ok": null } },
+    { "note": "ttl with seconds <= 0 drops every key of that flow", "call": "ttl", "args": { "seconds": 0, "flow": "conformance-other" }, "expect": { "ok": null } },
+    { "call": "get", "args": { "key": "x", "flow": "conformance-other" }, "expect": { "ok": null } }
+  ]
+}

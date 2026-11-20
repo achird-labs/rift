@@ -75,6 +75,8 @@ imposters carrying the same bytes compile once.
 
 A component implements this world. The WIT file is
 [`crates/rift-mock-core/wit/rift-mock.wit`](https://github.com/achird-labs/rift/blob/master/crates/rift-mock-core/wit/rift-mock.wit).
+Every function's semantics, the compatibility policy for changes and a conformance guest for other
+hosts are in [The `rift:mock` WIT contract](wasm-wit.md).
 
 ```wit
 package rift:mock@0.1.0;

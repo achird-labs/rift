@@ -193,6 +193,28 @@ jobs:
           RIFT_BENCH_COMPONENT: ${{ github.workspace }}/examples/wasm/counter-twin/target/wasm32-wasip2/release/counter_twin.wasm
         run: cargo test -p rift-mock-core --features wasm --bench script_engine_bench
 
+      # Issue #1797: the published rift:mock contract. Package the release asset as release.yml
+      # does, build the conformance guest from the unpacked tarball (a guest author's view: no Rift
+      # checkout), and run its script against Rift's in-memory store.
+      - name: Package the rift:mock WIT asset and build its guest from it
+        run: |
+          cargo build --release --target wasm32-wasip2 --locked \
+            --manifest-path crates/rift-mock-core/wit/conformance/Cargo.toml
+          ./scripts/gen-rift-mock-wit.sh 0.0.0-ci "$RUNNER_TEMP/rift-mock-wit-0.0.0-ci.tar.gz" \
+            crates/rift-mock-core/wit/conformance/target/wasm32-wasip2/release/rift_mock_conformance.wasm
+          tar -xzf "$RUNNER_TEMP/rift-mock-wit-0.0.0-ci.tar.gz" -C "$RUNNER_TEMP"
+          cargo build --release --target wasm32-wasip2 --locked \
+            --manifest-path "$RUNNER_TEMP/rift-mock-wit-0.0.0-ci/conformance/Cargo.toml"
+
+      - name: Run the conformance script against the in-memory store
+        env:
+          RIFT_CONFORMANCE_COMPONENT: ${{ runner.temp }}/rift-mock-wit-0.0.0-ci/conformance/target/wasm32-wasip2/release/rift_mock_conformance.wasm
+        run: cargo test -p rift-mock-core --features wasm --test wit_contract -- --include-ignored
+
+      # `bindgen!` reads wit/ from inside the crate; the published crate must carry it.
+      - name: The published rift-mock-core carries its WIT
+        run: cargo package -p rift-mock-core --list --allow-dirty | grep -qx 'wit/rift-mock.wit'
+
   # Issue #420: the truststore keytool tests are #[ignore]d (they need a JDK on PATH), so the
   # matrix `test` job never runs them and the PKCS#12/JKS JVM-loadability guarantee has no CI
   # enforcement — a regression that breaks the container structure (e.g. dropping the Oracle
@@ -244,6 +266,12 @@ jobs:
         run: |
           ./scripts/verify-docs-coverage.sh --self-test
           ./scripts/verify-docs-coverage.sh
+
+      # Issue #1797: every rift:mock WIT function has its semantics in docs/features/wasm-wit.md.
+      - name: Verify the rift:mock contract page covers the WIT
+        run: |
+          python3 scripts/verify-wit-docs.py --self-test
+          python3 scripts/verify-wit-docs.py
 
       # The docs state Rift is compatible with the latest Mountebank; keep that version equal to the
       # differential oracle's MB_VERSION, so moving the oracle can't leave the old release advertised.

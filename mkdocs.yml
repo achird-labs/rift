@@ -108,6 +108,7 @@ nav:
       - Fault Injection: features/fault-injection.md
       - Scripting: features/scripting.md
       - WebAssembly scripting: features/wasm-scripting.md
+      - "The rift:mock WIT contract": features/wasm-wit.md
       - TLS/HTTPS: features/tls.md
       - Metrics: features/metrics.md
       - Stub Analysis: features/stub-analysis.md
