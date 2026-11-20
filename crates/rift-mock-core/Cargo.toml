@@ -146,7 +146,7 @@ tokio-test = "0.4"
 # The model-based state-machine test, tests/model/ (issue #1344).
 proptest.workspace = true
 tracing-test = "0.2"
-criterion = { version = "0.8", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 # `rift:mock` test components built from core-module text and the real WIT (issue #1751),
 # test-support/wasm_fixtures.rs: no wasm toolchain needed to run the wasm engine's tests.
 wit-component = "0.261"
@@ -164,6 +164,12 @@ harness = false
 [[bench]]
 name = "apply_config_bench"
 harness = false
+
+# Per-engine `_rift.script` costs (issue #1760).
+[[bench]]
+name = "script_engine_bench"
+harness = false
+required-features = ["javascript", "wasm"]
 
 [features]
 default = ["javascript", "quamina-matching"]

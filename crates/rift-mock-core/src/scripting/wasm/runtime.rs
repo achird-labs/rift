@@ -7,9 +7,9 @@ use super::host::bindings::{Mock, MockPre};
 use super::host::{Host, Limits};
 use super::pipe::LogPipe;
 use crate::extensions::flow_state::FlowStore;
-use crate::imposter::ResponseMode;
+use crate::imposter::{ResponseMode, WasmLimits};
 use crate::scripting::{
-    FaultDecision, ScriptCtxExtras, ScriptRequest, ScriptResult, ScriptResultBody,
+    FaultDecision, ScriptClock, ScriptCtxExtras, ScriptRequest, ScriptResult, ScriptResultBody,
     ScriptTimeoutError, WasmScript,
 };
 use anyhow::anyhow;
@@ -164,6 +164,18 @@ fn load(code: &str) -> Result<Arc<Loaded>, WasmAdmitError> {
     if let Some(hit) = cached(code) {
         return Ok(hit);
     }
+    let loaded = Arc::new(compile(code)?);
+    let key = fingerprint(code);
+    let mut cache = CACHE.lock();
+    if !cache.contains_key(&key) && cache.len() >= CACHE_CAPACITY {
+        cache.clear();
+    }
+    cache.insert(key, Arc::clone(&loaded));
+    Ok(loaded)
+}
+
+/// Decode, compile, check the imports of and link the component in `code`, bypassing the cache.
+fn compile(code: &str) -> Result<Loaded, WasmAdmitError> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(code.trim())
         .map_err(|e| WasmAdmitError::NotBase64(e.to_string()))?;
@@ -191,18 +203,11 @@ fn load(code: &str) -> Result<Arc<Loaded>, WasmAdmitError> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    let loaded = Arc::new(Loaded {
+    Ok(Loaded {
         code: Arc::from(code),
         sha12: Arc::from(sha12),
         pre,
-    });
-    let key = fingerprint(code);
-    let mut cache = CACHE.lock();
-    if !cache.contains_key(&key) && cache.len() >= CACHE_CAPACITY {
-        cache.clear();
-    }
-    cache.insert(key, Arc::clone(&loaded));
-    Ok(loaded)
+    })
 }
 
 fn root(e: &wasmtime::Error) -> String {
@@ -351,55 +356,17 @@ async fn run(
         .knobs
         .map_or_else(|| "{}".to_owned(), serde_json::Value::to_string);
     let limits = script.limits;
-    let memory_size = usize::try_from(u64::from(limits.max_memory_mib) << 20).map_err(|_| {
-        anyhow!(
-            "maxMemoryMiB {} is more than this host can address",
-            limits.max_memory_mib
-        )
-    })?;
 
     let stdout = LogPipe::new(LOG_PIPE_BYTES);
     let stderr = LogPipe::new(LOG_PIPE_BYTES);
-    let mut wasi = WasiCtxBuilder::new();
-    wasi.stdout(stdout.clone()).stderr(stderr.clone());
-    if let Some(clock) = script.clock {
-        wasi.wall_clock(GuestWallClock(clock.clone()))
-            .monotonic_clock(GuestMonotonicClock(clock.clone()));
-    }
-    let mut table = ResourceTable::new();
-    table.set_max_capacity(MAX_RESOURCES);
-    let host = Host {
-        wasi: wasi.build(),
-        table,
-        limits: Limits {
-            inner: StoreLimitsBuilder::new()
-                .instances(MAX_INSTANCES)
-                .memories(MAX_INSTANCES)
-                .tables(limits.max_tables as usize)
-                .table_elements(limits.max_table_elements as usize)
-                .trap_on_grow_failure(true)
-                .build(),
-            memory_cap: memory_size,
-            memory_total: 0,
-            memory_refused: false,
-        },
+    let (mut store, budget) = new_store(
+        &limits,
+        script.clock,
         flow_store,
-        flow_id: ctx.flow_id.clone(),
-    };
-    let mut store = Store::new(engine()?, host);
-    store.limiter(|h| &mut h.limits);
-    let budget = limits.fuel.unwrap_or(u64::MAX);
-    store.set_fuel(budget).map_err(|e| anyhow!("{e:#}"))?;
-    // A deadline past what `Instant` can hold is no deadline: the outer timeout below still bounds
-    // the call, as it bounds a Rhai or JavaScript script.
-    let deadline = Instant::now().checked_add(remaining);
-    store.set_epoch_deadline(1);
-    store.epoch_deadline_callback(move |_| {
-        Ok(match deadline {
-            Some(at) if Instant::now() >= at => UpdateDeadline::Interrupt,
-            _ => UpdateDeadline::Yield(1),
-        })
-    });
+        ctx.flow_id.clone(),
+        (stdout.clone(), stderr.clone()),
+        remaining,
+    )?;
 
     let call = async {
         let instance = loaded.pre.instantiate_async(&mut store).await?;
@@ -431,6 +398,102 @@ async fn run(
         limits.max_memory_mib,
         timeout,
     )
+}
+
+/// A store for one call: WASI with nothing behind it but the captured `logs` (stdout, stderr) and
+/// `clock`, the `rift:mock/state` host on `flow_store`, `limits`' memory, table and fuel caps, and
+/// an epoch deadline `remaining` from now. Returns the store and its fuel budget.
+fn new_store(
+    limits: &WasmLimits,
+    clock: Option<&ScriptClock>,
+    flow_store: Arc<dyn FlowStore>,
+    flow_id: String,
+    logs: (LogPipe, LogPipe),
+    remaining: Duration,
+) -> anyhow::Result<(Store<Host>, u64)> {
+    let memory_size = usize::try_from(u64::from(limits.max_memory_mib) << 20).map_err(|_| {
+        anyhow!(
+            "maxMemoryMiB {} is more than this host can address",
+            limits.max_memory_mib
+        )
+    })?;
+    let mut wasi = WasiCtxBuilder::new();
+    wasi.stdout(logs.0).stderr(logs.1);
+    if let Some(clock) = clock {
+        wasi.wall_clock(GuestWallClock(clock.clone()))
+            .monotonic_clock(GuestMonotonicClock(clock.clone()));
+    }
+    let mut table = ResourceTable::new();
+    table.set_max_capacity(MAX_RESOURCES);
+    let host = Host {
+        wasi: wasi.build(),
+        table,
+        limits: Limits {
+            inner: StoreLimitsBuilder::new()
+                .instances(MAX_INSTANCES)
+                .memories(MAX_INSTANCES)
+                .tables(limits.max_tables as usize)
+                .table_elements(limits.max_table_elements as usize)
+                .trap_on_grow_failure(true)
+                .build(),
+            memory_cap: memory_size,
+            memory_total: 0,
+            memory_refused: false,
+        },
+        flow_store,
+        flow_id,
+    };
+    let mut store = Store::new(engine()?, host);
+    store.limiter(|h| &mut h.limits);
+    let budget = limits.fuel.unwrap_or(u64::MAX);
+    store.set_fuel(budget).map_err(|e| anyhow!("{e:#}"))?;
+    // A deadline past what `Instant` can hold is no deadline: the outer timeout still bounds the
+    // call, as it bounds a Rhai or JavaScript script.
+    let deadline = Instant::now().checked_add(remaining);
+    store.set_epoch_deadline(1);
+    store.epoch_deadline_callback(move |_| {
+        Ok(match deadline {
+            Some(at) if Instant::now() >= at => UpdateDeadline::Interrupt,
+            _ => UpdateDeadline::Yield(1),
+        })
+    });
+    Ok((store, budget))
+}
+
+/// What the script-engine benches measure apart (issue #1760): the parts of a call `respond` runs
+/// together. Not an API.
+#[doc(hidden)]
+pub mod bench {
+    use super::{
+        Arc, Duration, FlowStore, LOG_PIPE_BYTES, LogPipe, WasmLimits, anyhow, compile, load,
+        new_store,
+    };
+
+    /// Compile and link `code` (base64) without the cache: what admitting a component costs.
+    pub fn compile_uncached(code: &str) -> anyhow::Result<()> {
+        compile(code).map(drop).map_err(|e| anyhow!("{e}"))
+    }
+
+    /// A fresh store, the component instantiated in it and `init("{}")` run: what every call pays
+    /// before `respond`. `code` is compiled on first use and cached.
+    pub async fn instantiate(code: &str, flow_store: Arc<dyn FlowStore>) -> anyhow::Result<()> {
+        let loaded = load(code).map_err(|e| anyhow!("{e}"))?;
+        let logs = (LogPipe::new(LOG_PIPE_BYTES), LogPipe::new(LOG_PIPE_BYTES));
+        let (mut store, _) = new_store(
+            &WasmLimits::default(),
+            None,
+            flow_store,
+            String::new(),
+            logs,
+            Duration::from_secs(5),
+        )?;
+        let instance = loaded.pre.instantiate_async(&mut store).await?;
+        instance
+            .rift_mock_handler()
+            .call_init(&mut store, "{}")
+            .await?
+            .map_err(|msg| anyhow!("init: {msg}"))
+    }
 }
 
 /// A deadline miss, as the `_rift.script` path reports one for every engine.
