@@ -161,6 +161,19 @@ pub struct RecordedRequest {
     #[serde(rename = "_mode", default, skip_serializing_if = "is_text_mode")]
     pub mode: ResponseMode,
     pub timestamp: String,
+    /// The imposter-clock instant the request arrived at, in milliseconds since the Unix epoch
+    /// (issue #1796), when it was not the wall clock: a request's own `X-Rift-Now`, or the
+    /// imposter's frozen clock. `timestamp` stays wall time. A Rift extension, like `_mode`: absent
+    /// on every request a wall-clock imposter records, so existing output is unchanged.
+    #[serde(rename = "_clockMs", default, skip_serializing_if = "Option::is_none")]
+    pub clock_ms: Option<i64>,
+    /// Where `_clockMs` came from: `"frozen"` or `"header"`.
+    #[serde(
+        rename = "_clockSource",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub clock_source: Option<crate::imposter::clock::RecordedClock>,
     /// Why this request matched — or did not. Captured at request time and attached to this
     /// entry once matching has finished, so an operator reading the journal can answer "why did
     /// this not match?" without re-deriving the scan by hand.
@@ -262,6 +275,10 @@ struct RecordedRequestWire<'a> {
     #[serde(rename = "_mode", skip_serializing_if = "is_text_mode")]
     mode: &'a ResponseMode,
     timestamp: &'a str,
+    #[serde(rename = "_clockMs", skip_serializing_if = "Option::is_none")]
+    clock_ms: Option<i64>,
+    #[serde(rename = "_clockSource", skip_serializing_if = "Option::is_none")]
+    clock_source: Option<crate::imposter::clock::RecordedClock>,
     #[serde(skip_serializing_if = "Option::is_none")]
     match_outcome: Option<&'a MatchOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -302,6 +319,8 @@ impl Serialize for RecordedRequest {
             body_omitted: self.body_omitted,
             mode: &self.mode,
             timestamp: &self.timestamp,
+            clock_ms: self.clock_ms,
+            clock_source: self.clock_source,
             match_outcome: self.match_outcome.as_ref(),
             status: self.status,
             latency_ms: self.latency_ms,
@@ -6993,6 +7012,8 @@ mod tests {
     #[test]
     fn an_unannotated_recording_omits_the_outcome_fields() {
         let req = RecordedRequest {
+            clock_ms: None,
+            clock_source: None,
             body_omitted: false,
             request_from: "127.0.0.1:1234".to_string(),
             method: "GET".to_string(),
@@ -7039,6 +7060,8 @@ mod tests {
     #[test]
     fn recorded_request_text_body_omits_mode_field() {
         let req = RecordedRequest {
+            clock_ms: None,
+            clock_source: None,
             body_omitted: false,
             request_from: "127.0.0.1:1234".to_string(),
             method: "POST".to_string(),
@@ -7066,6 +7089,8 @@ mod tests {
     #[test]
     fn recorded_request_binary_body_carries_mode_field() {
         let req = RecordedRequest {
+            clock_ms: None,
+            clock_source: None,
             body_omitted: false,
             request_from: "127.0.0.1:1234".to_string(),
             method: "POST".to_string(),
@@ -7092,6 +7117,8 @@ mod tests {
     #[test]
     fn recorded_request_without_match_outcome_serializes_unchanged() {
         let req = RecordedRequest {
+            clock_ms: None,
+            clock_source: None,
             body_omitted: false,
             request_from: "127.0.0.1:1234".to_string(),
             method: "POST".to_string(),

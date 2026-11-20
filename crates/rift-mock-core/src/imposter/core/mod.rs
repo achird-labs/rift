@@ -2496,6 +2496,8 @@ mod tests {
         // A budget of exactly 100 of the entries below (issue #1441: bytes, not a count).
         let budget = 100;
         let req = RecordedRequest {
+            clock_ms: None,
+            clock_source: None,
             body_omitted: false,
             mode: ResponseMode::Text,
             request_from: "127.0.0.1".to_string(),
@@ -2545,6 +2547,8 @@ mod tests {
             let mut headers = crate::imposter::Headers::new();
             headers.insert("X-Mock-Space".to_string(), vec![space.to_string()]);
             RecordedRequest {
+                clock_ms: None,
+                clock_source: None,
                 body_omitted: false,
                 mode: ResponseMode::Text,
                 request_from: "127.0.0.1".to_string(),

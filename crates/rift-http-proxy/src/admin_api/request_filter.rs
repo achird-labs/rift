@@ -157,6 +157,8 @@ mod tests {
         let mut headers = rift_mock_core::imposter::Headers::new();
         headers.insert(name.to_string(), vec![value.to_string()]);
         RecordedRequest {
+            clock_ms: None,
+            clock_source: None,
             body_omitted: false,
             mode: ResponseMode::Text,
             request_from: "127.0.0.1".to_string(),

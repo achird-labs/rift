@@ -170,6 +170,8 @@ mod tests {
 
     fn rec() -> RecordedRequest {
         RecordedRequest {
+            clock_ms: None,
+            clock_source: None,
             body_omitted: false,
             mode: ResponseMode::Text,
             request_from: "127.0.0.1:5000".to_string(),

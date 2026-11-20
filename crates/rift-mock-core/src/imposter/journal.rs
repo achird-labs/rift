@@ -464,6 +464,8 @@ mod tests {
 
     fn req(path: &str) -> RecordedRequest {
         RecordedRequest {
+            clock_ms: None,
+            clock_source: None,
             body_omitted: false,
             mode: ResponseMode::Text,
             request_from: "t".into(),
