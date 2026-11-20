@@ -159,6 +159,13 @@ record.
 
 ### Added
 
+- **The `wasm` feature's cost is measured, and its split recorded** (#1753): the `rift` binary and
+  images ship with the engine, and `librift_ffi` does not by default (stripped release, macOS arm64:
+  binary 24.9 → 38.6 MB, cdylib 22.4 → 35.0 MB with `--features wasm`). `rift_build_info().features`
+  reports `wasm` only when built in. CI now lints `rift-http-proxy` without `wasm`, and builds and
+  checks a wasm-flavour musl cdylib for self-containment; the `Decision Sweeps` workflow gains a
+  `wasm-sizes` run. See [Build features](docs/embedding/ffi.md#build-features).
+
 - **`--allowWasm` admits sandboxed wasm components apart from `--allowInjection`** (#1752): a
   `_rift.script` with `engine: "wasm"` no longer needs `--allowInjection`, which means host code
   execution; it is admitted by the new `--allow-wasm <BOOL>` (alias `--allowWasm`, env

@@ -41,6 +41,12 @@ MANIFEST="${MANIFEST:-$repo_root/Cargo.toml}"
 # engine feature changes those types, and forwarding them would compile the whole engine into the
 # default linter build — the released `rift-lint` is built without `schema` at all, and the
 # generated schema ships in the SDK-conformance tarball instead.
+#
+# `wasm` (issue #1753) needs no entry and must not get one: it is *not* a rift-mock-core default,
+# so this invariant does not reach it. It is on by default in rift-http-proxy (the `rift` binary
+# and images ship the engine) and forwarded but off in rift-ffi, because wasmtime + cranelift add
+# megabytes to every embedder's cdylib (sizes in docs/embedding/ffi.md, "Build features"). That
+# split is the decision, not drift: do not "fix" it by making rift-ffi's default match.
 DELIBERATELY_NOT_FORWARDED=(
   "rift-lint:javascript=schema generation does not run scripts; the engine is optional here"
   "rift-lint:quamina-matching=schema generation does not match requests; the engine is optional here"

@@ -363,13 +363,37 @@ is present, gate on it; if absent (an older cdylib), fall back to probing the sy
 ## Cargo features
 
 `rift-ffi` forwards engine features rather than hard-coding them, so a per-platform build can drop
-engines it doesn't need: `default = ["javascript", "quamina-matching"]`. (`rift_build_info().features` reports only `javascript`.) The `mimalloc` allocator
+engines it doesn't need: `default = ["javascript", "quamina-matching"]`. (`rift_build_info().features` reports `javascript`, and `wasm` when built in.) The `mimalloc` allocator
 feature is **deliberately never forwarded** — a `cdylib` must not impose a global allocator on its
 host process.
+
+### Build features
+
+| Feature | `rift` binary | `librift_ffi` (default) | What it adds |
+|:--------|:--------------|:------------------------|:-------------|
+| `javascript` | on | on | Boa: `inject`, `decorate`, JavaScript `_rift.script` |
+| `quamina-matching` | on | on | The body-field prefilter |
+| `wasm` | on | **off** | wasmtime + cranelift: `_rift.script` with `engine: "wasm"` ([WebAssembly scripting](../features/wasm-scripting.md)) |
+| `mimalloc` | on | never | The binary's global allocator |
+
+`wasm` is off in the cdylib because it is the largest feature by far. Stripped release builds on
+macOS arm64 (issue #1753):
+
+| Artifact | without `wasm` | with `wasm` | delta |
+|:---------|---------------:|------------:|------:|
+| `rift` binary | 24.9 MB | 38.6 MB | +13.7 MB |
+| `librift_ffi.dylib` | 22.4 MB | 35.0 MB | +12.6 MB |
+
+The `Decision Sweeps` workflow's `wasm-sizes` run records the same four sizes on Linux. A cdylib
+built without `wasm` refuses a wasm script at admission with `engine "wasm" is not available in this
+build`; check `rift_build_info().features` (or `GET /config` `features`) to see which you have.
 
 ```sh
 # Full-featured cdylib (default)
 cargo build -p rift-ffi --release
+
+# With the wasm engine — what the rift binary ships with
+cargo build -p rift-ffi --release --features wasm
 
 # Minimal cdylib — no scripting engine, no Quamina prefilter
 cargo build -p rift-ffi --release --no-default-features
