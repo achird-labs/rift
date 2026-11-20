@@ -186,6 +186,13 @@ jobs:
       - name: Run it behind an imposter
         run: cargo test -p rift-http-proxy --features wasm --test wasm_counter_twin -- --ignored
 
+      # Issue #1760: each script-engine benchmark once (criterion's test mode), compiling the real
+      # component in cold_compile, so the bench cannot rot between the runs that record numbers.
+      - name: Smoke-run the script engine benches
+        env:
+          RIFT_BENCH_COMPONENT: ${{ github.workspace }}/examples/wasm/counter-twin/target/wasm32-wasip2/release/counter_twin.wasm
+        run: cargo test -p rift-mock-core --features wasm --bench script_engine_bench
+
   # Issue #420: the truststore keytool tests are #[ignore]d (they need a JDK on PATH), so the
   # matrix `test` job never runs them and the PKCS#12/JKS JVM-loadability guarantee has no CI
   # enforcement — a regression that breaks the container structure (e.g. dropping the Oracle

@@ -332,6 +332,38 @@ medians, spread and each arm's delta against it.
 > `oha` reads the macOS keychain to initialise TLS even for plain-HTTP targets —
 > run outside a restricted sandbox.
 
+### Scripting engines
+
+What one `_rift.script` call costs per engine, through the same entry points the imposter handler
+uses (`benches/script_engine_bench.rs`, issue #1760). Rhai and JavaScript include the hop to a
+blocking thread every script call makes; wasm runs on the request task.
+
+| Benchmark | What it measures | Median |
+|:----------|:-----------------|-------:|
+| `cold_compile/wasm` | Compiling and linking the 84 KB counter-twin component, bypassing the cache: what admitting it costs | 22.3 ms |
+| `warm_instantiate/wasm` | A fresh `Store`, instantiation and `init`: what every wasm call pays before `respond` | 21.3 µs |
+| `warm_call/rhai` | A trivial `respond` answering `200` | 85.8 µs |
+| `warm_call/js` | The same in JavaScript | 246.8 µs |
+| `warm_call/wasm` | The same as a component, fresh `Store` included | 22.9 µs |
+| `state_roundtrip/rhai` | `respond` incrementing a flow-store counter, then answering | 90.4 µs |
+| `state_roundtrip/js` | The same in JavaScript | 260.3 µs |
+| `state_roundtrip/wasm` | The same as a component (one `incr-by` host call) | 46.4 µs |
+
+Measured 2026-11-20 on commit `18f5d29c`, Apple Silicon (aarch64 macOS), release build, wasmtime 50,
+criterion 100 samples (10 for the compile). The host was not idle (load average 7–14), so read the
+ratios rather than the absolute figures.
+
+```bash
+# Optional: compile a real component in cold_compile instead of the minimal built-in one.
+cargo build --release --target wasm32-wasip2 --manifest-path examples/wasm/counter-twin/Cargo.toml
+export RIFT_BENCH_COMPONENT=$PWD/examples/wasm/counter-twin/target/wasm32-wasip2/release/counter_twin.wasm
+cargo bench -p rift-mock-core --features wasm --bench script_engine_bench
+```
+
+A warm wasm call is well inside the epic's bar of 2× the JavaScript path: about a tenth of it. Most
+of a wasm call is the fresh `Store` and instantiation (21 of 23 µs), not `respond`. The bench is not
+in the `performance`-labelled regression gate yet; CI runs each benchmark once as a smoke test.
+
 ---
 
 ## Optimization Tips

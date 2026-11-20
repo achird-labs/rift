@@ -19,6 +19,10 @@ pub use bounded::{
 // `engine: "wasm"` (issue #1751).
 #[cfg(feature = "wasm")]
 mod wasm;
+/// The parts of a wasm call, apart, for `benches/script_engine_bench.rs` (issue #1760). Not an API.
+#[cfg(feature = "wasm")]
+#[doc(hidden)]
+pub use wasm::bench as wasm_bench;
 
 /// A `_rift.script` with `engine: "wasm"`, as one call needs it (issue #1751).
 #[derive(Debug, Clone, Copy)]

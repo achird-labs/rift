@@ -167,6 +167,21 @@ gives up its thread every 10 ms, so a slow component does not hold up other requ
 time limit: it counts instructions, so the same component on the same input always spends the same
 fuel. Use it when a test needs a budget that does not depend on the machine.
 
+### What a request costs
+
+Each call gets a fresh `Store`: the component is instantiated and `init` runs before `respond`, so
+no state survives between requests except what the flow store holds. Measured with
+`benches/script_engine_bench.rs` (Apple Silicon, release, a loaded host; see
+[Performance](../performance/index.md#scripting-engines) for the full table):
+
+| | wasm | Rhai | JavaScript |
+|:--|--:|--:|--:|
+| Trivial `respond` answering `200` | 23 µs | 86 µs | 247 µs |
+| Plus one flow-store increment | 46 µs | 90 µs | 260 µs |
+
+About 21 µs of the wasm figure is the fresh `Store` and instantiation. Compiling a component is paid
+once, at admission (about 22 ms for the 84 KB counter-twin example), and cached after that.
+
 ---
 
 ## Time

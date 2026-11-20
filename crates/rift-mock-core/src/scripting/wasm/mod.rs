@@ -15,6 +15,7 @@ mod host;
 mod pipe;
 mod runtime;
 
+pub use runtime::bench;
 pub(crate) use runtime::{admit, emit_logs, respond};
 
 #[cfg(test)]

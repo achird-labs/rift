@@ -159,6 +159,12 @@ record.
 
 ### Added
 
+- **`script_engine_bench`: what a `_rift.script` call costs in Rhai, JavaScript and wasm** (#1760).
+  Cold compile, warm instantiation, a trivial call and a flow-store round trip, recorded in
+  `docs/performance/index.md` and `docs/features/wasm-scripting.md`. A warm wasm call measures
+  about a tenth of the JavaScript path. CI runs each benchmark once against the counter-twin
+  example.
+
 - **Each imposter has its own clock** (#1754): `GET/PUT/DELETE /imposters/{port}/clock` freeze it
   at an instant (`{"nowMs": …}`), step it (`{"advanceMs": …}`) and put it back on wall time, and with
   `_rift.scriptEngine.clock: "header"` a request's `X-Rift-Now` is its own instant (a malformed one
