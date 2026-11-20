@@ -141,3 +141,133 @@ async fn a_restart_or_recreate_resets_the_clock() {
     let recreated = manager.get_imposter(port).expect("imposter");
     assert_eq!(recreated.clock().mode(), ClockMode::Wall);
 }
+
+/// Every recorded request on `port`, as the admin API prints them.
+fn recorded(manager: &ImposterManager, port: u16) -> Vec<Value> {
+    manager
+        .get_imposter(port)
+        .expect("imposter")
+        .get_recorded_requests()
+        .iter()
+        .map(|r| serde_json::to_value(r).expect("serializes"))
+        .collect()
+}
+
+fn recording_imposter(engine: Option<Value>) -> ImposterConfig {
+    let mut config = json!({
+        "protocol": "http",
+        "recordRequests": true,
+        "stubs": [{ "responses": [{ "is": { "statusCode": 200 } }] }]
+    });
+    if let Some(engine) = engine {
+        config["_rift"] = json!({ "scriptEngine": engine });
+    }
+    cfg(config)
+}
+
+// Issue #1796: a request recorded while the clock is frozen carries the virtual instant it arrived
+// at; `timestamp` stays wall time; after a reset, nothing is added.
+#[tokio::test]
+async fn recorded_requests_carry_the_frozen_instant() {
+    let manager = ImposterManager::new();
+    let port = manager
+        .create_imposter(recording_imposter(None))
+        .await
+        .expect("create");
+    let imposter = manager.get_imposter(port).expect("imposter");
+    imposter.clock().freeze(1_700_000_000_000).expect("freeze");
+    get(port, "/one", None).await;
+    get(port, "/two", None).await;
+    imposter.clock().advance(5_000).expect("advance");
+    get(port, "/three", None).await;
+    imposter.clock().reset();
+    get(port, "/four", None).await;
+
+    let requests = recorded(&manager, port);
+    let clock: Vec<&Value> = requests.iter().map(|r| &r["_clockMs"]).collect();
+    assert_eq!(
+        clock,
+        [
+            &json!(1_700_000_000_000_i64),
+            &json!(1_700_000_000_000_i64),
+            &json!(1_700_000_005_000_i64),
+            &Value::Null
+        ]
+    );
+    for r in &requests[..3] {
+        assert_eq!(r["_clockSource"], "frozen");
+        let year: i32 = r["timestamp"].as_str().expect("timestamp")[..4]
+            .parse()
+            .expect("year");
+        assert!(year >= 2025, "timestamp stays wall time: {r}");
+    }
+    assert!(requests[3].get("_clockSource").is_none());
+}
+
+// Header mode: each request records its own `X-Rift-Now`, concurrently.
+#[tokio::test]
+async fn recorded_requests_carry_their_own_header_instant() {
+    let manager = ImposterManager::new();
+    let port = manager
+        .create_imposter(recording_imposter(Some(json!({ "clock": "header" }))))
+        .await
+        .expect("create");
+    let (a, b) = tokio::join!(get(port, "/a", Some("1000")), get(port, "/b", Some("2000")));
+    assert_eq!((a.0, b.0), (200, 200));
+    let mut seen: Vec<(String, i64, String)> = recorded(&manager, port)
+        .iter()
+        .map(|r| {
+            (
+                r["path"].as_str().expect("path").to_owned(),
+                r["_clockMs"].as_i64().expect("clock"),
+                r["_clockSource"].as_str().expect("source").to_owned(),
+            )
+        })
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        [
+            ("/a".into(), 1000, "header".into()),
+            ("/b".into(), 2000, "header".into())
+        ]
+    );
+}
+
+// A wall-clock imposter records exactly what it did before, with or without a scriptEngine block.
+#[tokio::test]
+async fn a_wall_clock_imposter_records_no_clock_fields() {
+    for engine in [None, Some(json!({ "timeoutMs": 1000 }))] {
+        let manager = ImposterManager::new();
+        let port = manager
+            .create_imposter(recording_imposter(engine))
+            .await
+            .expect("create");
+        get(port, "/x", None).await;
+        let requests = recorded(&manager, port);
+        let keys: Vec<&String> = requests[0].as_object().expect("object").keys().collect();
+        assert!(
+            !keys.iter().any(|k| k.starts_with("_clock")),
+            "no clock fields on wall time: {keys:?}"
+        );
+    }
+}
+
+// A journal written before #1796, or by a later release with another source, still decodes.
+#[test]
+fn recorded_requests_decode_with_and_without_the_clock_fields() {
+    use rift_mock_core::imposter::RecordedRequest;
+    let old = json!({ "requestFrom": "127.0.0.1:1", "method": "GET", "path": "/", "query": {},
+                      "headers": {}, "timestamp": "2026-01-01T00:00:00.000Z" });
+    let decoded: RecordedRequest = serde_json::from_value(old).expect("an old entry decodes");
+    assert_eq!(decoded.clock_ms, None);
+    let newer = json!({ "requestFrom": "127.0.0.1:1", "method": "GET", "path": "/", "query": {},
+                        "headers": {}, "timestamp": "2026-01-01T00:00:00.000Z",
+                        "_clockMs": 5, "_clockSource": "simulated" });
+    let decoded: RecordedRequest = serde_json::from_value(newer).expect("decodes");
+    assert_eq!(decoded.clock_ms, Some(5));
+    assert_eq!(
+        decoded.clock_source,
+        Some(rift_mock_core::imposter::clock::RecordedClock::Unrecognized)
+    );
+}

@@ -161,6 +161,33 @@ pub enum ClockSource {
     Unrecognized,
 }
 
+/// Where a recorded request's `_clockMs` came from (issue #1796). Only a request whose instant is not
+/// the wall clock carries one: a wall-clock imposter records exactly what it did before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordedClock {
+    /// The imposter's clock was frozen (or stepped) when the request arrived.
+    Frozen,
+    /// The request named its own instant in `X-Rift-Now`.
+    Header,
+    /// A value a later release wrote: kept decodable, as a journal outlives the engine that wrote it.
+    #[serde(other)]
+    Unrecognized,
+}
+
+/// The instant a request arrives at, when it is not the wall clock (issue #1796): its own
+/// `X-Rift-Now`, else the imposter's frozen clock, else `None`. Read on the request's task.
+#[must_use]
+pub fn recorded_instant(clock: &ImposterClock) -> Option<(i64, RecordedClock)> {
+    match request_override() {
+        Some(ms) => Some((ms, RecordedClock::Header)),
+        None => match clock.mode() {
+            ClockMode::Wall => None,
+            ClockMode::Frozen { now_ms } => Some((now_ms, RecordedClock::Frozen)),
+        },
+    }
+}
+
 /// The header a request names its own instant in, under `clock: "header"`.
 pub const NOW_HEADER: &str = "x-rift-now";
 

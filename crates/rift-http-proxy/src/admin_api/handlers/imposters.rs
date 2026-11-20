@@ -1865,6 +1865,8 @@ mod requests_filter_tests {
             headers.insert("X-Tenant".to_string(), vec![t.to_string()]);
         }
         RecordedRequest {
+            clock_ms: None,
+            clock_source: None,
             body_omitted: false,
             mode: ResponseMode::Text,
             request_from: "127.0.0.1".to_string(),
@@ -2650,6 +2652,8 @@ mod verify_tests {
 
     fn rec(method: &str, path: &str) -> RecordedRequest {
         RecordedRequest {
+            clock_ms: None,
+            clock_source: None,
             body_omitted: false,
             mode: ResponseMode::Text,
             request_from: "127.0.0.1:5000".to_string(),
@@ -3127,6 +3131,8 @@ mod replace_all_tests {
             .get_imposter(imposter_port)
             .expect("imposter")
             .record_request(RecordedRequest {
+                clock_ms: None,
+                clock_source: None,
                 body_omitted: false,
                 mode: ResponseMode::Text,
                 request_from: "127.0.0.1:5000".to_string(),

@@ -877,6 +877,26 @@ Instants are milliseconds since the Unix epoch from year 1 to year 9999
 (`-62135596800000` to `253402300799999`); `nowMs`, an `advanceMs` result or an `X-Rift-Now` outside
 that is refused, as every platform's clock can hold that range.
 
+### Recorded requests on the imposter's timeline
+
+`timestamp` on a recorded request is always wall time. A request that arrived while the imposter's
+clock was not the wall also carries where it sits on the imposter's timeline (issue #1796):
+
+| Field | Value |
+|:------|:------|
+| `_clockMs` | The instant it arrived at, in milliseconds since the Unix epoch: its own `X-Rift-Now`, else the frozen clock. |
+| `_clockSource` | `"header"` or `"frozen"`. |
+
+A request recorded on wall time has neither, so an imposter that never touches its clock records
+exactly what it did before. A reader falls back to `timestamp` when they are absent. They appear
+wherever recorded requests do: `GET /imposters/{port}`, `savedRequests`, and the
+`savedRequests/stream` and `/events` streams.
+
+```json
+{ "method": "POST", "path": "/retry", "timestamp": "2026-11-20T10:15:03.120Z",
+  "_clockMs": 1700000030000, "_clockSource": "frozen" }
+```
+
 ---
 
 ## Components
