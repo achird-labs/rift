@@ -558,6 +558,34 @@ async fn alias_endpoint_streams_scoped_requests() {
     running.shutdown().await;
 }
 
+// Issue #1796: a request recorded on a frozen imposter clock streams its `_clockMs`/`_clockSource`,
+// as `savedRequests` prints them (the same serialization).
+#[tokio::test]
+async fn a_stream_carries_the_imposter_clock_instant() {
+    let (addr, mgr, running) = start_server(None).await;
+    let a = create(&mgr, serde_json::json!({"protocol":"http","recordRequests":true,"stubs":[{"responses":[{"is":{"statusCode":200}}]}]})).await;
+    mgr.get_imposter(a)
+        .expect("imposter")
+        .clock()
+        .freeze(1_700_000_000_000)
+        .expect("freeze");
+    let (mut sse, _status) =
+        Sse::connect(addr, &format!("/imposters/{a}/savedRequests/stream"), None).await;
+    sse.wait_for("hello", Duration::from_secs(5))
+        .await
+        .expect("hello");
+    reqwest::get(format!("http://127.0.0.1:{a}/at"))
+        .await
+        .expect("req");
+    let ev = sse
+        .wait_for("request", Duration::from_secs(5))
+        .await
+        .expect("request event");
+    assert_eq!(json(&ev)["request"]["_clockMs"], 1_700_000_000_000_i64);
+    assert_eq!(json(&ev)["request"]["_clockSource"], "frozen");
+    running.shutdown().await;
+}
+
 #[tokio::test]
 async fn no_types_param_streams_both_families_with_monotonic_ids() {
     let (addr, mgr, running) = start_server(None).await;

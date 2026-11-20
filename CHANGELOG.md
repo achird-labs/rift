@@ -159,6 +159,11 @@ record.
 
 ### Added
 
+- **Recorded requests carry their imposter-clock instant** (#1796): `_clockMs` and `_clockSource`
+  (`"frozen"` or `"header"`) when the request arrived while the imposter's clock was frozen or it
+  named its own `X-Rift-Now`. `timestamp` stays wall time, and a request recorded on wall time
+  prints exactly as before. In `savedRequests`, the imposter view and both SSE streams.
+
 - **`rift wasm check`: replay a saved recording against a component, offline** (#1759). The corpus
   is the saved imposter (`rift save`): its stubs replay in document order through `rift-verify`'s
   request generator (now a shared library module), against the component run in-process with one

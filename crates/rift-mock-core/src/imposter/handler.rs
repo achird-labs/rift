@@ -1236,6 +1236,7 @@ async fn handle_request_inner(
     // `None` means there is no entry to annotate — recording is off, or the backend has no stable
     // indices.
     *journal_index = if imposter.config.record_requests {
+        let arrived_at = crate::imposter::clock::recorded_instant(&imposter.clock);
         let recorded = RecordedRequest {
             body_omitted: false,
             request_from: client_addr.to_string(),
@@ -1260,6 +1261,9 @@ async fn handle_request_inner(
             body: (!body_undefined).then(|| body_string.as_deref().unwrap_or_default().to_string()),
             mode: body_mode.clone(),
             timestamp: super::types::journal_timestamp(chrono::Utc::now()),
+            // Its place on the imposter's timeline, when that is not the wall (issue #1796).
+            clock_ms: arrived_at.map(|(ms, _)| ms),
+            clock_source: arrived_at.map(|(_, source)| source),
             // Filled in after the match, via `attach_match_outcome` below.
             match_outcome: None,
             // Filled in after the response exists, by `attach_response_outcome` in the caller.

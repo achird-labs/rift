@@ -258,6 +258,12 @@ while the clock's mode and instant do not change, but a change can move it back:
 freezing at an earlier instant. A component that keeps a monotonic reading across calls and
 subtracts should allow for that.
 
+A recorded request carries the imposter-clock instant it arrived at (`_clockMs`, with
+`_clockSource`) whenever that was not the wall, so a harness that drives the clock can place each
+request on its own timeline and check timing across the mock, such as "the retry came within 30 s
+of the timeout" ([Recorded requests on the imposter's
+timeline](../api/index.md#recorded-requests-on-the-imposters-timeline)).
+
 What the clock does **not** reach: guest timers. `wasi:clocks` `subscribe-duration` and
 `subscribe-instant` (a `sleep` in the guest) still wait in real time, count against `timeoutMs`,
 and are not woken by a step. A component models a delay by comparing clock reads across calls, not
