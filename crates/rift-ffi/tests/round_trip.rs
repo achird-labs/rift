@@ -771,6 +771,12 @@ fn ffi_build_info_reports_version_and_features() {
             .iter()
             .map(|f| f.as_str().expect("feature str"))
             .collect();
+        // Issue #1753: `wasm` is off by default in the cdylib and reported only when built in.
+        assert_eq!(
+            features.contains(&"wasm"),
+            cfg!(feature = "wasm"),
+            "{features:?}"
+        );
         if cfg!(feature = "javascript") {
             assert!(
                 features.contains(&"javascript"),

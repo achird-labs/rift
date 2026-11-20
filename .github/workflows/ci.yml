@@ -465,6 +465,17 @@ jobs:
       - name: Assert the musl cdylib is self-contained
         run: ./scripts/check-ffi-selfcontained.sh target/x86_64-unknown-linux-musl/release/librift_ffi.so
 
+      # Issue #1753: the cdylib's `wasm` feature is off by default, so the build above is the one
+      # embedders get. An embedder that turns it on links wasmtime + cranelift; prove that flavour
+      # still builds for musl and stays self-contained, into its own target dir so the default
+      # artifact above is not overwritten.
+      - name: Build and check the wasm-flavour musl cdylib
+        run: |
+          RUSTFLAGS="-C target-feature=-crt-static" \
+            cross build --release --package rift-ffi --target x86_64-unknown-linux-musl \
+            --no-default-features --features javascript,wasm --target-dir target/wasm
+          ./scripts/check-ffi-selfcontained.sh target/wasm/x86_64-unknown-linux-musl/release/librift_ffi.so
+
   static-image:
     name: Static Image
     runs-on: ubuntu-latest
@@ -626,6 +637,11 @@ jobs:
       # too — otherwise warnings can silently accumulate in feature-gated paths (issue #599).
       - name: Run clippy (no default features)
         run: cargo clippy -p rift-mock-core -p rift-ffi --all-targets --no-default-features -- -D warnings
+
+      # Issue #1753: `wasm` is a default of the rift binary only. A binary built without it (what
+      # an embedder links via rift-ffi's defaults) must keep compiling and linting.
+      - name: Run clippy (rift-http-proxy without wasm)
+        run: cargo clippy -p rift-http-proxy --all-targets --no-default-features --features javascript,quamina-matching -- -D warnings
 
       # rift-lint without its `javascript` feature (issue #1156). Every other rift-lint job runs
       # `--all-features`, which is neither the shipped configuration nor this one, so the opt-out

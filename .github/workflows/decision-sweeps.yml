@@ -22,7 +22,7 @@ on:
       sweep:
         description: "Which sweep to run"
         type: choice
-        options: [both, allocator, topology, quamina]
+        options: [both, allocator, topology, quamina, wasm-sizes]
         default: both
       reps:
         description: "Repetitions per variant (medians taken offline)"
@@ -212,7 +212,8 @@ jobs:
           set -euo pipefail
           for q in on off; do
             if [ "$q" = "on" ]; then FEATURES=(); else
-              FEATURES=(--no-default-features --features javascript,mimalloc); fi
+              # `wasm` (issue #1753) kept on, so the two builds differ in quamina alone.
+              FEATURES=(--no-default-features --features javascript,mimalloc,wasm); fi
             echo "===== building quamina=$q ====="
             cargo build --release -p rift-http-proxy --jobs 4 \
               --target-dir "target/quamina-$q" "${FEATURES[@]}"
@@ -273,4 +274,39 @@ jobs:
             tests/benchmark/results/environment.txt
             tests/benchmark/results/binary-sizes.txt
             tests/benchmark/results/*.log
+          retention-days: 30
+
+  # Issue #1753: what the `wasm` feature (wasmtime + cranelift) costs in bytes, for the shipped
+  # `rift` binary (on by default) and the `librift_ffi` cdylib embedders link (off by default).
+  # Stripped release builds, the release profile's settings. Each flavour gets its own target dir.
+  wasm-sizes:
+    if: ${{ inputs.sweep == 'wasm-sizes' }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build each flavour
+        run: |
+          set -euo pipefail
+          build() { cargo build --release --jobs 4 --target-dir "target/$1" "${@:2}"; }
+          build bin-wasm -p rift-http-proxy --bin rift-http-proxy
+          build bin-nowasm -p rift-http-proxy --bin rift-http-proxy \
+            --no-default-features --features javascript,quamina-matching,mimalloc
+          build ffi-nowasm -p rift-ffi
+          build ffi-wasm -p rift-ffi --features wasm
+      - name: Record binary sizes
+        run: |
+          mkdir -p tests/benchmark/results
+          {
+            uname -sm
+            for f in bin-wasm/release/rift-http-proxy bin-nowasm/release/rift-http-proxy \
+                     ffi-nowasm/release/librift_ffi.so ffi-wasm/release/librift_ffi.so; do
+              printf "%-36s %s bytes\n" "$f" "$(stat -c%s "target/$f")"
+            done
+          } | tee tests/benchmark/results/binary-sizes.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wasm-binary-sizes
+          path: tests/benchmark/results/binary-sizes.txt
           retention-days: 30

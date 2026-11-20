@@ -9,9 +9,10 @@ JavaScript script. The component can be written in any language that builds for
 `wasm32-wasip2`. It runs in a sandbox under [wasmtime](https://wasmtime.dev), with limits that stop
 it mid-run: a wall-clock deadline, an optional fuel budget, and a memory cap.
 
-The `rift` binary includes this engine, and admits components by default (`--allowWasm`, see the
-[security model](#security-model)). An embedder linking `librift_ffi` needs the library's
-`wasm` feature.
+The released `rift` binary and images include this engine and admit components by default
+(`--allowWasm`, see the [security model](#security-model)). The C-ABI library `librift_ffi` does
+**not** by default: the engine adds about 13 MB, so an embedder builds the library with
+`--features wasm`. See [Build features](../embedding/ffi.md#build-features).
 
 ---
 
