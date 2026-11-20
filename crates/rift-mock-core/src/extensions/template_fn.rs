@@ -602,7 +602,8 @@ fn parse_offset(s: &str) -> Result<chrono::Duration, String> {
 
 /// Evaluate `now` with an optional `offset` and `format`. Default format is RFC3339.
 fn eval_now(offset: Option<&str>, format: Option<&str>) -> Result<String, String> {
-    let mut dt = chrono::Utc::now();
+    // The imposter's clock, or the request's X-Rift-Now (issue #1756).
+    let mut dt = crate::scripting::env::now_utc();
     if let Some(off) = offset {
         let duration = parse_offset(off)?;
         dt = dt

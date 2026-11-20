@@ -717,14 +717,17 @@ pub async fn handle_imposter_request(
     let request_rng = imposter.request_rng();
     let inner = Box::pin(crate::imposter::rng::with_request_rng(
         request_rng,
-        crate::imposter::clock::with_request_override(
-            request_now,
-            handle_request_inner(
-                req,
-                Arc::clone(&imposter),
-                client_addr,
-                &mut journal_index,
-                &mut inspection,
+        crate::imposter::clock::with_imposter_clock(
+            Arc::clone(&imposter.clock),
+            crate::imposter::clock::with_request_override(
+                request_now,
+                handle_request_inner(
+                    req,
+                    Arc::clone(&imposter),
+                    client_addr,
+                    &mut journal_index,
+                    &mut inspection,
+                ),
             ),
         ),
     ));

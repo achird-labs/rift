@@ -239,7 +239,8 @@ static DOUBLE_BRACE_FINDER: std::sync::LazyLock<memchr::memmem::Finder<'static>>
 /// UTC timestamp. A token whose offset overflows the representable date range is left unchanged
 /// rather than panicking. These are a legacy extension, not standard Mountebank/WireMock.
 pub fn apply_date_templates(body: &str) -> String {
-    let now = chrono::Utc::now();
+    // The imposter's clock, or the request's X-Rift-Now (issue #1756).
+    let now = crate::scripting::env::now_utc();
     let days_re = days_regex();
     let months_re = months_regex();
     let now_re = now_regex();

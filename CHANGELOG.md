@@ -130,6 +130,14 @@ record.
 
 ### Changed
 
+- **Rhai, JavaScript and templates read the imposter's clock and seed** (#1756), as wasm, flow-state
+  TTLs and `_rift.fault` already did. Rhai `timestamp_header()`, JavaScript `Date.now()`/`new
+  Date()`, and the template `now` (and `{{NOW}}`, `{{DAYS±N}}`) read the imposter clock, or a
+  request's `X-Rift-Now`. JavaScript `Math.random()` draws from the seeded stream. This holds in
+  `_rift.script`, Mountebank `inject`/`decorate`/`wait` functions, and for Mountebank scripts of
+  several imposters sharing a worker. On wall time with no seed nothing changes. Timers keep real
+  time.
+
 - **Script engine names are parsed in one place** (#1750): `ScriptEngineKind` (`rhai`, `javascript`
   or its alias `js`, `wasm`) replaces seven hand-written allowlists, with the same error messages.
   `wasm` (and a `.wasm` file) is recognised and refused with `engine "wasm" is not available in this

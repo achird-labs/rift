@@ -24,6 +24,11 @@ fn imposter(seed: Option<Value>) -> ImposterConfig {
                 "responses": [{ "is": { "statusCode": 200, "body": "{{ randomInt 1 1000000000 }}" },
                     "_rift": { "templated": true } }] }),
     ];
+    // JavaScript's Math.random draws from the same stream (issue #1756).
+    #[cfg(feature = "javascript")]
+    stubs.push(json!({ "predicates": [{ "equals": { "path": "/js" } }],
+        "responses": [{ "_rift": { "script": { "engine": "javascript",
+            "code": "function respond(ctx) { return http(200, String(Math.random())); }" } } }] }));
     #[cfg(feature = "wasm")]
     stubs.push(json!({ "predicates": [{ "equals": { "path": "/wasm" } }],
         "responses": [{ "_rift": { "script": { "engine": "wasm",
@@ -41,10 +46,12 @@ type Answer = (u16, Vec<(String, String)>, String);
 
 /// The fixed sequence, cycling the stubs; `/wasm` answers its component's draw in the body.
 async fn run(port: u16) -> Vec<Answer> {
+    let mut paths: Vec<&str> = Vec::new();
+    paths.extend(["/fault", "/template"]);
+    #[cfg(feature = "javascript")]
+    paths.push("/js");
     #[cfg(feature = "wasm")]
-    let paths = ["/fault", "/template", "/wasm"];
-    #[cfg(not(feature = "wasm"))]
-    let paths = ["/fault", "/template"];
+    paths.push("/wasm");
     let client = reqwest::Client::new();
     let mut out = Vec::new();
     for i in 0..10 {

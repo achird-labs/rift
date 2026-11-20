@@ -289,6 +289,24 @@ pub(crate) fn bounded_js_context() -> Context {
 fn sealed_js_context_builder() -> boa_engine::context::ContextBuilder {
     boa_engine::context::ContextBuilder::new()
         .module_loader(std::rc::Rc::new(boa_engine::module::IdleModuleLoader))
+        .clock(std::rc::Rc::new(ScriptClockSource::default()))
+}
+
+/// Boa's clock, with `Date.now()` / `new Date()` reading the run's time (issue #1756): its
+/// imposter's clock or its request's `X-Rift-Now`. Read per call, never per context: realms are
+/// shared across imposters, so it asks the run executing now. The monotonic reading Boa measures
+/// durations with stays real time.
+#[derive(Default)]
+struct ScriptClockSource(boa_engine::context::time::StdClock);
+
+impl boa_engine::context::Clock for ScriptClockSource {
+    fn now(&self) -> boa_engine::context::time::JsInstant {
+        self.0.now()
+    }
+
+    fn system_time_millis(&self) -> i64 {
+        super::env::now_ms()
+    }
 }
 
 /// Build a sealed context, then remove `Atomics.waitAsync` from it (review of #1593). A waiter
@@ -313,6 +331,28 @@ fn build_sealed_js_context(builder: boa_engine::context::ContextBuilder) -> Cont
     assert!(
         matches!(removed, Some(Ok(_))),
         "could not remove Atomics.waitAsync from a script context"
+    );
+    // `Math.random()` draws from the run's stream (issue #1756): Boa's own calls its process RNG
+    // with no hook, so it is replaced. Fail closed, as above: a context still drawing Boa's own
+    // random numbers would break a seeded replay silently.
+    let math = context
+        .global_object()
+        .get(js_string!("Math"), &mut context)
+        .ok()
+        .and_then(|math| math.as_object());
+    let random = boa_engine::object::FunctionObjectBuilder::new(
+        context.realm(),
+        boa_engine::native_function::NativeFunction::from_fn_ptr(|_, _, _| {
+            Ok(JsValue::from(super::env::random_f64()))
+        }),
+    )
+    .name(js_string!("random"))
+    .length(0)
+    .build();
+    let replaced = math.map(|math| math.set(js_string!("random"), random, false, &mut context));
+    assert!(
+        matches!(replaced, Some(Ok(true))),
+        "could not replace Math.random in a script context"
     );
     context
 }
@@ -446,6 +486,16 @@ impl MbJsThread {
 
     /// Run the ready jobs of the runs in flight, end the runs that are done, and try the deferred
     /// starts again.
+    /// Put a run start off until the next step, keeping the submitter's time, random stream
+    /// (issue #1756) and log dispatcher: the step runs outside the job that submitted it.
+    fn defer(&mut self, start: DeferredStart) {
+        let env = super::env::ScriptEnv::capture();
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+        self.deferred.push(Box::new(move |thread: &mut MbJsThread| {
+            env.enter(|| tracing::dispatcher::with_default(&dispatcher, || start(thread)));
+        }));
+    }
+
     fn step(&mut self) {
         for realm in &mut self.realms {
             if !realm.runs.is_empty() {
@@ -1142,10 +1192,14 @@ fn submit_mb_job(
     job: impl FnOnce(&mut MbJsThread, Claim) + Send + 'static,
 ) -> Result<()> {
     let pool = mb_js_pool();
+    // The submitter's time and random stream (issue #1756) travel with the job, as its dispatcher.
+    let env = super::env::ScriptEnv::capture();
     let Some(key) = key else {
         let dispatcher = tracing::dispatcher::get_default(Clone::clone);
         let wrapped: MbJob = Box::new(move |thread| {
-            tracing::dispatcher::with_default(&dispatcher, || job(thread, Claim::local()));
+            env.enter(|| {
+                tracing::dispatcher::with_default(&dispatcher, || job(thread, Claim::local()));
+            });
         });
         return pool
             .shared
@@ -1158,7 +1212,7 @@ fn submit_mb_job(
     pool.queued[worker].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let wrapped: MbJob = Box::new(move |thread| {
         pool.queued[worker].fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        tracing::dispatcher::with_default(&dispatcher, || job(thread, claim));
+        env.enter(|| tracing::dispatcher::with_default(&dispatcher, || job(thread, claim)));
     });
     pool.queues[worker].send(wrapped).map_err(|_| {
         pool.queued[worker].fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -2731,11 +2785,9 @@ fn start_inject(
         return;
     }
     if thread.split_from(&input.scope, &input.files) {
-        thread
-            .deferred
-            .push(Box::new(move |thread: &mut MbJsThread| {
-                start_inject(thread, input, budget, reply, claim);
-            }));
+        thread.defer(Box::new(move |thread: &mut MbJsThread| {
+            start_inject(thread, input, budget, reply, claim);
+        }));
         return;
     }
     let InjectInput {
@@ -3097,11 +3149,9 @@ fn start_predicate_inject(
     claim: Claim,
 ) {
     if thread.split_from(&input.scope, &input.files) {
-        thread
-            .deferred
-            .push(Box::new(move |thread: &mut MbJsThread| {
-                start_predicate_inject(thread, input, reply, claim);
-            }));
+        thread.defer(Box::new(move |thread: &mut MbJsThread| {
+            start_predicate_inject(thread, input, reply, claim);
+        }));
         return;
     }
     let PredicateInput {
@@ -3718,6 +3768,9 @@ struct MbRun {
     files: Arc<ScriptFileAccess>,
     console: JsObject,
     dispatch: tracing::Dispatch,
+    /// The time and random stream of the request this run serves (issue #1756), installed whenever
+    /// it resumes.
+    env: super::env::ScriptEnv,
     jobs: std::rc::Rc<super::js_runtime::MbJobExecutor>,
     timers: super::js_runtime::TimerGlobals,
 }
@@ -3756,6 +3809,7 @@ impl MbRun {
             files: Arc::clone(files),
             console,
             dispatch: tracing::dispatcher::get_default(Clone::clone),
+            env: super::env::ScriptEnv::capture(),
             jobs: std::rc::Rc::clone(&realm.jobs),
             timers: realm.timers.clone(),
         };
@@ -3778,6 +3832,7 @@ impl MbRun {
             previous_thread_run,
             previous_require,
             _dispatch: tracing::dispatcher::set_default(&self.dispatch),
+            _env: self.env.clone().install(),
         };
         // Domain-optional: only a script of this realm can make `console` refuse the write (made
         // read-only, or an accessor that throws), and it then keeps its own `console` in its own
@@ -3818,6 +3873,8 @@ struct ActiveRun {
     previous_thread_run: Option<super::js_runtime::RunId>,
     previous_require: Option<(u64, Arc<ScriptFileAccess>)>,
     _dispatch: tracing::dispatcher::DefaultGuard,
+    /// This run's time and random stream (issue #1756), as its dispatcher.
+    _env: super::env::EnvGuard,
 }
 
 impl Drop for ActiveRun {
@@ -4181,11 +4238,9 @@ fn start_decorate(
         return;
     }
     if thread.split_from(&input.scope, &input.files) {
-        thread
-            .deferred
-            .push(Box::new(move |thread: &mut MbJsThread| {
-                start_decorate(thread, input, budget, reply, claim);
-            }));
+        thread.defer(Box::new(move |thread: &mut MbJsThread| {
+            start_decorate(thread, input, budget, reply, claim);
+        }));
         return;
     }
     let DecorateInput {

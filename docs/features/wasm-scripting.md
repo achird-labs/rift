@@ -296,8 +296,11 @@ are the same either way.
 - **Every wasm call draws twice** from the stream for its `insecure-seed`, whether or not the
   component uses randomness, so adding a wasm stub to a sequence shifts the draws that follow it.
   The run still replays; it is a different run from the one without that stub.
-- **What it does not reach:** the `wait` behaviour's random range, which stays on the system's
-  entropy and only changes timing. Rhai and JavaScript scripts do not draw from it yet.
+- **What it does not reach:** the `wait` behaviour's numeric `{min, max}` range, which stays on
+  the system's entropy and only changes timing. (A JavaScript `wait` function's `Math.random()`
+  does draw from the stream, so it takes its place in a seeded sequence.) JavaScript's `Math.random()` draws from the stream, in a
+  `_rift.script` and in Mountebank `inject`/`decorate` functions alike
+  ([Time and randomness](scripting.md#time-and-randomness)); Rhai has no random function.
 
 ---
 

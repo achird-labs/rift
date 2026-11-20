@@ -5,7 +5,9 @@
 //! `wasi:random` (`random`, `insecure`, `insecure-seed`). With a seed and a frozen clock (#1754), a
 //! serialized request sequence replays byte for byte; concurrent requests interleave their draws
 //! nondeterministically, as they would against any single stream. What does not: the `wait`
-//! behaviour's random range, which only changes timing. Rhai and JavaScript read it from #1756.
+//! behaviour's numeric random range, which only changes timing. JavaScript's `Math.random()` draws
+//! from it too (#1756, through `scripting::env`), a JS `wait` function's included; Rhai has no
+//! random function.
 //! The template `uuid` draws from it too.
 //!
 //! Readers draw through a request's [`RequestRng`], never the imposter's stream directly, which is

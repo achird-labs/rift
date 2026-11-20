@@ -144,10 +144,9 @@ impl RhaiEngine {
         engine.register_fn("timestamp_header", || -> String {
             // Generate RFC 1123 formatted timestamp for HTTP Date header
             // Format: "Tue, 13 Aug 2024 21:51:22 GMT"
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now();
-            let duration = now.duration_since(UNIX_EPOCH).unwrap();
-            let secs = duration.as_secs();
+            // The run's time (issue #1756): the imposter's clock, or the request's X-Rift-Now.
+            // An instant before the epoch prints as the epoch.
+            let secs = u64::try_from(crate::scripting::env::now_ms() / 1000).unwrap_or(0);
 
             // Convert to broken-down time
             let days_since_epoch = secs / 86400;
