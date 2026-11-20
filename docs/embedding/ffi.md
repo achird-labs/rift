@@ -425,6 +425,18 @@ build`. The `-wasm` asset gets the same `.sha256`, manifest entry and self-conta
 where the wasm engine cannot be built ships the plain asset alone, with a warning in the release
 log, rather than failing the release.
 
+Sizes of the two flavours as the release builds them (stripped, measured in a dry run of the
+release workflow for issue #1798):
+
+| Platform | plain | `-wasm` |
+|:---------|------:|--------:|
+| `linux-x86_64` | 26.0 MB | 42.8 MB |
+| `linux-x86_64-musl` | 25.8 MB | 42.4 MB |
+| `linux-aarch64` | 22.8 MB | 35.3 MB |
+| `darwin-aarch64` | 21.5 MB | 33.5 MB |
+| `darwin-x86_64` | 23.3 MB | 38.2 MB |
+| `windows-x86_64` | 30.2 MB | 47.9 MB |
+
 Each cdylib is **self-contained**: it links only stock-host system libraries (the C runtime and,
 on macOS, system frameworks) — no third-party native dependency to install. A release gate asserts
 this per platform (`scripts/check-ffi-selfcontained.sh`, issue #469), so a consumer can `dlopen`
