@@ -49,12 +49,18 @@ generate() {
     platform="${file#librift_ffi-}"                   # <platform>.<ext>
     platform="${platform%.*}"                         # <platform>
     [ -n "$platform" ] || fail "could not parse platform from $file"
+    # Issue #1798: `librift_ffi-<platform>-wasm.<ext>` is the same library with the wasm engine. Its
+    # `platform` keeps the `-wasm` suffix, so a consumer matching `platform` exactly still gets the
+    # default library, and `wasm` says which flavour an entry is.
+    local wasm=false
+    [[ "$platform" == *-wasm ]] && wasm=true
     artifacts="$(jq \
       --arg platform "$platform" \
       --arg file "$file" \
       --arg sha "$sha" \
       --arg url "$base_url/$file" \
-      '. += [{platform: $platform, file: $file, sha256: $sha, url: $url}]' <<<"$artifacts")"
+      --argjson wasm "$wasm" \
+      '. += [{platform: $platform, file: $file, sha256: $sha, url: $url, wasm: $wasm}]' <<<"$artifacts")"
     count=$((count + 1))
   done < <(find "$search_dir" -type f -name 'librift_ffi-*.sha256' | sort)
 
@@ -79,6 +85,8 @@ self_test() {
     >"$tmp/aarch64-apple-darwin/librift_ffi-darwin-aarch64.dylib.sha256"
   printf 'cccc3333  librift_ffi-windows-x86_64.dll\n' \
     >"$tmp/x86_64-pc-windows-msvc/librift_ffi-windows-x86_64.dll.sha256"
+  printf 'dddd4444  librift_ffi-linux-x86_64-wasm.so\n' \
+    >"$tmp/x86_64-unknown-linux-gnu/librift_ffi-linux-x86_64-wasm.so.sha256"
 
   # Inject a deliberately-synthetic repo so the self-test is hermetic and immune to the real
   # repo's slug (e.g. an org rename/transfer) — it asserts the generator threads
@@ -90,12 +98,20 @@ self_test() {
   jq -e . "$out" >/dev/null || fail "output is not valid JSON"
   [ "$(jq -r .abi "$out")" = "v2" ] || fail "abi must be v2"
   [ "$(jq -r .version "$out")" = "v9.9.9" ] || fail "version not propagated"
-  [ "$(jq '.artifacts | length' "$out")" -eq 3 ] || fail "expected 3 artifacts"
+  [ "$(jq '.artifacts | length' "$out")" -eq 4 ] || fail "expected 4 artifacts"
+  # Issue #1798: the wasm flavour is its own platform, flagged, and the plain platform still names
+  # the default library.
+  jq -e '.artifacts[] | select(.platform == "linux-x86_64-wasm" and .wasm == true
+    and .file == "librift_ffi-linux-x86_64-wasm.so" and .sha256 == "dddd4444")' "$out" >/dev/null \
+    || fail "linux-x86_64-wasm entry wrong"
+  [ "$(jq '[.artifacts[] | select(.platform == "linux-x86_64")] | length' "$out")" -eq 1 ] \
+    || fail "linux-x86_64 must name exactly the default library"
 
   local lx
   lx="$(jq -c '.artifacts[] | select(.platform == "linux-x86_64")' "$out")"
   [ -n "$lx" ] || fail "missing linux-x86_64 entry"
   [ "$(jq -r .file <<<"$lx")" = "librift_ffi-linux-x86_64.so" ] || fail "linux file wrong"
+  [ "$(jq -r .wasm <<<"$lx")" = "false" ] || fail "the default library is not the wasm flavour"
   [ "$(jq -r .sha256 <<<"$lx")" = "aaaa1111" ] || fail "linux sha256 wrong"
   [ "$(jq -r .url <<<"$lx")" = \
     "https://example.com/example-org/example-repo/releases/download/v9.9.9/librift_ffi-linux-x86_64.so" ] \

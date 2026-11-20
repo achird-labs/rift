@@ -4385,3 +4385,60 @@ fn ffi_strict_wasm_applies_the_list_to_the_handle() {
         rift_stop(h);
     }
 }
+
+#[path = "../../rift-mock-core/test-support/wasm_fixtures.rs"]
+mod wasm_fixtures;
+
+// Issue #1798: which library flavour this is. The `-wasm` release asset (built `--features wasm`)
+// reports `wasm` and runs a component through the C ABI's admin plane; the default asset reports
+// no `wasm` and refuses the same stub with a message naming the missing feature. CI runs this file
+// in both feature lanes, so each flavour is checked.
+#[test]
+fn a_wasm_stub_runs_in_the_wasm_flavour_and_is_refused_in_the_default() {
+    unsafe {
+        let info: serde_json::Value =
+            serde_json::from_str(CStr::from_ptr(rift_build_info()).to_str().expect("utf8"))
+                .expect("build info");
+        let has_wasm = info["features"]
+            .as_array()
+            .expect("features")
+            .iter()
+            .any(|f| f == "wasm");
+        assert_eq!(has_wasm, cfg!(feature = "wasm"));
+
+        let h = rift_start();
+        let admin_url = serve_admin(h, "{}")["adminUrl"]
+            .as_str()
+            .expect("adminUrl")
+            .to_string();
+        let code = wasm_fixtures::b64(&wasm_fixtures::respond_ok());
+        let config = serde_json::json!({ "protocol": "http", "stubs": [{ "responses": [
+            { "_rift": { "script": { "engine": "wasm", "code": code } } } ] }] });
+        rt().block_on(async {
+            let create = reqwest::Client::new()
+                .post(format!("{admin_url}/imposters"))
+                .json(&config)
+                .send()
+                .await
+                .expect("admin create");
+            let status = create.status().as_u16();
+            let body: serde_json::Value = create.json().await.expect("json");
+            if has_wasm {
+                assert_eq!(status, 201, "{body}");
+                let port = body["port"].as_u64().expect("port");
+                let served = reqwest::get(format!("http://127.0.0.1:{port}/"))
+                    .await
+                    .expect("served");
+                assert_eq!(served.status(), 200);
+                assert_eq!(served.text().await.expect("body"), "ok");
+            } else {
+                assert_eq!(status, 400, "{body}");
+                assert!(
+                    body.to_string().contains("is not available in this build"),
+                    "{body}"
+                );
+            }
+        });
+        rift_stop(h);
+    }
+}
