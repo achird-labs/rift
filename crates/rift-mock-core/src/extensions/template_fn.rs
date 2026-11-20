@@ -357,7 +357,16 @@ fn eval_base(head: &str, args: &[String], ctx: &TemplateContext<'_>) -> Result<S
             }
             eval_now(offset.as_deref(), format.as_deref())
         }
-        "uuid" => Ok(uuid::Uuid::new_v4().to_string()),
+        // From the request's stream (issue #1755), so a seeded imposter replays; else the thread's.
+        "uuid" => Ok(match crate::imposter::rng::current() {
+            Some(mut rng) => {
+                let mut bytes = [0u8; 16];
+                rand::TryRng::try_fill_bytes(&mut rng, &mut bytes).unwrap_or_else(|e| match e {});
+                uuid::Builder::from_random_bytes(bytes).into_uuid()
+            }
+            None => uuid::Uuid::new_v4(),
+        }
+        .to_string()),
         // Absent is empty, not an error (unlike `state.<key>`): a `set` whose value template
         // appends to `previousValue` must work on the very first write.
         "previousValue" => Ok(ctx.previous_value.map(value_to_string).unwrap_or_default()),
@@ -379,7 +388,12 @@ fn eval_base(head: &str, args: &[String], ctx: &TemplateContext<'_>) -> Result<S
                     "randomInt: lower bound {lo} is greater than upper bound {hi}"
                 ));
             }
-            Ok(rand::rng().random_range(lo..=hi).to_string())
+            // The request's stream (issue #1755), so a seeded imposter replays; else the thread's.
+            let n = match crate::imposter::rng::current() {
+                Some(mut rng) => rng.random_range(lo..=hi),
+                None => rand::rng().random_range(lo..=hi),
+            };
+            Ok(n.to_string())
         }
         _ => {
             if let Some(name) = head.strip_prefix("request.query.") {

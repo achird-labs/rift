@@ -1310,6 +1310,17 @@
           "description": "Engine for a script that names none and has no `.rhai`/`.js`/`.wasm`/`.lua` file\nextension: \"rhai\", \"javascript\" or \"wasm\" (issues #1159, #1750; \"wasm\" needs a build with the\n`wasm` feature). See [`ImposterConfig::default_script_engine`].",
           "type": "string"
         },
+        "seed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Seed"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The seed of the imposter's random stream (issue #1755): `_rift.fault` rolls, the template\n`randomInt` and a wasm component's `wasi:random` draw from it. Absent: seeded from OS\nentropy. Applied at every create, recreate and restart."
+        },
         "timeoutMs": {
           "default": 5000,
           "description": "Script execution timeout in milliseconds",
@@ -1416,6 +1427,17 @@
         "port"
       ],
       "type": "object"
+    },
+    "Seed": {
+      "anyOf": [
+        {
+          "description": "The seed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      ],
+      "description": "`_rift.scriptEngine.seed`. Decoded tolerantly: engines before #1755 admitted any value under this\nkey and ignored it, so a stored config carrying one must still replay (rift-cluster's log,\n`--datadir`). A value that is not an unsigned 64-bit integer is kept as a JSON value (an integer\npast `u64` re-encodes as a float), runs unseeded, and is logged when the imposter is built."
     },
     "SingleValueHeaders": {
       "additionalProperties": {

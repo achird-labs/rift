@@ -206,6 +206,35 @@ transition stamps or proxy latency, which stay on real time.
 
 ---
 
+## Randomness
+
+A component's `wasi:random` (`random`, `insecure` and `insecure-seed`) draws from the imposter's
+random stream. So do `_rift.fault` rolls and the template `randomInt` and `uuid`. With
+`_rift.scriptEngine.seed` set, the stream starts from that seed when the imposter is created,
+recreated or restarted, so request *n* draws the same values every run:
+
+```json
+{ "_rift": { "scriptEngine": { "seed": 42 } } }
+```
+
+Without a seed, the stream is seeded from the system's entropy, by the same code: behaviour and cost
+are the same either way.
+
+- **What replays.** With a seed and a [frozen clock](../api/index.md#imposter-clock), a sequence of
+  requests sent one after another gets the same responses every run. Requests sent concurrently
+  draw from the one stream in whatever order they reach it, so which request gets which value
+  varies between runs.
+- **"Secure" random is deterministic under a seed.** `wasi:random/random` is meant to be a
+  cryptographically secure source; behind a seeded imposter it is a seeded generator. This is a
+  mock: never seed one that generates real secrets.
+- **Every wasm call draws twice** from the stream for its `insecure-seed`, whether or not the
+  component uses randomness, so adding a wasm stub to a sequence shifts the draws that follow it.
+  The run still replays; it is a different run from the one without that stub.
+- **What it does not reach:** the `wait` behaviour's random range, which stays on the system's
+  entropy and only changes timing. Rhai and JavaScript scripts do not draw from it yet.
+
+---
+
 ## Logs
 
 Whatever a component writes to stdout or stderr is logged like a Rhai or JavaScript `ctx.logger`

@@ -714,14 +714,18 @@ pub async fn handle_imposter_request(
     let mut inspection: Option<Inspection> = None;
     // Boxed: the task-local scope nests the whole request future one level deeper, past the
     // compiler's layout depth for the serve loop's future (issue #1754).
-    let inner = Box::pin(crate::imposter::clock::with_request_override(
-        request_now,
-        handle_request_inner(
-            req,
-            Arc::clone(&imposter),
-            client_addr,
-            &mut journal_index,
-            &mut inspection,
+    let request_rng = imposter.request_rng();
+    let inner = Box::pin(crate::imposter::rng::with_request_rng(
+        request_rng,
+        crate::imposter::clock::with_request_override(
+            request_now,
+            handle_request_inner(
+                req,
+                Arc::clone(&imposter),
+                client_addr,
+                &mut journal_index,
+                &mut inspection,
+            ),
         ),
     ));
     /*
@@ -2867,9 +2871,11 @@ async fn apply_rift_fault(
     port: u16,
 ) -> Option<Response<Full<Bytes>>> {
     let rule_id = port.to_string();
-    // Generate all random values before any await points (ThreadRng is not Send)
+    // Every roll draws from the request's stream (issue #1755), so a seeded imposter replays; a
+    // caller outside a request (unit tests) gets a stream of its own.
+    let mut rng =
+        crate::imposter::rng::current().unwrap_or_else(crate::imposter::rng::RequestRng::unseeded);
     let (apply_latency, latency_delay_ms) = {
-        let mut rng = rand::rng();
         if let Some(ref latency) = fault_config.latency {
             if rng.random::<f64>() < latency.probability {
                 let delay_ms = if let Some(fixed_ms) = latency.ms {
@@ -2889,7 +2895,6 @@ async fn apply_rift_fault(
     };
 
     let apply_error = {
-        let mut rng = rand::rng();
         if let Some(ref error) = fault_config.error {
             rng.random::<f64>() < error.probability
         } else {
@@ -2902,7 +2907,6 @@ async fn apply_rift_fault(
     // as absent for this request, falling through to the `error` fault and normal response — the
     // same semantics `latency`/`error` already use.
     let apply_tcp = {
-        let mut rng = rand::rng();
         fault_config
             .tcp
             .as_ref()

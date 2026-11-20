@@ -510,6 +510,12 @@ pub struct Imposter {
     /// flow store's TTLs and a wasm component's `wasi:clocks` read. Not `load_clock`: cache
     /// validators stay on real time.
     pub(crate) clock: Arc<crate::imposter::clock::ImposterClock>,
+    /// The imposter's random stream (issue #1755): seeded from `_rift.scriptEngine.seed`, or OS
+    /// entropy; reseeded on restart. A fresh imposter (create, recreate) starts a fresh stream.
+    ///
+    /// Swapped, never reset in place: a request's handle keeps the stream it started on, so work a
+    /// restart cuts off (a blocking closure still running) cannot consume the new stream's draws.
+    pub(crate) rng: ArcSwap<crate::imposter::rng::ImposterRng>,
     /// Which imposter this is among all the manager created, for the lifecycle probe
     /// (`formal/lifecycle`). `0` for an imposter built outside a manager.
     pub(crate) generation: crate::imposter::probe::Generation,
@@ -732,6 +738,21 @@ impl Imposter {
         let provided = provider.and_then(|provider| provider.provide(&config));
         let flow_store_is_default = provided.is_none();
         let clock = Arc::new(crate::imposter::clock::ImposterClock::default());
+        let seed = config
+            .rift
+            .as_ref()
+            .and_then(|rift| rift.script_engine.as_ref())
+            .and_then(|engine| engine.seed.as_ref());
+        if let Some(crate::imposter::rng::Seed::Unrecognized(value)) = seed {
+            tracing::warn!(
+                port = ?config.port,
+                %value,
+                "_rift.scriptEngine.seed is not an unsigned 64-bit integer; running unseeded"
+            );
+        }
+        let rng = ArcSwap::from_pointee(crate::imposter::rng::ImposterRng::new(
+            seed.and_then(crate::imposter::rng::Seed::value),
+        ));
         let flow_store: Arc<dyn FlowStore> =
             Arc::new(crate::extensions::flow_state::MeteredFlowStore::new(
                 Self::create_flow_store(&config, provided, store_clock(&clock))?,
@@ -745,6 +766,7 @@ impl Imposter {
             stubs_write: Mutex::new(()),
             load_clock,
             clock,
+            rng,
             generation: 0,
             probe: None,
             scenario_transitions: ArcSwap::from_pointee(HashMap::new()),
@@ -783,6 +805,12 @@ impl Imposter {
     #[must_use]
     pub fn clock(&self) -> &crate::imposter::clock::ImposterClock {
         &self.clock
+    }
+
+    /// A handle on the imposter's random stream (issue #1755), as a request draws through.
+    #[must_use]
+    pub fn request_rng(&self) -> crate::imposter::rng::RequestRng {
+        crate::imposter::rng::RequestRng::new(self.rng.load_full())
     }
 
     /// What this imposter's scripts may `require()` (issue #1611), as the door that last wrote its

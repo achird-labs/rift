@@ -3341,6 +3341,13 @@ impl ImposterManager {
                 imposter.script_state.store(std::sync::Arc::default());
                 // The clock is runtime state too (issue #1754): back to wall time.
                 imposter.clock.reset();
+                // And so is the random stream (issue #1755): a fresh one from the seed's first draw.
+                // A fresh stream, not a reset one, so a request this restart cuts off cannot draw
+                // from it.
+                let seed = imposter.rng.load().seed();
+                imposter
+                    .rng
+                    .store(Arc::new(crate::imposter::rng::ImposterRng::new(seed)));
                 let flow = imposter
                     .restart_flow_state()
                     .map_err(ImposterError::Backend);

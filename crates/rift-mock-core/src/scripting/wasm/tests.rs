@@ -666,3 +666,29 @@ async fn the_monotonic_clock_does_not_go_back_between_calls() {
         delay_with_clock(&fixtures::monotonic_nanos(), Some(&frozen)).await
     );
 }
+
+// Issue #1755: a component's `wasi:random` draws from the request's stream, so a seeded imposter's
+// draws repeat after a reseed.
+#[tokio::test]
+async fn wasi_random_draws_from_the_request_stream() {
+    use crate::imposter::rng::{ImposterRng, RequestRng, with_request_rng};
+    let draws = |imposter: std::sync::Arc<ImposterRng>| async move {
+        let mut out = Vec::new();
+        for _ in 0..2 {
+            let rng = RequestRng::new(std::sync::Arc::clone(&imposter));
+            out.push(with_request_rng(rng, delay_with_clock(&fixtures::random_u64(), None)).await);
+        }
+        out
+    };
+    let seeded = std::sync::Arc::new(ImposterRng::new(Some(42)));
+    let first = draws(std::sync::Arc::clone(&seeded)).await;
+    seeded.reseed();
+    assert_eq!(draws(std::sync::Arc::clone(&seeded)).await, first);
+    assert_ne!(first[0], first[1], "two draws, not one value twice");
+    let other = draws(std::sync::Arc::new(ImposterRng::new(Some(43)))).await;
+    assert_ne!(other, first);
+    // Outside a request: the system's entropy, two calls apart.
+    let a = delay_with_clock(&fixtures::random_u64(), None).await;
+    let b = delay_with_clock(&fixtures::random_u64(), None).await;
+    assert_ne!(a, b);
+}

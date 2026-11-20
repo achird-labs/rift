@@ -159,6 +159,14 @@ record.
 
 ### Added
 
+- **`_rift.scriptEngine.seed`: seeded randomness per imposter** (#1755). One SplitMix64 stream per
+  imposter feeds `_rift.fault` rolls, the template `randomInt` and `uuid`, and a wasm component's
+  `wasi:random` (`random`, `insecure`, `insecure-seed`). With a seed it restarts from that seed at
+  every create, recreate and `restart`, so requests sent one after another replay byte for byte
+  (with a frozen imposter clock where time appears in a response). Without one it is
+  seeded from OS entropy, the same code either way. A seed that is not an unsigned 64-bit integer
+  still decodes (a stored config replays), runs unseeded and is logged.
+
 - **`rift:mock` is a published, versioned contract** (#1797). `docs/features/wasm-wit.md` specifies
   every `state` and `handler` function (missing keys, `cas` with `expected = none`, TTLs, flows,
   error strings, `init`), what a host must virtualise and what it must not link. Each release
