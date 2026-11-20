@@ -179,6 +179,7 @@ Server options:
       --scripts-dir <DIR>          Root directory for admin-API `file:`/`ref:` script resolution and for `require()` and `lookup` CSV files in admin-API, `--datadir` and `https:` imposters; paths that escape it are rejected (unset ⇒ all are refused)
   -i, --allow-injection            Enable JavaScript injection in responses (alias: --allowInjection)
       --allow-wasm <BOOL>          Admit `_rift.script` with `engine: "wasm"` (sandboxed components); default `true`, independent of --allow-injection; `--allow-wasm false` refuses them at every door (alias: --allowWasm)
+      --strict-wasm <FILE>         Admit only the wasm components whose SHA-256 this file lists (one lowercase hex digest per line, `#` comments); applies to uploads (`POST /components`), inline `code` and `component` references at every door; a file that cannot be read or parsed aborts startup (alias: --strictWasm)
   -l, --local-only                 Only accept requests from localhost: the admin API, /metrics and --intercept-port listen on `127.0.0.1` and `::1`, and they, every imposter port and the front door refuse non-loopback clients (alias: --localOnly)
       --require-admin-auth         Refuse to start when the admin API would bind a non-loopback address with no --api-key (default: warn)
       --loglevel <LEVEL>           Log level: trace, debug, info, warn, error (an unrecognised value is refused) [default: info]
@@ -194,7 +195,7 @@ Server options:
       --pidfile <FILE>             Write the server's PID here (off unless set; stop/restart read ./rift.pid when omitted)
   -o, --origin <ORIGIN>            Accepted for Mountebank compatibility; NOT implemented — the admin API sends no CORS headers
       --api-key <TOKEN>            Require this token in the Authorization header (or Mountebank's x-api-key) for all admin API requests; Authorization wins when both are sent (alias: --apikey)
-      --rcfile <FILE>              RC file with default flag values (a subset: port/host/loglevel/allowInjection/allowWasm/localOnly/requireAdminAuth/apiKey/datadir/configfile/noParse/mock/debug); a path that does not exist warns and starts; one that exists but cannot be read or applied aborts startup
+      --rcfile <FILE>              RC file with default flag values (a subset: port/host/loglevel/allowInjection/allowWasm/strictWasm/localOnly/requireAdminAuth/apiKey/datadir/configfile/noParse/mock/debug); a path that does not exist warns and starts; one that exists but cannot be read or applied aborts startup
       --default-tls-cert <FILE>    Default TLS certificate (PEM) for HTTPS imposters without their own
       --default-tls-key <FILE>     Default TLS private key (PEM), paired with --default-tls-cert
       --no-self-signed-tls         Disable the self-signed fallback; an HTTPS imposter with no cert is an error
@@ -324,6 +325,7 @@ keys are recognised (the snake_case spellings are accepted too):
 | `loglevel` / `logLevel` | string | `--loglevel` |
 | `allowInjection` | boolean | `--allow-injection` |
 | `allowWasm` | boolean | `--allow-wasm`. On by default, so an rcfile can only turn it off, and an rcfile `false` wins even over an explicit `--allow-wasm true` (the rcfile cannot tell it from the default) |
+| `strictWasm` | string | `--strict-wasm`. Path to the trust list; a flag or `RIFT_STRICT_WASM` wins over it |
 | `localOnly` | boolean | `--local-only` |
 | `requireAdminAuth` | boolean | `--require-admin-auth` |
 | `apiKey` | string | `--api-key` |
@@ -596,6 +598,7 @@ wins over the built-in default (and over an `--rcfile` value — see [RC file](#
 | `MB_DATADIR` | Persistent storage directory | |
 | `MB_ALLOW_INJECTION` | Enable injection (`true`/`false`) | `false` |
 | `RIFT_ALLOW_WASM` | Admit sandboxed wasm components (`true`/`false`; env alias of `--allow-wasm`) | `true` |
+| `RIFT_STRICT_WASM` | Path to the `--strict-wasm` trust list (env alias of `--strict-wasm`) | unset |
 | `MB_LOCAL_ONLY` | Localhost only: admin API and `/metrics` on loopback; imposters and the front door refuse non-loopback clients | `false` |
 | `RIFT_REQUIRE_ADMIN_AUTH` | Refuse to start on a keyless non-loopback admin bind (env alias of `--require-admin-auth`) | `false` |
 | `MB_LOGLEVEL` | Log level (env alias of `--loglevel`). Set-but-empty means `info` | `info` |

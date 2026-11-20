@@ -1770,7 +1770,42 @@ async fn handle_request_inner(
             // here means that pass was skipped (e.g. a stub added through a sub-resource
             // endpoint that doesn't resolve scripts) — surface it as a clear error instead of
             // silently running an empty script.
-            let Some(code) = script_config.code.as_deref() else {
+            // A `component` reference (issue #1757) resolves from the manager's registry now, not
+            // at admission: a replayed config whose component this node lacks still loads, and
+            // answers a script error here.
+            let held_component = match script_config.component.as_deref() {
+                None => None,
+                Some(reference) => {
+                    let entry = reference
+                        .parse::<crate::imposter::components::ComponentId>()
+                        .ok()
+                        .and_then(|id| imposter.components.get(&id));
+                    match entry {
+                        Some(entry) => Some(entry),
+                        None => {
+                            return Ok(build_response_with_headers(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                [
+                                    ("x-rift-imposter", "true"),
+                                    ("x-rift-script-error", "true"),
+                                    ("content-type", "application/json"),
+                                ],
+                                crate::response::error_body(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    &format!(
+                                        "Script error: unknown component {reference}; upload it with POST /components"
+                                    ),
+                                ),
+                            ));
+                        }
+                    }
+                }
+            };
+            let code = held_component
+                .as_ref()
+                .map(|entry| &*entry.code)
+                .or(script_config.code.as_deref());
+            let Some(code) = code else {
                 return Ok(build_response_with_headers(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [
@@ -1786,10 +1821,30 @@ async fn handle_request_inner(
             };
             // Resolution writes the engine into every script it sees; a door that does not resolve
             // (the C-ABI create) reaches here engine-less, and gets the same default (#1159).
-            let engine = script_config
-                .engine
-                .clone()
-                .unwrap_or_else(|| imposter.config.default_script_engine().to_owned());
+            let engine = match (&script_config.engine, &held_component) {
+                (Some(engine), _) => engine.clone(),
+                (None, Some(_)) => "wasm".to_owned(),
+                (None, None) => imposter.config.default_script_engine().to_owned(),
+            };
+            // A component is wasm (issue #1757). A door that does not validate (the C-ABI create,
+            // a replay) can still carry `component` with another engine: never run its bytes as
+            // Rhai or JavaScript.
+            if held_component.is_some() && !crate::scripting::ScriptEngineKind::is_wasm(&engine) {
+                return Ok(build_response_with_headers(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [
+                        ("x-rift-imposter", "true"),
+                        ("x-rift-script-error", "true"),
+                        ("content-type", "application/json"),
+                    ],
+                    crate::response::error_body(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!(
+                            "Script error: `component` is a wasm component; engine must be \"wasm\", not \"{engine}\""
+                        ),
+                    ),
+                ));
+            }
             trace!("Handling Rift script response (engine: {})", engine);
 
             // Build script request. Expose headers with lowercase keys so scripts can read

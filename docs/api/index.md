@@ -879,6 +879,50 @@ that is refused, as every platform's clock can hold that range.
 
 ---
 
+## Components
+
+WebAssembly components uploaded to the server, so a `_rift.script` can run one without a file on
+the server's host (issue #1757). A stub references one by hash:
+`"_rift": { "script": { "component": "sha256:<hex>" } }`. See
+[Uploading a component](../features/wasm-scripting.md#uploading-a-component).
+
+| Method | Path | Answer |
+|:-------|:-----|:-------|
+| `POST` | `/components` | Upload the raw component, `Content-Type: application/wasm`. `201` when new, `200` with the same body when the server already holds these bytes. |
+| `GET` | `/components` | `{"components": [ … ]}`, by hash. |
+| `GET` | `/components/{sha256}` | One component (`{sha256}` is the 64 hex digits). `404` if the server does not hold it. |
+| `DELETE` | `/components/{sha256}` | `204`. `409` while an imposter references it; `404` if it is not held. |
+
+A component's JSON:
+
+```json
+{
+  "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+  "size": 84211,
+  "world": "rift:mock/mock",
+  "imports": ["rift:mock/types@0.1.0", "rift:mock/state@0.1.0", "wasi:cli/stdout@0.2.6"],
+  "uploadedAt": "2026-11-20T12:00:00Z",
+  "referencedBy": [4545]
+}
+```
+
+`POST` validates the component as admitting one in a stub does: a core module, an import Rift
+does not link (`wasi:sockets`, `wasi:http`) or a missing `rift:mock/handler` is refused with
+`400 bad data` naming it. A body that is not `application/wasm` is `415`. A component may be at
+most 64 MiB (`413`, as is a body past the admin body limit), and the registry holds at most
+512 MiB of components in all (`507`; delete unused ones first). Under `--strict-wasm`, an unlisted
+component is `400` before it is compiled.
+
+A `DELETE` of a referenced component answers:
+
+```json
+{"errors": [{"code": "409", "type": "resource conflict", "message": "component is referenced by imposters 4545, 4546"}]}
+```
+
+Reads need the read role and writes the write role, as for `/config` and `/admin/reload`.
+
+---
+
 ## Spaces (Correlated Isolation)
 
 A "space" isolates stubs and state to a correlation id (`flowId`), so parallel test runs don't collide.

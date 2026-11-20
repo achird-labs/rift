@@ -305,7 +305,8 @@ top-level `fault` response form, and scripted faults.
 
 `_rift.script` runs a script (engine `rhai`, `javascript` or `wasm`) that decides whether to inject a
 response. The source is exactly one of `code` (inline), `file` (a path, relative to the config
-file, or to `--scripts-dir` for admin-API imposters) or `ref` (an entry in `_rift.scripts`). The script defines `respond(ctx)` and returns a result constructor — `http(status, body)`,
+file, or to `--scripts-dir` for admin-API imposters), `ref` (an entry in `_rift.scripts`) or, for
+`engine: "wasm"`, `component` (`"sha256:<hex>"`, a [component uploaded](../features/wasm-scripting.md#uploading-a-component) with `POST /components`). The script defines `respond(ctx)` and returns a result constructor — `http(status, body)`,
 `delay(ms)`, `reset()`, or `pass()`/nothing for no injection. `ctx.state` is a key/value handle
 already scoped to the request's resolved flow id — no explicit flow id argument needed. See
 [Scripting](../features/scripting.md#ctx-api) for the full `ctx` reference.

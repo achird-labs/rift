@@ -85,6 +85,8 @@ pub struct AdminApiServer {
     gates: crate::injection_gate::ScriptGates,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
+    /// The datadir the component registry is kept under; see [`with_datadir`](Self::with_datadir).
+    datadir: Option<Arc<PathBuf>>,
     /// The buffer `GET /logs` serves (issue #1615); see [`with_log_ring`](Self::with_log_ring).
     log_ring: Option<LogRing>,
     /// `--local-only` as supplied, reported verbatim by `GET /config` (issue #879). The flag, not
@@ -125,6 +127,7 @@ impl AdminApiServer {
             },
             intercept: None,
             scripts_dir: None,
+            datadir: None,
             log_ring: None,
             authorizer: None,
             local_only: false,
@@ -315,6 +318,14 @@ impl AdminApiServer {
         self
     }
 
+    /// Keep uploaded components (`POST /components`, issue #1757) in `<dir>/components`, so they
+    /// survive a restart. Loading them back is the starter's job: pass the manager's datadir.
+    #[must_use]
+    pub fn with_datadir(mut self, dir: PathBuf) -> Self {
+        self.datadir = Some(Arc::new(dir));
+        self
+    }
+
     /// Serve `GET /logs` from `ring` (issue #1615). Without it the route answers Mountebank's
     /// `--nologfile` sentinel. The ring only fills once it is also installed as a `tracing` layer
     /// (`registry().with(ring.clone())`); `rift-ffi` installs none, so FFI hosts get the sentinel.
@@ -416,6 +427,7 @@ impl AdminApiServer {
                     mock: self.mock,
                     debug: self.debug,
                     log_ring: self.log_ring,
+                    components_dir: self.datadir,
                 },
                 rift_mock_core::extensions::PeerCheck::new(
                     self.peer_policy,

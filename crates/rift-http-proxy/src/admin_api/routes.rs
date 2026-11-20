@@ -19,7 +19,8 @@ use hyper::Method;
 /// again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RouteFamily {
-    /// `/`, `/health`, `/config`, `/logs`, `/metrics`, `/admin/reload`.
+    /// `/`, `/health`, `/config`, `/logs`, `/metrics`, `/admin/reload`, `/components` and
+    /// `/components/{sha}`.
     System,
     /// `/imposters` and everything under `/imposters/{port}`.
     Imposters,
@@ -70,6 +71,10 @@ pub static ADMIN_ROUTES: &[AdminRoute] = &[
     route(Method::GET, "/logs", System),
     route(Method::POST, "/admin/reload", System),
     route(Method::GET, "/metrics", System),
+    route(Method::GET, "/components", System),
+    route(Method::POST, "/components", System),
+    route(Method::GET, "/components/{sha}", System),
+    route(Method::DELETE, "/components/{sha}", System),
     route(Method::GET, "/imposters", Imposters),
     route(Method::POST, "/imposters", Imposters),
     route(Method::PUT, "/imposters", Imposters),
@@ -202,6 +207,7 @@ mod tests {
             .replace("{scenario}", "order")
             .replace("{space}", "f1")
             .replace("{key}", "k")
+            .replace("{sha}", &"a".repeat(64))
     }
 
     fn placeholders(path: &str) -> BTreeSet<&str> {
@@ -495,7 +501,7 @@ mod tests {
     #[test]
     fn each_family_has_the_routes_it_names() {
         let count = |family| ADMIN_ROUTES.iter().filter(|r| r.family == family).count();
-        assert_eq!(count(System), 6);
+        assert_eq!(count(System), 10);
         assert_eq!(count(Imposters), 33);
         assert_eq!(count(FlowState), 4);
         assert_eq!(count(Events), 2);

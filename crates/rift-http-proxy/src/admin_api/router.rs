@@ -2,7 +2,9 @@
 //!
 //! This module provides routing
 
-use crate::admin_api::handlers::{clock, imposters, intercept, scenarios, stubs, system};
+use crate::admin_api::handlers::{
+    clock, components, imposters, intercept, scenarios, stubs, system,
+};
 use crate::admin_api::routes::ADMIN_ROUTES;
 use crate::admin_api::types::{
     error_response, express_not_found, get_base_url, json_response, not_found,
@@ -229,6 +231,10 @@ fn template_of(path: &str) -> Option<&'static str> {
             }
             _ => None,
         };
+    }
+    if let Some(sha) = path.strip_prefix("/components/") {
+        // One non-empty segment names the route, as `route_by_path` dispatches it.
+        return (!sha.is_empty() && !sha.contains('/')).then_some("/components/{sha}");
     }
     let rest = path.strip_prefix("/imposters/")?;
     // Split exactly as `route_imposter` does. The id is not parsed: any id names the route, and
@@ -501,6 +507,26 @@ async fn route_by_path(
         }
         (&Method::GET, "/metrics") => return system::handle_metrics(manager).await,
         _ => {}
+    }
+
+    // Component registry (issue #1757)
+    if path == "/components" {
+        return match *method {
+            Method::GET => components::handle_list(manager).await,
+            Method::POST => {
+                components::handle_upload(req, manager, config_snapshot.components_dir).await
+            }
+            _ => not_found(),
+        };
+    }
+    if let Some(sha) = path.strip_prefix("/components/") {
+        return match *method {
+            Method::GET => components::handle_get(sha, manager).await,
+            Method::DELETE => {
+                components::handle_delete(sha, manager, config_snapshot.components_dir).await
+            }
+            _ => not_found(),
+        };
     }
 
     // Imposter collection routes

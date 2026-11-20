@@ -150,7 +150,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E033 | Lookup behavior missing `into` | Lookup with `key` and `fromDataSource` only |
 | E034 | More than one operator in a single predicate | `{"equals": {...}, "contains": {...}}` — split them under `and` |
 | E035 | `repeat` is not an integer from 1 to 4294967295, on the response or in an object-form block. `0` and `null` are refused by the engine, as Mountebank refuses them. A `repeat` in a `behaviors` array element beside a behavior is not checked: it is ignored (see W024) | `"repeat": 0` |
-| E036 | `script` must specify exactly one of `code`, `file` or `ref` | Both `code` and `file` given |
+| E036 | `script` must specify exactly one of `code`, `file`, `ref` or `component` | Both `code` and `file` given |
 | E037 | Unknown script `ref` — no such entry in `_rift.scripts` | `"ref": "missing"` |
 | E038 | Script `file` (via `ref`) could not be read | `"file": "no-such.js"` |
 | E039 | A `_rift.scripts` entry uses `ref` itself (ref chains are not allowed) | `{"a": {"ref": "b"}}` |
@@ -177,6 +177,8 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E061 | A `behaviors` array element whose `copy`, `lookup` or `shellTransform` is a list, an empty one included, even when a later `null` removes it. The engine refuses it with Mountebank's first error (`copy behavior "from" field required`, `lookup behavior "key" field required`, `shellTransform behavior "shellTransform" field must be a string, …`). Write one element per item; the `_behaviors` object form takes a list | `"behaviors": [{"shellTransform": ["./a.sh", "./b.sh"]}]` |
 | E062 | `_rift.script` with `engine: "wasm"` whose `code` is not base64. A component has no inline source form: name its `.wasm` file with `file`, and resolution stores its bytes in `code` as base64 (the form a saved imposter carries) | `{"engine": "wasm", "code": "fn respond(ctx) { pass() }"}` |
 | E063 | A `.wasm` script file that is a core WebAssembly module (built for `wasm32-unknown-unknown` or `wasm32-wasip1`), not a component. The engine refuses it with `not a component; build for wasm32-wasip2` | `{"file": "plain-module.wasm"}` |
+| E064 | A `_rift.script` `component` that is not `sha256:` and 64 lowercase hex digits (issue #1757) | `{"component": "sha256:ABC"}` |
+| E065 | A `_rift.script` `component` with an `engine` other than `wasm`: an uploaded component is a wasm component | `{"engine": "rhai", "component": "sha256:…"}` |
 
 ### Warnings
 

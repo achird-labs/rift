@@ -48,6 +48,7 @@ fn concrete_path(path: &str, port: u16) -> String {
         .replace("{scenario}", "order")
         .replace("{space}", "f1")
         .replace("{key}", "k")
+        .replace("{sha}", &"a".repeat(64))
 }
 
 async fn send(

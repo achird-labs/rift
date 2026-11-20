@@ -398,6 +398,12 @@ pub async fn handle_add_space_stub(
     ) {
         return rejection;
     }
+    if let Some(rejection) = crate::admin_api::handlers::components::reject_dangling_in_stubs(
+        std::slice::from_ref(&stub),
+        &manager,
+    ) {
+        return rejection;
+    }
     // The path `:flowId` is the source of truth for the scope; ignore any `space` in the body.
     stub.space = Some(flow_id.to_string());
     // The stub's scripts get the admin door's access in the same write (issues #1611, #1645).

@@ -963,12 +963,14 @@ fn validate_script_source(
     let code_field = script.get("code").and_then(|v| v.as_str());
     let file_field = script.get("file").and_then(|v| v.as_str());
     let ref_field = script.get("ref").and_then(|v| v.as_str());
+    let component_field = script.get("component").and_then(|v| v.as_str());
     let engine_field = script.get("engine").and_then(|v| v.as_str());
 
     let source_count = [
         code_field.is_some(),
         file_field.is_some(),
         ref_field.is_some(),
+        component_field.is_some(),
     ]
     .into_iter()
     .filter(|set| *set)
@@ -978,13 +980,52 @@ fn validate_script_source(
             LintIssue::error(
                 "E036",
                 format!(
-                    "script must specify exactly one of 'code', 'file', or 'ref' (found {source_count})"
+                    "script must specify exactly one of 'code', 'file', 'ref', or 'component' (found {source_count})"
                 ),
                 config_file.to_path_buf(),
             )
             .with_location(location)
-            .with_suggestion("Set exactly one of 'code', 'file', or 'ref'"),
+            .with_suggestion("Set exactly one of 'code', 'file', 'ref', or 'component'"),
         );
+        return;
+    }
+
+    // An uploaded component (issue #1757): only its form and engine can be checked offline; whether
+    // a server holds it is the server's question.
+    if let Some(component) = component_field {
+        let well_formed = component.strip_prefix("sha256:").is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        });
+        if !well_formed {
+            result.add_issue(
+                LintIssue::error(
+                    "E064",
+                    format!("component must be 'sha256:' and 64 lowercase hex digits (got '{component}')"),
+                    config_file.to_path_buf(),
+                )
+                .with_location(location)
+                .with_suggestion("Use the sha256 POST /components returned, prefixed with 'sha256:'"),
+            );
+        }
+        match engine_field {
+            Some(engine) if engine != "wasm" => {
+                result.add_issue(
+                    LintIssue::error(
+                        "E065",
+                        format!(
+                            "'component' is a wasm component; engine must be 'wasm', not '{engine}'"
+                        ),
+                        config_file.to_path_buf(),
+                    )
+                    .with_location(location)
+                    .with_suggestion("Remove 'engine', or set it to 'wasm'"),
+                );
+            }
+            _ => check_wasm_only_keys(config_file, script, "wasm", location, result),
+        }
         return;
     }
 

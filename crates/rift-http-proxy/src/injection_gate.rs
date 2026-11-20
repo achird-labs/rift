@@ -197,6 +197,8 @@ fn leaf_surface(script: &RiftScriptConfig, default_engine: &str) -> ScriptSurfac
     };
     let wasm = match script.engine.as_deref() {
         Some(engine) => ScriptEngineKind::is_wasm(engine),
+        // An uploaded component (issue #1757) is a wasm component: engine-less, it runs as one.
+        None if script.component.is_some() => true,
         None => match by_extension() {
             Some(Ok(kind)) => kind == ScriptEngineKind::Wasm,
             Some(Err(_)) => false,

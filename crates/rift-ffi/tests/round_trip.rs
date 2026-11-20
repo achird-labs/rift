@@ -3160,6 +3160,8 @@ fn ffi_a_document_using_every_advertised_option_still_serves() {
                 "config" => serde_json::json!({"imposters": []}),
                 "allowInjection" => serde_json::json!(true),
                 "allowWasm" => serde_json::json!(true),
+                // A trust list file of its own: `ffi_strict_wasm_applies_the_list_to_the_handle`.
+                "strictWasm" => continue,
                 "requireAdminAuth" => serde_json::json!(false),
                 // Mutually exclusive with `upstreamCaPem` (issue #974), the same way `configFile`
                 // is with `config`; the file spelling is covered by its own test.
@@ -4307,5 +4309,79 @@ fn ffi_serve_admin_config_file_wasm_is_gated_by_allow_wasm() {
             "{message}"
         );
         rift_stop(refused);
+    }
+}
+
+// Issue #1757: `strictWasm` names the trust list. A list that cannot be read or parsed fails the
+// serve call naming the file; a valid one is applied to the handle's manager, which then refuses an
+// unlisted component at every write, the in-process ones included.
+#[test]
+fn ffi_strict_wasm_applies_the_list_to_the_handle() {
+    unsafe {
+        use rift_mock_core::imposter::components::ComponentId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bad = dir.path().join("bad.txt");
+        std::fs::write(&bad, "not-a-sha\n").expect("write");
+        let missing = dir.path().join("missing.txt");
+        for (path, expect) in [
+            (&missing, "could not read"),
+            (&bad, "expected 64 lowercase hex digits"),
+        ] {
+            let h = rift_start();
+            let path_json = serde_json::json!(path.to_str().expect("utf8 path"));
+            let opts = format!(r#"{{"strictWasm": {path_json}}}"#);
+            assert!(rift_serve_admin(h, cstr(&opts).as_ptr()).is_null());
+            let message = take_json(rift_last_error());
+            assert!(
+                message.contains(path.to_str().expect("utf8 path")) && message.contains(expect),
+                "{message}"
+            );
+            rift_stop(h);
+        }
+
+        let listed = ComponentId::of(b"listed component bytes");
+        let hex = listed.hex();
+        let good = dir.path().join("good.txt");
+        std::fs::write(&good, format!("# one\n{hex}\n")).expect("write");
+        let h = rift_start();
+        let path_json = serde_json::json!(good.to_str().expect("utf8 path"));
+        let served = rift_serve_admin(
+            h,
+            cstr(&format!(r#"{{"strictWasm": {path_json}}}"#)).as_ptr(),
+        );
+        assert!(!served.is_null(), "{}", take_json(rift_last_error()));
+        let imposter = |id: ComponentId| {
+            serde_json::json!({ "protocol": "http", "stubs": [{ "responses": [
+                { "_rift": { "script": { "component": id.to_string() } } } ] }] })
+            .to_string()
+        };
+        let unlisted = ComponentId::of(b"unlisted");
+        assert_eq!(
+            rift_create_imposter(h, cstr(&imposter(unlisted)).as_ptr()),
+            0
+        );
+        let message = take_json(rift_last_error());
+        assert!(message.contains("is not in --strict-wasm"), "{message}");
+        assert_ne!(rift_create_imposter(h, cstr(&imposter(listed)).as_ptr()), 0);
+        rift_stop(h);
+
+        // A handle already serving an unlisted component cannot be made strict after the fact.
+        let h = rift_start();
+        assert_ne!(
+            rift_create_imposter(h, cstr(&imposter(unlisted)).as_ptr()),
+            0
+        );
+        let served = rift_serve_admin(
+            h,
+            cstr(&format!(r#"{{"strictWasm": {path_json}}}"#)).as_ptr(),
+        );
+        assert!(served.is_null());
+        let message = take_json(rift_last_error());
+        assert!(
+            message.contains("already on this handle")
+                && message.contains("is not in --strict-wasm"),
+            "{message}"
+        );
+        rift_stop(h);
     }
 }
