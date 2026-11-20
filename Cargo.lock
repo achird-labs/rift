@@ -4475,6 +4475,7 @@ name = "rift-ffi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "parking_lot",
  "rcgen",
  "reqwest",
@@ -4486,6 +4487,9 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-test",
+ "wat",
+ "wit-component",
+ "wit-parser",
 ]
 
 [[package]]

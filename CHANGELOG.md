@@ -13,6 +13,11 @@ record.
 
 ### Fixed
 
+- **The plain `librift_ffi` release asset is wasm-free and keeps the Quamina prefilter on every
+  platform** (#1798). The release built the library with the server binary's feature flags, so on
+  five of seven targets the default asset carried `wasm` (against #1753) and lacked
+  `quamina-matching` (#777). It now builds with the library's own defaults.
+
 - **An imposter source that takes over a datadir imposter's port removes the file that imposter left**
   (#1821): an apply entry tagged ephemeral (a `--configfile` imposter on `POST /admin/reload`, or an
   embedder's `apply_desired`) could take over a port without removing the runtime `{port}.json` of the
@@ -158,6 +163,12 @@ record.
   must drop them.
 
 ### Added
+
+- **A `-wasm` flavour of `librift_ffi` per platform** (#1798): `librift_ffi-<classifier>-wasm.<ext>`,
+  the C-ABI library with the WebAssembly engine, so an embedder runs components in-process without a
+  source build. Same `.sha256`, self-contained check and `ffi-manifest.json` entry (platform
+  `<classifier>-wasm`, `"wasm": true`; every entry now carries `wasm`). `rift_build_info().features`
+  says which one is loaded.
 
 - **`rift wasm check`: replay a saved recording against a component, offline** (#1759). The corpus
   is the saved imposter (`rift save`): its stubs replay in document order through `rift-verify`'s

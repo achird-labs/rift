@@ -53,6 +53,12 @@ rcgen = "0.14"
 tempfile = "3.8"
 # Assert `warn_anyhow_failure` renders the whole cause chain, not just its outermost context (#683).
 tracing-test = "0.2"
+# Build test components from core-module text (rift-mock-core/test-support/wasm_fixtures.rs) for the
+# per-flavour wasm test (issue #1798).
+base64 = "0.23"
+wat = "1"
+wit-component = "0.261"
+wit-parser = "0.261"
 
 [features]
 default = ["javascript", "quamina-matching"]

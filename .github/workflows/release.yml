@@ -279,14 +279,34 @@ jobs:
             # PR-CI job validates; an aarch64-musl cdylib has no PR-time gate, so it's not shipped
             # (it would only surface a link failure at release time).
             if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
+              # librift_ffi takes its own default features (javascript, quamina-matching), not the
+              # binary's: the default asset never carries wasm (#1753), and keeps quamina (#777).
               RUSTFLAGS="-C target-feature=-crt-static" \
-                cross build --release --package rift-ffi --target ${{ matrix.target }} $FEATURE_FLAGS
+                cross build --release --package rift-ffi --target ${{ matrix.target }}
+              # The `-wasm` flavour (issue #1798), in its own target dir so it cannot overwrite the
+              # default library. Best effort: a target that cannot build wasmtime ships without it.
+              if RUSTFLAGS="-C target-feature=-crt-static" \
+                cross build --release --package rift-ffi --target ${{ matrix.target }} \
+                  --features wasm --target-dir target/ffi-wasm; then
+                echo "FFI_WASM_BUILT=true" >> "$GITHUB_ENV"
+              else
+                echo "::warning::librift_ffi -wasm flavour did not build for ${{ matrix.target }}; shipping without it"
+              fi
             fi
           else
             cargo build --release --package rift-http-proxy --target ${{ matrix.target }} $FEATURE_FLAGS
             cargo build --release --package rift-lint --target ${{ matrix.target }}
             cargo build --release --package rift-tui --target ${{ matrix.target }}
-            cargo build --release --package rift-ffi --target ${{ matrix.target }} $FEATURE_FLAGS
+            # librift_ffi takes its own default features (javascript, quamina-matching), not the
+            # binary's: the default asset never carries wasm (#1753), and keeps quamina (#777).
+            cargo build --release --package rift-ffi --target ${{ matrix.target }}
+            # The `-wasm` flavour (issue #1798), as above.
+            if cargo build --release --package rift-ffi --target ${{ matrix.target }} \
+                --features wasm --target-dir target/ffi-wasm; then
+              echo "FFI_WASM_BUILT=true" >> "$GITHUB_ENV"
+            else
+              echo "::warning::librift_ffi -wasm flavour did not build for ${{ matrix.target }}; shipping without it"
+            fi
           fi
 
       # Package
@@ -343,6 +363,18 @@ jobs:
             shasum -a 256 "$FFI_NAME" > "$FFI_NAME.sha256"
             echo "FFI_ASSET_PATH=target/${{ matrix.target }}/release/$FFI_NAME" >> $GITHUB_ENV
             echo "FFI_CHECKSUM_PATH=target/${{ matrix.target }}/release/$FFI_NAME.sha256" >> $GITHUB_ENV
+
+            # Issue #1798: `librift_ffi-<classifier>-wasm.<ext>`, the same library with the wasm
+            # engine, packaged beside the default one with the same checks.
+            if [ "${FFI_WASM_BUILT:-}" = "true" ]; then
+              WASM_NAME="librift_ffi-${{ matrix.classifier }}-wasm.$EXT"
+              cp "$GITHUB_WORKSPACE/target/ffi-wasm/${{ matrix.target }}/release/librift_ffi.$EXT" "$WASM_NAME"
+              "$GITHUB_WORKSPACE/scripts/check-ffi-selfcontained.sh" "$WASM_NAME"
+              shasum -a 256 "$WASM_NAME" > "$WASM_NAME.sha256"
+              ls -l "$FFI_NAME" "$WASM_NAME"
+              echo "FFI_WASM_ASSET_PATH=target/${{ matrix.target }}/release/$WASM_NAME" >> $GITHUB_ENV
+              echo "FFI_WASM_CHECKSUM_PATH=target/${{ matrix.target }}/release/$WASM_NAME.sha256" >> $GITHUB_ENV
+            fi
           fi
 
       - name: Package (Windows)
@@ -388,6 +420,16 @@ jobs:
           echo "FFI_ASSET_PATH=target/${{ matrix.target }}/release/$FFI_NAME" >> $env:GITHUB_ENV
           echo "FFI_CHECKSUM_PATH=target/${{ matrix.target }}/release/$FFI_NAME.sha256" >> $env:GITHUB_ENV
 
+          # Issue #1798: the `-wasm` flavour, when it built.
+          if ($env:FFI_WASM_BUILT -eq "true") {
+            $WASM_NAME = "librift_ffi-${{ matrix.classifier }}-wasm.dll"
+            Copy-Item "$env:GITHUB_WORKSPACE/target/ffi-wasm/${{ matrix.target }}/release/rift_ffi.dll" "$WASM_NAME"
+            $wasmHash = (Get-FileHash -Algorithm SHA256 "$WASM_NAME").Hash.ToLower()
+            "$wasmHash  $WASM_NAME" | Out-File -Encoding utf8 "$WASM_NAME.sha256"
+            echo "FFI_WASM_ASSET_PATH=target/${{ matrix.target }}/release/$WASM_NAME" >> $env:GITHUB_ENV
+            echo "FFI_WASM_CHECKSUM_PATH=target/${{ matrix.target }}/release/$WASM_NAME.sha256" >> $env:GITHUB_ENV
+          }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -397,6 +439,8 @@ jobs:
             ${{ env.CHECKSUM_PATH }}
             ${{ env.FFI_ASSET_PATH }}
             ${{ env.FFI_CHECKSUM_PATH }}
+            ${{ env.FFI_WASM_ASSET_PATH }}
+            ${{ env.FFI_WASM_CHECKSUM_PATH }}
           retention-days: 1
 
   # =============================================================================
