@@ -12,7 +12,7 @@ use crate::imposter::{
     ImposterConfig, ImposterManager, PeerPolicy, Persistence, ScriptBaseDir, ScriptFileAccess,
     ServerListener, TlsDefaults, resolve_scripts,
 };
-use crate::injection_gate::GATED_SCRIPT_SURFACES;
+use crate::injection_gate::{GATED_SCRIPT_SURFACES, GateRefusal, ScriptGates};
 use crate::intercept_control::{
     InterceptAuth, InterceptControl, InterceptOrigin, InterceptStartOptions,
 };
@@ -132,6 +132,21 @@ pub struct Cli {
         help_heading = "Server options"
     )]
     pub allow_injection: bool,
+
+    /// Admit `_rift.script` with `engine: "wasm"`: sandboxed WebAssembly components, which reach
+    /// nothing on the host. On by default and independent of `--allowInjection`; `--allow-wasm
+    /// false` refuses them at every door
+    #[arg(
+        long = "allow-wasm",
+        visible_alias = "allowWasm",
+        env = "RIFT_ALLOW_WASM",
+        action = clap::ArgAction::Set,
+        default_value_t = true,
+        value_name = "BOOL",
+        global = true,
+        help_heading = "Server options"
+    )]
+    pub allow_wasm: bool,
 
     /// Only accept requests from localhost: the admin API, /metrics and --intercept-port listen on
     /// `127.0.0.1` and `::1`, and they, every imposter port and the front door refuse non-loopback
@@ -499,6 +514,17 @@ impl Cli {
 ///
 /// The destructuring below names every field with no `..`, so a new flag does not compile until it
 /// is given a rendering here — the impl cannot silently fall behind the struct.
+impl Cli {
+    /// The two script flags, as every door checks a document against them.
+    #[must_use]
+    pub fn script_gates(&self) -> ScriptGates {
+        ScriptGates {
+            allow_injection: self.allow_injection,
+            allow_wasm: self.allow_wasm,
+        }
+    }
+}
+
 impl std::fmt::Debug for Cli {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         const REDACTED: &str = "<redacted>";
@@ -511,6 +537,7 @@ impl std::fmt::Debug for Cli {
             imposters,
             scripts_dir,
             allow_injection,
+            allow_wasm,
             local_only,
             require_admin_auth,
             loglevel,
@@ -554,6 +581,7 @@ impl std::fmt::Debug for Cli {
             .field("imposters", imposters)
             .field("scripts_dir", scripts_dir)
             .field("allow_injection", allow_injection)
+            .field("allow_wasm", allow_wasm)
             .field("local_only", local_only)
             .field("require_admin_auth", require_admin_auth)
             .field("loglevel", loglevel)
@@ -1075,7 +1103,7 @@ impl ServerBuilder {
                 source_set.as_deref(),
                 cli.datadir.as_deref(),
                 cli.scripts_dir.as_deref(),
-                cli.allow_injection,
+                cli.script_gates(),
                 &cli_intercept_flags(&cli),
             )
             .await?;
@@ -1252,6 +1280,7 @@ impl ServerBuilder {
             .with_bound_listeners(admin_listeners)
             .with_reported_host(reported_host)
             .with_allow_injection(cli.allow_injection)
+            .with_allow_wasm(cli.allow_wasm)
             .with_local_only(cli.local_only)
             .with_mock_debug(cli.mock, cli.debug)
             .with_peer_policy(server_peer_policy)
@@ -2002,7 +2031,12 @@ fn configfile_injection_error(
     if allow_injection {
         return None;
     }
-    let offenders = crate::injection_gate::gated_offender_ports(configs);
+    let gates = ScriptGates {
+        allow_injection,
+        allow_wasm: true,
+    };
+    let offenders =
+        crate::injection_gate::gated_offender_ports(configs, gates, GateRefusal::Injection);
     if offenders.is_empty() {
         return None;
     }
@@ -2011,6 +2045,34 @@ fn configfile_injection_error(
          Restart with --allowInjection to allow this, or remove the scripting from the config.",
         path.display(),
         offenders.join(", "),
+    ))
+}
+
+/// The startup error for a `--configfile` whose imposters carry wasm components on a server started
+/// with `--allowWasm false` (issue #1752), or `None`. Every offender at once, as
+/// [`configfile_injection_error`] lists its own.
+fn configfile_wasm_error(
+    path: &Path,
+    configs: &[ImposterConfig],
+    allow_wasm: bool,
+) -> Option<String> {
+    if allow_wasm {
+        return None;
+    }
+    let gates = ScriptGates {
+        allow_injection: true,
+        allow_wasm,
+    };
+    let offenders = crate::injection_gate::gated_offender_ports(configs, gates, GateRefusal::Wasm);
+    if offenders.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}: imposter(s) on port(s) {}: {}. Restart with --allowWasm true to allow them, or \
+         remove them from the config.",
+        path.display(),
+        offenders.join(", "),
+        crate::injection_gate::WASM_DISALLOWED,
     ))
 }
 
@@ -2056,12 +2118,34 @@ fn partition_gated_datadir(
     }
     let (gated, servable): (Vec<_>, Vec<_>) = parsed
         .into_iter()
-        .partition(|(_, config)| crate::injection_gate::config_uses_script_surface(config));
+        .partition(|(_, config)| crate::injection_gate::classify_config(config).host_code());
     let gated = gated
         .into_iter()
         .map(|(path, _)| SkippedImposterFile {
             path,
             reason: format!("uses {GATED_SCRIPT_SURFACES}, which require --allowInjection"),
+        })
+        .collect();
+    (servable, gated)
+}
+
+/// As [`partition_gated_datadir`], for files carrying wasm components on a server started with
+/// `--allowWasm false` (issue #1752).
+fn partition_wasm_gated_datadir(
+    parsed: Vec<LoadedImposter>,
+    allow_wasm: bool,
+) -> (Vec<LoadedImposter>, Vec<SkippedImposterFile>) {
+    if allow_wasm {
+        return (parsed, Vec::new());
+    }
+    let (gated, servable): (Vec<_>, Vec<_>) = parsed
+        .into_iter()
+        .partition(|(_, config)| crate::injection_gate::classify_config(config).sandboxed());
+    let gated = gated
+        .into_iter()
+        .map(|(path, _)| SkippedImposterFile {
+            path,
+            reason: crate::injection_gate::WASM_DISALLOWED.to_owned(),
         })
         .collect();
     (servable, gated)
@@ -2240,17 +2324,15 @@ async fn load_startup_imposters(
     sources: Option<&SourceSet>,
     datadir: Option<&Path>,
     scripts_dir: Option<&Path>,
-    allow_injection: bool,
+    gates: ScriptGates,
     intercept_flags: &[&str],
 ) -> anyhow::Result<ConfigFileStartOptions> {
     let (source_configs, options) = match sources {
-        Some(set) => {
-            fetch_and_gate_sources(set, allow_injection, intercept_flags, scripts_dir).await?
-        }
+        Some(set) => fetch_and_gate_sources(set, gates, intercept_flags, scripts_dir).await?,
         None => (Vec::new(), ConfigFileStartOptions::default()),
     };
     let (datadir_configs, mut skipped) = match datadir {
-        Some(dir) => read_and_gate_datadir(dir, allow_injection)?,
+        Some(dir) => read_and_gate_datadir(dir, gates)?,
         None => (Vec::new(), Vec::new()),
     };
 
@@ -2275,7 +2357,7 @@ async fn load_startup_imposters(
 /// set. Creates nothing.
 async fn fetch_and_gate_sources(
     set: &SourceSet,
-    allow_injection: bool,
+    gates: ScriptGates,
     intercept_flags: &[&str],
     scripts_dir: Option<&Path>,
 ) -> anyhow::Result<(Vec<SourcedImposter>, ConfigFileStartOptions)> {
@@ -2297,7 +2379,9 @@ async fn fetch_and_gate_sources(
         .into_iter()
         .map(|sourced| (sourced.config, sourced.authorship))
         .unzip();
-    if let Some(message) = configfile_injection_error(&label, &configs, allow_injection) {
+    if let Some(message) = configfile_injection_error(&label, &configs, gates.allow_injection)
+        .or_else(|| configfile_wasm_error(&label, &configs, gates.allow_wasm))
+    {
         anyhow::bail!(message);
     }
     for (config, authorship) in configs.iter().zip(&authorships) {
@@ -2313,7 +2397,7 @@ async fn fetch_and_gate_sources(
             anyhow::bail!(message);
         }
         if let Some(message) =
-            configfile_intercept_injection_error(&label, &block.rules, allow_injection)
+            configfile_intercept_injection_error(&label, &block.rules, gates.allow_injection)
         {
             anyhow::bail!(message);
         }
@@ -2512,7 +2596,7 @@ fn sweep_interrupted_writes(datadir: &Path) {
 /// imposter; unparseable and gated files come back as skipped, never fatal.
 fn read_and_gate_datadir(
     datadir: &Path,
-    allow_injection: bool,
+    gates: ScriptGates,
 ) -> anyhow::Result<(Vec<LoadedImposter>, Vec<SkippedImposterFile>)> {
     info!("Loading imposters from datadir: {:?}", datadir);
 
@@ -2529,7 +2613,9 @@ fn read_and_gate_datadir(
     // B1/B2 defense-in-depth against a datadir re-resolution reading `/etc/passwd`).
     let base = ScriptBaseDir::DatadirRelative(datadir.to_path_buf());
     let (parsed, mut skipped) = read_and_parse_datadir(datadir, &base)?;
-    let (parsed, gated) = partition_gated_datadir(parsed, allow_injection);
+    let (parsed, gated) = partition_gated_datadir(parsed, gates.allow_injection);
+    skipped.extend(gated);
+    let (parsed, gated) = partition_wasm_gated_datadir(parsed, gates.allow_wasm);
     skipped.extend(gated);
     Ok((parsed, skipped))
 }
@@ -3433,6 +3519,95 @@ mod tests {
         }))
     }
 
+    /// A stub whose response is a wasm component (issue #1752). The gate classifies, never runs it.
+    fn wasm_config(port: u16) -> ImposterConfig {
+        config_from(serde_json::json!({
+            "port": port,
+            "protocol": "http",
+            "stubs": [{"responses": [{"_rift": {"script": {"engine": "wasm", "code": "AA=="}}}]}],
+        }))
+    }
+
+    #[test]
+    fn configfile_wasm_error_names_file_ports_and_flag() {
+        let path = PathBuf::from("/cfg/imposters.json");
+        let err = configfile_wasm_error(
+            &path,
+            &[wasm_config(4545), clean_config(4546), wasm_config(4547)],
+            false,
+        )
+        .expect("wasm with --allowWasm false aborts startup");
+        assert_eq!(
+            err,
+            "/cfg/imposters.json: imposter(s) on port(s) 4545, 4547: engine \"wasm\" requires \
+             --allowWasm (disabled on this server). Restart with --allowWasm true to allow them, or \
+             remove them from the config."
+        );
+        assert!(configfile_wasm_error(&path, &[wasm_config(4545)], true).is_none());
+        // Host code is the injection door's business, not this one's.
+        assert!(configfile_wasm_error(&path, &[inject_response_config(4545)], false).is_none());
+        // And a component needs no --allowInjection.
+        assert!(configfile_injection_error(&path, &[wasm_config(4545)], false).is_none());
+    }
+
+    #[test]
+    fn partition_wasm_gated_datadir_skips_only_the_wasm_file() {
+        let parsed = vec![
+            (PathBuf::from("/d/4545.json"), wasm_config(4545)),
+            (PathBuf::from("/d/4546.json"), clean_config(4546)),
+        ];
+        let (servable, gated) = partition_wasm_gated_datadir(parsed.clone(), false);
+        assert_eq!(servable.len(), 1);
+        assert_eq!(servable[0].0, PathBuf::from("/d/4546.json"));
+        assert_eq!(gated.len(), 1);
+        assert_eq!(gated[0].path, PathBuf::from("/d/4545.json"));
+        assert_eq!(
+            gated[0].reason,
+            "engine \"wasm\" requires --allowWasm (disabled on this server)"
+        );
+        let (servable, gated) = partition_wasm_gated_datadir(parsed, true);
+        assert_eq!((servable.len(), gated.len()), (2, 0));
+    }
+
+    // `RIFT_ALLOW_WASM` is the flag's env alias, and the flag is global (it follows a subcommand).
+    #[test]
+    fn allow_wasm_has_its_env_alias_and_is_global() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "allow_wasm")
+            .expect("allow_wasm arg");
+        assert_eq!(
+            arg.get_env().and_then(|e| e.to_str()),
+            Some("RIFT_ALLOW_WASM")
+        );
+        assert!(arg.is_global_set());
+        let after = Cli::try_parse_from(["rift", "start", "--allow-wasm", "false"]).expect("parse");
+        assert!(!after.allow_wasm);
+    }
+
+    // `--allow-wasm` takes an explicit value, as its default is on.
+    #[test]
+    fn allow_wasm_defaults_on_and_takes_a_value() {
+        let on = Cli::try_parse_from(["rift"]).expect("parse");
+        assert!(on.allow_wasm);
+        for argv in [
+            &["rift", "--allow-wasm", "false"][..],
+            &["rift", "--allowWasm", "false"][..],
+            &["rift", "--allow-wasm=false"][..],
+        ] {
+            let off = Cli::try_parse_from(argv).expect("parse");
+            assert!(!off.allow_wasm, "{argv:?}");
+            assert!(!off.allow_injection, "{argv:?}");
+        }
+        assert!(
+            Cli::try_parse_from(["rift", "--allow-wasm", "true"])
+                .expect("parse")
+                .allow_wasm
+        );
+    }
+
     fn clean_config(port: u16) -> ImposterConfig {
         config_from(serde_json::json!({
             "port": port,
@@ -3675,9 +3850,16 @@ mod tests {
 
         let manager = Arc::new(ImposterManager::new());
         let set = single_file_source(&path);
-        let err = load_startup_imposters(&manager, Some(&set), None, None, false, &[])
-            .await
-            .expect_err("a gated configfile must abort startup");
+        let err = load_startup_imposters(
+            &manager,
+            Some(&set),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            &[],
+        )
+        .await
+        .expect_err("a gated configfile must abort startup");
         assert!(err.to_string().contains("--allowInjection"), "got: {err}");
 
         assert_eq!(
@@ -3699,9 +3881,16 @@ mod tests {
 
         let manager = Arc::new(ImposterManager::new());
         let set = single_file_source(&example);
-        let err = load_startup_imposters(&manager, Some(&set), None, None, false, &[])
-            .await
-            .expect_err("examples/latency-testing.json uses a JS-function wait; it must be gated");
+        let err = load_startup_imposters(
+            &manager,
+            Some(&set),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            &[],
+        )
+        .await
+        .expect_err("examples/latency-testing.json uses a JS-function wait; it must be gated");
         assert!(err.to_string().contains("--allowInjection"), "got: {err}");
 
         manager.delete_all().await;
@@ -3732,7 +3921,7 @@ mod tests {
             Some(&single_file_source(&path)),
             None,
             None,
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             &[],
         )
         .await
@@ -3767,9 +3956,16 @@ mod tests {
         set: Option<&SourceSet>,
         datadir: Option<&Path>,
     ) -> anyhow::Result<()> {
-        load_startup_imposters(manager, set, datadir, None, false, &[])
-            .await
-            .map(|_| ())
+        load_startup_imposters(
+            manager,
+            set,
+            datadir,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            &[],
+        )
+        .await
+        .map(|_| ())
     }
 
     /// A port a port-less create was just given, learned rather than hardcoded: fixed test ports
@@ -3962,7 +4158,14 @@ mod tests {
             "no `{imposter_port}.json` copy is written"
         );
 
-        let (parsed, skipped) = read_and_gate_datadir(&datadir, false).expect("listable");
+        let (parsed, skipped) = read_and_gate_datadir(
+            &datadir,
+            ScriptGates {
+                allow_injection: false,
+                allow_wasm: true,
+            },
+        )
+        .expect("listable");
         assert!(parsed.is_empty());
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].path, datadir.join("foo.json"));
@@ -4009,7 +4212,14 @@ mod tests {
             None
         );
 
-        let (parsed, skipped) = read_and_gate_datadir(&datadir, false).expect("listable");
+        let (parsed, skipped) = read_and_gate_datadir(
+            &datadir,
+            ScriptGates {
+                allow_injection: false,
+                allow_wasm: true,
+            },
+        )
+        .expect("listable");
         assert_eq!(
             parsed.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
             vec![datadir.join(format!("{imposter_port}.json"))]
@@ -4045,7 +4255,14 @@ mod tests {
             serde_json::json!({"port": 0, "protocol": "http", "stubs": []}),
         );
 
-        let (parsed, skipped) = read_and_gate_datadir(dir.path(), false).expect("listable");
+        let (parsed, skipped) = read_and_gate_datadir(
+            dir.path(),
+            ScriptGates {
+                allow_injection: false,
+                allow_wasm: true,
+            },
+        )
+        .expect("listable");
 
         assert!(parsed.is_empty());
         let mut named: Vec<(String, String)> = skipped
@@ -4310,9 +4527,16 @@ mod tests {
 
         let manager = Arc::new(ImposterManager::new());
         let datadir = dir.path().to_path_buf();
-        load_startup_imposters(&manager, None, Some(&datadir), None, false, &[])
-            .await
-            .expect("a gated datadir file is skipped, never fatal");
+        load_startup_imposters(
+            &manager,
+            None,
+            Some(&datadir),
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            &[],
+        )
+        .await
+        .expect("a gated datadir file is skipped, never fatal");
 
         assert!(
             manager.get_imposter(port_a).is_ok(),
@@ -4338,9 +4562,16 @@ mod tests {
 
         let manager = Arc::new(ImposterManager::new());
         let datadir = dir.path().to_path_buf();
-        load_startup_imposters(&manager, None, Some(&datadir), None, true, &[])
-            .await
-            .expect("datadir load succeeds");
+        load_startup_imposters(
+            &manager,
+            None,
+            Some(&datadir),
+            None,
+            crate::injection_gate::ScriptGates::from_injection(true),
+            &[],
+        )
+        .await
+        .expect("datadir load succeeds");
         assert!(
             manager.get_imposter(imposter_port).is_ok(),
             "--allowInjection must serve the scripted file"
@@ -4572,7 +4803,14 @@ mod tests {
         std::fs::write(dir.path().join("4545.json.tmp"), "{ truncated").expect("write");
         std::fs::write(dir.path().join("notes.json.tmp"), "operator's").expect("write");
 
-        let (parsed, skipped) = read_and_gate_datadir(dir.path(), false).expect("listable");
+        let (parsed, skipped) = read_and_gate_datadir(
+            dir.path(),
+            ScriptGates {
+                allow_injection: false,
+                allow_wasm: true,
+            },
+        )
+        .expect("listable");
 
         assert_eq!(parsed.len(), 1);
         assert!(skipped.is_empty(), "{} file(s) skipped", skipped.len());

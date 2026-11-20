@@ -63,6 +63,7 @@ pub const SERVE_OPTION_KEYS: &[&str] = &[
     "noParse",
     "config",
     "allowInjection",
+    "allowWasm",
     "requireAdminAuth",
     "upstreamCaFile",
     "upstreamCaPem",

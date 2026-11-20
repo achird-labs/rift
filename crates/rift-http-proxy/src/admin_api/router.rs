@@ -310,7 +310,7 @@ pub async fn route_request(
     manager: Arc<ImposterManager>,
     config_source: Option<ReloadSource>,
     front_door_routes: Option<FrontDoorRoutes>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
     config_snapshot: system::ConfigSnapshot,
@@ -377,7 +377,7 @@ pub async fn route_request(
         manager,
         config_source,
         front_door_routes,
-        allow_injection,
+        gates,
         intercept,
         scripts_dir,
         config_snapshot,
@@ -401,7 +401,7 @@ async fn dispatch(
     manager: Arc<ImposterManager>,
     config_source: Option<ReloadSource>,
     front_door_routes: Option<FrontDoorRoutes>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
     config_snapshot: system::ConfigSnapshot,
@@ -419,7 +419,7 @@ async fn dispatch(
                 query,
                 req,
                 control,
-                allow_injection,
+                gates.allow_injection,
                 &manager.body_guard(),
             )
             .await
@@ -438,7 +438,7 @@ async fn dispatch(
         config_source,
         front_door_routes,
         intercept.as_ref(),
-        allow_injection,
+        gates,
         scripts_dir,
         config_snapshot,
     )
@@ -470,7 +470,7 @@ async fn route_by_path(
     config_source: Option<ReloadSource>,
     front_door_routes: Option<FrontDoorRoutes>,
     intercept: Option<&InterceptControl>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     scripts_dir: Option<Arc<PathBuf>>,
     config_snapshot: system::ConfigSnapshot,
 ) -> Response<Full<Bytes>> {
@@ -479,7 +479,7 @@ async fn route_by_path(
         (&Method::GET, "/") => return system::handle_root(base_url),
         (&Method::GET, "/health") => return system::handle_health(),
         (&Method::GET, "/config") => {
-            return system::handle_config(allow_injection, config_snapshot);
+            return system::handle_config(gates, config_snapshot);
         }
         (&Method::GET, "/logs") => {
             return system::handle_logs(query, config_snapshot.log_ring.as_ref());
@@ -490,7 +490,7 @@ async fn route_by_path(
                 config_source,
                 front_door_routes.as_ref(),
                 intercept,
-                allow_injection,
+                gates,
                 scripts_dir.as_deref().map(std::path::PathBuf::as_path),
             )
             .await;
@@ -504,11 +504,10 @@ async fn route_by_path(
         return match *method {
             Method::GET => imposters::handle_list(manager, query, base_url).await,
             Method::POST => {
-                imposters::handle_create(req, base_url, manager, allow_injection, scripts_dir).await
+                imposters::handle_create(req, base_url, manager, gates, scripts_dir).await
             }
             Method::PUT => {
-                imposters::handle_replace_all(req, base_url, manager, allow_injection, scripts_dir)
-                    .await
+                imposters::handle_replace_all(req, base_url, manager, gates, scripts_dir).await
             }
             Method::DELETE => imposters::handle_delete_all(manager, query, base_url).await,
             _ => not_found(),
@@ -529,7 +528,7 @@ async fn route_by_path(
             req,
             base_url,
             manager,
-            allow_injection,
+            gates,
             scripts_dir,
         )
         .await;
@@ -586,7 +585,7 @@ async fn route_imposter(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     // Parse: port/remaining/path
@@ -627,11 +626,10 @@ async fn route_imposter(
             stubs::handle_get_all(port, base_url, manager).await
         }
         (&Method::POST, ImposterRoute::Stubs) => {
-            stubs::handle_add(port, req, base_url, manager, allow_injection, scripts_dir).await
+            stubs::handle_add(port, req, base_url, manager, gates, scripts_dir).await
         }
         (&Method::PUT, ImposterRoute::Stubs) => {
-            stubs::handle_replace_all(port, req, base_url, manager, allow_injection, scripts_dir)
-                .await
+            stubs::handle_replace_all(port, req, base_url, manager, gates, scripts_dir).await
         }
 
         // /imposters/:port/stubs/:index
@@ -639,16 +637,7 @@ async fn route_imposter(
             stubs::handle_get(port, &index, base_url, manager).await
         }
         (&Method::PUT, ImposterRoute::StubByIndex(index)) => {
-            stubs::handle_replace(
-                port,
-                &index,
-                req,
-                base_url,
-                manager,
-                allow_injection,
-                scripts_dir,
-            )
-            .await
+            stubs::handle_replace(port, &index, req, base_url, manager, gates, scripts_dir).await
         }
         (&Method::DELETE, ImposterRoute::StubByIndex(index)) => {
             stubs::handle_delete(port, &index, base_url, manager).await
@@ -659,16 +648,7 @@ async fn route_imposter(
             stubs::handle_get_by_id(port, &id, manager).await
         }
         (&Method::PUT, ImposterRoute::StubById(id)) => {
-            stubs::handle_replace_by_id(
-                port,
-                &id,
-                req,
-                base_url,
-                manager,
-                allow_injection,
-                scripts_dir,
-            )
-            .await
+            stubs::handle_replace_by_id(port, &id, req, base_url, manager, gates, scripts_dir).await
         }
         (&Method::DELETE, ImposterRoute::StubById(id)) => {
             stubs::handle_delete_by_id(port, &id, base_url, manager).await
@@ -684,7 +664,7 @@ async fn route_imposter(
 
         // /imposters/:port/verify (issue #494)
         (&Method::POST, ImposterRoute::Verify) => {
-            imposters::handle_verify(port, req, manager, allow_injection, scripts_dir).await
+            imposters::handle_verify(port, req, manager, gates, scripts_dir).await
         }
 
         // /imposters/:port/savedProxyResponses
@@ -709,15 +689,7 @@ async fn route_imposter(
 
         // /imposters/:port/spaces/:flowId — Correlated isolation (issue #223)
         (&Method::POST, ImposterRoute::SpaceStubs(flow_id)) => {
-            scenarios::handle_add_space_stub(
-                port,
-                &flow_id,
-                req,
-                manager,
-                allow_injection,
-                scripts_dir,
-            )
-            .await
+            scenarios::handle_add_space_stub(port, &flow_id, req, manager, gates, scripts_dir).await
         }
         (&Method::GET, ImposterRoute::SpaceStubs(flow_id)) => {
             scenarios::handle_list_space_stubs(port, &flow_id, manager).await

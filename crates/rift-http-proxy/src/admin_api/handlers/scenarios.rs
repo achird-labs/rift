@@ -336,7 +336,7 @@ pub async fn handle_add_space_stub(
     flow_id: &str,
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req, &manager.body_guard()).await {
@@ -360,7 +360,7 @@ pub async fn handle_add_space_stub(
     };
     // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
     if let Some(rejection) =
-        reject_stubs_if_injection_disallowed(std::slice::from_ref(&stub), allow_injection)
+        reject_stubs_if_injection_disallowed(std::slice::from_ref(&stub), &manager, port, gates)
     {
         return rejection;
     }

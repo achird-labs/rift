@@ -961,6 +961,7 @@ Get current configuration.
   "options": {
     "port": 2525,
     "allowInjection": true,
+    "allowWasm": true,
     "localOnly": false,
     "mock": false,
     "debug": false,
@@ -968,16 +969,21 @@ Get current configuration.
   },
   "serveOptions": [
     "host", "port", "apiKey", "metricsPort", "configFile", "noParse", "config",
-    "allowInjection", "requireAdminAuth", "upstreamCaFile", "upstreamCaPem",
+    "allowInjection", "allowWasm", "requireAdminAuth", "upstreamCaFile", "upstreamCaPem",
     "upstreamTlsSkipVerify", "maxBodySize", "bodyMemoryBudget", "journalMaxBytes",
     "scriptsDir"
   ],
+  "features": ["javascript", "quamina-matching", "wasm"],
   "process": {
     "nodeVersion": "N/A (Rust)", "architecture": "aarch64", "platform": "macos",
     "rss": 0, "heapTotal": 0, "heapUsed": 0, "uptime": 0, "cwd": "/srv/rift"
   }
 }
 ```
+
+`options.allowWasm` is `--allow-wasm` (default `true`). `features` lists the engine features this
+build was compiled with (`javascript`, `quamina-matching`, `wasm`); an engine that reports no
+`features` key predates it, so treat its absence as "unknown", not "none".
 
 `commit` is `null` unless the build was stamped with one. `process` mirrors Mountebank's shape: only
 `architecture`, `platform` and `cwd` carry real values.

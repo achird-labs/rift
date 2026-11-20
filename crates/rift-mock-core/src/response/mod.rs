@@ -42,6 +42,8 @@ pub enum ErrorKind {
     Unauthorized,
     // --- Rift doors Mountebank has no equivalent for ---
     InvalidPredicateInjection,
+    /// A wasm component on a server started with `--allowWasm false` (issue #1752).
+    InvalidWasm,
     InjectionTimeout,
     PredicateInjectionTimeout,
     BackendUnavailable,
@@ -62,7 +64,7 @@ impl ErrorKind {
     /// Every variant as of writing — keep in sync by hand when adding one. The exhaustive,
     /// wildcard-free match in [`slug`](Self::slug) is the half of the guard the compiler enforces;
     /// this array is what lets the shape test iterate them.
-    pub const ALL: [ErrorKind; 21] = [
+    pub const ALL: [ErrorKind; 22] = [
         ErrorKind::BadData,
         ErrorKind::InvalidInjection,
         ErrorKind::ResourceConflict,
@@ -70,6 +72,7 @@ impl ErrorKind {
         ErrorKind::NoSuchResource,
         ErrorKind::Unauthorized,
         ErrorKind::InvalidPredicateInjection,
+        ErrorKind::InvalidWasm,
         ErrorKind::InjectionTimeout,
         ErrorKind::PredicateInjectionTimeout,
         ErrorKind::BackendUnavailable,
@@ -97,6 +100,7 @@ impl ErrorKind {
             ErrorKind::NoSuchResource => "no such resource",
             ErrorKind::Unauthorized => "unauthorized",
             ErrorKind::InvalidPredicateInjection => "invalid predicate injection",
+            ErrorKind::InvalidWasm => "invalid wasm",
             ErrorKind::InjectionTimeout => "injection timeout",
             ErrorKind::PredicateInjectionTimeout => "predicate injection timeout",
             ErrorKind::BackendUnavailable => "backend unavailable",

@@ -268,6 +268,10 @@ struct ServeOptions {
     /// `rift_create_imposter` — is ungated by design: that host can already execute code in this
     /// process, so gating its own JSON would restrict nobody.
     allow_injection: Option<bool>,
+    /// Admit `_rift.script` with `engine: "wasm"` — sandboxed components — across the same trust
+    /// boundaries (issue #1752). Default true. Independent of `allowInjection`; a library built
+    /// without the `wasm` feature refuses components whatever this says.
+    allow_wasm: Option<bool>,
     /// Refuse to bind when the admin plane would be reachable off-host with no `apiKey`
     /// (issue #863), instead of warning. Optional and defaulting to `false`, so every existing SDK
     /// that omits it keeps the previous behaviour unchanged.
@@ -2033,20 +2037,34 @@ fn warn_failed(report: &ApplyReport, source: &str) {
 /// authored by the embedding host, so it crosses a trust boundary and is gated exactly like the
 /// CLI's `--configfile` (issue #612). The host's own in-process config (`config`,
 /// `rift_apply_config`, `rift_create_imposter`) is the trusted path and stays ungated (issue #492).
-fn gated_config_file_error(configs: &[ImposterConfig], allow_injection: bool) -> Option<String> {
-    if allow_injection {
-        return None;
+fn gated_config_file_error(
+    configs: &[ImposterConfig],
+    gates: injection_gate::ScriptGates,
+) -> Option<String> {
+    let injection = injection_gate::gated_offender_ports(
+        configs,
+        gates,
+        injection_gate::GateRefusal::Injection,
+    );
+    if !injection.is_empty() {
+        return Some(format!(
+            "configFile load: imposter(s) on port(s) {} use {}, which require allowInjection. \
+             Set \"allowInjection\": true to allow this, or remove the scripting from the config.",
+            injection.join(", "),
+            injection_gate::GATED_SCRIPT_SURFACES,
+        ));
     }
-    let offenders = injection_gate::gated_offender_ports(configs);
-    if offenders.is_empty() {
-        return None;
+    let wasm =
+        injection_gate::gated_offender_ports(configs, gates, injection_gate::GateRefusal::Wasm);
+    if !wasm.is_empty() {
+        return Some(format!(
+            "configFile load: imposter(s) on port(s) {}: {}. Set \"allowWasm\": true to allow \
+             them, or remove them from the config.",
+            wasm.join(", "),
+            injection_gate::WASM_DISALLOWED,
+        ));
     }
-    Some(format!(
-        "configFile load: imposter(s) on port(s) {} use {}, which require allowInjection. \
-         Set \"allowInjection\": true to allow this, or remove the scripting from the config.",
-        offenders.join(", "),
-        injection_gate::GATED_SCRIPT_SURFACES,
-    ))
+    None
 }
 
 /// The `configFile` gate for the file's `intercept` block (issue #655). Same boundary, same
@@ -2122,6 +2140,10 @@ async fn build_admin_plane_inner(
     rift_http_proxy::admin_api::validate_admin_api_key(opts.api_key.as_deref())?;
     let api_key = opts.api_key.clone();
     let allow_injection = opts.allow_injection.unwrap_or(false);
+    let gates = injection_gate::ScriptGates {
+        allow_injection,
+        allow_wasm: opts.allow_wasm.unwrap_or(true),
+    };
     let no_parse = opts.no_parse.unwrap_or(false);
     if no_parse && opts.config_file.is_none() {
         anyhow::bail!(
@@ -2238,7 +2260,7 @@ async fn build_admin_plane_inner(
                 no_parse,
             };
             let loaded = config_loader::load_configs_full(&source).context("configFile load")?;
-            if let Some(err) = gated_config_file_error(&loaded.imposters, allow_injection) {
+            if let Some(err) = gated_config_file_error(&loaded.imposters, gates) {
                 return Err(anyhow::anyhow!(err));
             }
             // The file's `intercept` block (issue #655) gives an embedded host the same
@@ -2309,6 +2331,7 @@ async fn build_admin_plane_inner(
     // Without this the same call would log the warning twice.
     let mut server = AdminApiServer::new(addr, Arc::clone(&handle.manager), api_key)
         .with_allow_injection(allow_injection)
+        .with_allow_wasm(gates.allow_wasm)
         .with_intercept(handle.intercept.clone())
         .with_exposure_checked();
     if let Some(source) = config_source {
@@ -2432,6 +2455,9 @@ pub extern "C" fn rift_build_info() -> *const c_char {
         if cfg!(feature = "javascript") {
             features.push("javascript");
         }
+        if cfg!(feature = "wasm") {
+            features.push("wasm");
+        }
         let info = json!({
             "version": env!("CARGO_PKG_VERSION"),
             "commit": option_env!("RIFT_COMMIT"),
@@ -2532,6 +2558,7 @@ mod build_admin_plane_chain_tests {
             no_parse: None,
             config: None,
             allow_injection: None,
+            allow_wasm: None,
             require_admin_auth: None,
             upstream_ca_file: None,
             upstream_ca_pem: None,
@@ -2695,6 +2722,41 @@ mod panic_safety_tests {
 mod serve_options_tests {
     use super::*;
 
+    // Issue #1752: `allowWasm` parses to its typed field; absent is `None` (on at the call site).
+    #[test]
+    fn serve_options_parses_allow_wasm() {
+        let off: ServeOptions =
+            serde_json::from_str(r#"{"allowWasm": false}"#).expect("parse allowWasm");
+        assert_eq!(off.allow_wasm, Some(false));
+        let absent: ServeOptions = serde_json::from_str("{}").expect("parse empty options");
+        assert_eq!(absent.allow_wasm, None);
+        assert!(serde_json::from_str::<ServeOptions>(r#"{"allowWasm": "no"}"#).is_err());
+    }
+
+    // Issue #1752: a `configFile` gate names the flag each refused document lacks.
+    #[test]
+    fn config_file_gate_names_the_missing_flag() {
+        use rift_http_proxy::injection_gate::ScriptGates;
+        let configs: Vec<ImposterConfig> = vec![
+            serde_json::from_value(serde_json::json!({"port": 4545, "protocol": "http",
+                "stubs": [{"responses": [{"_rift": {"script": {"engine": "wasm", "code": "AA=="}}}]}]}))
+            .expect("config"),
+        ];
+        let gates = |allow_injection, allow_wasm| ScriptGates {
+            allow_injection,
+            allow_wasm,
+        };
+        assert_eq!(gated_config_file_error(&configs, gates(false, true)), None);
+        let refused =
+            gated_config_file_error(&configs, gates(true, false)).expect("wasm off refuses");
+        assert_eq!(
+            refused,
+            "configFile load: imposter(s) on port(s) 4545: engine \"wasm\" requires --allowWasm \
+             (disabled on this server). Set \"allowWasm\": true to allow them, or remove them from \
+             the config."
+        );
+    }
+
     // Issue #492: rift_serve_admin gains an `allowInjection` option (camelCase) that gates
     // script imposters on the embedded admin plane. It must parse to the typed field and default
     // to None (→ false at the call site) when absent, preserving prior behavior.
@@ -2829,6 +2891,7 @@ mod serve_option_capability_tests {
             "config": {"imposters": []},
             "noParse": false,
             "allowInjection": true,
+            "allowWasm": false,
             "requireAdminAuth": false,
             "upstreamCaFile": "/tmp/ca.pem",
             "upstreamCaPem": "-----BEGIN CERTIFICATE-----",

@@ -159,6 +159,17 @@ record.
 
 ### Added
 
+- **`--allowWasm` admits sandboxed wasm components apart from `--allowInjection`** (#1752): a
+  `_rift.script` with `engine: "wasm"` no longer needs `--allowInjection`, which means host code
+  execution; it is admitted by the new `--allow-wasm <BOOL>` (alias `--allowWasm`, env
+  `RIFT_ALLOW_WASM`, rcfile `allowWasm`, FFI `serveOptions` `allowWasm`), **on by default**.
+  `--allow-wasm false` refuses components at every door (`400 invalid wasm`, a `--configfile` startup
+  error, a skipped `--datadir` file, a `NULL` FFI serve). A document with both a component and host
+  code needs both flags, and the refusal names the missing one. `GET /config` reports
+  `options.allowWasm` and a new top-level `features` list (`javascript`, `quamina-matching`,
+  `wasm`); `rift_build_info().features` gains `wasm`. Behaviour change: a wasm script that was
+  refused without `--allowInjection` since #1751 is now admitted.
+
 - **`_rift.script` runs WebAssembly components: `"engine": "wasm"`** (#1751): a component built for
   `wasm32-wasip2` against the new `rift:mock` world (`crates/rift-mock-core/wit/rift-mock.wit`)
   answers requests under wasmtime, in a sandbox: it may import the standard WASI interfaces, which
@@ -173,7 +184,7 @@ record.
   `rift_wasm_traps_total{kind}`; the debug trace gains `fuelUsed` and `trap`; `rift script
   check/run` take a `.wasm` file; rift-lint gains `E062` (inline `code` with engine wasm), `E063`
   (a core module, not a component) and `W026` (`export`/`knobs` without it). On in every `rift` release binary and image; `librift_ffi`
-  needs its new `wasm` feature. Still gated by `--allowInjection`. See
+  needs its new `wasm` feature. Admitted by `--allowWasm` (#1752). See
   [WebAssembly scripting](docs/features/wasm-scripting.md) and `examples/wasm/counter-twin`.
 
 - **`ProxyRecordingStore::forget_recorded_by`** (#1776): forget a recording only if a given token settled

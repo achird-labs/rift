@@ -80,18 +80,57 @@ pub(crate) fn imposter_default_script_engine(manager: &ImposterManager, port: u1
     )
 }
 
-/// Reject a set of stubs carrying a Mountebank scripting surface when `--allowInjection` is off,
-/// mirroring Mountebank's gate (issue #355 Item 4). `None` when the stubs are allowed through.
-/// Shared by the imposter CRUD handlers and the stub sub-resource handlers (B3) so the gate can't
-/// be bypassed by adding a script-bearing stub through `POST/PUT /imposters/:port/stubs[...]`.
+/// Reject a set of stubs carrying a scripting surface its flag does not allow: host code without
+/// `--allowInjection`, mirroring Mountebank's gate (issue #355 Item 4), or a wasm component with
+/// `--allowWasm false` (issue #1752). `None` when the stubs are allowed through. Shared by the
+/// imposter CRUD handlers and the stub sub-resource handlers (B3) so the gate can't be bypassed by
+/// adding a script-bearing stub through `POST/PUT /imposters/:port/stubs[...]`.
+///
+/// The stubs are classified against the live imposter on `port`: its `_rift.scripts` registry is
+/// what a `ref` resolves to, and its `defaultEngine` is what an engine-less script runs on.
 pub(crate) fn reject_stubs_if_injection_disallowed(
     stubs: &[Stub],
-    allow_injection: bool,
+    manager: &ImposterManager,
+    port: u16,
+    gates: crate::injection_gate::ScriptGates,
 ) -> Option<Response<Full<Bytes>>> {
-    if allow_injection || !crate::injection_gate::stubs_contain_script_surface(stubs) {
-        return None;
+    let registry = imposter_script_registry(manager, port);
+    let default_engine = imposter_default_script_engine(manager, port);
+    let surface = crate::injection_gate::classify_stubs(
+        stubs,
+        crate::injection_gate::ScriptContext {
+            registry: &registry,
+            default_engine: &default_engine,
+        },
+    );
+    gates.refusal(surface).map(gate_refusal_response)
+}
+
+/// The `400` for a document `refusal` names the missing flag of.
+pub(crate) fn gate_refusal_response(
+    refusal: crate::injection_gate::GateRefusal,
+) -> Response<Full<Bytes>> {
+    match refusal {
+        crate::injection_gate::GateRefusal::Injection => injection_disallowed_response(),
+        crate::injection_gate::GateRefusal::Wasm => wasm_disallowed_response(),
     }
-    Some(injection_disallowed_response())
+}
+
+/// The `400 invalid wasm` a wasm component gets on a server started with `--allowWasm false`.
+fn wasm_disallowed_response() -> Response<Full<Bytes>> {
+    let body = serde_json::json!({
+        "errors": [{
+            "code": ErrorKind::InvalidWasm.slug(),
+            "type": ErrorKind::InvalidWasm.slug(),
+            "message": crate::injection_gate::WASM_DISALLOWED,
+        }]
+    })
+    .to_string();
+    build_response_with_headers(
+        StatusCode::BAD_REQUEST,
+        [("Content-Type", ADMIN_JSON_CONTENT_TYPE)],
+        body,
+    )
 }
 
 /// The Mountebank-compatible `400 invalid injection` response returned when a request carries a
@@ -172,9 +211,11 @@ pub(crate) fn imposter_script_timeout_ms(manager: &ImposterManager, port: u16) -
 /// is off. Delegates to [`reject_stubs_if_injection_disallowed`].
 fn reject_if_injection_disallowed(
     config: &ImposterConfig,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
 ) -> Option<Response<Full<Bytes>>> {
-    reject_stubs_if_injection_disallowed(&config.stubs, allow_injection)
+    gates
+        .refusal(crate::injection_gate::classify_config(config))
+        .map(gate_refusal_response)
 }
 
 /// POST /imposters - Create a new imposter
@@ -182,7 +223,7 @@ pub async fn handle_create(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req, &manager.body_guard()).await {
@@ -195,7 +236,7 @@ pub async fn handle_create(
         Err(e) => return e.into_response("Invalid imposter JSON"),
     };
 
-    if let Some(rejection) = reject_if_injection_disallowed(&config, allow_injection) {
+    if let Some(rejection) = reject_if_injection_disallowed(&config, gates) {
         return rejection;
     }
     if let Some(rejection) = reject_failing_generators(
@@ -372,7 +413,7 @@ pub async fn handle_replace_all(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let reconcile = match reconcile_param(req.uri().query()) {
@@ -388,7 +429,7 @@ pub async fn handle_replace_all(
         body.bytes().clone(),
         base_url,
         manager,
-        allow_injection,
+        gates,
         scripts_dir,
         reconcile,
     )
@@ -443,7 +484,7 @@ async fn replace_all_from_bytes(
     body: Bytes,
     base_url: &str,
     manager: Arc<ImposterManager>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     scripts_dir: Option<Arc<PathBuf>>,
     reconcile: bool,
 ) -> Response<Full<Bytes>> {
@@ -460,7 +501,7 @@ async fn replace_all_from_bytes(
     // Reject the whole batch (before making any changes) if any imposter carries a script
     // surface and --allowInjection is off (issue #355 Item 4).
     for config in &batch.imposters {
-        if let Some(rejection) = reject_if_injection_disallowed(config, allow_injection) {
+        if let Some(rejection) = reject_if_injection_disallowed(config, gates) {
             return rejection;
         }
     }
@@ -1038,7 +1079,7 @@ pub async fn handle_verify(
     port: u16,
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req, &manager.body_guard()).await {
@@ -1052,7 +1093,7 @@ pub async fn handle_verify(
     // since verify is not a per-request hot path.
     let door = admin_script_access(&scripts_dir);
     tokio::task::spawn_blocking(move || {
-        verify_response(port, &body, &manager, allow_injection, &door)
+        verify_response(port, &body, &manager, gates.allow_injection, &door)
     })
     .await
     .unwrap_or_else(|e| {
@@ -1262,8 +1303,20 @@ mod allow_injection_tests {
                 "responses": [{ "is": { "statusCode": 200, "body": "fine" } }]
             }]
         }));
-        assert!(reject_if_injection_disallowed(&config, false).is_none());
-        assert!(reject_if_injection_disallowed(&config, true).is_none());
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_none()
+        );
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(true)
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1274,10 +1327,19 @@ mod allow_injection_tests {
                 "responses": [{ "inject": "function(config) { return { statusCode: 200 }; }" }]
             }]
         }));
-        let rejection = reject_if_injection_disallowed(&config, false)
-            .expect("inject response must be rejected when allowInjection is off");
+        let rejection = reject_if_injection_disallowed(
+            &config,
+            crate::injection_gate::ScriptGates::from_injection(false),
+        )
+        .expect("inject response must be rejected when allowInjection is off");
         assert_eq!(rejection.status(), StatusCode::BAD_REQUEST);
-        assert!(reject_if_injection_disallowed(&config, true).is_none());
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(true)
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1291,8 +1353,20 @@ mod allow_injection_tests {
                 }]
             }]
         }));
-        assert!(reject_if_injection_disallowed(&config, false).is_some());
-        assert!(reject_if_injection_disallowed(&config, true).is_none());
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_some()
+        );
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(true)
+            )
+            .is_none()
+        );
     }
 
     /// Issue #1093: `POST /imposters` admits a null behavior key without the flag, and a null
@@ -1309,10 +1383,22 @@ mod allow_injection_tests {
         };
         let null_only =
             with_behaviors(json!({ "wait": null, "decorate": null, "shellTransform": null }));
-        assert!(reject_if_injection_disallowed(&null_only, false).is_none());
+        assert!(
+            reject_if_injection_disallowed(
+                &null_only,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_none()
+        );
 
         let mixed = with_behaviors(json!({ "wait": null, "decorate": "function(config) { }" }));
-        assert!(reject_if_injection_disallowed(&mixed, false).is_some());
+        assert!(
+            reject_if_injection_disallowed(
+                &mixed,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -1325,7 +1411,13 @@ mod allow_injection_tests {
                 }]
             }]
         }));
-        assert!(reject_if_injection_disallowed(&config, false).is_some());
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -1337,8 +1429,20 @@ mod allow_injection_tests {
                 "responses": [{ "is": { "statusCode": 200 } }]
             }]
         }));
-        assert!(reject_if_injection_disallowed(&config, false).is_some());
-        assert!(reject_if_injection_disallowed(&config, true).is_none());
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_some()
+        );
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(true)
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1350,7 +1454,13 @@ mod allow_injection_tests {
                 "responses": [{ "is": { "statusCode": 200 } }]
             }]
         }));
-        assert!(reject_if_injection_disallowed(&config, false).is_some());
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -1366,8 +1476,20 @@ mod allow_injection_tests {
                 }]
             }]
         }));
-        assert!(reject_if_injection_disallowed(&config, false).is_some());
-        assert!(reject_if_injection_disallowed(&config, true).is_none());
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_some()
+        );
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(true)
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1380,8 +1502,20 @@ mod allow_injection_tests {
                 }]
             }]
         }));
-        assert!(reject_if_injection_disallowed(&config, false).is_some());
-        assert!(reject_if_injection_disallowed(&config, true).is_none());
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_some()
+        );
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(true)
+            )
+            .is_none()
+        );
     }
 
     // B1: shellTransform runs a host shell command and MUST be gated.
@@ -1397,10 +1531,20 @@ mod allow_injection_tests {
             }]
         }));
         assert!(
-            reject_if_injection_disallowed(&config, false).is_some(),
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_some(),
             "shellTransform is a host-command execution surface and must be gated"
         );
-        assert!(reject_if_injection_disallowed(&config, true).is_none());
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(true)
+            )
+            .is_none()
+        );
     }
 
     // B2: a `wait` expressed as a JS function is now executed on Boa, so it's an injection surface.
@@ -1416,10 +1560,20 @@ mod allow_injection_tests {
             }]
         }));
         assert!(
-            reject_if_injection_disallowed(&config, false).is_some(),
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_some(),
             "a JS-function wait is executed on Boa and must be gated"
         );
-        assert!(reject_if_injection_disallowed(&config, true).is_none());
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(true)
+            )
+            .is_none()
+        );
     }
 
     // B2: a numeric wait (Fixed/Range) is NOT a scripting surface and must stay allowed.
@@ -1435,7 +1589,11 @@ mod allow_injection_tests {
             }]
         }));
         assert!(
-            reject_if_injection_disallowed(&fixed, false).is_none(),
+            reject_if_injection_disallowed(
+                &fixed,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_none(),
             "a numeric (Fixed) wait must never be gated"
         );
 
@@ -1449,7 +1607,11 @@ mod allow_injection_tests {
             }]
         }));
         assert!(
-            reject_if_injection_disallowed(&range, false).is_none(),
+            reject_if_injection_disallowed(
+                &range,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_none(),
             "a numeric (Range) wait must never be gated"
         );
     }
@@ -1466,17 +1628,37 @@ mod allow_injection_tests {
         }));
         let stubs = &config.stubs;
         assert!(
-            reject_stubs_if_injection_disallowed(stubs, false).is_some(),
+            reject_stubs_if_injection_disallowed(
+                stubs,
+                &ImposterManager::new(),
+                4545,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_some(),
             "the shared stub-slice gate must reject a script-bearing stub when injection is off"
         );
-        assert!(reject_stubs_if_injection_disallowed(stubs, true).is_none());
+        assert!(
+            reject_stubs_if_injection_disallowed(
+                stubs,
+                &ImposterManager::new(),
+                4545,
+                crate::injection_gate::ScriptGates::from_injection(true)
+            )
+            .is_none()
+        );
 
         let clean = cfg(json!({
             "protocol": "http",
             "stubs": [{ "responses": [{ "is": { "statusCode": 200 } }] }]
         }));
         assert!(
-            reject_stubs_if_injection_disallowed(&clean.stubs, false).is_none(),
+            reject_stubs_if_injection_disallowed(
+                &clean.stubs,
+                &ImposterManager::new(),
+                4545,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_none(),
             "a non-script stub slice is always allowed"
         );
     }
@@ -1501,10 +1683,20 @@ mod allow_injection_tests {
     fn bare_string_function_wait_is_gated() {
         let config = wait_cfg(json!("function() { return 100; }"));
         assert!(
-            reject_if_injection_disallowed(&config, false).is_some(),
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_some(),
             "a JS-function wait must require --allowInjection"
         );
-        assert!(reject_if_injection_disallowed(&config, true).is_none());
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(true)
+            )
+            .is_none()
+        );
     }
 
     // AC 610-2: THE BYPASS REGRESSION TEST. #608 makes `{"inject": ...}` parse and execute on Boa;
@@ -1514,10 +1706,20 @@ mod allow_injection_tests {
     fn object_form_inject_wait_is_gated_identically() {
         let config = wait_cfg(json!({ "inject": "function() { return 100; }" }));
         assert!(
-            reject_if_injection_disallowed(&config, false).is_some(),
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(false)
+            )
+            .is_some(),
             "the object-form wait executes JS just like the bare string — it must not bypass the gate"
         );
-        assert!(reject_if_injection_disallowed(&config, true).is_none());
+        assert!(
+            reject_if_injection_disallowed(
+                &config,
+                crate::injection_gate::ScriptGates::from_injection(true)
+            )
+            .is_none()
+        );
     }
 
     // AC 610-3 / #1162: the gate fails closed on a `wait` it cannot prove is a plain delay, and the
@@ -1562,7 +1764,11 @@ mod allow_injection_tests {
                 }]
             }));
             assert!(
-                reject_if_injection_disallowed(&config, false).is_none(),
+                reject_if_injection_disallowed(
+                    &config,
+                    crate::injection_gate::ScriptGates::from_injection(false)
+                )
+                .is_none(),
                 "{behaviors} carries no script surface — the injection gate must not reject it"
             );
         }
@@ -1575,7 +1781,11 @@ mod allow_injection_tests {
         for wait in [json!(500), json!({ "min": 1, "max": 9 })] {
             let config = wait_cfg(wait.clone());
             assert!(
-                reject_if_injection_disallowed(&config, false).is_none(),
+                reject_if_injection_disallowed(
+                    &config,
+                    crate::injection_gate::ScriptGates::from_injection(false)
+                )
+                .is_none(),
                 "{wait} is not a scripting surface and must not require --allowInjection"
             );
         }
@@ -2614,7 +2824,7 @@ mod replace_all_tests {
             Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             None,
             false,
         )
@@ -2662,7 +2872,7 @@ mod replace_all_tests {
             Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             None,
             false,
         )
@@ -2719,7 +2929,7 @@ mod replace_all_tests {
             Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             None,
             false,
         )
@@ -2825,7 +3035,7 @@ mod replace_all_tests {
             Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             None,
             false,
         )
@@ -2872,7 +3082,7 @@ mod replace_all_tests {
             Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             None,
             false,
         )
@@ -2932,7 +3142,7 @@ mod replace_all_tests {
             Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             None,
             false,
         )
@@ -2956,7 +3166,7 @@ mod replace_all_tests {
             Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             None,
             true,
         )
@@ -3001,7 +3211,7 @@ mod replace_all_tests {
             Bytes::copy_from_slice(body.as_bytes()),
             BASE,
             Arc::clone(&manager),
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             None,
             false,
         )

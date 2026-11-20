@@ -82,7 +82,7 @@ pub struct AdminApiServer {
     api_key: Option<Arc<String>>,
     config_source: Option<ReloadSource>,
     front_door_routes: Option<FrontDoorRoutes>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
     /// The buffer `GET /logs` serves (issue #1615); see [`with_log_ring`](Self::with_log_ring).
@@ -119,7 +119,10 @@ impl AdminApiServer {
             api_key: api_key.map(Arc::new),
             config_source: None,
             front_door_routes: None,
-            allow_injection: false,
+            gates: crate::injection_gate::ScriptGates {
+                allow_injection: false,
+                allow_wasm: true,
+            },
             intercept: None,
             scripts_dir: None,
             log_ring: None,
@@ -280,7 +283,15 @@ impl AdminApiServer {
     /// explicitly so an embedder can set it without mutating the process environment.
     #[must_use]
     pub fn with_allow_injection(mut self, allow: bool) -> Self {
-        self.allow_injection = allow;
+        self.gates.allow_injection = allow;
+        self
+    }
+
+    /// Set whether sandboxed wasm components are admitted (`--allowWasm`, issue #1752); on unless
+    /// an embedder turns it off. Reported by `GET /config` as `options.allowWasm`.
+    #[must_use]
+    pub fn with_allow_wasm(mut self, allow: bool) -> Self {
+        self.gates.allow_wasm = allow;
         self
     }
 
@@ -392,7 +403,7 @@ impl AdminApiServer {
                 self.api_key,
                 self.config_source,
                 self.front_door_routes,
-                self.allow_injection,
+                self.gates,
                 self.intercept,
                 self.scripts_dir,
                 self.authorizer,
@@ -626,7 +637,7 @@ async fn accept_loop(
     api_key: Option<Arc<String>>,
     config_source: Option<ReloadSource>,
     front_door_routes: Option<FrontDoorRoutes>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
     authorizer: Option<Arc<dyn AdminAuthorizer>>,
@@ -905,7 +916,7 @@ async fn accept_loop(
                                 manager,
                                 config_source,
                                 front_door_routes,
-                                allow_injection,
+                                gates,
                                 intercept,
                                 scripts_dir,
                                 config_snapshot,

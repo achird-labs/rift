@@ -101,7 +101,7 @@ rift_free(result);
 ```
 
 - **Options JSON** (pass `NULL` or `{}` for all defaults; every field optional):
-  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"noParse":false,"config":null,"allowInjection":false,"requireAdminAuth":false,"upstreamCaFile":null,"upstreamCaPem":null,"upstreamTlsSkipVerify":false,"maxBodySize":null,"bodyMemoryBudget":null,"journalMaxBytes":null,"scriptsDir":null}`.
+  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"noParse":false,"config":null,"allowInjection":false,"allowWasm":true,"requireAdminAuth":false,"upstreamCaFile":null,"upstreamCaPem":null,"upstreamTlsSkipVerify":false,"maxBodySize":null,"bodyMemoryBudget":null,"journalMaxBytes":null,"scriptsDir":null}`.
   `port: 0` binds an ephemeral port; `host` must be an IP literal — IPv4, or IPv6 bare (`::1`) or
   bracketed (`[::1]`), a numeric scope id (`fe80::1%2`) kept — and a DNS name such as `localhost` is
   refused (#1137; before that fix a bare IPv6 host could never bind). The metrics server, if asked
@@ -172,6 +172,12 @@ rift_free(result);
 - **`allowInjection`** (default `false`): whether Rift admits script/`inject` imposters
   (`inject`/`decorate`/`shellTransform`/JS-function `wait`/`_rift.script`), mirroring the
   `--allowInjection` CLI flag. Leave it `false` unless you intend to permit them.
+- **`allowWasm`** (default `true`): whether Rift admits `_rift.script` with `engine: "wasm"`,
+  sandboxed components that reach nothing on the host, across the same doors as `allowInjection`
+  (admin plane, `configFile`, reload). Independent of `allowInjection`: a component needs only this
+  one, and a document carrying both a component and an `inject` needs both. `false` refuses
+  components with `400 invalid wasm` (admin plane) or `NULL` + `rift_last_error` (`configFile`).
+  A library built without the `wasm` feature refuses components whatever this says.
 
     **What the gate protects.** `allowInjection` gates config **documents that cross a trust
     boundary**, not untrusted *hosts*. A config the embedding host hands over in-process is trusted;
@@ -214,9 +220,9 @@ rift_free(result);
 check before sending one:
 
 ```jsonc
-{"version":"…","commit":"…","builtAt":"…","features":["javascript"],
+{"version":"…","commit":"…","builtAt":"…","features":["javascript","wasm"],
  "serveOptions":["host","port","apiKey","metricsPort","configFile","noParse","config",
-                 "allowInjection","requireAdminAuth","upstreamCaFile","upstreamCaPem",
+                 "allowInjection","allowWasm","requireAdminAuth","upstreamCaFile","upstreamCaPem",
                  "upstreamTlsSkipVerify","maxBodySize","bodyMemoryBudget","journalMaxBytes",
                  "scriptsDir"]}
 ```
@@ -235,7 +241,8 @@ you must not feature-detect by sending the option and watching for an error:
   deliberately provoking a failure, and it still tells you nothing about the older engines.
 
 `serveOptions` is deliberately separate from `features`, which lists compiled cargo features
-(`javascript`) — different question, different array. The same list is published
+(`javascript`, and `wasm` when the library was built with it) — different question, different
+array. `GET /config` reports the same `features` for HTTP consumers. The same list is published
 over HTTP at `GET /config` for consumers that do not link the C-ABI.
 
 ## Intercept proxy over FFI

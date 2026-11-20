@@ -94,11 +94,14 @@ pub struct ConfigSnapshot {
 
 /// GET /config - Mountebank-compatible config endpoint
 ///
-/// `allow_injection` is threaded in explicitly (issue #342) rather than read from
+/// `gates` is threaded in explicitly (issue #342) rather than read from
 /// `MB_ALLOW_INJECTION`, so an embedded host can set it without mutating process env.
 ///
 /// `snapshot` carries the values that used to be hardcoded literals (issue #879).
-pub fn handle_config(allow_injection: bool, snapshot: ConfigSnapshot) -> Response<Full<Bytes>> {
+pub fn handle_config(
+    gates: crate::injection_gate::ScriptGates,
+    snapshot: ConfigSnapshot,
+) -> Response<Full<Bytes>> {
     let config = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         // Build identity (issue #344), stamped by build.rs — the same value rift_build_info
@@ -107,7 +110,8 @@ pub fn handle_config(allow_injection: bool, snapshot: ConfigSnapshot) -> Respons
         "options": {
             "port": snapshot.admin_port,
             "host": snapshot.host.as_deref(),
-            "allowInjection": allow_injection,
+            "allowInjection": gates.allow_injection,
+            "allowWasm": gates.allow_wasm,
             "localOnly": snapshot.local_only,
             "mock": snapshot.mock,
             "debug": snapshot.debug,
@@ -121,6 +125,9 @@ pub fn handle_config(allow_injection: bool, snapshot: ConfigSnapshot) -> Respons
         // An HTTP-only consumer feature-detects on this exactly as an FFI consumer does on
         // `rift_build_info().serveOptions`; absence means an engine too old to report capabilities.
         "serveOptions": crate::admin_api::SERVE_OPTION_KEYS,
+        // The cargo features this engine was built with (issue #1752), as `rift_build_info` reports
+        // them over FFI. Absence of the key means an engine too old to report them.
+        "features": compiled_features(),
         "process": {
             "nodeVersion": "N/A (Rust)",
             "architecture": std::env::consts::ARCH,
@@ -135,6 +142,19 @@ pub fn handle_config(allow_injection: bool, snapshot: ConfigSnapshot) -> Respons
         }
     });
     json_response(StatusCode::OK, &config)
+}
+
+/// The engine features this build carries, for `GET /config` (issue #1752).
+#[must_use]
+pub fn compiled_features() -> Vec<&'static str> {
+    [
+        ("javascript", cfg!(feature = "javascript")),
+        ("quamina-matching", cfg!(feature = "quamina-matching")),
+        ("wasm", cfg!(feature = "wasm")),
+    ]
+    .into_iter()
+    .filter_map(|(name, on)| on.then_some(name))
+    .collect()
 }
 
 /// GET /logs - Mountebank-compatible logs endpoint (issue #1615)
@@ -171,13 +191,15 @@ fn query_value(query: Option<&str>, key: &str) -> Option<String> {
     })
 }
 
-/// True when a reload's configs carry a scripting surface that `--allowInjection` has not
-/// enabled (issue #612) — the same classifier every other imposter door uses.
-fn reload_is_gated(configs: &[ReloadEntry], allow_injection: bool) -> bool {
-    !allow_injection
-        && configs
-            .iter()
-            .any(|(config, _)| crate::injection_gate::config_uses_script_surface(config))
+/// The flag a reload's configs need and the server lacks (issues #612, #1752) — the same
+/// classifier every other imposter door uses.
+fn reload_refusal(
+    configs: &[ReloadEntry],
+    gates: crate::injection_gate::ScriptGates,
+) -> Option<crate::injection_gate::GateRefusal> {
+    configs
+        .iter()
+        .find_map(|(config, _)| gates.refusal(crate::injection_gate::classify_config(config)))
 }
 
 /// A reloaded imposter and what its scripts may `require()` (issue #1611).
@@ -268,7 +290,7 @@ pub async fn handle_reload(
     config_source: Option<crate::sources::ReloadSource>,
     front_door_routes: Option<&crate::front_door::FrontDoorRoutes>,
     intercept: Option<&crate::intercept_control::InterceptControl>,
-    allow_injection: bool,
+    gates: crate::injection_gate::ScriptGates,
     scripts_dir: Option<&std::path::Path>,
 ) -> Response<Full<Bytes>> {
     let network = crate::imposter::ScriptFileAccess::network(scripts_dir);
@@ -407,18 +429,20 @@ pub async fn handle_reload(
     // Validate-before-touch: refuse a gated config before anything mutates, so a refused reload
     // leaves the running imposters exactly as they were (issue #612). The intercept rules are part
     // of the same document and get the same all-or-nothing answer (issue #1271).
-    let intercept_gated = !allow_injection
+    let intercept_gated = !gates.allow_injection
         && intercept_block.as_ref().is_some_and(|block| {
             block
                 .rules
                 .iter()
                 .any(crate::injection_gate::intercept_rule_uses_script_surface)
         });
-    if intercept_gated
-        || reload_is_gated(&persisted, allow_injection)
-        || reload_is_gated(&ephemeral, allow_injection)
-    {
+    if intercept_gated {
         return crate::admin_api::handlers::imposters::injection_disallowed_response();
+    }
+    if let Some(refusal) =
+        reload_refusal(&persisted, gates).or_else(|| reload_refusal(&ephemeral, gates))
+    {
+        return crate::admin_api::handlers::imposters::gate_refusal_response(refusal);
     }
 
     // Mountebank's create-time dry run of generator injects (issue #1580), still before anything
@@ -580,7 +604,7 @@ mod tests {
     #[test]
     fn test_handle_config() {
         let resp = handle_config(
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             ConfigSnapshot {
                 admin_port: 2525,
                 local_only: false,
@@ -593,13 +617,73 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    // Issue #1752: `options.allowWasm` reports the flag, apart from `allowInjection`, and the
+    // top-level `features` lists what this build was compiled with.
+    #[test]
+    fn handle_config_reports_allow_wasm_and_features() {
+        use http_body_util::BodyExt;
+        let body = |gates| {
+            let resp = handle_config(
+                gates,
+                ConfigSnapshot {
+                    admin_port: 2525,
+                    local_only: false,
+                    host: None,
+                    mock: false,
+                    debug: false,
+                    log_ring: None,
+                },
+            );
+            let bytes = tokio::runtime::Runtime::new()
+                .expect("runtime")
+                .block_on(resp.into_body().collect())
+                .expect("body")
+                .to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("json")
+        };
+        let on = body(crate::injection_gate::ScriptGates {
+            allow_injection: false,
+            allow_wasm: true,
+        });
+        assert_eq!(on["options"]["allowInjection"], false);
+        assert_eq!(on["options"]["allowWasm"], true);
+        let off = body(crate::injection_gate::ScriptGates {
+            allow_injection: true,
+            allow_wasm: false,
+        });
+        assert_eq!(off["options"]["allowInjection"], true);
+        assert_eq!(off["options"]["allowWasm"], false);
+        let features: Vec<&str> = on["features"]
+            .as_array()
+            .expect("features")
+            .iter()
+            .map(|f| f.as_str().expect("string"))
+            .collect();
+        assert_eq!(
+            features.contains(&"wasm"),
+            cfg!(feature = "wasm"),
+            "{features:?}"
+        );
+        assert_eq!(
+            features.contains(&"javascript"),
+            cfg!(feature = "javascript"),
+            "{features:?}"
+        );
+        assert!(
+            on["serveOptions"]
+                .as_array()
+                .expect("serveOptions")
+                .contains(&serde_json::json!("allowWasm"))
+        );
+    }
+
     // AC2 (#344): GET /config exposes a `commit` build-identity field (present even when unstamped,
     // i.e. JSON null); in a git checkout build.rs stamps it to HEAD, matching rift_build_info.
     #[test]
     fn handle_config_reports_commit() {
         use http_body_util::BodyExt;
         let resp = handle_config(
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             ConfigSnapshot {
                 admin_port: 2525,
                 local_only: false,
@@ -641,7 +725,7 @@ mod tests {
         use http_body_util::BodyExt;
         let read = |mock: bool, debug: bool| {
             let resp = handle_config(
-                false,
+                crate::injection_gate::ScriptGates::from_injection(false),
                 ConfigSnapshot {
                     admin_port: 2525,
                     local_only: false,
@@ -673,7 +757,7 @@ mod tests {
         use http_body_util::BodyExt;
         let read_flag = |allow: bool| {
             let resp = handle_config(
-                allow,
+                crate::injection_gate::ScriptGates::from_injection(allow),
                 ConfigSnapshot {
                     admin_port: 2525,
                     local_only: false,
@@ -698,7 +782,15 @@ mod tests {
     #[tokio::test]
     async fn test_handle_reload_no_source_is_noop() {
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager, None, None, None, false, None).await;
+        let resp = handle_reload(
+            manager,
+            None,
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -739,7 +831,7 @@ mod tests {
             Some(source),
             Some(&table),
             None,
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             None,
         )
         .await;
@@ -784,7 +876,15 @@ mod tests {
         ));
 
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
@@ -845,7 +945,7 @@ mod tests {
             Some(source.clone()),
             None,
             None,
-            true,
+            crate::injection_gate::ScriptGates::from_injection(true),
             None,
         )
         .await;
@@ -870,7 +970,15 @@ mod tests {
         // Edit the referenced file (the configfile itself is untouched) and reload again.
         std::fs::write(&script_path, r#"fn respond(ctx) { http(503, "second") }"#)
             .expect("write script (second version)");
-        let resp = handle_reload(manager.clone(), Some(source), None, None, true, None).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(true),
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             script_code(&manager).as_deref(),
@@ -926,7 +1034,7 @@ mod tests {
             Some(source.clone()),
             None,
             None,
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             None,
         )
         .await;
@@ -945,7 +1053,15 @@ mod tests {
         )
         .expect("write scripted config");
 
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            None,
+        )
+        .await;
         assert_eq!(
             resp.status(),
             StatusCode::BAD_REQUEST,
@@ -1004,7 +1120,15 @@ mod tests {
             },
         ));
 
-        let resp = handle_reload(manager.clone(), Some(source), None, None, true, None).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(true),
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
@@ -1048,7 +1172,15 @@ mod tests {
             },
         ));
 
-        let resp = handle_reload(manager.clone(), Some(source), None, None, true, None).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(true),
+            None,
+        )
+        .await;
         assert_eq!(
             resp.status(),
             StatusCode::OK,
@@ -1130,7 +1262,15 @@ mod tests {
             format!("file:{}", file.display()),
             &datadir,
         );
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
         let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -1207,7 +1347,15 @@ mod tests {
         let source = sources_and_datadir(registry, "unchanged:x".to_string(), &datadir);
 
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(
@@ -1250,14 +1398,22 @@ mod tests {
             Some(source.clone()),
             None,
             None,
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             None,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         write(false);
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(
@@ -1290,7 +1446,15 @@ mod tests {
         };
 
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(
@@ -1325,7 +1489,15 @@ mod tests {
             format!("file:{}", file.display()),
             &datadir,
         );
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
         let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -1362,7 +1534,15 @@ mod tests {
             &datadir,
         );
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(manager.get_imposter(imposter_port).is_err());
 
@@ -1385,7 +1565,15 @@ mod tests {
             &datadir,
         );
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
+        let resp = handle_reload(
+            manager.clone(),
+            Some(source),
+            None,
+            None,
+            crate::injection_gate::ScriptGates::from_injection(false),
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(manager.count(), 1);
         let written: Vec<_> = std::fs::read_dir(&datadir)
@@ -1423,7 +1611,15 @@ mod tests {
         );
 
         for source in [legacy, both] {
-            let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
+            let resp = handle_reload(
+                manager.clone(),
+                Some(source),
+                None,
+                None,
+                crate::injection_gate::ScriptGates::from_injection(false),
+                None,
+            )
+            .await;
             assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
             let body = body_json(resp).await;
             let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -1459,7 +1655,15 @@ mod tests {
         );
 
         for source in [legacy, both] {
-            let resp = handle_reload(manager.clone(), Some(source), None, None, false, None).await;
+            let resp = handle_reload(
+                manager.clone(),
+                Some(source),
+                None,
+                None,
+                crate::injection_gate::ScriptGates::from_injection(false),
+                None,
+            )
+            .await;
             assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
             let body = body_json(resp).await;
             let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -1494,7 +1698,7 @@ mod tests {
             Some(source),
             None,
             None,
-            false,
+            crate::injection_gate::ScriptGates::from_injection(false),
             None,
         )
         .await;
