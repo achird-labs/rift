@@ -138,10 +138,30 @@ fn validate_rift_script_config(
             response_index,
             engine: script_config.engine.clone().unwrap_or_default(),
             message: format!(
-                "script must specify exactly one of `code`, `file`, or `ref` (found {})",
+                "script must specify exactly one of `code`, `file`, `ref`, or `component` (found {})",
                 script_config.source_count()
             ),
         });
+    }
+    if let Some(component) = script_config.component.as_deref() {
+        let refused = |message: String| {
+            Some(StubValidationError {
+                stub_id: stub_id.to_string(),
+                response_index,
+                engine: "wasm".to_string(),
+                message,
+            })
+        };
+        if let Err(e) = component.parse::<crate::imposter::components::ComponentId>() {
+            return refused(e.to_string());
+        }
+        return match script_config.engine.as_deref() {
+            None => None,
+            Some(engine) if super::ScriptEngineKind::is_wasm(engine) => None,
+            Some(other) => refused(format!(
+                "`component` is a wasm component; engine must be \"wasm\", not \"{other}\""
+            )),
+        };
     }
     let code = script_config.code.as_deref()?;
     let engine = script_config.engine.as_deref().unwrap_or("rhai");

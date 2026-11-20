@@ -526,6 +526,13 @@ impl ScriptEngineKind {
     }
 }
 
+/// Admit a component (base64) as `_rift.script` admission does, returning what it imports (issue
+/// #1757's upload).
+#[cfg(feature = "wasm")]
+pub(crate) fn wasm_admit_imports(code: &str) -> Result<Vec<String>, String> {
+    wasm::admit_imports(code).map_err(|e| e.to_string())
+}
+
 /// The message `wasm` gets in a build without the `wasm` feature (issue #1751).
 #[cfg_attr(feature = "wasm", allow(dead_code))]
 pub(crate) const WASM_UNAVAILABLE: &str = "engine \"wasm\" is not available in this build";

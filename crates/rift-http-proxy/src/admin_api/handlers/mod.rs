@@ -1,6 +1,7 @@
 //! Request handlers for the Admin API.
 
 pub mod clock;
+pub mod components;
 pub mod events;
 pub mod imposters;
 pub mod intercept;

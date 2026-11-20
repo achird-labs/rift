@@ -13,7 +13,7 @@
 // alternative — a second route parser — is the divergence `authz`'s own doc comment records as a
 // shipped security bug (issue #887).
 pub mod authz;
-mod handlers;
+pub(crate) mod handlers;
 pub mod log_ring;
 mod ordered_json;
 mod request_filter;
@@ -64,6 +64,7 @@ pub const SERVE_OPTION_KEYS: &[&str] = &[
     "config",
     "allowInjection",
     "allowWasm",
+    "strictWasm",
     "requireAdminAuth",
     "upstreamCaFile",
     "upstreamCaPem",

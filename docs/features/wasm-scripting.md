@@ -51,6 +51,7 @@ The `.wasm` extension selects the engine, so `"engine": "wasm"` can be left out.
 |:----|:--------|:--------|
 | `_rift.script.engine` | from the file extension | `"wasm"`. |
 | `_rift.script.file` | — | The component. It is resolved like any script file: relative to the config file for `--configfile`, or to `--scripts-dir` through the admin API. A path that leaves `--scripts-dir` is refused. |
+| `_rift.script.component` | — | Instead of `file`: a component uploaded with `POST /components`, as `"sha256:<hex>"` ([Uploading a component](#uploading-a-component)). Implies `engine: "wasm"`. |
 | `_rift.script.export` | `"rift"` | Which export answers. `"rift"` is the `rift:mock/handler` interface below. It is the only value for now. |
 | `_rift.script.knobs` | `{}` | Any JSON. The component's `init` gets it as text before every call. |
 | `_rift.scriptEngine.timeoutMs` | `5000` | The wall-clock deadline of one call. |
@@ -68,6 +69,47 @@ component itself, and replay without the file. A `code` that is not base64 is re
 The component is compiled once, when the imposter is created, so a broken component is refused
 with `400` before any request reaches it. Compiled components are cached by their content: two
 imposters carrying the same bytes compile once.
+
+### Uploading a component
+
+A test or an agent that has just built a `.wasm` can hand it to a running Rift, local or remote,
+without putting a file on its host:
+
+```bash
+sha=$(curl -s -X POST localhost:2525/components \
+  -H 'Content-Type: application/wasm' --data-binary @counter_twin.wasm | jq -r .sha256)
+
+curl -X POST localhost:2525/imposters -H 'Content-Type: application/json' -d '{
+  "port": 4545, "protocol": "http",
+  "stubs": [{ "responses": [{ "_rift": { "script": { "component": "sha256:'"$sha"'" } } }] }]
+}'
+```
+
+The upload is validated as a `file` component is, and refused with `400` naming the problem. The
+same bytes again answer `200` with the same hash. A stub that names a hash the server does not
+hold is refused at the admin API with `400` (`unknown component sha256:…; upload it with POST
+/components`).
+
+**Pinning by hash.** A reference names the exact bytes that run. To run new code, upload it and
+point the stub at the new hash (`PUT /imposters/{port}/stubs`, or a recreate). Requests already
+running finish on the old component, and new requests use the new one. Every call has its own
+store, so nothing is swapped mid-request.
+
+**Where components live.** Without `--datadir` the registry is in memory and empty after a
+restart. With `--datadir`, each upload is also written to `<datadir>/components/<sha256>.wasm`
+and loaded at startup, its hash re-checked; a file whose bytes no longer match its name is skipped
+and reported. A config loaded from `--configfile` or `--datadir` that names a component the server
+does not hold still loads, and that stub answers `500` with `Script error: unknown component
+sha256:…` until the component is uploaded. The registry belongs to one server; it is not shared
+between servers.
+
+**`--strict-wasm <file>`** limits which components run at all. The file lists one lowercase
+SHA-256 per line (`#` starts a comment). With it set, a component whose hash is not listed is
+refused when it is uploaded and wherever a stub carrying it is admitted, whether it came in by
+`component`, `file` or `code`: `component sha256:… is not in --strict-wasm`. The trust model is
+to approve the behaviour, keyed by the hash: you never have to judge whether the code is safe to
+run. The list is read at startup; a change needs a restart. Env `RIFT_STRICT_WASM`, rcfile
+`strictWasm`.
 
 ---
 

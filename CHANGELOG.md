@@ -159,6 +159,18 @@ record.
 
 ### Added
 
+- **A content-addressed component registry** (#1757). `POST /components` uploads a wasm component
+  (`application/wasm`, validated as admission validates one), `GET /components[/{sha256}]` lists
+  them with the imposters that reference them, and `DELETE /components/{sha256}` removes one (`409`
+  while referenced). A `_rift.script` runs one with `component: "sha256:<hex>"`, so a remote Rift
+  runs a component without a file on its host. With `--datadir`, uploads persist under
+  `components/` and reload at startup with their hash re-checked. A config naming a component the
+  server lacks still loads from `--configfile`/`--datadir` (a script error when served) and is
+  refused with `400` at the admin API. **`--strict-wasm <file>`** (`RIFT_STRICT_WASM`, rcfile
+  `strictWasm`, FFI `strictWasm`) admits only listed hashes, at upload and at every write that
+  admits a stub. rift-lint: `E064` (malformed `component`), `E065` (`component` under a non-wasm
+  engine).
+
 - **`_rift.scriptEngine.seed`: seeded randomness per imposter** (#1755). One SplitMix64 stream per
   imposter feeds `_rift.fault` rolls, the template `randomInt` and `uuid`, and a wasm component's
   `wasi:random` (`random`, `insecure`, `insecure-seed`). With a seed it restarts from that seed at

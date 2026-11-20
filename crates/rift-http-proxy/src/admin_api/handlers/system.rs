@@ -90,6 +90,9 @@ pub struct ConfigSnapshot {
     /// (`--nologfile`, or an embedder that installed no ring), which answers Mountebank's
     /// `No logfile` sentinel.
     pub log_ring: Option<crate::admin_api::log_ring::LogRing>,
+    /// `<datadir>/components` is kept beside the imposters when the server runs with `--datadir`
+    /// (issue #1757): the datadir itself, `None` without one. Not reported by `GET /config`.
+    pub components_dir: Option<std::sync::Arc<std::path::PathBuf>>,
 }
 
 /// GET /config - Mountebank-compatible config endpoint
@@ -612,6 +615,7 @@ mod tests {
                 mock: false,
                 debug: false,
                 log_ring: None,
+                components_dir: None,
             },
         );
         assert_eq!(resp.status(), StatusCode::OK);
@@ -632,6 +636,7 @@ mod tests {
                     mock: false,
                     debug: false,
                     log_ring: None,
+                    components_dir: None,
                 },
             );
             let bytes = tokio::runtime::Runtime::new()
@@ -691,6 +696,7 @@ mod tests {
                 mock: false,
                 debug: false,
                 log_ring: None,
+                components_dir: None,
             },
         );
         let bytes = tokio::runtime::Runtime::new()
@@ -733,6 +739,7 @@ mod tests {
                     mock,
                     debug,
                     log_ring: None,
+                    components_dir: None,
                 },
             );
             let bytes = tokio::runtime::Runtime::new()
@@ -765,6 +772,7 @@ mod tests {
                     mock: false,
                     debug: false,
                     log_ring: None,
+                    components_dir: None,
                 },
             );
             let bytes = tokio::runtime::Runtime::new()

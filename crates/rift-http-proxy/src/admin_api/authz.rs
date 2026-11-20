@@ -204,6 +204,21 @@ fn classify_route(method: &Method, path: &str) -> Option<AuthzTarget> {
         _ => {}
     }
 
+    // The component registry (issue #1757): code that runs inside the mock, so every verb but the
+    // read is a system write.
+    if path == "/components" || path.starts_with("/components/") {
+        let action = match *method {
+            Method::GET | Method::HEAD => actions::SYSTEM_READ,
+            _ => actions::SYSTEM_WRITE,
+        };
+        let target = AuthzTarget::new(action);
+        return Some(match path.strip_prefix("/components/") {
+            Some(sha) if !sha.is_empty() && !sha.contains('/') => target.with_param("sha", sha),
+            Some(_) => return None,
+            None => target,
+        });
+    }
+
     // The SSE streams (issue #461) are dispatched in `service_fn` *before* the router, so they
     // reach no branch below and would otherwise be the one admin surface the hook cannot gate.
     // That is the worst possible gap to leave: `/events` streams recorded method, path, headers
@@ -673,6 +688,49 @@ mod tests {
                 "{method}"
             );
         }
+    }
+
+    #[test]
+    fn the_component_routes_are_system_read_on_get_and_system_write_otherwise() {
+        let sha = "a".repeat(64);
+        for (method, path, action) in [
+            (Method::GET, "/components".to_string(), actions::SYSTEM_READ),
+            (
+                Method::POST,
+                "/components".to_string(),
+                actions::SYSTEM_WRITE,
+            ),
+            (
+                Method::GET,
+                format!("/components/{sha}"),
+                actions::SYSTEM_READ,
+            ),
+            (
+                Method::DELETE,
+                format!("/components/{sha}"),
+                actions::SYSTEM_WRITE,
+            ),
+            (
+                Method::OPTIONS,
+                "/components".to_string(),
+                actions::SYSTEM_READ,
+            ),
+            // A trailing slash is the same route.
+            (
+                Method::POST,
+                "/components/".to_string(),
+                actions::SYSTEM_WRITE,
+            ),
+        ] {
+            assert_eq!(
+                action_of(method.clone(), &path),
+                Some(action),
+                "{method} {path}"
+            );
+        }
+        let target = classify(&Method::DELETE, &format!("/components/{sha}")).expect("classifies");
+        assert!(target.params.contains(&("sha", sha)));
+        assert_eq!(classify(&Method::GET, "/components/a/b"), None);
     }
 
     #[test]

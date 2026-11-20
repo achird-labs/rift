@@ -732,6 +732,12 @@ pub struct ImposterManager {
     script_file_access: ScriptFileAccess,
     /// The lifecycle probe (`formal/lifecycle`), `None` in production. See [`Self::with_probe`].
     probe: ProbeHandle,
+    /// Components uploaded with `POST /components` (issue #1757); every imposter this manager
+    /// builds resolves `component` references from it.
+    components: Arc<super::components::ComponentRegistry>,
+    /// `--strict-wasm` (issue #1757): when set, only these components are admitted, at every write
+    /// this manager takes: create, apply, a stub edit, an upload.
+    trusted_components: ArcSwapOption<super::components::TrustedComponents>,
     /// Numbers the imposters this manager creates, for the probe's generations.
     generations: std::sync::atomic::AtomicU64,
 }
@@ -762,6 +768,8 @@ impl ImposterManager {
             event_listener: None,
             response_decorator: None,
             flow_store_provider: None,
+            components: Arc::default(),
+            trusted_components: ArcSwapOption::empty(),
             sequencer: None,
             request_journal: None,
             journal_max_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -1456,6 +1464,10 @@ impl ImposterManager {
         // later stub edit or replace — never carries it, as Mountebank's stored imposter does not.
         super::types::check_binary_mode(&config).map_err(ImposterError::InvalidConfig)?;
         config.mode = None;
+        self.check_trusted(
+            super::components::config_scripts(&config),
+            config.default_script_engine(),
+        )?;
 
         // Client-auth settings are validated for EVERY protocol, not just https (issue #977).
         // `resolve_tls_acceptors` derives this again on the https branch; that is fine and
@@ -1567,6 +1579,7 @@ impl ImposterManager {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         imposter.probe = self.probe.clone();
+        imposter.components = Arc::clone(&self.components);
         self.probe(Point::CreateBound {
             port,
             generation: imposter.generation,
@@ -2466,6 +2479,90 @@ impl ImposterManager {
     }
 
     /// Get an imposter by port
+    /// Admit only the components `trusted` lists (`--strict-wasm`, issue #1757).
+    #[must_use]
+    pub fn with_trusted_components(
+        self,
+        trusted: Arc<super::components::TrustedComponents>,
+    ) -> Self {
+        self.set_trusted_components(trusted);
+        self
+    }
+
+    /// As [`Self::with_trusted_components`], on a manager already built (the C ABI builds its
+    /// manager before it reads serve options). Applies to every write from here on; what is
+    /// already admitted stays.
+    pub fn set_trusted_components(&self, trusted: Arc<super::components::TrustedComponents>) {
+        self.trusted_components.store(Some(trusted));
+    }
+
+    /// Validate and register an uploaded component (`POST /components`, issue #1757), refusing one
+    /// `--strict-wasm` does not list before compiling it. Returns the entry and whether it is new.
+    pub fn upload_component(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(Arc<super::components::ComponentEntry>, bool), ImposterError> {
+        if let Some(trusted) = self.trusted_components.load_full() {
+            trusted
+                .check(&super::components::ComponentId::of(bytes))
+                .map_err(ImposterError::InvalidConfig)?;
+        }
+        self.components
+            .insert(bytes)
+            .map_err(|e| ImposterError::InvalidConfig(e.to_string()))
+    }
+
+    /// `--strict-wasm` over `scripts` (issue #1757): the first unlisted component is refused.
+    fn check_trusted<'a>(
+        &self,
+        scripts: impl IntoIterator<Item = &'a super::types::RiftScriptConfig>,
+        default_engine: &str,
+    ) -> Result<(), ImposterError> {
+        match self.trusted_components.load_full() {
+            Some(trusted) => match trusted.first_untrusted(scripts, default_engine) {
+                Some(refusal) => Err(ImposterError::InvalidConfig(refusal)),
+                None => Ok(()),
+            },
+            None => Ok(()),
+        }
+    }
+
+    /// [`Self::check_trusted`] for stubs headed into the imposter on `port`, under its default
+    /// engine.
+    fn check_trusted_stubs(&self, port: u16, stubs: &[Stub]) -> Result<(), ImposterError> {
+        if self.trusted_components.load().is_none() {
+            return Ok(());
+        }
+        let default_engine = self
+            .get_imposter(port)
+            .map(|imposter| imposter.config.default_script_engine().to_owned())
+            .unwrap_or_else(|_| "rhai".to_owned());
+        self.check_trusted(super::components::stub_scripts(stubs), &default_engine)
+    }
+
+    /// The component registry (issue #1757).
+    #[must_use]
+    pub fn components(&self) -> &Arc<super::components::ComponentRegistry> {
+        &self.components
+    }
+
+    /// The ports of the imposters whose config references `id`, ascending.
+    #[must_use]
+    pub fn component_references(&self, id: &super::components::ComponentId) -> Vec<u16> {
+        let mut ports: Vec<u16> = self
+            .list_imposters()
+            .iter()
+            .filter(|imposter| {
+                super::components::references(&imposter.config)
+                    .any(|r| r.parse::<super::components::ComponentId>().as_ref() == Ok(id))
+            })
+            .map(|imposter| imposter.bound_port())
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
+
     pub fn get_imposter(&self, port: u16) -> Result<Arc<Imposter>, ImposterError> {
         self.imposters
             .get(port)
@@ -2519,6 +2616,13 @@ impl ImposterManager {
     )]
     pub async fn reload(&self, mut configs: Vec<ImposterConfig>) -> Result<(), ImposterError> {
         Self::validate_config_set(&configs)?;
+        // `--strict-wasm` before anything is deleted (issue #1757): a refusal leaves the set as it was.
+        for config in &configs {
+            self.check_trusted(
+                super::components::config_scripts(config),
+                config.default_script_engine(),
+            )?;
+        }
         self.refuse_reserved_in_set(&configs)?;
         Self::explicit_ports_first(&mut configs);
 
@@ -2782,6 +2886,15 @@ impl ImposterManager {
         script_files: ScriptFileAccess,
         report: &mut ApplyReport,
     ) {
+        // `--strict-wasm` first (issue #1757): a refused entry must leave a running imposter as it
+        // was, so it is checked before a replace takes the old one down or a patch lands in place.
+        if let Err(e) = self.check_trusted(
+            super::components::config_scripts(&config),
+            config.default_script_engine(),
+        ) {
+            report.failed.push((port, e));
+            return;
+        }
         let Ok(existing) = self.get_imposter(port) else {
             // A new imposter read from its datadir file resumes where that file's imposter stopped
             // (issue #1603): `POST /admin/reload` is a load of the datadir, like startup.
@@ -3092,6 +3205,7 @@ impl ImposterManager {
         index: Option<usize>,
         door: Option<&ScriptFileAccess>,
     ) -> Result<(), ImposterError> {
+        self.check_trusted_stubs(port, std::slice::from_ref(&stub))?;
         // Reject a duplicate `id` atomically (issue #202); stubs without an id are unaffected.
         let id = stub.id.clone();
         // Under the persist lock: a stub edit can restart a reordered stub's cursor by port
@@ -3139,6 +3253,7 @@ impl ImposterManager {
         stub: Stub,
         door: Option<&ScriptFileAccess>,
     ) -> Result<(), ImposterError> {
+        self.check_trusted_stubs(port, std::slice::from_ref(&stub))?;
         let (imposter, replaced) = self
             .write_owning(port, |imposter| {
                 imposter.replace_stub_by_id_from(door, id, stub)
@@ -3165,6 +3280,16 @@ impl ImposterManager {
         id: &str,
         responses: Vec<StubResponse>,
     ) -> Result<(), ImposterError> {
+        if self.trusted_components.load().is_some() {
+            let default_engine = self
+                .get_imposter(port)
+                .map(|imposter| imposter.config.default_script_engine().to_owned())
+                .unwrap_or_else(|_| "rhai".to_owned());
+            self.check_trusted(
+                super::components::response_scripts(&responses),
+                &default_engine,
+            )?;
+        }
         let (imposter, appended) = self
             .write_owning(port, |imposter| {
                 imposter.append_stub_responses_by_id(id, responses)
@@ -3243,6 +3368,7 @@ impl ImposterManager {
         stub: Stub,
         door: Option<&ScriptFileAccess>,
     ) -> Result<(), ImposterError> {
+        self.check_trusted_stubs(port, std::slice::from_ref(&stub))?;
         let (imposter, replaced) = self
             .write_owning(port, |imposter| {
                 // An index-addressed replace restarts the stub's cycle, as Mountebank's
@@ -3424,6 +3550,7 @@ impl ImposterManager {
         stubs: Vec<Stub>,
         door: Option<&ScriptFileAccess>,
     ) -> Result<(), ImposterError> {
+        self.check_trusted_stubs(port, &stubs)?;
         let (imposter, ()) = self
             .write_owning(port, |imposter| {
                 imposter.replace_stubs_from(door, stubs);

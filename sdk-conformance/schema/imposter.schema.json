@@ -1256,6 +1256,13 @@
             "null"
           ]
         },
+        "component": {
+          "description": "A component uploaded with `POST /components`, by its hash: `\"sha256:<64 hex>\"` (issue\n#1757). `engine: \"wasm\"` only, and implied when `engine` is absent. Resolved from the\nimposter manager's registry when served, not when admitted: a stored or replayed config whose\ncomponent this node does not hold still loads, and the stub answers a script error.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "engine": {
           "description": "Script engine: \"rhai\", \"javascript\" or \"wasm\" (\"wasm\" needs a build with the `wasm`\nfeature, as the `rift` binary is). When absent, the resolver infers it from `file`'s extension (`.rhai`/`.js`/`.wasm`; a\n`.lua` file still resolves to the now-removed \"lua\"\nengine so it is rejected with a clear error rather than silently mis-run), falling back to\n\"rhai\" — the legacy default — when neither `engine` nor an inferable extension is present.",
           "type": [

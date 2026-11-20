@@ -149,6 +149,7 @@ fn resolve_response_script(
             .get(&ref_name)
             .ok_or_else(|| ScriptResolveError::UnknownRef(ref_name.clone()))?;
         script.code = target.code.clone();
+        script.component = target.component.clone();
         script.engine = target.engine.clone();
         // A wasm entry's export and knobs come with it, unless the response sets its own.
         if script.export.is_none() {
@@ -181,7 +182,12 @@ fn resolve_leaf(
     base: &ScriptBaseDir,
 ) -> Result<(), ScriptResolveError> {
     if script.engine.is_none() {
-        script.engine = Some(infer_engine(script.file.as_deref(), default_engine));
+        // A component reference is a wasm component whatever the imposter's default (issue #1757).
+        script.engine = Some(if script.component.is_some() {
+            "wasm".to_owned()
+        } else {
+            infer_engine(script.file.as_deref(), default_engine)
+        });
     }
     if let Some(file) = script.file.take() {
         // A component is binary: its bytes travel in `code` as base64 (issue #1751), so a persisted

@@ -263,6 +263,13 @@ pub async fn handle_create(
         return rejection;
     }
 
+    // An uploaded component only (issue #1757): a stored config replays dangling, a new one does not.
+    if let Some(rejection) =
+        crate::admin_api::handlers::components::reject_dangling_in_config(&config, &manager)
+    {
+        return rejection;
+    }
+
     // Validate all scripts in stubs before creating the imposter
     let validation_result = validate_stubs(&config.stubs);
     if !validation_result.is_valid() {
@@ -534,6 +541,14 @@ async fn replace_all_from_bytes(
 
     for config in &batch.imposters {
         if let Some(rejection) = reject_unreadable_lookups(&config.stubs, &scripts_dir) {
+            return rejection;
+        }
+    }
+
+    for config in &batch.imposters {
+        if let Some(rejection) =
+            crate::admin_api::handlers::components::reject_dangling_in_config(config, &manager)
+        {
             return rejection;
         }
     }

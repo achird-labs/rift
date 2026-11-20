@@ -148,6 +148,20 @@ pub struct Cli {
     )]
     pub allow_wasm: bool,
 
+    /// Admit only the wasm components whose SHA-256 this file lists, one lowercase hex digest per
+    /// line (`#` comments allowed). Applies to an upload, to an inline `code` and to a
+    /// `component` reference at every door. Approve the behaviour by its hash rather than judging
+    /// whether the code is safe to run
+    #[arg(
+        long = "strict-wasm",
+        visible_alias = "strictWasm",
+        env = "RIFT_STRICT_WASM",
+        value_name = "FILE",
+        global = true,
+        help_heading = "Server options"
+    )]
+    pub strict_wasm: Option<PathBuf>,
+
     /// Only accept requests from localhost: the admin API, /metrics and --intercept-port listen on
     /// `127.0.0.1` and `::1`, and they, every imposter port and the front door refuse non-loopback
     /// clients
@@ -538,6 +552,7 @@ impl std::fmt::Debug for Cli {
             scripts_dir,
             allow_injection,
             allow_wasm,
+            strict_wasm,
             local_only,
             require_admin_auth,
             loglevel,
@@ -582,6 +597,7 @@ impl std::fmt::Debug for Cli {
             .field("scripts_dir", scripts_dir)
             .field("allow_injection", allow_injection)
             .field("allow_wasm", allow_wasm)
+            .field("strict_wasm", strict_wasm)
             .field("local_only", local_only)
             .field("require_admin_auth", require_admin_auth)
             .field("loglevel", loglevel)
@@ -950,6 +966,13 @@ impl ServerBuilder {
         // authenticates every request, so the admin plane must never reach the accept loop in that
         // state.
         crate::admin_api::validate_admin_api_key(cli.api_key.as_deref())?;
+        // The `--strict-wasm` trust list is read before anything binds: an unreadable or
+        // malformed one must stop the server, not leave it admitting what it was told to refuse.
+        let trusted_components = cli
+            .strict_wasm
+            .as_deref()
+            .map(load_strict_wasm)
+            .transpose()?;
         // Resolve the admin bind address here rather than at the `AdminApiServer::new` call below,
         // because both things that read it must happen before anything binds (issue #863):
         //   * the exposure check — under `--require-admin-auth` its error must not have to unwind
@@ -1082,6 +1105,9 @@ impl ServerBuilder {
                     .with_accept_runtimes(self.accept_runtimes)
                     .with_body_limits(body_limits)
                     .with_journal_max_bytes(journal_max_bytes);
+                if let Some(trusted) = &trusted_components {
+                    built = built.with_trusted_components(Arc::clone(trusted));
+                }
                 if let Some(client) = &upstream_client {
                     // The policy too, for `proxy` stubs presenting a client certificate (#1609).
                     built = built
@@ -1097,6 +1123,14 @@ impl ServerBuilder {
         // `--configfile` and `--imposters` converge here: the flag is sugar for a single `file:`
         // ref, so both spellings run the same fetch, gating and block handling (U-12).
         let source_set = resolve_source_set(&cli, extra_sources, &outbound_tls)?;
+        // Components first: an imposter loaded below may reference one (issue #1757).
+        if let Some(datadir) = cli.datadir.as_deref() {
+            let skipped =
+                crate::admin_api::handlers::components::load_stored_components(&manager, datadir);
+            if let Some(summary) = format_skipped_components(&skipped) {
+                error!("{summary}");
+            }
+        }
         if source_set.is_some() || cli.datadir.is_some() {
             let loaded = load_startup_imposters(
                 &manager,
@@ -1296,6 +1330,9 @@ impl ServerBuilder {
         }
         if let Some(scripts_dir) = cli.scripts_dir {
             server = server.with_scripts_dir(scripts_dir);
+        }
+        if let Some(datadir) = &cli.datadir {
+            server = server.with_datadir(datadir.clone());
         }
         if let Some(routes) = front_door_routes {
             server = server.with_front_door_routes(routes);
@@ -2475,6 +2512,34 @@ async fn create_startup_imposters(
         }
     }
     skipped
+}
+
+/// Read and parse the `--strict-wasm` trust list (issue #1757). Either failure names the file.
+pub fn load_strict_wasm(
+    path: &Path,
+) -> anyhow::Result<Arc<rift_mock_core::imposter::components::TrustedComponents>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("--strict-wasm: could not read {}", path.display()))?;
+    rift_mock_core::imposter::components::TrustedComponents::parse(&text)
+        .map(Arc::new)
+        .map_err(|e| anyhow::anyhow!("--strict-wasm: {}: {e}", path.display()))
+}
+
+/// Operator-visible summary of the datadir's `components/*.wasm` files that were not loaded.
+fn format_skipped_components(
+    skipped: &[crate::admin_api::handlers::components::SkippedComponentFile],
+) -> Option<String> {
+    if skipped.is_empty() {
+        return None;
+    }
+    let mut summary = format!(
+        "{} component file(s) in the datadir were skipped and are NOT loaded:",
+        skipped.len()
+    );
+    for file in skipped {
+        summary.push_str(&format!("\n  - {}: {}", file.path.display(), file.reason));
+    }
+    Some(summary)
 }
 
 /// A datadir `*.json` file that could not be turned into a served imposter, kept so the loader can

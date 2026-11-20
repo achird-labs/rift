@@ -272,6 +272,9 @@ struct ServeOptions {
     /// boundaries (issue #1752). Default true. Independent of `allowInjection`; a library built
     /// without the `wasm` feature refuses components whatever this says.
     allow_wasm: Option<bool>,
+    /// Path to a `--strict-wasm` trust list: one lowercase SHA-256 per line, `#` comments (issue
+    /// #1757). A file that cannot be read or parsed fails the serve call, naming it.
+    strict_wasm: Option<String>,
     /// Refuse to bind when the admin plane would be reachable off-host with no `apiKey`
     /// (issue #863), instead of warning. Optional and defaulting to `false`, so every existing SDK
     /// that omits it keeps the previous behaviour unchanged.
@@ -2144,6 +2147,13 @@ async fn build_admin_plane_inner(
         allow_injection,
         allow_wasm: opts.allow_wasm.unwrap_or(true),
     };
+    // Read and parsed before any side effect; applied to the handle's manager with the other
+    // manager-wide limits below (issue #1757). A list that cannot be read fails this call.
+    let trusted = opts
+        .strict_wasm
+        .as_deref()
+        .map(|path| rift_http_proxy::server::load_strict_wasm(std::path::Path::new(path)))
+        .transpose()?;
     let no_parse = opts.no_parse.unwrap_or(false);
     if no_parse && opts.config_file.is_none() {
         anyhow::bail!(
@@ -2206,6 +2216,23 @@ async fn build_admin_plane_inner(
     if let Some(max) = opts.journal_max_bytes {
         let max = std::num::NonZeroUsize::new(max).context("journalMaxBytes must be at least 1")?;
         handle.manager.set_journal_max_bytes(max);
+    }
+    // `strictWasm`: every write the manager takes from here on, through any door (issue #1757).
+    if let Some(trusted) = trusted {
+        // Imposters created on this handle before this call were admitted without the list; a
+        // handle that already serves an unlisted component cannot claim to be strict.
+        for imposter in handle.manager.list_imposters() {
+            if let Some(refusal) = trusted.first_untrusted(
+                rift_mock_core::imposter::components::config_scripts(&imposter.config),
+                imposter.config.default_script_engine(),
+            ) {
+                anyhow::bail!(
+                    "strictWasm: imposter {} already on this handle: {refusal}",
+                    imposter.config.port.unwrap_or_default()
+                );
+            }
+        }
+        handle.manager.set_trusted_components(trusted);
     }
     // Outbound TLS trust policy (issue #974), before any imposter exists: imposters read the
     // client when they are created, and a bad anchor must fail this call rather than surface later
@@ -2559,6 +2586,7 @@ mod build_admin_plane_chain_tests {
             config: None,
             allow_injection: None,
             allow_wasm: None,
+            strict_wasm: None,
             require_admin_auth: None,
             upstream_ca_file: None,
             upstream_ca_pem: None,
@@ -2892,6 +2920,7 @@ mod serve_option_capability_tests {
             "noParse": false,
             "allowInjection": true,
             "allowWasm": false,
+            "strictWasm": "/tmp/trusted.txt",
             "requireAdminAuth": false,
             "upstreamCaFile": "/tmp/ca.pem",
             "upstreamCaPem": "-----BEGIN CERTIFICATE-----",

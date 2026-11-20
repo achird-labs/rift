@@ -2792,6 +2792,46 @@ fn e036_multiple_script_sources_is_an_error() {
     assert!(has_code(&r, "E036"), "expected E036, got {:?}", codes(&r));
 }
 
+// Issue #1757: an uploaded component is a source of its own.
+const COMPONENT: &str = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+fn lint_script(script: Value) -> LintResult {
+    let v = make_imposter(json!([rift_script_stub(script)]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    r
+}
+
+#[test]
+fn a_component_is_a_source_and_needs_engine_wasm() {
+    for ok in [
+        json!({ "component": COMPONENT }),
+        json!({ "engine": "wasm", "component": COMPONENT, "knobs": { "limit": 3 } }),
+    ] {
+        let r = lint_script(ok.clone());
+        assert!(
+            !has_code(&r, "E036") && !has_code(&r, "E064") && !has_code(&r, "E065"),
+            "{ok}: {:?}",
+            codes(&r)
+        );
+    }
+    let r = lint_script(json!({ "code": "x", "component": COMPONENT }));
+    assert!(
+        has_code(&r, "E036"),
+        "both code and component: {:?}",
+        codes(&r)
+    );
+    for bad in [
+        "sha256:BA7816",
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    ] {
+        let r = lint_script(json!({ "component": bad }));
+        assert!(has_code(&r, "E064"), "{bad}: {:?}", codes(&r));
+    }
+    let r = lint_script(json!({ "engine": "rhai", "component": COMPONENT }));
+    assert!(has_code(&r, "E065"), "{:?}", codes(&r));
+}
+
 #[test]
 fn inline_code_is_accepted_without_e036() {
     let v = make_imposter(json!([rift_script_stub(

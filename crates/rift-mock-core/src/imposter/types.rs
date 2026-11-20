@@ -4036,6 +4036,12 @@ pub struct RiftScriptConfig {
     /// validation error.
     #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
     pub ref_name: Option<String>,
+    /// A component uploaded with `POST /components`, by its hash: `"sha256:<64 hex>"` (issue
+    /// #1757). `engine: "wasm"` only, and implied when `engine` is absent. Resolved from the
+    /// imposter manager's registry when served, not when admitted: a stored or replayed config whose
+    /// component this node does not hold still loads, and the stub answers a script error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
     /// `engine: "wasm"` only: which export of the component answers. `"rift"` (the default) is the
     /// `rift:mock/handler` interface (issue #1751).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4047,20 +4053,21 @@ pub struct RiftScriptConfig {
 }
 
 impl RiftScriptConfig {
-    /// How many of `code`/`file`/`ref` are set. Exactly one is valid; used by both the resolver
-    /// and rift-lint to report "missing source" vs. "multiple sources" distinctly.
+    /// How many of `code`/`file`/`ref`/`component` are set. Exactly one is valid; used by both the
+    /// resolver and rift-lint to report "missing source" vs. "multiple sources" distinctly.
     pub fn source_count(&self) -> usize {
         [
             self.code.is_some(),
             self.file.is_some(),
             self.ref_name.is_some(),
+            self.component.is_some(),
         ]
         .into_iter()
         .filter(|set| *set)
         .count()
     }
 
-    /// True when exactly one of `code`/`file`/`ref` is set.
+    /// True when exactly one of `code`/`file`/`ref`/`component` is set.
     pub fn has_valid_source(&self) -> bool {
         self.source_count() == 1
     }

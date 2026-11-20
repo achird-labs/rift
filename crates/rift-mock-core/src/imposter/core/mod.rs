@@ -521,6 +521,9 @@ pub struct Imposter {
     pub(crate) generation: crate::imposter::probe::Generation,
     /// The lifecycle probe the manager installed, `None` in production.
     pub(crate) probe: crate::imposter::probe::ProbeHandle,
+    /// The manager's component registry (issue #1757): what a `component: "sha256:…"` script
+    /// resolves from when served. An imposter built outside a manager has an empty one.
+    pub(crate) components: Arc<crate::imposter::components::ComponentRegistry>,
     /// When each scenario last changed state, by scenario name (issue #1307). An entry never
     /// decreases (issue #1779). A transition changes
     /// which stub answers with no stub changing, so the served `Last-Modified` folds in the
@@ -769,6 +772,7 @@ impl Imposter {
             rng,
             generation: 0,
             probe: None,
+            components: Arc::default(),
             scenario_transitions: ArcSwap::from_pointee(HashMap::new()),
             // Each request claims with its own proxy response's mode (issue #1387).
             proxy_store: Arc::new(LocalProxyStore::new(ProxyMode::ProxyOnce)),

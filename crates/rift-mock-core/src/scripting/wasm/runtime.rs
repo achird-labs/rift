@@ -110,6 +110,8 @@ struct Loaded {
     code: Arc<str>,
     /// The first 12 hex digits of the bytes' SHA-256, for logs.
     sha12: Arc<str>,
+    /// What the component imports, by interface name (issue #1757 reports them on upload).
+    imports: Arc<[String]>,
     pre: MockPre<Host>,
 }
 
@@ -187,12 +189,16 @@ fn compile(code: &str) -> Result<Loaded, WasmAdmitError> {
     }
     let component =
         Component::new(engine, &bytes).map_err(|e| WasmAdmitError::NotComponent(root(&e)))?;
-    if let Some((name, _)) = component
+    let imports: Vec<String> = component
         .component_type()
         .imports(engine)
-        .find(|(name, _)| !ALLOWED_IMPORTS.iter().any(|p| name.starts_with(p)))
+        .map(|(name, _)| name.to_owned())
+        .collect();
+    if let Some(name) = imports
+        .iter()
+        .find(|name| !ALLOWED_IMPORTS.iter().any(|p| name.starts_with(p)))
     {
-        return Err(WasmAdmitError::Import(name.to_owned()));
+        return Err(WasmAdmitError::Import(name.clone()));
     }
     let pre = linker
         .instantiate_pre(&component)
@@ -206,6 +212,7 @@ fn compile(code: &str) -> Result<Loaded, WasmAdmitError> {
     Ok(Loaded {
         code: Arc::from(code),
         sha12: Arc::from(sha12),
+        imports: Arc::from(imports),
         pre,
     })
 }
@@ -229,12 +236,21 @@ fn check_export(export: Option<&str>) -> Result<(), WasmAdmitError> {
 /// while this compiles.
 pub(crate) fn admit(code: &str, export: Option<&str>) -> Result<(), WasmAdmitError> {
     check_export(export)?;
+    admitted(code).map(drop)
+}
+
+/// As [`admit`] for the default export, returning what the component imports (issue #1757).
+pub(crate) fn admit_imports(code: &str) -> Result<Vec<String>, WasmAdmitError> {
+    admitted(code).map(|loaded| loaded.imports.to_vec())
+}
+
+fn admitted(code: &str) -> Result<Arc<Loaded>, WasmAdmitError> {
     let on_worker = tokio::runtime::Handle::try_current()
         .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
     if on_worker {
-        tokio::task::block_in_place(|| load(code)).map(drop)
+        tokio::task::block_in_place(|| load(code))
     } else {
-        load(code).map(drop)
+        load(code)
     }
 }
 

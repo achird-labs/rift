@@ -95,6 +95,12 @@ pub async fn handle_add(
         return rejection;
     }
 
+    if let Some(rejection) = crate::admin_api::handlers::components::reject_dangling_in_stubs(
+        std::slice::from_ref(&add_req.stub),
+        &manager,
+    ) {
+        return rejection;
+    }
     // Validate scripts in the stub before adding
     let insert_index = add_req.index.unwrap_or(0);
     let validation_result = validate_stub(&add_req.stub, insert_index);
@@ -195,6 +201,12 @@ pub async fn handle_replace_all(
         return rejection;
     }
 
+    if let Some(rejection) = crate::admin_api::handlers::components::reject_dangling_in_stubs(
+        &replace_req.stubs,
+        &manager,
+    ) {
+        return rejection;
+    }
     // Validate all scripts in stubs before replacing
     let validation_result = validate_stubs(&replace_req.stubs);
     if !validation_result.is_valid() {
@@ -383,6 +395,12 @@ pub async fn handle_replace(
         return rejection;
     }
 
+    if let Some(rejection) = crate::admin_api::handlers::components::reject_dangling_in_stubs(
+        std::slice::from_ref(&stub),
+        &manager,
+    ) {
+        return rejection;
+    }
     // Validate scripts in the stub before replacing
     let validation_result = validate_stub(&stub, index);
     if !validation_result.is_valid() {
@@ -475,6 +493,12 @@ pub async fn handle_replace_by_id(
         &manager,
         port,
         &scripts_dir,
+    ) {
+        return rejection;
+    }
+    if let Some(rejection) = crate::admin_api::handlers::components::reject_dangling_in_stubs(
+        std::slice::from_ref(&stub),
+        &manager,
     ) {
         return rejection;
     }

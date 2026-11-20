@@ -101,7 +101,7 @@ rift_free(result);
 ```
 
 - **Options JSON** (pass `NULL` or `{}` for all defaults; every field optional):
-  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"noParse":false,"config":null,"allowInjection":false,"allowWasm":true,"requireAdminAuth":false,"upstreamCaFile":null,"upstreamCaPem":null,"upstreamTlsSkipVerify":false,"maxBodySize":null,"bodyMemoryBudget":null,"journalMaxBytes":null,"scriptsDir":null}`.
+  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"noParse":false,"config":null,"allowInjection":false,"allowWasm":true,"strictWasm":null,"requireAdminAuth":false,"upstreamCaFile":null,"upstreamCaPem":null,"upstreamTlsSkipVerify":false,"maxBodySize":null,"bodyMemoryBudget":null,"journalMaxBytes":null,"scriptsDir":null}`.
   `port: 0` binds an ephemeral port; `host` must be an IP literal — IPv4, or IPv6 bare (`::1`) or
   bracketed (`[::1]`), a numeric scope id (`fe80::1%2`) kept — and a DNS name such as `localhost` is
   refused (#1137; before that fix a bare IPv6 host could never bind). The metrics server, if asked
@@ -178,6 +178,13 @@ rift_free(result);
   one, and a document carrying both a component and an `inject` needs both. `false` refuses
   components with `400 invalid wasm` (admin plane) or `NULL` + `rift_last_error` (`configFile`).
   A library built without the `wasm` feature refuses components whatever this says.
+- **`strictWasm`** (default none): the path of a `--strict-wasm` trust list, one lowercase SHA-256
+  per line (issue #1757). The handle then admits only listed components, at every write its
+  manager takes: the admin plane, `configFile`, reload, and the in-process calls
+  (`rift_create_imposter`, `rift_apply_config`, the stub calls) too, since the list is the
+  operator's statement of which code may run. A file that cannot be read or parsed fails the call
+  with `NULL` + `rift_last_error`, and so does a list that an imposter already on the handle
+  (created before this call) does not satisfy. Once set it stays for the handle's life.
 
     **What the gate protects.** `allowInjection` gates config **documents that cross a trust
     boundary**, not untrusted *hosts*. A config the embedding host hands over in-process is trusted;
@@ -222,7 +229,7 @@ check before sending one:
 ```jsonc
 {"version":"…","commit":"…","builtAt":"…","features":["javascript","wasm"],
  "serveOptions":["host","port","apiKey","metricsPort","configFile","noParse","config",
-                 "allowInjection","allowWasm","requireAdminAuth","upstreamCaFile","upstreamCaPem",
+                 "allowInjection","allowWasm","strictWasm","requireAdminAuth","upstreamCaFile","upstreamCaPem",
                  "upstreamTlsSkipVerify","maxBodySize","bodyMemoryBudget","journalMaxBytes",
                  "scriptsDir"]}
 ```

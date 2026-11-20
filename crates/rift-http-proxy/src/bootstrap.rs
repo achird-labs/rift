@@ -236,6 +236,14 @@ pub fn apply_rcfile_defaults_reporting(
                     cli.allow_wasm = val.as_bool().unwrap_or(true);
                 }
             }
+            // The trust list `--strict-wasm` reads (issue #1757).
+            "strictWasm" | "strict_wasm" => {
+                if cli.strict_wasm.is_none()
+                    && let Some(f) = val.as_str()
+                {
+                    cli.strict_wasm = Some(std::path::PathBuf::from(f));
+                }
+            }
             "localOnly" | "local_only" => {
                 if !cli.local_only {
                     cli.local_only = val.as_bool().unwrap_or(false);
@@ -334,9 +342,8 @@ fn expected_rcfile_type(key: &str) -> Option<RcfileType> {
         "allowInjection" | "allow_injection" | "allowWasm" | "allow_wasm" | "localOnly"
         | "local_only" | "requireAdminAuth" | "require_admin_auth" | "noParse" | "no_parse"
         | "mock" | "debug" => Some(RcfileType::Boolean),
-        "host" | "logLevel" | "loglevel" | "datadir" | "configfile" | "apiKey" | "api_key" => {
-            Some(RcfileType::String)
-        }
+        "host" | "logLevel" | "loglevel" | "datadir" | "configfile" | "apiKey" | "api_key"
+        | "strictWasm" | "strict_wasm" => Some(RcfileType::String),
         "port" => Some(RcfileType::Port),
         _ => None,
     }
@@ -833,6 +840,25 @@ mod tests {
         let mut c = cli(&[]);
         assert!(apply_rcfile_defaults(&mut c, &rcfile).is_err());
         assert!(c.allow_wasm, "a refused rcfile changes nothing");
+    }
+
+    // Issue #1757: `strictWasm` is an rcfile key naming the trust list; a flag wins over it.
+    #[test]
+    fn rcfile_strict_wasm_fills_the_default_and_is_typed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rcfile = dir.path().join("rift.rc");
+        std::fs::write(&rcfile, r#"{"strictWasm": "trusted.txt"}"#).expect("write rcfile");
+        let mut c = cli(&[]);
+        apply_rcfile_defaults(&mut c, &rcfile).expect("applies");
+        assert_eq!(c.strict_wasm, Some(std::path::PathBuf::from("trusted.txt")));
+
+        let mut c = cli(&["--strict-wasm", "flag.txt"]);
+        apply_rcfile_defaults(&mut c, &rcfile).expect("applies");
+        assert_eq!(c.strict_wasm, Some(std::path::PathBuf::from("flag.txt")));
+
+        std::fs::write(&rcfile, r#"{"strictWasm": true}"#).expect("write rcfile");
+        let mut c = cli(&[]);
+        assert!(apply_rcfile_defaults(&mut c, &rcfile).is_err());
     }
 
     // Issue #1569: `mock` and `debug` are rcfile keys; the CLI flag wins over a `false`, and an
