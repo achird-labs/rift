@@ -31,6 +31,31 @@ pub struct WasmScript<'a> {
     pub knobs: Option<&'a serde_json::Value>,
     /// `_rift.scriptEngine.wasm`.
     pub limits: crate::imposter::WasmLimits,
+    /// What the component's `wasi:clocks` read (issue #1754); `None` is the system clock.
+    pub clock: Option<&'a ScriptClock>,
+}
+
+/// The time a script reads (issue #1754).
+#[derive(Debug, Clone)]
+pub enum ScriptClock {
+    /// The imposter's clock, read at every use: a step taken while a script runs is seen.
+    Imposter(std::sync::Arc<crate::imposter::clock::ImposterClock>),
+    /// A fixed instant, in milliseconds since the Unix epoch: a request's `X-Rift-Now`.
+    Fixed(i64),
+}
+
+impl ScriptClock {
+    /// The current instant in milliseconds since the Unix epoch, or `None` for wall time.
+    #[must_use]
+    pub fn frozen_ms(&self) -> Option<i64> {
+        match self {
+            Self::Imposter(clock) => match clock.mode() {
+                crate::imposter::clock::ClockMode::Wall => None,
+                crate::imposter::clock::ClockMode::Frozen { now_ms } => Some(now_ms),
+            },
+            Self::Fixed(ms) => Some(*ms),
+        }
+    }
 }
 
 pub use rhai_engine::RhaiEngine;

@@ -3504,6 +3504,16 @@ impl ImposterConfig {
             .map_or("rhai", |engine| engine.default_engine.as_str())
     }
 
+    /// Whether a request may name its own instant (`_rift.scriptEngine.clock`, issue #1754).
+    #[must_use]
+    pub fn clock_source(&self) -> crate::imposter::clock::ClockSource {
+        self.rift
+            .as_ref()
+            .and_then(|rift| rift.script_engine.as_ref())
+            .and_then(|engine| engine.clock)
+            .unwrap_or_default()
+    }
+
     /// The limits an `engine: "wasm"` script runs under: `_rift.scriptEngine.wasm`, else the
     /// defaults (issue #1751).
     #[must_use]
@@ -3639,8 +3649,8 @@ fn default_idle_timeout() -> u64 {
 #[serde(rename_all = "camelCase")]
 pub struct RiftScriptEngineConfig {
     /// Engine for a script that names none and has no `.rhai`/`.js`/`.wasm`/`.lua` file
-    /// extension: "rhai", "javascript" or "wasm" (issues #1159, #1750; "wasm" is refused until a
-    /// build carries it). See [`ImposterConfig::default_script_engine`].
+    /// extension: "rhai", "javascript" or "wasm" (issues #1159, #1750; "wasm" needs a build with the
+    /// `wasm` feature). See [`ImposterConfig::default_script_engine`].
     #[serde(default = "default_script_engine")]
     pub default_engine: String,
     /// Script execution timeout in milliseconds
@@ -3649,6 +3659,10 @@ pub struct RiftScriptEngineConfig {
     /// Limits for `engine: "wasm"` scripts (issue #1751); absent ⇒ [`WasmLimits::default`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wasm: Option<WasmLimits>,
+    /// Whether a request may name its own instant in `X-Rift-Now` (issue #1754): `"wall"` (the
+    /// default, the imposter's clock only) or `"header"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<crate::imposter::clock::ClockSource>,
 }
 
 /// Per-call limits on an `engine: "wasm"` script (`_rift.scriptEngine.wasm`, issue #1751). The

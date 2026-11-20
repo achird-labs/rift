@@ -36,13 +36,26 @@ const EXTRA_WIT: &[(&str, &str)] = &[
         "package wasi:cli@0.2.6; interface environment { get-environment: func() -> list<tuple<string, string>>; }",
     ),
     (
+        "wasi-clocks.wit",
+        "package wasi:clocks@0.2.6;
+         interface wall-clock {
+           record datetime { seconds: u64, nanoseconds: u32 }
+           now: func() -> datetime;
+         }
+         interface monotonic-clock {
+           type instant = u64;
+           now: func() -> instant;
+         }",
+    ),
+    (
         "fixture.wit",
         "package test:fixture;
          world mock { include rift:mock/mock@0.1.0; }
          world sockets { include rift:mock/mock@0.1.0; import wasi:sockets/tcp@0.2.6; }
          world http { include rift:mock/mock@0.1.0; import wasi:http/outgoing-handler@0.2.6; }
          world cli { include rift:mock/mock@0.1.0; import wasi:cli/environment@0.2.6; }
-         world no-handler { import rift:mock/state@0.1.0; }",
+         world no-handler { import rift:mock/state@0.1.0; }
+         world clocks { include rift:mock/mock@0.1.0; import wasi:clocks/wall-clock@0.2.6; import wasi:clocks/monotonic-clock@0.2.6; }",
     ),
 ];
 
@@ -327,6 +340,34 @@ pub fn two_memories(pages: u32) -> Vec<u8> {
                  (drop (memory.grow $second (i32.const {pages})))
                  (i32.const 64)"
             ),
+        ),
+    )
+}
+
+/// `respond` reads `wasi:clocks/wall-clock.now` and answers `delay(<its seconds>)`, so a test reads
+/// the guest's wall time from the decision (issue #1754).
+pub fn wall_clock_seconds() -> Vec<u8> {
+    component(
+        "clocks",
+        &core(
+            r#"(import "wasi:clocks/wall-clock@0.2.6" "now" (func $now (param i32)))"#,
+            r#"(data (i32.const 64) "\00") (data (i32.const 72) "\01")"#,
+            "(call $now (i32.const 512))
+             (i64.store (i32.const 80) (i64.load (i32.const 512)))
+             (i32.const 64)",
+        ),
+    )
+}
+
+/// `respond` reads `wasi:clocks/monotonic-clock.now` and answers `delay(<its nanoseconds>)`.
+pub fn monotonic_nanos() -> Vec<u8> {
+    component(
+        "clocks",
+        &core(
+            r#"(import "wasi:clocks/monotonic-clock@0.2.6" "now" (func $now (result i64)))"#,
+            r#"(data (i32.const 64) "\00") (data (i32.const 72) "\01")"#,
+            "(i64.store (i32.const 80) (call $now))
+             (i32.const 64)",
         ),
     )
 }

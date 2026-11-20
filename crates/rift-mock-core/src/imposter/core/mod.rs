@@ -506,6 +506,10 @@ pub struct Imposter {
     stubs_write: Mutex<()>,
     /// Where new content's `Last-Modified: load` comes from (issue #1301).
     pub(crate) load_clock: LoadClock,
+    /// The imposter's own clock (issue #1754), which a test can freeze and step: what the built-in
+    /// flow store's TTLs and a wasm component's `wasi:clocks` read. Not `load_clock`: cache
+    /// validators stay on real time.
+    pub(crate) clock: Arc<crate::imposter::clock::ImposterClock>,
     /// Which imposter this is among all the manager created, for the lifecycle probe
     /// (`formal/lifecycle`). `0` for an imposter built outside a manager.
     pub(crate) generation: crate::imposter::probe::Generation,
@@ -704,6 +708,18 @@ impl Imposter {
         }
 
         Self::report_unknown_proxy_modes(&config.stubs);
+        if config
+            .rift
+            .as_ref()
+            .and_then(|rift| rift.script_engine.as_ref())
+            .and_then(|engine| engine.clock)
+            == Some(crate::imposter::clock::ClockSource::Unrecognized)
+        {
+            tracing::warn!(
+                port = ?config.port,
+                "_rift.scriptEngine.clock is not \"wall\" or \"header\"; running as \"wall\""
+            );
+        }
 
         // Initialize flow store: a registered provider wins; otherwise the built-in
         // `_rift.flowState` selection.
@@ -715,9 +731,10 @@ impl Imposter {
         // method, including `is_blocking`, so backend behaviour is unchanged.
         let provided = provider.and_then(|provider| provider.provide(&config));
         let flow_store_is_default = provided.is_none();
+        let clock = Arc::new(crate::imposter::clock::ImposterClock::default());
         let flow_store: Arc<dyn FlowStore> =
             Arc::new(crate::extensions::flow_state::MeteredFlowStore::new(
-                Self::create_flow_store(&config, provided)?,
+                Self::create_flow_store(&config, provided, store_clock(&clock))?,
             ));
 
         let enabled = config.enabled;
@@ -727,6 +744,7 @@ impl Imposter {
             stubs_snapshot: ArcSwap::from_pointee(StubSnapshot::build(stubs)),
             stubs_write: Mutex::new(()),
             load_clock,
+            clock,
             generation: 0,
             probe: None,
             scenario_transitions: ArcSwap::from_pointee(HashMap::new()),
@@ -758,6 +776,13 @@ impl Imposter {
             imposter_level: OnceLock::new(),
             script_files: ArcSwap::from_pointee(crate::imposter::ScriptFileAccess::Refused),
         })
+    }
+
+    /// The imposter's own clock (issue #1754): wall time until frozen or stepped through
+    /// `PUT /imposters/{port}/clock`.
+    #[must_use]
+    pub fn clock(&self) -> &crate::imposter::clock::ImposterClock {
+        &self.clock
     }
 
     /// What this imposter's scripts may `require()` (issue #1611), as the door that last wrote its
@@ -1045,6 +1070,7 @@ impl Imposter {
     fn create_flow_store(
         config: &ImposterConfig,
         provided: Option<Arc<dyn FlowStore>>,
+        clock: crate::backends::StoreClock,
     ) -> anyhow::Result<Arc<dyn FlowStore>> {
         if let Some(store) = provided {
             // A provider store wins over any built-in selection, including an explicit
@@ -1073,15 +1099,17 @@ impl Imposter {
                 "Creating InMemory FlowStore for imposter (ttl={}s)",
                 flow_state_config.ttl_seconds
             );
-            return Ok(Arc::new(InMemoryFlowStore::new(
+            return Ok(Arc::new(InMemoryFlowStore::with_clock(
                 flow_state_config.ttl_seconds as u64,
+                clock,
             )));
         }
 
         if Self::uses_scenario_fsm(&config.stubs) {
             info!("Stubs declare scenario state; using default in-memory FlowStore");
-            return Ok(Arc::new(InMemoryFlowStore::new(
+            return Ok(Arc::new(InMemoryFlowStore::with_clock(
                 DEFAULT_FLOW_STATE_TTL_SECS,
+                Arc::clone(&clock),
             )));
         }
 
@@ -1097,8 +1125,9 @@ impl Imposter {
                  auto-provisioning an in-memory FlowStore. State will NOT persist across restarts \
                  or be shared across a cluster — configure _rift.flowState for production."
             );
-            return Ok(Arc::new(InMemoryFlowStore::new(
+            return Ok(Arc::new(InMemoryFlowStore::with_clock(
                 DEFAULT_FLOW_STATE_TTL_SECS,
+                Arc::clone(&clock),
             )));
         }
 
@@ -1113,13 +1142,15 @@ impl Imposter {
                  auto-provisioning an in-memory FlowStore. State will NOT persist across restarts \
                  or be shared across a cluster — configure _rift.flowState for production."
             );
-            return Ok(Arc::new(InMemoryFlowStore::new(
+            return Ok(Arc::new(InMemoryFlowStore::with_clock(
                 DEFAULT_FLOW_STATE_TTL_SECS,
+                Arc::clone(&clock),
             )));
         }
 
-        Ok(Arc::new(InMemoryFlowStore::new(
+        Ok(Arc::new(InMemoryFlowStore::with_clock(
             DEFAULT_FLOW_STATE_TTL_SECS,
+            clock,
         )))
     }
 
@@ -1269,6 +1300,22 @@ mod responses;
 mod verify;
 pub use recording::ClearedProxyResponses;
 pub use verify::{ClosestMatch, FailedPredicate, VerifyOptions, VerifyOutcome};
+
+/// The time an imposter's built-in flow store reads (issue #1754): the `X-Rift-Now` of the request
+/// being served, else the imposter's clock, which is the system clock until frozen.
+fn store_clock(clock: &Arc<crate::imposter::clock::ImposterClock>) -> crate::backends::StoreClock {
+    let clock = Arc::clone(clock);
+    Arc::new(move || {
+        use crate::imposter::clock::{ClockMode, request_override, system_time_of};
+        if let Some(ms) = request_override() {
+            return system_time_of(ms);
+        }
+        match clock.mode() {
+            ClockMode::Wall => std::time::SystemTime::now(),
+            ClockMode::Frozen { now_ms } => system_time_of(now_ms),
+        }
+    })
+}
 
 #[cfg(test)]
 mod tests {

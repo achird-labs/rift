@@ -47,6 +47,7 @@ async fn call(
             export: None,
             knobs,
             limits,
+            clock: None,
         },
         "t",
         &request,
@@ -585,4 +586,78 @@ async fn a_component_not_yet_cached_is_compiled_when_served() {
         FaultDecision::None
     ));
     assert_eq!(compile_count(&code), 1);
+}
+
+async fn delay_with_clock(bytes: &[u8], clock: Option<&crate::scripting::ScriptClock>) -> u64 {
+    let code = fixtures::b64(bytes);
+    let (result, _) = respond(
+        WasmScript {
+            code: &code,
+            export: None,
+            knobs: None,
+            limits: WasmLimits::default(),
+            clock,
+        },
+        "t",
+        &req(),
+        store(),
+        Duration::from_millis(5000),
+        &ScriptCtxExtras::default(),
+    )
+    .await;
+    match result.expect("clock read") {
+        FaultDecision::Latency { duration_ms, .. } => duration_ms,
+        other => panic!("expected delay, got {other:?}"),
+    }
+}
+
+// Issue #1754: a component's `wasi:clocks` read the imposter's frozen instant, a request's
+// `X-Rift-Now`, or the system clock.
+#[tokio::test]
+async fn wasi_clocks_read_the_frozen_or_fixed_instant() {
+    use crate::scripting::ScriptClock;
+    let clock = std::sync::Arc::new(crate::imposter::clock::ImposterClock::default());
+    clock.freeze(1_700_000_000_000).expect("freeze");
+    let imposter = ScriptClock::Imposter(std::sync::Arc::clone(&clock));
+    assert_eq!(
+        delay_with_clock(&fixtures::wall_clock_seconds(), Some(&imposter)).await,
+        1_700_000_000
+    );
+    assert_eq!(
+        delay_with_clock(&fixtures::monotonic_nanos(), Some(&imposter)).await,
+        1_700_000_000_000_000_000
+    );
+    // A step taken after the store exists is seen at the next read: read at every call.
+    clock.advance(5_000).expect("advance");
+    assert_eq!(
+        delay_with_clock(&fixtures::wall_clock_seconds(), Some(&imposter)).await,
+        1_700_000_005
+    );
+    let fixed = ScriptClock::Fixed(1_000_000);
+    assert_eq!(
+        delay_with_clock(&fixtures::wall_clock_seconds(), Some(&fixed)).await,
+        1_000
+    );
+    // Unfrozen: wall time.
+    clock.reset();
+    let wall = delay_with_clock(&fixtures::wall_clock_seconds(), Some(&imposter)).await;
+    let now = u64::try_from(crate::imposter::clock::wall_ms() / 1000).expect("positive");
+    assert!(wall + 5 >= now && wall <= now, "{wall} vs {now}");
+    let unset = delay_with_clock(&fixtures::wall_clock_seconds(), None).await;
+    assert!(unset + 5 >= now && unset <= now, "{unset} vs {now}");
+}
+
+// Monotonic reads never go back between calls, though each call has a fresh store.
+#[tokio::test]
+async fn the_monotonic_clock_does_not_go_back_between_calls() {
+    use crate::scripting::ScriptClock;
+    let wall = ScriptClock::Imposter(std::sync::Arc::default());
+    let first = delay_with_clock(&fixtures::monotonic_nanos(), Some(&wall)).await;
+    let second = delay_with_clock(&fixtures::monotonic_nanos(), Some(&wall)).await;
+    assert!(second >= first, "{first} then {second}");
+    let frozen = ScriptClock::Fixed(42);
+    assert_eq!(
+        delay_with_clock(&fixtures::monotonic_nanos(), Some(&frozen)).await,
+        delay_with_clock(&fixtures::monotonic_nanos(), Some(&frozen)).await
+    );
 }

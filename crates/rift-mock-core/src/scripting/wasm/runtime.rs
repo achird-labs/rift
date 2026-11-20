@@ -362,6 +362,10 @@ async fn run(
     let stderr = LogPipe::new(LOG_PIPE_BYTES);
     let mut wasi = WasiCtxBuilder::new();
     wasi.stdout(stdout.clone()).stderr(stderr.clone());
+    if let Some(clock) = script.clock {
+        wasi.wall_clock(GuestWallClock(clock.clone()))
+            .monotonic_clock(GuestMonotonicClock(clock.clone()));
+    }
     let mut table = ResourceTable::new();
     table.set_max_capacity(MAX_RESOURCES);
     let host = Host {
@@ -562,4 +566,46 @@ fn decision_to_fault(decision: Decision, rule_id: &str) -> anyhow::Result<FaultD
         }
     };
     Ok(result.into_fault_decision(rule_id))
+}
+
+/// A component's `wasi:clocks/wall-clock` (issue #1754): the imposter's frozen instant, a request's
+/// `X-Rift-Now`, or the system clock. Read at every call, so a step taken mid-call is seen.
+struct GuestWallClock(crate::scripting::ScriptClock);
+
+impl wasmtime_wasi::HostWallClock for GuestWallClock {
+    fn resolution(&self) -> Duration {
+        Duration::from_millis(1)
+    }
+
+    fn now(&self) -> Duration {
+        match self.0.frozen_ms() {
+            // An instant before the epoch reads as the epoch: WASI's wall clock is unsigned.
+            Some(ms) => Duration::from_millis(u64::try_from(ms).unwrap_or(0)),
+            None => std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO),
+        }
+    }
+}
+
+/// When the process's monotonic clock started: shared by every store, so a component's monotonic
+/// reads do not go back between calls, as each call gets a fresh store.
+static MONOTONIC_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// A component's `wasi:clocks/monotonic-clock` (issue #1754): under a frozen clock its nanoseconds
+/// are the frozen instant's, so two reads of one frozen instant are equal; otherwise time since the
+/// process started. Never decreasing while the mode stays the same.
+struct GuestMonotonicClock(crate::scripting::ScriptClock);
+
+impl wasmtime_wasi::HostMonotonicClock for GuestMonotonicClock {
+    fn resolution(&self) -> u64 {
+        1
+    }
+
+    fn now(&self) -> u64 {
+        match self.0.frozen_ms() {
+            Some(ms) => u64::try_from(ms).unwrap_or(0).saturating_mul(1_000_000),
+            None => u64::try_from(MONOTONIC_ORIGIN.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        }
+    }
 }

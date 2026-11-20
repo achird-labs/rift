@@ -683,15 +683,47 @@ pub async fn handle_imposter_request(
      * itself (`is_served_answer`, #1227), never by which path produced it.
      */
     let started = Instant::now();
+    // The request's own instant (issue #1754): its `X-Rift-Now` under
+    // `_rift.scriptEngine.clock: "header"`. A malformed one is refused rather than read as wall
+    // time, which would make the test silently wrong; the refusal still leaves through the funnel
+    // below, so it is counted and gets the CORS echo like any answer.
+    let (request_now, refused) = match crate::imposter::clock::resolve_request_now(
+        imposter.config.clock_source(),
+        req.headers()
+            .get(crate::imposter::clock::NOW_HEADER)
+            .map(|v| v.to_str().unwrap_or("<not visible ASCII>")),
+    ) {
+        Ok(now) => (now, None),
+        Err(bad) => (
+            None,
+            Some(build_response_with_headers(
+                StatusCode::BAD_REQUEST,
+                [
+                    ("x-rift-imposter", "true"),
+                    ("content-type", "application/json"),
+                ],
+                crate::response::error_body_typed(
+                    StatusCode::BAD_REQUEST,
+                    crate::response::ErrorKind::BadData,
+                    &bad.to_string(),
+                ),
+            )),
+        ),
+    };
     let mut journal_index = None;
     let mut inspection: Option<Inspection> = None;
-    let inner = handle_request_inner(
-        req,
-        Arc::clone(&imposter),
-        client_addr,
-        &mut journal_index,
-        &mut inspection,
-    );
+    // Boxed: the task-local scope nests the whole request future one level deeper, past the
+    // compiler's layout depth for the serve loop's future (issue #1754).
+    let inner = Box::pin(crate::imposter::clock::with_request_override(
+        request_now,
+        handle_request_inner(
+            req,
+            Arc::clone(&imposter),
+            client_addr,
+            &mut journal_index,
+            &mut inspection,
+        ),
+    ));
     /*
      * Issue #1643: a delete or replace cancels the generation (and a plain `PUT /imposters` the
      * runtime generation of an imposter it keeps, #1799), and every request it is still
@@ -709,10 +741,17 @@ pub async fn handle_imposter_request(
     // Loaded once: a request that loads it before a runtime restart swaps it is cut by that restart
     // (issue #1799); one that loads it after belongs to the new generation.
     let in_flight = imposter.in_flight.load_full();
-    let computed = tokio::select! {
-        biased;
-        () = in_flight.cancelled() => None,
-        response = inner => Some(response?),
+    let computed = match refused {
+        // Never polled: the refused request is not matched.
+        Some(refusal) => {
+            drop(inner);
+            Some(refusal)
+        }
+        None => tokio::select! {
+            biased;
+            () = in_flight.cancelled() => None,
+            response = inner => Some(response?),
+        },
     };
     let mut response = match computed {
         Some(response) => response,
@@ -1840,11 +1879,19 @@ async fn handle_request_inner(
                 if crate::scripting::ScriptEngineKind::is_wasm(&engine) {
                     // A component runs on this task under its epoch deadline (issue #1751), and
                     // borrows its code: no per-request copy of the component's text.
+                    // The request's `X-Rift-Now`, else the imposter's clock (issue #1754).
+                    let script_clock = match crate::imposter::clock::request_override() {
+                        Some(ms) => crate::scripting::ScriptClock::Fixed(ms),
+                        None => {
+                            crate::scripting::ScriptClock::Imposter(Arc::clone(&imposter.clock))
+                        }
+                    };
                     let script = crate::scripting::WasmScript {
                         code,
                         export: script_config.export.as_deref(),
                         knobs: script_config.knobs.as_ref(),
                         limits: imposter.config.wasm_limits(),
+                        clock: Some(&script_clock),
                     };
                     let rule_id = format!("rift_script_{stub_index}");
                     let timeout = Duration::from_millis(timeout_ms);

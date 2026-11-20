@@ -3339,6 +3339,8 @@ impl ImposterManager {
                 // old cell's live state and saves into the old cell (#1726, #1678), its request cut
                 // below; the imposter's next runs start from the new one.
                 imposter.script_state.store(std::sync::Arc::default());
+                // The clock is runtime state too (issue #1754): back to wall time.
+                imposter.clock.reset();
                 let flow = imposter
                     .restart_flow_state()
                     .map_err(ImposterError::Backend);

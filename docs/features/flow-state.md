@@ -107,6 +107,12 @@ TTL is a **per-key** attribute, and every backend applies the same rules:
   *currently* in the flow.
 - There is deliberately **no "no expiry" mode** — an unexpirable store is a memory leak by
   construction — so `ttlSeconds` is mandatory and must be `>= 1`.
+- **`now` is the imposter's clock** (issue #1754): the system clock until
+  `PUT /imposters/{port}/clock` freezes or steps it, or a request's own `X-Rift-Now` under
+  `_rift.scriptEngine.clock: "header"`. A test steps past a TTL instead of sleeping through it:
+  freeze the clock, write, `PUT {"advanceMs": 61000}`, and a 60 s key is gone. See
+  [Imposter clock](../api/index.md#imposter-clock). A store a `FlowStoreProvider` supplies keeps
+  its own clock.
 
 ---
 
