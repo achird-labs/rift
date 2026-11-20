@@ -63,3 +63,5 @@ javascript = ["rift-mock-core/javascript", "rift-http-proxy/javascript"]
 # above: without it the cdylib silently ships without the dimension (#777). Unlike mimalloc this
 # imposes nothing on the host process; it is an ordinary Rust dependency.
 quamina-matching = ["rift-mock-core/quamina-matching", "rift-http-proxy/quamina-matching"]
+# `engine: "wasm"` (issue #1751): forwarded, but off by default in the library (#1753).
+wasm = ["rift-mock-core/wasm", "rift-http-proxy/wasm"]

@@ -125,7 +125,9 @@ option). It leaves out (`Mode::excludes`):
 - `@rift-debug-env` (05, 19): debug mode is `RIFT_DEBUG`, which the engine reads once per process,
   so an in-process engine cannot have it for one scenario;
 - `@tls-flags` (20): a TLS CLI flag or environment variable, which an in-process engine cannot take
-  per scenario.
+  per scenario;
+- `@wasm` (23): `engine: "wasm"` components, which `rift-ffi` builds without by default (its `wasm`
+  feature is off, #1753).
 
 Known limit of embedded mode: the engine is linked into the test binary, so under `cargo test` it
 runs at the debug profile, not the release build external mode spawns. The timing assertions are

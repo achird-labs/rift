@@ -19,7 +19,7 @@ use tracing::field::{Field, Visit};
 use tracing::{Event, Metadata, Subscriber, span};
 
 /// The `tracing` target every `ctx.logger` call is routed to (issue #355 P1).
-const SCRIPT_LOG_TARGET: &str = "rift::script";
+pub(crate) const SCRIPT_LOG_TARGET: &str = "rift::script";
 
 /// Max `ctx.logger` lines kept in a debug-mode [`ScriptTraceEntry`] (issue #360): the trace ships
 /// on the `x-rift-script-trace` response header, so a chatty script must not blow the header up
@@ -57,6 +57,12 @@ pub struct ScriptTraceEntry {
     #[serde(rename = "durationMs")]
     pub duration_ms: u64,
     pub logs: Vec<String>,
+    /// Fuel an `engine: "wasm"` call spent (issue #1751).
+    #[serde(rename = "fuelUsed", skip_serializing_if = "Option::is_none")]
+    pub fuel_used: Option<u64>,
+    /// How an `engine: "wasm"` call trapped, e.g. `fuel: fuel` or `deadline: deadline`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trap: Option<String>,
 }
 
 /// Render a [`FaultDecision`] the way `rift script run`/the debug trace print it: `pass()` /
@@ -322,6 +328,8 @@ mod tests {
             decision: "pass()".to_string(),
             duration_ms: 7,
             logs: vec!["hello".to_string()],
+            fuel_used: None,
+            trap: None,
         };
 
         let json = serde_json::to_value(&entry).expect("ScriptTraceEntry is Serialize");
@@ -335,5 +343,21 @@ mod tests {
         assert_eq!(obj["decision"], "pass()");
         assert_eq!(obj["durationMs"], 7);
         assert_eq!(obj["logs"], serde_json::json!(["hello"]));
+    }
+
+    // Issue #1751: a wasm call adds `fuelUsed` and `trap`, and only when they are set.
+    #[test]
+    fn script_trace_entry_carries_wasm_fuel_and_trap_when_set() {
+        let entry = ScriptTraceEntry {
+            hook: "respond".to_string(),
+            decision: "error: fuel exhausted (1000 units)".to_string(),
+            duration_ms: 1,
+            logs: vec![],
+            fuel_used: Some(1000),
+            trap: Some("fuel: fuel".to_string()),
+        };
+        let json = serde_json::to_value(&entry).expect("ScriptTraceEntry is Serialize");
+        assert_eq!(json["fuelUsed"], 1000);
+        assert_eq!(json["trap"], "fuel: fuel");
     }
 }

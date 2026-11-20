@@ -38,6 +38,8 @@ pub const PORTED_FEATURES: &[&str] = &[
     "20-tls-and-http2.feature",
     "16-front-door.feature",
     "12-intercept.feature",
+    // Issue #1751.
+    "23-wasm-scripting.feature",
 ];
 
 /// The conformance tree: `features/`, `rift-fixtures/`, `rift-lint-fixtures/`, `rift-scripts/`.

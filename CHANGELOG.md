@@ -159,6 +159,23 @@ record.
 
 ### Added
 
+- **`_rift.script` runs WebAssembly components: `"engine": "wasm"`** (#1751): a component built for
+  `wasm32-wasip2` against the new `rift:mock` world (`crates/rift-mock-core/wit/rift-mock.wit`)
+  answers requests under wasmtime, in a sandbox: it may import the standard WASI interfaces, which
+  are linked with nothing behind them (no files, no environment), and a component importing
+  `wasi:sockets` or `wasi:http` is refused with `400` when the imposter is created. Each call is
+  interrupted at `timeoutMs`, and gives its thread back every 10 ms while it runs. New limits under
+  `_rift.scriptEngine.wasm`: `fuel` (unlimited by default), `maxMemoryMiB` (64), `maxTables` (4),
+  `maxTableElements` (100000). New script keys `export` and `knobs` (JSON passed to the component's
+  `init`). The component reads and writes the imposter's flow store through a `state` import, and
+  its stdout/stderr are logged as `ctx.logger` lines. A `.wasm` `file` is stored in `code` as
+  base64, so a saved or `--datadir` imposter carries its component. New metric
+  `rift_wasm_traps_total{kind}`; the debug trace gains `fuelUsed` and `trap`; `rift script
+  check/run` take a `.wasm` file; rift-lint gains `E062` (inline `code` with engine wasm), `E063`
+  (a core module, not a component) and `W026` (`export`/`knobs` without it). On in every `rift` release binary and image; `librift_ffi`
+  needs its new `wasm` feature. Still gated by `--allowInjection`. See
+  [WebAssembly scripting](docs/features/wasm-scripting.md) and `examples/wasm/counter-twin`.
+
 - **`ProxyRecordingStore::forget_recorded_by`** (#1776): forget a recording only if a given token settled
   it, which is what the engine now calls. A custom store compiles unchanged. The default forgets by
   signature, so it keeps the race this closes for `LocalProxyStore`, and it gains one behaviour change:

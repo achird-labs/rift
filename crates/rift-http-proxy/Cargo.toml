@@ -139,6 +139,11 @@ p12 = "0.6"
 # Reads a generated CA back (CN, validity) in the intercept-ca CLI tests; rcgen 0.14 no longer
 # parses certificates into `CertificateParams`. Already in the tree via rift-mock-core.
 x509-parser = "0.18"
+# `rift:mock` test components from core-module text (issue #1751), shared with rift-mock-core via
+# its test-support/wasm_fixtures.rs.
+wit-component = "0.261"
+wit-parser = "0.261"
+wat = "1"
 
 # Integration testing
 # Test builds only: reqwest 0.13's `rustls` feature gives the hundreds of ad-hoc test clients
@@ -154,8 +159,10 @@ tracing-test = "0.2"
 port_check = "0.3"
 
 [features]
-default = ["javascript", "mimalloc", "quamina-matching"]
+default = ["javascript", "mimalloc", "quamina-matching", "wasm"]
 javascript = ["rift-mock-core/javascript"]
+# `engine: "wasm"` (issue #1751): on in the binary.
+wasm = ["rift-mock-core/wasm"]
 # The quamina body-field candidate dimension (#767). rift-mock-core is taken with
 # `default-features = false`, so a feature that is default-on THERE reaches nothing users run
 # unless it is forwarded here — which is exactly how #777 shipped the dimension into the library

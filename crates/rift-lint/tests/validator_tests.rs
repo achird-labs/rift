@@ -4861,3 +4861,69 @@ fn an_ignored_underscore_behaviors_is_not_validated_but_a_non_object_one_is_e048
     let r = lint_response(&json!({ "is": {}, "repeat": 2, "_behaviors": [1] }));
     assert!(has_code(&r, "E048"), "{:?}", codes(&r));
 }
+
+/// E062 (issue #1751): `engine: "wasm"` has no inline source; `code` is only a component's base64.
+#[test]
+fn e062_flags_inline_wasm_source_but_not_base64_bytes() {
+    let lint = |script: Value| {
+        let mut r = LintResult::new();
+        let resp = json!({ "_rift": { "script": script } });
+        validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+        r
+    };
+    let inline = lint(json!({ "engine": "wasm", "code": "fn respond(ctx) { pass() }" }));
+    let e062: Vec<_> = inline.issues.iter().filter(|i| i.code == "E062").collect();
+    assert_eq!(e062.len(), 1, "{:?}", codes(&inline));
+    assert_eq!(
+        e062[0].message,
+        "engine \"wasm\" has no inline form; use file"
+    );
+    assert_eq!(e062[0].location.as_deref(), Some("loc._rift.script.code"));
+
+    let saved = lint(json!({ "engine": "wasm", "code": "AGFzbQ0AAQA=" }));
+    assert!(!has_code(&saved, "E062"), "{:?}", codes(&saved));
+    // Rhai code is never judged as base64.
+    let rhai = lint(json!({ "engine": "rhai", "code": "fn respond(ctx) { pass() }" }));
+    assert!(!has_code(&rhai, "E062"), "{:?}", codes(&rhai));
+}
+
+/// W026 (issue #1751): `export` and `knobs` are ignored on any engine but wasm.
+#[test]
+fn w026_flags_export_and_knobs_on_a_script_that_is_not_wasm() {
+    let lint = |script: Value| {
+        let mut r = LintResult::new();
+        let resp = json!({ "_rift": { "script": script } });
+        validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+        r.issues
+            .iter()
+            .filter(|i| i.code == "W026")
+            .map(|i| i.location.clone().unwrap_or_default())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        lint(json!({ "code": "pass()", "export": "rift", "knobs": {"a": 1} })),
+        ["loc._rift.script.export", "loc._rift.script.knobs"]
+    );
+    assert!(lint(json!({ "engine": "wasm", "code": "AGFzbQ0AAQA=", "knobs": {} })).is_empty());
+}
+
+/// E063 (issue #1751): a `.wasm` file that is a core module, not a component. A component, or a
+/// file that is not wasm at all, is not judged.
+#[test]
+fn e063_flags_a_core_module_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("core.wasm"), b"\0asm\x01\x00\x00\x00").expect("core");
+    std::fs::write(dir.path().join("comp.wasm"), b"\0asm\x0d\x00\x01\x00").expect("component");
+    let config = dir.path().join("imposter.json");
+    let lint = |file: &str| {
+        let mut r = LintResult::new();
+        let resp = json!({ "_rift": { "script": { "file": file } } });
+        validate_response(&config, &resp, "loc", &mut r, &opts(), &Value::Null);
+        r
+    };
+    let core = lint("core.wasm");
+    assert!(has_code(&core, "E063"), "{:?}", codes(&core));
+    let comp = lint("comp.wasm");
+    assert!(!has_code(&comp, "E063"), "{:?}", codes(&comp));
+    assert!(!has_code(&comp, "E038"), "{:?}", codes(&comp));
+}

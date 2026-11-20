@@ -121,7 +121,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04
             archive: tar.gz
-            features: javascript
+            features: javascript,wasm
             no_default_features: true
             cross: true
             classifier: linux-aarch64
@@ -130,7 +130,7 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-22.04
             archive: tar.gz
-            features: javascript
+            features: javascript,wasm
             no_default_features: true
             cross: true
             classifier: linux-x86_64-musl
@@ -139,7 +139,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-22.04
             archive: tar.gz
-            features: javascript
+            features: javascript,wasm
             no_default_features: true
             cross: true
             classifier: linux-aarch64-musl
@@ -148,7 +148,7 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-14
             archive: tar.gz
-            features: javascript
+            features: javascript,wasm
             no_default_features: true
             classifier: darwin-x86_64
 
@@ -163,7 +163,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
-            features: javascript
+            features: javascript,wasm
             no_default_features: true
             classifier: windows-x86_64
 

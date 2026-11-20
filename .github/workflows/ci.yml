@@ -154,6 +154,38 @@ jobs:
       - name: Run integration tests (tests/*.rs binaries)
         run: cargo test --workspace --all-features --tests
 
+  # Issue #1751: every other wasm test runs a component built from core-module text, so this is the
+  # one place a real wasm32-wasip2 toolchain's output (std, wit-bindgen, its WASI imports) runs
+  # under the engine. Builds examples/wasm/counter-twin and runs its #[ignore]d end-to-end test.
+  wasm-example:
+    name: Wasm Example Component
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v6
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-wasm-example-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build the counter-twin component
+        run: cargo build --release --target wasm32-wasip2 --locked --manifest-path examples/wasm/counter-twin/Cargo.toml
+
+      - name: Run it behind an imposter
+        run: cargo test -p rift-http-proxy --features wasm --test wasm_counter_twin -- --ignored
+
   # Issue #420: the truststore keytool tests are #[ignore]d (they need a JDK on PATH), so the
   # matrix `test` job never runs them and the PKCS#12/JKS JVM-loadability guarantee has no CI
   # enforcement — a regression that breaks the container structure (e.g. dropping the Oracle
@@ -455,7 +487,7 @@ jobs:
       - name: Build rift-http-proxy for musl
         run: |
           cross build --release --package rift-http-proxy --target x86_64-unknown-linux-musl \
-            --no-default-features --features javascript
+            --no-default-features --features javascript,wasm
 
       - name: Assemble the build context
         run: |

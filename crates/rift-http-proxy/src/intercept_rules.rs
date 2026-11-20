@@ -54,7 +54,9 @@ pub struct ServeStub {
     /// Issue #936: one or many values per name, matching `is.headers` on the imposter stub path.
     /// Serialized back through the shared helper, so a single value lists as a bare string and
     /// only a genuinely multi-value header becomes an array.
-    #[serde(serialize_with = "multi_value_headers::serialize")]
+    // Named in full: with wasmtime's dependencies linked, an inferred `M` overflows trait
+    // selection on a blanket `IntoIterator` impl (issue #1751).
+    #[serde(serialize_with = "multi_value_headers::serialize::<HashMap<String, Vec<String>>, _>")]
     pub headers: HashMap<String, Vec<String>>,
     /// Issue #933: any JSON value, matching `is.body` on the imposter stub path. A string body is
     /// served verbatim; any other value is pre-rendered into `rendered_body`. Read it through

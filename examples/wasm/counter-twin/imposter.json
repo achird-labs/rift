@@ -1,0 +1,21 @@
+{
+  "port": 4561,
+  "protocol": "http",
+  "name": "counter-twin",
+  "_rift": { "flowState": {} },
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/count" } }],
+      "responses": [
+        {
+          "_rift": {
+            "script": {
+              "file": "target/wasm32-wasip2/release/counter_twin.wasm",
+              "knobs": { "limit": 2 }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1679,7 +1679,9 @@ where
     S: serde::Serializer,
 {
     match headers {
-        Some(headers) => multi_value_headers::serialize(headers.borrow(), serializer),
+        // `M` named: with wasmtime's dependencies linked, inferring it overflows trait selection
+        // on a blanket `IntoIterator` impl (issue #1751).
+        Some(headers) => multi_value_headers::serialize::<Headers, S>(headers.borrow(), serializer),
         None => serializer.serialize_none(),
     }
 }
@@ -3502,6 +3504,17 @@ impl ImposterConfig {
             .map_or("rhai", |engine| engine.default_engine.as_str())
     }
 
+    /// The limits an `engine: "wasm"` script runs under: `_rift.scriptEngine.wasm`, else the
+    /// defaults (issue #1751).
+    #[must_use]
+    pub fn wasm_limits(&self) -> WasmLimits {
+        self.rift
+            .as_ref()
+            .and_then(|rift| rift.script_engine.as_ref())
+            .and_then(|engine| engine.wasm)
+            .unwrap_or_default()
+    }
+
     /// The port the author pinned, if any. `Some(0)` reads as absent: `0` is the "any free port"
     /// idiom and is auto-assigned at creation (issue #637), so every door that asks whether a port
     /// is explicit — creation, `apply_config`, cross-source claims — agrees on it (issue #1104).
@@ -3633,6 +3646,54 @@ pub struct RiftScriptEngineConfig {
     /// Script execution timeout in milliseconds
     #[serde(default = "default_script_timeout")]
     pub timeout_ms: u64,
+    /// Limits for `engine: "wasm"` scripts (issue #1751); absent ⇒ [`WasmLimits::default`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<WasmLimits>,
+}
+
+/// Per-call limits on an `engine: "wasm"` script (`_rift.scriptEngine.wasm`, issue #1751). The
+/// wall-clock deadline is `timeoutMs`, as for every engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct WasmLimits {
+    /// Compute budget in wasmtime fuel units: a call that spends it fails with "fuel exhausted".
+    /// Deterministic, unlike the deadline. Absent ⇒ unlimited (fuel is still counted, for the
+    /// debug trace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fuel: Option<u64>,
+    /// Largest linear memory a call may grow to, in MiB.
+    #[serde(default = "default_wasm_memory_mib", rename = "maxMemoryMiB")]
+    pub max_memory_mib: u32,
+    /// Most tables a call may create.
+    #[serde(default = "default_wasm_tables")]
+    pub max_tables: u32,
+    /// Most elements one table may hold.
+    #[serde(default = "default_wasm_table_elements")]
+    pub max_table_elements: u32,
+}
+
+impl Default for WasmLimits {
+    fn default() -> Self {
+        Self {
+            fuel: None,
+            max_memory_mib: default_wasm_memory_mib(),
+            max_tables: default_wasm_tables(),
+            max_table_elements: default_wasm_table_elements(),
+        }
+    }
+}
+
+fn default_wasm_memory_mib() -> u32 {
+    64
+}
+
+fn default_wasm_tables() -> u32 {
+    4
+}
+
+fn default_wasm_table_elements() -> u32 {
+    100_000
 }
 
 fn default_script_engine() -> String {
@@ -3935,14 +3996,15 @@ fn default_error_status() -> u16 {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RiftScriptConfig {
-    /// Script engine: "rhai", "javascript" or "wasm" ("wasm" is refused until a build carries
-    /// it). When absent, the resolver infers it from `file`'s extension (`.rhai`/`.js`/`.wasm`; a
+    /// Script engine: "rhai", "javascript" or "wasm" ("wasm" needs a build with the `wasm`
+    /// feature, as the `rift` binary is). When absent, the resolver infers it from `file`'s extension (`.rhai`/`.js`/`.wasm`; a
     /// `.lua` file still resolves to the now-removed "lua"
     /// engine so it is rejected with a clear error rather than silently mis-run), falling back to
     /// "rhai" — the legacy default — when neither `engine` nor an inferable extension is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<String>,
-    /// Inline script code.
+    /// Inline script code. For `engine: "wasm"` this is the component's bytes in base64, which
+    /// resolution writes from a `.wasm` `file`; wasm has no inline source form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     /// Path to a script file. Resolved relative to the config file's directory for
@@ -3955,6 +4017,14 @@ pub struct RiftScriptConfig {
     /// validation error.
     #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
     pub ref_name: Option<String>,
+    /// `engine: "wasm"` only: which export of the component answers. `"rift"` (the default) is the
+    /// `rift:mock/handler` interface (issue #1751).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export: Option<String>,
+    /// `engine: "wasm"` only: any JSON, passed to the component's `init` as text before each call.
+    /// Absent ⇒ `{}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knobs: Option<serde_json::Value>,
 }
 
 impl RiftScriptConfig {

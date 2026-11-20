@@ -89,6 +89,10 @@
     {
       "file": "features/rift/22-mountebank-compat.feature",
       "name": "Mountebank compatibility — predicates, imposter options and response forms the corpus only loads"
+    },
+    {
+      "file": "features/rift/23-wasm-scripting.feature",
+      "name": "WebAssembly components as _rift.script (engine \"wasm\")"
     }
   ]
 }

@@ -807,6 +807,36 @@ fn read_script_file_relative(config_file: &Path, rel: &str) -> std::io::Result<S
     std::fs::read_to_string(dir.join(rel))
 }
 
+/// A `file:` source's content as the checks see it: a wasm component is binary, so it is only
+/// required to be readable, and its text is empty (issue #1751).
+fn read_script_source(config_file: &Path, rel: &str, engine: &str) -> std::io::Result<String> {
+    if engine == "wasm" {
+        let dir = config_file.parent().unwrap_or_else(|| Path::new("."));
+        return std::fs::read(dir.join(rel)).map(|_| String::new());
+    }
+    read_script_file_relative(config_file, rel)
+}
+
+/// Whether the binary at `rel` is a core WebAssembly module: the `\0asm` magic with version 1,
+/// where a component's header carries the component layer. Anything else (a component, WAT text,
+/// an unreadable file) is not judged here.
+fn is_core_module(config_file: &Path, rel: &str) -> bool {
+    let dir = config_file.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::read(dir.join(rel))
+        .is_ok_and(|bytes| bytes.get(..8) == Some(b"\0asm\x01\x00\x00\x00".as_slice()))
+}
+
+/// Whether `code` could be a component's bytes in base64, the only form `code` takes for
+/// `engine: "wasm"` (standard alphabet, padded).
+fn looks_like_base64(code: &str) -> bool {
+    let code = code.trim();
+    !code.is_empty()
+        && code.len().is_multiple_of(4)
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+}
+
 /// Syntax-check a resolved script's content at the same level inline `code:` would get for its
 /// engine. Only "javascript" has an embedded syntax checker in this crate (`js_validator`,
 /// gated behind the `javascript` feature) — rhai scripts (and any other engine string) get the
@@ -958,6 +988,19 @@ fn validate_script_source(
         return;
     }
 
+    let effective_engine = match ref_field {
+        Some(name) => registry.get(name).map(|target| {
+            infer_script_engine(
+                target.get("engine").and_then(|v| v.as_str()),
+                target.get("file").and_then(|v| v.as_str()),
+            )
+        }),
+        None => Some(infer_script_engine(engine_field, file_field)),
+    };
+    if let Some(engine) = &effective_engine {
+        check_wasm_only_keys(config_file, script, engine, location, result);
+    }
+
     if let Some(ref_name) = ref_field {
         let Some(target) = registry.get(ref_name) else {
             result.add_issue(
@@ -981,7 +1024,11 @@ fn validate_script_source(
         let target_engine = target.get("engine").and_then(|v| v.as_str());
         let resolved = match (target_code, target_file) {
             (Some(c), _) => Some(c.to_string()),
-            (None, Some(f)) => match read_script_file_relative(config_file, f) {
+            (None, Some(f)) => match read_script_source(
+                config_file,
+                f,
+                &infer_script_engine(target_engine, Some(f)),
+            ) {
                 Ok(content) => Some(content),
                 Err(e) => {
                     result.add_issue(
@@ -1007,10 +1054,23 @@ fn validate_script_source(
     }
 
     if let Some(f) = file_field {
-        match read_script_file_relative(config_file, f) {
+        let engine = infer_script_engine(engine_field, Some(f));
+        match read_script_source(config_file, f, &engine) {
             Ok(content) => {
-                let engine = infer_script_engine(engine_field, Some(f));
                 check_script_syntax(config_file, &content, &engine, location, result);
+                if engine == "wasm" && is_core_module(config_file, f) {
+                    result.add_issue(
+                        LintIssue::error(
+                            "E063",
+                            format!(
+                                "script file '{f}' is a core WebAssembly module, not a component"
+                            ),
+                            config_file.to_path_buf(),
+                        )
+                        .with_location(location)
+                        .with_suggestion("Build for wasm32-wasip2, which produces a component"),
+                    );
+                }
             }
             Err(e) => {
                 result.add_issue(
@@ -1029,7 +1089,51 @@ fn validate_script_source(
 
     if let Some(code) = code_field {
         let engine = infer_script_engine(engine_field, None);
+        // E062 (issue #1751): a component has no inline source; `code` is only ever its base64
+        // bytes, which resolution writes from a `.wasm` file.
+        if engine == "wasm" && !looks_like_base64(code) {
+            result.add_issue(
+                LintIssue::error(
+                    "E062",
+                    "engine \"wasm\" has no inline form; use file",
+                    config_file.to_path_buf(),
+                )
+                .with_location(format!("{location}.code"))
+                .with_suggestion(
+                    "Build the component for wasm32-wasip2 and name it with 'file' (resolved \
+                     relative to the config file, or to --scripts-dir through the admin API)",
+                ),
+            );
+            return;
+        }
         check_script_syntax(config_file, code, &engine, location, result);
+    }
+}
+
+/// W026 (issue #1751): `export` and `knobs` only mean something to `engine: "wasm"`; on any other
+/// engine they are ignored. `engine` is the script's effective engine.
+fn check_wasm_only_keys(
+    config_file: &Path,
+    script: &Value,
+    engine: &str,
+    location: &str,
+    result: &mut LintResult,
+) {
+    if engine == "wasm" {
+        return;
+    }
+    for key in ["export", "knobs"] {
+        if script.get(key).is_some() {
+            result.add_issue(
+                LintIssue::warning(
+                    "W026",
+                    format!("'{key}' is ignored: it applies only to engine \"wasm\", and this script's engine is \"{engine}\""),
+                    config_file.to_path_buf(),
+                )
+                .with_location(format!("{location}.{key}"))
+                .with_suggestion(format!("Remove '{key}', or set engine \"wasm\"")),
+            );
+        }
     }
 }
 

@@ -150,6 +150,13 @@ fn resolve_response_script(
             .ok_or_else(|| ScriptResolveError::UnknownRef(ref_name.clone()))?;
         script.code = target.code.clone();
         script.engine = target.engine.clone();
+        // A wasm entry's export and knobs come with it, unless the response sets its own.
+        if script.export.is_none() {
+            script.export = target.export.clone();
+        }
+        if script.knobs.is_none() {
+            script.knobs = target.knobs.clone();
+        }
         // `ref` fully collapses into `code`/`engine` — clearing it keeps `source_count() == 1`
         // for any post-resolution re-check (e.g. `validate_stubs`, run after resolution in the
         // admin-API handlers) and matches the resolved leaf's shape below.
@@ -177,7 +184,22 @@ fn resolve_leaf(
         script.engine = Some(infer_engine(script.file.as_deref(), default_engine));
     }
     if let Some(file) = script.file.take() {
-        script.code = Some(read_script_file(&file, base)?);
+        // A component is binary: its bytes travel in `code` as base64 (issue #1751), so a persisted
+        // or saved imposter still carries it.
+        let wasm = script
+            .engine
+            .as_deref()
+            .is_some_and(crate::scripting::ScriptEngineKind::is_wasm);
+        let bytes = read_script_file(&file, base)?;
+        script.code = Some(if wasm {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        } else {
+            String::from_utf8(bytes).map_err(|e| ScriptResolveError::FileRead {
+                path: file.clone(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+            })?
+        });
     }
     Ok(())
 }
@@ -203,7 +225,7 @@ fn infer_engine(file: Option<&str>, default_engine: &str) -> String {
 /// `DatadirRelative`) the path is resolved AND canonicalized-under-root BEFORE any read (issue
 /// #356 B5), so a symlink inside the root that points outside is rejected without its target ever
 /// being read, and a canonicalize failure fails closed (reject) rather than open.
-fn read_script_file(file: &str, base: &ScriptBaseDir) -> Result<String, ScriptResolveError> {
+fn read_script_file(file: &str, base: &ScriptBaseDir) -> Result<Vec<u8>, ScriptResolveError> {
     match base {
         ScriptBaseDir::Unconfigured => Err(ScriptResolveError::ScriptsDirNotConfigured(
             file.to_string(),
@@ -211,7 +233,7 @@ fn read_script_file(file: &str, base: &ScriptBaseDir) -> Result<String, ScriptRe
         // Explicit --configfile: human-authored, any path allowed (no escape check).
         ScriptBaseDir::ConfigRelative(dir) => {
             let path = dir.join(file);
-            std::fs::read_to_string(&path).map_err(|source| ScriptResolveError::FileRead {
+            std::fs::read(&path).map_err(|source| ScriptResolveError::FileRead {
                 path: file.to_string(),
                 source,
             })
@@ -219,7 +241,7 @@ fn read_script_file(file: &str, base: &ScriptBaseDir) -> Result<String, ScriptRe
         // Escape-checked roots: resolve strictly under `root`, then read the vetted path.
         ScriptBaseDir::ScriptsDir(root) | ScriptBaseDir::DatadirRelative(root) => {
             let vetted = resolve_within_root(root, file)?;
-            std::fs::read_to_string(&vetted).map_err(|source| ScriptResolveError::FileRead {
+            std::fs::read(&vetted).map_err(|source| ScriptResolveError::FileRead {
                 path: file.to_string(),
                 source,
             })
@@ -738,6 +760,7 @@ mod tests {
             code: code.map(str::to_string),
             file: file.map(str::to_string),
             ref_name: ref_name.map(str::to_string),
+            ..Default::default()
         }
     }
 

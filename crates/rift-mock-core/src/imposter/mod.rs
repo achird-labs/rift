@@ -49,8 +49,8 @@ pub use types::{
     RecordedRequest, ResponseMode, RiftConfig, RiftConnectionPoolConfig, RiftErrorFault,
     RiftFaultConfig, RiftFlowStateConfig, RiftLatencyFault, RiftMetricsConfig, RiftProxyConfig,
     RiftResponseExtension, RiftScriptConfig, RiftScriptEngineConfig, RiftTcpFault,
-    RiftUpstreamConfig, SingleHeaders, Stub, StubResponse, TriedStub, TriedWhy, admission_check,
-    admission_check_stub, deserialize_replayed,
+    RiftUpstreamConfig, SingleHeaders, Stub, StubResponse, TriedStub, TriedWhy, WasmLimits,
+    admission_check, admission_check_stub, deserialize_replayed,
 };
 
 #[cfg(feature = "schema")]

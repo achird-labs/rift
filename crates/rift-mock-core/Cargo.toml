@@ -120,6 +120,8 @@ p12 = "0.6.3"
 # `DERWriter`) must be the exact ones p12 0.6.3 (its last release) exposes, and it requires ^0.5.
 yasna = "0.5"
 ring = "0.17"
+wasmtime = { version = "50", optional = true }
+wasmtime-wasi = { version = "50", optional = true }
 # Issue #1609: decrypts a `proxy` client identity's `ENCRYPTED PRIVATE KEY` (PKCS#8 PBES2, what
 # OpenSSL 3 writes by default) with its `passphrase`. Pure Rust (RustCrypto); ring cannot do it.
 pkcs8 = { version = "0.11", features = ["encryption", "pem"] }
@@ -145,6 +147,11 @@ tokio-test = "0.4"
 proptest.workspace = true
 tracing-test = "0.2"
 criterion = { version = "0.8", features = ["html_reports"] }
+# `rift:mock` test components built from core-module text and the real WIT (issue #1751),
+# test-support/wasm_fixtures.rs: no wasm toolchain needed to run the wasm engine's tests.
+wit-component = "0.261"
+wit-parser = "0.261"
+wat = "1"
 
 [[bench]]
 name = "imposter_matcher_bench"
@@ -166,3 +173,6 @@ javascript = ["boa_engine"]
 quamina-matching = ["dep:quamina"]
 # The imposter JSON Schema generated from the config types (issue #1342).
 schema = ["dep:schemars", "rift-types/schema"]
+# The sandboxed `engine: "wasm"` for `_rift.script` (issue #1751): WebAssembly components under
+# wasmtime. Off here, on in the `rift` binary (rift-http-proxy's default), forwarded but off in rift-ffi.
+wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]

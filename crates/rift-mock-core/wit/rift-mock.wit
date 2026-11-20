@@ -1,0 +1,57 @@
+// The `rift:mock` world a `_rift.script` with `engine: "wasm"` runs (issue #1751).
+//
+// A component imports `state` (the imposter's flow store) and exports `handler`. It may export more
+// than `handler`, and it may import the standard WASI interfaces a wasm32-wasip2 toolchain emits:
+// wasi:cli, wasi:io, wasi:filesystem, wasi:clocks and wasi:random. Rift links those with nothing
+// behind them (no preopened directory, no environment, no arguments); wasi:sockets and wasi:http are
+// not linked, so a component importing them is refused when it is admitted.
+package rift:mock@0.1.0;
+
+interface types {
+  record header { name: string, value: string }
+  record request {
+    method: string,
+    path: string,
+    query: list<tuple<string, string>>,
+    path-params: list<tuple<string, string>>,
+    headers: list<header>,
+    body: list<u8>,
+    flow-id: string,
+    port: u16,
+    stub-id: option<string>,
+    scenario-name: option<string>,
+    scenario-state: option<string>,
+  }
+  record response { status: u16, headers: list<header>, body: list<u8> }
+  /// The `_rift.script` result constructors: pass = respond normally, delay = latency in
+  /// milliseconds, reset = TCP connection reset, respond = this response. Rhai and JavaScript
+  /// spell them pass(), delay(ms), reset() and http(status, body).
+  variant decision { pass, delay(u64), reset, respond(response) }
+}
+
+/// The imposter's flow store. `flow = none` is the request's flow id, the one `ctx.state` is bound
+/// to; `some(id)` is another flow, as `ctx.store.flow(id)`. Values are JSON text; TTLs are seconds.
+interface state {
+  variant cas-outcome { applied, conflict(option<string>) }
+  get:     func(key: string, flow: option<string>) -> result<option<string>, string>;
+  set:     func(key: string, value: string, flow: option<string>) -> result<_, string>;
+  incr-by: func(key: string, by: s64, flow: option<string>) -> result<s64, string>;
+  exists:  func(key: string, flow: option<string>) -> result<bool, string>;
+  delete:  func(key: string, flow: option<string>) -> result<_, string>;
+  cas:     func(key: string, expected: option<string>, new: string, flow: option<string>) -> result<cas-outcome, string>;
+  ttl:     func(seconds: s64, flow: option<string>) -> result<_, string>;
+  key-ttl: func(key: string, seconds: s64, flow: option<string>) -> result<bool, string>;
+  clear:   func(flow: option<string>) -> result<_, string>;
+}
+
+interface handler {
+  use types.{request, decision};
+  /// Called once per instantiation with `_rift.script.knobs` as JSON text (`{}` when absent).
+  init:    func(knobs: string) -> result<_, string>;
+  respond: func(req: request) -> result<decision, string>;
+}
+
+world mock {
+  import state;
+  export handler;
+}

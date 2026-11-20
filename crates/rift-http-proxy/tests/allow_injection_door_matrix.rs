@@ -12,6 +12,10 @@ use clap::Parser;
 use rift_http_proxy::server::{Cli, RunningServer, ServerBuilder};
 use serde_json::{Value, json};
 
+#[cfg(feature = "wasm")]
+#[path = "../../rift-mock-core/test-support/wasm_fixtures.rs"]
+mod wasm_fixtures;
+
 const INJECT: &str = "function (config) { return { statusCode: 200, body: 'x' }; }";
 const INJECT_PRED: &str = "function (config) { return true; }";
 // A generator returns the predicates to add: an array, which the create-time dry run checks (#1580).
@@ -55,6 +59,13 @@ fn scripted_stubs() -> Vec<(&'static str, Value)> {
             "_rift.script",
             json!({ "responses": [{ "_rift": { "script": {
                     "engine": "rhai", "code": "fn respond(ctx) { http(200, #{}) }" } } }] }),
+        ),
+        // Issue #1751: a component is a `_rift.script`, gated by --allowInjection until #1752.
+        #[cfg(feature = "wasm")]
+        (
+            "_rift.script engine wasm",
+            json!({ "responses": [{ "_rift": { "script": {
+                    "engine": "wasm", "code": wasm_fixtures::b64(&wasm_fixtures::respond_ok()) } } }] }),
         ),
         (
             "predicateGenerators.inject",
@@ -210,7 +221,11 @@ async fn every_scripted_payload_is_refused_at_every_admin_door_without_the_flag(
             checked += 1;
         }
     }
-    assert_eq!(checked, 8 * 7);
+    assert_eq!(checked, scripted_stubs().len() * 7);
+    assert_eq!(
+        scripted_stubs().len(),
+        if cfg!(feature = "wasm") { 9 } else { 8 }
+    );
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     server.shutdown().await;
 }
