@@ -1,0 +1,22 @@
+[package]
+name = "rift-mock-conformance"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The rift:mock/state conformance guest: runs script.json's calls against the host it is loaded in and reports every mismatch."
+
+# Built on its own for wasm32-wasip2, never as part of the Rift workspace; shipped in
+# rift-mock-wit-<version>.tar.gz next to the WIT it is built from.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.57"
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true

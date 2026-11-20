@@ -32,12 +32,16 @@ any you do not install. The engine ships only the in-memory flow store; any othe
 |:--------|:--------|:-------|
 | `javascript` | on | JavaScript (Boa) for `inject`, `decorate` and `_rift.script` |
 | `quamina-matching` | on | Quamina-backed body-field candidate pruning; matching results are identical without it |
+| `wasm` | off | `engine: "wasm"` for `_rift.script`: WebAssembly components under wasmtime |
 
 ## Documentation
 
 - [Embedding & SPI](https://achird-labs.github.io/rift/embedding/) — the crate map, the embeddable
   server and every SPI trait
 - [Concepts](https://achird-labs.github.io/rift/concepts/) — the request lifecycle and the Rift model
+- [The `rift:mock` WIT contract](https://achird-labs.github.io/rift/features/wasm-wit/) — the world a
+  wasm `_rift.script` runs ([`wit/rift-mock.wit`](wit/rift-mock.wit), shipped in this crate), every
+  function's semantics, the compatibility policy and the conformance guest
 
 ## License
 

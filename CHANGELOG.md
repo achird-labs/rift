@@ -159,6 +159,14 @@ record.
 
 ### Added
 
+- **`rift:mock` is a published, versioned contract** (#1797). `docs/features/wasm-wit.md` specifies
+  every `state` and `handler` function (missing keys, `cas` with `expected = none`, TTLs, flows,
+  error strings, `init`), what a host must virtualise and what it must not link. Each release
+  attaches `rift-mock-wit-<version>.tar.gz`: the WIT, a conformance guest with its script of
+  `state` calls and expected results, and the guest built. Compatibility policy: an additive change
+  (a new interface or optional export) bumps `0.1.x` and never alters an existing interface; a
+  breaking change bumps to `0.2.0`, and Rift keeps linking `0.1.x` for one release.
+
 - **`script_engine_bench`: what a `_rift.script` call costs in Rhai, JavaScript and wasm** (#1760).
   Cold compile, warm instantiation, a trivial call and a flow-store round trip, recorded in
   `docs/performance/index.md` and `docs/features/wasm-scripting.md`. A warm wasm call measures

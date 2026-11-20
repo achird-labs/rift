@@ -564,6 +564,23 @@ jobs:
             "sdk-conformance-${{ steps.version.outputs.VERSION }}.tar.gz"
           ls -l sdk-conformance-*.tar.gz*
 
+      # Issue #1797: package rift-mock-wit-<version>.tar.gz — the rift:mock WIT contract, the
+      # conformance guest's source and script, and the guest built for wasm32-wasip2, so a guest
+      # author or another host needs neither a Rift checkout nor (to run the conformance) a toolchain.
+      - name: Install Rust for the conformance guest
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Package the rift:mock WIT contract
+        run: |
+          cargo build --release --target wasm32-wasip2 --locked \
+            --manifest-path crates/rift-mock-core/wit/conformance/Cargo.toml
+          ./scripts/gen-rift-mock-wit.sh "${{ steps.version.outputs.VERSION }}" \
+            "rift-mock-wit-${{ steps.version.outputs.VERSION }}.tar.gz" \
+            crates/rift-mock-core/wit/conformance/target/wasm32-wasip2/release/rift_mock_conformance.wasm
+          ls -l rift-mock-wit-*.tar.gz*
+
       # Issue #1339: package rift-conformance-<version>.tar.gz — the Plane A specification (the
       # features and fixtures the rift-conformance runner executes), version-locked to this
       # release, so the runner can be pointed at a released engine's own spec.
@@ -694,6 +711,8 @@ jobs:
             sdk-conformance-*.tar.gz.sha256
             rift-conformance-*.tar.gz
             rift-conformance-*.tar.gz.sha256
+            rift-mock-wit-*.tar.gz
+            rift-mock-wit-*.tar.gz.sha256
             rift-templates-*.tar.gz
             rift-templates-*.tar.gz.sha256
         env:
