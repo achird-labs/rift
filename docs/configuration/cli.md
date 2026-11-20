@@ -962,6 +962,46 @@ rift script run scripts/echo.js --request fixtures/get-resource.json --flow-id t
 | `--engine <ENGINE>` | Script engine (`rhai`/`js`); inferred from the file extension when omitted | (from extension) |
 | `--hook <HOOK>` | Entrypoint to run. Only `respond` is wired across both engines, so any other value is rejected | `respond` |
 
+### wasm
+
+**`rift wasm check`** replays a saved imposter's recorded stubs against a component, offline, and
+reports every field where the component answers differently from the recording (issue #1759). No
+server runs and no port opens.
+
+```bash
+rift save --savefile saved.json                  # or GET /imposters/:port?replayable=true
+rift wasm check --component twin.wasm --corpus saved.json
+rift wasm check --component twin.wasm --corpus saved.json --port 4545 \
+  --knobs '{"limit":2}' --seed 42 --fields status,body.$.count --json
+```
+
+- `--corpus` is a saved imposter: one imposter, or `{"imposters": [...]}` with `--port` choosing
+  one. Its stubs replay **in document order**, each from the request its predicates describe
+  (the generator `rift-verify` uses). A stub holding several recorded responses (`proxyAlways`)
+  replays each, in order. A stub with no `is` response (a proxy, an inject, a fault), predicates
+  no request can be built from, or a binary recorded body (a component answers UTF-8 bodies only)
+  is skipped and counted. A run in which nothing could be checked is an error, not a pass.
+- The component runs in-process against one flow store kept for the whole run, so a stateful
+  component sees the sequence as the recording did. A stub recorded by a proxy carries
+  `recordedAt`, and the clock is frozen there for its call; a stub without one keeps the instant
+  before it (the run's start if none has one). The corpus's own `_rift.scriptEngine` settings
+  apply (its `seed`, its `wasm` limits); `--seed` overrides the seed, and `--knobs` is
+  `_rift.script.knobs`.
+- `--fields` chooses what is compared: `status`, `body` (as JSON structure when both sides are
+  JSON, else as bytes), `body.$<path>` (one value, `$.items[0].id`; a path the recording lacks
+  drifts, so a typo is never a silent pass), and `headers.<name>`. The default is `status,body`.
+  A header with several values (`Set-Cookie`) compares as one value on each side.
+- A component that answers `pass`, `delay` or `reset` instead of a response, or fails, drifts on
+  its `decision`. `--stop-on-first` stops at the first drifting stub.
+- The summary line is `N stubs, M checked, K skipped, D drifted`; `--json` prints the whole report
+  (each drift's stub index, field, expected and actual value). Exit `0` with no drift, `1` on
+  drift, `2` when the check cannot run (an unreadable or invalid component, a bad corpus, an
+  unknown flag value).
+- `--export http` needs the `wasi:http` export (issue #1758) and is refused until it exists.
+- Rift's own CI runs it against the `examples/wasm/counter-twin` component in
+  `tests/wasm_check.rs`, which reads the built component from `RIFT_COUNTER_TWIN` (default: the
+  example's `target/wasm32-wasip2/release/counter_twin.wasm`).
+
 ### healthcheck
 
 Probe a running server's admin API and exit `0` when it answers `2xx`, `1` otherwise. This is what

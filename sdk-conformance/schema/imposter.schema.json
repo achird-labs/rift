@@ -1592,6 +1592,15 @@
           },
           "type": "array"
         },
+        "recordedAt": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "recordedFrom": {
           "default": null,
           "type": [

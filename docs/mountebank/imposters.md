@@ -160,6 +160,7 @@ Each stub contains predicates (matching rules) and responses:
 | `routePattern` | string | No | Rift extension: route such as `/users/:id` that fills `request.pathParams` |
 | `delayRange` | array | No | Stub-level latency `[{"min": 50, "max": 100}]`, applied as a `wait` on each response. An entry with `min` greater than `max` is refused |
 | `recordedFrom` | string | No | Upstream a recorded stub came from (written by proxy recording) |
+| `recordedAt` | integer | No | Rift extension: when proxy recording created the stub, in seconds since the Unix epoch. `rift wasm check` replays the stub on that clock |
 | `_verify` | object | No | Ignored by the engine; read by `rift-verify` |
 
 The `id` field is a **Rift extension** that allows you to identify stubs by name rather than index:

@@ -111,6 +111,24 @@ to approve the behaviour, keyed by the hash: you never have to judge whether the
 run. The list is read at startup; a change needs a restart. Env `RIFT_STRICT_WASM`, rcfile
 `strictWasm`.
 
+### Earning trust
+
+A component that imitates a real service is a hypothesis until it is checked against that service.
+Rift already has the evidence: record the real service through a [proxy](../mountebank/proxy.md),
+save the imposter, and replay the recording against the component with
+[`rift wasm check`](../configuration/cli.md#wasm):
+
+```bash
+rift wasm check --component twin.wasm --corpus saved.json
+```
+
+Each recorded request is sent to the component in recorded order, on the recorded clock, and every
+answer that differs is reported by stub and field. Report the result for what it is: **inside the
+corpus, the component matches the real service; outside it, it is a hypothesis.** A clean check over
+three recorded calls says nothing about a fourth kind of request. Grow the recording where the
+component will be relied on, and rerun the check whenever the component or the recording changes
+(`--json` gives CI and agents a report to gate on).
+
 ---
 
 ## The `rift:mock` world

@@ -547,6 +547,7 @@ pub fn create_stub_from_proxy_response(
         new_scenario_state: None,
         space: None,
         recorded_from,
+        recorded_at: None,
         verify: None,
     }
 }

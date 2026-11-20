@@ -193,6 +193,13 @@ jobs:
           RIFT_BENCH_COMPONENT: ${{ github.workspace }}/examples/wasm/counter-twin/target/wasm32-wasip2/release/counter_twin.wasm
         run: cargo test -p rift-mock-core --features wasm --bench script_engine_bench
 
+      # Issue #1759: `rift wasm check` against the real counter-twin: a stateful sequence that
+      # matches only in recorded order.
+      - name: Check the counter-twin against a recorded sequence
+        env:
+          RIFT_COUNTER_TWIN: ${{ github.workspace }}/examples/wasm/counter-twin/target/wasm32-wasip2/release/counter_twin.wasm
+        run: cargo test -p rift-http-proxy --features wasm --test wasm_check -- --ignored
+
       # Issue #1797: the published rift:mock contract. Package the release asset as release.yml
       # does, build the conformance guest from the unpacked tarball (a guest author's view: no Rift
       # checkout), and run its script against Rift's in-memory store.

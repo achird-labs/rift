@@ -1686,7 +1686,7 @@ impl Imposter {
                     // stub replays. The proxy response's own behaviors already ran above, and the
                     // stub holds their result — never the behaviors themselves, so nothing runs
                     // twice (Mountebank's `newIsResponse`).
-                    let new_stub = create_stub_from_proxy_response(
+                    let mut new_stub = create_stub_from_proxy_response(
                         predicates.typed,
                         status,
                         &response_headers,
@@ -1696,6 +1696,10 @@ impl Imposter {
                         Some(proxy_config.to.clone()),
                         latency_ms,
                     );
+                    // When it was recorded (issue #1759): `rift wasm check` replays a saved
+                    // recording on this clock. Real time, not the imposter's clock: a recording is
+                    // of the real service.
+                    new_stub.recorded_at = Some(crate::util::unix_timestamp());
 
                     // Insert or append the stub based on proxy mode
                     // proxyOnce: Insert new stub before the proxy stub

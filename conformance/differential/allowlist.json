@@ -165,6 +165,17 @@
     "riftMatches": "\"http://localhost:\\d+\""
   },
   {
+    "id": "recorded-at",
+    "case": "*",
+    "location": "*/stubs/*/recordedAt",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `recordedAt` | integer | No | Rift extension: when proxy recording created the stub, in seconds since the Unix epoch. `rift wasm check` replays the stub on that clock |",
+    "reason": "a proxy-recorded stub carries when it was recorded (issue #1759, rift wasm check)",
+    "mountebank": "(absent)",
+    "riftMatches": "\\d+"
+  },
+  {
     "id": "error-envelope-code",
     "case": "*",
     "location": "step*.body/errors/*/code",

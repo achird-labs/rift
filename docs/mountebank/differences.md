@@ -640,5 +640,5 @@ Each of these is described where the feature is:
 - An unknown proxy `mode` is refused; Mountebank treats it as `proxyOnce` — [Proxy](proxy.md#proxy-modes).
 - A `proxyOnce` request in flight across a clear of saved proxy responses leaves no stub, where Mountebank's would land, so the next request forwards once more — [Proxy](proxy.md#where-recordings-go).
 - `protocol` is optional and defaults to `http` — [Imposters](imposters.md).
-- A proxy-recorded stub carries `recordedFrom` (Rift only, per stub) — [Imposters](imposters.md). Each recorded response also carries `_proxyResponseTime`, the per-response mark both engines share — [Proxy](proxy.md).
+- A proxy-recorded stub carries `recordedFrom` and `recordedAt` (Rift only, per stub) — [Imposters](imposters.md). Each recorded response also carries `_proxyResponseTime`, the per-response mark both engines share — [Proxy](proxy.md).
 - Rift-only config keys print with `?replayable=true`, and the error envelope carries `type` — [API](../api/index.md).

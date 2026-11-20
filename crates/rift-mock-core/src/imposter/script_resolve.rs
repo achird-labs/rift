@@ -792,6 +792,7 @@ mod tests {
             new_scenario_state: None,
             space: None,
             recorded_from: None,
+            recorded_at: None,
             verify: None,
         }
     }
@@ -1131,6 +1132,7 @@ mod tests {
             new_scenario_state: None,
             space: None,
             recorded_from: None,
+            recorded_at: None,
             verify: None,
         };
         let mut config = ImposterConfig {

@@ -544,6 +544,11 @@ pub struct Stub {
     /// Upstream URL recorded from during proxy recording (Mountebank compatible)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recorded_from: Option<String>,
+    /// When proxy recording created this stub, in seconds since the Unix epoch (issue #1759), so
+    /// `rift wasm check` can replay a saved recording on its recorded clock. A Rift extension;
+    /// absent on stubs not recorded by a proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at: Option<u64>,
     /// Engine-ignored verification annotation (issue #251). Preserved verbatim across the load
     /// round-trip so `rift-verify --verify-dynamic` can read the declared expectation sequence
     /// back from `GET /imposters`; the engine never acts on it.
@@ -637,6 +642,8 @@ struct StubRaw {
     responses: Vec<StubResponse>,
     #[serde(default)]
     recorded_from: Option<String>,
+    #[serde(default)]
+    recorded_at: Option<u64>,
     /// Stub-level latency range: `[{ "min": "50", "max": "100" }]`
     #[serde(default)]
     delay_range: Vec<DelayRange>,
@@ -747,6 +754,7 @@ impl TryFrom<StubRaw> for Stub {
             predicates,
             responses,
             recorded_from: raw.recorded_from,
+            recorded_at: raw.recorded_at,
             verify: raw.verify,
         })
     }

@@ -693,6 +693,12 @@ pub enum Commands {
         action: ScriptAction,
     },
 
+    /// Work with wasm components outside a running server (issue #1759)
+    Wasm {
+        #[command(subcommand)]
+        action: WasmAction,
+    },
+
     /// Probe a running server's admin API; exits 0 when healthy, 1 otherwise (issue #664).
     ///
     /// This is the container HEALTHCHECK: the `-static` image is `FROM scratch`, so there is no
@@ -784,6 +790,54 @@ pub enum InterceptCaAction {
 pub enum TruststoreFormat {
     Jks,
     Pkcs12,
+}
+
+/// `rift wasm <check>` (issue #1759): component tools that need no server.
+#[derive(Subcommand, Debug, Clone)]
+pub enum WasmAction {
+    /// Replay a saved imposter's recorded stubs against a component, offline, and report every
+    /// field where the component's answer differs from the recording. Exits 0 with no drift, 1 on
+    /// drift, 2 when the check cannot run (a bad component, corpus or flag).
+    Check {
+        /// The component (`.wasm`, built for wasm32-wasip2).
+        #[arg(long)]
+        component: PathBuf,
+
+        /// A saved imposter document (`rift save`, `GET /imposters/:port?replayable=true`): one
+        /// imposter, or `{"imposters": [...]}` with `--port` choosing one.
+        #[arg(long)]
+        corpus: PathBuf,
+
+        /// Which imposter of a multi-imposter corpus to replay.
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Which export answers: `rift` (the `rift:mock/handler` interface, the default) or
+        /// `http` (needs the wasi:http export, issue #1758).
+        #[arg(long)]
+        export: Option<String>,
+
+        /// JSON passed to the component's `init`, as `_rift.script.knobs`.
+        #[arg(long)]
+        knobs: Option<String>,
+
+        /// Seed the component's `wasi:random`, as `_rift.scriptEngine.seed`.
+        #[arg(long)]
+        seed: Option<u64>,
+
+        /// What to compare, comma-separated: `status`, `body`, `body.$<path>`, `headers.<name>`.
+        /// Default: `status,body`.
+        #[arg(long)]
+        fields: Option<String>,
+
+        /// Stop at the first stub that drifts.
+        #[arg(long)]
+        stop_on_first: bool,
+
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `rift script <check|run>` (issue #360): scripting DX tools that need neither an admin API nor

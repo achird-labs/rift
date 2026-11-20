@@ -159,6 +159,13 @@ record.
 
 ### Added
 
+- **`rift wasm check`: replay a saved recording against a component, offline** (#1759). The corpus
+  is the saved imposter (`rift save`): its stubs replay in document order through `rift-verify`'s
+  request generator (now a shared library module), against the component run in-process with one
+  flow store for the run, and every differing field is reported (`--fields status,body,body.$…,
+  headers.<name>`; `--json`). Exit `0`/`1` drift/`2` error. Proxy-recorded stubs now carry
+  `recordedAt` (epoch seconds), and the check freezes the clock there for each stub.
+
 - **A content-addressed component registry** (#1757). `POST /components` uploads a wasm component
   (`application/wasm`, validated as admission validates one), `GET /components[/{sha256}]` lists
   them with the imposters that reference them, and `DELETE /components/{sha256}` removes one (`409`

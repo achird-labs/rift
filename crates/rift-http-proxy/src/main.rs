@@ -65,6 +65,10 @@ fn main() -> Result<(), anyhow::Error> {
     if let Some(Commands::Script { action }) = cli.command.clone() {
         return script_cli::dispatch(action, cli.no_parse);
     }
+    // Likewise `wasm check` (issue #1759): an offline replay with its own exit codes.
+    if let Some(Commands::Wasm { action }) = cli.command.clone() {
+        rift_http_proxy::wasm_cli::dispatch(action);
+    }
     // Likewise `intercept-ca` (issue #1274): file work only, nothing to bootstrap.
     if let Some(Commands::InterceptCa { action }) = cli.command.clone() {
         intercept_ca_cli::dispatch(action);
@@ -208,6 +212,9 @@ fn main() -> Result<(), anyhow::Error> {
         // match stays exhaustive and correct if that ever changes.
         Some(Commands::Script { action }) => {
             return script_cli::dispatch(action.clone(), cli.no_parse);
+        }
+        Some(Commands::Wasm { action }) => {
+            rift_http_proxy::wasm_cli::dispatch(action.clone());
         }
         // Likewise already handled above — and it must stay that way: reaching here would mean the
         // probe had paid for the whole server bootstrap, and (since issue #1133) had computed its
