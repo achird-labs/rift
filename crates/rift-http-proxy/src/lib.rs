@@ -90,6 +90,9 @@ pub mod sources;
 
 // `rift script check` / `rift script run` (issue #360): scripting DX outside a running server
 pub mod script_cli;
+pub mod stub_requests;
+pub mod wasm_check_diff;
+pub mod wasm_cli;
 
 // ===== Embeddable server composition (issue #317) =====
 // Gateway dispatch (issue #212) callable from any listener

@@ -63,6 +63,7 @@ fn test_predicate_matching() {
         new_scenario_state: None,
         space: None,
         recorded_from: None,
+        recorded_at: None,
         verify: None,
     };
 
@@ -170,6 +171,7 @@ fn test_execute_stub() {
         new_scenario_state: None,
         space: None,
         recorded_from: None,
+        recorded_at: None,
         verify: None,
     };
 

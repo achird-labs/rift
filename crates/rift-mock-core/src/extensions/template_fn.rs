@@ -538,8 +538,9 @@ fn parse_jsonpath(path: &str) -> Result<Vec<PathSegment>, String> {
     Ok(segments)
 }
 
-/// Resolve `path` against `root`. A missing key/out-of-bounds index is an `Err` (AC3 policy).
-fn eval_jsonpath(root: &Value, path: &str) -> Result<Value, String> {
+/// Resolve `path` (`$`, dotted keys, `[<index>]`) against `root`. A missing key/out-of-bounds
+/// index is an `Err` (AC3 policy). Public for `rift wasm check`'s `body.$…` fields (issue #1759).
+pub fn eval_jsonpath(root: &Value, path: &str) -> Result<Value, String> {
     let segments = parse_jsonpath(path)?;
     let mut current = root;
     for segment in &segments {

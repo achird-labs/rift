@@ -158,7 +158,16 @@ pub(crate) fn key_for(id: Option<&str>, hash: u64, occurrence: usize) -> String 
 /// stub is first converted to a `serde_json::Value`, whose objects are sorted maps (`preserve_order`
 /// is off workspace-wide), and that is what gets hashed (issue #1256). Struct fields are sorted
 /// too, so this form differs from serializing the stub directly: every id-less key moved once.
+///
+/// `recordedAt` (issue #1759) is left out: it says when a proxy recorded the stub, not what the stub
+/// does, so a recording keeps the key it would have had without it, on every release (a rift-cluster
+/// rolling upgrade hashes the same bytes on old and new nodes alike).
 pub(crate) fn content_hash(stub: &Stub) -> u64 {
+    if stub.recorded_at.is_some() {
+        let mut keyed = stub.clone();
+        keyed.recorded_at = None;
+        return content_hash(&keyed);
+    }
     let mut hasher = Fnv1a::default();
     let hashed = serde_json::to_value(stub)
         .and_then(|canonical| serde_json::to_writer(&mut hasher, &canonical));
@@ -585,6 +594,16 @@ mod tests {
     }
 
     // AC3: determinism, occurrence suffixes, "~" disjointness from user ids.
+
+    #[test]
+    fn recorded_at_is_not_part_of_the_key() {
+        // Issue #1759: when a proxy recorded a stub says nothing about what it does, and a node
+        // that predates the field must key the same bytes the same way.
+        let plain = one_resp("a");
+        let mut recorded = one_resp("a");
+        recorded.recorded_at = Some(1_700_000_000);
+        assert_eq!(stub_key(&plain, 0), stub_key(&recorded, 0));
+    }
 
     #[test]
     fn stub_key_is_deterministic_and_prefixed() {
