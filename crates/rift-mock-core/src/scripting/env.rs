@@ -10,6 +10,11 @@
 //!
 //! Timers (`setTimeout`, a guest's sleep) keep real time: they schedule work, they do not report
 //! the time.
+//!
+//! A JavaScript `wait` function reads them too: its `Math.random()` draws from the imposter's
+//! stream, so it takes its place in a seeded sequence. A promise continuation that one run leaves
+//! to a later run of the same imposter (an MB realm's bequeathed jobs) runs under that later run's
+//! env, as it runs inside that run.
 
 use crate::imposter::clock::{self, wall_ms};
 use crate::imposter::rng::{self, RequestRng};
@@ -76,13 +81,26 @@ impl Drop for EnvGuard {
     }
 }
 
-/// The time a script reads, in milliseconds since the Unix epoch.
+/// The time a script reads, in milliseconds since the Unix epoch. Reads the installed env in
+/// place: this runs on every `Date.now()`.
 #[must_use]
 pub(crate) fn now_ms() -> i64 {
-    ScriptEnv::capture()
-        .clock
-        .and_then(|clock| clock.frozen_ms())
-        .unwrap_or_else(wall_ms)
+    let installed = ENV.with(|e| {
+        e.borrow()
+            .as_ref()
+            .map(|env| env.clock.as_ref().and_then(ScriptClock::frozen_ms))
+    });
+    let frozen = match installed {
+        Some(frozen) => frozen,
+        None => match clock::request_override() {
+            Some(ms) => Some(ms),
+            None => clock::current_imposter_clock().and_then(|clock| match clock.mode() {
+                clock::ClockMode::Wall => None,
+                clock::ClockMode::Frozen { now_ms } => Some(now_ms),
+            }),
+        },
+    };
+    frozen.unwrap_or_else(wall_ms)
 }
 
 /// [`now_ms`] as a UTC date-time; an instant chrono cannot hold reads as the wall clock.
@@ -96,7 +114,9 @@ pub(crate) fn now_utc() -> chrono::DateTime<chrono::Utc> {
 #[cfg_attr(not(feature = "javascript"), allow(dead_code))]
 pub(crate) fn random_f64() -> f64 {
     use rand::RngExt;
-    match ScriptEnv::capture().rng {
+    // The handle is an `Arc` clone, not the whole env: this runs on every `Math.random()`.
+    let installed = ENV.with(|e| e.borrow().as_ref().map(|env| env.rng.clone()));
+    match installed.unwrap_or_else(rng::current) {
         Some(mut rng) => rng.random::<f64>(),
         None => rand::random::<f64>(),
     }

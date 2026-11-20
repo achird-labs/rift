@@ -1239,21 +1239,24 @@ impl Imposter {
         let timeout = std::time::Duration::from_millis(
             crate::scripting::resolve_script_timeout_ms(&self.config),
         );
-        // Plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987):
-        // `execute_predicate_generator_inject` never installs a flow store, so a predicate
-        // generator has no `ctx.state` and nothing here can annotate.
+        // Nothing here annotates (issue #987: a predicate generator has no `ctx.state`), but an
+        // inject generator reads the request's time and random stream (issue #1756), which ride
+        // with the work only through the env carried here.
+        let env = crate::scripting::env::ScriptEnv::capture();
         let handle = tokio::task::spawn_blocking(move || {
-            Self::run_generators(
-                &generators,
-                &method,
-                &path,
-                &headers,
-                body.as_deref(),
-                query.as_deref(),
-                client_addr,
-                &script_files,
-                false,
-            )
+            env.enter(|| {
+                Self::run_generators(
+                    &generators,
+                    &method,
+                    &path,
+                    &headers,
+                    body.as_deref(),
+                    query.as_deref(),
+                    client_addr,
+                    &script_files,
+                    false,
+                )
+            })
         });
         match tokio::time::timeout(timeout, handle).await {
             Ok(Ok(Ok(preds))) => Ok(preds),

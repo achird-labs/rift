@@ -204,3 +204,98 @@ async fn math_random_replays_under_a_seed() {
         "unseeded"
     );
 }
+
+// The legacy `{{NOW}}` token and the `now` function read the same clock.
+#[tokio::test]
+async fn the_legacy_now_token_reads_the_frozen_clock() {
+    let manager = ImposterManager::new();
+    let port = manager
+        .create_imposter(imposter(
+            vec![at(
+                "/legacy",
+                json!({ "is": { "statusCode": 200, "body": "{{NOW}}" } }),
+            )],
+            None,
+        ))
+        .await
+        .expect("create");
+    manager
+        .get_imposter(port)
+        .expect("imposter")
+        .clock()
+        .freeze(FROZEN_MS)
+        .expect("freeze");
+    assert!(
+        body(port, "/legacy")
+            .await
+            .starts_with("2023-11-14T22:13:20")
+    );
+    manager.delete_imposter(port).await.expect("delete");
+}
+
+// A request's own X-Rift-Now reaches a Mountebank inject on the script pool.
+#[tokio::test]
+async fn a_request_instant_reaches_pool_javascript() {
+    let manager = ImposterManager::new();
+    let config: ImposterConfig = serde_json::from_value(json!({
+        "protocol": "http",
+        "_rift": { "scriptEngine": { "clock": "header" } },
+        "stubs": time_stubs(),
+    }))
+    .expect("config");
+    let port = manager.create_imposter(config).await.expect("create");
+    let client = reqwest::Client::new();
+    for (path, instant) in [("/inject", "1234"), ("/js", "5678"), ("/inject", "42")] {
+        let got = client
+            .get(format!("http://127.0.0.1:{port}{path}"))
+            .header("x-rift-now", instant)
+            .send()
+            .await
+            .expect("request")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(got, instant, "{path}");
+    }
+    manager.delete_imposter(port).await.expect("delete");
+}
+
+// A recording proxy's predicateGenerators inject reads the imposter's clock too.
+#[tokio::test]
+async fn a_predicate_generator_inject_reads_the_frozen_clock() {
+    let manager = ImposterManager::new();
+    let upstream = manager
+        .create_imposter(imposter(
+            vec![json!({ "responses": [{ "is": { "statusCode": 200, "body": "up" } }] })],
+            None,
+        ))
+        .await
+        .expect("upstream");
+    let proxy = manager
+        .create_imposter(imposter(
+            vec![json!({ "responses": [{ "proxy": {
+                "to": format!("http://127.0.0.1:{upstream}"),
+                "mode": "proxyOnce",
+                "predicateGenerators": [{ "inject":
+                    "function (config) { return [{ equals: { path: config.request.path, query: { at: String(Date.now()) } } }]; }" }]
+            } }] })],
+            None,
+        ))
+        .await
+        .expect("proxy");
+    manager
+        .get_imposter(proxy)
+        .expect("imposter")
+        .clock()
+        .freeze(FROZEN_MS)
+        .expect("freeze");
+    assert_eq!(body(proxy, "/rec").await, "up");
+    let stubs = serde_json::to_value(manager.get_imposter(proxy).expect("imposter").get_stubs())
+        .expect("stubs");
+    assert!(
+        stubs.to_string().contains(&FROZEN_MS.to_string()),
+        "the generated predicate read the frozen clock: {stubs}"
+    );
+    manager.delete_imposter(proxy).await.expect("delete");
+    manager.delete_imposter(upstream).await.expect("delete");
+}

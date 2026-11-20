@@ -340,10 +340,15 @@ fn build_sealed_js_context(builder: boa_engine::context::ContextBuilder) -> Cont
         .get(js_string!("Math"), &mut context)
         .ok()
         .and_then(|math| math.as_object());
-    let random = boa_engine::native_function::NativeFunction::from_fn_ptr(|_, _, _| {
-        Ok(JsValue::from(super::env::random_f64()))
-    })
-    .to_js_function(context.realm());
+    let random = boa_engine::object::FunctionObjectBuilder::new(
+        context.realm(),
+        boa_engine::native_function::NativeFunction::from_fn_ptr(|_, _, _| {
+            Ok(JsValue::from(super::env::random_f64()))
+        }),
+    )
+    .name(js_string!("random"))
+    .length(0)
+    .build();
     let replaced = math.map(|math| math.set(js_string!("random"), random, false, &mut context));
     assert!(
         matches!(replaced, Some(Ok(true))),
@@ -481,6 +486,16 @@ impl MbJsThread {
 
     /// Run the ready jobs of the runs in flight, end the runs that are done, and try the deferred
     /// starts again.
+    /// Put a run start off until the next step, keeping the submitter's time, random stream
+    /// (issue #1756) and log dispatcher: the step runs outside the job that submitted it.
+    fn defer(&mut self, start: DeferredStart) {
+        let env = super::env::ScriptEnv::capture();
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+        self.deferred.push(Box::new(move |thread: &mut MbJsThread| {
+            env.enter(|| tracing::dispatcher::with_default(&dispatcher, || start(thread)));
+        }));
+    }
+
     fn step(&mut self) {
         for realm in &mut self.realms {
             if !realm.runs.is_empty() {
@@ -2770,11 +2785,9 @@ fn start_inject(
         return;
     }
     if thread.split_from(&input.scope, &input.files) {
-        thread
-            .deferred
-            .push(Box::new(move |thread: &mut MbJsThread| {
-                start_inject(thread, input, budget, reply, claim);
-            }));
+        thread.defer(Box::new(move |thread: &mut MbJsThread| {
+            start_inject(thread, input, budget, reply, claim);
+        }));
         return;
     }
     let InjectInput {
@@ -3136,11 +3149,9 @@ fn start_predicate_inject(
     claim: Claim,
 ) {
     if thread.split_from(&input.scope, &input.files) {
-        thread
-            .deferred
-            .push(Box::new(move |thread: &mut MbJsThread| {
-                start_predicate_inject(thread, input, reply, claim);
-            }));
+        thread.defer(Box::new(move |thread: &mut MbJsThread| {
+            start_predicate_inject(thread, input, reply, claim);
+        }));
         return;
     }
     let PredicateInput {
@@ -4227,11 +4238,9 @@ fn start_decorate(
         return;
     }
     if thread.split_from(&input.scope, &input.files) {
-        thread
-            .deferred
-            .push(Box::new(move |thread: &mut MbJsThread| {
-                start_decorate(thread, input, budget, reply, claim);
-            }));
+        thread.defer(Box::new(move |thread: &mut MbJsThread| {
+            start_decorate(thread, input, budget, reply, claim);
+        }));
         return;
     }
     let DecorateInput {

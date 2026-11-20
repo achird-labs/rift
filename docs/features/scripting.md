@@ -419,7 +419,9 @@ of requests replays exactly, whichever engines answer it. Each script reads its 
 clock and stream, even when Mountebank scripts of several imposters share a worker.
 
 Timers keep real time: `setTimeout` in an `inject` waits real milliseconds, because it schedules
-work rather than reporting the time.
+work rather than reporting the time. A recording proxy's `predicateGenerators` inject reads them
+too. A promise continuation one request's script leaves behind, which a later request of the same
+imposter runs, reads that later request's time.
 
 ## `ctx` API
 
