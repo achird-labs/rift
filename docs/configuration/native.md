@@ -114,8 +114,14 @@ Defaults for `_rift.script` execution.
 
 | Field | Type | Default | Notes |
 |:------|:-----|:--------|:------|
-| `defaultEngine` | string | `"rhai"` | `rhai` or `javascript` (`js`). The engine for a script that omits `engine` and whose `file` extension (`.rhai`, `.js`) does not name one. An explicit `engine` and a file extension both take precedence. |
-| `timeoutMs` | integer | `5000` | Per-script wall-clock timeout, also applied to `decorate`. |
+| `defaultEngine` | string | `"rhai"` | `rhai`, `javascript` (`js`) or `wasm`. The engine for a script that omits `engine` and whose `file` extension (`.rhai`, `.js`, `.wasm`) does not name one. An explicit `engine` and a file extension both take precedence. |
+| `timeoutMs` | integer | `5000` | Per-script wall-clock timeout, also applied to `decorate`. For `wasm` it is the epoch deadline that interrupts a running component. |
+| `wasm.fuel` | integer | unlimited | `wasm` only: a deterministic compute budget in wasmtime fuel units; a call that spends it fails with `fuel exhausted`. |
+| `wasm.maxMemoryMiB` | integer | `64` | `wasm` only: the most linear memory a call may grow to. |
+| `wasm.maxTables` | integer | `4` | `wasm` only: the most tables a call may create. |
+| `wasm.maxTableElements` | integer | `100000` | `wasm` only: the most elements one table may hold. |
+
+See [WebAssembly scripting](../features/wasm-scripting.md#limits) for how each limit fails.
 
 ### `scripts`
 
@@ -295,7 +301,7 @@ top-level `fault` response form, and scripted faults.
 
 ## Scripting
 
-`_rift.script` runs a script (engine `rhai` or `javascript`) that decides whether to inject a
+`_rift.script` runs a script (engine `rhai`, `javascript` or `wasm`) that decides whether to inject a
 response. The source is exactly one of `code` (inline), `file` (a path, relative to the config
 file, or to `--scripts-dir` for admin-API imposters) or `ref` (an entry in `_rift.scripts`). The script defines `respond(ctx)` and returns a result constructor — `http(status, body)`,
 `delay(ms)`, `reset()`, or `pass()`/nothing for no injection. `ctx.state` is a key/value handle
@@ -325,6 +331,10 @@ other's block is accepted and ignored.
 
 - `rhai` is built in; `javascript` requires the `javascript` feature. JavaScript can also use the
   Mountebank `inject` response format directly.
+- `wasm` runs a WebAssembly component (the `rift` binary has it; `librift_ffi` needs its `wasm`
+  feature). It has no inline form: name a `.wasm` file, and resolution stores its bytes in `code`
+  as base64. Two more keys apply to it only: `export` (`"rift"`, the default) and `knobs` (any
+  JSON, passed to the component's `init`). See [WebAssembly scripting](../features/wasm-scripting.md).
 - Scripts require `--allow-injection` and are bounded by a wall-clock timeout
   (`_rift.scriptEngine.timeoutMs`, default 5000 ms).
 

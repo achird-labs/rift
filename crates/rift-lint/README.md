@@ -140,6 +140,8 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | E059 | A `behaviors` array element with more than one behavior type, which the engine refuses (formerly `W018`) |
 | E060 | A `behaviors` array element with no behavior in it (`Unrecognized behavior`), which the engine refuses |
 | E061 | A `behaviors` array element whose `copy`, `lookup` or `shellTransform` is a list, which the engine refuses |
+| E062 | `_rift.script` with `engine: "wasm"` whose `code` is not base64 (a component has no inline form; use `file`) |
+| E063 | A `.wasm` script file that is a core module, not a component |
 
 ### Warnings
 
@@ -154,6 +156,7 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | W022 | A top-level `fault` name the engine does not know; it is ignored at serve time, as in Mountebank |
 | W023 | A `statusCode` string that is not a status code and that no `copy`/`lookup`/`decorate` rewrites; it answers 500, as in Mountebank |
 | W024 | A `repeat` beside a behavior in a `behaviors` array element; the engine ignores it, as Mountebank does — put `repeat` on the response |
+| W026 | `export`/`knobs` on a `_rift.script` whose engine is not `wasm` (ignored) |
 
 ### Info
 

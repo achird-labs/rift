@@ -1,0 +1,21 @@
+[package]
+name = "counter-twin"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "A rift:mock component for _rift.script engine \"wasm\": a counter in the imposter's flow store, with a knob-set limit."
+
+# Built on its own for wasm32-wasip2, never as part of the Rift workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.57"
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true

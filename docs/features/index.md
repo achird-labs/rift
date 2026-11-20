@@ -78,6 +78,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 
 - [Fault Injection](fault-injection.md) - Latency and error simulation
 - [Scripting](scripting.md) - Dynamic behavior with scripts
+- [WebAssembly scripting](wasm-scripting.md) - Sandboxed components as `_rift.script`, with time, fuel and memory limits
 - [Scenarios (FSM)](scenarios.md) - Stateful stubs with declarative state machines
 - [Correlated Isolation (Spaces)](spaces.md) - Per-flow stub and state partitioning
 - [Flow State](flow-state.md) - Per-flow key/value store for stateful mocks

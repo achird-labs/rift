@@ -44,10 +44,12 @@ script is attached — see the table below.
 |:-------|:-------|:---------|
 | **JavaScript** | `inject` response, `decorate`, or `_rift.script` with `"engine": "javascript"` (alias `js`) | Mountebank-compatible injection; the same `ctx` API as Rhai |
 | **Rhai** | `_rift.script` (`"engine": "rhai"`, the default) | Lightweight fault logic with flow state |
+| **WebAssembly** | `_rift.script` with `"engine": "wasm"` and a `.wasm` `file` | A component in any language that builds for `wasm32-wasip2`, sandboxed, with pre-emptive time, fuel and memory limits — see [WebAssembly scripting](wasm-scripting.md) |
 
 Every script surface — `inject` responses and predicates, `decorate`, `shellTransform`, a
 function `wait`, and `_rift.script` — requires `--allowInjection`, exactly as Mountebank gates
-`inject`. Without it, creating the imposter returns `400 invalid injection`. The Lua engine was
+`inject`. Without it, creating the imposter returns `400 invalid injection`. That includes a
+`_rift.script` with `"engine": "wasm"`, for now, although a component runs in a sandbox. The Lua engine was
 removed; `"engine": "lua"` (or a `.lua` script file) is rejected with an error naming the
 replacement.
 

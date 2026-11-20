@@ -98,6 +98,9 @@ impl Mode {
             (Self::Embedded, "front-door") => Some(
                 "drives the front door of `rift --front-door`, which rift_serve_admin has no option for",
             ),
+            (Self::Embedded, "wasm") => Some(
+                "runs `engine: \"wasm\"` components, which rift-ffi builds without by default (its `wasm` feature is off, #1753)",
+            ),
             (Self::Embedded, "log-ring") => Some(
                 "reads entries from GET /logs, which the binary fills through its own tracing subscriber; rift_serve_admin installs none, so the host owns logging and /logs answers `No logfile`",
             ),
@@ -1875,7 +1878,7 @@ mod tests {
 
     #[test]
     fn only_embedded_excludes_the_spawned_engine_tags() {
-        for tag in ["upstream-trust", "front-door", "log-ring"] {
+        for tag in ["upstream-trust", "front-door", "log-ring", "wasm"] {
             assert!(Mode::Embedded.excludes(tag).is_some(), "{tag}");
             assert!(Mode::External.excludes(tag).is_none(), "{tag}");
         }

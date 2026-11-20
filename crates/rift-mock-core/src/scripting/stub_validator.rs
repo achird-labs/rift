@@ -145,13 +145,20 @@ fn validate_rift_script_config(
     }
     let code = script_config.code.as_deref()?;
     let engine = script_config.engine.as_deref().unwrap_or("rhai");
-    validate_rift_script(engine, code, stub_id, response_index)
+    validate_rift_script(
+        engine,
+        code,
+        script_config.export.as_deref(),
+        stub_id,
+        response_index,
+    )
 }
 
 /// Validates a Rift script (_rift.script) using the appropriate validator
 fn validate_rift_script(
     engine: &str,
     code: &str,
+    export: Option<&str>,
     stub_id: &str,
     response_index: usize,
 ) -> Option<StubValidationError> {
@@ -185,7 +192,18 @@ fn validate_rift_script(
             "javascript",
             "JavaScript engine is not enabled (requires 'javascript' feature)".to_string(),
         ),
-        Ok(ScriptEngineKind::Wasm) => refused("wasm", super::WASM_UNAVAILABLE.to_string()),
+        #[cfg(not(feature = "wasm"))]
+        Ok(ScriptEngineKind::Wasm) => {
+            let _ = export;
+            refused("wasm", super::WASM_UNAVAILABLE.to_string())
+        }
+        // Compiles and links the component (issue #1751): a core module, an import Rift does not
+        // provide and a missing `rift:mock/handler` are refused here, and the cache is warm.
+        #[cfg(feature = "wasm")]
+        Ok(ScriptEngineKind::Wasm) => match super::wasm::admit(code, export) {
+            Ok(()) => None,
+            Err(e) => refused("wasm", e.to_string()),
+        },
         Err(removed @ EngineNameError::Removed) => refused("lua", removed.to_string()),
         Err(EngineNameError::Unknown(other)) => {
             let message = format!("Unknown script engine type: '{other}'");
@@ -269,6 +287,7 @@ mod tests {
                         code: Some(code.to_string()),
                         file: None,
                         ref_name: None,
+                        ..Default::default()
                     }),
                     templated: false,
                     state_ops: Vec::new(),
@@ -436,6 +455,7 @@ mod tests {
                             code: Some(r#"fn respond(ctx) { pass() }"#.to_string()),
                             file: None,
                             ref_name: None,
+                            ..Default::default()
                         }),
                         templated: false,
                         state_ops: Vec::new(),
@@ -466,6 +486,7 @@ mod tests {
                             ),
                             file: None,
                             ref_name: None,
+                            ..Default::default()
                         }),
                         templated: false,
                         state_ops: Vec::new(),

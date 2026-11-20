@@ -93,7 +93,7 @@ fn target_kind(path: &Path) -> Result<TargetKind> {
         )),
         Some("json") | Some("yaml") | Some("yml") => Ok(TargetKind::Config),
         other => Err(anyhow!(
-            "cannot determine target kind from extension {:?} of {}; expected .rhai/.js \
+            "cannot determine target kind from extension {:?} of {}; expected .rhai/.js/.wasm \
              (script) or .json/.yaml/.yml (config)",
             other,
             path.display()
@@ -101,9 +101,20 @@ fn target_kind(path: &Path) -> Result<TargetKind> {
     }
 }
 
+/// A script file's text, or for `engine == "wasm"` the component's bytes as base64, the form a
+/// resolved `_rift.script` carries (issue #1751).
+fn read_script(path: &Path, engine: &str) -> Result<String> {
+    if engine == "wasm" {
+        use base64::Engine as _;
+        let bytes =
+            std::fs::read(path).with_context(|| format!("reading component {}", path.display()))?;
+        return Ok(base64::engine::general_purpose::STANDARD.encode(bytes));
+    }
+    std::fs::read_to_string(path).with_context(|| format!("reading script file {}", path.display()))
+}
+
 fn check_raw_script(path: &Path, engine: &str, hook: &str) -> Result<CheckReport> {
-    let code = std::fs::read_to_string(path)
-        .with_context(|| format!("reading script file {}", path.display()))?;
+    let code = read_script(path, engine)?;
     let mut report = CheckReport::new(path.display().to_string());
     check_one_script(&code, engine, hook, path.display().to_string(), &mut report);
     Ok(report)
@@ -184,6 +195,15 @@ fn check_config_script(
     };
     let engine = script_cfg.engine.as_deref().unwrap_or("rhai");
     check_one_script(code, engine, "respond", location.clone(), report);
+    // `export` is the one wasm key the entrypoint check does not see (issue #1751).
+    if ScriptEngineKind::is_wasm(engine)
+        && let Some(export) = script_cfg.export.as_deref()
+        && export != "rift"
+    {
+        report.errors.push(format!(
+            "{location}: wasm export \"{export}\" is not supported; the only export is \"rift\""
+        ));
+    }
 
     if !has_flow_state && (code.contains("ctx.state") || code.contains("flow_store")) {
         report.warnings.push(format!(
@@ -310,17 +330,16 @@ pub fn run_run(
         );
     }
 
-    let code = std::fs::read_to_string(target)
-        .with_context(|| format!("reading script file {}", target.display()))?;
     let engine_type = match engine_override {
         Some(e) => e.to_string(),
         None => infer_engine_from_extension(target).ok_or_else(|| {
             anyhow!(
-                "cannot infer script engine from extension of {}; pass --engine rhai|js",
+                "cannot infer script engine from extension of {}; pass --engine rhai|js|wasm",
                 target.display()
             )
         })?,
     };
+    let code = read_script(target, &engine_type)?;
 
     let fixture: RequestFixture = match request_path {
         Some(p) => {
@@ -348,8 +367,14 @@ pub fn run_run(
 
     // Surface a genuine compile/syntax error as a clean CLI error up front (rather than an
     // "error:" decision in the report).
-    crate::scripting::ScriptEngine::new(&engine_type, &code, "cli-run")
-        .with_context(|| format!("compiling {}", target.display()))?;
+    if ScriptEngineKind::is_wasm(&engine_type) {
+        // A component compiles and links at admission, not through the synchronous engine.
+        crate::scripting::check_entrypoint(&engine_type, &code, hook)
+            .with_context(|| format!("compiling {}", target.display()))?;
+    } else {
+        crate::scripting::ScriptEngine::new(&engine_type, &code, "cli-run")
+            .with_context(|| format!("compiling {}", target.display()))?;
+    }
     let extras = crate::scripting::ScriptCtxExtras {
         flow_id: Some(flow_id.to_string()),
         ..Default::default()

@@ -1727,7 +1727,7 @@ async fn handle_request_inner(
             // here means that pass was skipped (e.g. a stub added through a sub-resource
             // endpoint that doesn't resolve scripts) — surface it as a clear error instead of
             // silently running an empty script.
-            let Some(code) = script_config.code.clone() else {
+            let Some(code) = script_config.code.as_deref() else {
                 return Ok(build_response_with_headers(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [
@@ -1837,10 +1837,53 @@ async fn handle_request_inner(
             let script_started = std::time::Instant::now();
             let script_duration_ms: u64;
             let (script_result, trace_header): (Result<FaultDecision, anyhow::Error>, _) =
-                if crate::util::rift_debug_env() {
+                if crate::scripting::ScriptEngineKind::is_wasm(&engine) {
+                    // A component runs on this task under its epoch deadline (issue #1751), and
+                    // borrows its code: no per-request copy of the component's text.
+                    let script = crate::scripting::WasmScript {
+                        code,
+                        export: script_config.export.as_deref(),
+                        knobs: script_config.knobs.as_ref(),
+                        limits: imposter.config.wasm_limits(),
+                    };
+                    let rule_id = format!("rift_script_{stub_index}");
+                    let timeout = Duration::from_millis(timeout_ms);
+                    let (result, header) = if crate::util::rift_debug_env() {
+                        let (result, mut entry) = crate::scripting::should_inject_wasm_traced(
+                            script,
+                            &rule_id,
+                            &script_request,
+                            flow_store,
+                            timeout,
+                            &ctx_extra,
+                        )
+                        .await;
+                        entry.logs = crate::scripting::cap_trace_logs(entry.logs);
+                        let header = serde_json::to_string(&[entry])
+                            .inspect_err(|e| {
+                                warn!("failed to serialize x-rift-script-trace: {}", e)
+                            })
+                            .ok();
+                        (result, header)
+                    } else {
+                        let result = crate::scripting::should_inject_wasm(
+                            script,
+                            &rule_id,
+                            &script_request,
+                            flow_store,
+                            timeout,
+                            &ctx_extra,
+                        )
+                        .await;
+                        (result, None)
+                    };
+                    script_duration_ms =
+                        u64::try_from(script_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    (result, header)
+                } else if crate::util::rift_debug_env() {
                     let (result, mut entry) = should_inject_bounded_with_ctx_traced(
                         engine.clone(),
-                        code,
+                        code.to_owned(),
                         format!("rift_script_{stub_index}"),
                         script_request,
                         flow_store,
@@ -1863,7 +1906,7 @@ async fn handle_request_inner(
                 } else {
                     let result = should_inject_bounded_with_ctx(
                         engine.clone(),
-                        code,
+                        code.to_owned(),
                         format!("rift_script_{stub_index}"),
                         script_request,
                         flow_store,

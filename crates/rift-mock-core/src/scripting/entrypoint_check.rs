@@ -54,6 +54,11 @@ pub enum EntrypointCheckError {
          the `decorate`/`shellTransform` behaviors."
     )]
     UnsupportedHook { hook: String },
+    /// An `engine: "wasm"` component Rift would refuse (issue #1751): not a component, an import
+    /// Rift does not provide, or no `rift:mock/handler` export. A string, as the reason's type exists
+    /// only in a build with the `wasm` feature.
+    #[error("{0}")]
+    Component(String),
 }
 
 /// Statically check whether `script` (for `engine_type`) defines a valid entrypoint for `hook`.
@@ -74,6 +79,13 @@ pub fn check_entrypoint(
         return Err(EntrypointCheckError::UnsupportedHook {
             hook: hook.to_string(),
         });
+    }
+    // A component's entrypoint is its `rift:mock/handler` export, which admission checks.
+    #[cfg(feature = "wasm")]
+    if super::ScriptEngineKind::is_wasm(engine_type) {
+        return super::wasm::admit(script, None)
+            .map(|()| EntrypointMatch::Named)
+            .map_err(|e| EntrypointCheckError::Component(e.to_string()));
     }
     let declared = declared_functions(engine_type, script)?;
     decide(&declared, hook)

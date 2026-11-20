@@ -33,6 +33,17 @@ pub struct ScriptTimeoutError {
     pub timeout_ms: u64,
 }
 
+/// A wasm script named only by its code: no knobs, the `rift` export, default limits. For the
+/// string-typed entry points, which carry no `_rift.script` config.
+fn default_wasm_script(code: &str) -> super::WasmScript<'_> {
+    super::WasmScript {
+        code,
+        export: None,
+        knobs: None,
+        limits: crate::imposter::WasmLimits::default(),
+    }
+}
+
 /// Default script timeout when `_rift.scriptEngine.timeoutMs` is not configured.
 pub const DEFAULT_SCRIPT_TIMEOUT_MS: u64 = 5000;
 
@@ -87,6 +98,17 @@ pub async fn should_inject_bounded_with_ctx(
     timeout: Duration,
     ctx_extra: ScriptCtxExtras,
 ) -> Result<FaultDecision> {
+    if super::ScriptEngineKind::is_wasm(&engine_type) {
+        return should_inject_wasm(
+            default_wasm_script(&code),
+            &rule_id,
+            &request,
+            flow_store,
+            timeout,
+            &ctx_extra,
+        )
+        .await;
+    }
     let abort = Arc::new(AtomicBool::new(false));
     let run_abort = Arc::clone(&abort);
     // A script's `ctx.state` reaches the flow store, and a failing backend annotates the op it
@@ -141,6 +163,17 @@ pub async fn should_inject_bounded_with_ctx_traced(
     timeout: Duration,
     ctx_extra: ScriptCtxExtras,
 ) -> (Result<FaultDecision>, ScriptTraceEntry) {
+    if super::ScriptEngineKind::is_wasm(&engine_type) {
+        return should_inject_wasm_traced(
+            default_wasm_script(&code),
+            &rule_id,
+            &request,
+            flow_store,
+            timeout,
+            &ctx_extra,
+        )
+        .await;
+    }
     let abort = Arc::new(AtomicBool::new(false));
     let run_abort = Arc::clone(&abort);
     let start = Instant::now();
@@ -197,6 +230,72 @@ pub async fn should_inject_bounded_with_ctx_traced(
         decision,
         duration_ms,
         logs,
+        fuel_used: None,
+        trap: None,
+    };
+    (result, entry)
+}
+
+/// Run an `engine: "wasm"` `_rift.script` (issue #1751): one call of the component's `respond` on
+/// the request task, interrupted at `timeout` by wasmtime's epoch deadline, so no blocking thread is
+/// held. The component's stdout and stderr lines are emitted as `ctx.logger` events.
+pub async fn should_inject_wasm(
+    script: super::WasmScript<'_>,
+    rule_id: &str,
+    request: &ScriptRequest,
+    flow_store: Arc<dyn FlowStore>,
+    timeout: Duration,
+    ctx_extra: &ScriptCtxExtras,
+) -> Result<FaultDecision> {
+    #[cfg(feature = "wasm")]
+    {
+        let (result, report) =
+            super::wasm::respond(script, rule_id, request, flow_store, timeout, ctx_extra).await;
+        super::wasm::emit_logs(&report);
+        result
+    }
+    #[cfg(not(feature = "wasm"))]
+    {
+        let _ = (script, rule_id, request, flow_store, timeout, ctx_extra);
+        Err(anyhow::anyhow!(super::WASM_UNAVAILABLE))
+    }
+}
+
+/// As [`should_inject_wasm`], and the debug-mode trace entry: the decision, the duration, the
+/// component's log lines, the fuel it spent and how it trapped.
+pub async fn should_inject_wasm_traced(
+    script: super::WasmScript<'_>,
+    rule_id: &str,
+    request: &ScriptRequest,
+    flow_store: Arc<dyn FlowStore>,
+    timeout: Duration,
+    ctx_extra: &ScriptCtxExtras,
+) -> (Result<FaultDecision>, ScriptTraceEntry) {
+    let start = Instant::now();
+    #[cfg(feature = "wasm")]
+    let (result, logs, fuel_used, trap) = {
+        let (result, report) =
+            super::wasm::respond(script, rule_id, request, flow_store, timeout, ctx_extra).await;
+        let ((), logs) = capture_script_logs(|| super::wasm::emit_logs(&report));
+        (result, logs, report.fuel_used, report.trap_text())
+    };
+    #[cfg(not(feature = "wasm"))]
+    let (result, logs, fuel_used, trap) = {
+        let _ = (script, rule_id, request, flow_store, timeout, ctx_extra);
+        let result: Result<FaultDecision> = Err(anyhow::anyhow!(super::WASM_UNAVAILABLE));
+        (result, Vec::new(), None, None)
+    };
+    let decision = match &result {
+        Ok(d) => render_decision(d),
+        Err(e) => format!("error: {e}"),
+    };
+    let entry = ScriptTraceEntry {
+        hook: "respond".to_string(),
+        decision,
+        duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        logs,
+        fuel_used,
+        trap,
     };
     (result, entry)
 }

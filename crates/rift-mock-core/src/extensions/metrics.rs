@@ -170,6 +170,16 @@ pub static SCRIPT_ERRORS_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// Calls of an `engine: "wasm"` script that ended in a trap or a guest error (issue #1751).
+pub static WASM_TRAPS_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
+    register_counter_vec!(
+        "rift_wasm_traps_total",
+        "Total number of wasm script calls that trapped or returned a guest error",
+        &["kind"] // kind: deadline|fuel|memory|trap|guest-error
+    )
+    .expect("rift_wasm_traps_total registers once")
+});
+
 /// Collect and return all metrics in Prometheus text format
 pub fn collect_metrics() -> String {
     let encoder = TextEncoder::new();
@@ -468,6 +478,12 @@ pub fn record_script_error(rule_id: &str, error_type: &str) {
     SCRIPT_ERRORS_TOTAL
         .with_label_values(&[rule_id, error_type])
         .inc();
+}
+
+/// Count a wasm call that ended in `kind`: `deadline`, `fuel`, `memory`, `trap` or `guest-error`.
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+pub(crate) fn record_wasm_trap(kind: &str) {
+    WASM_TRAPS_TOTAL.with_label_values(&[kind]).inc();
 }
 
 #[cfg(test)]

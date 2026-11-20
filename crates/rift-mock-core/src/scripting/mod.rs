@@ -13,7 +13,25 @@ mod rhai_engine;
 pub use bounded::{
     DEFAULT_SCRIPT_TIMEOUT_MS, ScriptTimeoutError, resolve_script_timeout_ms,
     should_inject_bounded, should_inject_bounded_with_ctx, should_inject_bounded_with_ctx_traced,
+    should_inject_wasm, should_inject_wasm_traced,
 };
+
+// `engine: "wasm"` (issue #1751).
+#[cfg(feature = "wasm")]
+mod wasm;
+
+/// A `_rift.script` with `engine: "wasm"`, as one call needs it (issue #1751).
+#[derive(Debug, Clone, Copy)]
+pub struct WasmScript<'a> {
+    /// The component's bytes, base64.
+    pub code: &'a str,
+    /// `_rift.script.export`; `None` is `"rift"`.
+    pub export: Option<&'a str>,
+    /// `_rift.script.knobs`; `None` is `{}`.
+    pub knobs: Option<&'a serde_json::Value>,
+    /// `_rift.scriptEngine.wasm`.
+    pub limits: crate::imposter::WasmLimits,
+}
 
 pub use rhai_engine::RhaiEngine;
 pub(crate) use rhai_engine::values_map_to_rhai;
@@ -460,6 +478,12 @@ impl ScriptEngineKind {
         }
     }
 
+    /// Whether `name` names the wasm engine.
+    #[must_use]
+    pub fn is_wasm(name: &str) -> bool {
+        matches!(Self::parse(name), Ok(Self::Wasm))
+    }
+
     /// The engine a script file's extension names: `None` for an extension that names none, and
     /// `Removed` for `.lua`.
     pub fn from_extension(ext: &str) -> Option<Result<Self, EngineNameError>> {
@@ -473,7 +497,8 @@ impl ScriptEngineKind {
     }
 }
 
-/// The message `wasm` gets until a build carries that engine (issue #1751).
+/// The message `wasm` gets in a build without the `wasm` feature (issue #1751).
+#[cfg_attr(feature = "wasm", allow(dead_code))]
 pub(crate) const WASM_UNAVAILABLE: &str = "engine \"wasm\" is not available in this build";
 
 /// Unified script engine that supports Rhai and JavaScript
@@ -498,7 +523,13 @@ impl ScriptEngine {
             ScriptEngineKind::JavaScript => Err(anyhow!(
                 "JavaScript engine is not enabled. Enable the 'javascript' feature flag"
             )),
+            #[cfg(not(feature = "wasm"))]
             ScriptEngineKind::Wasm => Err(anyhow!(WASM_UNAVAILABLE)),
+            // A component runs on the request task, not through this synchronous engine.
+            #[cfg(feature = "wasm")]
+            ScriptEngineKind::Wasm => Err(anyhow!(
+                "engine \"wasm\" runs only as a `_rift.script` response"
+            )),
         }
     }
 
@@ -818,7 +849,9 @@ mod tests {
         assert_eq!(ScriptEngineKind::from_extension("txt"), None);
     }
 
-    // Until #1751, `wasm` parses and is refused with its own message, not as an unknown engine.
+    // Without the `wasm` feature, `wasm` parses and is refused with its own message, not as an
+    // unknown engine.
+    #[cfg(not(feature = "wasm"))]
     #[test]
     fn wasm_is_refused_as_unavailable() {
         let err = super::ScriptEngine::new("wasm", "x", "r")

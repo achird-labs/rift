@@ -1235,14 +1235,21 @@
       "description": "Script configuration for response generation.\n\nExactly one of `code`, `file`, or `ref` must be set (issue #356). This is enforced by the\nconfig-time script-resolution pass (`imposter::script_resolve`) rather than at deserialize\ntime, so a validation error can name the offending stub/registry entry instead of a generic\nserde failure — and so existing configs using only `code` keep deserializing unchanged.",
       "properties": {
         "code": {
-          "description": "Inline script code.",
+          "description": "Inline script code. For `engine: \"wasm\"` this is the component's bytes in base64, which\nresolution writes from a `.wasm` `file`; wasm has no inline source form.",
           "type": [
             "string",
             "null"
           ]
         },
         "engine": {
-          "description": "Script engine: \"rhai\", \"javascript\" or \"wasm\" (\"wasm\" is refused until a build carries\nit). When absent, the resolver infers it from `file`'s extension (`.rhai`/`.js`/`.wasm`; a\n`.lua` file still resolves to the now-removed \"lua\"\nengine so it is rejected with a clear error rather than silently mis-run), falling back to\n\"rhai\" — the legacy default — when neither `engine` nor an inferable extension is present.",
+          "description": "Script engine: \"rhai\", \"javascript\" or \"wasm\" (\"wasm\" needs a build with the `wasm`\nfeature, as the `rift` binary is). When absent, the resolver infers it from `file`'s extension (`.rhai`/`.js`/`.wasm`; a\n`.lua` file still resolves to the now-removed \"lua\"\nengine so it is rejected with a clear error rather than silently mis-run), falling back to\n\"rhai\" — the legacy default — when neither `engine` nor an inferable extension is present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "export": {
+          "description": "`engine: \"wasm\"` only: which export of the component answers. `\"rift\"` (the default) is the\n`rift:mock/handler` interface (issue #1751).",
           "type": [
             "string",
             "null"
@@ -1254,6 +1261,9 @@
             "string",
             "null"
           ]
+        },
+        "knobs": {
+          "description": "`engine: \"wasm\"` only: any JSON, passed to the component's `init` as text before each call.\nAbsent ⇒ `{}`."
         },
         "ref": {
           "description": "Name of a `_rift.scripts` registry entry (see [`RiftConfig::scripts`]) to resolve this\nscript from. The referenced entry must itself use `code` or `file` — a `ref` chain is a\nvalidation error.",
@@ -1280,6 +1290,17 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "wasm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WasmLimits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Limits for `engine: \"wasm\"` scripts (issue #1751); absent ⇒ [`WasmLimits::default`]."
         }
       },
       "type": "object"
@@ -1755,6 +1776,43 @@
         }
       ],
       "description": "Wait behavior - add latency before response"
+    },
+    "WasmLimits": {
+      "additionalProperties": false,
+      "description": "Per-call limits on an `engine: \"wasm\"` script (`_rift.scriptEngine.wasm`, issue #1751). The\nwall-clock deadline is `timeoutMs`, as for every engine.",
+      "properties": {
+        "fuel": {
+          "description": "Compute budget in wasmtime fuel units: a call that spends it fails with \"fuel exhausted\".\nDeterministic, unlike the deadline. Absent ⇒ unlimited (fuel is still counted, for the\ndebug trace).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxMemoryMiB": {
+          "default": 64,
+          "description": "Largest linear memory a call may grow to, in MiB.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxTableElements": {
+          "default": 100000,
+          "description": "Most elements one table may hold.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxTables": {
+          "default": 4,
+          "description": "Most tables a call may create.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
     }
   },
   "$id": "https://github.com/achird-labs/rift/sdk-conformance/schema/imposter.schema.json",

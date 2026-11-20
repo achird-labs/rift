@@ -107,6 +107,7 @@ nav:
       - features/index.md
       - Fault Injection: features/fault-injection.md
       - Scripting: features/scripting.md
+      - WebAssembly scripting: features/wasm-scripting.md
       - TLS/HTTPS: features/tls.md
       - Metrics: features/metrics.md
       - Stub Analysis: features/stub-analysis.md
