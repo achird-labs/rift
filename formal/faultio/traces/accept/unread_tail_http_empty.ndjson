@@ -1,0 +1,3 @@
+{"bodyUnits":0,"kinds":["empty","ok"],"pipelines":true,"point":"Start","timing":"before","transport":"http","version":"h1"}
+{"kind":"empty","point":"FaultArmed"}
+{"kind":"empty","layer":"RawSocket","point":"FaultTaken"}

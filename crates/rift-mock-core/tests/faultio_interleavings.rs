@@ -14,6 +14,10 @@
 //! defect filed as issue n. The fix removes the attribute.
 //!
 //! Ports come from the manager only (`test_port_uniqueness.rs`).
+//!
+//! With `FORMAL_TRACE_DIR` set, each test writes its run as ndjson there, with the run's
+//! configuration as the model names it, and `formal/faultio/validate.py` asks TLC whether
+//! `FaultIo.tla` allows that order (issue #1791).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,6 +75,28 @@ impl Recorder {
             .collect()
     }
 
+    /// Write the run to `$FORMAL_TRACE_DIR/<name>.ndjson`, when the variable is set. `start` is the
+    /// run's configuration as `FaultIo.tla` names it: `kinds` (what each request's stub answers),
+    /// `transport`, `version`, `timing` (the fault stubs exist at accept, or are added later),
+    /// `pipelines` and `bodyUnits`.
+    fn write(&self, name: &str, mut start: Value) {
+        let Ok(dir) = std::env::var("FORMAL_TRACE_DIR") else {
+            return;
+        };
+        start["point"] = json!("Start");
+        let mut lines = start.to_string();
+        lines.push('\n');
+        // The manager's other points (create, delete) are no part of this model.
+        for point in self.0.lock().iter().map(|p| to_json(*p)) {
+            if point["point"] != "Other" {
+                lines.push_str(&point.to_string());
+                lines.push('\n');
+            }
+        }
+        std::fs::create_dir_all(&dir).expect("trace dir");
+        std::fs::write(format!("{dir}/{name}.ndjson"), lines).expect("write trace");
+    }
+
     /// The lingering-close points, in the order the engine took them.
     fn linger(&self) -> Vec<&'static str> {
         self.0
@@ -84,6 +110,45 @@ impl Recorder {
             })
             .collect()
     }
+}
+
+/// A fault kind as `FaultIo.tla` names it.
+fn kind_name(kind: TcpFaultKind) -> &'static str {
+    match kind {
+        TcpFaultKind::Reset => "reset",
+        TcpFaultKind::Empty => "empty",
+        TcpFaultKind::RandomData => "random",
+        TcpFaultKind::MalformedChunk => "malformed",
+        // A kind the model does not have: no step takes it, so the trace is rejected.
+        _ => "unmodelled",
+    }
+}
+
+fn to_json(point: Point) -> Value {
+    match point {
+        Point::FaultArmed { kind } => json!({ "point": "FaultArmed", "kind": kind_name(kind) }),
+        Point::FaultTaken { kind, layer } => json!({
+            "point": "FaultTaken",
+            "kind": kind_name(kind),
+            "layer": match layer {
+                FaultLayer::RawSocket => "RawSocket",
+                FaultLayer::AboveTls => "AboveTls",
+                _ => "unmodelled",
+            },
+        }),
+        Point::LingerArmed => json!({ "point": "LingerArmed" }),
+        Point::LingerFinSent => json!({ "point": "LingerFinSent" }),
+        Point::LingerDrained { discarded } => {
+            json!({ "point": "LingerDrained", "discarded": discarded })
+        }
+        _ => json!({ "point": "Other" }),
+    }
+}
+
+/// A run's configuration for its trace (see [`Recorder::write`]).
+fn run(kinds: &[&str], transport: &str, version: &str, timing: &str, pipelines: bool) -> Value {
+    json!({ "kinds": kinds, "transport": transport, "version": version, "timing": timing,
+            "pipelines": pipelines, "bodyUnits": 0 })
 }
 
 fn path_stub(path: &str, response: Value) -> Value {
@@ -290,6 +355,10 @@ async fn a_fault_for_a_pipelined_response_leaves_the_earlier_response_whole() {
             vec![(kind, FaultLayer::RawSocket)],
             "{fault}"
         );
+        recorder.write(
+            &format!("pipelined_http_{}", kind_name(kind)),
+            run(&["ok", kind_name(kind)], "http", "h1", "before", true),
+        );
         let _ = manager.delete_imposter(port).await;
     }
 }
@@ -321,6 +390,10 @@ async fn a_payload_fault_over_tls_follows_the_earlier_response_inside_tls() {
             vec![(kind, FaultLayer::AboveTls)],
             "{fault}"
         );
+        recorder.write(
+            &format!("pipelined_https_{}", kind_name(kind)),
+            run(&["ok", kind_name(kind)], "https", "h1", "before", true),
+        );
         let _ = manager.delete_imposter(port).await;
     }
 }
@@ -337,6 +410,10 @@ async fn an_empty_close_over_tls_is_taken_beneath_tls_after_the_earlier_response
     assert_eq!(
         recorder.taken(),
         vec![(TcpFaultKind::Empty, FaultLayer::RawSocket)]
+    );
+    recorder.write(
+        "pipelined_https_empty",
+        run(&["ok", "empty"], "https", "h1", "before", true),
     );
     let _ = manager.delete_imposter(port).await;
 }
@@ -373,6 +450,10 @@ async fn a_kept_alive_connection_arms_after_its_first_response() {
     assert!(received.bytes.is_empty(), "{:?}", received.bytes);
     assert_eq!(recorder.armed(), vec![TcpFaultKind::Empty]);
     assert_eq!(recorder.taken().len(), 1, "fires once");
+    recorder.write(
+        "kept_alive_http_empty",
+        run(&["ok", "empty"], "http", "h1", "before", false),
+    );
     let _ = manager.delete_imposter(port).await;
 }
 
@@ -428,6 +509,10 @@ async fn bytes_of_n_before_a_reset() -> usize {
         recorder.taken(),
         vec![(TcpFaultKind::Reset, FaultLayer::RawSocket)]
     );
+    recorder.write(
+        "pipelined_http_reset",
+        run(&["ok", "reset"], "http", "h1", "before", true),
+    );
     let _ = manager.delete_imposter(port).await;
     body.len()
 }
@@ -458,6 +543,11 @@ async fn unread_pipelined_bytes_turn_an_empty_close_into_a_reset() {
         received.end.as_ref().map(std::io::Error::kind)
     );
     assert_eq!(recorder.taken().len(), 1);
+    // The bytes past the request are a second, unread one as the model counts them.
+    recorder.write(
+        "unread_tail_http_empty",
+        run(&["empty", "ok"], "http", "h1", "before", true),
+    );
     let _ = manager.delete_imposter(port).await;
 }
 
@@ -506,6 +596,9 @@ async fn a_lingering_close_delivers_the_refusal_over_http() {
     let stubs = vec![path_stub("/ok", json!({ "is": { "body": "ok" } }))];
     let (manager, port, recorder) = serve("http", stubs, limited()).await;
     refusal_reaches_a_client_still_writing(connect(port).await, &recorder).await;
+    let mut config = run(&["refuse"], "http", "h1", "before", false);
+    config["bodyUnits"] = json!(1);
+    recorder.write("linger_http_refuse", config);
     let _ = manager.delete_imposter(port).await;
 }
 
@@ -514,6 +607,9 @@ async fn a_lingering_close_delivers_the_refusal_over_https() {
     let stubs = vec![path_stub("/ok", json!({ "is": { "body": "ok" } }))];
     let (manager, port, recorder) = serve("https", stubs, limited()).await;
     refusal_reaches_a_client_still_writing(connect_tls(port).await, &recorder).await;
+    let mut config = run(&["refuse"], "https", "h1", "before", false);
+    config["bodyUnits"] = json!(1);
+    recorder.write("linger_https_refuse", config);
     let _ = manager.delete_imposter(port).await;
 }
 
@@ -548,6 +644,9 @@ async fn a_refusal_behind_a_blocked_response_still_arrives_before_the_fin() {
     assert!(rest.is_empty());
     assert!(received.end.is_none(), "{:?}", received.end);
     assert_eq!(recorder.linger()[..2], ["armed", "fin"]);
+    let mut config = run(&["ok", "refuse"], "http", "h1", "before", true);
+    config["bodyUnits"] = json!(1);
+    recorder.write("linger_behind_big_http", config);
     let _ = manager.delete_imposter(port).await;
 }
 
@@ -618,6 +717,10 @@ async fn a_fault_stub_added_under_an_alpn_h2_connection_resets_only_its_stream()
         "the connection stays open"
     );
     assert!(recorder.armed().is_empty(), "h2 must not arm the cell");
+    recorder.write(
+        "h2_alpn_stub_added",
+        run(&["ok", "empty", "ok"], "https", "h2", "after", false),
+    );
     driver.abort();
     let _ = manager.delete_imposter(port).await;
 }
@@ -673,6 +776,10 @@ async fn a_fault_stub_added_under_an_open_h2_connection_resets_only_its_stream()
     assert!(
         recorder.armed().is_empty(),
         "h2 must not arm the connection's cell"
+    );
+    recorder.write(
+        "h2_stub_added",
+        run(&["ok", "ok", "empty"], "http", "h2", "after", true),
     );
     driver.abort();
     let _ = manager.delete_imposter(port).await;
