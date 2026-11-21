@@ -1,0 +1,4 @@
+{"bodyUnits":1,"kinds":["refuse"],"pipelines":false,"point":"Start","timing":"before","transport":"https","version":"h1"}
+{"point":"LingerArmed"}
+{"point":"LingerFinSent"}
+{"discarded":4199936,"point":"LingerDrained"}

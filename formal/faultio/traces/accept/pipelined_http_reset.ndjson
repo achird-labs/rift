@@ -1,0 +1,3 @@
+{"bodyUnits":0,"kinds":["ok","reset"],"pipelines":true,"point":"Start","timing":"before","transport":"http","version":"h1"}
+{"kind":"reset","point":"FaultArmed"}
+{"kind":"reset","layer":"RawSocket","point":"FaultTaken"}

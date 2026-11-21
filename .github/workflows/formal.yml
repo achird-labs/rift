@@ -114,6 +114,18 @@ jobs:
         working-directory: formal/${{ matrix.model }}
         run: python3 validate.py "$GITHUB_WORKSPACE/tla2tools.jar" --selftest traces
 
+      # Issue #1791: each model's mutants that a recorded run must catch, so trace validation that
+      # accepts everything cannot pass. Models whose validate.py names none skip it.
+      - name: Trace validation has teeth
+        if: hashFiles(format('formal/{0}/validate.py', matrix.model)) != ''
+        working-directory: formal/${{ matrix.model }}
+        run: |
+          if grep -q '^MUTANTS = ' validate.py; then
+            python3 validate.py "$GITHUB_WORKSPACE/tla2tools.jar" --mutants traces/accept
+          else
+            echo "validate.py names no mutants"
+          fi
+
       - name: The full cfgs
         if: github.event_name != 'pull_request'
         run: python3 formal/check.py tla2tools.jar ${{ matrix.model }} full

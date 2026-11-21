@@ -167,6 +167,39 @@ test in `crates/rift-mock-core/tests/faultio_interleavings.rs` forces it, and a 
   looked like a FIN ahead of the answer. `Buffered::poll_shutdown` flushes first (`io.rs:337`), and
   `a_refusal_behind_a_blocked_response_still_arrives_before_the_fin` passes.
 
+## Trace validation
+
+`validate.py` asks TLC whether a recorded run is a behaviour of the model (`TraceValidation.tla`, issue #1791), as
+`formal/proxyonce` does. Each test in `faultio_interleavings.rs` writes its run with the configuration the model names: what
+each request's stub answers (`kinds`), the transport, the HTTP version, whether the fault stubs existed at accept
+(`timing`), whether the client pipelines, and whether a refused request still has body to write. TLC starts from exactly
+that configuration.
+
+| Point | Step |
+|:--|:--|
+| `FaultArmed{kind}` | `ServiceDone` for a carrier, setting the cell to `kind` |
+| `LingerArmed` | `ServiceDone` for a refusal, setting `linger` |
+| `FaultTaken{kind, RawSocket}` | the trip in `HttpWrite`, `TlsRecordWrite` or `H2Write`, on a cell holding `kind` |
+| `FaultTaken{kind, AboveTls}` | `TlsTakePayload` on a cell holding `kind` |
+| `LingerFinSent` | `LingerShutWrite` |
+| `LingerDrained` | `DrainEnds` |
+
+Every other step is free: reads, response bytes written, flushes, the client, the kernel. A step that would fire a point
+is never free, so the engine taking one the run did not record is a rejection. Acceptance says the order is allowed; it
+does not pin which request a free step served. `LingerDrained.discarded` is not constrained: the model does not count
+the bytes a drain reads.
+
+`traces/accept` holds the 14 runs the 11 tests record (one per fault kind where a test loops). `traces/reject` holds 6
+written by hand that the model must refuse: a fault taken before it was armed, taken twice, taken above TLS on plain
+http, a payload taken beneath TLS on https (#1600), the cell armed for another kind than the stub's, and a lingering
+close's FIN before the linger was armed.
+
+`validate.py --mutants traces/accept` shows the validation has teeth: with #1460's bug put back (`a refusal does not ask
+for a lingering close`) the three lingering-close runs are rejected, and with #1600's (`the payload is taken beneath
+TLS`) the two https payload runs are. CI runs both. A protocol change changes these runs; record them again with
+`FORMAL_TRACE_DIR=formal/faultio/traces/accept cargo test -p rift-mock-core --all-features --test faultio_interleavings
+-- --include-ignored --test-threads=1` (the directory must be absolute, or relative to the crate).
+
 ## What is outside the model
 
 - **Time.** The drain's timers can fire at any point, but only with the send queue empty unless `DrainOutrunsDelivery`.
@@ -177,7 +210,6 @@ test in `crates/rift-mock-core/tests/faultio_interleavings.rs` forces it, and a 
 - **The other listeners.** Admin and front door take `apply_tcp_fault`'s rule, which the control case models; their tests
   are `issue_1234_gateway_tcp_fault.rs`. The intercept listener arms only the linger.
 - **h2 frames through TLS layers.** `H2Write` goes straight to the cell, so `PayloadAboveTlsOnHttps` says nothing about h2.
-- **Trace validation.** The probe points (`FaultArmed`, `FaultTaken`, `LingerArmed`, `LingerFinSent`, `LingerDrained`) are
-  used by assertions in `faultio_interleavings.rs`. There is no `TraceValidation.tla` for this model. `FaultCell` fires
-  them only where a fault or a linger is armed or taken, so an unarmed connection never reads the probe, and only the
-  imposter listener installs one (`FaultCell::probed`).
+- **Unarmed connections and the other listeners, for trace validation.** `FaultCell` fires its points only where a
+  fault or a linger is armed or taken, and only the imposter listener installs a probe (`FaultCell::probed`), so a
+  recorded run says nothing about a connection that never armed one, or about the admin and front-door listeners.

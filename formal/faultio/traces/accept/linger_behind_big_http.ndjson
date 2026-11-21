@@ -1,0 +1,3 @@
+{"bodyUnits":1,"kinds":["ok","refuse"],"pipelines":true,"point":"Start","timing":"before","transport":"http","version":"h1"}
+{"point":"LingerArmed"}
+{"point":"LingerFinSent"}

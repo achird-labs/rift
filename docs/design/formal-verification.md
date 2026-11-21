@@ -52,7 +52,7 @@ advance the load clock, because a planning note said so. They do not, and an iss
 "confirmed against the source" before anyone had checked. The defect turned out to be real by another route, but
 the evidence was not.
 
-Probes also feed trace validation in `lifecycle` and `proxyonce`: a recorded run is written as a `Trace` module, and
+Probes also feed trace validation in `lifecycle`, `proxyonce` and `faultio`: a recorded run is written as a `Trace` module, and
 TLC searches for a behaviour of the model taking those steps. It checks the model against the engine, the
 one direction model checking alone cannot.
 
@@ -129,8 +129,13 @@ rift-cluster. Each model's README lists its own.
 | scripting | 760,890 | 18,563,719, liveness 192,992 | 8 |
 | faultio | 42,894 | 721,960 | 6 |
 
-Not yet done: model-based replay, which runs behaviours generated from a model against a pure reference such as
-`tests/model/model.rs`. Trace validation for `scenario`, `scripting` and `faultio` is also not done.
+Trace validation for `scenario` and `scripting` is not yet done (#1791). `faultio`'s shows a recorded run can reject a
+fixed bug put back: `validate.py --mutants` names the mutants, and CI runs it.
+
+Weighed and declined: model-based replay, which would run behaviours generated from a model against a pure reference
+such as `tests/model/model.rs` (#1789). The models describe concurrent protocols and `model.rs` a sequential stub
+semantics, so a generated behaviour projected onto it is a sequential op list, which the proptest in `tests/model`
+already generates against the real engine.
 
 ## Changing it
 
