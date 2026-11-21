@@ -986,7 +986,9 @@ rift wasm check --component twin.wasm --corpus saved.json --port 4545 \
   `recordedAt`, and the clock is frozen there for its call; a stub without one keeps the instant
   before it (the run's start if none has one). The corpus's own `_rift.scriptEngine` settings
   apply (its `seed`, its `wasm` limits); `--seed` overrides the seed, and `--knobs` is
-  `_rift.script.knobs`.
+  `_rift.script.knobs`. `--instance imposter` keeps one instance for the whole replay, as
+  `_rift.script.instance: "imposter"` does on an imposter, so a twin that keeps its state in guest
+  memory replays in order; the default `request` makes a fresh one per recorded call.
 - `--fields` chooses what is compared: `status`, `body` (as JSON structure when both sides are
   JSON, else as bytes), `body.$<path>` (one value, `$.items[0].id`; a path the recording lacks
   drifts, so a typo is never a silent pass), and `headers.<name>`. The default is `status,body`.

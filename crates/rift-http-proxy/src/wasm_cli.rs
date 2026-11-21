@@ -40,6 +40,8 @@ pub struct CheckOptions {
     pub port: Option<u16>,
     pub export: Option<String>,
     pub knobs: Option<String>,
+    /// `request` (the default) or `imposter`: one kept instance for the whole replay (issue #1793).
+    pub instance: Option<String>,
     pub seed: Option<u64>,
     pub fields: Option<String>,
     pub stop_on_first: bool,
@@ -224,6 +226,12 @@ pub async fn run_check(opts: &CheckOptions) -> Result<CheckReport> {
         None | Some("rift" | "http") => {}
         Some(other) => bail!("--export must be \"rift\" or \"http\" (got {other:?})"),
     }
+    match opts.instance.as_deref() {
+        None | Some("request" | "imposter") => {}
+        Some(other) => bail!("--instance must be \"request\" or \"imposter\" (got {other:?})"),
+    }
+    // One kept instance for the whole replay under `--instance imposter`, as an imposter keeps it.
+    let instances = rift_mock_core::scripting::WasmInstances::default();
     let fields: Vec<Field> = match &opts.fields {
         Some(spec) => parse_fields(spec).map_err(|e| anyhow!(e))?,
         None => default_fields(),
@@ -401,6 +409,8 @@ pub async fn run_check(opts: &CheckOptions) -> Result<CheckReport> {
                     knobs: knobs.as_ref(),
                     limits,
                     clock: Some(&script_clock),
+                    instance: opts.instance.as_deref(),
+                    instances: Some(&instances),
                 },
                 "wasm-check",
                 &request,
@@ -575,6 +585,7 @@ pub fn dispatch(action: WasmAction) -> ! {
         port,
         export,
         knobs,
+        instance,
         seed,
         fields,
         stop_on_first,
@@ -586,6 +597,7 @@ pub fn dispatch(action: WasmAction) -> ! {
         port,
         export,
         knobs,
+        instance,
         seed,
         fields,
         stop_on_first,

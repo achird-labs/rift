@@ -27,9 +27,10 @@ impl LogPipe {
         }
     }
 
-    /// The bytes kept so far.
-    pub(super) fn contents(&self) -> Vec<u8> {
-        self.kept.lock().clone()
+    /// The bytes kept so far, emptying the pipe: an instance kept across calls (issue #1793)
+    /// reports each call's lines once, and its cap applies to each call.
+    pub(super) fn take(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.kept.lock())
     }
 
     fn keep(&self, bytes: &[u8]) {
@@ -112,6 +113,6 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(stream.check_write().ok(), Some(PERMIT));
-        assert_eq!(pipe.contents(), b"hello wo");
+        assert_eq!(pipe.take(), b"hello wo");
     }
 }

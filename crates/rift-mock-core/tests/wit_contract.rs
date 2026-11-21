@@ -73,6 +73,8 @@ async fn the_conformance_script_passes_on_the_in_memory_store() {
             knobs: Some(&knobs),
             limits: WasmLimits::default(),
             clock: None,
+            instance: None,
+            instances: None,
         },
         "conformance",
         &request,

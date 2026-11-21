@@ -310,6 +310,12 @@ impl RequestRng {
         self.0.store(Arc::new(stream));
     }
 
+    /// Draw from the stream `other` draws from now, from now on: how a wasm store kept across
+    /// requests (issue #1793) reads each request's stream through one handle.
+    pub fn follow(&self, other: &Self) {
+        self.0.store(other.0.load_full());
+    }
+
     /// A `wasi:random/insecure-seed` value: two draws.
     pub fn seed_u128(&mut self) -> u128 {
         (u128::from(self.next()) << 64) | u128::from(self.next())

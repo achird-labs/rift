@@ -3467,6 +3467,8 @@ impl ImposterManager {
                 imposter.script_state.store(std::sync::Arc::default());
                 // The clock is runtime state too (issue #1754): back to wall time.
                 imposter.clock.reset();
+                // And so are kept wasm instances (issue #1793): guest memory is state.
+                imposter.wasm_instances.clear();
                 // And so is the random stream (issue #1755): a fresh one from the seed's first draw.
                 // A fresh stream, not a reset one, so a request this restart cuts off cannot draw
                 // from it.

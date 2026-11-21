@@ -2832,6 +2832,23 @@ fn a_component_is_a_source_and_needs_engine_wasm() {
     assert!(has_code(&r, "E065"), "{:?}", codes(&r));
 }
 
+// Issue #1793: `instance` is "request" or "imposter", on a wasm script only.
+#[test]
+fn instance_is_e066_unknown_or_off_wasm() {
+    for ok in ["request", "imposter"] {
+        let r = lint_script(json!({ "component": COMPONENT, "instance": ok }));
+        assert!(!has_code(&r, "E066"), "{ok}: {:?}", codes(&r));
+    }
+    for bad in [
+        json!({ "component": COMPONENT, "instance": "forever" }),
+        json!({ "component": COMPONENT, "instance": 1 }),
+        json!({ "engine": "rhai", "code": "fn respond() {}", "instance": "imposter" }),
+    ] {
+        let r = lint_script(bad.clone());
+        assert!(has_code(&r, "E066"), "{bad}: {:?}", codes(&r));
+    }
+}
+
 #[test]
 fn inline_code_is_accepted_without_e036() {
     let v = make_imposter(json!([rift_script_stub(

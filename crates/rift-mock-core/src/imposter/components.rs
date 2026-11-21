@@ -36,6 +36,12 @@ impl ComponentId {
         Self(id)
     }
 
+    /// The SHA-256 itself.
+    #[must_use]
+    pub fn bytes(&self) -> [u8; 32] {
+        self.0
+    }
+
     /// The 64 lowercase hex digits, without the `sha256:` prefix.
     #[must_use]
     pub fn hex(&self) -> String {

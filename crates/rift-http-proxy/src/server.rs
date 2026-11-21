@@ -821,6 +821,11 @@ pub enum WasmAction {
         #[arg(long)]
         knobs: Option<String>,
 
+        /// `request` (a fresh instance per recorded call, the default) or `imposter` (one instance
+        /// for the whole replay, as `_rift.script.instance: "imposter"` keeps it), issue #1793.
+        #[arg(long)]
+        instance: Option<String>,
+
         /// Seed the component's `wasi:random`, as `_rift.scriptEngine.seed`.
         #[arg(long)]
         seed: Option<u64>,

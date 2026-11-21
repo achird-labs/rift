@@ -76,15 +76,16 @@ async fn hit(client: &reqwest::Client, port: u16, path: &str) {
 #[tokio::test]
 async fn documented_metric_families_all_appear_in_the_scrape() {
     let families = documented_families();
-    // The `:9090` table has 14 rows (11 before `rift_preface_failures_total`, issue #1045,
-    // `rift_blocked_connections_total`, issue #1523, and `rift_wasm_traps_total`, issue #1751). A
+    // The `:9090` table has 16 rows (11 before `rift_preface_failures_total`, issue #1045,
+    // `rift_blocked_connections_total`, issue #1523, `rift_wasm_traps_total`, issue #1751, and
+    // `rift_wasm_instances` and `rift_wasm_instance_drops_total`, issue #1793). A
     // parser that silently dropped a few would leave exactly those families unchecked, which is
     // the failure this guard is supposed to make impossible — so the floor is the real count, not
     // a loose lower bound.
     assert_eq!(
         families.len(),
-        14,
-        "expected 14 documented `:9090` families; the table shape or contents changed. If a row \
+        16,
+        "expected 16 documented `:9090` families; the table shape or contents changed. If a row \
          was deliberately added or removed, update this count deliberately too: {families:?}"
     );
 
@@ -193,6 +194,20 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     )
     .await;
 
+    // A kept wasm instance -> wasm_instances; a restart drops it -> wasm_instance_drops_total
+    // {reason="reset"} (issue #1793).
+    #[cfg(feature = "wasm")]
+    let kept_port = mk(
+        &manager,
+        serde_json::json!({
+            "protocol": "http", "stubs": [{ "responses": [{
+                "_rift": { "script": { "engine": "wasm", "instance": "imposter",
+                    "code": wasm_fixtures::b64(&wasm_fixtures::memory_counter("metrics")) } }
+            }] }]
+        }),
+    )
+    .await;
+
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let client = reqwest::Client::new();
@@ -208,12 +223,20 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     }
     #[cfg(feature = "wasm")]
     hit(&client, wasm_port, "/x").await;
+    #[cfg(feature = "wasm")]
+    {
+        hit(&client, kept_port, "/x").await;
+        manager
+            .restart_runtime_state(kept_port)
+            .await
+            .expect("restart");
+    }
 
     let scrape = rift_http_proxy::extensions::collect_metrics();
     let missing: Vec<&String> = families
         .iter()
         // A build without the engine never registers its counter.
-        .filter(|f| cfg!(feature = "wasm") || f.as_str() != "rift_wasm_traps_total")
+        .filter(|f| cfg!(feature = "wasm") || !f.starts_with("rift_wasm_"))
         .filter(|f| !scrape.contains(f.as_str()))
         .collect();
 

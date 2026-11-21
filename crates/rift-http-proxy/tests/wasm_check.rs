@@ -25,6 +25,7 @@ fn options(component: &Path, corpus: &Path) -> CheckOptions {
         port: None,
         export: None,
         knobs: None,
+        instance: None,
         seed: None,
         fields: None,
         stop_on_first: false,

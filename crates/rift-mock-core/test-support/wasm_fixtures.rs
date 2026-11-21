@@ -408,3 +408,33 @@ pub fn random_u64() -> Vec<u8> {
         ),
     )
 }
+
+/// Issue #1793: a counter in guest memory. Each `respond` adds one to a wasm global and answers
+/// `delay(<count>)`, so a test reads the count from the decision; a path of 5 bytes (`/trap`)
+/// traps first, and one of 6 (`/sleep`) busy-waits 300 ms of monotonic time before answering.
+/// `tag` goes in a data segment, so two tags are two components.
+pub fn memory_counter(tag: &str) -> Vec<u8> {
+    component(
+        "clocks",
+        &core(
+            r#"(import "wasi:clocks/monotonic-clock@0.2.6" "now" (func $now (result i64)))"#,
+            &format!(
+                r#"(global $n (mut i64) (i64.const 0))
+                   (data (i32.const 64) "\00") (data (i32.const 72) "\01")
+                   (data (i32.const 2000) "{tag}")"#
+            ),
+            "(local $until i64)
+             (global.set $n (i64.add (global.get $n) (i64.const 1)))
+             (if (i32.eq (i32.load offset=12 (local.get 0)) (i32.const 5)) (then (unreachable)))
+             (if (i32.eq (i32.load offset=12 (local.get 0)) (i32.const 6))
+               (then
+                 (local.set $until (i64.add (call $now) (i64.const 300000000)))
+                 (block $done
+                   (loop $wait
+                     (br_if $done (i64.ge_u (call $now) (local.get $until)))
+                     (br $wait)))))
+             (i64.store (i32.const 80) (global.get $n))
+             (i32.const 64)",
+        ),
+    )
+}
