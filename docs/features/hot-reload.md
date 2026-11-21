@@ -30,6 +30,10 @@ an imposter in a file and reloading no longer tears every imposter down.
   reload, and a request in flight on an unchanged imposter is never cut. `PUT /imposters` resets
   that state for every imposter in its body, and cuts off the requests it is still answering, as
   Mountebank does, unless `?reconcile=true` is set.
+- **Reloads run one at a time** (issue #1840). A reload that arrives while another is still
+  running waits for it, then reads its source and applies what it reads then, so the reload that
+  started last decides the imposters, the front-door routes and the intercept rules together. A
+  waiting reload is never refused: it may carry newer content.
 
 ```bash
 rift --configfile ./imposters.json      # start with a config source
