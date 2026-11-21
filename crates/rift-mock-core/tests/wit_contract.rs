@@ -84,6 +84,7 @@ async fn the_conformance_script_passes_on_the_in_memory_store() {
         },
     )
     .await
+    .and_then(|answer| answer.into_fault_decision("conformance"))
     .expect("the guest runs");
     let FaultDecision::Error { status, body, .. } = decision else {
         panic!("the guest answers a report, got {decision:?}");

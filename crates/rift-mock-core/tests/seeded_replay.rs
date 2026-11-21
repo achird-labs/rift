@@ -182,6 +182,7 @@ async fn a_component_draws_the_same_value_after_a_recreate() {
             ),
         )
         .await
+        .and_then(|answer| answer.into_fault_decision("t"))
         .expect("runs");
         manager.delete_imposter(port).await.expect("delete");
         match decision {

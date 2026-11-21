@@ -155,6 +155,15 @@ fn validate_rift_script_config(
         if let Err(e) = component.parse::<crate::imposter::components::ComponentId>() {
             return refused(e.to_string());
         }
+        // The bytes are resolved when served, so only the name is checked here: an export the
+        // component lacks is a script error on the request (issue #1758).
+        if let Some(export) = script_config.export.as_deref()
+            && !matches!(export, "rift" | "http")
+        {
+            return refused(format!(
+                "wasm export \"{export}\" is not supported; use \"rift\" or \"http\""
+            ));
+        }
         return match script_config.engine.as_deref() {
             None => None,
             Some(engine) if super::ScriptEngineKind::is_wasm(engine) => None,
@@ -322,6 +331,34 @@ mod tests {
             recorded_at: None,
             verify: None,
         }
+    }
+
+    // Issue #1758: a `component` reference's bytes are resolved when served, but an `export` name
+    // that is neither "rift" nor "http" is refused when the stub is admitted.
+    #[test]
+    fn a_component_reference_with_an_unknown_export_is_refused() {
+        let with_export = |export: &str| {
+            let mut stub = make_rift_script_stub("wasm", "");
+            if let StubResponse::RiftScript { rift, .. } = &mut stub.responses[0]
+                && let Some(script) = rift.script.as_mut()
+            {
+                script.code = None;
+                script.component = Some(format!("sha256:{}", "ab".repeat(32)));
+                script.export = Some(export.to_string());
+            }
+            stub
+        };
+        for ok in ["rift", "http"] {
+            assert!(validate_stub(&with_export(ok), 0).is_valid(), "{ok}");
+        }
+        let refused = validate_stub(&with_export("grpc"), 0);
+        assert!(
+            refused.errors[0]
+                .message
+                .contains("wasm export \"grpc\" is not supported"),
+            "{:?}",
+            refused.errors
+        );
     }
 
     /// Its callers are all `javascript`-gated, so this helper is too — it is otherwise dead in a

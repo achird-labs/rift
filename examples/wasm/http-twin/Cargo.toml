@@ -1,0 +1,27 @@
+[package]
+name = "http-twin"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "A wasi:http/proxy component for _rift.script engine \"wasm\" with export \"http\"; it also exports rift:mock/handler, so one component serves both exports."
+
+# Built on its own for wasm32-wasip2, never as part of the Rift workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+# Also export `rift:mock/handler`. Off (`--no-default-features`): an http-only component, as
+# `componentize-js` or TinyGo would build.
+default = ["rift-export"]
+rift-export = []
+
+[dependencies]
+wasip2 = "1.0.4"
+wit-bindgen = "0.57"
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true

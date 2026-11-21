@@ -103,6 +103,7 @@ async fn wasm(code: &str, store: &Arc<dyn FlowStore>) -> FaultDecision {
         &extras(),
     )
     .await
+    .and_then(|answer| answer.into_fault_decision("bench"))
     .expect("component runs")
 }
 

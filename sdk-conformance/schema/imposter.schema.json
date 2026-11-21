@@ -1271,7 +1271,7 @@
           ]
         },
         "export": {
-          "description": "`engine: \"wasm\"` only: which export of the component answers. `\"rift\"` (the default) is the\n`rift:mock/handler` interface (issue #1751).",
+          "description": "`engine: \"wasm\"` only: which export of the component answers. `\"rift\"` is the\n`rift:mock/handler` interface (issue #1751), `\"http\"` a standard `wasi:http/incoming-handler`\n(issue #1758). Absent ⇒ `\"rift\"` when the component exports it, else `\"http\"`.",
           "type": [
             "string",
             "null"
@@ -1285,7 +1285,7 @@
           ]
         },
         "knobs": {
-          "description": "`engine: \"wasm\"` only: any JSON, passed to the component's `init` as text before each call.\nAbsent ⇒ `{}`."
+          "description": "`engine: \"wasm\"` only: any JSON, passed to the component's `init` as text before each call,\nor in the `RIFT_KNOBS` environment variable under `export: \"http\"`. Absent ⇒ `{}`."
         },
         "ref": {
           "description": "Name of a `_rift.scripts` registry entry (see [`RiftConfig::scripts`]) to resolve this\nscript from. The referenced entry must itself use `code` or `file` — a `ref` chain is a\nvalidation error.",

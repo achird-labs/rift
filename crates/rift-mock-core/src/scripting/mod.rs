@@ -31,7 +31,8 @@ pub use wasm::bench as wasm_bench;
 pub struct WasmScript<'a> {
     /// The component's bytes, base64.
     pub code: &'a str,
-    /// `_rift.script.export`; `None` is `"rift"`.
+    /// `_rift.script.export`: `"rift"` or `"http"` (issue #1758); `None` is `"rift"` when the
+    /// component exports `rift:mock/handler`, else `"http"`.
     pub export: Option<&'a str>,
     /// `_rift.script.knobs`; `None` is `{}`.
     pub knobs: Option<&'a serde_json::Value>,
@@ -39,6 +40,64 @@ pub struct WasmScript<'a> {
     pub limits: crate::imposter::WasmLimits,
     /// What the component's `wasi:clocks` read (issue #1754); `None` is the system clock.
     pub clock: Option<&'a ScriptClock>,
+}
+
+/// What an `engine: "wasm"` call answered (issue #1758).
+#[derive(Debug, Clone)]
+pub enum WasmAnswer {
+    /// `export: "rift"`: a decision, as Rhai and JavaScript return one.
+    Decision(FaultDecision),
+    /// `export: "http"`: the component's whole response.
+    Response(WasmResponse),
+}
+
+/// An `export: "http"` component's response: bytes, and every header value it set.
+#[derive(Debug, Clone)]
+pub struct WasmResponse {
+    pub status: u16,
+    pub headers: hyper::HeaderMap,
+    pub body: bytes::Bytes,
+}
+
+impl WasmAnswer {
+    /// As a [`FaultDecision`], for a caller that serves only decisions (the generic
+    /// `should_inject_bounded*` entry points). A response's body must be UTF-8, and a repeated
+    /// header's values are joined with `", "`, as HTTP combines them.
+    pub fn into_fault_decision(self, rule_id: &str) -> anyhow::Result<FaultDecision> {
+        match self {
+            Self::Decision(decision) => Ok(decision),
+            Self::Response(response) => {
+                let body = String::from_utf8(response.body.to_vec()).map_err(|_| {
+                    anyhow::anyhow!(
+                        "the component's response body is not UTF-8, which this caller cannot serve"
+                    )
+                })?;
+                Ok(FaultDecision::Error {
+                    status: response.status,
+                    body,
+                    rule_id: rule_id.to_owned(),
+                    headers: joined_headers(&response.headers),
+                })
+            }
+        }
+    }
+}
+
+/// `headers` with each name once, its values joined with `", "`. A value that is not UTF-8 is
+/// read lossily.
+pub fn joined_headers(headers: &hyper::HeaderMap) -> std::collections::HashMap<String, String> {
+    let mut joined: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (name, value) in headers {
+        let value = String::from_utf8_lossy(value.as_bytes());
+        joined
+            .entry(name.as_str().to_owned())
+            .and_modify(|v| {
+                v.push_str(", ");
+                v.push_str(&value);
+            })
+            .or_insert_with(|| value.into_owned());
+    }
+    joined
 }
 
 /// The time a script reads (issue #1754).
@@ -339,6 +398,11 @@ pub struct ScriptCtxExtras {
     pub flow_id: Option<String>,
     pub stub: ScriptStubContext,
     pub port: u16,
+    /// The query string as the client sent it, without `?` (issue #1758): an `export: "http"`
+    /// component sees it unchanged. `None` encodes the parsed pairs again.
+    pub raw_query: Option<String>,
+    /// Whether the request arrived over TLS: the scheme an `export: "http"` component sees.
+    pub https: bool,
 }
 
 impl ScriptCtxExtras {
@@ -533,6 +597,21 @@ impl ScriptEngineKind {
 #[cfg(feature = "wasm")]
 pub(crate) fn wasm_admit_imports(code: &str) -> Result<Vec<String>, String> {
     wasm::admit_imports(code).map_err(|e| e.to_string())
+}
+
+/// Admit a component (base64) under `export` (`"rift"`, `"http"` or `None`), as `_rift.script`
+/// admission does (issues #1751, #1758), and return the export that answers: `"rift"` or `"http"`.
+/// Without the `wasm` feature, every component is refused.
+pub fn admit_wasm_component(code: &str, export: Option<&str>) -> Result<&'static str, String> {
+    #[cfg(feature = "wasm")]
+    {
+        wasm::admit_export(code, export).map_err(|e| e.to_string())
+    }
+    #[cfg(not(feature = "wasm"))]
+    {
+        let _ = (code, export);
+        Err(WASM_UNAVAILABLE.to_owned())
+    }
 }
 
 /// The message `wasm` gets in a build without the `wasm` feature (issue #1751).

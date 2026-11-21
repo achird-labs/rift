@@ -186,6 +186,17 @@ jobs:
       - name: Run it behind an imposter
         run: cargo test -p rift-http-proxy --features wasm --test wasm_counter_twin -- --ignored
 
+      # Issue #1758: the http-twin example, a wasi:http/proxy component, in its two builds (with
+      # and without a rift:mock/handler export), served through `export: "http"`.
+      - name: Build the http-twin component
+        run: |
+          cargo build --release --target wasm32-wasip2 --locked --manifest-path examples/wasm/http-twin/Cargo.toml
+          cargo build --release --target wasm32-wasip2 --locked --manifest-path examples/wasm/http-twin/Cargo.toml \
+            --no-default-features --target-dir examples/wasm/http-twin/target/http-only
+
+      - name: Serve it through the http export
+        run: cargo test -p rift-http-proxy --features wasm --test wasm_http_export -- --ignored
+
       # Issue #1760: each script-engine benchmark once (criterion's test mode), compiling the real
       # component in cold_compile, so the bench cannot rot between the runs that record numbers.
       - name: Smoke-run the script engine benches

@@ -4,13 +4,13 @@
 use super::WasmAdmitError;
 use super::host::bindings::rift::mock::types::{Decision, Header, Request};
 use super::host::bindings::{Mock, MockPre};
-use super::host::{Host, Limits};
+use super::host::{FIELD_SIZE_BYTES, Host, Limits, NoOutgoing};
 use super::pipe::LogPipe;
 use crate::extensions::flow_state::FlowStore;
 use crate::imposter::{ResponseMode, WasmLimits};
 use crate::scripting::{
     FaultDecision, ScriptClock, ScriptCtxExtras, ScriptRequest, ScriptResult, ScriptResultBody,
-    ScriptTimeoutError, WasmScript,
+    ScriptTimeoutError, WasmAnswer, WasmResponse, WasmScript,
 };
 use anyhow::anyhow;
 use base64::Engine as _;
@@ -21,6 +21,10 @@ use std::time::{Duration, Instant};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimitsBuilder, Trap, UpdateDeadline};
 use wasmtime_wasi::WasiCtxBuilder;
+use wasmtime_wasi_http::p2::bindings::ProxyPre;
+use wasmtime_wasi_http::p2::bindings::http::types::{ErrorCode, Scheme};
+use wasmtime_wasi_http::p2::body::HyperOutgoingBody;
+use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView as _};
 
 /// How often the epoch ticks: a CPU-bound guest yields to tokio, and sees its deadline, this often.
 const EPOCH_TICK: Duration = Duration::from_millis(10);
@@ -69,7 +73,8 @@ fn engine() -> anyhow::Result<&'static Engine> {
 }
 
 /// The interfaces a component may import. Everything a wasm32-wasip2 std guest imports, with
-/// nothing behind it, and `rift:mock/state`; never wasi:sockets or wasi:http.
+/// nothing behind it, `rift:mock/state`, and `wasi:http/types` (issue #1758); never wasi:sockets or
+/// `wasi:http/outgoing-handler`, so no component can reach the network.
 fn build_linker(engine: &Engine) -> wasmtime::Result<Linker<Host>> {
     use wasmtime_wasi::p2::bindings::{cli, filesystem, random};
     use wasmtime_wasi::{cli::WasiCli, filesystem::WasiFilesystem, random::WasiRandom};
@@ -89,6 +94,16 @@ fn build_linker(engine: &Engine) -> wasmtime::Result<Linker<Host>> {
     random::insecure::add_to_linker::<Host, WasiRandom>(&mut l, Host::random)?;
     random::insecure_seed::add_to_linker::<Host, WasiRandom>(&mut l, Host::random)?;
     Mock::add_to_linker::<_, HasSelf<Host>>(&mut l, |h| h)?;
+    // `wasi:http/types` alone, not `p2::add_only_http_to_linker_async`, which also links the
+    // outgoing handler.
+    wasmtime_wasi_http::p2::bindings::http::types::add_to_linker::<
+        Host,
+        wasmtime_wasi_http::WasiHttp,
+    >(
+        &mut l,
+        &wasmtime_wasi_http::p2::bindings::LinkOptions::default().into(),
+        Host::http,
+    )?;
     Ok(l)
 }
 
@@ -112,7 +127,78 @@ struct Loaded {
     sha12: Arc<str>,
     /// What the component imports, by interface name (issue #1757 reports them on upload).
     imports: Arc<[String]>,
-    pre: MockPre<Host>,
+    /// `rift:mock/handler`, or why the component does not export it as Rift expects.
+    mock: Result<MockPre<Host>, Arc<str>>,
+    /// `wasi:http/incoming-handler` (issue #1758), or why the component does not export it.
+    proxy: Result<ProxyPre<Host>, Arc<str>>,
+}
+
+/// Which export of a component answers (`_rift.script.export`, issue #1758).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WasmExport {
+    /// `rift:mock/handler`: `init(knobs)`, then `respond` returns a decision.
+    Rift,
+    /// `wasi:http/incoming-handler`: the component answers the whole response.
+    Http,
+}
+
+impl WasmExport {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Rift => "rift",
+            Self::Http => "http",
+        }
+    }
+
+    fn interface(self) -> &'static str {
+        match self {
+            Self::Rift => "rift:mock/handler",
+            Self::Http => "wasi:http/incoming-handler",
+        }
+    }
+
+    /// `export` as written, without the component: an unknown name is refused before compiling.
+    fn parse(requested: Option<&str>) -> Result<Option<Self>, WasmAdmitError> {
+        match requested {
+            None => Ok(None),
+            Some("rift") => Ok(Some(Self::Rift)),
+            Some("http") => Ok(Some(Self::Http)),
+            Some(other) => Err(WasmAdmitError::Export(other.to_owned())),
+        }
+    }
+
+    /// The export that answers for `loaded`. Unset is `rift` when the component exports
+    /// `rift:mock/handler`, else `http`; a named export the component lacks is refused, naming
+    /// what it does export.
+    fn resolve(requested: Option<&str>, loaded: &Loaded) -> Result<Self, WasmAdmitError> {
+        let exports = |e: Self| match e {
+            Self::Rift => loaded.mock.is_ok(),
+            Self::Http => loaded.proxy.is_ok(),
+        };
+        let why_not = |e: Self| match e {
+            Self::Rift => loaded.mock.as_ref().err().cloned(),
+            Self::Http => loaded.proxy.as_ref().err().cloned(),
+        };
+        let wanted = match Self::parse(requested)? {
+            Some(wanted) => wanted,
+            None if exports(Self::Rift) => return Ok(Self::Rift),
+            None => return Ok(Self::Http),
+        };
+        if exports(wanted) {
+            return Ok(wanted);
+        }
+        let other = match wanted {
+            Self::Rift => Self::Http,
+            Self::Http => Self::Rift,
+        };
+        Err(WasmAdmitError::World(format!(
+            "export \"{}\" needs {}, which this component does not export (it exports {}): {}",
+            wanted.as_str(),
+            wanted.interface(),
+            other.interface(),
+            why_not(wanted).as_deref().unwrap_or("not exported")
+        )))
+    }
 }
 
 static CACHE: LazyLock<parking_lot::Mutex<HashMap<u64, Arc<Loaded>>>> =
@@ -159,6 +245,8 @@ const ALLOWED_IMPORTS: &[&str] = &[
     "wasi:random/",
     "rift:mock/state@",
     "rift:mock/types@",
+    // Issue #1758: the types an http component is built from; never `wasi:http/outgoing-handler`.
+    "wasi:http/types@",
 ];
 
 /// The component in `code`, compiled and linked, from the cache or compiled now.
@@ -203,7 +291,13 @@ fn compile(code: &str) -> Result<Loaded, WasmAdmitError> {
     let pre = linker
         .instantiate_pre(&component)
         .map_err(|e| WasmAdmitError::World(root(&e)))?;
-    let pre = MockPre::new(pre).map_err(|e| WasmAdmitError::World(root(&e)))?;
+    let mock = MockPre::new(pre.clone()).map_err(|e| Arc::from(root(&e)));
+    let proxy = ProxyPre::new(pre).map_err(|e| Arc::from(root(&e)));
+    if let (Err(mock), Err(proxy)) = (&mock, &proxy) {
+        return Err(WasmAdmitError::World(format!(
+            "it exports neither rift:mock/handler ({mock}) nor wasi:http/incoming-handler ({proxy})"
+        )));
+    }
     let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
     let sha12: String = digest.as_ref()[..6]
         .iter()
@@ -213,19 +307,13 @@ fn compile(code: &str) -> Result<Loaded, WasmAdmitError> {
         code: Arc::from(code),
         sha12: Arc::from(sha12),
         imports: Arc::from(imports),
-        pre,
+        mock,
+        proxy,
     })
 }
 
 fn root(e: &wasmtime::Error) -> String {
     e.root_cause().to_string()
-}
-
-fn check_export(export: Option<&str>) -> Result<(), WasmAdmitError> {
-    match export {
-        None | Some("rift") => Ok(()),
-        Some(other) => Err(WasmAdmitError::Export(other.to_owned())),
-    }
 }
 
 /// Admission (issue #1751): `code` is a component Rift can run under `export`. Compiling it here
@@ -235,11 +323,21 @@ fn check_export(export: Option<&str>) -> Result<(), WasmAdmitError> {
 /// for a large component; on a multi-threaded runtime that task's worker hands its other tasks on
 /// while this compiles.
 pub(crate) fn admit(code: &str, export: Option<&str>) -> Result<(), WasmAdmitError> {
-    check_export(export)?;
-    admitted(code).map(drop)
+    admit_export(code, export).map(drop)
 }
 
-/// As [`admit`] for the default export, returning what the component imports (issue #1757).
+/// As [`admit`], returning the export that answers (`"rift"` or `"http"`, issue #1758).
+pub(crate) fn admit_export(
+    code: &str,
+    export: Option<&str>,
+) -> Result<&'static str, WasmAdmitError> {
+    WasmExport::parse(export)?;
+    let loaded = admitted(code)?;
+    WasmExport::resolve(export, &loaded).map(WasmExport::as_str)
+}
+
+/// As [`admit`] for the default export, returning what the component imports (issue #1757). Every
+/// component that compiles has a default export: `compile` refuses one with neither.
 pub(crate) fn admit_imports(code: &str) -> Result<Vec<String>, WasmAdmitError> {
     admitted(code).map(|loaded| loaded.imports.to_vec())
 }
@@ -265,7 +363,8 @@ pub(crate) enum TrapKind {
     Memory,
     /// Any other trap.
     Trap,
-    /// `init` or `respond` returned `err`.
+    /// `init` or `respond` returned `err`; an http component set an error, set no response, or
+    /// its body failed.
     GuestError,
 }
 
@@ -312,7 +411,8 @@ impl CallReport {
     }
 }
 
-/// Run `respond` once: a fresh store, `init(knobs)`, `respond(request)`, then the store is dropped.
+/// Run the component once: a fresh store, then `init(knobs)` and `respond(request)` (`export:
+/// "rift"`) or `wasi:http/incoming-handler.handle` (`export: "http"`), then the store is dropped.
 /// The epoch deadline is `timeout` from now; `timeout` also bounds the whole call from outside.
 pub(crate) async fn respond(
     script: WasmScript<'_>,
@@ -321,7 +421,7 @@ pub(crate) async fn respond(
     flow_store: Arc<dyn FlowStore>,
     timeout: Duration,
     ctx_extra: &ScriptCtxExtras,
-) -> (anyhow::Result<FaultDecision>, CallReport) {
+) -> (anyhow::Result<WasmAnswer>, CallReport) {
     let mut report = CallReport::default();
     let result = run(
         script,
@@ -344,8 +444,8 @@ async fn run(
     timeout: Duration,
     ctx_extra: &ScriptCtxExtras,
     report: &mut CallReport,
-) -> anyhow::Result<FaultDecision> {
-    check_export(script.export)?;
+) -> anyhow::Result<WasmAnswer> {
+    WasmExport::parse(script.export)?;
     let started = Instant::now();
     let loaded = match cached(script.code) {
         Some(hit) => hit,
@@ -363,11 +463,11 @@ async fn run(
             }
         }
     };
+    let export = WasmExport::resolve(script.export, &loaded)?;
     // What is left of the call's deadline after any compile.
     let remaining = timeout.saturating_sub(started.elapsed());
     report.sha12 = Some(Arc::clone(&loaded.sha12));
     let ctx = ctx_extra.build_ctx_input(request);
-    let wit_request = to_wit_request(request, &ctx)?;
     let knobs = script
         .knobs
         .map_or_else(|| "{}".to_owned(), serde_json::Value::to_string);
@@ -375,26 +475,252 @@ async fn run(
 
     let stdout = LogPipe::new(LOG_PIPE_BYTES);
     let stderr = LogPipe::new(LOG_PIPE_BYTES);
+    // `wasi:http` has no `init`: an http component reads its knobs from `RIFT_KNOBS`, the one
+    // variable any component ever sees.
+    let knobs_env = (export == WasmExport::Http).then_some(knobs.as_str());
     let (mut store, budget) = new_store(
         &limits,
         script.clock,
         flow_store,
         ctx.flow_id.clone(),
         (stdout.clone(), stderr.clone()),
+        knobs_env,
         remaining,
     )?;
-
-    let call = async {
-        let instance = loaded.pre.instantiate_async(&mut store).await?;
-        let handler = instance.rift_mock_handler();
-        if let Err(msg) = handler.call_init(&mut store, &knobs).await? {
-            return Ok(Err(format!("init: {msg}")));
-        }
-        handler.call_respond(&mut store, &wit_request).await
-    };
     // The epoch deadline normally ends a runaway call first, as a trap the store reports; this
     // outer bound, two ticks later, catches a call parked in a host import.
-    let outcome = tokio::time::timeout(remaining.saturating_add(2 * EPOCH_TICK), call).await;
+    let bound = remaining.saturating_add(2 * EPOCH_TICK);
+    let failed = Failure {
+        budget,
+        max_memory_mib: limits.max_memory_mib,
+        timeout,
+    };
+
+    match export {
+        WasmExport::Rift => {
+            let pre = loaded.mock.as_ref().map_err(|e| anyhow!("{e}"))?;
+            let wit_request = to_wit_request(request, &ctx)?;
+            let call = async {
+                let instance = pre.instantiate_async(&mut store).await?;
+                let handler = instance.rift_mock_handler();
+                if let Err(msg) = handler.call_init(&mut store, &knobs).await? {
+                    return Ok(Err(format!("init: {msg}")));
+                }
+                handler.call_respond(&mut store, &wit_request).await
+            };
+            let outcome = tokio::time::timeout(bound, call).await;
+            let memory_refused = settle(store, budget, (&stdout, &stderr), report);
+            match failed.classify(outcome, report, memory_refused)? {
+                Ok(decision) => decision_to_fault(decision, rule_id).map(WasmAnswer::Decision),
+                Err(guest) => {
+                    report.trapped(TrapKind::GuestError, &guest);
+                    Err(anyhow!("{guest}"))
+                }
+            }
+        }
+        WasmExport::Http => {
+            let pre = loaded.proxy.as_ref().map_err(|e| anyhow!("{e}"))?;
+            let http_request = to_http_request(request, ctx_extra)?;
+            let body_limit =
+                usize::try_from(u64::from(limits.max_memory_mib) << 20).unwrap_or(usize::MAX);
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let collect = collect_response(receiver, body_limit);
+            tokio::pin!(collect);
+            let mut collected = None;
+            let call = async {
+                let proxy = pre.instantiate_async(&mut store).await?;
+                let scheme = if ctx_extra.https {
+                    Scheme::Https
+                } else {
+                    Scheme::Http
+                };
+                let req = store
+                    .data_mut()
+                    .http()
+                    .new_incoming_request(scheme, http_request)?;
+                let out = store.data_mut().http().new_response_outparam(sender)?;
+                proxy
+                    .wasi_http_incoming_handler()
+                    .call_handle(&mut store, req, out)
+                    .await
+            };
+            // The body is read while `handle` runs: a guest can set the response and keep writing
+            // the body inside the call, and a full body buffer waits for this side to read.
+            let outcome = tokio::time::timeout(bound, async {
+                tokio::pin!(call);
+                loop {
+                    tokio::select! {
+                        out = &mut call => break out,
+                        got = &mut collect, if collected.is_none() => collected = Some(got),
+                    }
+                }
+            })
+            .await;
+            // Dropping the store closes the outparam and the body, so what is left to read ends.
+            let memory_refused = settle(store, budget, (&stdout, &stderr), report);
+            // A body past the bound stops this side reading, and a guest whose next write then
+            // fails usually traps: the bound is the cause to report, not the trap it led to.
+            if !matches!(collected, Some(Collected::TooLarge)) {
+                failed.classify(outcome, report, memory_refused)?;
+            }
+            let collected = match collected {
+                Some(collected) => collected,
+                None => collect.await,
+            };
+            match collected {
+                Collected::Response(response) => Ok(WasmAnswer::Response(response)),
+                Collected::TooLarge => {
+                    let msg = format!(
+                        "response body exceeds maxMemoryMiB ({} MiB)",
+                        limits.max_memory_mib
+                    );
+                    report.trapped(TrapKind::Memory, &msg);
+                    Err(anyhow!("{msg}"))
+                }
+                Collected::Failed(msg) => {
+                    report.trapped(TrapKind::GuestError, &msg);
+                    Err(anyhow!("{msg}"))
+                }
+            }
+        }
+    }
+}
+
+/// What an http component's response came to.
+enum Collected {
+    Response(WasmResponse),
+    /// The body passed the bound.
+    TooLarge,
+    /// No response, an error response, or a body that failed.
+    Failed(String),
+}
+
+/// The response an http component sets on its outparam, with its whole body, at most `limit` bytes.
+async fn collect_response(
+    receiver: tokio::sync::oneshot::Receiver<Result<hyper::Response<HyperOutgoingBody>, ErrorCode>>,
+    limit: usize,
+) -> Collected {
+    use http_body_util::BodyExt as _;
+    let response = match receiver.await {
+        Ok(Ok(response)) => response,
+        Ok(Err(code)) => {
+            return Collected::Failed(format!("component answered an error: {code:?}"));
+        }
+        // The outparam was dropped unset.
+        Err(_) => return Collected::Failed("component returned no response".to_owned()),
+    };
+    let (parts, body) = response.into_parts();
+    match http_body_util::Limited::new(body, limit).collect().await {
+        Ok(body) => {
+            let body = body.to_bytes();
+            // A guest that returns holding an unfinished body ends it cleanly when the store goes:
+            // the length it declared is what tells a cut-off body from a whole one.
+            if let Some(declared) = parts.headers.get(hyper::header::CONTENT_LENGTH) {
+                let parsed = declared
+                    .to_str()
+                    .ok()
+                    .and_then(|v| v.trim().parse::<usize>().ok());
+                if parsed != Some(body.len()) {
+                    return Collected::Failed(format!(
+                        "response body is {} bytes, but its content-length is {declared:?}",
+                        body.len()
+                    ));
+                }
+            }
+            Collected::Response(WasmResponse {
+                status: parts.status.as_u16(),
+                headers: parts.headers,
+                body,
+            })
+        }
+        Err(e)
+            if e.downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some() =>
+        {
+            Collected::TooLarge
+        }
+        Err(e) => Collected::Failed(format!("response body failed: {e}")),
+    }
+}
+
+/// The request an http component handles: method, path and query, every header value, the body's
+/// bytes. The query is the one the client sent when the caller has it (`ScriptCtxExtras::raw_query`),
+/// else it is encoded again from its parsed pairs. A request without a `Host` header (an HTTP/2
+/// one, say) gets the imposter's address, since `wasi:http` requires an authority.
+fn to_http_request(
+    request: &ScriptRequest,
+    extras: &ScriptCtxExtras,
+) -> anyhow::Result<hyper::Request<http_body_util::Full<bytes::Bytes>>> {
+    let port = extras.port;
+    let mut target = request.path.clone();
+    match extras.raw_query.as_deref() {
+        Some("") => {}
+        Some(raw) => {
+            target.push('?');
+            target.push_str(raw);
+        }
+        None => {
+            let pairs = query_pairs(&request.query);
+            if !pairs.is_empty() {
+                target.push('?');
+                target.push_str(
+                    &url::form_urlencoded::Serializer::new(String::new())
+                        .extend_pairs(pairs)
+                        .finish(),
+                );
+            }
+        }
+    }
+    let method = hyper::Method::from_bytes(request.method.as_bytes())
+        .map_err(|e| anyhow!("request method {:?}: {e}", request.method))?;
+    let mut builder = hyper::Request::builder().method(method).uri(target);
+    let mut has_host = false;
+    for (name, value) in query_pairs(&request.headers) {
+        has_host |= name.eq_ignore_ascii_case("host");
+        builder = builder.header(name, value);
+    }
+    if !has_host {
+        builder = builder.header("host", format!("127.0.0.1:{port}"));
+    }
+    builder
+        .body(http_body_util::Full::new(bytes::Bytes::from(request_body(
+            request,
+        )?)))
+        .map_err(|e| anyhow!("request for the http export: {e}"))
+}
+
+/// Every value of `map`, one pair each, in the map's order.
+fn query_pairs(map: &crate::util::MultiValueMap) -> Vec<(String, String)> {
+    map.iter()
+        .flat_map(|(k, vs)| vs.iter().map(move |v| (k.clone(), v.clone())))
+        .collect()
+}
+
+/// The request body's bytes: the raw text, or a binary body's base64 decoded.
+fn request_body(request: &ScriptRequest) -> anyhow::Result<Vec<u8>> {
+    let raw = request
+        .raw_body
+        .clone()
+        .unwrap_or_else(|| match &request.body {
+            serde_json::Value::Null => String::new(),
+            other => other.to_string(),
+        });
+    match request.mode {
+        ResponseMode::Text => Ok(raw.into_bytes()),
+        ResponseMode::Binary => base64::engine::general_purpose::STANDARD
+            .decode(raw.as_bytes())
+            .map_err(|e| anyhow!("binary request body is not base64: {e}")),
+    }
+}
+
+/// After a call: the fuel it spent and what it logged, into `report`; then the store is dropped.
+/// Returns whether the memory cap refused a growth.
+fn settle(
+    store: Store<Host>,
+    budget: u64,
+    logs: (&LogPipe, &LogPipe),
+    report: &mut CallReport,
+) -> bool {
     // Fuel is always metered (`consume_fuel` is on), so this only fails on a misconfigured engine;
     // the trace then omits `fuelUsed`.
     report.fuel_used = store
@@ -403,17 +729,9 @@ async fn run(
         .map(|left| budget.saturating_sub(left));
     let memory_refused = store.data().limits.memory_refused;
     drop(store);
-    report.stdout = stdout.contents();
-    report.stderr = stderr.contents();
-    classify(
-        outcome,
-        report,
-        rule_id,
-        budget,
-        memory_refused,
-        limits.max_memory_mib,
-        timeout,
-    )
+    report.stdout = logs.0.contents();
+    report.stderr = logs.1.contents();
+    memory_refused
 }
 
 /// A store for one call: WASI with nothing behind it but the captured `logs` (stdout, stderr) and
@@ -425,6 +743,7 @@ fn new_store(
     flow_store: Arc<dyn FlowStore>,
     flow_id: String,
     logs: (LogPipe, LogPipe),
+    knobs_env: Option<&str>,
     remaining: Duration,
 ) -> anyhow::Result<(Store<Host>, u64)> {
     let memory_size = usize::try_from(u64::from(limits.max_memory_mib) << 20).map_err(|_| {
@@ -435,6 +754,9 @@ fn new_store(
     })?;
     let mut wasi = WasiCtxBuilder::new();
     wasi.stdout(logs.0).stderr(logs.1);
+    if let Some(knobs) = knobs_env {
+        wasi.env("RIFT_KNOBS", knobs);
+    }
     // `wasi:random` draws from the request's stream (issue #1755), so a seeded imposter replays.
     // "Secure" random is deterministic under a seed too: this is a mock.
     if let Some(mut rng) = crate::imposter::rng::current() {
@@ -451,6 +773,12 @@ fn new_store(
     let host = Host {
         wasi: wasi.build(),
         table,
+        http: {
+            let mut http = WasiHttpCtx::new();
+            http.set_field_size_limit(FIELD_SIZE_BYTES);
+            http
+        },
+        http_hooks: NoOutgoing,
         limits: Limits {
             inner: StoreLimitsBuilder::new()
                 .instances(MAX_INSTANCES)
@@ -508,9 +836,14 @@ pub mod bench {
             flow_store,
             String::new(),
             logs,
+            None,
             Duration::from_secs(5),
         )?;
-        let instance = loaded.pre.instantiate_async(&mut store).await?;
+        let pre = loaded
+            .mock
+            .as_ref()
+            .map_err(|e| anyhow!("the bench component has no rift export: {e}"))?;
+        let instance = pre.instantiate_async(&mut store).await?;
         instance
             .rift_mock_handler()
             .call_init(&mut store, "{}")
@@ -528,40 +861,44 @@ fn timeout_error(timeout: Duration) -> anyhow::Error {
     .into()
 }
 
-/// A call's outcome as a decision or a script error, recording how it trapped.
-fn classify(
-    outcome: Result<wasmtime::Result<Result<Decision, String>>, tokio::time::error::Elapsed>,
-    report: &mut CallReport,
-    rule_id: &str,
+/// What a call's trap is reported against.
+struct Failure {
     budget: u64,
-    memory_refused: bool,
     max_memory_mib: u32,
     timeout: Duration,
-) -> anyhow::Result<FaultDecision> {
-    match outcome {
-        Err(_elapsed) => {
-            report.trapped(TrapKind::Deadline, "");
-            Err(timeout_error(timeout))
-        }
-        Ok(Ok(Ok(decision))) => decision_to_fault(decision, rule_id),
-        Ok(Ok(Err(guest))) => {
-            report.trapped(TrapKind::GuestError, &guest);
-            Err(anyhow!("{guest}"))
-        }
-        Ok(Err(e)) => match e.downcast_ref::<Trap>() {
+}
+
+impl Failure {
+    /// A call's outcome as its value, or as a script error recording how it trapped.
+    fn classify<T>(
+        &self,
+        outcome: Result<wasmtime::Result<T>, tokio::time::error::Elapsed>,
+        report: &mut CallReport,
+        memory_refused: bool,
+    ) -> anyhow::Result<T> {
+        let e = match outcome {
+            Err(_elapsed) => {
+                report.trapped(TrapKind::Deadline, "");
+                return Err(timeout_error(self.timeout));
+            }
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(e)) => e,
+        };
+        match e.downcast_ref::<Trap>() {
             Some(Trap::Interrupt) => {
                 report.trapped(TrapKind::Deadline, "");
-                Err(timeout_error(timeout))
+                Err(timeout_error(self.timeout))
             }
             Some(Trap::OutOfFuel) => {
                 report.trapped(TrapKind::Fuel, "");
-                Err(anyhow!("fuel exhausted ({budget} units)"))
+                Err(anyhow!("fuel exhausted ({} units)", self.budget))
             }
             _ if memory_refused => {
                 let cause = root(&e);
                 report.trapped(TrapKind::Memory, &cause);
                 Err(anyhow!(
-                    "memory limit exceeded (maxMemoryMiB {max_memory_mib}): {cause}"
+                    "memory limit exceeded (maxMemoryMiB {}): {cause}",
+                    self.max_memory_mib
                 ))
             }
             _ => {
@@ -569,7 +906,7 @@ fn classify(
                 report.trapped(TrapKind::Trap, &cause);
                 Err(anyhow!("wasm trap: {cause}"))
             }
-        },
+        }
     }
 }
 
@@ -589,24 +926,8 @@ fn to_wit_request(
     request: &ScriptRequest,
     ctx: &crate::scripting::ScriptCtxInput<'_>,
 ) -> anyhow::Result<Request> {
-    let pairs = |map: &crate::util::MultiValueMap| -> Vec<(String, String)> {
-        map.iter()
-            .flat_map(|(k, vs)| vs.iter().map(move |v| (k.clone(), v.clone())))
-            .collect()
-    };
-    let raw = request
-        .raw_body
-        .clone()
-        .unwrap_or_else(|| match &request.body {
-            serde_json::Value::Null => String::new(),
-            other => other.to_string(),
-        });
-    let body = match request.mode {
-        ResponseMode::Text => raw.into_bytes(),
-        ResponseMode::Binary => base64::engine::general_purpose::STANDARD
-            .decode(raw.as_bytes())
-            .map_err(|e| anyhow!("binary request body is not base64: {e}"))?,
-    };
+    let pairs = query_pairs;
+    let body = request_body(request)?;
     let mut path_params: Vec<(String, String)> = request
         .path_params
         .iter()
@@ -638,7 +959,7 @@ fn decision_to_fault(decision: Decision, rule_id: &str) -> anyhow::Result<FaultD
         Decision::Reset => ScriptResult::Reset,
         Decision::Respond(response) => {
             let body = String::from_utf8(response.body).map_err(|_| {
-                anyhow!("response body is not UTF-8; use export \"http\" (#1758) for binary bodies")
+                anyhow!("response body is not UTF-8; use export \"http\" for binary bodies")
             })?;
             ScriptResult::Http {
                 status: response.status,

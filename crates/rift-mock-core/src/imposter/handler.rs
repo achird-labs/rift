@@ -1939,6 +1939,8 @@ async fn handle_request_inner(
                     stub_id: stub_state.stub.id.clone(),
                 },
                 port: imposter.config.port.unwrap_or(0),
+                raw_query: Some(query_str.clone()),
+                https: imposter.config.protocol.eq_ignore_ascii_case("https"),
             };
 
             // Debug-mode script trace (issue #360 Item 3): which hook ran, its decision,
@@ -1952,6 +1954,9 @@ async fn handle_request_inner(
             // an outer timer would also count the trace's JSON serialization below.
             let script_started = std::time::Instant::now();
             let script_duration_ms: u64;
+            // An `export: "http"` component's whole response (issue #1758), served as it is;
+            // `script_result` then carries its status for the metrics below.
+            let mut wasm_http: Option<crate::scripting::WasmResponse> = None;
             let (script_result, trace_header): (Result<FaultDecision, anyhow::Error>, _) =
                 if crate::scripting::ScriptEngineKind::is_wasm(&engine) {
                     // A component runs on this task under its epoch deadline (issue #1751), and
@@ -2003,6 +2008,20 @@ async fn handle_request_inner(
                     };
                     script_duration_ms =
                         u64::try_from(script_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let result = match result {
+                        Ok(crate::scripting::WasmAnswer::Decision(decision)) => Ok(decision),
+                        Ok(crate::scripting::WasmAnswer::Response(response)) => {
+                            let status = response.status;
+                            wasm_http = Some(response);
+                            Ok(FaultDecision::Error {
+                                status,
+                                body: String::new(),
+                                rule_id,
+                                headers: std::collections::HashMap::new(),
+                            })
+                        }
+                        Err(e) => Err(e),
+                    };
                     (result, header)
                 } else if crate::util::rift_debug_env() {
                     let (result, mut entry) = should_inject_bounded_with_ctx_traced(
@@ -2091,6 +2110,9 @@ async fn handle_request_inner(
                 }
             }
 
+            if let Some(response) = wasm_http {
+                return Ok(wasm_http_response(response, &engine, trace_header));
+            }
             match script_result {
                 Ok(FaultDecision::Error {
                     status,
@@ -4910,4 +4932,34 @@ fn rekey_request_stream(
     handle.rekey(ImposterRng::new(Some(keyed_state(
         seed, digest, occurrence,
     ))));
+}
+
+/// An `export: "http"` component's response (issue #1758): its status, its body's bytes and every
+/// header value it set, with Rift's markers. Framing headers are Rift's own: hyper frames the body.
+fn wasm_http_response(
+    answer: crate::scripting::WasmResponse,
+    engine: &str,
+    trace: Option<String>,
+) -> Response<Full<Bytes>> {
+    use hyper::header::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING};
+    let mut builder = Response::builder().status(answer.status);
+    for (name, value) in &answer.headers {
+        if name == CONNECTION
+            || name == CONTENT_LENGTH
+            || name == TRANSFER_ENCODING
+            || name == "keep-alive"
+        {
+            continue;
+        }
+        builder = builder.header(name, value);
+    }
+    builder = builder
+        .header("x-rift-imposter", "true")
+        .header("x-rift-script", engine);
+    if let Some(trace) = &trace {
+        builder = builder.header("x-rift-script-trace", trace.as_str());
+    }
+    builder
+        .body(Full::new(answer.body))
+        .unwrap_or_else(|e| build_failure_response(&e, "wasm http response build failed"))
 }

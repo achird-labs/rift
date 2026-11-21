@@ -927,7 +927,8 @@ A component's JSON:
 ```
 
 `POST` validates the component as admitting one in a stub does: a core module, an import Rift
-does not link (`wasi:sockets`, `wasi:http`) or a missing `rift:mock/handler` is refused with
+does not link (`wasi:sockets`, `wasi:http/outgoing-handler`) or a component exporting neither
+`rift:mock/handler` nor `wasi:http/incoming-handler` is refused with
 `400 bad data` naming it. A body that is not `application/wasm` is `415`. A component may be at
 most 64 MiB (`413`, as is a body past the admin body limit), and the registry holds at most
 512 MiB of components in all (`507`; delete unused ones first). Under `--strict-wasm`, an unlisted

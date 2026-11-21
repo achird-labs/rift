@@ -997,10 +997,14 @@ rift wasm check --component twin.wasm --corpus saved.json --port 4545 \
   (each drift's stub index, field, expected and actual value). Exit `0` with no drift, `1` on
   drift, `2` when the check cannot run (an unreadable or invalid component, a bad corpus, an
   unknown flag value).
-- `--export http` needs the `wasi:http` export (issue #1758) and is refused until it exists.
+- `--export http` replays against the component's `wasi:http/incoming-handler`, with `--knobs` as
+  `RIFT_KNOBS`. Its answers are compared as bytes, so a binary recording (`_mode: binary`) is
+  checked too; under `rift` it is skipped. A component without the export named is an error
+  (exit `2`). Repeated response headers are joined with `", "` for comparison.
 - Rift's own CI runs it against the `examples/wasm/counter-twin` component in
   `tests/wasm_check.rs`, which reads the built component from `RIFT_COUNTER_TWIN` (default: the
-  example's `target/wasm32-wasip2/release/counter_twin.wasm`).
+  example's `target/wasm32-wasip2/release/counter_twin.wasm`), and with `--export http` against
+  `examples/wasm/http-twin`, from `RIFT_HTTP_TWIN` (default: its `target/wasm32-wasip2/release/http_twin.wasm`).
 
 ### healthcheck
 

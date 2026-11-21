@@ -269,7 +269,7 @@ async fn errors_that_keep_the_check_from_running_are_errors_not_drift() {
                 export: Some("http".into()),
                 ..options(&ok, &corpus_path)
             },
-            "#1758",
+            "needs wasi:http/incoming-handler",
         ),
     ] {
         let err = run_check(&opts).await.expect_err(why);
@@ -457,6 +457,46 @@ async fn a_stateful_twin_matches_only_in_recorded_order() {
     opts.corpus = write(dir.path(), "b.json", &corpus(reordered));
     let report = run_check(&opts).await.expect("runs");
     assert_eq!(report.drifted, 2, "{report:#?}");
+}
+
+// Issue #1758: `--export http` replays a corpus against a wasi:http component, its binary
+// recordings included (compared as bytes). Needs `examples/wasm/http-twin` built.
+#[tokio::test]
+#[ignore = "needs examples/wasm/http-twin built for wasm32-wasip2"]
+async fn an_http_component_is_checked_bytes_and_all() {
+    let component = std::env::var_os("RIFT_HTTP_TWIN").map_or_else(
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../examples/wasm/http-twin/target/wasm32-wasip2/release/http_twin.wasm")
+        },
+        PathBuf::from,
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Not UTF-8 (`ff 00 fe`): the test-case generator keeps such a body as base64, so it matches
+    // only when the check decodes the recording itself.
+    let binary = json!({ "predicates": [{ "equals": { "method": "GET", "path": "/bytes" } }],
+                         "responses": [{ "is": { "statusCode": 200, "body": "/wD+", "_mode": "binary" } }] });
+    let mut opts = options(
+        &component,
+        &write(
+            dir.path(),
+            "ok.json",
+            &corpus(vec![stub("/echo", 200, "GET /echo\n"), binary.clone()]),
+        ),
+    );
+    opts.export = Some("http".into());
+    let report = run_check(&opts).await.expect("runs");
+    assert!(report.is_ok(), "{report:#?}");
+    assert_eq!(report.checked, 2, "{report:#?}");
+
+    opts.corpus = write(
+        dir.path(),
+        "drift.json",
+        &corpus(vec![stub("/echo", 200, "something else"), binary]),
+    );
+    let report = run_check(&opts).await.expect("runs");
+    assert_eq!(report.drifted, 1, "{report:#?}");
+    assert_eq!(report.drifts[0].mismatches[0].field, "body", "{report:#?}");
 }
 
 // Issue #1795: the corpus's rngKey is honoured, so each stub's draws depend on its key, not on

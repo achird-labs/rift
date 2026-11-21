@@ -80,7 +80,8 @@ pub fn check_entrypoint(
             hook: hook.to_string(),
         });
     }
-    // A component's entrypoint is its `rift:mock/handler` export, which admission checks.
+    // A component's entrypoint is its `rift:mock/handler` or `wasi:http/incoming-handler` export,
+    // which admission checks.
     #[cfg(feature = "wasm")]
     if super::ScriptEngineKind::is_wasm(engine_type) {
         return super::wasm::admit(script, None)

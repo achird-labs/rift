@@ -3,8 +3,9 @@
 // A component imports `state` (the imposter's flow store) and exports `handler`. It may export more
 // than `handler`, and it may import the standard WASI interfaces a wasm32-wasip2 toolchain emits:
 // wasi:cli, wasi:io, wasi:filesystem, wasi:clocks and wasi:random. Rift links those with nothing
-// behind them (no preopened directory, no environment, no arguments); wasi:sockets and wasi:http are
-// not linked, so a component importing them is refused when it is admitted.
+// behind them (no preopened directory, no environment, no arguments), and wasi:http/types for
+// components it serves with export "http"; wasi:sockets and wasi:http/outgoing-handler are not
+// linked, so a component importing them is refused when it is admitted.
 package rift:mock@0.1.0;
 
 interface types {
