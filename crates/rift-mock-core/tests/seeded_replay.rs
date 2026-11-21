@@ -173,6 +173,8 @@ async fn a_component_draws_the_same_value_after_a_recreate() {
                     knobs: None,
                     limits: Default::default(),
                     clock: None,
+                    instance: None,
+                    instances: None,
                 },
                 "t",
                 &request,

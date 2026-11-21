@@ -180,6 +180,25 @@ pub static WASM_TRAPS_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
     .expect("rift_wasm_traps_total registers once")
 });
 
+/// `instance: "imposter"` wasm instances alive across every imposter (issue #1793).
+pub static WASM_INSTANCES: LazyLock<prometheus::IntGauge> = LazyLock::new(|| {
+    prometheus::register_int_gauge!(
+        "rift_wasm_instances",
+        "Number of instance: \"imposter\" wasm instances alive"
+    )
+    .expect("rift_wasm_instances registers once")
+});
+
+/// `instance: "imposter"` wasm instances dropped, by why (issue #1793).
+pub static WASM_INSTANCE_DROPS_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
+    register_counter_vec!(
+        "rift_wasm_instance_drops_total",
+        "Total number of instance: \"imposter\" wasm instances dropped",
+        &["reason"] // reason: unreferenced|reset|trap|deadline|unfinished
+    )
+    .expect("rift_wasm_instance_drops_total registers once")
+});
+
 /// Collect and return all metrics in Prometheus text format
 pub fn collect_metrics() -> String {
     let encoder = TextEncoder::new();
@@ -478,6 +497,18 @@ pub fn record_script_error(rule_id: &str, error_type: &str) {
     SCRIPT_ERRORS_TOTAL
         .with_label_values(&[rule_id, error_type])
         .inc();
+}
+
+/// Move `rift_wasm_instances` by `delta`.
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+pub(crate) fn wasm_instances_gauge(delta: i64) {
+    WASM_INSTANCES.add(delta);
+}
+
+/// Count a kept wasm instance dropped for `reason`.
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+pub(crate) fn record_wasm_instance_drop(reason: &str) {
+    WASM_INSTANCE_DROPS_TOTAL.with_label_values(&[reason]).inc();
 }
 
 /// Count a wasm call that ended in `kind`: `deadline`, `fuel`, `memory`, `trap` or `guest-error`.

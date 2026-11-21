@@ -865,6 +865,23 @@ value, or an instant outside years 1–9999: `400 bad data`. Unknown port: `404`
 
 Back to wall time. **Response:** `200 {"mode": "wall", "nowMs": …}`.
 
+### GET /imposters/{port}/wasm/instances
+
+The `instance: "imposter"` wasm instances the imposter keeps ([Keeping an
+instance](../features/wasm-scripting.md#keeping-an-instance-instance-imposter)), one per component,
+`export` and `knobs` its stubs reference, once a call has made one.
+
+**Response:**
+
+```json
+{"instances": [{"id": "<sha256 of the key>", "sha256": "<the component's sha256>", "export": null,
+  "knobsHash": "<12 hex>", "instantiatedAt": 1700000000000, "calls": 3, "memoryBytes": 1114112}]}
+```
+
+`instantiatedAt` is milliseconds since the Unix epoch; `calls` counts since then. Unknown port:
+`404`. In a build without the `wasm` feature: `404` with `engine "wasm" is not available in this
+build`.
+
 ### A request's own instant: `X-Rift-Now`
 
 With `_rift.scriptEngine.clock: "header"`, a request carrying `X-Rift-Now: <ms since epoch>` reads

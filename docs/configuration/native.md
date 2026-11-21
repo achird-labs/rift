@@ -337,9 +337,10 @@ other's block is accepted and ignored.
   Mountebank `inject` response format directly.
 - `wasm` runs a WebAssembly component (the `rift` binary has it; `librift_ffi` needs its `wasm`
   feature). It has no inline form: name a `.wasm` file, and resolution stores its bytes in `code`
-  as base64. Two more keys apply to it only: `export` (`"rift"` or `"http"`, a standard
-  `wasi:http/incoming-handler`; default: `"rift"` when the component exports it) and `knobs` (any
-  JSON, passed to `init`, or as `RIFT_KNOBS` under `"http"`). See
+  as base64. Three more keys apply to it only: `export` (`"rift"` or `"http"`, a standard
+  `wasi:http/incoming-handler`; default: `"rift"` when the component exports it), `knobs` (any
+  JSON, passed to `init`, or as `RIFT_KNOBS` under `"http"`) and `instance` (`"request"`, the
+  default, or `"imposter"` to keep one instance across requests). See
   [WebAssembly scripting](../features/wasm-scripting.md).
 - Scripts require `--allow-injection` and are bounded by a wall-clock timeout
   (`_rift.scriptEngine.timeoutMs`, default 5000 ms).

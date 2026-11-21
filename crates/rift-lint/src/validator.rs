@@ -1152,7 +1152,8 @@ fn validate_script_source(
 }
 
 /// W026 (issue #1751): `export` and `knobs` only mean something to `engine: "wasm"`; on any other
-/// engine they are ignored. `engine` is the script's effective engine.
+/// engine they are ignored. `engine` is the script's effective engine. E066 (issue #1793):
+/// `instance` must be `"request"` or `"imposter"`, on a wasm script; the engine refuses it otherwise.
 fn check_wasm_only_keys(
     config_file: &Path,
     script: &Value,
@@ -1160,6 +1161,26 @@ fn check_wasm_only_keys(
     location: &str,
     result: &mut LintResult,
 ) {
+    if let Some(instance) = script.get("instance") {
+        let message = match instance.as_str() {
+            Some("request" | "imposter") if engine == "wasm" => None,
+            Some("request" | "imposter") => Some(format!(
+                "'instance' applies only to engine \"wasm\", and this script's engine is \"{engine}\""
+            )),
+            _ => Some(format!(
+                "'instance' must be \"request\" or \"imposter\" (got {instance})"
+            )),
+        };
+        if let Some(message) = message {
+            result.add_issue(
+                LintIssue::error("E066", message, config_file.to_path_buf())
+                    .with_location(format!("{location}.instance"))
+                    .with_suggestion(
+                        "Use \"request\" or \"imposter\", on an engine \"wasm\" script",
+                    ),
+            );
+        }
+    }
     if engine == "wasm" {
         return;
     }

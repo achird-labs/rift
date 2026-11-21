@@ -1974,9 +1974,18 @@ async fn handle_request_inner(
                         knobs: script_config.knobs.as_ref(),
                         limits: imposter.config.wasm_limits(),
                         clock: Some(&script_clock),
+                        instance: script_config.instance.as_deref(),
+                        instances: Some(&imposter.wasm_instances),
                     };
                     let rule_id = format!("rift_script_{stub_index}");
                     let timeout = Duration::from_millis(timeout_ms);
+                    // A kept instance's call outlives this request (issue #1793): once a restart
+                    // or a delete cuts the request, the call no longer reaches the imposter's state.
+                    let flow_store: Arc<dyn crate::extensions::flow_state::FlowStore> =
+                        Arc::new(crate::extensions::flow_state::CutOffStore::new(
+                            flow_store,
+                            imposter.in_flight.load_full(),
+                        ));
                     let (result, header) = if crate::util::rift_debug_env() {
                         let (result, mut entry) = crate::scripting::should_inject_wasm_traced(
                             script,

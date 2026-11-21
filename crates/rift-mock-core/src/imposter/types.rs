@@ -4093,6 +4093,11 @@ pub struct RiftScriptConfig {
     /// or in the `RIFT_KNOBS` environment variable under `export: "http"`. Absent ⇒ `{}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knobs: Option<serde_json::Value>,
+    /// `engine: "wasm"` only: `"request"` (the default) runs a fresh instance for every call;
+    /// `"imposter"` keeps one instance per component, `export` and `knobs` on the imposter, so the
+    /// guest's memory is its state (issue #1793). Checked when admitted, not decoded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 impl RiftScriptConfig {

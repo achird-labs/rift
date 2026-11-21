@@ -1284,6 +1284,13 @@
             "null"
           ]
         },
+        "instance": {
+          "description": "`engine: \"wasm\"` only: `\"request\"` (the default) runs a fresh instance for every call;\n`\"imposter\"` keeps one instance per component, `export` and `knobs` on the imposter, so the\nguest's memory is its state (issue #1793). Checked when admitted, not decoded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "knobs": {
           "description": "`engine: \"wasm\"` only: any JSON, passed to the component's `init` as text before each call,\nor in the `RIFT_KNOBS` environment variable under `export: \"http\"`. Absent ⇒ `{}`."
         },

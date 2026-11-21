@@ -183,6 +183,16 @@ record.
 
 ### Added
 
+- **`_rift.script.instance: "imposter"` keeps one wasm instance across requests** (#1793), so a
+  twin's guest memory is its state. An instance is keyed by the component's SHA-256, its `export`
+  and its `knobs`: it survives stub edits that keep it referenced (a fault-window stub added in
+  front and removed, a move, a replace with new predicates, a reload), and two stubs with the same
+  key share one. A call runs on a task of its own, so a client that hangs up does not cut the guest
+  mid-change; a trap or a deadline miss drops the instance. Each call reads its own request's flow,
+  random stream (`rngKey` included) and clock. `GET /imposters/:port/wasm/instances` lists them;
+  `rift_wasm_instances` and `rift_wasm_instance_drops_total` count them; `rift wasm check --instance
+  imposter` replays against one.
+
 - **`_rift.script.export: "http"` serves a standard `wasi:http/proxy` component** (#1758): a
   component built by `componentize-js`, `componentize-py`, TinyGo or the `wasip2` crate answers the
   whole response, with binary bodies and repeated headers kept. Knobs arrive as the `RIFT_KNOBS`

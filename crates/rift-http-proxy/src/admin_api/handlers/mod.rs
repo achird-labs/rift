@@ -8,6 +8,7 @@ pub mod intercept;
 pub mod scenarios;
 pub mod stubs;
 pub mod system;
+pub mod wasm_instances;
 
 /// Why [`decode_config_body`] produced no value.
 #[derive(Debug)]

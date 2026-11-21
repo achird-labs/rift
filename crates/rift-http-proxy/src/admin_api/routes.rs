@@ -136,6 +136,7 @@ pub static ADMIN_ROUTES: &[AdminRoute] = &[
     route(Method::GET, "/imposters/{port}/clock", Imposters),
     route(Method::PUT, "/imposters/{port}/clock", Imposters),
     route(Method::DELETE, "/imposters/{port}/clock", Imposters),
+    route(Method::GET, "/imposters/{port}/wasm/instances", Imposters),
     route(Method::GET, "/imposters/{port}/spaces/{space}", Imposters),
     route(
         Method::DELETE,
@@ -290,6 +291,7 @@ mod tests {
                 (Method::PUT, "/imposters/{port}/clock"),
                 (Method::DELETE, "/imposters/{port}/clock"),
             ],
+            ImposterRoute::WasmInstances => vec![(Method::GET, "/imposters/{port}/wasm/instances")],
             ImposterRoute::Space(_) => vec![
                 (Method::GET, "/imposters/{port}/spaces/{space}"),
                 (Method::DELETE, "/imposters/{port}/spaces/{space}"),
@@ -317,6 +319,7 @@ mod tests {
             ImposterRoute::ScenarioState(String::new()),
             ImposterRoute::ScenariosReset,
             ImposterRoute::Clock,
+            ImposterRoute::WasmInstances,
             ImposterRoute::Space(String::new()),
             ImposterRoute::SpaceStubs(String::new()),
         ];
@@ -502,7 +505,7 @@ mod tests {
     fn each_family_has_the_routes_it_names() {
         let count = |family| ADMIN_ROUTES.iter().filter(|r| r.family == family).count();
         assert_eq!(count(System), 10);
-        assert_eq!(count(Imposters), 33);
+        assert_eq!(count(Imposters), 34);
         assert_eq!(count(FlowState), 4);
         assert_eq!(count(Events), 2);
         assert_eq!(count(Intercept), 10);

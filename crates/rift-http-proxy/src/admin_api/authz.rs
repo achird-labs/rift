@@ -310,7 +310,8 @@ fn classify_imposter(method: &Method, rest: &str) -> Option<AuthzTarget> {
         | ImposterRoute::Stubs
         | ImposterRoute::SavedRequests
         | ImposterRoute::SavedProxyResponses
-        | ImposterRoute::Scenarios => base(imposter_action(method)),
+        | ImposterRoute::Scenarios
+        | ImposterRoute::WasmInstances => base(imposter_action(method)),
 
         // A POST that mutates nothing: it asserts against already-recorded requests. Mapping it
         // to `imposter.write` on method alone would stop a read-only principal verifying.
@@ -762,6 +763,7 @@ mod tests {
             (Method::GET, "/clock"),
             (Method::PUT, "/clock"),
             (Method::DELETE, "/clock"),
+            (Method::GET, "/wasm/instances"),
             (Method::GET, "/spaces/f"),
             (Method::DELETE, "/spaces/f"),
             (Method::POST, "/spaces/f/stubs"),
