@@ -654,6 +654,9 @@ pub struct ImposterManager {
     /// (issue #1158) — otherwise a second write could share its temp file, or a delete could run
     /// before its late rename.
     persist_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Held by a whole-configuration reload from read to finish (issue #1840): see
+    /// [`ImposterManager::reload_gate`].
+    reload_gate: tokio::sync::Mutex<()>,
     /// The last `_rift.conditional` load stamp, in seconds, of each port's deleted imposter (issue
     /// #1301). A client polls a URL, not an imposter, so the next imposter on that port continues
     /// the clock instead of stamping from the wall clock again — which would answer `304` for new
@@ -763,6 +766,7 @@ impl ImposterManager {
             shutdown_tx,
             datadir: datadir.map(Arc::new),
             persist_lock: Arc::new(tokio::sync::Mutex::new(())),
+            reload_gate: tokio::sync::Mutex::new(()),
             load_floors: parking_lot::Mutex::new(std::collections::HashMap::new()),
             tls_defaults: TlsDefaults::default(),
             event_listener: None,
@@ -834,6 +838,16 @@ impl ImposterManager {
     #[must_use]
     pub fn reserved_by(&self, port: u16) -> Option<ServerListener> {
         self.reserved.read().get(&port).copied()
+    }
+
+    /// The gate a server holds across one whole-configuration reload (issue #1840): from reading its
+    /// source to applying its imposters, routes and intercept rules. Two reloads that overlap then
+    /// run one after the other, so the server never ends with one reload's imposters and another's
+    /// routes, and the reload that started last reads, and applies, the newest content. Admin writes
+    /// do not take it: they serialize per port against the apply as before.
+    #[must_use]
+    pub fn reload_gate(&self) -> &tokio::sync::Mutex<()> {
+        &self.reload_gate
     }
 
     /// Whether an imposter on `port` is accepting on its own listener (issue #1557). A server

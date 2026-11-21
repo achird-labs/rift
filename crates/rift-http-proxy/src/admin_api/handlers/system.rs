@@ -303,6 +303,11 @@ pub async fn handle_reload(
             &serde_json::json!({"message": "No config source configured; nothing to reload"}),
         );
     };
+    // One reload at a time, from reading its source to its last swap (issue #1840): imposters,
+    // routes and intercept rules are three separate stores, so two overlapping reloads could
+    // otherwise leave one's imposters with the other's routes. Waiting, not refusing: the reload
+    // that waits may carry newer content, and it reads its source only once it holds the gate.
+    let _reload = manager.reload_gate().lock().await;
 
     // Parse/fetch before touching state — a bad config leaves the running imposters intact.
     //
@@ -1720,5 +1725,152 @@ mod tests {
             "{body}"
         );
         assert!(body.get("intercept").is_none(), "{body}");
+    }
+
+    /// Issue #1840: a source whose first fetch waits until the test releases it, counting fetches.
+    /// Fetch `n` serves an imposter on `ports[n]` and a route named after it.
+    struct HeldSource {
+        ports: [u16; 2],
+        fetches: std::sync::atomic::AtomicUsize,
+        release: tokio::sync::Notify,
+    }
+
+    impl crate::sources::ImposterSource for HeldSource {
+        fn schemes(&self) -> &'static [&'static str] {
+            &["held"]
+        }
+
+        fn fetch<'a>(
+            &'a self,
+            _r: &'a crate::sources::SourceRef,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = anyhow::Result<crate::sources::FetchedImposters>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                let n = self
+                    .fetches
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    self.release.notified().await;
+                }
+                let port = self.ports[n.min(1)];
+                let config: crate::imposter::ImposterConfig = serde_json::from_value(
+                    serde_json::json!({ "protocol": "http", "port": port, "stubs": [] }),
+                )?;
+                let routes: crate::front_door::RouteTable = serde_json::from_str(&format!(
+                    r#"{{"routes":[{{"id":"gen{n}","match":{{"host":"gen.test"}},"target":{{"port":{port}}}}}]}}"#
+                ))?;
+                Ok(crate::sources::FetchedImposters {
+                    configs: vec![config],
+                    intercept: None,
+                    routes: Some(routes),
+                    meta: crate::sources::SourceMeta {
+                        version: None,
+                        fetched_at: std::time::SystemTime::now(),
+                    },
+                    unchanged: false,
+                })
+            })
+        }
+    }
+
+    // Issue #1840: a reload that starts while another is reading waits for it, and reads its own
+    // source only then; the one that started last decides both the imposters and the routes.
+    // Without the gate the second reads at once, applies first, and the held one, finishing
+    // last, puts back the older content.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn overlapping_reloads_run_one_at_a_time_and_the_last_started_wins() {
+        use std::sync::atomic::Ordering;
+        let ports = [free_port(), free_port()];
+        let source = Arc::new(HeldSource {
+            ports,
+            fetches: std::sync::atomic::AtomicUsize::new(0),
+            release: tokio::sync::Notify::new(),
+        });
+        let mut registry = crate::sources::SourceRegistry::new();
+        registry
+            .register(Arc::clone(&source) as Arc<dyn crate::sources::ImposterSource>)
+            .expect("register");
+        let set = Arc::new(crate::sources::SourceSet::new(
+            vec![crate::sources::SourceRef::new("held:config")],
+            registry,
+        ));
+        let reload_source = || crate::sources::ReloadSource::Sources {
+            set: Arc::clone(&set),
+            datadir: None,
+        };
+        let empty: crate::front_door::RouteTable =
+            serde_json::from_str(r#"{"routes":[]}"#).expect("table");
+        let table: crate::front_door::FrontDoorRoutes = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::front_door::CompiledRoutes::new(&empty),
+        ));
+        let manager = Arc::new(ImposterManager::new());
+        let gates = crate::injection_gate::ScriptGates::from_injection(false);
+        let fetched = |n: usize| {
+            let source = Arc::clone(&source);
+            async move {
+                while source.fetches.load(Ordering::SeqCst) < n {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }
+        };
+
+        let first = handle_reload(
+            Arc::clone(&manager),
+            Some(reload_source()),
+            Some(&table),
+            None,
+            gates,
+            None,
+        );
+        let second = async {
+            fetched(1).await;
+            handle_reload(
+                Arc::clone(&manager),
+                Some(reload_source()),
+                Some(&table),
+                None,
+                gates,
+                None,
+            )
+            .await
+        };
+        let release = async {
+            fetched(1).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let reads = source.fetches.load(Ordering::SeqCst);
+            source.release.notify_one();
+            reads
+        };
+        let (first, second, reads_while_held) = tokio::join!(first, second, release);
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(
+            reads_while_held, 1,
+            "the second reload read its source while the first still held it"
+        );
+        assert!(
+            manager.imposter_listens_on(ports[1]) && !manager.imposter_listens_on(ports[0]),
+            "the reload that started last decides the imposters"
+        );
+        let routes = table.load();
+        let id = routes
+            .resolve(
+                Some("gen.test"),
+                &hyper::Method::GET,
+                "/",
+                &hyper::HeaderMap::new(),
+            )
+            .map(|r| r.id.clone());
+        assert_eq!(
+            id.as_deref(),
+            Some("gen1"),
+            "and the routes, from the same reload"
+        );
+        manager.delete_imposter(ports[1]).await.expect("delete");
     }
 }

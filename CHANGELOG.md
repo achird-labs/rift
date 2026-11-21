@@ -13,6 +13,13 @@ record.
 
 ### Fixed
 
+- **Overlapping reloads no longer mix two configurations** (#1840). `POST /admin/reload` reads its
+  source, then applies imposters, front-door routes and intercept rules as three separate steps,
+  and nothing serialized two reloads: one reload's imposters could end up with another's routes,
+  and a reload that read an older file could finish last and win. Reloads now run one at a time,
+  from reading the source to the last swap; a reload that arrives meanwhile waits, then reads the
+  newest content. `ImposterManager::reload_gate` is the gate, for embedders that reload too.
+
 - **The plain `librift_ffi` release asset is wasm-free and keeps the Quamina prefilter on every
   platform** (#1798). The release built the library with the server binary's feature flags, so on
   five of seven targets the default asset carried `wasm` (against #1753) and lacked
