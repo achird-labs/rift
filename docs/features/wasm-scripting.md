@@ -52,8 +52,8 @@ The `.wasm` extension selects the engine, so `"engine": "wasm"` can be left out.
 | `_rift.script.engine` | from the file extension | `"wasm"`. |
 | `_rift.script.file` | — | The component. It is resolved like any script file: relative to the config file for `--configfile`, or to `--scripts-dir` through the admin API. A path that leaves `--scripts-dir` is refused. |
 | `_rift.script.component` | — | Instead of `file`: a component uploaded with `POST /components`, as `"sha256:<hex>"` ([Uploading a component](#uploading-a-component)). Implies `engine: "wasm"`. |
-| `_rift.script.export` | `"rift"` | Which export answers. `"rift"` is the `rift:mock/handler` interface below. It is the only value for now. |
-| `_rift.script.knobs` | `{}` | Any JSON. The component's `init` gets it as text before every call. |
+| `_rift.script.export` | `"rift"` when the component exports `rift:mock/handler`, else `"http"` | Which export answers: `"rift"` is the `rift:mock/handler` interface below, `"http"` a standard `wasi:http/incoming-handler` ([The `http` export](#the-http-export)). Naming one the component does not export is refused with `400`. |
+| `_rift.script.knobs` | `{}` | Any JSON. Under `"rift"`, the component's `init` gets it as text before every call; under `"http"`, the `RIFT_KNOBS` environment variable holds it. |
 | `_rift.scriptEngine.timeoutMs` | `5000` | The wall-clock deadline of one call. |
 | `_rift.scriptEngine.wasm.fuel` | unlimited | A compute budget in wasmtime fuel units. |
 | `_rift.scriptEngine.wasm.maxMemoryMiB` | `64` | The most linear memory one call may use, all of its memories together. |
@@ -181,8 +181,8 @@ world mock {
 
 - **`respond`** answers each request. Its `decision` is what a Rhai or JavaScript script returns:
   `pass` serves the response normally, `delay(ms)` adds latency, `reset` resets the connection,
-  and `respond(response)` answers with that status, headers and body. The body must be UTF-8.
-  An `err(message)` is a script error.
+  and `respond(response)` answers with that status, headers and body. The body must be UTF-8;
+  a binary body needs [the `http` export](#the-http-export). An `err(message)` is a script error.
 - **`init`** runs before `respond`, with `knobs` as JSON text.
 - **`state`** is the imposter's [flow store](flow-state.md), shared with every other script on the
   imposter. `flow = none` is the request's flow id, the one `ctx.state` uses; `some(id)` is another
@@ -193,13 +193,53 @@ the next. State that should last goes in `state`.
 
 A component may export more than `handler`, and it may import the WASI interfaces below.
 
+### The `http` export
+
+`"export": "http"` serves a standard `wasi:http/proxy` component: one that exports
+`wasi:http/incoming-handler`, as `componentize-js`, `componentize-py`, TinyGo and Spin-style Rust
+(the [`wasip2`](https://crates.io/crates/wasip2) crate's `http::proxy::export!`) build. The
+component answers the whole response:
+
+- **The request** is the one the stub matched: method, path, the query exactly as the client sent
+  it, every header value, the body's bytes, and `https` as the scheme on an `https` imposter. A
+  request without `Host` (an HTTP/2 one) gets the imposter's address, since `wasi:http` needs an
+  authority.
+- **The response** is served as the component sets it: status, every header value (two
+  `set-cookie`s stay two), and the body's bytes, which need not be UTF-8. Rift adds
+  `x-rift-imposter` and `x-rift-script: wasm`, and frames the body itself, so `content-length`,
+  `transfer-encoding` and `connection` from the component are dropped. A `content-length` the
+  component sets must match its body: a body cut short (a component that returns without finishing
+  it) is a script error, not a shorter `200`. Trailers passed to `outgoing-body.finish` are not
+  sent.
+- **Knobs** arrive in the `RIFT_KNOBS` environment variable, as JSON text (`{}` when absent).
+  `wasi:http` has no `init`, and this is the only environment variable a component ever sees.
+- **The body is read while `handle` runs**, so a component may set the response and keep writing
+  its body. A body past `maxMemoryMiB` is a script error, not a truncated `200`.
+- **Failures are script errors** (`500`): a component that returns without setting its
+  `response-outparam` (`component returned no response`), one that sets it to an error, a body
+  that fails, and traps, fuel, memory and deadline misses as under `"rift"`.
+- **There is no `delay` or `reset`**: an http component can only answer. `_rift.fault` and
+  behaviors still apply around the stub.
+- **Outgoing HTTP is never available.** `wasi:http/types` is linked; `wasi:http/outgoing-handler`
+  is not, so a component importing it is refused when it is admitted.
+- **Host memory.** The bytes a `wasi:http` body queues, and its header maps, live in Rift's memory,
+  not the component's, so `maxMemoryMiB` does not count them. They are bounded: a body queues at
+  most one 64 KiB write, a header map holds at most 32 KiB, and a call holds at most 1024
+  resources, so one call can hold at most about 64 MiB this way.
+- It may import `rift:mock/state` too, for the imposter's flow store.
+
+A component may export both `rift:mock/handler` and `wasi:http/incoming-handler`. Without
+`export`, Rift runs `rift`; name `"http"` to serve the other. The example
+[`examples/wasm/http-twin`](https://github.com/achird-labs/rift/tree/master/examples/wasm/http-twin)
+is one, so a simulation runtime can drive it directly while Rift serves it over HTTP.
+
 ### Toolchains
 
-Anything that produces a `wasm32-wasip2` component for this world works:
+Anything that produces a `wasm32-wasip2` component for either world works:
 
 | Language | Tool |
 |:---------|:-----|
-| Rust | [`wit-bindgen`](https://github.com/bytecodealliance/wit-bindgen) and `cargo build --target wasm32-wasip2` |
+| Rust | [`wit-bindgen`](https://github.com/bytecodealliance/wit-bindgen) (`rift`), or the [`wasip2`](https://crates.io/crates/wasip2) crate (`http`), and `cargo build --target wasm32-wasip2` |
 | JavaScript | [`componentize-js`](https://github.com/bytecodealliance/ComponentizeJS) |
 | Python | [`componentize-py`](https://github.com/bytecodealliance/componentize-py) |
 | Go | [TinyGo](https://tinygo.org) with `-target=wasip2` |
@@ -368,7 +408,8 @@ would refuse real components. Instead, Rift links each one with nothing behind i
 | `wasi:random` | The host's random source. |
 | `wasi:io` | Streams for the interfaces above. |
 | `rift:mock/state` | The imposter's flow store. |
-| `wasi:sockets`, `wasi:http` | **Not linked.** A component importing them is refused at creation with `wasm component imports <interface>, which Rift does not provide`. |
+| `wasi:http/types` | The request and response types of [the `http` export](#the-http-export). It cannot send a request. |
+| `wasi:sockets`, `wasi:http/outgoing-handler` | **Not linked.** A component importing them is refused at creation with `wasm component imports <interface>, which Rift does not provide`. |
 
 What this does **not** isolate:
 

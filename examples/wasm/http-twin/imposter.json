@@ -1,0 +1,21 @@
+{
+  "port": 4562,
+  "protocol": "http",
+  "name": "http-twin",
+  "_rift": { "flowState": {} },
+  "stubs": [
+    {
+      "responses": [
+        {
+          "_rift": {
+            "script": {
+              "file": "target/wasm32-wasip2/release/http_twin.wasm",
+              "export": "http",
+              "knobs": { "region": "eu-west-1" }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

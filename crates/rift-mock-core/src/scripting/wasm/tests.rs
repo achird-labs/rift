@@ -41,7 +41,7 @@ async fn call(
     request: ScriptRequest,
 ) -> (anyhow::Result<FaultDecision>, CallReport) {
     let code = fixtures::b64(bytes);
-    respond(
+    let (result, report) = respond(
         WasmScript {
             code: &code,
             export: None,
@@ -58,7 +58,16 @@ async fn call(
             ..Default::default()
         },
     )
-    .await
+    .await;
+    (result.map(decision), report)
+}
+
+/// A rift-export answer's decision.
+fn decision(answer: crate::scripting::WasmAnswer) -> FaultDecision {
+    match answer {
+        crate::scripting::WasmAnswer::Decision(decision) => decision,
+        other => panic!("expected a decision, got {other:?}"),
+    }
 }
 
 async fn run_with(
@@ -206,7 +215,7 @@ async fn a_body_that_is_not_utf8_is_a_script_error() {
         .expect_err("binary body");
     assert_eq!(
         err.to_string(),
-        "response body is not UTF-8; use export \"http\" (#1758) for binary bodies"
+        "response body is not UTF-8; use export \"http\" for binary bodies"
     );
 }
 
@@ -476,7 +485,8 @@ fn admission_refuses_sockets_and_http_imports_by_name() {
     assert_eq!(
         WasmAdmitError::Import("wasi:sockets/tcp@0.2.6".into()).to_string(),
         "wasm component imports wasi:sockets/tcp@0.2.6, which Rift does not provide (allowed: \
-         wasi:cli, wasi:io, wasi:filesystem, wasi:clocks, wasi:random, rift:mock/state)"
+         wasi:cli, wasi:io, wasi:filesystem, wasi:clocks, wasi:random, wasi:http/types, \
+         rift:mock/state)"
     );
 }
 
@@ -534,13 +544,31 @@ fn admission_refuses_a_core_module_a_world_mismatch_and_inline_source() {
     }
 }
 
+// Issue #1758: `export` names `rift` or `http`; one the component does not export is refused,
+// naming what it does export.
 #[test]
-fn admission_refuses_an_export_other_than_rift() {
+fn admission_resolves_the_export() {
     let code = fixtures::b64(&fixtures::respond_ok());
     assert_eq!(admit(&code, Some("rift")), Ok(()));
+    assert_eq!(admit(&code, None), Ok(()));
+    match admit(&code, Some("http")) {
+        Err(e @ WasmAdmitError::World(_)) => assert!(
+            e.to_string().starts_with(
+                "wasm component does not implement a world Rift runs: export \"http\" needs \
+                 wasi:http/incoming-handler, which this component does not export (it exports \
+                 rift:mock/handler): "
+            ),
+            "{e}"
+        ),
+        other => panic!("expected World, got {other:?}"),
+    }
     assert_eq!(
-        admit(&code, Some("http")),
-        Err(WasmAdmitError::Export("http".into()))
+        admit(&code, Some("grpc")),
+        Err(WasmAdmitError::Export("grpc".into()))
+    );
+    assert_eq!(
+        WasmAdmitError::Export("grpc".into()).to_string(),
+        "wasm export \"grpc\" is not supported; use \"rift\" or \"http\""
     );
 }
 
@@ -605,7 +633,7 @@ async fn delay_with_clock(bytes: &[u8], clock: Option<&crate::scripting::ScriptC
         &ScriptCtxExtras::default(),
     )
     .await;
-    match result.expect("clock read") {
+    match decision(result.expect("clock read")) {
         FaultDecision::Latency { duration_ms, .. } => duration_ms,
         other => panic!("expected delay, got {other:?}"),
     }

@@ -108,7 +108,8 @@ pub async fn should_inject_bounded_with_ctx(
             timeout,
             &ctx_extra,
         )
-        .await;
+        .await
+        .and_then(|answer| answer.into_fault_decision(&rule_id));
     }
     let abort = Arc::new(AtomicBool::new(false));
     let run_abort = Arc::clone(&abort);
@@ -165,7 +166,7 @@ pub async fn should_inject_bounded_with_ctx_traced(
     ctx_extra: ScriptCtxExtras,
 ) -> (Result<FaultDecision>, ScriptTraceEntry) {
     if super::ScriptEngineKind::is_wasm(&engine_type) {
-        return should_inject_wasm_traced(
+        let (answer, entry) = should_inject_wasm_traced(
             default_wasm_script(&code),
             &rule_id,
             &request,
@@ -174,6 +175,10 @@ pub async fn should_inject_bounded_with_ctx_traced(
             &ctx_extra,
         )
         .await;
+        return (
+            answer.and_then(|answer| answer.into_fault_decision(&rule_id)),
+            entry,
+        );
     }
     let abort = Arc::new(AtomicBool::new(false));
     let run_abort = Arc::clone(&abort);
@@ -237,9 +242,10 @@ pub async fn should_inject_bounded_with_ctx_traced(
     (result, entry)
 }
 
-/// Run an `engine: "wasm"` `_rift.script` (issue #1751): one call of the component's `respond` on
-/// the request task, interrupted at `timeout` by wasmtime's epoch deadline, so no blocking thread is
-/// held. The component's stdout and stderr lines are emitted as `ctx.logger` events.
+/// Run an `engine: "wasm"` `_rift.script` (issue #1751): one call of the component on the request
+/// task, interrupted at `timeout` by wasmtime's epoch deadline, so no blocking thread is held. The
+/// answer is a decision (`export: "rift"`) or a whole response (`export: "http"`, issue #1758). The
+/// component's stdout and stderr lines are emitted as `ctx.logger` events.
 pub async fn should_inject_wasm(
     script: super::WasmScript<'_>,
     rule_id: &str,
@@ -247,7 +253,7 @@ pub async fn should_inject_wasm(
     flow_store: Arc<dyn FlowStore>,
     timeout: Duration,
     ctx_extra: &ScriptCtxExtras,
-) -> Result<FaultDecision> {
+) -> Result<super::WasmAnswer> {
     #[cfg(feature = "wasm")]
     {
         let (result, report) =
@@ -271,7 +277,7 @@ pub async fn should_inject_wasm_traced(
     flow_store: Arc<dyn FlowStore>,
     timeout: Duration,
     ctx_extra: &ScriptCtxExtras,
-) -> (Result<FaultDecision>, ScriptTraceEntry) {
+) -> (Result<super::WasmAnswer>, ScriptTraceEntry) {
     let start = Instant::now();
     #[cfg(feature = "wasm")]
     let (result, logs, fuel_used, trap) = {
@@ -283,11 +289,17 @@ pub async fn should_inject_wasm_traced(
     #[cfg(not(feature = "wasm"))]
     let (result, logs, fuel_used, trap) = {
         let _ = (script, rule_id, request, flow_store, timeout, ctx_extra);
-        let result: Result<FaultDecision> = Err(anyhow::anyhow!(super::WASM_UNAVAILABLE));
+        let result: Result<super::WasmAnswer> = Err(anyhow::anyhow!(super::WASM_UNAVAILABLE));
         (result, Vec::new(), None, None)
     };
     let decision = match &result {
-        Ok(d) => render_decision(d),
+        Ok(super::WasmAnswer::Decision(d)) => render_decision(d),
+        Ok(super::WasmAnswer::Response(r)) => render_decision(&FaultDecision::Error {
+            status: r.status,
+            body: String::from_utf8_lossy(&r.body).into_owned(),
+            rule_id: rule_id.to_owned(),
+            headers: super::joined_headers(&r.headers),
+        }),
         Err(e) => format!("error: {e}"),
     };
     let entry = ScriptTraceEntry {

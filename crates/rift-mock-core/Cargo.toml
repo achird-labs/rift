@@ -122,6 +122,9 @@ yasna = "0.5"
 ring = "0.17"
 wasmtime = { version = "50", optional = true }
 wasmtime-wasi = { version = "50", optional = true }
+# Issue #1758: `wasi:http/types` for `export: "http"` components. No default features: they link an
+# outgoing HTTP client (`default-send-request`) and p3, and a component must never reach the network.
+wasmtime-wasi-http = { version = "50", optional = true, default-features = false, features = ["p2"] }
 # Issue #1609: decrypts a `proxy` client identity's `ENCRYPTED PRIVATE KEY` (PKCS#8 PBES2, what
 # OpenSSL 3 writes by default) with its `passphrase`. Pure Rust (RustCrypto); ring cannot do it.
 pkcs8 = { version = "0.11", features = ["encryption", "pem"] }
@@ -181,4 +184,4 @@ quamina-matching = ["dep:quamina"]
 schema = ["dep:schemars", "rift-types/schema"]
 # The sandboxed `engine: "wasm"` for `_rift.script` (issue #1751): WebAssembly components under
 # wasmtime. Off here, on in the `rift` binary (rift-http-proxy's default), forwarded but off in rift-ffi.
-wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
+wasm = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http"]

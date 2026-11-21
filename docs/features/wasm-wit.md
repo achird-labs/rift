@@ -120,6 +120,7 @@ the host:
 | `wasi:io` | As needed by the others. |
 | `wasi:clocks` | **Virtualised:** the imposter's clock — the system clock unless a test froze or stepped it — or a request's `X-Rift-Now` ([Time](wasm-scripting.md#time)). |
 | `wasi:random` | **Virtualised:** the imposter's random stream, seeded by `_rift.scriptEngine.seed` or from the system's entropy ([Randomness](wasm-scripting.md#randomness)). |
+| `wasi:http/types` | For a component Rift serves with `export: "http"` ([The `http` export](wasm-scripting.md#the-http-export)); types only, no client. |
 
 A host must **not** link `wasi:sockets` or `wasi:http/outgoing-handler`. A component that imports
 either is refused when it is admitted, so a component cannot reach the network from inside a mock.

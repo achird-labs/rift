@@ -4084,12 +4084,13 @@ pub struct RiftScriptConfig {
     /// component this node does not hold still loads, and the stub answers a script error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component: Option<String>,
-    /// `engine: "wasm"` only: which export of the component answers. `"rift"` (the default) is the
-    /// `rift:mock/handler` interface (issue #1751).
+    /// `engine: "wasm"` only: which export of the component answers. `"rift"` is the
+    /// `rift:mock/handler` interface (issue #1751), `"http"` a standard `wasi:http/incoming-handler`
+    /// (issue #1758). Absent ⇒ `"rift"` when the component exports it, else `"http"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export: Option<String>,
-    /// `engine: "wasm"` only: any JSON, passed to the component's `init` as text before each call.
-    /// Absent ⇒ `{}`.
+    /// `engine: "wasm"` only: any JSON, passed to the component's `init` as text before each call,
+    /// or in the `RIFT_KNOBS` environment variable under `export: "http"`. Absent ⇒ `{}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knobs: Option<serde_json::Value>,
 }

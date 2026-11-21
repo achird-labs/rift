@@ -20,7 +20,8 @@ use rift_mock_core::imposter::ResponseMode;
 use rift_mock_core::imposter::clock::{ImposterClock, wall_ms};
 use rift_mock_core::imposter::rng::{ImposterRng, RequestRng, with_request_rng};
 use rift_mock_core::scripting::{
-    FaultDecision, ScriptClock, ScriptCtxExtras, ScriptRequest, WasmScript, should_inject_wasm,
+    FaultDecision, ScriptClock, ScriptCtxExtras, ScriptRequest, WasmAnswer, WasmScript,
+    should_inject_wasm,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -172,12 +173,26 @@ fn expected_of(case: &TestCase) -> Answer {
     }
 }
 
-/// The component's answer, or the mismatch that says it gave none.
-fn answer_of(result: Result<FaultDecision>) -> Result<Answer, Mismatch> {
+/// The component's answer, or the mismatch that says it gave none. An http component's repeated
+/// header values are joined with `", "`, as a recording stores one value per name.
+fn answer_of(result: Result<WasmAnswer>) -> Result<Answer, Mismatch> {
     let not_an_answer = |actual: Value| Mismatch {
         field: "decision".into(),
         expected: Value::from("respond"),
         actual,
+    };
+    let result = match result {
+        Ok(WasmAnswer::Response(response)) => {
+            return Ok(Answer {
+                status: response.status,
+                headers: rift_mock_core::scripting::joined_headers(&response.headers)
+                    .into_iter()
+                    .collect(),
+                body: response.body.to_vec(),
+            });
+        }
+        Ok(WasmAnswer::Decision(decision)) => Ok(decision),
+        Err(e) => Err(e),
     };
     match result {
         Ok(FaultDecision::Error {
@@ -206,10 +221,7 @@ fn answer_of(result: Result<FaultDecision>) -> Result<Answer, Mismatch> {
 /// Run the check. `Err` is a usage, corpus or component error (exit 2); drift is in the report.
 pub async fn run_check(opts: &CheckOptions) -> Result<CheckReport> {
     match opts.export.as_deref() {
-        None | Some("rift") => {}
-        Some("http") => bail!(
-            "--export http needs the wasi:http export (issue #1758), which this build does not have"
-        ),
+        None | Some("rift" | "http") => {}
         Some(other) => bail!("--export must be \"rift\" or \"http\" (got {other:?})"),
     }
     let fields: Vec<Field> = match &opts.fields {
@@ -229,9 +241,13 @@ pub async fn run_check(opts: &CheckOptions) -> Result<CheckReport> {
         use base64::Engine as _;
         base64::engine::general_purpose::STANDARD.encode(&bytes)
     };
-    // Admission: a broken component is an error for the run, not drift on every stub.
-    rift_mock_core::scripting::check_entrypoint("wasm", &code, "respond")
+    // Admission: a broken component, or one without the export asked for, is an error for the run,
+    // not drift on every stub.
+    let export = rift_mock_core::scripting::admit_wasm_component(&code, opts.export.as_deref())
         .map_err(|e| anyhow!("{}: {e}", opts.component.display()))?;
+    // A recorded binary body can match only an http component's bytes (issue #1758): the export
+    // that answers, whether `--export` named it or the component's own exports decided it.
+    let http_export = export == "http";
 
     let corpus_text = std::fs::read_to_string(&opts.corpus)
         .with_context(|| format!("cannot read the corpus {}", opts.corpus.display()))?;
@@ -324,8 +340,13 @@ pub async fn run_check(opts: &CheckOptions) -> Result<CheckReport> {
     let mut skipped_stubs = std::collections::BTreeSet::new();
     for (n, case) in cases.iter().enumerate() {
         let response_index = origins[n].1;
-        let reason =
-            skip_reason(case).or_else(|| binary_recording(&stubs[case.stub_index], response_index));
+        let reason = skip_reason(case).or_else(|| {
+            if http_export {
+                None
+            } else {
+                binary_recording(&stubs[case.stub_index], response_index)
+            }
+        });
         if let Some(reason) = reason {
             if skipped_stubs.insert(case.stub_index) {
                 report.skipped += 1;
@@ -376,7 +397,7 @@ pub async fn run_check(opts: &CheckOptions) -> Result<CheckReport> {
             should_inject_wasm(
                 WasmScript {
                     code: &code,
-                    export: None,
+                    export: Some(export),
                     knobs: knobs.as_ref(),
                     limits,
                     clock: Some(&script_clock),
@@ -391,7 +412,16 @@ pub async fn run_check(opts: &CheckOptions) -> Result<CheckReport> {
         .await;
         report.checked += 1;
         let mismatches = match answer_of(result) {
-            Ok(actual) => diff(&fields, &expected_of(case), &actual),
+            Ok(actual) => {
+                let mut expected = expected_of(case);
+                if http_export
+                    && let Some(bytes) = binary_body(&stubs[case.stub_index], response_index)
+                        .map_err(|e| anyhow!("stub {}: {e}", case.stub_index))?
+                {
+                    expected.body = bytes;
+                }
+                diff(&fields, &expected, &actual)
+            }
             Err(not_an_answer) => vec![not_an_answer],
         };
         if !mismatches.is_empty() {
@@ -457,14 +487,36 @@ fn recorded_ms(at: &Value) -> Result<i64> {
         .ok_or_else(|| anyhow!("recordedAt must be whole seconds since the Unix epoch (got {at})"))
 }
 
-/// A recorded binary body (`_mode: binary`): a component answers only UTF-8 bodies through the
-/// `rift` export, so it could never match; skipped until the `wasi:http` export (#1758).
+/// Whether the recorded response is a binary body (`_mode: binary`).
+fn is_binary(stub: &Value, response_index: usize) -> bool {
+    stub.pointer(&format!("/responses/{response_index}/is/_mode"))
+        .and_then(Value::as_str)
+        == Some("binary")
+}
+
+/// A binary recording's bytes, decoded from its own base64: the test-case generator decodes only
+/// a body that is UTF-8, and an http component answers any bytes (issue #1758).
+fn binary_body(stub: &Value, response_index: usize) -> Result<Option<Vec<u8>>> {
+    use base64::Engine as _;
+    if !is_binary(stub, response_index) {
+        return Ok(None);
+    }
+    let text = stub
+        .pointer(&format!("/responses/{response_index}/is/body"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .map(Some)
+        .map_err(|e| anyhow!("a binary recorded body is not base64: {e}"))
+}
+
+/// A recorded binary body under the `rift` export, which answers only UTF-8 bodies, so it could
+/// never match; `--export http` checks it (issue #1758).
 fn binary_recording(stub: &Value, response_index: usize) -> Option<String> {
-    let mode = stub
-        .pointer(&format!("/responses/{response_index}/is/_mode"))
-        .and_then(Value::as_str);
-    (mode == Some("binary")).then(|| {
-        "a binary recorded body; a component answers UTF-8 bodies only (binary needs #1758)".into()
+    is_binary(stub, response_index).then(|| {
+        "a binary recorded body; the rift export answers UTF-8 bodies only (use --export http)"
+            .into()
     })
 }
 

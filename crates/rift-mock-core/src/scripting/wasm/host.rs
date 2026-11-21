@@ -78,6 +78,9 @@ impl ResourceLimiter for Limits {
 pub(super) struct Host {
     pub(super) wasi: WasiCtx,
     pub(super) table: ResourceTable,
+    /// `wasi:http/types` (issue #1758), for `export: "http"` and any component importing it.
+    pub(super) http: wasmtime_wasi_http::WasiHttpCtx,
+    pub(super) http_hooks: NoOutgoing,
     pub(super) limits: Limits,
     pub(super) flow_store: Arc<dyn FlowStore>,
     /// The request's flow id: what `flow = none` means, as `ctx.state` is bound to it.
@@ -94,6 +97,65 @@ impl WasiView for Host {
 }
 
 impl bindings::rift::mock::types::Host for Host {}
+
+impl wasmtime_wasi_http::WasiHttpView for Host {
+    fn http(&mut self) -> wasmtime_wasi_http::WasiHttpCtxView<'_> {
+        wasmtime_wasi_http::WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: &mut self.http_hooks,
+        }
+    }
+}
+
+/// The `wasi:http` hooks: no HTTP client, and small host-side body buffers. `wasi:http/outgoing-handler`
+/// is never linked, so nothing calls `send_request`; were it ever reached, the request is denied
+/// rather than sent (issue #1758).
+///
+/// A guest can create `wasi:http` bodies whose queued chunks live in host memory, outside
+/// `maxMemoryMiB`: each body holds at most [`BODY_BUFFER_CHUNKS`] chunks of [`BODY_CHUNK_BYTES`],
+/// and a call at most `MAX_RESOURCES` resources, so the host memory one call can hold this way is
+/// bounded (about 64 MiB with the 1024-resource cap, against 2 MiB a body by default).
+pub(super) struct NoOutgoing;
+
+/// The most bytes one write to a `wasi:http` body may carry; the library's default is 1 MiB.
+pub(super) const BODY_CHUNK_BYTES: usize = 64 * 1024;
+/// Writes a body buffers before the writer waits for this side to read (the library's default).
+pub(super) const BODY_BUFFER_CHUNKS: usize = 1;
+/// The most bytes one `wasi:http` fields resource (a header map) may hold; the default is 128 KiB.
+pub(super) const FIELD_SIZE_BYTES: usize = 32 * 1024;
+
+type OutgoingFuture =
+    Box<dyn std::future::Future<Output = Result<(), wasmtime_wasi_http::Error>> + Send>;
+
+impl wasmtime_wasi_http::WasiHttpHooks for NoOutgoing {
+    fn send_request(
+        &mut self,
+        _request: hyper::Request<wasmtime_wasi_http::WasiBody>,
+        _options: Option<wasmtime_wasi_http::RequestOptions>,
+        _fut: OutgoingFuture,
+    ) -> Box<
+        dyn std::future::Future<
+                Output = Result<
+                    (
+                        hyper::Response<wasmtime_wasi_http::WasiBody>,
+                        OutgoingFuture,
+                    ),
+                    wasmtime_wasi_http::Error,
+                >,
+            > + Send,
+    > {
+        Box::new(async { Err(wasmtime_wasi_http::Error::HttpRequestDenied) })
+    }
+
+    fn p2_outgoing_body_buffer_chunks(&mut self) -> usize {
+        BODY_BUFFER_CHUNKS
+    }
+
+    fn p2_outgoing_body_chunk_size(&mut self) -> usize {
+        BODY_CHUNK_BYTES
+    }
+}
 
 /// A guest's JSON text, or a guest error naming the op when it is not JSON.
 fn from_text(op: &str, text: &str) -> Result<serde_json::Value, String> {

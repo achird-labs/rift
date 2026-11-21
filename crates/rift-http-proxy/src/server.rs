@@ -812,8 +812,8 @@ pub enum WasmAction {
         #[arg(long)]
         port: Option<u16>,
 
-        /// Which export answers: `rift` (the `rift:mock/handler` interface, the default) or
-        /// `http` (needs the wasi:http export, issue #1758).
+        /// Which export answers: `rift` (the `rift:mock/handler` interface) or `http`
+        /// (`wasi:http/incoming-handler`). Default: `rift` when the component exports it.
         #[arg(long)]
         export: Option<String>,
 

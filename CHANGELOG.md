@@ -135,6 +135,10 @@ record.
 
 ### Changed
 
+- **`wasi:http/types` imports are admitted** (#1758) for every component; `wasi:http/outgoing-handler`
+  is still refused, so no component can make a request. `should_inject_wasm` (rift-mock-core) returns
+  a `WasmAnswer` (a decision, or an http component's response) instead of a `FaultDecision`.
+
 - **Rhai, JavaScript and templates read the imposter's clock and seed** (#1756), as wasm, flow-state
   TTLs and `_rift.fault` already did. Rhai `timestamp_header()`, JavaScript `Date.now()`/`new
   Date()`, and the template `now` (and `{{NOW}}`, `{{DAYS±N}}`) read the imposter clock, or a
@@ -171,6 +175,13 @@ record.
   must drop them.
 
 ### Added
+
+- **`_rift.script.export: "http"` serves a standard `wasi:http/proxy` component** (#1758): a
+  component built by `componentize-js`, `componentize-py`, TinyGo or the `wasip2` crate answers the
+  whole response, with binary bodies and repeated headers kept. Knobs arrive as the `RIFT_KNOBS`
+  environment variable. Without `export`, a component exporting only `wasi:http/incoming-handler`
+  runs as `http`. `rift wasm check --export http` replays a corpus against one, binary recordings
+  included. See `examples/wasm/http-twin`.
 
 - **`_rift.scriptEngine.rngKey`: request-keyed random streams** (#1795). With a `seed`, each
   request whose key parts (`header:<name>`, `query:<name>`, `method`, `path`, `body:<pointer>`) are
