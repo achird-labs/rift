@@ -77,6 +77,7 @@ impl Imposter {
         };
         if let Some((before, after)) = swapped {
             self.forget_orphaned_claims(before.stubs(), after.stubs());
+            self.prune_wasm_instances(after.stubs());
         }
         outcome
     }

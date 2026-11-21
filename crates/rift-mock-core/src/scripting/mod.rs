@@ -40,6 +40,104 @@ pub struct WasmScript<'a> {
     pub limits: crate::imposter::WasmLimits,
     /// What the component's `wasi:clocks` read (issue #1754); `None` is the system clock.
     pub clock: Option<&'a ScriptClock>,
+    /// `_rift.script.instance` (issue #1793): `"request"` (`None`) for a fresh instance per call,
+    /// `"imposter"` for one kept in `instances`.
+    pub instance: Option<&'a str>,
+    /// Where an `instance: "imposter"` component is kept: the imposter's. `None` runs it as
+    /// `"request"` (a caller with no imposter).
+    pub instances: Option<&'a WasmInstances>,
+}
+
+/// An imposter's kept `instance: "imposter"` wasm instances (issue #1793). Empty, and inert, in a
+/// build without the `wasm` feature.
+#[derive(Default)]
+pub struct WasmInstances {
+    #[cfg(feature = "wasm")]
+    pub(crate) map: wasm::instances::InstanceMap,
+}
+
+impl std::fmt::Debug for WasmInstances {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WasmInstances").finish_non_exhaustive()
+    }
+}
+
+impl WasmInstances {
+    /// Whether no instance is kept.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        #[cfg(feature = "wasm")]
+        {
+            self.map.is_empty()
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            true
+        }
+    }
+
+    /// Drop every instance: `restart_runtime_state`.
+    pub fn clear(&self) {
+        #[cfg(feature = "wasm")]
+        self.map.clear();
+    }
+
+    /// What `GET /imposters/:port/wasm/instances` reports.
+    #[must_use]
+    pub fn list(&self) -> Vec<WasmInstanceInfo> {
+        #[cfg(feature = "wasm")]
+        {
+            self.map.list()
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Keep only the instances some stub in `stubs` still references (issue #1793): an edit that
+    /// keeps a component referenced, by any stub, keeps its instance.
+    #[cfg_attr(not(feature = "wasm"), allow(unused_variables))]
+    pub(crate) fn retain_referenced<'s>(
+        &self,
+        stubs: impl Iterator<Item = &'s crate::imposter::Stub>,
+    ) {
+        #[cfg(feature = "wasm")]
+        {
+            if self.map.is_empty() {
+                return;
+            }
+            let referenced: std::collections::HashSet<_> = stubs
+                .flat_map(|stub| stub.responses.iter())
+                .filter_map(|response| match response {
+                    crate::imposter::StubResponse::RiftScript { rift, .. } => rift.script.as_ref(),
+                    _ => None,
+                })
+                .filter_map(wasm::instances::key_of)
+                .collect();
+            self.map.retain(&referenced);
+        }
+    }
+}
+
+/// One kept instance, as `GET /imposters/:port/wasm/instances` lists it (issue #1793).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WasmInstanceInfo {
+    /// The SHA-256 of its key: the component, `export` and `knobs`.
+    pub id: String,
+    /// The component's SHA-256.
+    pub sha256: String,
+    /// `export` as the stubs write it.
+    pub export: Option<String>,
+    /// The first 12 hex digits of the SHA-256 of its canonical `knobs`.
+    pub knobs_hash: String,
+    /// When it was instantiated, in milliseconds since the Unix epoch.
+    pub instantiated_at: u64,
+    /// Calls it has answered since.
+    pub calls: u64,
+    /// The bytes of linear memory it holds.
+    pub memory_bytes: usize,
 }
 
 /// What an `engine: "wasm"` call answered (issue #1758).

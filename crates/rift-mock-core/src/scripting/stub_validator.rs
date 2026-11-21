@@ -143,6 +143,32 @@ fn validate_rift_script_config(
             ),
         });
     }
+    // `instance` (issue #1793): a name this engine knows, on a wasm script only. Checked when
+    // admitted, never decoded, so a stored config carrying a bad value still loads.
+    if let Some(instance) = script_config.instance.as_deref() {
+        let is_wasm = script_config.component.is_some()
+            || script_config
+                .engine
+                .as_deref()
+                .is_some_and(super::ScriptEngineKind::is_wasm);
+        let message = if !matches!(instance, "request" | "imposter") {
+            Some(format!(
+                "wasm instance \"{instance}\" is not supported; use \"request\" or \"imposter\""
+            ))
+        } else if !is_wasm {
+            Some("`instance` applies only to engine \"wasm\"".to_string())
+        } else {
+            None
+        };
+        if let Some(message) = message {
+            return Some(StubValidationError {
+                stub_id: stub_id.to_string(),
+                response_index,
+                engine: script_config.engine.clone().unwrap_or_default(),
+                message,
+            });
+        }
+    }
     if let Some(component) = script_config.component.as_deref() {
         let refused = |message: String| {
             Some(StubValidationError {
@@ -358,6 +384,43 @@ mod tests {
                 .contains("wasm export \"grpc\" is not supported"),
             "{:?}",
             refused.errors
+        );
+    }
+
+    // Issue #1793: `instance` is "request" or "imposter", on a wasm script only.
+    #[test]
+    fn instance_is_refused_unknown_or_off_wasm() {
+        let with = |engine: &str, instance: &str| {
+            let mut stub = make_rift_script_stub(engine, "fn respond(ctx) { pass() }");
+            if let StubResponse::RiftScript { rift, .. } = &mut stub.responses[0]
+                && let Some(script) = rift.script.as_mut()
+            {
+                script.instance = Some(instance.to_string());
+                if engine == "wasm" {
+                    script.code = None;
+                    script.component = Some(format!("sha256:{}", "ab".repeat(32)));
+                }
+            }
+            stub
+        };
+        for ok in ["request", "imposter"] {
+            assert!(validate_stub(&with("wasm", ok), 0).is_valid(), "{ok}");
+        }
+        let unknown = validate_stub(&with("wasm", "forever"), 0);
+        assert!(
+            unknown.errors[0]
+                .message
+                .contains("wasm instance \"forever\" is not supported"),
+            "{:?}",
+            unknown.errors
+        );
+        let off_wasm = validate_stub(&with("rhai", "imposter"), 0);
+        assert!(
+            off_wasm.errors[0]
+                .message
+                .contains("applies only to engine \"wasm\""),
+            "{:?}",
+            off_wasm.errors
         );
     }
 

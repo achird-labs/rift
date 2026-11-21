@@ -867,3 +867,105 @@ mod metered_flow_store_tests {
         );
     }
 }
+
+/// A request's flow store that refuses every operation once `cut` is cancelled (issue #1793): a
+/// kept wasm instance's call outlives its request, and a restart or a delete that cut the request
+/// must not see the call read or write the next generation's state.
+pub(crate) struct CutOffStore {
+    inner: Arc<dyn FlowStore>,
+    cut: Arc<tokio_util::sync::CancellationToken>,
+}
+
+impl CutOffStore {
+    pub(crate) fn new(
+        inner: Arc<dyn FlowStore>,
+        cut: Arc<tokio_util::sync::CancellationToken>,
+    ) -> Self {
+        Self { inner, cut }
+    }
+
+    fn live(&self) -> Result<&dyn FlowStore> {
+        if self.cut.is_cancelled() {
+            anyhow::bail!(
+                "the imposter was restarted or deleted while this call ran; its state is no longer reachable"
+            );
+        }
+        Ok(self.inner.as_ref())
+    }
+}
+
+impl FlowStore for CutOffStore {
+    fn get(&self, flow_id: &str, key: &str) -> Result<Option<Value>> {
+        self.live()?.get(flow_id, key)
+    }
+    fn set(&self, flow_id: &str, key: &str, value: Value) -> Result<()> {
+        self.live()?.set(flow_id, key, value)
+    }
+    fn exists(&self, flow_id: &str, key: &str) -> Result<bool> {
+        self.live()?.exists(flow_id, key)
+    }
+    fn delete(&self, flow_id: &str, key: &str) -> Result<()> {
+        self.live()?.delete(flow_id, key)
+    }
+    fn is_blocking(&self) -> bool {
+        self.inner.is_blocking()
+    }
+    fn increment(&self, flow_id: &str, key: &str) -> Result<i64> {
+        self.live()?.increment(flow_id, key)
+    }
+    fn increment_by(&self, flow_id: &str, key: &str, by: i64) -> Result<i64> {
+        self.live()?.increment_by(flow_id, key, by)
+    }
+    fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> Result<()> {
+        self.live()?.set_ttl(flow_id, ttl_seconds)
+    }
+    fn set_key_ttl(&self, flow_id: &str, key: &str, ttl_seconds: i64) -> Result<bool> {
+        self.live()?.set_key_ttl(flow_id, key, ttl_seconds)
+    }
+    fn clear_flow(&self, flow_id: &str) -> Result<()> {
+        self.live()?.clear_flow(flow_id)
+    }
+    fn compare_and_set(
+        &self,
+        flow_id: &str,
+        key: &str,
+        expected: Option<&Value>,
+        new: Value,
+    ) -> Result<CasOutcome> {
+        self.live()?.compare_and_set(flow_id, key, expected, new)
+    }
+    fn flow_ids(&self) -> Result<Option<Vec<String>>> {
+        self.live()?.flow_ids()
+    }
+    fn entry_count(&self, flow_id: &str) -> Result<Option<usize>> {
+        self.live()?.entry_count(flow_id)
+    }
+}
+
+#[cfg(test)]
+mod cut_off_tests {
+    use super::{CutOffStore, FlowStore};
+    use std::sync::Arc;
+
+    // Issue #1793: once the request's generation is cut, a detached call reaches nothing.
+    #[test]
+    fn a_cut_store_refuses_every_operation() {
+        let inner: Arc<dyn FlowStore> = Arc::new(crate::backends::InMemoryFlowStore::new(60));
+        let cut = Arc::new(tokio_util::sync::CancellationToken::new());
+        let store = CutOffStore::new(Arc::clone(&inner), Arc::clone(&cut));
+        store.set("f", "k", serde_json::json!(1)).expect("live");
+        assert_eq!(
+            store.get("f", "k").expect("live"),
+            Some(serde_json::json!(1))
+        );
+        cut.cancel();
+        let err = store.set("f", "k", serde_json::json!(2)).expect_err("cut");
+        assert!(err.to_string().contains("restarted or deleted"), "{err}");
+        assert!(store.get("f", "k").is_err());
+        assert!(store.increment_by("f", "n", 1).is_err());
+        assert_eq!(
+            inner.get("f", "k").expect("inner"),
+            Some(serde_json::json!(1))
+        );
+    }
+}

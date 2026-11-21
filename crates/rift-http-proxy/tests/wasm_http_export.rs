@@ -33,12 +33,23 @@ fn twin_path(http_only: bool) -> PathBuf {
         .join(target)
 }
 
-/// The component, base64, as resolution writes a `.wasm` file into `_rift.script.code`.
+/// The component, base64, as resolution writes a `.wasm` file into `_rift.script.code`. Compiled
+/// once here, as admitting it through the admin API would: these tests create imposters directly,
+/// and a dozen first requests compiling the same component at once can miss their deadline.
 fn twin(http_only: bool) -> String {
+    static COMPILED: std::sync::Mutex<Vec<bool>> = std::sync::Mutex::new(Vec::new());
     let path = twin_path(http_only);
     let bytes = std::fs::read(&path)
         .unwrap_or_else(|e| panic!("build the example first: {}: {e}", path.display()));
-    base64::engine::general_purpose::STANDARD.encode(bytes)
+    let code = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let mut compiled = COMPILED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !compiled.contains(&http_only) {
+        rift_http_proxy::scripting::admit_wasm_component(&code, None).expect("the twin compiles");
+        compiled.push(http_only);
+    }
+    code
 }
 
 /// An imposter whose one stub runs the component under `script` (merged over `engine`/`code`).
@@ -374,5 +385,25 @@ async fn the_query_reaches_the_component_unchanged() {
         resp.text().await.expect("body"),
         "GET /echo?b=2&a=1&b=%20x&flag\n"
     );
+    served.stop().await;
+}
+
+// Issue #1793: under `instance: "imposter"` an http component's guest memory lasts across requests.
+#[tokio::test]
+#[ignore = "needs examples/wasm/http-twin built for wasm32-wasip2; the CI wasm job runs it"]
+async fn a_kept_http_instance_counts_in_guest_memory() {
+    let served = Served::new(imposter(
+        &twin(false),
+        json!({ "export": "http", "instance": "imposter" }),
+        json!({}),
+    ))
+    .await;
+    for n in 1..=3 {
+        let resp = served.get("/memory").await;
+        assert_eq!(
+            resp.text().await.expect("body"),
+            format!(r#"{{"count":{n}}}"#)
+        );
+    }
     served.stop().await;
 }

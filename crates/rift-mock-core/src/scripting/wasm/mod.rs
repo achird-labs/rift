@@ -13,6 +13,7 @@
 //! component importing them is refused at admission and none can reach the network.
 
 mod host;
+pub(crate) mod instances;
 mod pipe;
 mod runtime;
 

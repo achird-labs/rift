@@ -95,6 +95,8 @@ async fn wasm(code: &str, store: &Arc<dyn FlowStore>) -> FaultDecision {
             knobs: None,
             limits: WasmLimits::default(),
             clock: None,
+            instance: None,
+            instances: None,
         },
         "bench",
         &request(),

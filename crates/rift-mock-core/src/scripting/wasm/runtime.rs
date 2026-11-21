@@ -120,11 +120,13 @@ fn linker() -> anyhow::Result<&'static Linker<Host>> {
 }
 
 /// A compiled, linked component, ready to instantiate.
-struct Loaded {
+pub(super) struct Loaded {
     /// The base64 text it was loaded from, compared on every hit: the key is only a fingerprint.
     code: Arc<str>,
     /// The first 12 hex digits of the bytes' SHA-256, for logs.
     sha12: Arc<str>,
+    /// The bytes' SHA-256: an `instance: "imposter"` component's identity (issue #1793).
+    pub(super) sha256: [u8; 32],
     /// What the component imports, by interface name (issue #1757 reports them on upload).
     imports: Arc<[String]>,
     /// `rift:mock/handler`, or why the component does not export it as Rift expects.
@@ -227,6 +229,20 @@ fn fingerprint(code: &str) -> u64 {
     h.finish()
 }
 
+/// The SHA-256 of the component in `code`: the cached compile's, else its bytes hashed now.
+pub(super) fn code_sha256(code: &str) -> Option<[u8; 32]> {
+    if let Some(hit) = cached(code) {
+        return Some(hit.sha256);
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(code.trim())
+        .ok()?;
+    ring::digest::digest(&ring::digest::SHA256, &bytes)
+        .as_ref()
+        .try_into()
+        .ok()
+}
+
 fn cached(code: &str) -> Option<Arc<Loaded>> {
     let key = fingerprint(code);
     // Compared outside the lock: the texts are long, and every wasm request takes this lock.
@@ -306,6 +322,10 @@ fn compile(code: &str) -> Result<Loaded, WasmAdmitError> {
     Ok(Loaded {
         code: Arc::from(code),
         sha12: Arc::from(sha12),
+        sha256: digest
+            .as_ref()
+            .try_into()
+            .map_err(|_| WasmAdmitError::Unavailable("sha256 is not 32 bytes".into()))?,
         imports: Arc::from(imports),
         mock,
         proxy,
@@ -391,6 +411,8 @@ pub(crate) struct CallReport {
     stderr: Vec<u8>,
     /// The component's short SHA-256, which tags its log lines.
     sha12: Option<Arc<str>>,
+    /// An http call returned with its response body or outparam still open (issue #1793).
+    pub(super) unfinished: bool,
 }
 
 impl CallReport {
@@ -405,9 +427,25 @@ impl CallReport {
         })
     }
 
-    fn trapped(&mut self, kind: TrapKind, detail: impl Into<String>) {
+    pub(super) fn trapped(&mut self, kind: TrapKind, detail: impl Into<String>) {
         crate::extensions::metrics::record_wasm_trap(kind.as_str());
         self.trap = Some((kind, detail.into()));
+    }
+
+    /// Take in what a call on an instance's task reported (issue #1793).
+    pub(super) fn absorb(&mut self, other: CallReport) {
+        if other.fuel_used.is_some() {
+            self.fuel_used = other.fuel_used;
+        }
+        if other.trap.is_some() {
+            self.trap = other.trap;
+        }
+        self.stdout.extend(other.stdout);
+        self.stderr.extend(other.stderr);
+        if self.sha12.is_none() {
+            self.sha12 = other.sha12;
+        }
+        self.unfinished |= other.unfinished;
     }
 }
 
@@ -446,6 +484,7 @@ async fn run(
     report: &mut CallReport,
 ) -> anyhow::Result<WasmAnswer> {
     WasmExport::parse(script.export)?;
+    let mode = InstanceMode::parse(script.instance)?;
     let started = Instant::now();
     let loaded = match cached(script.code) {
         Some(hit) => hit,
@@ -464,126 +503,404 @@ async fn run(
         }
     };
     let export = WasmExport::resolve(script.export, &loaded)?;
-    // What is left of the call's deadline after any compile.
-    let remaining = timeout.saturating_sub(started.elapsed());
     report.sha12 = Some(Arc::clone(&loaded.sha12));
     let ctx = ctx_extra.build_ctx_input(request);
     let knobs = script
         .knobs
         .map_or_else(|| "{}".to_owned(), serde_json::Value::to_string);
-    let limits = script.limits;
-
-    let stdout = LogPipe::new(LOG_PIPE_BYTES);
-    let stderr = LogPipe::new(LOG_PIPE_BYTES);
-    // `wasi:http` has no `init`: an http component reads its knobs from `RIFT_KNOBS`, the one
-    // variable any component ever sees.
-    let knobs_env = (export == WasmExport::Http).then_some(knobs.as_str());
-    let (mut store, budget) = new_store(
-        &limits,
-        script.clock,
-        flow_store,
-        ctx.flow_id.clone(),
-        (stdout.clone(), stderr.clone()),
-        knobs_env,
-        remaining,
-    )?;
-    // The epoch deadline normally ends a runaway call first, as a trap the store reports; this
-    // outer bound, two ticks later, catches a call parked in a host import.
-    let bound = remaining.saturating_add(2 * EPOCH_TICK);
-    let failed = Failure {
-        budget,
-        max_memory_mib: limits.max_memory_mib,
-        timeout,
+    let prepared = match export {
+        WasmExport::Rift => Prepared::Rift(to_wit_request(request, &ctx)?),
+        WasmExport::Http => Prepared::Http {
+            request: to_http_request(request, ctx_extra)?,
+            https: ctx_extra.https,
+        },
     };
-
-    match export {
-        WasmExport::Rift => {
-            let pre = loaded.mock.as_ref().map_err(|e| anyhow!("{e}"))?;
-            let wit_request = to_wit_request(request, &ctx)?;
-            let call = async {
-                let instance = pre.instantiate_async(&mut store).await?;
-                let handler = instance.rift_mock_handler();
-                if let Err(msg) = handler.call_init(&mut store, &knobs).await? {
-                    return Ok(Err(format!("init: {msg}")));
-                }
-                handler.call_respond(&mut store, &wit_request).await
-            };
-            let outcome = tokio::time::timeout(bound, call).await;
-            let memory_refused = settle(store, budget, (&stdout, &stderr), report);
-            match failed.classify(outcome, report, memory_refused)? {
-                Ok(decision) => decision_to_fault(decision, rule_id).map(WasmAnswer::Decision),
-                Err(guest) => {
-                    report.trapped(TrapKind::GuestError, &guest);
-                    Err(anyhow!("{guest}"))
-                }
-            }
+    let call = CallSpec {
+        loaded,
+        export,
+        knobs,
+        limits: script.limits,
+        scope: Scope {
+            flow_store,
+            flow_id: ctx.flow_id.clone(),
+            rng: crate::imposter::rng::current(),
+            clock: script.clock.cloned(),
+        },
+        prepared,
+        rule_id: rule_id.to_owned(),
+        timeout,
+        started,
+        insecure_seed: None,
+    };
+    match (mode, script.instances) {
+        (InstanceMode::Imposter, Some(instances)) => {
+            let key =
+                super::instances::InstanceKey::new(call.loaded.sha256, script.export, script.knobs);
+            let (result, call_report) = super::instances::call_in(&instances.map, key, call).await;
+            report.absorb(call_report);
+            result
         }
-        WasmExport::Http => {
-            let pre = loaded.proxy.as_ref().map_err(|e| anyhow!("{e}"))?;
-            let http_request = to_http_request(request, ctx_extra)?;
-            let body_limit =
-                usize::try_from(u64::from(limits.max_memory_mib) << 20).unwrap_or(usize::MAX);
-            let (sender, receiver) = tokio::sync::oneshot::channel();
-            let collect = collect_response(receiver, body_limit);
-            tokio::pin!(collect);
-            let mut collected = None;
-            let call = async {
-                let proxy = pre.instantiate_async(&mut store).await?;
-                let scheme = if ctx_extra.https {
-                    Scheme::Https
-                } else {
-                    Scheme::Http
-                };
-                let req = store
-                    .data_mut()
-                    .http()
-                    .new_incoming_request(scheme, http_request)?;
-                let out = store.data_mut().http().new_response_outparam(sender)?;
-                proxy
-                    .wasi_http_incoming_handler()
-                    .call_handle(&mut store, req, out)
-                    .await
-            };
-            // The body is read while `handle` runs: a guest can set the response and keep writing
-            // the body inside the call, and a full body buffer waits for this side to read.
-            let outcome = tokio::time::timeout(bound, async {
-                tokio::pin!(call);
-                loop {
-                    tokio::select! {
-                        out = &mut call => break out,
-                        got = &mut collect, if collected.is_none() => collected = Some(got),
-                    }
-                }
-            })
-            .await;
-            // Dropping the store closes the outparam and the body, so what is left to read ends.
-            let memory_refused = settle(store, budget, (&stdout, &stderr), report);
-            // A body past the bound stops this side reading, and a guest whose next write then
-            // fails usually traps: the bound is the cause to report, not the trap it led to.
-            if !matches!(collected, Some(Collected::TooLarge)) {
-                failed.classify(outcome, report, memory_refused)?;
-            }
-            let collected = match collected {
-                Some(collected) => collected,
-                None => collect.await,
-            };
-            match collected {
-                Collected::Response(response) => Ok(WasmAnswer::Response(response)),
-                Collected::TooLarge => {
-                    let msg = format!(
-                        "response body exceeds maxMemoryMiB ({} MiB)",
-                        limits.max_memory_mib
-                    );
-                    report.trapped(TrapKind::Memory, &msg);
-                    Err(anyhow!("{msg}"))
-                }
-                Collected::Failed(msg) => {
-                    report.trapped(TrapKind::GuestError, &msg);
-                    Err(anyhow!("{msg}"))
-                }
-            }
+        // Request mode, or an imposter-mode script with no imposter to hold its instance
+        // (`rift script run`, an embedder calling the engine directly): a fresh instance.
+        _ => {
+            let (result, _kept) = call.run(None, report).await;
+            result
         }
     }
+}
+
+/// `_rift.script.instance` (issue #1793): a fresh instance per request, or one kept per imposter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstanceMode {
+    Request,
+    Imposter,
+}
+
+impl InstanceMode {
+    /// `instance` as written. Admission refuses an unknown value; a stored config that carries one
+    /// answers a script error here.
+    pub(crate) fn parse(value: Option<&str>) -> anyhow::Result<Self> {
+        match value {
+            None | Some("request") => Ok(Self::Request),
+            Some("imposter") => Ok(Self::Imposter),
+            Some(other) => Err(anyhow!(
+                "wasm instance \"{other}\" is not supported; use \"request\" or \"imposter\""
+            )),
+        }
+    }
+}
+
+/// The request in the form the export takes.
+enum Prepared {
+    Rift(Request),
+    Http {
+        request: hyper::Request<http_body_util::Full<bytes::Bytes>>,
+        https: bool,
+    },
+}
+
+/// What a call reads that belongs to the request, not the instance.
+struct Scope {
+    flow_store: Arc<dyn FlowStore>,
+    flow_id: String,
+    rng: Option<crate::imposter::rng::RequestRng>,
+    clock: Option<ScriptClock>,
+}
+
+/// One call, with everything it needs owned: a kept instance's call runs on a task of its own,
+/// which outlives the request that started it (issue #1793).
+pub(super) struct CallSpec {
+    pub(super) loaded: Arc<Loaded>,
+    export: WasmExport,
+    knobs: String,
+    limits: WasmLimits,
+    scope: Scope,
+    prepared: Prepared,
+    rule_id: String,
+    timeout: Duration,
+    /// When the call's deadline started: its compile and any wait for its instance count.
+    pub(super) started: Instant,
+    /// `wasi:random/insecure-seed` for a kept instance, from its key; `None` draws it from the
+    /// request's stream, as a fresh instance per call always has.
+    pub(super) insecure_seed: Option<u128>,
+}
+
+/// The typed exports of an instantiated component.
+enum Bindings {
+    Rift(Mock),
+    Http(wasmtime_wasi_http::p2::bindings::Proxy),
+}
+
+/// A store with its component instantiated: one call's in `instance: "request"` mode, an
+/// imposter's for as long as it lives in `"imposter"` mode.
+pub(super) struct Live {
+    store: Store<Host>,
+    bindings: Bindings,
+    logs: (LogPipe, LogPipe),
+    /// Set while the instance is kept by an imposter: counts it in `rift_wasm_instances`.
+    pub(super) counted: Option<super::instances::Counted>,
+}
+
+impl Live {
+    /// Let go of what the last call held that belongs to its request: the flow store holds the
+    /// imposter, so a kept instance holding it would keep a deleted imposter alive (issue #1793).
+    pub(super) fn release_request(&mut self) {
+        let data = self.store.data_mut();
+        data.flow_store = Arc::new(crate::extensions::flow_state::NoOpFlowStore);
+        data.flow_id.clear();
+        *data.clock.write() = None;
+        data.deadline = None;
+    }
+
+    /// The bytes of linear memory the instance holds.
+    pub(super) fn memory_bytes(&self) -> usize {
+        self.store.data().limits.memory_total
+    }
+}
+
+impl CallSpec {
+    /// What is left of the deadline.
+    pub(super) fn remaining(&self) -> Duration {
+        self.timeout.saturating_sub(self.started.elapsed())
+    }
+
+    fn failure(&self) -> Failure {
+        Failure {
+            budget: self.limits.fuel.unwrap_or(u64::MAX),
+            max_memory_mib: self.limits.max_memory_mib,
+            timeout: self.timeout,
+        }
+    }
+
+    /// Run the call on `live`, or on a fresh instance when there is none. Returns the answer and
+    /// the instance when it may be called again: only after a call that returned without trapping,
+    /// whatever it answered. A trap, a deadline miss or a body left open drops it.
+    pub(super) async fn run(
+        self,
+        live: Option<Live>,
+        report: &mut CallReport,
+    ) -> (anyhow::Result<WasmAnswer>, Option<Live>) {
+        // A fresh instance's `init` and its call share one fuel budget and one deadline, as they
+        // always have; a kept instance's call starts a budget of its own.
+        let (live, fresh) = match live {
+            Some(live) => (live, false),
+            None => match self.instantiate(report).await {
+                Ok(live) => (live, true),
+                Err(e) => return (Err(e), None),
+            },
+        };
+        self.call(live, fresh, report).await
+    }
+
+    /// A store, the component instantiated in it, and the rift export's `init(knobs)`.
+    async fn instantiate(&self, report: &mut CallReport) -> anyhow::Result<Live> {
+        let logs = (LogPipe::new(LOG_PIPE_BYTES), LogPipe::new(LOG_PIPE_BYTES));
+        // `wasi:http` has no `init`: an http component reads its knobs from `RIFT_KNOBS`, the one
+        // variable any component ever sees.
+        let knobs_env = (self.export == WasmExport::Http).then_some(self.knobs.as_str());
+        let mut store = new_store(
+            &self.limits,
+            (logs.0.clone(), logs.1.clone()),
+            knobs_env,
+            &self.scope,
+            self.insecure_seed,
+        )?;
+        begin(&mut store, &self.scope, &self.limits, self.remaining())?;
+        let failed = self.failure();
+        let bound = self.remaining().saturating_add(2 * EPOCH_TICK);
+        let knobs = &self.knobs;
+        let made = match self.export {
+            WasmExport::Rift => {
+                let pre = self.loaded.mock.as_ref().map_err(|e| anyhow!("{e}"))?;
+                let outcome = tokio::time::timeout(bound, async {
+                    let mock = pre.instantiate_async(&mut store).await?;
+                    let init = mock
+                        .rift_mock_handler()
+                        .call_init(&mut store, knobs)
+                        .await?;
+                    Ok::<_, wasmtime::Error>(init.map(|()| mock))
+                })
+                .await;
+                let memory_refused = store.data().limits.memory_refused;
+                take_logs(&logs, report);
+                match failed.classify(outcome, report, memory_refused)? {
+                    Ok(mock) => Bindings::Rift(mock),
+                    Err(msg) => {
+                        let msg = format!("init: {msg}");
+                        report.trapped(TrapKind::GuestError, &msg);
+                        return Err(anyhow!("{msg}"));
+                    }
+                }
+            }
+            WasmExport::Http => {
+                let pre = self.loaded.proxy.as_ref().map_err(|e| anyhow!("{e}"))?;
+                let outcome = tokio::time::timeout(bound, pre.instantiate_async(&mut store)).await;
+                let memory_refused = store.data().limits.memory_refused;
+                take_logs(&logs, report);
+                Bindings::Http(failed.classify(outcome, report, memory_refused)?)
+            }
+        };
+        Ok(Live {
+            store,
+            bindings: made,
+            logs,
+            counted: None,
+        })
+    }
+
+    /// One call of the export on `live`.
+    async fn call(
+        self,
+        mut live: Live,
+        fresh: bool,
+        report: &mut CallReport,
+    ) -> (anyhow::Result<WasmAnswer>, Option<Live>) {
+        let failed = self.failure();
+        if !fresh
+            && let Err(e) = begin(&mut live.store, &self.scope, &self.limits, self.remaining())
+        {
+            return (Err(e), None);
+        }
+        // The epoch deadline normally ends a runaway call first, as a trap the store reports; this
+        // outer bound, two ticks later, catches a call parked in a host import.
+        let bound = self.remaining().saturating_add(2 * EPOCH_TICK);
+        let Live {
+            store, bindings, ..
+        } = &mut live;
+        match (bindings, self.prepared) {
+            (Bindings::Rift(mock), Prepared::Rift(wit_request)) => {
+                let outcome = tokio::time::timeout(
+                    bound,
+                    mock.rift_mock_handler()
+                        .call_respond(&mut *store, &wit_request),
+                )
+                .await;
+                let kept = matches!(outcome, Ok(Ok(_)));
+                let memory_refused = finish(store, &failed, report);
+                take_logs(&live.logs, report);
+                let answer = match failed.classify(outcome, report, memory_refused) {
+                    Ok(Ok(decision)) => {
+                        decision_to_fault(decision, &self.rule_id).map(WasmAnswer::Decision)
+                    }
+                    Ok(Err(guest)) => {
+                        report.trapped(TrapKind::GuestError, &guest);
+                        Err(anyhow!("{guest}"))
+                    }
+                    Err(e) => Err(e),
+                };
+                (answer, kept.then_some(live))
+            }
+            (Bindings::Http(proxy), Prepared::Http { request, https }) => {
+                let body_limit = usize::try_from(u64::from(self.limits.max_memory_mib) << 20)
+                    .unwrap_or(usize::MAX);
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                let mut collect = Box::pin(collect_response(receiver, body_limit));
+                let mut collected = None;
+                let scheme = if https { Scheme::Https } else { Scheme::Http };
+                let outcome = tokio::time::timeout(bound, async {
+                    let req = store
+                        .data_mut()
+                        .http()
+                        .new_incoming_request(scheme, request)?;
+                    let out = store.data_mut().http().new_response_outparam(sender)?;
+                    let call =
+                        proxy
+                            .wasi_http_incoming_handler()
+                            .call_handle(&mut *store, req, out);
+                    tokio::pin!(call);
+                    // The body is read while `handle` runs: a guest can set the response and keep
+                    // writing the body inside the call, and a full body buffer waits for this side.
+                    loop {
+                        tokio::select! {
+                            out = &mut call => break out,
+                            got = &mut collect, if collected.is_none() => collected = Some(got),
+                        }
+                    }
+                })
+                .await;
+                let mut kept = matches!(outcome, Ok(Ok(())));
+                // Once `handle` has returned the guest cannot write again, so what is left of the
+                // body is already queued: one poll reads it. A guest that left its body or its
+                // outparam open is waiting on nothing: drop its store, which ends them.
+                if collected.is_none() {
+                    collected = poll_ready(collect.as_mut());
+                }
+                let memory_refused = finish(store, &failed, report);
+                take_logs(&live.logs, report);
+                let live = if collected.is_none() {
+                    kept = false;
+                    report.unfinished = true;
+                    drop(live);
+                    None
+                } else {
+                    Some(live)
+                };
+                // A body past the bound stops this side reading, and a guest whose next write
+                // then fails usually traps: the bound is the cause to report, not the trap.
+                if !matches!(collected, Some(Collected::TooLarge))
+                    && let Err(e) = failed.classify(outcome, report, memory_refused)
+                {
+                    return (Err(e), None);
+                }
+                let collected = match collected {
+                    Some(collected) => collected,
+                    None => collect.await,
+                };
+                let answer = match collected {
+                    Collected::Response(response) => Ok(WasmAnswer::Response(response)),
+                    Collected::TooLarge => {
+                        let msg = format!(
+                            "response body exceeds maxMemoryMiB ({} MiB)",
+                            self.limits.max_memory_mib
+                        );
+                        report.trapped(TrapKind::Memory, &msg);
+                        Err(anyhow!("{msg}"))
+                    }
+                    Collected::Failed(msg) => {
+                        report.trapped(TrapKind::GuestError, &msg);
+                        Err(anyhow!("{msg}"))
+                    }
+                };
+                (answer, if kept { live } else { None })
+            }
+            // `resolve` picked the export and `prepared` was built for it.
+            _ => (Err(anyhow!("wasm export and request disagree")), None),
+        }
+    }
+}
+
+/// `future`'s output if it is ready now, polled once outside tokio's cooperative budget, so a
+/// ready channel is never reported pending.
+fn poll_ready<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> Option<F::Output> {
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut unconstrained = tokio::task::unconstrained(future);
+    match std::pin::Pin::new(&mut unconstrained).poll(&mut cx) {
+        std::task::Poll::Ready(out) => Some(out),
+        std::task::Poll::Pending => None,
+    }
+}
+
+/// Set what a call reads that is the request's: its flow, random stream and clock; and its fuel
+/// budget and epoch deadline, `remaining` from now.
+fn begin(
+    store: &mut Store<Host>,
+    scope: &Scope,
+    limits: &WasmLimits,
+    remaining: Duration,
+) -> anyhow::Result<()> {
+    let data = store.data_mut();
+    data.flow_store = Arc::clone(&scope.flow_store);
+    data.flow_id.clone_from(&scope.flow_id);
+    if let Some(rng) = &scope.rng {
+        data.rng.follow(rng);
+    }
+    *data.clock.write() = scope.clock.clone();
+    // A deadline past what `Instant` can hold is no deadline: the outer timeout still bounds the
+    // call, as it bounds a Rhai or JavaScript script.
+    data.deadline = Instant::now().checked_add(remaining);
+    data.limits.memory_refused = false;
+    store
+        .set_fuel(limits.fuel.unwrap_or(u64::MAX))
+        .map_err(|e| anyhow!("{e:#}"))?;
+    store.set_epoch_deadline(1);
+    Ok(())
+}
+
+/// After a call: the fuel it spent, into `report`. Returns whether the memory cap refused a growth.
+fn finish(store: &Store<Host>, failed: &Failure, report: &mut CallReport) -> bool {
+    // Fuel is always metered (`consume_fuel` is on), so this only fails on a misconfigured engine;
+    // the trace then omits `fuelUsed`.
+    report.fuel_used = store
+        .get_fuel()
+        .ok()
+        .map(|left| failed.budget.saturating_sub(left));
+    store.data().limits.memory_refused
+}
+
+/// What the call wrote to stdout and stderr, into `report`; the pipes are emptied for the next.
+fn take_logs(logs: &(LogPipe, LogPipe), report: &mut CallReport) {
+    report.stdout.extend(logs.0.take());
+    report.stderr.extend(logs.1.take());
 }
 
 /// What an http component's response came to.
@@ -713,39 +1030,16 @@ fn request_body(request: &ScriptRequest) -> anyhow::Result<Vec<u8>> {
     }
 }
 
-/// After a call: the fuel it spent and what it logged, into `report`; then the store is dropped.
-/// Returns whether the memory cap refused a growth.
-fn settle(
-    store: Store<Host>,
-    budget: u64,
-    logs: (&LogPipe, &LogPipe),
-    report: &mut CallReport,
-) -> bool {
-    // Fuel is always metered (`consume_fuel` is on), so this only fails on a misconfigured engine;
-    // the trace then omits `fuelUsed`.
-    report.fuel_used = store
-        .get_fuel()
-        .ok()
-        .map(|left| budget.saturating_sub(left));
-    let memory_refused = store.data().limits.memory_refused;
-    drop(store);
-    report.stdout = logs.0.contents();
-    report.stderr = logs.1.contents();
-    memory_refused
-}
-
-/// A store for one call: WASI with nothing behind it but the captured `logs` (stdout, stderr) and
-/// `clock`, the `rift:mock/state` host on `flow_store`, `limits`' memory, table and fuel caps, and
-/// an epoch deadline `remaining` from now. Returns the store and its fuel budget.
+/// A store: WASI with nothing behind it but the captured `logs` (stdout, stderr), the clock and
+/// random stream a call sets ([`begin`]), the `rift:mock/state` host, and `limits`' memory and
+/// table caps. `knobs_env` is `RIFT_KNOBS` for an http component.
 fn new_store(
     limits: &WasmLimits,
-    clock: Option<&ScriptClock>,
-    flow_store: Arc<dyn FlowStore>,
-    flow_id: String,
     logs: (LogPipe, LogPipe),
     knobs_env: Option<&str>,
-    remaining: Duration,
-) -> anyhow::Result<(Store<Host>, u64)> {
+    scope: &Scope,
+    insecure_seed: Option<u128>,
+) -> anyhow::Result<Store<Host>> {
     let memory_size = usize::try_from(u64::from(limits.max_memory_mib) << 20).map_err(|_| {
         anyhow!(
             "maxMemoryMiB {} is more than this host can address",
@@ -757,17 +1051,23 @@ fn new_store(
     if let Some(knobs) = knobs_env {
         wasi.env("RIFT_KNOBS", knobs);
     }
-    // `wasi:random` draws from the request's stream (issue #1755), so a seeded imposter replays.
-    // "Secure" random is deterministic under a seed too: this is a mock.
-    if let Some(mut rng) = crate::imposter::rng::current() {
-        wasi.insecure_random_seed(rng.seed_u128())
-            .secure_random(rng.clone())
-            .insecure_random(rng);
+    // `wasi:random` draws from the request's stream (issue #1755), through the store's own handle
+    // that each call points at its request's (#1793), so a seeded imposter replays. "Secure"
+    // random is deterministic under a seed too: this is a mock.
+    let rng = crate::imposter::rng::RequestRng::unseeded();
+    if let Some(request_rng) = &scope.rng {
+        rng.follow(request_rng);
     }
-    if let Some(clock) = clock {
-        wasi.wall_clock(GuestWallClock(clock.clone()))
-            .monotonic_clock(GuestMonotonicClock(clock.clone()));
-    }
+    // A kept instance's seed comes from its key, not from the request that happens to create it:
+    // drawing it there would shift that request's stream, and the values a key draws would then
+    // depend on which request came first (issue #1793).
+    let seed = insecure_seed.unwrap_or_else(|| rng.clone().seed_u128());
+    wasi.insecure_random_seed(seed)
+        .secure_random(rng.clone())
+        .insecure_random(rng.clone());
+    let clock: super::host::CallClock = Arc::default();
+    wasi.wall_clock(GuestWallClock(Arc::clone(&clock)))
+        .monotonic_clock(GuestMonotonicClock(Arc::clone(&clock)));
     let mut table = ResourceTable::new();
     table.set_max_capacity(MAX_RESOURCES);
     let host = Host {
@@ -791,24 +1091,21 @@ fn new_store(
             memory_total: 0,
             memory_refused: false,
         },
-        flow_store,
-        flow_id,
+        flow_store: Arc::clone(&scope.flow_store),
+        flow_id: scope.flow_id.clone(),
+        rng,
+        clock,
+        deadline: None,
     };
     let mut store = Store::new(engine()?, host);
     store.limiter(|h| &mut h.limits);
-    let budget = limits.fuel.unwrap_or(u64::MAX);
-    store.set_fuel(budget).map_err(|e| anyhow!("{e:#}"))?;
-    // A deadline past what `Instant` can hold is no deadline: the outer timeout still bounds the
-    // call, as it bounds a Rhai or JavaScript script.
-    let deadline = Instant::now().checked_add(remaining);
-    store.set_epoch_deadline(1);
-    store.epoch_deadline_callback(move |_| {
-        Ok(match deadline {
+    store.epoch_deadline_callback(|store| {
+        Ok(match store.data().deadline {
             Some(at) if Instant::now() >= at => UpdateDeadline::Interrupt,
             _ => UpdateDeadline::Yield(1),
         })
     });
-    Ok((store, budget))
+    Ok(store)
 }
 
 /// What the script-engine benches measure apart (issue #1760): the parts of a call `respond` runs
@@ -816,8 +1113,8 @@ fn new_store(
 #[doc(hidden)]
 pub mod bench {
     use super::{
-        Arc, Duration, FlowStore, LOG_PIPE_BYTES, LogPipe, WasmLimits, anyhow, compile, load,
-        new_store,
+        Arc, Duration, FlowStore, LOG_PIPE_BYTES, LogPipe, Scope, WasmLimits, anyhow, begin,
+        compile, load, new_store,
     };
 
     /// Compile and link `code` (base64) without the cache: what admitting a component costs.
@@ -830,13 +1127,17 @@ pub mod bench {
     pub async fn instantiate(code: &str, flow_store: Arc<dyn FlowStore>) -> anyhow::Result<()> {
         let loaded = load(code).map_err(|e| anyhow!("{e}"))?;
         let logs = (LogPipe::new(LOG_PIPE_BYTES), LogPipe::new(LOG_PIPE_BYTES));
-        let (mut store, _) = new_store(
-            &WasmLimits::default(),
-            None,
+        let scope = Scope {
             flow_store,
-            String::new(),
-            logs,
-            None,
+            flow_id: String::new(),
+            rng: None,
+            clock: None,
+        };
+        let mut store = new_store(&WasmLimits::default(), logs, None, &scope, None)?;
+        begin(
+            &mut store,
+            &scope,
+            &WasmLimits::default(),
             Duration::from_secs(5),
         )?;
         let pre = loaded
@@ -850,6 +1151,11 @@ pub mod bench {
             .await?
             .map_err(|msg| anyhow!("init: {msg}"))
     }
+}
+
+/// [`timeout_error`] for `call`'s deadline.
+pub(super) fn timeout_error_for(call: &CallSpec) -> anyhow::Error {
+    timeout_error(call.timeout)
 }
 
 /// A deadline miss, as the `_rift.script` path reports one for every engine.
@@ -976,8 +1282,9 @@ fn decision_to_fault(decision: Decision, rule_id: &str) -> anyhow::Result<FaultD
 }
 
 /// A component's `wasi:clocks/wall-clock` (issue #1754): the imposter's frozen instant, a request's
-/// `X-Rift-Now`, or the system clock. Read at every call, so a step taken mid-call is seen.
-struct GuestWallClock(crate::scripting::ScriptClock);
+/// `X-Rift-Now`, or the system clock, whichever the current call set. Read at every call, so a step
+/// taken mid-call is seen.
+struct GuestWallClock(super::host::CallClock);
 
 impl wasmtime_wasi::HostWallClock for GuestWallClock {
     fn resolution(&self) -> Duration {
@@ -985,7 +1292,7 @@ impl wasmtime_wasi::HostWallClock for GuestWallClock {
     }
 
     fn now(&self) -> Duration {
-        match self.0.frozen_ms() {
+        match self.0.read().as_ref().and_then(ScriptClock::frozen_ms) {
             // An instant before the epoch reads as the epoch: WASI's wall clock is unsigned.
             Some(ms) => Duration::from_millis(u64::try_from(ms).unwrap_or(0)),
             None => std::time::SystemTime::now()
@@ -1002,7 +1309,7 @@ static MONOTONIC_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
 /// A component's `wasi:clocks/monotonic-clock` (issue #1754): under a frozen clock its nanoseconds
 /// are the frozen instant's, so two reads of one frozen instant are equal; otherwise time since the
 /// process started. Never decreasing while the mode stays the same.
-struct GuestMonotonicClock(crate::scripting::ScriptClock);
+struct GuestMonotonicClock(super::host::CallClock);
 
 impl wasmtime_wasi::HostMonotonicClock for GuestMonotonicClock {
     fn resolution(&self) -> u64 {
@@ -1010,7 +1317,7 @@ impl wasmtime_wasi::HostMonotonicClock for GuestMonotonicClock {
     }
 
     fn now(&self) -> u64 {
-        match self.0.frozen_ms() {
+        match self.0.read().as_ref().and_then(ScriptClock::frozen_ms) {
             Some(ms) => u64::try_from(ms).unwrap_or(0).saturating_mul(1_000_000),
             None => u64::try_from(MONOTONIC_ORIGIN.elapsed().as_nanos()).unwrap_or(u64::MAX),
         }

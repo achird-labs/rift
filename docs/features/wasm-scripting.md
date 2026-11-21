@@ -53,6 +53,7 @@ The `.wasm` extension selects the engine, so `"engine": "wasm"` can be left out.
 | `_rift.script.file` | — | The component. It is resolved like any script file: relative to the config file for `--configfile`, or to `--scripts-dir` through the admin API. A path that leaves `--scripts-dir` is refused. |
 | `_rift.script.component` | — | Instead of `file`: a component uploaded with `POST /components`, as `"sha256:<hex>"` ([Uploading a component](#uploading-a-component)). Implies `engine: "wasm"`. |
 | `_rift.script.export` | `"rift"` when the component exports `rift:mock/handler`, else `"http"` | Which export answers: `"rift"` is the `rift:mock/handler` interface below, `"http"` a standard `wasi:http/incoming-handler` ([The `http` export](#the-http-export)). Naming one the component does not export is refused with `400`. |
+| `_rift.script.instance` | `"request"` | `"request"` runs a fresh instance for every call; `"imposter"` keeps one instance across calls, so the guest's memory is its state ([Keeping an instance](#keeping-an-instance-instance-imposter)). |
 | `_rift.script.knobs` | `{}` | Any JSON. Under `"rift"`, the component's `init` gets it as text before every call; under `"http"`, the `RIFT_KNOBS` environment variable holds it. |
 | `_rift.scriptEngine.timeoutMs` | `5000` | The wall-clock deadline of one call. |
 | `_rift.scriptEngine.wasm.fuel` | unlimited | A compute budget in wasmtime fuel units. |
@@ -188,8 +189,9 @@ world mock {
   imposter. `flow = none` is the request's flow id, the one `ctx.state` uses; `some(id)` is another
   flow. Values are JSON text; TTLs are seconds. A failing store returns `err`, never a default.
 
-Every request gets a fresh instance: nothing in the component's memory carries from one request to
-the next. State that should last goes in `state`.
+By default every request gets a fresh instance: nothing in the component's memory carries from one
+request to the next, and state that should last goes in `state`. To keep the guest's memory, see
+[Keeping an instance](#keeping-an-instance-instance-imposter).
 
 A component may export more than `handler`, and it may import the WASI interfaces below.
 
@@ -232,6 +234,63 @@ A component may export both `rift:mock/handler` and `wasi:http/incoming-handler`
 `export`, Rift runs `rift`; name `"http"` to serve the other. The example
 [`examples/wasm/http-twin`](https://github.com/achird-labs/rift/tree/master/examples/wasm/http-twin)
 is one, so a simulation runtime can drive it directly while Rift serves it over HTTP.
+
+### Keeping an instance: `instance: "imposter"`
+
+`"instance": "imposter"` keeps one live instance of the component on the imposter and calls it for
+every request, so state the guest keeps in its own memory lasts. This is the mode for a twin that a
+simulation runtime also drives directly, and one call costs about 3 µs instead of 21–25 µs, since
+nothing is instantiated. It works with either export; `init(knobs)` runs once, when the instance is
+made.
+
+| | `"request"` (default) | `"imposter"` |
+|:--|:--|:--|
+| State | only in `state` | guest memory, and `state` |
+| Calls | in parallel | one at a time per instance |
+| After a trap | nothing to lose | the instance is dropped; the next call starts afresh |
+
+**Identity is the component, not the stub.** An instance is keyed by the component's SHA-256, its
+`export` as written and its `knobs` (as JSON with sorted keys). So:
+
+- Two stubs with the same component, `export` and `knobs` share one instance: a twin split across
+  route stubs is one service. Give two copies different `knobs` to keep them apart.
+- A `component: "sha256:…"` reference and inline `code` of the same bytes are the same component.
+- Unset `export` and `"rift"` are two keys: write it the same way in every stub.
+
+**What keeps it, and what drops it.** Editing stubs keeps an instance for as long as some stub still
+references its key: adding or removing other stubs, moving the twin's stub, replacing it with new
+predicates or a `_rift.fault`, a `PUT /imposters/:port/stubs` or a reload that keeps it. It is
+dropped when:
+
+- no stub references its key any more (a delete, or a replace with other `knobs` or another
+  component: changing `knobs` resets a stateful twin, since a guest reads them only once);
+- the imposter's runtime state is restarted, or it is deleted or recreated;
+- a call traps, runs out of fuel or memory, misses its deadline while the guest runs, or returns with
+  its http response body still open.
+
+A guest `err`, or an http component's error response, keeps it. Each drop is logged at `warn` with
+the component's short SHA-256 and a reason, and counted in `rift_wasm_instance_drops_total`.
+
+**To open a fault window** in front of a twin, add a stub ahead of it (`POST
+/imposters/:port/stubs` at index `0`) and delete that stub afterwards. Deleting the twin's own stub
+and adding it back drops the instance.
+
+**A call outlives its client.** It runs on a task of its own, so a client that hangs up, or a delete
+that cuts the request, does not stop the guest half-way through changing its memory. The call is
+still bounded by `timeoutMs`, and the time a request waits for its instance counts toward it: a
+request that times out waiting, or gets the instance with less than 20 ms of its deadline left,
+answers a script timeout and drops nothing. A call cut by a restart or a delete finishes on its old
+instance, which is not kept, and its `state` operations fail from then on, so it never reads or
+writes the next generation's state.
+
+**Each call is its request's.** A kept instance reads the calling request's flow, its random stream
+(with `rngKey`, its own key's), its clock and `X-Rift-Now`, and its logs. `wasi:random`'s
+insecure seed comes from the instance's key, so a kept instance replays the same way whichever
+request creates it.
+
+**Memory.** An instance holds its linear memory, up to `maxMemoryMiB`, for as long as it lives. There
+is no cap on how many an imposter keeps: one per distinct key its stubs reference. `GET
+/imposters/:port/wasm/instances` lists them, with their memory, and `rift_wasm_instances` counts them.
 
 ### Toolchains
 

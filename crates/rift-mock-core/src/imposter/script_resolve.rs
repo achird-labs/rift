@@ -158,6 +158,9 @@ fn resolve_response_script(
         if script.knobs.is_none() {
             script.knobs = target.knobs.clone();
         }
+        if script.instance.is_none() {
+            script.instance = target.instance.clone();
+        }
         // `ref` fully collapses into `code`/`engine` — clearing it keeps `source_count() == 1`
         // for any post-resolution re-check (e.g. `validate_stubs`, run after resolution in the
         // admin-API handlers) and matches the resolved leaf's shape below.

@@ -179,6 +179,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E063 | A `.wasm` script file that is a core WebAssembly module (built for `wasm32-unknown-unknown` or `wasm32-wasip1`), not a component. The engine refuses it with `not a component; build for wasm32-wasip2` | `{"file": "plain-module.wasm"}` |
 | E064 | A `_rift.script` `component` that is not `sha256:` and 64 lowercase hex digits (issue #1757) | `{"component": "sha256:ABC"}` |
 | E065 | A `_rift.script` `component` with an `engine` other than `wasm`: an uploaded component is a wasm component | `{"engine": "rhai", "component": "sha256:…"}` |
+| E066 | A `_rift.script` `instance` that is not `"request"` or `"imposter"`, or one on an engine other than `wasm`. The engine refuses both when the imposter is created (issue #1793) | `{"engine": "rhai", "code": "…", "instance": "imposter"}` |
 
 ### Warnings
 

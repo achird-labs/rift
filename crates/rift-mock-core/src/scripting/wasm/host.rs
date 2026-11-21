@@ -74,7 +74,9 @@ impl ResourceLimiter for Limits {
     }
 }
 
-/// One call's store state. Nothing outlives the call: the store is dropped after it.
+/// A store's state. In `instance: "request"` mode the store is dropped after its one call; in
+/// `"imposter"` mode (issue #1793) it lives as long as its instance, and the fields a call owns —
+/// flow, random stream, clock, deadline — are set again before every call.
 pub(super) struct Host {
     pub(super) wasi: WasiCtx,
     pub(super) table: ResourceTable,
@@ -85,7 +87,17 @@ pub(super) struct Host {
     pub(super) flow_store: Arc<dyn FlowStore>,
     /// The request's flow id: what `flow = none` means, as `ctx.state` is bound to it.
     pub(super) flow_id: String,
+    /// The store's own random handle, which `wasi:random` reads; each call points it at the
+    /// request's stream (issues #1755, #1795).
+    pub(super) rng: crate::imposter::rng::RequestRng,
+    /// What `wasi:clocks` read for the current call (issue #1754); `None` is the system clock.
+    pub(super) clock: CallClock,
+    /// When the current call's deadline passes; `None` is no deadline.
+    pub(super) deadline: Option<std::time::Instant>,
 }
+
+/// The clock a store's `wasi:clocks` read, set for each call.
+pub(super) type CallClock = Arc<parking_lot::RwLock<Option<crate::scripting::ScriptClock>>>;
 
 impl WasiView for Host {
     fn ctx(&mut self) -> WasiCtxView<'_> {

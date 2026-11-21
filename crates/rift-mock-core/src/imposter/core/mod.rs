@@ -516,6 +516,10 @@ pub struct Imposter {
     /// Swapped, never reset in place: a request's handle keeps the stream it started on, so work a
     /// restart cuts off (a blocking closure still running) cannot consume the new stream's draws.
     pub(crate) rng: ArcSwap<crate::imposter::rng::ImposterRng>,
+    /// The `instance: "imposter"` wasm instances its stubs reference (issue #1793): pruned after
+    /// every stub edit to the keys still referenced, cleared by `restart_runtime_state`, and gone
+    /// with the imposter on delete or recreate.
+    pub(crate) wasm_instances: crate::scripting::WasmInstances,
     /// Which imposter this is among all the manager created, for the lifecycle probe
     /// (`formal/lifecycle`). `0` for an imposter built outside a manager.
     pub(crate) generation: crate::imposter::probe::Generation,
@@ -778,6 +782,7 @@ impl Imposter {
             generation: 0,
             probe: None,
             components: Arc::default(),
+            wasm_instances: crate::scripting::WasmInstances::default(),
             scenario_transitions: ArcSwap::from_pointee(HashMap::new()),
             // Each request claims with its own proxy response's mode (issue #1387).
             proxy_store: Arc::new(LocalProxyStore::new(ProxyMode::ProxyOnce)),
@@ -814,6 +819,12 @@ impl Imposter {
     #[must_use]
     pub fn clock(&self) -> &crate::imposter::clock::ImposterClock {
         &self.clock
+    }
+
+    /// The `instance: "imposter"` wasm instances its stubs keep (issue #1793).
+    #[must_use]
+    pub fn wasm_instances(&self) -> &crate::scripting::WasmInstances {
+        &self.wasm_instances
     }
 
     /// A handle on the imposter's random stream (issue #1755), as a request draws through.
@@ -937,7 +948,16 @@ impl Imposter {
         };
         self.forget_orphaned_claims(before.stubs(), after.stubs());
         self.restart_reordered_sequences(before.stubs(), after.stubs());
+        self.prune_wasm_instances(after.stubs());
         result
+    }
+
+    /// Drop the `instance: "imposter"` wasm instances no stub in `after` references any more
+    /// (issue #1793). After the swap, like the claims: a request that matched before it can still
+    /// finish on, or briefly bring back, an instance the edit removed.
+    pub(crate) fn prune_wasm_instances(&self, after: &[Arc<StubState>]) {
+        self.wasm_instances
+            .retain_referenced(after.iter().map(|state| &state.stub));
     }
 
     /// Restart a sequencer's cursor for each slot whose cycle order an edit built, changed or

@@ -3,7 +3,7 @@
 //! This module provides routing
 
 use crate::admin_api::handlers::{
-    clock, components, imposters, intercept, scenarios, stubs, system,
+    clock, components, imposters, intercept, scenarios, stubs, system, wasm_instances,
 };
 use crate::admin_api::routes::ADMIN_ROUTES;
 use crate::admin_api::types::{
@@ -53,6 +53,8 @@ pub(crate) enum ImposterRoute {
     ScenariosReset,
     /// GET/PUT/DELETE /imposters/:port/clock (issue #1754)
     Clock,
+    /// GET /imposters/:port/wasm/instances (issue #1793)
+    WasmInstances,
     /// GET/DELETE /imposters/:port/spaces/:flowId
     Space(String),
     /// POST/GET /imposters/:port/spaces/:flowId/stubs
@@ -78,6 +80,7 @@ impl ImposterRoute {
             ["scenarios", "reset"] => Some(ImposterRoute::ScenariosReset),
             ["scenarios", name, "state"] => Some(ImposterRoute::ScenarioState((*name).to_string())),
             ["clock"] => Some(ImposterRoute::Clock),
+            ["wasm", "instances"] => Some(ImposterRoute::WasmInstances),
             ["spaces", flow_id] => Some(ImposterRoute::Space((*flow_id).to_string())),
             ["spaces", flow_id, "stubs"] => Some(ImposterRoute::SpaceStubs((*flow_id).to_string())),
             _ => None,
@@ -102,6 +105,7 @@ impl ImposterRoute {
             ImposterRoute::ScenarioState(_) => "/imposters/{port}/scenarios/{scenario}/state",
             ImposterRoute::ScenariosReset => "/imposters/{port}/scenarios/reset",
             ImposterRoute::Clock => "/imposters/{port}/clock",
+            ImposterRoute::WasmInstances => "/imposters/{port}/wasm/instances",
             ImposterRoute::Space(_) => "/imposters/{port}/spaces/{space}",
             ImposterRoute::SpaceStubs(_) => "/imposters/{port}/spaces/{space}/stubs",
         }
@@ -721,6 +725,11 @@ async fn route_imposter(
         (&Method::GET, ImposterRoute::Clock) => clock::handle_get(port, manager).await,
         (&Method::PUT, ImposterRoute::Clock) => clock::handle_put(port, req, manager).await,
         (&Method::DELETE, ImposterRoute::Clock) => clock::handle_delete(port, manager).await,
+
+        // /imposters/:port/wasm/instances — kept wasm instances (issue #1793)
+        (&Method::GET, ImposterRoute::WasmInstances) => {
+            wasm_instances::handle_list(port, manager).await
+        }
 
         // /imposters/:port/spaces/:flowId — Correlated isolation (issue #223)
         (&Method::POST, ImposterRoute::SpaceStubs(flow_id)) => {
