@@ -54,6 +54,10 @@ pub enum Point {
     /// `PortTable::try_claim` found the slot held; the create fails with `PortInUse`
     /// (`CreateTryClaim`, the loser).
     CreateClaimLost { port: u16, generation: Generation },
+    /// A server listener reserved the port while this create was binding (issue #1841): the create
+    /// does not claim it, stops its waiting accept loops and fails with `PortInUse`. Outside the
+    /// lifecycle model, which has no server listeners.
+    CreateReservedLost { port: u16, generation: Generation },
     /// The claim's winner re-read the load floor, which a delete may have recorded since
     /// `CreateFloorRead`; its accept loops open next (`CreateReread`).
     CreateFloorReread { port: u16, generation: Generation },

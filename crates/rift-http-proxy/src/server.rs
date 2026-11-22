@@ -1247,9 +1247,26 @@ impl ServerBuilder {
         // No imposter may take a port this server listens on (issue #1557). Each listener reserves
         // the port it really bound, so `--metrics-port 0` reserves the kernel's choice. Dropped on
         // every early return below, which releases it.
-        let metrics_reservation = metrics.as_ref().map(|running| {
-            PortReservation::new(&manager, running.local_addrs(), ServerListener::Metrics)
-        });
+        //
+        // Checked and reserved in one step against an imposter's claim (issue #1841). A refusal
+        // stops the metrics server, as a refused bind leaves none.
+        let (metrics, metrics_reservation) = match metrics {
+            Some(running) => {
+                match PortReservation::try_new(
+                    &manager,
+                    running.local_addrs(),
+                    ServerListener::Metrics,
+                ) {
+                    Ok(reservation) => (Some(running), Some(reservation)),
+                    Err(taken) => {
+                        running.shutdown().await;
+                        error!("Metrics server error: {taken}");
+                        (None, None)
+                    }
+                }
+            }
+            None => (None, None),
+        };
 
         // Front door (issue #19 / U-11): one listener serving every imposter, resolved by the
         // `routes` block threaded through above exactly like the `intercept` block is (falling

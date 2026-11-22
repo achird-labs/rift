@@ -106,6 +106,9 @@ pub struct PortReservation {
 impl PortReservation {
     /// Reserve the ports of `addrs` for `by`. A listener bound on several addresses of one port
     /// (`--local-only`'s `127.0.0.1` and `[::1]`) reserves it once.
+    ///
+    /// Does not look for an imposter on the ports: use [`Self::try_new`] wherever an imposter can be
+    /// created while the listener starts (issue #1841).
     pub fn new(
         manager: &Arc<ImposterManager>,
         addrs: &[std::net::SocketAddr],
@@ -121,6 +124,60 @@ impl PortReservation {
             manager: Arc::clone(manager),
             ports,
         }
+    }
+}
+
+/// A server listener could not reserve a port because an imposter already accepts on it (issues
+/// #1557, #1841). Converts into the `io::Error` (`AddrInUse`) the listeners' bind paths return, with
+/// the message their check before the bind uses, so a race lost at the reservation reads the same
+/// as one lost before the bind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortTaken {
+    /// The port an imposter holds.
+    pub port: u16,
+    /// The listener that was refused it.
+    pub by: ServerListener,
+}
+
+impl std::fmt::Display for PortTaken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "port {} is already in use by an imposter; the {} cannot bind it",
+            self.port, self.by
+        )
+    }
+}
+
+impl std::error::Error for PortTaken {}
+
+impl From<PortTaken> for std::io::Error {
+    fn from(taken: PortTaken) -> Self {
+        Self::new(std::io::ErrorKind::AddrInUse, taken)
+    }
+}
+
+impl PortReservation {
+    /// [`Self::new`], refused if an imposter already accepts on one of the ports (issue #1841).
+    ///
+    /// The check and the reservation are one step against an imposter's claim: an imposter create
+    /// re-checks the reservations under the same lock before it claims its port, so whichever of
+    /// the two comes second sees the other, and exactly one of them gets the port. `new` reserves
+    /// without looking, which is right only where no imposter can be created concurrently (a
+    /// server's startup, before its admin API accepts). All or nothing: a refusal reserves no port.
+    pub fn try_new(
+        manager: &Arc<ImposterManager>,
+        addrs: &[std::net::SocketAddr],
+        by: ServerListener,
+    ) -> Result<Self, PortTaken> {
+        let mut ports: Vec<u16> = addrs.iter().map(std::net::SocketAddr::port).collect();
+        ports.sort_unstable();
+        ports.dedup();
+        manager.try_reserve_ports(&ports, by)?;
+        Ok(Self {
+            manager: Arc::clone(manager),
+            ports,
+        })
     }
 }
 
@@ -828,6 +885,27 @@ impl ImposterManager {
         self.reserved.write().insert(port, by);
     }
 
+    /// Reserve `ports` for `by` unless an imposter already accepts on one of them (issue #1841), as
+    /// one step: under the write lock an imposter's claim re-checks (`create_imposter_staged`,
+    /// `rebind_imposter`), so a create that binds while this runs is refused when it claims, and
+    /// one that claimed first is seen here. All or nothing.
+    ///
+    /// Lock order is `reserved`, then an imposter's `serve_handles` (through `is_bound`); the claim
+    /// side takes `reserved`, then the port table's `mutations`. Nothing takes them the other way.
+    pub fn try_reserve_ports(&self, ports: &[u16], by: ServerListener) -> Result<(), PortTaken> {
+        let mut reserved = self.reserved.write();
+        if let Some(&port) = ports
+            .iter()
+            .find(|&&port| port != 0 && self.imposter_listens_on(port))
+        {
+            return Err(PortTaken { port, by });
+        }
+        for &port in ports {
+            reserved.insert(port, by);
+        }
+        Ok(())
+    }
+
     /// Undo [`Self::reserve_port`]: imposters may take `port` again. A no-op for a port that is not
     /// reserved.
     pub fn release_port(&self, port: u16) {
@@ -1524,7 +1602,7 @@ impl ImposterManager {
                     .await
             }
         };
-        let (port, listeners, bind_failure) = match (bound, explicit_port) {
+        let (port, listeners, mut bind_failure) = match (bound, explicit_port) {
             (Ok((port, listeners)), _) => (port, Some(listeners), None),
             // Only a socket-level failure on an explicit port may degrade to serving unbound:
             // an auto-assigned port minted from a failed bind has no identity to register
@@ -1682,17 +1760,54 @@ impl ImposterManager {
         // concurrent creates for the same explicit port can both bind, so the loser of the claim
         // race must stop the listener it just started rather than leave an orphan on the shared
         // port.
-        if self
-            .imposters
-            .try_claim(port, Arc::clone(&imposter))
-            .is_err()
-        {
+        //
+        // A server listener may have reserved the port since the check before the bind (issue
+        // #1841): re-checked under the `reserved` read lock, held across the claim, so the check
+        // and the claim are one step against `try_reserve_ports`. A listener that reserves first
+        // refuses this create; one that reserves after sees it bound. A serve-unbound apply gives
+        // up its listener instead and registers the imposter unbound, as it would have before the
+        // bind; the gate below kept its loops from answering anything.
+        let claim = {
+            let reserved = self.reserved.read();
+            let holder = reserved.get(&port).copied().filter(|_| imposter.is_bound());
+            match holder {
+                Some(holder) if !allow_unbound => Err(Some(holder)),
+                _ => {
+                    if let Some(holder) = holder {
+                        for handle in std::mem::take(&mut *imposter.serve_handles.lock()) {
+                            handle.abort();
+                        }
+                        warn!(
+                            port,
+                            "the {holder} reserved port {port} while it was binding; registering \
+                             the imposter without a listener so in-process routes still serve it"
+                        );
+                        bind_failure = Some(ImposterError::BindError(
+                            port,
+                            anyhow::anyhow!("port {port} is this server's {holder}"),
+                        ));
+                    }
+                    self.imposters
+                        .try_claim(port, Arc::clone(&imposter))
+                        .map_err(|()| None)
+                }
+            }
+        };
+        if let Err(reserved_by) = claim {
             imposter.cancel.cancel();
             let _ = shutdown_tx.send(());
-            self.probe(Point::CreateClaimLost {
-                port,
-                generation: imposter.generation,
-            });
+            let generation = imposter.generation;
+            match reserved_by {
+                Some(holder) => {
+                    warn!(
+                        port,
+                        "refusing an imposter on port {port}: the {holder} reserved it while the \
+                         imposter was binding"
+                    );
+                    self.probe(Point::CreateReservedLost { port, generation });
+                }
+                None => self.probe(Point::CreateClaimLost { port, generation }),
+            }
             return Err(ImposterError::PortInUse(port));
         }
         self.probe(Point::CreateClaimed {
@@ -1988,14 +2103,16 @@ impl ImposterManager {
             .local_addr()
             .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?;
         let listeners = self.bind_listener_group(addr, Some(probe))?;
-        // No gate: this imposter already holds the port.
+        // Gated like a create's (issue #1841): a server listener may reserve the port while this
+        // binds, and the loops must answer nothing until the install below has checked.
+        let (admit, admitted) = tokio::sync::watch::channel(false);
         let handles = self.spawn_accept_loops(
             imposter,
             listeners,
             &shutdown_tx,
             tls_acceptors.as_ref(),
             port,
-            None,
+            Some(&admitted),
         );
 
         // Install only if nobody else already did. Unlike the create path, this imposter is
@@ -2008,11 +2125,26 @@ impl ImposterManager {
         // would stop awaiting them and its issue-#596 guarantee — the bind is released before
         // delete returns — would silently break, and the shared connection cap would double.
         //
-        // No `await` between the check and the store, so the lock covers the whole decision.
+        // No `await` between the check and the store, so the lock covers the whole decision. The
+        // `reserved` read lock is held across it too (issue #1841), as a create's claim holds it, so
+        // a server listener reserving the port meanwhile either refuses this install or sees it.
+        let reserved = self.reserved.read();
+        if let Some(holder) = reserved.get(&port).copied() {
+            drop(reserved);
+            for handle in handles {
+                handle.abort();
+            }
+            return Err(ImposterError::BindError(
+                port,
+                anyhow::anyhow!("port {port} is this server's {holder}"),
+            ));
+        }
         let mut installed = imposter.serve_handles.lock();
         if installed.is_empty() {
             *installed = handles;
             drop(installed);
+            drop(reserved);
+            admit.send_replace(true);
             info!("Imposter rebound to {addr}");
         } else {
             // Lost the race: abort our loops so they stop accepting and drop their listeners,

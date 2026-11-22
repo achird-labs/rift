@@ -96,7 +96,9 @@ pub use handler::{handle_imposter_request, handle_imposter_request_decorated};
 pub use crate::extensions::flow_state::FlowStoreProvider;
 
 // Re-export manager
-pub use manager::{CursorFlusher, ImposterManager, PortReservation, ServerListener, TlsDefaults};
+pub use manager::{
+    CursorFlusher, ImposterManager, PortReservation, PortTaken, ServerListener, TlsDefaults,
+};
 // Which clients the manager's imposters (and a front door over it) admit (issue #1523).
 pub use crate::proxy::PeerPolicy;
 

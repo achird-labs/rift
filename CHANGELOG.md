@@ -13,6 +13,16 @@ record.
 
 ### Fixed
 
+- **An imposter and the intercept listener can no longer share a port** (#1841). Each checked
+  whether the other held the port, bound, and only then made its own claim visible, so an imposter
+  created on a port while the intercept listener was starting on it (or the other way round) passed
+  both checks. On macOS both binds then succeeded and the port's clients were split between them;
+  Linux refused the second bind. The reservation and the imposter's claim are now one step against
+  each other: exactly one gets the port, and the other fails with the existing `already in use`
+  refusal. The admin API, front door and metrics listeners reserve the same way, which matters for
+  an embedder starting them through the C ABI while it creates imposters. `PortReservation::new`
+  is unchanged; the new `PortReservation::try_new` refuses a port an imposter accepts on.
+
 - **Overlapping reloads no longer mix two configurations** (#1840). `POST /admin/reload` reads its
   source, then applies imposters, front-door routes and intercept rules as three separate steps,
   and nothing serialized two reloads: one reload's imposters could end up with another's routes,
