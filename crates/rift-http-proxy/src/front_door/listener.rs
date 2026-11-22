@@ -90,9 +90,11 @@ pub async fn bind_front_door_at(
     let local_addrs = listener.local_addrs()?;
     // `from_std` refuses an empty set, so there is always a first address.
     let local_addr = local_addrs[0];
+    // No imposter may take this port while the front door holds it (issue #1557). Checked and
+    // reserved in one step against an imposter's claim (issue #1841); a refusal drops the listener.
+    let reservation = PortReservation::try_new(&manager, &local_addrs, ServerListener::FrontDoor)
+        .map_err(std::io::Error::from)?;
     info!("Front door listening on {}", http_urls(&local_addrs, ""));
-    // No imposter may take this port while the front door holds it (issue #1557).
-    let reservation = PortReservation::new(&manager, &local_addrs, ServerListener::FrontDoor);
 
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();

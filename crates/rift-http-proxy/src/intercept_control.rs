@@ -19,6 +19,7 @@ use crate::intercept_rules::{
     InterceptRule, InterceptRules, InterceptState, RulesAtCapacity, SeededReplaced,
 };
 use crate::listen::{ListenAddr, PortReservation, refuse_imposter_port};
+use rift_mock_core::imposter::PortTaken;
 use rift_mock_core::proxy::intercept_ca::{
     CaInputs, CaSource, CertificateAuthority, SniCertResolver,
 };
@@ -160,6 +161,8 @@ enum InstallRefused {
     AlreadyRunning(InterceptListener),
     /// The exposure policy became `Refuse` while this listener was binding (issue #1149).
     Exposed(InterceptListener, String),
+    /// An imposter took the port while this listener was binding (issue #1841).
+    PortTaken(InterceptListener, PortTaken),
 }
 
 /// Shared, mutable slot for the process's (or FFI handle's) single intercept plane. Cheap to clone
@@ -524,12 +527,17 @@ impl InterceptControl {
         {
             return Err(InstallRefused::Exposed(plane.listener, format!("{e:#}")));
         }
+        // Checked and reserved in one step against an imposter's claim (issue #1841): the check
+        // before the bind cannot see an imposter that binds meanwhile.
         if let Some(manager) = self.reservations_lock().as_ref() {
-            plane.reservation = Some(PortReservation::new(
+            match PortReservation::try_new(
                 manager,
                 plane.listener.local_addrs(),
                 ServerListener::Intercept,
-            ));
+            ) {
+                Ok(reservation) => plane.reservation = Some(reservation),
+                Err(taken) => return Err(InstallRefused::PortTaken(plane.listener, taken)),
+            }
         }
         *slot = Some(plane);
         Ok(())
@@ -713,6 +721,14 @@ impl InterceptControl {
             Err(InstallRefused::Exposed(listener, reason)) => {
                 listener.shutdown().await;
                 Err(InterceptStartError::Exposed(reason))
+            }
+            // An imposter claimed the port while this listener was binding: the refusal the check
+            // before the bind gives, had the imposter been a moment earlier.
+            Err(InstallRefused::PortTaken(listener, taken)) => {
+                listener.shutdown().await;
+                let e = anyhow::Error::new(std::io::Error::from(taken));
+                warn_intercept_start_failure(&e, "bind failed");
+                Err(InterceptStartError::Bind(e))
             }
         }
     }
@@ -1376,6 +1392,63 @@ mod tests {
         }
     }
 
+    // Issue #1841's window: the check before the bind passed, then an imposter claimed the port,
+    // then the listener installs. `install` must refuse it (the reservation is checked against the
+    // imposter in one step) and leave the slot empty, so the caller shuts the listener down. Driven
+    // directly, as above: the plane is bound first and the imposter created beside it. Where the
+    // platform refuses that second bind (Linux) the window cannot occur and there is nothing to test.
+    #[tokio::test]
+    async fn install_refuses_a_plane_whose_port_an_imposter_claimed_during_the_bind() {
+        let ca = Arc::new(CertificateAuthority::generate().expect("generate CA"));
+        let rules = InterceptRules::new();
+        let listener = InterceptListener::bind(
+            "127.0.0.1:0".parse().expect("addr"),
+            Arc::new(SniCertResolver::new(ca.clone())),
+            rules.clone(),
+            None,
+            OutboundTls::default(),
+        )
+        .await
+        .expect("bind");
+        let port = listener.local_addr().port();
+        let manager = Arc::new(ImposterManager::new());
+        let config = serde_json::from_value(serde_json::json!({"port": port, "protocol": "http"}))
+            .expect("config");
+        if manager.create_imposter(config).await.is_err() {
+            listener.shutdown().await;
+            return;
+        }
+        assert!(manager.imposter_listens_on(port));
+        let control = InterceptControl::default().with_port_reservations(Arc::clone(&manager));
+        let plane = InterceptPlane {
+            listener,
+            state: InterceptState { rules, ca },
+            has_auth: false,
+            origin: InterceptOrigin::Runtime,
+            spec: ListenerSpec::of(&InterceptStartOptions::default()),
+            reservation: None,
+        };
+        match control.install(plane) {
+            Err(InstallRefused::PortTaken(listener, taken)) => {
+                assert_eq!(taken.port, port);
+                listener.shutdown().await;
+            }
+            Err(
+                InstallRefused::AlreadyRunning(listener) | InstallRefused::Exposed(listener, _),
+            ) => {
+                listener.shutdown().await;
+                panic!("the slot was empty and the plane loopback: this is the imposter's port");
+            }
+            Ok(()) => panic!("a plane on a port an imposter claimed must not install"),
+        }
+        assert!(
+            control.status().is_none(),
+            "a refused install leaves the slot empty"
+        );
+        assert_eq!(manager.reserved_by(port), None, "and reserves nothing");
+        manager.delete_all().await;
+    }
+
     // The TOCTOU window (issue #1149). `start` snapshots the policy before it awaits the bind, so a
     // concurrent `set_exposure_policy(Refuse)` — `rift_serve_admin` on another thread — would see an
     // empty slot, pass `check_running_exposure`, and report success while this listener installed
@@ -1390,7 +1463,9 @@ mod tests {
 
         match control.install(plane) {
             Err(InstallRefused::Exposed(listener, _)) => listener.shutdown().await,
-            Err(InstallRefused::AlreadyRunning(listener)) => {
+            Err(
+                InstallRefused::AlreadyRunning(listener) | InstallRefused::PortTaken(listener, _),
+            ) => {
                 listener.shutdown().await;
                 panic!("the slot was empty; this must be refused as exposed, not as a race");
             }

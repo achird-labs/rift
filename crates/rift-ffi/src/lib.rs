@@ -2359,13 +2359,22 @@ async fn build_admin_plane_inner(
         Some(maddr) => Some(bind_metrics_server(maddr).await.context("metrics bind")?),
         None => None,
     };
-    let metrics_reservation = metrics.as_ref().map(|running| {
-        PortReservation::new(
+    // Checked and reserved in one step against an imposter's claim (issue #1841): the embedder may
+    // be creating imposters while this runs. A refusal stops the metrics server it just bound.
+    let metrics_reservation = match metrics.as_ref() {
+        Some(running) => match PortReservation::try_new(
             &handle.manager,
             running.local_addrs(),
             ServerListener::Metrics,
-        )
-    });
+        ) {
+            Ok(reservation) => Some(reservation),
+            Err(taken) => {
+                running.shutdown().await;
+                return Err(anyhow::anyhow!("metrics bind: {taken}"));
+            }
+        },
+        None => None,
+    };
 
     // Share the handle's intercept slot with the admin plane (issue #493) so `rift_serve_admin`
     // serves the full `/intercept*` surface against the same listener the C-ABI drives: a

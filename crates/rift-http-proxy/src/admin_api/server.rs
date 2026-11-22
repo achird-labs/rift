@@ -372,8 +372,11 @@ impl AdminApiServer {
         // `from_std` refuses an empty set, so there is always a first address.
         let local_addr = local_addrs[0];
         // No imposter may take the admin port while this server holds it (issue #1557). Owned by
-        // the accept-loop task, so it is released however that task ends.
-        let reservation = PortReservation::new(&self.manager, &local_addrs, ServerListener::Admin);
+        // the accept-loop task, so it is released however that task ends. Checked and reserved in
+        // one step against an imposter's claim (issue #1841); a refusal drops the bound listeners.
+        let reservation =
+            PortReservation::try_new(&self.manager, &local_addrs, ServerListener::Admin)
+                .map_err(std::io::Error::from)?;
         info!(
             "Rift Admin API (Mountebank-compatible) listening on {}",
             http_urls(&local_addrs, "")
