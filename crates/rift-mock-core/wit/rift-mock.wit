@@ -52,6 +52,15 @@ interface handler {
   respond: func(req: request) -> result<decision, string>;
 }
 
+/// Optional (issue #1794): a component kept with `instance: "imposter"` may export this beside
+/// `handler` or `wasi:http/incoming-handler`, and `GET /imposters/{port}/wasm/snapshot` calls it.
+interface introspect {
+  /// JSON text describing the component's observable state. Must not mutate state: `state` is
+  /// read-only for the call (its writes return `err`), `wasi:random` draws from a throwaway stream,
+  /// and a snapshot that changes guest memory breaks a seeded replay.
+  snapshot: func() -> result<string, string>;
+}
+
 world mock {
   import state;
   export handler;

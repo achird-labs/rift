@@ -615,6 +615,8 @@ enum Bindings {
 /// imposter's for as long as it lives in `"imposter"` mode.
 pub(super) struct Live {
     store: Store<Host>,
+    /// The instantiated component, for exports the typed bindings do not cover (issue #1794).
+    instance: wasmtime::component::Instance,
     bindings: Bindings,
     logs: (LogPipe, LogPipe),
     /// Set while the instance is kept by an imposter: counts it in `rift_wasm_instances`.
@@ -636,9 +638,108 @@ impl Live {
     pub(super) fn memory_bytes(&self) -> usize {
         self.store.data().limits.memory_total
     }
+
+    /// Call the optional `rift:mock/introspect.snapshot` export (issue #1794), with `limits`' fuel
+    /// and `remaining` as its deadline, in a way that does not perturb the run: `state` is
+    /// read-only, `wasi:random` draws from a throwaway stream, and the clock is the system's.
+    /// `flow_store` is the imposter's, read under the empty flow id a request without
+    /// `x-flow-id` has.
+    ///
+    /// Returns the guest's text and the fuel it spent, and whether the instance may be called
+    /// again: a missing export or a guest `err` keeps it, a trap or deadline miss drops it.
+    pub(super) async fn snapshot(
+        &mut self,
+        limits: &WasmLimits,
+        remaining: Duration,
+        flow_store: Arc<dyn FlowStore>,
+    ) -> (Result<String, SnapshotFailure>, Option<u64>, bool) {
+        let Some(func) = self.introspect() else {
+            return (Err(SnapshotFailure::NoExport), None, true);
+        };
+        let func = match func.typed::<(), (Result<String, String>,)>(&self.store) {
+            Ok(func) => func,
+            Err(e) => {
+                return (
+                    Err(SnapshotFailure::Guest(format!(
+                        "{INTROSPECT}.snapshot does not have the type \
+                         `func() -> result<string, string>`: {e}"
+                    ))),
+                    None,
+                    true,
+                );
+            }
+        };
+        // Saved and restored around the call: a later request whose scope has no stream of its
+        // own reads the one the last request left, as it did before the snapshot.
+        let saved = crate::imposter::rng::RequestRng::unseeded();
+        saved.follow(&self.store.data().rng);
+        let throwaway = crate::imposter::rng::RequestRng::new(Arc::new(
+            crate::imposter::rng::ImposterRng::new(Some(0)),
+        ));
+        let scope = Scope {
+            flow_store,
+            flow_id: String::new(),
+            rng: Some(throwaway),
+            clock: None,
+        };
+        if let Err(e) = begin(&mut self.store, &scope, limits, remaining) {
+            return (Err(SnapshotFailure::Trap(format!("{e:#}"))), None, false);
+        }
+        self.store.data_mut().read_only = true;
+        let failed = Failure {
+            budget: limits.fuel.unwrap_or(u64::MAX),
+            max_memory_mib: limits.max_memory_mib,
+            timeout: remaining,
+        };
+        let bound = remaining.saturating_add(2 * EPOCH_TICK);
+        let outcome = tokio::time::timeout(bound, func.call_async(&mut self.store, ())).await;
+        let mut report = CallReport::default();
+        let memory_refused = finish(&self.store, &failed, &mut report);
+        self.store.data_mut().read_only = false;
+        self.store.data().rng.follow(&saved);
+        // A snapshot's log lines are not a request's: dropped, so the next call does not emit them.
+        drop(take_pipes(&self.logs));
+        let fuel = report.fuel_used;
+        match failed.classify(outcome, &mut report, memory_refused) {
+            Ok((Ok(text),)) => (Ok(text), fuel, true),
+            Ok((Err(guest),)) => (Err(SnapshotFailure::Guest(guest)), fuel, true),
+            Err(e) => (Err(SnapshotFailure::Trap(format!("{e:#}"))), fuel, false),
+        }
+    }
+
+    /// `rift:mock/introspect.snapshot`, when the component exports it.
+    fn introspect(&mut self) -> Option<wasmtime::component::Func> {
+        let interface = self
+            .instance
+            .get_export_index(&mut self.store, None, INTROSPECT)?;
+        let snapshot =
+            self.instance
+                .get_export_index(&mut self.store, Some(&interface), "snapshot")?;
+        self.instance.get_func(&mut self.store, snapshot)
+    }
+}
+
+/// The optional state-reading export (issue #1794). Wasmtime matches any `0.1.x` export to it.
+const INTROSPECT: &str = "rift:mock/introspect@0.1.0";
+
+/// Why a snapshot produced no text.
+#[derive(Debug)]
+pub(super) enum SnapshotFailure {
+    /// The component does not export `rift:mock/introspect`.
+    NoExport,
+    /// The guest returned `err`, or the export has the wrong type.
+    Guest(String),
+    /// A trap, fuel or memory exhaustion, or the deadline: the instance is dropped.
+    Trap(String),
 }
 
 impl CallSpec {
+    /// The limits and `timeoutMs` the call runs under: what a snapshot of its instance reuses
+    /// (issue #1794).
+    pub(super) fn bounds(&self) -> (WasmLimits, Duration) {
+        (self.limits, self.timeout)
+    }
+
     /// What is left of the deadline.
     pub(super) fn remaining(&self) -> Duration {
         self.timeout.saturating_sub(self.started.elapsed())
@@ -693,18 +794,21 @@ impl CallSpec {
             WasmExport::Rift => {
                 let pre = self.loaded.mock.as_ref().map_err(|e| anyhow!("{e}"))?;
                 let outcome = tokio::time::timeout(bound, async {
-                    let mock = pre.instantiate_async(&mut store).await?;
+                    // Instantiated from the `InstancePre` so the `Instance` is kept: the optional
+                    // `rift:mock/introspect` export is looked up on it by name (issue #1794).
+                    let instance = pre.instance_pre().instantiate_async(&mut store).await?;
+                    let mock = Mock::new(&mut store, &instance)?;
                     let init = mock
                         .rift_mock_handler()
                         .call_init(&mut store, knobs)
                         .await?;
-                    Ok::<_, wasmtime::Error>(init.map(|()| mock))
+                    Ok::<_, wasmtime::Error>(init.map(|()| (instance, mock)))
                 })
                 .await;
                 let memory_refused = store.data().limits.memory_refused;
                 take_logs(&logs, report);
                 match failed.classify(outcome, report, memory_refused)? {
-                    Ok(mock) => Bindings::Rift(mock),
+                    Ok((instance, mock)) => (instance, Bindings::Rift(mock)),
                     Err(msg) => {
                         let msg = format!("init: {msg}");
                         report.trapped(TrapKind::GuestError, &msg);
@@ -714,14 +818,23 @@ impl CallSpec {
             }
             WasmExport::Http => {
                 let pre = self.loaded.proxy.as_ref().map_err(|e| anyhow!("{e}"))?;
-                let outcome = tokio::time::timeout(bound, pre.instantiate_async(&mut store)).await;
+                let outcome = tokio::time::timeout(bound, async {
+                    let instance = pre.instance_pre().instantiate_async(&mut store).await?;
+                    let proxy =
+                        wasmtime_wasi_http::p2::bindings::Proxy::new(&mut store, &instance)?;
+                    Ok::<_, wasmtime::Error>((instance, proxy))
+                })
+                .await;
                 let memory_refused = store.data().limits.memory_refused;
                 take_logs(&logs, report);
-                Bindings::Http(failed.classify(outcome, report, memory_refused)?)
+                let (instance, proxy) = failed.classify(outcome, report, memory_refused)?;
+                (instance, Bindings::Http(proxy))
             }
         };
+        let (instance, made) = made;
         Ok(Live {
             store,
+            instance,
             bindings: made,
             logs,
             counted: None,
@@ -899,8 +1012,14 @@ fn finish(store: &Store<Host>, failed: &Failure, report: &mut CallReport) -> boo
 
 /// What the call wrote to stdout and stderr, into `report`; the pipes are emptied for the next.
 fn take_logs(logs: &(LogPipe, LogPipe), report: &mut CallReport) {
-    report.stdout.extend(logs.0.take());
-    report.stderr.extend(logs.1.take());
+    let (stdout, stderr) = take_pipes(logs);
+    report.stdout.extend(stdout);
+    report.stderr.extend(stderr);
+}
+
+/// Empty the pipes, returning what they held.
+fn take_pipes(logs: &(LogPipe, LogPipe)) -> (Vec<u8>, Vec<u8>) {
+    (logs.0.take(), logs.1.take())
 }
 
 /// What an http component's response came to.
@@ -1096,6 +1215,7 @@ fn new_store(
         rng,
         clock,
         deadline: None,
+        read_only: false,
     };
     let mut store = Store::new(engine()?, host);
     store.limiter(|h| &mut h.limits);

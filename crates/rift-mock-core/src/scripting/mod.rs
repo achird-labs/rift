@@ -95,6 +95,49 @@ impl WasmInstances {
         }
     }
 
+    /// Call `rift:mock/introspect.snapshot` on a live instance (issue #1794): `id` as
+    /// [`Self::list`] gives it, or the only live one. `stubs` tells "no instance yet" from "no
+    /// stub keeps one"; `flow_store` is the imposter's, which the guest reads but cannot write.
+    #[cfg_attr(not(feature = "wasm"), allow(unused_variables, clippy::unused_async))]
+    pub async fn snapshot<'s>(
+        &self,
+        id: Option<&str>,
+        stubs: impl Iterator<Item = &'s crate::imposter::Stub>,
+        flow_store: std::sync::Arc<dyn crate::extensions::flow_state::FlowStore>,
+    ) -> Result<WasmSnapshot, WasmSnapshotError> {
+        #[cfg(feature = "wasm")]
+        {
+            if self.map.is_empty() {
+                // `RequestMode` only for an imposter whose wasm stubs are all `instance:
+                // "request"`; with no wasm stub, or one that keeps an instance, there is simply
+                // none live yet.
+                let (mut wasm, mut keeps_one) = (false, false);
+                for script in stubs
+                    .flat_map(|stub| stub.responses.iter())
+                    .filter_map(|response| match response {
+                        crate::imposter::StubResponse::RiftScript { rift, .. } => {
+                            rift.script.as_ref()
+                        }
+                        _ => None,
+                    })
+                {
+                    wasm |= script.engine.as_deref() == Some("wasm");
+                    keeps_one |= wasm::instances::key_of(script).is_some();
+                }
+                return Err(if wasm && !keeps_one {
+                    WasmSnapshotError::RequestMode
+                } else {
+                    WasmSnapshotError::NotInstantiated
+                });
+            }
+            wasm::instances::snapshot(&self.map, id, flow_store).await
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            Err(WasmSnapshotError::Unavailable)
+        }
+    }
+
     /// Keep only the instances some stub in `stubs` still references (issue #1793): an edit that
     /// keeps a component referenced, by any stub, keeps its instance.
     #[cfg_attr(not(feature = "wasm"), allow(unused_variables))]
@@ -118,6 +161,48 @@ impl WasmInstances {
             self.map.retain(&referenced);
         }
     }
+}
+
+/// What `rift:mock/introspect.snapshot` returned (issue #1794).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmSnapshot {
+    /// The guest's JSON text, byte for byte.
+    pub body: String,
+    /// The fuel the call spent.
+    pub fuel_used: Option<u64>,
+}
+
+/// Why `GET /imposters/:port/wasm/snapshot` has no snapshot to give (issue #1794).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WasmSnapshotError {
+    /// No `instance` was named and more than one is live: their ids.
+    #[error("more than one wasm instance is live; name one with ?instance=<id> ({})", .0.join(", "))]
+    Ambiguous(Vec<String>),
+    /// The named instance, or any, is not live: none was made yet, or the last one was dropped.
+    /// The route never instantiates, since that would run `init`.
+    #[error("not instantiated")]
+    NotInstantiated,
+    /// The imposter's wasm stubs are all `instance: "request"`: their state is the flow store's.
+    #[error("no live instance (instance: \"request\")")]
+    RequestMode,
+    /// The component does not export `rift:mock/introspect`.
+    #[error("component does not export rift:mock/introspect")]
+    NoExport,
+    /// The guest returned `err`, or its export has the wrong type.
+    #[error("{0}")]
+    Guest(String),
+    /// The guest returned text that is not JSON.
+    #[error("snapshot is not JSON")]
+    NotJson,
+    /// The call trapped or missed its deadline; the instance was dropped.
+    #[error("{0}")]
+    Trap(String),
+    /// Waiting for the instance passed `timeoutMs`.
+    #[error("timed out waiting for the wasm instance")]
+    Busy,
+    /// A build without the `wasm` feature.
+    #[error("engine \"wasm\" is not available in this build")]
+    Unavailable,
 }
 
 /// One kept instance, as `GET /imposters/:port/wasm/instances` lists it (issue #1793).

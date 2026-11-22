@@ -882,6 +882,25 @@ instance](../features/wasm-scripting.md#keeping-an-instance-instance-imposter)),
 `404`. In a build without the `wasm` feature: `404` with `engine "wasm" is not available in this
 build`.
 
+### GET /imposters/{port}/wasm/snapshot
+
+A kept instance's state, from its optional `rift:mock/introspect.snapshot` export ([Reading a
+twin's state](../features/wasm-scripting.md#reading-a-twins-state-riftmockintrospect)).
+`?instance=<id>` names one of the ids `GET /imposters/{port}/wasm/instances` lists; without it the
+imposter's only live instance answers. The route never instantiates.
+
+**Response:** `200` with the guest's JSON text, byte for byte, and `X-Rift-Fuel-Used: <fuel>`.
+
+| Case | Status |
+|:--|:--|
+| No `instance` and more than one live instance | `400`, listing the ids |
+| The named instance, or any, not live yet (or dropped since) | `409 not instantiated` |
+| Only `instance: "request"` stubs | `409 no live instance (instance: "request")`, pointing at the flow-state route |
+| The component does not export `rift:mock/introspect` | `404` |
+| The guest returned `err`, text that is not JSON, or trapped | `500` (a trap drops the instance) |
+| Waiting for the instance passed `timeoutMs` | `504` |
+| Unknown port, or a build without the `wasm` feature | `404` |
+
 ### A request's own instant: `X-Rift-Now`
 
 With `_rift.scriptEngine.clock: "header"`, a request carrying `X-Rift-Now: <ms since epoch>` reads

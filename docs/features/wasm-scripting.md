@@ -292,6 +292,42 @@ request creates it.
 is no cap on how many an imposter keeps: one per distinct key its stubs reference. `GET
 /imposters/:port/wasm/instances` lists them, with their memory, and `rift_wasm_instances` counts them.
 
+### Reading a twin's state: `rift:mock/introspect`
+
+With `instance: "imposter"` the guest's memory is its state, which nothing outside it can read. A
+component may also export the optional `rift:mock/introspect` interface (in `wit/rift-mock.wit`),
+beside `rift:mock/handler` or `wasi:http/incoming-handler`:
+
+```wit
+interface introspect {
+  snapshot: func() -> result<string, string>;
+}
+```
+
+`GET /imposters/:port/wasm/snapshot` calls it on a live instance and answers its JSON text byte for
+byte, so a harness can check invariants over what the twin holds ("the command was applied at most
+once") and not only over what crossed the wire. A component without the export still runs.
+
+**A snapshot does not perturb the run**, so reading an invariant never changes the result being
+checked:
+
+- It waits for the instance as a request does, so it never sees a call half-applied.
+- `state` is read-only for the call: `set`, `incr-by`, `delete`, `cas`, `ttl`, `key-ttl` and
+  `clear` return `err("read-only during snapshot")`. Reads see the imposter's flow store under the
+  empty flow id, as a request without `x-flow-id`.
+- `wasi:random` draws from a throwaway stream, so a seeded imposter replays the same with or
+  without snapshots in between.
+- It is not a request: it is not recorded, and it does not count in the instance's `calls`.
+- Nothing stops a guest writing its own memory in `snapshot`; one that does breaks a seeded replay.
+
+A snapshot holds the instance while it runs, as a call does, so requests that arrive meanwhile wait
+for it and their wait counts toward their `timeoutMs`: keep `snapshot` cheap. Its `wasi:clocks` read
+the system clock, not a frozen imposter clock or `X-Rift-Now`. It runs under the last call's
+`timeoutMs` and fuel budget. A trap or deadline miss drops the instance,
+as on the request path, logged and counted with reason `snapshot-trap`; a guest `err`, or text that
+is not JSON, answers `500` and keeps it. With only `instance: "request"` stubs there is no instance
+to read: their state is in `state`, which `GET /admin/imposters/:port/flow-state/…` reads.
+
 ### Toolchains
 
 Anything that produces a `wasm32-wasip2` component for either world works:
