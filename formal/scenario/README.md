@@ -97,6 +97,55 @@ sending an ETag never saw the stale `304`s.
   here as a documented limit.
 - **A transition landing during a delete of the imposter** is #1762, from the lifecycle model. This model has no delete.
 
+## Trace validation
+
+`validate.py` asks TLC whether a recorded run is a behaviour of the model (`TraceValidation.tla`, issue #1791), as
+`formal/faultio` does. Every test in `scenario_interleavings.rs` runs on the model's own stub table: `/go` carries the
+cycle `Started -> A -> B -> Started` (`Gated`), `/read` a read-only stub under each gate in the same order (`Pollers`),
+and `/set` an ungated move to `B` (`Setters`, `SetTo = "B"`). Each test writes its run with how many requests of each
+role it made, admin deletes and clears included, and TLC starts from exactly those requests with the store empty.
+
+| Point | Step |
+|:--|:--|
+| `GateRead{role, pos}` | `GateRead` of a request of that role, at gate `pos` of `Order` |
+| `CasApplied` | `CasCompare` taking the write |
+| `CasConflict` | `CasCompare` dropping the transition |
+| `TransitionStampIssued{stamp}` | `Issue`, taking that stamp |
+| `TransitionStamped{stamp}` | `Publish` of that stamp |
+| `Served{stamp}` | `Serve` of a request whose copy holds that stamp |
+| `ScenarioChangeRead{changed}` | `SetRead`, or `SetWrite` after a conflict, deciding `changed` |
+| `ScenarioWriteNext` | before a delete's `DelWrite` (recorded in `told`, which `DelWrite` then needs); a clear's `ClearHeld` |
+
+The test writes each stamp as the model's counter: the k-th stamp the load clock issued is k, and a stub's own load
+stamp, which it issued before any transition, is 0, so a recorded run is the same file every time. Every other step is free: `Copy`, a compare-and-set's
+retry against absence (which fires no point), a set's write that landed, and a clear's map loads and wipe. A step that
+would fire a point is never free.
+
+Acceptance says the order is allowed; it does not pin which request of a role took a step, because the points carry no
+request. Because `Copy` is free, a served stamp can come from a copy taken at any time before that request's first gate
+read. That is why #1779's mutant (a late publish overwrites a higher stamp) passes every trace: TLC moves the last
+poller's copy before the stalled publish. `mutants.py` still catches it with `StampMonotone`.
+
+`traces/accept` holds the 9 runs the 9 tests record, including each order that reproduced a finding: the stalled stamp
+(#1779), a set and a `flow_set` that decided "no change" (#1780), a delete, a reset and a clear about to write (#1780), a
+scan while the state moves (#1781), and the dropped transition. `traces/reject` holds 5 written by hand from them that
+the model must refuse: a stamp published before it was issued, the old answer served under the new stamp (#1307), a
+transition writing over a state its gate did not see (#311), a stamp issued by a set that decided it moved nothing, and
+a scan judging its last gate twice.
+
+`validate.py --mutants traces/accept` shows the validation has teeth:
+
+| Mutant | Rejected runs |
+|:--|:--|
+| each gate reads the state again (#1781) | `scan_while_state_moves` |
+| a gated transition is a plain set (#311) | `cas_lost` |
+| a set decides before its write (#1780) | `set_no_change`, `flow_set_no_change` |
+| a clear does not re-check the stamp map (#1780) | `flow_clear` |
+
+CI runs both. A change to the scenario code changes these runs; record them again with
+`FORMAL_TRACE_DIR=$PWD/formal/scenario/traces/accept cargo test -p rift-mock-core --test scenario_interleavings --
+--include-ignored` (the directory must be absolute, or relative to the crate).
+
 ## Known limits
 
 - One flow and one scenario. `served_load_stamp` folds several scenarios with a maximum, and the map is keyed by scenario
@@ -108,7 +157,9 @@ sending an ETag never saw the stale `304`s.
 - Backend errors are out: a failing store fails the request (#318), with no stamp.
 - A setter's answer is not modelled: its ungated stub's body does not depend on the state.
 - The no-match interceptor's retry (`handler.rs:1389-1418`) is not modelled.
-- There is no trace validation here, as there is in `formal/lifecycle`. The probe points are used for holds.
+- Trace validation covers the model's stub table only, on the in-memory store. A run on another table, a set of a key no
+  conditional stub gates (`set_scenario_state`'s early return), and the writes that always move (`stamped`) fire points
+  this mapping does not read, and no test records them.
 
 ## Runs
 

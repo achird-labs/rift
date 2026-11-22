@@ -1,0 +1,14 @@
+{"clearers":0,"gated":1,"point":"Start","pollers":2,"resetters":1,"setters":0}
+{"point":"ScenarioWriteNext"}
+{"point":"GateRead","pos":1,"role":"gated"}
+{"point":"CasApplied"}
+{"point":"TransitionStampIssued","stamp":1}
+{"point":"TransitionStamped","stamp":1}
+{"point":"Served","stamp":0}
+{"point":"GateRead","pos":1,"role":"poller"}
+{"point":"GateRead","pos":2,"role":"poller"}
+{"point":"Served","stamp":1}
+{"point":"TransitionStampIssued","stamp":2}
+{"point":"TransitionStamped","stamp":2}
+{"point":"GateRead","pos":1,"role":"poller"}
+{"point":"Served","stamp":2}

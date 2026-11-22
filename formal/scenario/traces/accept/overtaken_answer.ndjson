@@ -1,0 +1,11 @@
+{"clearers":0,"gated":1,"point":"Start","pollers":2,"resetters":0,"setters":0}
+{"point":"GateRead","pos":1,"role":"poller"}
+{"point":"GateRead","pos":1,"role":"gated"}
+{"point":"CasApplied"}
+{"point":"TransitionStampIssued","stamp":1}
+{"point":"TransitionStamped","stamp":1}
+{"point":"Served","stamp":0}
+{"point":"Served","stamp":0}
+{"point":"GateRead","pos":1,"role":"poller"}
+{"point":"GateRead","pos":2,"role":"poller"}
+{"point":"Served","stamp":1}
