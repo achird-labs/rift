@@ -83,8 +83,11 @@ step ([`/imposters/{port}/clock`](../api/index.md#imposter-clock)).
 | `init(knobs)` | Once per instantiation, before `respond`. `knobs` is `_rift.script.knobs` as JSON text, `{}` when absent. | `err(msg)` fails the request: `500`, `Script error: init: <msg>`. |
 | `respond(req)` | Once per request. | A `decision`, or `err(msg)`: `500`, `Script error: <msg>`. |
 
-Rift instantiates a component **for every request**, so `init` runs on every request and nothing in
-the component's memory survives between requests. State that must persist goes through `state`.
+With the default `instance: "request"`, Rift instantiates a component **for every request**, so
+`init` runs on every request and nothing in the component's memory survives between requests: state
+that must persist goes through `state`. With `instance: "imposter"` one instance is kept and `init`
+runs once, when it is made (see [Keeping an
+instance](wasm-scripting.md#keeping-an-instance-instance-imposter)).
 
 The records and variants `handler` uses (`header`, `request`, `response`, `decision`) are defined
 in the `types` interface, which `state` and `handler` share.
@@ -106,6 +109,20 @@ milliseconds. `reset` resets the TCP connection. `respond(response)` answers wit
 those headers and that body. Rhai and JavaScript spell these `pass()`, `delay(ms)`, `reset()` and
 `http(status, body)`. Through `handler`, a `respond` body must be UTF-8; otherwise the request fails
 with `500`.
+
+## `introspect`: an optional state reader
+
+A component kept with `instance: "imposter"` may also export `introspect`, beside `handler` or
+`wasi:http/incoming-handler`. It is not part of `world mock`: a component without it runs as before.
+
+| Function | Called | Result |
+|:---------|:-------|:-------|
+| `snapshot()` | By `GET /imposters/:port/wasm/snapshot`, never by a request. | JSON text describing the component's observable state, answered byte for byte; `err(msg)` answers `500` with `msg`, and text that is not JSON `500 snapshot is not JSON`. |
+
+During `snapshot` the `state` writes return `err("read-only during snapshot")` and `wasi:random`
+draws from a throwaway stream, so a snapshot does not change the run it reads. A guest must not
+change its own memory in `snapshot` either: nothing enforces that, and one that does breaks a seeded
+replay. See [Reading a twin's state](wasm-scripting.md#reading-a-twins-state-riftmockintrospect).
 
 ## What a host links
 
