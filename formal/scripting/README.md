@@ -74,6 +74,44 @@ All four are modelled.
   is what justifies the weak fairness on `Finish`/`Deadline`: `next_wake` (`:462`) never returns later than the poll
   when a run is in flight, and `has_runs` counts deferred starts (`:443`), so a worker with work never sleeps forever.
 
+## Trace validation
+
+`validate.py` asks TLC whether a recorded run is a behaviour of the model (`TraceValidation.tla`, issue #1791), as
+`formal/faultio` does. Each test in `scripting_interleavings.rs` writes its run with how many script runs started, its
+`restart_runtime_state` calls and its `set_script_file_access` calls. TLC starts from that many runs, with two workers,
+one job per run and the getter's write allowed, and no panic or failed save.
+
+| Point | Step |
+|:--|:--|
+| `ScriptSeeded{key}` | `Start` of a run of that cell, with no live state for its key |
+| `ScriptSaved{key}` | `EndSave` of a run of that cell, whichever branch it takes |
+| `ScriptFinished{key}` | `FinishAnswered` of a run of that cell |
+| `ScriptReleased{key}` | `EndRelease` of a run of that cell |
+
+Four points against the model's twenty-odd actions, so most steps are free: the caller's capture, submit and leaving, a
+start that finds the live state, deferral, jobs, how a run in flight ends, restarts and access changes. A step that
+would fire a point is never free. A key is the cell's address, so the test writes it as the order in which the cell first
+appeared, and `cellOf` binds each to a model cell the first time a step takes it, one to one: TLC cannot credit one
+cell's save to a run of another. Workers are not in the trace, so the check runs under worker symmetry.
+
+Acceptance says the order of seeds and of each end's three steps is allowed for some choice of which run took them,
+when jobs ran and how each run in flight ended. It does not see what a cell holds: the points carry a cell, not its
+writes. So a recorded run cannot catch the fixed bugs that lose a write (#1785, #1726's save into the current cell,
+#477's live state dropped under a run), and the ones that add behaviours (#1786, an ignored route, no deferral) leave
+the fixed engine's runs among the model's. `mutants.py` catches all of them.
+
+`traces/accept` holds the 13 runs the 13 tests record, among them a run in flight across a restart, a start deferred
+across a realm change, a request cut between its hooks by a restart, and a job left to another run. `traces/reject`
+holds 4 written by hand that the model must refuse: a run that lets go of its claim before it saved, one that answers
+before it saved (#1678), the run in flight across the restart saving into the new cell (#1726), and a second live state
+seeded while one is live.
+
+`validate.py --mutants traces/accept` shows the validation has teeth: with #1678's first cut put back (the answer goes
+out before the save) every recorded run is rejected. CI runs both. The two runs with three script runs and a restart take
+the longest, about 30 s each. A change to the pool or the state cell changes these runs; record them again with
+`FORMAL_TRACE_DIR=$PWD/formal/scripting/traces/accept cargo test -p rift-mock-core --test scripting_interleavings --
+--include-ignored` (the directory must be absolute, or relative to the crate).
+
 ## What leaving things out hides
 
 - **A script keeping a state object in a global.** A realm's globals are shared by design (`MbJsThread`'s doc), so

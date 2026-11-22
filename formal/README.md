@@ -42,7 +42,7 @@ gigabytes of state there.
 | `Mutants.cfg`, `Witness.cfg` | Bounds those scripts start from |
 | `witness.py` | Each case requires an exact verdict |
 | `mutants.py` | Each mutant must be caught by its named invariant |
-| `TraceValidation.tla`, `validate.py`, `traces/` | Checks recorded engine runs against the model (`lifecycle`, `proxyonce`, `faultio`); `validate.py --mutants`, where a model has it, shows a recorded run rejects a fixed bug put back |
+| `TraceValidation.tla`, `validate.py`, `traces/` | Checks recorded engine runs against the model (every model); `validate.py --mutants`, where a model has it, shows a recorded run rejects a fixed bug put back |
 
 ## Reproducing a defect on the engine
 
@@ -53,4 +53,4 @@ gigabytes of state there.
 cargo test -p rift-mock-core --all-features --test lifecycle_interleavings -- --ignored
 ```
 
-With `FORMAL_TRACE_DIR` set, the lifecycle and proxyonce tests write their runs as ndjson for `validate.py`.
+With `FORMAL_TRACE_DIR` set, every model's interleaving tests write their runs as ndjson for `validate.py`.

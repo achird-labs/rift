@@ -8,6 +8,14 @@
 //! A test marked `#[ignore = "#n"]` states the correct behaviour and fails today: it reproduces the
 //! defect filed as issue n. `cargo test --test scripting_interleavings -- --ignored` runs them, and
 //! the fix removes the attribute.
+//!
+//! With `FORMAL_TRACE_DIR` set, each test writes its run there as ndjson, for
+//! `formal/scripting/validate.py` to check against the model:
+//!
+//! ```text
+//! FORMAL_TRACE_DIR=$PWD/formal/scripting/traces/accept \
+//!   cargo test -p rift-mock-core --test scripting_interleavings -- --include-ignored
+//! ```
 #![cfg(feature = "javascript")]
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -108,6 +116,55 @@ impl Recorder {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         panic!("the engine never reached the point: {:?}", self.seen());
+    }
+
+    /// Write the run to `$FORMAL_TRACE_DIR/<name>.ndjson`, when the variable is set, once all
+    /// `runs` script runs have let go of their claims (a run's last point can fire after its client
+    /// has the answer). The `Start` line is the run's configuration as `StateCell.tla` names it: the
+    /// script runs that started, `restart_runtime_state` calls and `set_script_file_access` calls.
+    /// A key is written as the order in which its cell first appeared, as an address means nothing
+    /// to the model.
+    async fn write(&self, name: &str, runs: usize, restarts: usize, access_changes: usize) {
+        let Ok(dir) = std::env::var("FORMAL_TRACE_DIR") else {
+            return;
+        };
+        let released = |seen: &[Seen]| {
+            seen.iter()
+                .filter(|s| matches!(s.point, Point::ScriptReleased { .. }))
+                .count()
+        };
+        for _ in 0..2000 {
+            if released(&self.seen()) >= runs {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let seen = self.seen();
+        assert_eq!(released(&seen), runs, "the runs that started: {seen:?}");
+        let start = json!({ "point": "Start", "runs": runs, "restarts": restarts,
+                            "accessChanges": access_changes });
+        let mut lines = format!("{start}\n");
+        let mut cells: Vec<usize> = Vec::new();
+        for s in &seen {
+            let key = key_of(&s.point);
+            let cell = match cells.iter().position(|k| *k == key) {
+                Some(i) => i + 1,
+                None => {
+                    cells.push(key);
+                    cells.len()
+                }
+            };
+            let point = match s.point {
+                Point::ScriptSeeded { .. } => "ScriptSeeded",
+                Point::ScriptSaved { .. } => "ScriptSaved",
+                Point::ScriptFinished { .. } => "ScriptFinished",
+                _ => "ScriptReleased",
+            };
+            lines.push_str(&json!({ "point": point, "key": cell }).to_string());
+            lines.push('\n');
+        }
+        std::fs::create_dir_all(&dir).expect("trace dir");
+        std::fs::write(format!("{dir}/{name}.ndjson"), lines).expect("write trace");
     }
 }
 
@@ -227,6 +284,7 @@ async fn a_run_saves_then_answers_then_lets_go_of_its_claim() {
         })
         .collect();
     assert_eq!(order, ["seeded", "saved", "finished", "released"]);
+    recorder.write("one_run", 1, 0, 0).await;
     let _ = manager.delete_all().await;
 }
 
@@ -266,6 +324,7 @@ async fn a_run_held_at_its_save_keeps_the_imposters_next_run_behind_it() {
     let threads: std::collections::BTreeSet<String> =
         recorder.seen().into_iter().map(|s| s.thread).collect();
     assert_eq!(threads.len(), 1, "two workers ran one key: {threads:?}");
+    recorder.write("held_at_save", 2, 0, 0).await;
     let _ = manager.delete_all().await;
 }
 
@@ -318,6 +377,7 @@ async fn a_run_in_flight_across_a_restart_saves_to_its_old_cell() {
         "undefined",
         "the old run's save reached the new cell"
     );
+    recorder.write("in_flight_across_restart", 3, 1, 0).await;
     let _ = manager.delete_all().await;
 }
 
@@ -356,6 +416,7 @@ async fn a_start_in_another_realm_waits_for_the_imposters_run_in_flight() {
         2,
         "the deferred run seeds anew from the cell, in its own realm"
     );
+    recorder.write("start_in_another_realm", 2, 0, 1).await;
     let _ = manager.delete_all().await;
 }
 
@@ -386,6 +447,7 @@ async fn a_request_held_between_its_hooks_is_cut_by_a_restart() {
     // Cut off by the restart (issue #1799): its later hooks never run, so it cannot answer from
     // a second cell.
     let answered = request.await.expect("request");
+    recorder.write("predicate_then_restart", 1, 1, 0).await;
     let _ = manager.delete_all().await;
     assert_eq!(
         answered, None,
@@ -419,6 +481,7 @@ async fn a_request_held_between_its_inject_and_decorate_is_cut_by_a_restart() {
     // Cut off by the restart (issue #1799): its later hooks never run, so it cannot answer from
     // a second cell.
     let answered = request.await.expect("request");
+    recorder.write("inject_then_restart", 1, 1, 0).await;
     let _ = manager.delete_all().await;
     assert_eq!(
         answered, None,
@@ -453,6 +516,9 @@ async fn a_request_held_between_its_predicate_and_decorate_is_cut_by_a_restart()
     // Cut off by the restart (issue #1799): its later hooks never run, so it cannot answer from
     // a second cell.
     let answered = request.await.expect("request");
+    recorder
+        .write("predicate_then_restart_before_decorate", 1, 1, 0)
+        .await;
     let _ = manager.delete_all().await;
     assert_eq!(
         answered, None,
@@ -478,6 +544,7 @@ async fn the_request_after_a_restart_starts_on_the_new_cell() {
     assert_eq!(get(port, "/").await.1, "seen");
     manager.restart_runtime_state(port).await.expect("restart");
     assert_eq!(get(port, "/").await.1, "undefined");
+    recorder.write("after_restart", 3, 1, 0).await;
     let _ = manager.delete_all().await;
 }
 
@@ -498,6 +565,7 @@ async fn a_write_made_while_the_answer_is_read_is_not_lost() {
 
     let first = get(port, "/").await;
     let second = get(port, "/").await;
+    recorder.write("getter_on_answer", 2, 0, 0).await;
     let _ = manager.delete_all().await;
     assert_eq!(first.1, "undefined");
     assert_eq!(
@@ -524,6 +592,7 @@ async fn a_write_made_while_a_thrown_value_is_read_is_not_lost() {
 
     let (status, _) = get(port, "/throw").await;
     let (_, read) = get(port, "/read").await;
+    recorder.write("getter_on_thrown", 2, 0, 0).await;
     let _ = manager.delete_all().await;
     assert_eq!(status, 500, "it still fails as a throw");
     assert_eq!(read, "1", "the getter's write did not reach the next run");
@@ -551,6 +620,7 @@ async fn a_write_made_while_a_predicates_thrown_value_is_read_is_not_lost() {
 
     let _ = get(port, "/predicate").await;
     let (_, read) = get(port, "/read").await;
+    recorder.write("getter_on_predicate_throw", 2, 0, 0).await;
     let _ = manager.delete_all().await;
     assert_eq!(read, "1", "the getter's write did not reach the next run");
 }
@@ -580,6 +650,7 @@ async fn a_write_made_while_a_decorated_response_is_read_is_not_lost() {
 
     let (_, body) = get(port, "/decorate").await;
     let (_, read) = get(port, "/read").await;
+    recorder.write("getter_on_decorated", 2, 0, 0).await;
     let _ = manager.delete_all().await;
     assert_eq!(body, "plain");
     assert_eq!(read, "1", "the getter's write did not reach the next run");
@@ -612,6 +683,7 @@ async fn a_job_left_behind_does_not_fail_the_run_that_inherited_it() {
     let (_, left) = get(port, "/leaves").await;
     assert_eq!(left, "left");
     let (status, body) = waits.await.expect("waits");
+    recorder.write("job_left_behind", 2, 0, 0).await;
     let _ = manager.delete_all().await;
     assert_eq!(
         (status, body.as_str()),
