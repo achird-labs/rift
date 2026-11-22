@@ -205,6 +205,15 @@ async fn nothing_is_instantiated_to_answer_a_snapshot() {
     assert_eq!(t.count("/c").await, Ok(1));
     assert_eq!(t.snapshot(None).await, Err(WasmSnapshotError::RequestMode));
     t.stop().await;
+
+    // No wasm stub at all is not request mode: there is just no instance.
+    let plain = json!({ "responses": [{ "is": { "statusCode": 200 } }] });
+    let t = Twin::new(vec![plain], json!({})).await;
+    assert_eq!(
+        t.snapshot(None).await,
+        Err(WasmSnapshotError::NotInstantiated)
+    );
+    t.stop().await;
 }
 
 // Two live instances: a snapshot must name one. Each id reads its own instance's state; an id no

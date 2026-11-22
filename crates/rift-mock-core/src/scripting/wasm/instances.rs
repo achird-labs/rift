@@ -111,6 +111,18 @@ struct Slot {
     meta: parking_lot::Mutex<Meta>,
 }
 
+impl Slot {
+    /// Record that the slot holds no instance: after a drop, or a call task that panicked holding
+    /// it, so the route does not list an instance that is gone.
+    fn forget(&self) {
+        let mut meta = self.meta.lock();
+        meta.instantiated_at = None;
+        meta.calls = 0;
+        meta.memory_bytes = 0;
+        meta.bounds = None;
+    }
+}
+
 #[derive(Default)]
 struct Meta {
     instantiated_at: Option<SystemTime>,
@@ -278,6 +290,7 @@ pub(super) async fn call_in(
         drop(guard);
         return (Err(super::runtime::timeout_error_for(&call)), report);
     }
+    let watched = Arc::clone(&slot);
     let task = tokio::spawn(async move {
         let mut guard = guard;
         let mut report = CallReport::default();
@@ -303,14 +316,9 @@ pub(super) async fn call_in(
                 *guard = Some(live);
             }
             None => {
-                let mut meta = slot.meta.lock();
                 // An instance this call made and could not keep was never one the route reported.
                 let had = !fresh;
-                meta.instantiated_at = None;
-                meta.calls = 0;
-                meta.memory_bytes = 0;
-                meta.bounds = None;
-                drop(meta);
+                slot.forget();
                 if had {
                     let reason = if report.unfinished {
                         DropReason::Unfinished
@@ -331,10 +339,14 @@ pub(super) async fn call_in(
             report.absorb(call_report);
             (result, report)
         }
-        Err(e) => (
-            Err(anyhow::anyhow!("wasm instance task failed: {e}")),
-            report,
-        ),
+        // A panic dropped the instance with the task's guard.
+        Err(e) => {
+            watched.forget();
+            (
+                Err(anyhow::anyhow!("wasm instance task failed: {e}")),
+                report,
+            )
+        }
     }
 }
 
@@ -379,6 +391,7 @@ pub(crate) async fn snapshot(
     let guard = tokio::time::timeout(timeout, Arc::clone(&slot.live).lock_owned())
         .await
         .map_err(|_elapsed| WasmSnapshotError::Busy)?;
+    let watched = Arc::clone(&slot);
     let task = tokio::spawn(async move {
         let mut guard = guard;
         // Dropped by a trap while this waited.
@@ -397,12 +410,7 @@ pub(crate) async fn snapshot(
             *guard = Some(live);
         } else {
             drop(live);
-            let mut meta = slot.meta.lock();
-            meta.instantiated_at = None;
-            meta.calls = 0;
-            meta.memory_bytes = 0;
-            meta.bounds = None;
-            drop(meta);
+            slot.forget();
             log_drop(&key, DropReason::SnapshotTrap);
         }
         drop(guard);
@@ -419,6 +427,8 @@ pub(crate) async fn snapshot(
         }
     });
     task.await.unwrap_or_else(|e| {
+        // A panic dropped the instance with the task's guard.
+        watched.forget();
         Err(WasmSnapshotError::Trap(format!(
             "snapshot task failed: {e}"
         )))

@@ -108,7 +108,11 @@ impl WasmInstances {
         #[cfg(feature = "wasm")]
         {
             if self.map.is_empty() {
-                let keeps_one = stubs
+                // `RequestMode` only for an imposter whose wasm stubs are all `instance:
+                // "request"`; with no wasm stub, or one that keeps an instance, there is simply
+                // none live yet.
+                let (mut wasm, mut keeps_one) = (false, false);
+                for script in stubs
                     .flat_map(|stub| stub.responses.iter())
                     .filter_map(|response| match response {
                         crate::imposter::StubResponse::RiftScript { rift, .. } => {
@@ -116,11 +120,14 @@ impl WasmInstances {
                         }
                         _ => None,
                     })
-                    .any(|script| wasm::instances::key_of(script).is_some());
-                return Err(if keeps_one {
-                    WasmSnapshotError::NotInstantiated
-                } else {
+                {
+                    wasm |= script.engine.as_deref() == Some("wasm");
+                    keeps_one |= wasm::instances::key_of(script).is_some();
+                }
+                return Err(if wasm && !keeps_one {
                     WasmSnapshotError::RequestMode
+                } else {
+                    WasmSnapshotError::NotInstantiated
                 });
             }
             wasm::instances::snapshot(&self.map, id, flow_store).await

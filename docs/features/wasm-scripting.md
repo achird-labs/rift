@@ -320,7 +320,10 @@ checked:
 - It is not a request: it is not recorded, and it does not count in the instance's `calls`.
 - Nothing stops a guest writing its own memory in `snapshot`; one that does breaks a seeded replay.
 
-It runs under the last call's `timeoutMs` and fuel budget. A trap or deadline miss drops the instance,
+A snapshot holds the instance while it runs, as a call does, so requests that arrive meanwhile wait
+for it and their wait counts toward their `timeoutMs`: keep `snapshot` cheap. Its `wasi:clocks` read
+the system clock, not a frozen imposter clock or `X-Rift-Now`. It runs under the last call's
+`timeoutMs` and fuel budget. A trap or deadline miss drops the instance,
 as on the request path, logged and counted with reason `snapshot-trap`; a guest `err`, or text that
 is not JSON, answers `500` and keeps it. With only `instance: "request"` stubs there is no instance
 to read: their state is in `state`, which `GET /admin/imposters/:port/flow-state/…` reads.
