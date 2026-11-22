@@ -8,6 +8,14 @@
 //! A test marked `#[ignore = "#n"]` states the correct behaviour and fails today: it reproduces the
 //! defect filed as issue n. `cargo test --test scenario_interleavings -- --ignored` runs them, and
 //! the fix removes the attribute.
+//!
+//! Every test runs on the model's own stub table ([`model_table`]). With `FORMAL_TRACE_DIR` set, each
+//! writes its run there as ndjson, for `formal/scenario/validate.py` to check against the model:
+//!
+//! ```text
+//! FORMAL_TRACE_DIR=$PWD/formal/scenario/traces/accept \
+//!   cargo test -p rift-mock-core --test scenario_interleavings -- --include-ignored
+//! ```
 
 use std::sync::{Arc, Condvar};
 use std::time::Duration;
@@ -90,6 +98,84 @@ impl Recorder {
             self.points.lock()
         );
     }
+
+    /// Write the run to `$FORMAL_TRACE_DIR/<name>.ndjson`, when the variable is set. `start` is the
+    /// run's configuration as `Scenario.tla` names it (see [`roles`]).
+    fn write(&self, name: &str, mut start: Value) {
+        let Ok(dir) = std::env::var("FORMAL_TRACE_DIR") else {
+            return;
+        };
+        start["point"] = json!("Start");
+        let mut lines = start.to_string();
+        lines.push('\n');
+        let points = self.points.lock();
+        // A stamp is written as the model's counter: the k-th stamp issued is k (the load clock
+        // never repeats or goes back), and one older than every transition, a stub's own load
+        // stamp, is 0. Anything else no step serves, so the trace is rejected.
+        let mut issued: Vec<i64> = points
+            .iter()
+            .filter_map(|p| match p {
+                Point::TransitionStampIssued { stamp, .. } => Some(*stamp),
+                _ => None,
+            })
+            .collect();
+        issued.sort_unstable();
+        let counter = |stamp: i64| match issued.iter().position(|s| *s == stamp) {
+            Some(k) => json!(k + 1),
+            None if issued.first().is_none_or(|first| stamp < *first) => json!(0),
+            None => json!(-1),
+        };
+        // The manager's other points (create, delete) are no part of this model.
+        for mut point in points.iter().map(to_json) {
+            if point["point"] == "Other" {
+                continue;
+            }
+            if let Some(stamp) = point["stamp"].as_i64() {
+                point["stamp"] = counter(stamp);
+            }
+            lines.push_str(&point.to_string());
+            lines.push('\n');
+        }
+        std::fs::create_dir_all(&dir).expect("trace dir");
+        std::fs::write(format!("{dir}/{name}.ndjson"), lines).expect("write trace");
+    }
+}
+
+/// A point as `formal/scenario/TraceValidation.tla` labels it. A gate read names the model's request
+/// role and the gate's position in `Order`, from where [`model_table`] puts the stub.
+fn to_json(point: &Point) -> Value {
+    match *point {
+        Point::GateRead { stub_index, .. } => {
+            let (role, pos) = match stub_index {
+                0..3 => ("gated", stub_index + 1),
+                3..6 => ("poller", stub_index - 2),
+                // No stub of the model's table: no step takes it, so the trace is rejected.
+                _ => ("unmodelled", 0),
+            };
+            json!({ "point": "GateRead", "role": role, "pos": pos })
+        }
+        Point::CasApplied { .. } => json!({ "point": "CasApplied" }),
+        Point::CasConflict { .. } => json!({ "point": "CasConflict" }),
+        Point::ScenarioChangeRead { changed, .. } => {
+            json!({ "point": "ScenarioChangeRead", "changed": changed })
+        }
+        Point::ScenarioWriteNext { .. } => json!({ "point": "ScenarioWriteNext" }),
+        Point::TransitionStampIssued { stamp, .. } => {
+            json!({ "point": "TransitionStampIssued", "stamp": stamp })
+        }
+        Point::TransitionStamped { stamp, .. } => {
+            json!({ "point": "TransitionStamped", "stamp": stamp })
+        }
+        Point::Served { stamp, .. } => json!({ "point": "Served", "stamp": stamp }),
+        _ => json!({ "point": "Other" }),
+    }
+}
+
+/// A run's configuration for its trace: how many requests of each of the model's roles it made.
+/// The store starts empty, and a setter writes `B`, as in [`model_table`].
+fn roles(gated: usize, pollers: usize, setters: usize, resetters: usize, clearers: usize) -> Value {
+    json!({ "gated": gated, "pollers": pollers, "setters": setters, "resetters": resetters,
+            "clearers": clearers })
 }
 
 fn manager(recorder: &Arc<Recorder>) -> ImposterManager {
@@ -115,12 +201,33 @@ fn stub(path: &str, required: Option<&str>, next: Option<&str>, body: &str) -> V
     stub
 }
 
-async fn create(manager: &ImposterManager, stubs: Value) -> u16 {
+/// `Scenario.tla`'s stub table. `/go` carries the cycle `Started -> A -> B -> Started` in scan order
+/// (the model's `Gated`); `/read` has a read-only stub under each of the same gates, in the same
+/// order (`Pollers`); `/set` is ungated and moves the scenario to `B` (`Setters`, `SetTo`). Each
+/// conditional stub answers the state its gate saw.
+fn model_table() -> Value {
+    json!([
+        stub("/go", Some("Started"), Some("A"), "started"),
+        stub("/go", Some("A"), Some("B"), "a"),
+        stub("/go", Some("B"), Some("Started"), "b"),
+        stub("/read", Some("Started"), None, "started"),
+        stub("/read", Some("A"), None, "a"),
+        stub("/read", Some("B"), None, "b"),
+        {
+            "scenarioName": "S",
+            "newScenarioState": "B",
+            "predicates": [{ "equals": { "path": "/set" } }],
+            "responses": [{ "is": { "statusCode": 200, "body": "set" } }]
+        },
+    ])
+}
+
+async fn create(manager: &ImposterManager) -> u16 {
     let config = serde_json::from_value(json!({
         "port": 0,
         "host": "127.0.0.1",
         "protocol": "http",
-        "stubs": stubs
+        "stubs": model_table()
     }))
     .expect("imposter config");
     manager.create_imposter(config).await.expect("create")
@@ -162,22 +269,13 @@ async fn get(port: u16, path: &str, since: Option<&str>) -> Answer {
 }
 
 /// `Scenario.tla`, `StampMonotone`: the regression's three transitions. The first issues its stamp
-/// and stalls before publishing it; the other two run to the end, one of them serving its answer
-/// under the second stamp; then the first publishes, and the map goes back to the lowest stamp.
+/// and stalls before publishing it; the other two run to the end, the last serving its answer under
+/// the second stamp; then the first publishes, and must not take the map back to the lowest stamp.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stalled_stamp_does_not_take_the_scenario_back() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
-    let port = create(
-        &manager,
-        json!([
-            stub("/go", Some("Started"), Some("A"), "started"),
-            stub("/go", Some("A"), Some("B"), "a"),
-            stub("/go", Some("B"), Some("C"), "b"),
-            stub("/go", Some("C"), None, "c"),
-        ]),
-    )
-    .await;
+    let port = create(&manager).await;
 
     let latch = recorder.hold(|p| matches!(p, Point::TransitionStampIssued { .. }));
     let stalled = tokio::spawn(async move { get(port, "/go", None).await });
@@ -185,10 +283,10 @@ async fn a_stalled_stamp_does_not_take_the_scenario_back() {
         .reached(|p| matches!(p, Point::TransitionStampIssued { .. }))
         .await;
 
-    // Issues the second stamp and publishes it; answers `a` under no stamp yet.
+    // Moves `A -> B`, issues the second stamp and publishes it; answers `a` under no stamp yet.
     assert_eq!(get(port, "/go", None).await.body, "a");
-    // Copies the second stamp, moves the scenario to `C` under the third, and answers `b` under
-    // the second. This client now holds `b`.
+    // Copies the second stamp, moves `B -> Started` under the third, and answers `b` under the
+    // second. This client now holds `b`.
     let held = get(port, "/go", None).await;
     assert_eq!(held.body, "b");
     let since = held.last_modified.expect("a conditional stub's stamp");
@@ -196,33 +294,25 @@ async fn a_stalled_stamp_does_not_take_the_scenario_back() {
     latch.open();
     assert_eq!(stalled.await.expect("request").body, "started");
 
-    let now = get(port, "/go", Some(&since)).await;
+    let now = get(port, "/read", Some(&since)).await;
     assert_eq!(
         (now.status, now.body.as_str()),
-        (200, "c"),
-        "the client holding `b` under {since} is told about `c`, Last-Modified {:?}",
+        (200, "started"),
+        "the client holding `b` under {since} is told about `Started`, Last-Modified {:?}",
         now.last_modified
     );
+    recorder.write("stalled_stamp", roles(3, 1, 0, 0, 0));
     manager.delete_all().await;
 }
 
 /// `Scenario.tla`, `NoStaleAnswerAtRest`: a setter decides "no change" while the state is what it
-/// writes, a gated transition moves the state and stamps, and the setter's write moves it back
-/// under no stamp at all.
+/// writes, a gated transition moves the state and stamps, and the setter's write moves it back,
+/// which must be stamped too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_set_that_decided_no_change_still_stamps_what_it_moved() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
-    let port = create(
-        &manager,
-        json!([
-            stub("/set", None, Some("B"), "set"),
-            stub("/go", Some("B"), Some("C"), "moved"),
-            stub("/read", Some("B"), None, "b"),
-            stub("/read", Some("C"), None, "c"),
-        ]),
-    )
-    .await;
+    let port = create(&manager).await;
     assert_eq!(get(port, "/set", None).await.body, "set");
 
     let latch = recorder.hold(|p| matches!(p, Point::ScenarioChangeRead { changed: false, .. }));
@@ -231,9 +321,9 @@ async fn a_set_that_decided_no_change_still_stamps_what_it_moved() {
         .reached(|p| matches!(p, Point::ScenarioChangeRead { changed: false, .. }))
         .await;
 
-    assert_eq!(get(port, "/go", None).await.body, "moved");
+    assert_eq!(get(port, "/go", None).await.body, "b");
     let held = get(port, "/read", None).await;
-    assert_eq!(held.body, "c");
+    assert_eq!(held.body, "started");
     let since = held.last_modified.expect("a conditional stub's stamp");
 
     latch.open();
@@ -243,26 +333,19 @@ async fn a_set_that_decided_no_change_still_stamps_what_it_moved() {
     assert_eq!(
         (now.status, now.body.as_str()),
         (200, "b"),
-        "the client holding `c` under {since} is told the state went back to `B`"
+        "the client holding `started` under {since} is told the state went back to `B`"
     );
+    recorder.write("set_no_change", roles(1, 2, 2, 0, 0));
     manager.delete_all().await;
 }
 
-/// The same window through the admin door: `flow_delete` decides "no change" on an absent key, a
-/// gated transition moves the state and stamps, and the delete returns it to `Started` unstamped.
+/// The same window through the admin door: `flow_delete` is about to delete an absent key, a gated
+/// transition moves the state and stamps, and the delete returns it to `Started`, which it stamps.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_delete_that_decided_no_change_still_stamps_what_it_moved() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
-    let port = create(
-        &manager,
-        json!([
-            stub("/go", Some("Started"), Some("A"), "moved"),
-            stub("/read", Some("Started"), None, "started"),
-            stub("/read", Some("A"), None, "a"),
-        ]),
-    )
-    .await;
+    let port = create(&manager).await;
     let imposter = manager.get_imposter(port).expect("imposter");
 
     let latch = recorder.hold(|p| matches!(p, Point::ScenarioWriteNext { .. }));
@@ -272,7 +355,7 @@ async fn a_delete_that_decided_no_change_still_stamps_what_it_moved() {
         .reached(|p| matches!(p, Point::ScenarioWriteNext { .. }))
         .await;
 
-    assert_eq!(get(port, "/go", None).await.body, "moved");
+    assert_eq!(get(port, "/go", None).await.body, "started");
     let held = get(port, "/read", None).await;
     assert_eq!(held.body, "a");
     let since = held.last_modified.expect("a conditional stub's stamp");
@@ -286,6 +369,7 @@ async fn a_delete_that_decided_no_change_still_stamps_what_it_moved() {
         (200, "started"),
         "the client holding `a` under {since} is told the scenario was reset"
     );
+    recorder.write("flow_delete", roles(1, 2, 0, 1, 0));
     manager.delete_all().await;
 }
 
@@ -294,15 +378,7 @@ async fn a_delete_that_decided_no_change_still_stamps_what_it_moved() {
 async fn a_scenario_reset_about_to_write_still_stamps_what_it_moved() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
-    let port = create(
-        &manager,
-        json!([
-            stub("/go", Some("Started"), Some("A"), "moved"),
-            stub("/read", Some("Started"), None, "started"),
-            stub("/read", Some("A"), None, "a"),
-        ]),
-    )
-    .await;
+    let port = create(&manager).await;
     let imposter = manager.get_imposter(port).expect("imposter");
 
     let latch = recorder.hold(|p| matches!(p, Point::ScenarioWriteNext { .. }));
@@ -312,7 +388,7 @@ async fn a_scenario_reset_about_to_write_still_stamps_what_it_moved() {
         .reached(|p| matches!(p, Point::ScenarioWriteNext { .. }))
         .await;
 
-    assert_eq!(get(port, "/go", None).await.body, "moved");
+    assert_eq!(get(port, "/go", None).await.body, "started");
     let held = get(port, "/read", None).await;
     assert_eq!(held.body, "a");
     let since = held.last_modified.expect("a conditional stub's stamp");
@@ -326,6 +402,7 @@ async fn a_scenario_reset_about_to_write_still_stamps_what_it_moved() {
         (200, "started"),
         "the client holding `a` under {since} is told the scenario was reset"
     );
+    recorder.write("scenario_reset", roles(1, 2, 0, 1, 0));
     manager.delete_all().await;
 }
 
@@ -335,15 +412,7 @@ async fn a_scenario_reset_about_to_write_still_stamps_what_it_moved() {
 async fn a_clear_about_to_write_still_stamps_what_it_moved() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
-    let port = create(
-        &manager,
-        json!([
-            stub("/go", Some("Started"), Some("A"), "moved"),
-            stub("/read", Some("Started"), None, "started"),
-            stub("/read", Some("A"), None, "a"),
-        ]),
-    )
-    .await;
+    let port = create(&manager).await;
     let imposter = manager.get_imposter(port).expect("imposter");
 
     let latch = recorder.hold(|p| matches!(p, Point::ScenarioWriteNext { .. }));
@@ -353,7 +422,7 @@ async fn a_clear_about_to_write_still_stamps_what_it_moved() {
         .reached(|p| matches!(p, Point::ScenarioWriteNext { .. }))
         .await;
 
-    assert_eq!(get(port, "/go", None).await.body, "moved");
+    assert_eq!(get(port, "/go", None).await.body, "started");
     let held = get(port, "/read", None).await;
     assert_eq!(held.body, "a");
     let since = held.last_modified.expect("a conditional stub's stamp");
@@ -367,6 +436,7 @@ async fn a_clear_about_to_write_still_stamps_what_it_moved() {
         (200, "started"),
         "the client holding `a` under {since} is told the flow was cleared"
     );
+    recorder.write("flow_clear", roles(1, 2, 0, 0, 1));
     manager.delete_all().await;
 }
 
@@ -375,16 +445,7 @@ async fn a_clear_about_to_write_still_stamps_what_it_moved() {
 async fn a_flow_set_that_decided_no_change_still_stamps_what_it_moved() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
-    let port = create(
-        &manager,
-        json!([
-            stub("/set", None, Some("B"), "set"),
-            stub("/go", Some("B"), Some("C"), "moved"),
-            stub("/read", Some("B"), None, "b"),
-            stub("/read", Some("C"), None, "c"),
-        ]),
-    )
-    .await;
+    let port = create(&manager).await;
     assert_eq!(get(port, "/set", None).await.body, "set");
     let imposter = manager.get_imposter(port).expect("imposter");
 
@@ -395,9 +456,9 @@ async fn a_flow_set_that_decided_no_change_still_stamps_what_it_moved() {
         .reached(|p| matches!(p, Point::ScenarioChangeRead { changed: false, .. }))
         .await;
 
-    assert_eq!(get(port, "/go", None).await.body, "moved");
+    assert_eq!(get(port, "/go", None).await.body, "b");
     let held = get(port, "/read", None).await;
-    assert_eq!(held.body, "c");
+    assert_eq!(held.body, "started");
     let since = held.last_modified.expect("a conditional stub's stamp");
 
     latch.open();
@@ -407,39 +468,30 @@ async fn a_flow_set_that_decided_no_change_still_stamps_what_it_moved() {
     assert_eq!(
         (now.status, now.body.as_str()),
         (200, "b"),
-        "the client holding `c` under {since} is told the state went back to `B`"
+        "the client holding `started` under {since} is told the state went back to `B`"
     );
+    recorder.write("flow_set_no_change", roles(1, 2, 2, 0, 0));
     manager.delete_all().await;
 }
 
-/// `Scenario.tla`, `NoMatchOnlyWhenUncovered`: a scan reads the state once per gated candidate.
-/// With the state at `B`, the scan passes the gate of `Started`, then of `A`; a transition takes the
-/// state to `Started`; the gate of `B` then fails too. Every state has a stub, and the request
-/// matched none.
+/// `Scenario.tla`, `NoMatchOnlyWhenUncovered`: a scan reads the state once per scenario. With the
+/// state at `B`, the scan passes the gate of `Started`, then of `A`; a transition takes the state to
+/// `Started`; the gate of `B` is still judged against the `B` the scan read. Every state has a stub,
+/// and the request must match one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_scan_of_covered_states_finds_a_stub_while_the_state_moves() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
-    let port = create(
-        &manager,
-        json!([
-            stub("/read", Some("Started"), None, "started"),
-            stub("/read", Some("A"), None, "a"),
-            stub("/read", Some("B"), None, "b"),
-            stub("/set", None, Some("B"), "set"),
-            stub("/go", Some("B"), Some("Started"), "moved"),
-        ]),
-    )
-    .await;
+    let port = create(&manager).await;
     assert_eq!(get(port, "/set", None).await.body, "set");
 
-    // The gate of the second stub has been read; the third's has not.
-    let at_second_gate: Matcher = |p| matches!(p, Point::GateRead { stub_index: 1, .. });
+    // The gate of `/read`'s second stub (`A`) has been judged; the third's has not.
+    let at_second_gate: Matcher = |p| matches!(p, Point::GateRead { stub_index: 4, .. });
     let latch = recorder.hold(at_second_gate);
     let scan = tokio::spawn(async move { get(port, "/read", None).await });
     recorder.reached(at_second_gate).await;
 
-    assert_eq!(get(port, "/go", None).await.body, "moved");
+    assert_eq!(get(port, "/go", None).await.body, "b");
 
     latch.open();
     let answer = scan.await.expect("request");
@@ -447,70 +499,55 @@ async fn a_scan_of_covered_states_finds_a_stub_while_the_state_moves() {
         !answer.no_match && ["b", "started"].contains(&answer.body.as_str()),
         "every state the scan could have read has a stub, got {answer:?}"
     );
+    recorder.write("scan_while_state_moves", roles(1, 1, 1, 0, 0));
     manager.delete_all().await;
 }
 
 /// `Scenario.tla`, `NeverDroppedTransition` is violated on purpose: a transition whose gate saw a
-/// state that moved loses its compare-and-set, and its answer still goes out. This one holds today.
+/// state that moved loses its compare-and-set, and its answer still goes out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_transition_that_lost_its_compare_and_set_is_dropped() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
-    let port = create(
-        &manager,
-        json!([
-            stub("/go", Some("Started"), Some("A"), "first"),
-            stub("/also", Some("Started"), Some("B"), "second"),
-            stub("/read", Some("A"), None, "a"),
-            stub("/read", Some("B"), None, "b"),
-        ]),
-    )
-    .await;
+    let port = create(&manager).await;
 
-    // Hold `/go` once its gate read `Started`, before its compare-and-set.
+    // Hold one `/go` once its gate read `Started`, before its compare-and-set.
     let at_first_gate: Matcher = |p| matches!(p, Point::GateRead { stub_index: 0, .. });
     let latch = recorder.hold(at_first_gate);
     let loser = tokio::spawn(async move { get(port, "/go", None).await });
     recorder.reached(at_first_gate).await;
 
-    assert_eq!(get(port, "/also", None).await.body, "second");
+    assert_eq!(get(port, "/go", None).await.body, "started");
 
     latch.open();
-    assert_eq!(loser.await.expect("request").body, "first");
+    assert_eq!(loser.await.expect("request").body, "started");
     recorder
         .reached(|p| matches!(p, Point::CasConflict { .. }))
         .await;
     assert_eq!(
         get(port, "/read", None).await.body,
-        "b",
+        "a",
         "the winner stands"
     );
+    recorder.write("cas_lost", roles(2, 1, 0, 0, 0));
     manager.delete_all().await;
 }
 
 /// `Scenario.tla`, `NeverOldAnswerUnderNewStamp` (#1307), on the engine: a request held after its
-/// gate read, while a transition lands, serves the old answer under the old stamp, so its client
-/// is told about the new answer. This one holds today.
+/// gate read, while a transition lands, serves the old answer under the old stamp, so its client is
+/// told about the new answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_answer_overtaken_by_a_transition_keeps_the_stamp_it_copied() {
     let recorder = Arc::new(Recorder::default());
     let manager = manager(&recorder);
-    let port = create(
-        &manager,
-        json!([
-            stub("/go", Some("Started"), Some("A"), "moved"),
-            stub("/read", Some("Started"), None, "started"),
-            stub("/read", Some("A"), None, "a"),
-        ]),
-    )
-    .await;
+    let port = create(&manager).await;
 
-    let at_read_gate: Matcher = |p| matches!(p, Point::GateRead { stub_index: 1, .. });
+    let at_read_gate: Matcher = |p| matches!(p, Point::GateRead { stub_index: 3, .. });
     let latch = recorder.hold(at_read_gate);
     let old = tokio::spawn(async move { get(port, "/read", None).await });
     recorder.reached(at_read_gate).await;
 
-    assert_eq!(get(port, "/go", None).await.body, "moved");
+    assert_eq!(get(port, "/go", None).await.body, "started");
     recorder
         .reached(|p| matches!(p, Point::TransitionStamped { .. }))
         .await;
@@ -522,5 +559,6 @@ async fn an_answer_overtaken_by_a_transition_keeps_the_stamp_it_copied() {
 
     let now = get(port, "/read", Some(&since)).await;
     assert_eq!((now.status, now.body.as_str()), (200, "a"));
+    recorder.write("overtaken_answer", roles(1, 2, 0, 0, 0));
     manager.delete_all().await;
 }

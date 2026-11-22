@@ -1,0 +1,16 @@
+{"clearers":0,"gated":1,"point":"Start","pollers":1,"resetters":0,"setters":1}
+{"changed":true,"point":"ScenarioChangeRead"}
+{"point":"TransitionStampIssued","stamp":1}
+{"point":"TransitionStamped","stamp":1}
+{"point":"GateRead","pos":1,"role":"poller"}
+{"point":"GateRead","pos":2,"role":"poller"}
+{"point":"GateRead","pos":1,"role":"gated"}
+{"point":"GateRead","pos":2,"role":"gated"}
+{"point":"GateRead","pos":3,"role":"gated"}
+{"point":"CasApplied"}
+{"point":"TransitionStampIssued","stamp":2}
+{"point":"TransitionStamped","stamp":2}
+{"point":"Served","stamp":1}
+{"point":"GateRead","pos":3,"role":"poller"}
+{"point":"GateRead","pos":3,"role":"poller"}
+{"point":"Served","stamp":1}
