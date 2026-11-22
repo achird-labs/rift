@@ -827,6 +827,24 @@ impl Imposter {
         &self.wasm_instances
     }
 
+    /// `rift:mock/introspect.snapshot` of one of its kept wasm instances (issue #1794): what
+    /// `GET /imposters/:port/wasm/snapshot` answers. The guest reads this imposter's flow store and
+    /// cannot write it.
+    pub async fn wasm_snapshot(
+        &self,
+        id: Option<&str>,
+    ) -> Result<crate::scripting::WasmSnapshot, crate::scripting::WasmSnapshotError> {
+        // Owned, not a guard: an `arc_swap` guard is not to be held across an await.
+        let snapshot = arc_swap::Guard::into_inner(self.snapshot());
+        self.wasm_instances
+            .snapshot(
+                id,
+                snapshot.stubs().iter().map(|state| &state.stub),
+                Arc::clone(&self.flow_store),
+            )
+            .await
+    }
+
     /// A handle on the imposter's random stream (issue #1755), as a request draws through.
     #[must_use]
     pub fn request_rng(&self) -> crate::imposter::rng::RequestRng {

@@ -193,6 +193,16 @@ record.
 
 ### Added
 
+- **Read a kept wasm instance's state: `GET /imposters/{port}/wasm/snapshot`** (#1794). With
+  `instance: "imposter"` a twin's state is its guest memory, which nothing outside it could read. A
+  component may now export the optional `rift:mock/introspect` interface (`snapshot: func() ->
+  result<string, string>`) and the route answers its JSON text byte for byte, with
+  `X-Rift-Fuel-Used`; `?instance=<id>` picks one of the ids `GET …/wasm/instances` lists. A
+  snapshot does not perturb the run: it waits for the instance as a request does, `state` is
+  read-only for the call, `wasi:random` draws from a throwaway stream, and it is neither recorded
+  nor counted as a call. The route never instantiates. A trap drops the instance and counts in
+  `rift_wasm_instance_drops_total{reason="snapshot-trap"}`.
+
 - **`_rift.script.instance: "imposter"` keeps one wasm instance across requests** (#1793), so a
   twin's guest memory is its state. An instance is keyed by the component's SHA-256, its `export`
   and its `knobs`: it survives stub edits that keep it referenced (a fault-window stub added in

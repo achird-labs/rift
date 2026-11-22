@@ -94,7 +94,13 @@ pub(super) struct Host {
     pub(super) clock: CallClock,
     /// When the current call's deadline passes; `None` is no deadline.
     pub(super) deadline: Option<std::time::Instant>,
+    /// Set for a `rift:mock/introspect.snapshot` call (issue #1794): every `state` write returns
+    /// [`READ_ONLY`], so reading a twin's state cannot change it.
+    pub(super) read_only: bool,
 }
+
+/// What a `state` write returns during a snapshot (issue #1794).
+pub(super) const READ_ONLY: &str = "read-only during snapshot";
 
 /// The clock a store's `wasi:clocks` read, set for each call.
 pub(super) type CallClock = Arc<parking_lot::RwLock<Option<crate::scripting::ScriptClock>>>;
@@ -222,6 +228,9 @@ impl StateHost for Host {
         value: String,
         flow: Option<String>,
     ) -> wasmtime::Result<Result<(), String>> {
+        if self.read_only {
+            return Ok(Err(READ_ONLY.to_owned()));
+        }
         let value = match from_text("set", &value) {
             Ok(v) => v,
             Err(e) => return Ok(Err(e)),
@@ -239,6 +248,9 @@ impl StateHost for Host {
         by: i64,
         flow: Option<String>,
     ) -> wasmtime::Result<Result<i64, String>> {
+        if self.read_only {
+            return Ok(Err(READ_ONLY.to_owned()));
+        }
         let flow = self.flow(flow);
         store_op(Arc::clone(&self.flow_store), "incrementBy", move |s| {
             s.increment_by(&flow, &key, by)
@@ -263,6 +275,9 @@ impl StateHost for Host {
         key: String,
         flow: Option<String>,
     ) -> wasmtime::Result<Result<(), String>> {
+        if self.read_only {
+            return Ok(Err(READ_ONLY.to_owned()));
+        }
         let flow = self.flow(flow);
         store_op(Arc::clone(&self.flow_store), "delete", move |s| {
             s.delete(&flow, &key)
@@ -277,6 +292,9 @@ impl StateHost for Host {
         new: String,
         flow: Option<String>,
     ) -> wasmtime::Result<Result<CasOutcome, String>> {
+        if self.read_only {
+            return Ok(Err(READ_ONLY.to_owned()));
+        }
         let expected = match expected.as_deref().map(|t| from_text("cas", t)).transpose() {
             Ok(v) => v,
             Err(e) => return Ok(Err(e)),
@@ -303,6 +321,9 @@ impl StateHost for Host {
         seconds: i64,
         flow: Option<String>,
     ) -> wasmtime::Result<Result<(), String>> {
+        if self.read_only {
+            return Ok(Err(READ_ONLY.to_owned()));
+        }
         let flow = self.flow(flow);
         store_op(Arc::clone(&self.flow_store), "setTtl", move |s| {
             s.set_ttl(&flow, seconds)
@@ -316,6 +337,9 @@ impl StateHost for Host {
         seconds: i64,
         flow: Option<String>,
     ) -> wasmtime::Result<Result<bool, String>> {
+        if self.read_only {
+            return Ok(Err(READ_ONLY.to_owned()));
+        }
         let flow = self.flow(flow);
         store_op(Arc::clone(&self.flow_store), "setKeyTtl", move |s| {
             s.set_key_ttl(&flow, &key, seconds)
@@ -324,6 +348,9 @@ impl StateHost for Host {
     }
 
     async fn clear(&mut self, flow: Option<String>) -> wasmtime::Result<Result<(), String>> {
+        if self.read_only {
+            return Ok(Err(READ_ONLY.to_owned()));
+        }
         let flow = self.flow(flow);
         store_op(Arc::clone(&self.flow_store), "clear", move |s| {
             s.clear_flow(&flow)

@@ -55,6 +55,8 @@ pub(crate) enum ImposterRoute {
     Clock,
     /// GET /imposters/:port/wasm/instances (issue #1793)
     WasmInstances,
+    /// GET /imposters/:port/wasm/snapshot (issue #1794)
+    WasmSnapshot,
     /// GET/DELETE /imposters/:port/spaces/:flowId
     Space(String),
     /// POST/GET /imposters/:port/spaces/:flowId/stubs
@@ -81,6 +83,7 @@ impl ImposterRoute {
             ["scenarios", name, "state"] => Some(ImposterRoute::ScenarioState((*name).to_string())),
             ["clock"] => Some(ImposterRoute::Clock),
             ["wasm", "instances"] => Some(ImposterRoute::WasmInstances),
+            ["wasm", "snapshot"] => Some(ImposterRoute::WasmSnapshot),
             ["spaces", flow_id] => Some(ImposterRoute::Space((*flow_id).to_string())),
             ["spaces", flow_id, "stubs"] => Some(ImposterRoute::SpaceStubs((*flow_id).to_string())),
             _ => None,
@@ -106,6 +109,7 @@ impl ImposterRoute {
             ImposterRoute::ScenariosReset => "/imposters/{port}/scenarios/reset",
             ImposterRoute::Clock => "/imposters/{port}/clock",
             ImposterRoute::WasmInstances => "/imposters/{port}/wasm/instances",
+            ImposterRoute::WasmSnapshot => "/imposters/{port}/wasm/snapshot",
             ImposterRoute::Space(_) => "/imposters/{port}/spaces/{space}",
             ImposterRoute::SpaceStubs(_) => "/imposters/{port}/spaces/{space}/stubs",
         }
@@ -729,6 +733,10 @@ async fn route_imposter(
         // /imposters/:port/wasm/instances — kept wasm instances (issue #1793)
         (&Method::GET, ImposterRoute::WasmInstances) => {
             wasm_instances::handle_list(port, manager).await
+        }
+        // /imposters/:port/wasm/snapshot — a kept instance's state (issue #1794)
+        (&Method::GET, ImposterRoute::WasmSnapshot) => {
+            wasm_instances::handle_snapshot(port, query, manager).await
         }
 
         // /imposters/:port/spaces/:flowId — Correlated isolation (issue #223)

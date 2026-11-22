@@ -14,8 +14,10 @@
 //! back only after a clean return, whatever the guest answered: a trap, a deadline miss, a panic
 //! or an abort leaves the slot empty, and the next call instantiates afresh.
 
-use super::runtime::{CallReport, CallSpec, Live};
-use crate::scripting::{WasmAnswer, WasmInstanceInfo};
+use super::runtime::{CallReport, CallSpec, Live, SnapshotFailure};
+use crate::extensions::flow_state::FlowStore;
+use crate::imposter::WasmLimits;
+use crate::scripting::{WasmAnswer, WasmInstanceInfo, WasmSnapshot, WasmSnapshotError};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -114,6 +116,8 @@ struct Meta {
     instantiated_at: Option<SystemTime>,
     calls: u64,
     memory_bytes: usize,
+    /// The limits and `timeoutMs` of the last call: a snapshot runs under them (issue #1794).
+    bounds: Option<(WasmLimits, std::time::Duration)>,
 }
 
 /// An imposter's kept instances.
@@ -152,6 +156,8 @@ pub(crate) enum DropReason {
     Deadline,
     /// The guest returned with its response body or outparam still open.
     Unfinished,
+    /// `rift:mock/introspect.snapshot` trapped or missed its deadline (issue #1794).
+    SnapshotTrap,
 }
 
 impl DropReason {
@@ -162,6 +168,7 @@ impl DropReason {
             Self::Trap => "trap",
             Self::Deadline => "deadline",
             Self::Unfinished => "unfinished",
+            Self::SnapshotTrap => "snapshot-trap",
         }
     }
 }
@@ -276,6 +283,7 @@ pub(super) async fn call_in(
         let mut report = CallReport::default();
         let held = guard.take();
         let fresh = held.is_none();
+        let bounds = call.bounds();
         let (result, kept) = call.run(held, &mut report).await;
         match kept {
             Some(mut live) => {
@@ -290,6 +298,7 @@ pub(super) async fn call_in(
                 }
                 meta.calls += 1;
                 meta.memory_bytes = live.memory_bytes();
+                meta.bounds = Some(bounds);
                 drop(meta);
                 *guard = Some(live);
             }
@@ -300,6 +309,7 @@ pub(super) async fn call_in(
                 meta.instantiated_at = None;
                 meta.calls = 0;
                 meta.memory_bytes = 0;
+                meta.bounds = None;
                 drop(meta);
                 if had {
                     let reason = if report.unfinished {
@@ -325,5 +335,127 @@ pub(super) async fn call_in(
             Err(anyhow::anyhow!("wasm instance task failed: {e}")),
             report,
         ),
+    }
+}
+
+/// Call `rift:mock/introspect.snapshot` on a live instance (issue #1794): `id` as
+/// `GET /imposters/:port/wasm/instances` lists it, or the only live one when `None`. Never
+/// instantiates, since that would run `init` as a side effect.
+///
+/// Waits for the instance as a request does, under the last call's `timeoutMs`, so it never sees a
+/// call half-applied; then runs on a task of its own, as a call does, so an admin client that hangs
+/// up does not cut the guest. Not a call: `calls` does not move. A trap or deadline miss drops the
+/// instance, as on the request path.
+pub(crate) async fn snapshot(
+    map: &InstanceMap,
+    id: Option<&str>,
+    flow_store: Arc<dyn FlowStore>,
+) -> Result<WasmSnapshot, WasmSnapshotError> {
+    let (key, slot) = {
+        let slots = map.slots.lock();
+        let mut live: Vec<(&InstanceKey, &Arc<Slot>)> = slots
+            .iter()
+            .filter(|(_, slot)| slot.meta.lock().instantiated_at.is_some())
+            .collect();
+        live.sort_by_cached_key(|(key, _)| key.id());
+        let chosen = match id {
+            Some(id) => live.into_iter().find(|(key, _)| key.id() == id),
+            None if live.len() > 1 => {
+                return Err(WasmSnapshotError::Ambiguous(
+                    live.iter().map(|(key, _)| key.id()).collect(),
+                ));
+            }
+            None => live.into_iter().next(),
+        };
+        let (key, slot) = chosen.ok_or(WasmSnapshotError::NotInstantiated)?;
+        (key.clone(), Arc::clone(slot))
+    };
+    let (limits, timeout) = slot
+        .meta
+        .lock()
+        .bounds
+        .ok_or(WasmSnapshotError::NotInstantiated)?;
+    let started = std::time::Instant::now();
+    let guard = tokio::time::timeout(timeout, Arc::clone(&slot.live).lock_owned())
+        .await
+        .map_err(|_elapsed| WasmSnapshotError::Busy)?;
+    let task = tokio::spawn(async move {
+        let mut guard = guard;
+        // Dropped by a trap while this waited.
+        let Some(mut live) = guard.take() else {
+            return Err(WasmSnapshotError::NotInstantiated);
+        };
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining < MIN_CALL_TIME {
+            *guard = Some(live);
+            return Err(WasmSnapshotError::Busy);
+        }
+        let (result, fuel_used, kept) = live.snapshot(&limits, remaining, flow_store).await;
+        if kept {
+            live.release_request();
+            slot.meta.lock().memory_bytes = live.memory_bytes();
+            *guard = Some(live);
+        } else {
+            drop(live);
+            let mut meta = slot.meta.lock();
+            meta.instantiated_at = None;
+            meta.calls = 0;
+            meta.memory_bytes = 0;
+            meta.bounds = None;
+            drop(meta);
+            log_drop(&key, DropReason::SnapshotTrap);
+        }
+        drop(guard);
+        match result {
+            Ok(body) => {
+                if serde_json::from_str::<serde::de::IgnoredAny>(&body).is_err() {
+                    return Err(WasmSnapshotError::NotJson);
+                }
+                Ok(WasmSnapshot { body, fuel_used })
+            }
+            Err(SnapshotFailure::NoExport) => Err(WasmSnapshotError::NoExport),
+            Err(SnapshotFailure::Guest(msg)) => Err(WasmSnapshotError::Guest(msg)),
+            Err(SnapshotFailure::Trap(msg)) => Err(WasmSnapshotError::Trap(msg)),
+        }
+    });
+    task.await.unwrap_or_else(|e| {
+        Err(WasmSnapshotError::Trap(format!(
+            "snapshot task failed: {e}"
+        )))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    // A snapshot waits for the instance under the last call's `timeoutMs`, as a request does: held
+    // past it, the snapshot answers busy and leaves the instance as it was.
+    #[tokio::test]
+    async fn a_snapshot_that_cannot_get_the_instance_in_time_is_busy() {
+        let map = InstanceMap::default();
+        let key = InstanceKey::new([7; 32], None, None);
+        let slot = map.slot(&key);
+        {
+            let mut meta = slot.meta.lock();
+            meta.instantiated_at = Some(SystemTime::now());
+            meta.bounds = Some((WasmLimits::default(), Duration::from_millis(50)));
+        }
+        let held = Arc::clone(&slot.live).lock_owned().await;
+        let started = Instant::now();
+        let got = snapshot(
+            &map,
+            None,
+            Arc::new(crate::extensions::flow_state::NoOpFlowStore),
+        )
+        .await;
+        assert_eq!(got, Err(WasmSnapshotError::Busy));
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        assert!(
+            slot.meta.lock().instantiated_at.is_some(),
+            "nothing dropped"
+        );
+        drop(held);
     }
 }

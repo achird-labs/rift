@@ -60,7 +60,13 @@ const EXTRA_WIT: &[(&str, &str)] = &[
          world cli { include rift:mock/mock@0.1.0; import wasi:cli/environment@0.2.6; }
          world no-handler { import rift:mock/state@0.1.0; }
          world clocks { include rift:mock/mock@0.1.0; import wasi:clocks/wall-clock@0.2.6; import wasi:clocks/monotonic-clock@0.2.6; }
-         world random { include rift:mock/mock@0.1.0; import wasi:random/random@0.2.6; }",
+         world random { include rift:mock/mock@0.1.0; import wasi:random/random@0.2.6; }
+         world introspect {
+           include rift:mock/mock@0.1.0;
+           import wasi:random/random@0.2.6;
+           import wasi:clocks/monotonic-clock@0.2.6;
+           export rift:mock/introspect@0.1.0;
+         }",
     ),
 ];
 
@@ -435,6 +441,78 @@ pub fn memory_counter(tag: &str) -> Vec<u8> {
                      (br $wait)))))
              (i64.store (i32.const 80) (global.get $n))
              (i32.const 64)",
+        ),
+    )
+}
+
+/// Issue #1794: a counter in guest memory that also exports `rift:mock/introspect`. Each `respond`
+/// adds one to a wasm global and answers `delay(<count>)` (`snapshot` = `"random"`: `delay` of the low
+/// 6 bits of a `wasi:random` draw instead); a path of 6 bytes (`/sleep`) busy-waits 300 ms first.
+///
+/// `snapshot` picks what `rift:mock/introspect.snapshot` does:
+///
+/// | `snapshot` | returns |
+/// |---|---|
+/// | `count` | `ok({"count":"NN"})`, the count as two digits |
+/// | `random` | draws `wasi:random` first, then as `count` |
+/// | `err` | `err("nope")` |
+/// | `not-json` | `ok("nope")` |
+/// | `trap` | traps |
+/// | `write` | `state.set("k", "1")`, and returns its result: `err(<why>)` when refused |
+pub fn introspect_counter(snapshot: &str) -> Vec<u8> {
+    let count = "(i32.store8 (i32.const 3110)
+                   (i32.add (i32.const 48) (i32.wrap_i64 (i64.div_u (global.get $n) (i64.const 10)))))
+                 (i32.store8 (i32.const 3111)
+                   (i32.add (i32.const 48) (i32.wrap_i64 (i64.rem_u (global.get $n) (i64.const 10)))))
+                 (i32.const 3000)";
+    let body = match snapshot {
+        "count" => count.to_owned(),
+        "random" => format!("(drop (call $r)) {count}"),
+        "err" => "(i32.const 3040)".to_owned(),
+        "not-json" => "(i32.const 3060)".to_owned(),
+        "trap" => "(unreachable)".to_owned(),
+        "write" => "(call $set (i32.const 3300) (i32.const 1) (i32.const 3301) (i32.const 1)
+                      (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 3400))
+                    (i32.const 3400)"
+            .to_owned(),
+        other => panic!("no snapshot kind {other}"),
+    };
+    let answer = if snapshot == "random" {
+        "(i64.store (i32.const 80) (i64.and (call $r) (i64.const 0x3F)))"
+    } else {
+        "(i64.store (i32.const 80) (global.get $n))"
+    };
+    component(
+        "introspect",
+        &core(
+            r#"(import "wasi:random/random@0.2.6" "get-random-u64" (func $r (result i64)))
+               (import "wasi:clocks/monotonic-clock@0.2.6" "now" (func $now (result i64)))
+               (import "rift:mock/state@0.1.0" "set" (func $set (param i32 i32 i32 i32 i32 i32 i32 i32)))"#,
+            &format!(
+                r#"(global $n (mut i64) (i64.const 0))
+                   (data (i32.const 64) "\00") (data (i32.const 72) "\01")
+                   (data (i32.const 3000) "\00\00\00\00\1c\0c\00\00\0e\00\00\00")
+                   (data (i32.const 3040) "\01\00\00\00\80\0c\00\00\04\00\00\00")
+                   (data (i32.const 3060) "\00\00\00\00\80\0c\00\00\04\00\00\00")
+                   (data (i32.const 3100) "{{\"count\":\"00\"}}")
+                   (data (i32.const 3200) "nope")
+                   (data (i32.const 3300) "k1")
+                   (func (export "rift:mock/introspect@0.1.0#snapshot") (result i32)
+                     {body})"#
+            ),
+            &format!(
+                "(local $until i64)
+                 (global.set $n (i64.add (global.get $n) (i64.const 1)))
+                 (if (i32.eq (i32.load offset=12 (local.get 0)) (i32.const 6))
+                   (then
+                     (local.set $until (i64.add (call $now) (i64.const 300000000)))
+                     (block $done
+                       (loop $wait
+                         (br_if $done (i64.ge_u (call $now) (local.get $until)))
+                         (br $wait)))))
+                 {answer}
+                 (i32.const 64)"
+            ),
         ),
     )
 }
