@@ -296,7 +296,7 @@ for full details.
 ```bash
 cargo build --release -p rift-http-proxy          # build Rift from source
 cargo install oha                                 # load generator
-npm install --prefix ~/bench-mb @mbtest/mountebank@2.9.5  # reference engine
+npm install --prefix ~/bench-mb @mbtest/mountebank@2.10.0  # reference engine
 ```
 
 ### Run the suite

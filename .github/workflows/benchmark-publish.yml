@@ -38,7 +38,7 @@ on:
         default: "10s"
       mb_version:
         description: "Mountebank version (pinned so the comparison is reproducible)"
-        default: "2.9.5"
+        default: "2.10.0"
       wiremock_version:
         description: "WireMock version (pinned, same reason as Mountebank)"
         default: "3.9.1"

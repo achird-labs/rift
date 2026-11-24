@@ -411,8 +411,26 @@ fn unread_in_response(
 
 /// A behaviors block as `BehaviorProgram::from_elements` reads it: each element is a
 /// `ResponseBehaviors`, whose derived keys `serde_ignored` sees, holding enums it cannot see into.
+/// An array element's `chaos` (issue #1850) is read beside it, field by field; the object form
+/// drops `chaos`, so there it is unread.
 fn unread_in_behaviors(block: &Value, path: &str, unread: &mut Vec<String>) -> Result<(), String> {
     for (element_path, element) in one_or_many(block, path) {
+        let mut element = element;
+        if block.is_array()
+            && let Some(chaos) = element.as_object_mut().and_then(|e| e.remove("chaos"))
+        {
+            unread_outside(
+                &chaos,
+                &[
+                    "errorRate",
+                    "errorStatusCode",
+                    "latencyRate",
+                    "maxLatencyMs",
+                ],
+                &join(&element_path, "chaos"),
+                unread,
+            );
+        }
         serde_ignored::deserialize::<_, _, ResponseBehaviors>(&element, |ignored| {
             unread.push(serde_path(&element_path, &ignored));
         })

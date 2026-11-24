@@ -10,7 +10,7 @@ patched, so moving to a new Mountebank release is a one-line change to `MBTEST_R
 ## Running it
 
 ```bash
-npm install --prefix ~/bench-mb @mbtest/mountebank@2.9.5   # once; the baseline engine
+npm install --prefix ~/bench-mb @mbtest/mountebank@2.10.0   # once; the baseline engine
 cargo build -p rift-http-proxy --bin rift-http-proxy
 RIFT_BIN=$PWD/target/debug/rift-http-proxy conformance/mbtest/run.sh
 ```

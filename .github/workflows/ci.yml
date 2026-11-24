@@ -753,7 +753,7 @@ jobs:
       # since 2.9.2 (the old `mountebank` package stops at 2.9.1); this is npm's newest stable
       # release, pinned exactly so CI stays reproducible. mountebank-release-watch.yml opens an
       # issue when a newer one ships; moving this pin is a reviewed change.
-      MB_VERSION: "2.9.5"
+      MB_VERSION: "2.10.0"
     steps:
       - uses: actions/checkout@v7
 

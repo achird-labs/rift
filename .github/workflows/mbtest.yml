@@ -35,7 +35,7 @@ env:
   CARGO_TERM_COLOR: always
   # The differential oracle's version. scripts/verify-mountebank-version-docs.sh holds this and
   # conformance/mbtest/MBTEST_REF to ci.yml's MB_VERSION, so the suite and the oracle move together.
-  MB_VERSION: "2.9.5"
+  MB_VERSION: "2.10.0"
 
 jobs:
   mbtest:

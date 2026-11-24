@@ -2,11 +2,11 @@
 
 Rift implements the [Mountebank](https://www.mbtest.dev/) REST API and configuration format, so most Mountebank configurations and clients work with Rift unchanged. Where Rift behaves differently, the difference is listed in [Differences from Mountebank](differences.md).
 
-**Version:** Rift is compatible with **Mountebank 2.9.5**, the latest release. Mountebank now
+**Version:** Rift is compatible with **Mountebank 2.10.0**, the latest release. Mountebank now
 publishes as [`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mountebank); the old
 `mountebank` npm package stops at 2.9.1. Every pull request that changes the engine replays the
 [differential corpus](https://github.com/achird-labs/rift/tree/master/conformance/differential)
-against Mountebank 2.9.5 and Rift, and a weekly job opens an issue when a newer Mountebank is
+against Mountebank 2.10.0 and Rift, and a weekly job opens an issue when a newer Mountebank is
 released. The deliberate exceptions are listed in [Differences from Mountebank](differences.md).
 
 **Scope:** Rift imposters are **HTTP/HTTPS only**. Mountebank also supports `tcp` and `smtp`

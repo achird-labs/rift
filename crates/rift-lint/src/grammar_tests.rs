@@ -4,9 +4,9 @@
 //! generates — so these run in every build, and a list that drifts from the engine fails here.
 
 use crate::validator::{
-    BODY_REWRITING_BEHAVIORS, CARRIER_FIELDS, EXTRACTION_METHODS, NESTING_OPERATORS, PROTOCOLS,
-    PROXY_MODES, REGEX_FLAGS, REQUIRED_FIELDS, RESPONSE_SHAPES, STEP_BEHAVIORS, TCP_FAULT_KINDS,
-    UNAPPLIED_RIFT_SHAPES,
+    ARRAY_ELEMENT_BEHAVIORS, BODY_REWRITING_BEHAVIORS, CARRIER_FIELDS, EXTRACTION_METHODS,
+    NESTING_OPERATORS, PROTOCOLS, PROXY_MODES, REGEX_FLAGS, REQUIRED_FIELDS, RESPONSE_SHAPES,
+    STEP_BEHAVIORS, TCP_FAULT_KINDS, UNAPPLIED_RIFT_SHAPES,
 };
 use rift_types::{PREDICATE_GENERATOR_KEYS, PREDICATE_OPERATORS, PREDICATE_PARAMETERS};
 use serde_json::Value;
@@ -235,11 +235,12 @@ fn extraction_methods_and_regex_flags_are_the_schemas() {
 }
 
 /// Issue #1724: the `behaviors` array element is its own definition, holding one of rift-lint's
-/// step behaviors, closed, with at most one key, and the array form's items name it.
+/// element behaviors (the canonical order and `chaos`, issue #1850), closed, with at most one key,
+/// and the array form's items name it.
 #[test]
 fn behavior_element_keys_are_the_canonical_order() {
     let element = def("BehaviorElement");
-    assert_eq!(properties(element), sorted(&STEP_BEHAVIORS));
+    assert_eq!(properties(element), sorted(&ARRAY_ELEMENT_BEHAVIORS));
     // Every key has a deliberate shape: one falling through to `true` would accept anything.
     for (key, shape) in element["properties"].as_object().expect("properties") {
         assert_ne!(shape, &Value::Bool(true), "{key} has no shape");

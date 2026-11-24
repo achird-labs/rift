@@ -636,6 +636,31 @@ fn a_list_valued_behavior_element_replays_to_its_pre_1639_value() {
     }
 }
 
+/// Issue #1850: a `chaos` field Mountebank 2.10.0 refuses is refused at a door and is door-only:
+/// engines up to v0.25.0 stored a `chaos` element as an inert custom key with any value, so the
+/// stored bytes replay, print back as written and pass `admission_check`.
+#[test]
+fn a_chaos_element_with_a_refused_field_replays_as_written() {
+    let stub = r#"{ "responses": [{ "is": {}, "behaviors": [{ "wait": 1 }, { "chaos": { "maxLatencyMs": -5 } }] }] }"#;
+    let door = serde_json::from_str::<Stub>(stub)
+        .expect_err("the validating decode refuses")
+        .to_string();
+    assert!(
+        door.starts_with(
+            "chaos behavior \"maxLatencyMs\" field must be an integer greater than or equal to 0"
+        ),
+        "door: {door}"
+    );
+    let decoded: Stub = replayed(stub).expect("the replayed decode admits the bytes");
+    assert_eq!(
+        serde_json::to_value(&decoded.responses[0]).expect("print"),
+        serde_json::json!({ "is": {}, "behaviors": [{ "wait": 1 }, { "chaos": { "maxLatencyMs": -5 } }] })
+    );
+    assert_eq!(admission_check_stub(&decoded), Ok(()), "door-only");
+    let config: ImposterConfig = replayed(&imposter_with(stub)).expect("replay admits");
+    assert_eq!(admission_check(&config), Ok(()));
+}
+
 /// Issue #1582: a lookup `key.index` that is not a match position (Mountebank reads it as a
 /// property name and finds no row) is admitted on both paths, and prints back as written.
 #[test]

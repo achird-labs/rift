@@ -44,7 +44,7 @@ Also on Homebrew (`brew install achird-labs/rift/rift`), crates.io (`cargo insta
 [Java](https://achird-labs.github.io/rift/sdk/java/), [Node](https://achird-labs.github.io/rift/sdk/node/),
 [Go](https://achird-labs.github.io/rift/sdk/go/) and [Scala](https://achird-labs.github.io/rift/sdk/scala/).
 
-Rift is compatible with **Mountebank 2.9.5**: every engine change is checked against it by a [differential harness](conformance/differential/)
+Rift is compatible with **Mountebank 2.10.0**: every engine change is checked against it by a [differential harness](conformance/differential/)
 that sends both the same requests and fails on any difference that is not
 [documented](https://achird-labs.github.io/rift/mountebank/differences/). Moving from the first stub of a 310-stub
 imposter to the last costs Rift under 1% of its throughput; Mountebank loses 84%

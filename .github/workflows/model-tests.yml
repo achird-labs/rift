@@ -77,7 +77,7 @@ jobs:
       issues: write
     env:
       # The same pin as ci.yml's `differential` job.
-      MB_VERSION: "2.9.5"
+      MB_VERSION: "2.10.0"
     steps:
       - uses: actions/checkout@v7
 

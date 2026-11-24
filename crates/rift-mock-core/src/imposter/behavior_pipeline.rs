@@ -12,7 +12,7 @@ use super::headers::StubRef;
 use super::response::{apply_decorate_bounded, body_text};
 use super::types::{IsResponse, ResponseMode, StatusValue};
 use crate::behaviors::{
-    BehaviorProgram, BehaviorStep, CsvCache, Decorated, LoadOutcome, RequestContext,
+    BehaviorProgram, BehaviorStep, ChaosStatus, CsvCache, Decorated, LoadOutcome, RequestContext,
     ResponseStatus, ShellTransformError, Spliced, SplicedHeaders, SplicedName, WaitScriptError,
     apply_copy_spliced, apply_lookup_row, apply_shell_transform, lookup_key,
 };
@@ -20,6 +20,7 @@ use crate::util::build_response_with_headers;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
+use rand::RngExt;
 use std::cell::OnceCell;
 use std::hash::BuildHasher;
 use std::time::Duration;
@@ -292,6 +293,54 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     if wait_ms > 0 {
                         // A delete cuts the wait off at the request's funnel (issues #1616, #1643).
                         tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                    }
+                }
+                BehaviorStep::Chaos(chaos) => {
+                    // Every roll draws from the request's stream (issues #1755, #1850), so a
+                    // seeded imposter replays its chaos; a caller outside a request gets a stream
+                    // of its own. Mountebank draws from `Math.random`.
+                    let roll = {
+                        let mut rng = crate::imposter::rng::current()
+                            .unwrap_or_else(crate::imposter::rng::RequestRng::unseeded);
+                        chaos.roll(|| rng.random::<f64>())
+                    };
+                    if let Some(delay) = roll.delay {
+                        // Cut off by a delete at the request's funnel, as `wait` is (#1643).
+                        tokio::time::sleep(delay).await;
+                    }
+                    if roll.error {
+                        // Mountebank replaces the status and the body and keeps the headers; the
+                        // funnel corrects a `Content-Length` to the new body (#1554).
+                        match &chaos.error_status {
+                            ChaosStatus::Code(code) => {
+                                status = *code;
+                                status_text = None;
+                            }
+                            ChaosStatus::Text(text) => {
+                                status_text = Some(Spliced::authored(text.clone()));
+                            }
+                        }
+                        // The empty body is falsy, so Mountebank's postProcess, which runs after
+                        // the behaviors, serves the `defaultResponse` body in its place.
+                        let default_body = self
+                            .default_response
+                            .and_then(|default| {
+                                default.body.as_ref().map(|body| (body, &default.mode))
+                            })
+                            .filter(|(body, _)| {
+                                !matches!(body, serde_json::Value::Null)
+                                    && body.as_str() != Some("")
+                            });
+                        match default_body {
+                            Some((default_body, mode)) => {
+                                body = Spliced::supplied(body_text(Some(default_body)));
+                                shell_body = ServedParts::typed_body_of(Some(default_body), mode);
+                            }
+                            None => {
+                                body = Spliced::authored(String::new());
+                                shell_body = None;
+                            }
+                        }
                     }
                 }
                 BehaviorStep::Copy(copy) => {

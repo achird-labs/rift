@@ -11,6 +11,28 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **The `chaos` behavior from Mountebank 2.10.0** (#1850). In the `behaviors` array,
+  `{"chaos": {"errorRate", "errorStatusCode", "latencyRate", "maxLatencyMs"}}` turns a share of
+  responses into an error (the status, default `500`, with the headers kept and an empty body) and
+  delays a share by up to `maxLatencyMs` (default 1000). Fields are validated in Mountebank's words.
+  As in Mountebank, a `chaos` key in the `_behaviors` object form is ignored. The rolls draw from the
+  imposter's random stream, so `_rift.scriptEngine.seed` makes them replay. On an injected error
+  the imposter's `defaultResponse` body, if it has one, takes the empty body's place, as in
+  Mountebank. A lone `chaos` element was refused with `Unrecognized behavior` before.
+  **Stored configs:** a `chaos` key that an engine up to v0.25.0 kept as an inert custom key now
+  runs when the config is replayed from a `--datadir` or a store. That covers a `chaos` written
+  beside another behavior in one element and, because the writer stores `_behaviors` in the array
+  form, a `chaos` written in `_behaviors` too.
+
+### Changed
+
+- **The Mountebank oracle moves to 2.10.0** (#1850): the differential harness, the mbTest suite
+  (`MBTEST_REF` v2.10.0) and the coverage baseline run against it, and the docs state compatibility
+  with Mountebank 2.10.0. Its other changes (csv-parse 7.0.3, http-proxy-agent 9, the smtp
+  libraries, node >= 20.19) change nothing Rift mirrors.
+
 ## [0.25.0] - 2026-11-23
 
 ### Fixed

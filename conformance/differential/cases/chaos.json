@@ -1,0 +1,604 @@
+{
+  "source": "#1850 \u2014 Mountebank 2.10.0's chaos behavior, at the rates where it is deterministic (0, 1, above 1), plus the object form that ignores it",
+  "cases": [
+    {
+      "name": "chaos: errorRate 1 answers the error status with the headers kept and an empty body",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-A": "1",
+                        "Content-Type": "application/json"
+                      },
+                      "body": {
+                        "a": 1
+                      }
+                    },
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "errorRate": 1,
+                          "errorStatusCode": 503
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "chaos: errorStatusCode 0 or absent answers 500",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/zero"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "errorRate": 1,
+                          "errorStatusCode": 0
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "errorRate": 1
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/zero"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/absent"
+        }
+      ]
+    },
+    {
+      "name": "chaos: rate 0 never fires and a rate above 1 always does",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/never"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "errorRate": 0,
+                          "latencyRate": 0
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "errorRate": 2,
+                          "errorStatusCode": 418
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/never"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/always"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/always"
+        }
+      ]
+    },
+    {
+      "name": "chaos: an unservable errorStatusCode fails each hit with node's invalid status 500",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/fraction"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "errorRate": 1,
+                          "errorStatusCode": 1.5
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "errorRate": 1,
+                          "errorStatusCode": 99
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/fraction"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "chaos: a copy after chaos still runs on the error response",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-P": "${P}"
+                      },
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "errorRate": 1,
+                          "errorStatusCode": 503
+                        }
+                      },
+                      {
+                        "copy": {
+                          "from": "path",
+                          "into": "${P}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".+"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/hello"
+        }
+      ]
+    },
+    {
+      "name": "chaos: latencyRate 1 with maxLatencyMs 0 or a small max answers unchanged",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/off"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "latencyRate": 1,
+                          "maxLatencyMs": 0
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "latencyRate": 1,
+                          "maxLatencyMs": 20
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/off"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/small"
+        }
+      ]
+    },
+    {
+      "name": "chaos: the config doors admit and refuse what Mountebank's validator does",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {},
+                    "behaviors": [
+                      {
+                        "chaos": {}
+                      },
+                      {
+                        "chaos": {
+                          "bogus": 1
+                        }
+                      },
+                      {
+                        "chaos": "x"
+                      },
+                      {
+                        "chaos": {
+                          "errorStatusCode": 1.5,
+                          "maxLatencyMs": 1.5
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {},
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "errorRate": "0.5"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {},
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "errorStatusCode": -3
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {},
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "errorRate": 1
+                        },
+                        "wait": 5
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "chaos: the _behaviors object form ignores chaos, invalid or not",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/invalid"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ok"
+                    },
+                    "_behaviors": {
+                      "chaos": {
+                        "errorRate": "x"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ok"
+                    },
+                    "_behaviors": {
+                      "chaos": {
+                        "errorRate": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/invalid"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/valid"
+        }
+      ]
+    },
+    {
+      "name": "chaos: an injected error serves the defaultResponse body",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "body": "fallback"
+            },
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "ok"
+                    },
+                    "behaviors": [
+                      {
+                        "chaos": {
+                          "errorRate": 1,
+                          "errorStatusCode": 503
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
+    }
+  ]
+}

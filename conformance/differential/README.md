@@ -8,7 +8,7 @@ body only, never headers and never the stored imposter, and so could not see #13
 ## Running it
 
 ```bash
-npm install --prefix ~/bench-mb @mbtest/mountebank@2.9.5   # once; the oracle
+npm install --prefix ~/bench-mb @mbtest/mountebank@2.10.0   # once; the oracle
 cargo build -p rift-http-proxy                             # the server binary the harness spawns
 cargo test -p rift-differential -- --nocapture
 ```
@@ -27,7 +27,7 @@ cargo test -p rift-differential -- --nocapture
 | `RIFT_DIFFERENTIAL_MB_COVERAGE_SUMMARY` | c8's `coverage-summary.json` of that profile; `mb_coverage_matches_baseline` holds it against `mb-coverage.json` (skipped when unset) |
 | `RIFT_DIFFERENTIAL_MB_COVERAGE_BLESS` | With the summary set: rewrite `mb-coverage.json`'s counts instead of checking them |
 
-Mountebank is pinned to 2.9.5 (`MB_VERSION` in `ci.yml`), the newest stable release on npm and the
+Mountebank is pinned to 2.10.0 (`MB_VERSION` in `ci.yml`), the newest stable release on npm and the
 version the published benchmark uses (`benchmark-publish.yml`). Since 2.9.2 Mountebank publishes as
 `@mbtest/mountebank`; the old `mountebank` package stops at 2.9.1. Betas are not tracked.
 `.github/workflows/mountebank-release-watch.yml` opens an issue when a newer stable release ships.
@@ -119,9 +119,11 @@ coverage fails the run). `c8 report`, run from Mountebank's package directory, w
   pins); V8's block ranges can shift between majors. Another major is refused with a message, not
   compared. To move the major, bless on it and commit the new baseline with the pin change.
 
-The baseline was measured on Mountebank 2.9.5 and node 22.23.3. The in-scope set is 28 files: the
+The baseline was measured on Mountebank 2.10.0 and node 22.23.5. The in-scope set is 27 files: the
 models, `models/http`, `models/https/httpsServer.js`, the imposter, imposters and config
-controllers, and `util` less its loggers.
+controllers, and `util` less its loggers and `date.js`. `date.js` dates the release feed relative to
+the wall clock, so for weeks after a Mountebank release its covered branch changes with the
+calendar (#1850). The table below is the 2.9.5 measurement that introduced `coverage.json`.
 
 | | lines | branches | functions |
 |:--|--:|--:|--:|
@@ -132,7 +134,7 @@ The branch and function totals grow because code that now runs has branches V8 d
 
 ### Uncovered in-scope code
 
-Line numbers are Mountebank 2.9.5's. Each range is out of reach of a case, or a case for it shows
+Line numbers are Mountebank 2.10.0's. Each range is out of reach of a case, or a case for it shows
 a divergence (to be fixed in Rift and then covered here), or nobody has written the case yet.
 
 **Divergences — a case would fail today:**
@@ -143,7 +145,7 @@ a divergence (to be fixed in Rift and then covered here), or nobody has written 
 | `predicates.js:21-24`, `:238-241`, `:269-271` | Array semantics of `deepEquals`/`equals`: order-independent arrays of objects, an expected array as a subset of the actual one, an object over an array of objects |
 | `predicates.js:58-59`, `:338-339` | An imposter with `"mode": "binary"` refuses `matches`, `jsonpath` and `xpath` at creation in Mountebank; Rift creates it |
 | `predicates.js:384-389`, `responseResolver.js:69-77` | A predicate or response `inject` that throws: Mountebank answers `500`, Rift `400` |
-| `behaviors.js:275-276`, `:364-369` | `copy` from a missing field, and into a header name or body key |
+| `behaviors.js:297-298`, `:386-391` | `copy` from a missing field, and into a header name or body key |
 | `baseHttpServer.js:47-50` | A CORS preflight (`Access-Control-Request-Headers` set): Mountebank echoes the request's values and serves the stub's body |
 | `baseHttpServer.js:64-65` | A stub's own `Content-Length` header: Mountebank recomputes it from the body |
 | `httpRequest.js:63-73` | A `gzip`/`br` `Content-Encoding` whose body does not decode |
@@ -158,7 +160,7 @@ the detail and the replayable export are compared too (#1576). The default certi
 
 | Mountebank | Why |
 |:-----------|:----|
-| `imposterController.js:124-128`, `:140-146`; `imposter.js:79-98`, `:132-138`; `responseResolver.js:281-295`, `:357-359`, `:376-393`; `dryRunValidator.js:91-93`; `httpProxy.js:62-68`; `middleware.js:125-127` | The callback API of out-of-process (`--protofile`) protocols, which Rift does not implement |
+| `imposterController.js:124-128`, `:140-146`; `imposter.js:79-98`, `:132-138`; `responseResolver.js:281-295`, `:357-359`, `:376-393`; `dryRunValidator.js:91-93`; `httpProxy.js:66-72`; `middleware.js:125-127` | The callback API of out-of-process (`--protofile`) protocols, which Rift does not implement |
 | `dryRunValidator.js:130-171`, `:229-232` | The injection checks, which run only without `--allowInjection`; the harness runs both engines with it |
 | `dryRunValidator.js:250-251` | A protocol's own validator; http and https have none |
 | `responseResolver.js:136-137` | `buildExists` recursing into an object: every `exists` generator crashes on the dry run's second key first (#1580), so no imposter that would reach it can be created |
@@ -167,16 +169,16 @@ the detail and the replayable export are compared too (#1576). The default certi
 | `imposter.js:126-127`, `inMemoryImpostersRepository.js:82-89` | `--debug` match recording; the harness starts both engines without it |
 | `middleware.js:228-252` | `--apikey`; likewise |
 | `imposter.js:195-196`; `impostersRepository.js:21-39` | `--host` and `--impostersRepository`/`--datadir` |
-| `middleware.js:146-153`, `:173-176`; `date.js:32-45` | HTML page rendering, Internet Explorer's `Accept` header, and the relative dates of the log and feed pages |
-| `httpProxy.js:81-85` | `http_proxy`/`https_proxy` in Mountebank's environment |
-| `httpProxy.js:118-119` | A proxied body with neither `Content-Length` nor `Transfer-Encoding`, which an HTTP/1.1 client cannot send |
+| `middleware.js:146-153`, `:173-176` | HTML page rendering and Internet Explorer's `Accept` header |
+| `httpProxy.js:85-89` | `http_proxy`/`https_proxy` in Mountebank's environment |
+| `httpProxy.js:122-123` | A proxied body with neither `Content-Length` nor `Transfer-Encoding`, which an HTTP/1.1 client cannot send |
 | `baseHttpServer.js:77-95` | `CONNECT` tunnelling, which the harness's client cannot send as a plain request |
 | `baseHttpServer.js:107`, `:161-165`, `:179`; `imposter.js:238-239`; `impostersController.js:207-208` | Socket errors, a bind the OS refuses (the `hold` step's `127.0.0.1` listener does not stop a wildcard bind), and a connection still open at shutdown |
 | `inMemoryImpostersRepository.js:174-175`, `:189-190`, `:357-359` | Guarded by the controllers' own index checks; imposters still running when Mountebank stops (every case deletes its imposters) |
 
-**Not yet written** (reachable, no case yet): `behaviors.js:346-348`, `:453-454`, `:472-474`,
-`:507-508`; `behaviorsValidator.js:23-24`, `:40-41`, `:107-108`, `:160-162`; `httpProxy.js:133-134`,
-`:203-204`, `:215-217`; `jsonpath.js:27-28`; `predicates.js:51-53`, `:137-138`, `:396-398`;
+**Not yet written** (reachable, no case yet): `behaviors.js:368-370`, `:475-476`, `:494-496`,
+`:529-530`; `behaviorsValidator.js:23-24`, `:40-41`, `:107-108`, `:160-162`; `httpProxy.js:137-138`,
+`:207-208`, `:219-221`; `jsonpath.js:27-28`; `predicates.js:51-53`, `:137-138`, `:396-398`;
 `responseResolver.js:86-87`; `xpath.js:15-16`, `:26-28`; `helpers.js:58-59`, `:122-127` (an array or
 object `ignore`).
 

@@ -168,7 +168,10 @@ const LEDGER: &[(&str, &str, usize)] = &[
         // decode of the identity.
         // #1639 the `refuse_list_valued_element` call in `refuse_door_only_behavior_shapes`:
         // door-only (see #1582; fixture in issue_1267_replay_decode.rs).
-        31,
+        // #1850 the `check_chaos` call in `refuse_door_only_behavior_shapes`: door-only (see
+        // #1582; fixture in issue_1267_replay_decode.rs). Engines up to v0.25.0 stored `chaos` as
+        // an inert custom key with any value.
+        32,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",
