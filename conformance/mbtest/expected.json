@@ -1,5 +1,5 @@
 {
-  "mbtestRef": "v2.9.5",
+  "mbtestRef": "v2.10.0",
   "unsupported": [
     {
       "glob": "api/tcp/**",

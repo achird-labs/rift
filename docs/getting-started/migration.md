@@ -10,7 +10,7 @@ Rift is designed to run your Mountebank setup unchanged. This guide covers the m
 
 ## Compatibility Overview
 
-Rift is compatible with **Mountebank 2.9.5**, the latest release ([`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mountebank)).
+Rift is compatible with **Mountebank 2.10.0**, the latest release ([`@mbtest/mountebank`](https://www.npmjs.com/package/@mbtest/mountebank)).
 It maintains full compatibility with Mountebank's HTTP/HTTPS protocol support:
 
 | Feature | Mountebank | Rift | Notes |

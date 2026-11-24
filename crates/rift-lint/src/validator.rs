@@ -1999,10 +1999,74 @@ pub fn validate_response(
     validate_response_behaviors(file, response, location, result, options);
 }
 
-/// The behaviors that are steps of the program the engine runs; mirrors `CANONICAL_ORDER` in
-/// rift-mock-core's `behaviors/types.rs` (issue #1198). `repeat` is not a step.
+/// The behaviors that are steps of the program the engine runs from the `_behaviors` object form;
+/// mirrors `CANONICAL_ORDER` in rift-mock-core's `behaviors/types.rs` (issue #1198). `repeat` is not
+/// a step. Only `crate::grammar_tests` reads it: an array element also takes `chaos`.
+#[cfg(test)]
 pub(crate) const STEP_BEHAVIORS: [&str; 5] =
     ["wait", "lookup", "copy", "shellTransform", "decorate"];
+
+/// The behaviors a `behaviors` array element may hold; mirrors `ARRAY_ELEMENT_BEHAVIORS` in
+/// rift-mock-core's `behaviors/types.rs`: the canonical order and `chaos` (issue #1850), which
+/// Mountebank 2.10.0 runs only in the array form.
+pub(crate) const ARRAY_ELEMENT_BEHAVIORS: [&str; 6] = [
+    "wait",
+    "lookup",
+    "copy",
+    "shellTransform",
+    "decorate",
+    "chaos",
+];
+
+/// The `chaos` fields a config door checks, in Mountebank 2.10.0's spec order, with its context for
+/// each and whether it must be at least `0`; mirrors `check_chaos` in rift-mock-core.
+const CHAOS_FIELDS: [(&str, &str, bool); 4] = [
+    (
+        "errorRate",
+        "probability between 0 and 1 of injecting an error response",
+        false,
+    ),
+    (
+        "errorStatusCode",
+        "the status code to return when injecting an error (defaults to 500)",
+        true,
+    ),
+    (
+        "latencyRate",
+        "probability between 0 and 1 of injecting random latency",
+        false,
+    ),
+    (
+        "maxLatencyMs",
+        "maximum latency in milliseconds when injecting",
+        true,
+    ),
+];
+
+/// E051 for a `chaos` element value the engine refuses (issue #1850), in Mountebank's words: the
+/// first field, in spec order, that is not a number, or a status or latency bound below `0`. Only
+/// an object is checked; Mountebank reads no field of anything else.
+fn report_chaos_fields(file: &Path, chaos: &Value, location: &str, result: &mut LintResult) {
+    let Some(config) = chaos.as_object() else {
+        return;
+    };
+    for (field, context, non_negative) in CHAOS_FIELDS {
+        let Some(value) = config.get(field) else {
+            continue;
+        };
+        let said = match value.as_f64() {
+            None => {
+                format!("chaos behavior \"{field}\" field must be a number, representing {context}")
+            }
+            Some(number) if non_negative && number < 0.0 => format!(
+                "chaos behavior \"{field}\" field must be an integer greater than or equal to 0"
+            ),
+            Some(_) => continue,
+        };
+        report_malformed_behavior(file, &format!("{location}.{field}"), &said, result);
+        return;
+    }
+}
 
 /// Validate the behaviors block the engine will actually read (issue #1099).
 ///
@@ -2137,7 +2201,7 @@ fn validate_response_behaviors(
                 }
             }
             let contributes = |key: &str, idx: usize| {
-                if STEP_BEHAVIORS.contains(&key) {
+                if ARRAY_ELEMENT_BEHAVIORS.contains(&key) {
                     last_null.get(key).is_none_or(|cleared| idx >= *cleared)
                 } else {
                     winner.get(key) == Some(&idx)
@@ -2178,7 +2242,7 @@ fn validate_response_behaviors(
                 // A `null` behavior counts, as it does in Mountebank's `Object.keys(config)`.
                 let behaviors = obj
                     .keys()
-                    .filter(|key| STEP_BEHAVIORS.contains(&key.as_str()))
+                    .filter(|key| ARRAY_ELEMENT_BEHAVIORS.contains(&key.as_str()))
                     .count();
                 if behaviors == 0
                     && let Some(first) = obj.keys().next()
@@ -2235,6 +2299,15 @@ fn validate_response_behaviors(
                             "Put `repeat` on the response, e.g. {\"is\": {...}, \"repeat\": 2, \
                              \"behaviors\": [...]}",
                         ),
+                    );
+                }
+                // Checked as written, a later `null` or not, as a config door checks it.
+                if let Some(chaos) = obj.get("chaos") {
+                    report_chaos_fields(
+                        file,
+                        chaos,
+                        &format!("{location}.behaviors[{idx}].chaos"),
+                        result,
                     );
                 }
                 // A list is refused as written (issue #1639), a later `null` or not: Mountebank

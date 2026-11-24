@@ -1,5 +1,6 @@
 //! Configuration types for response behaviors.
 
+use super::chaos::ChaosBehavior;
 use super::copy::CopyBehavior;
 use super::lookup::LookupBehavior;
 use super::wait::WaitBehavior;
@@ -14,6 +15,18 @@ use serde::{Deserialize, Serialize};
 /// request in the same block.
 pub const CANONICAL_ORDER: [&str; 5] = ["wait", "lookup", "copy", "shellTransform", "decorate"];
 
+/// The behavior keys an element of the `behaviors` array form may hold: [`CANONICAL_ORDER`] and
+/// `chaos` (issue #1850, Mountebank 2.10.0). `chaos` is not in the canonical order because that is
+/// also the `_behaviors` upcast list, and Mountebank's upcast ignores `chaos`.
+pub const ARRAY_ELEMENT_BEHAVIORS: [&str; 6] = [
+    "wait",
+    "lookup",
+    "copy",
+    "shellTransform",
+    "decorate",
+    "chaos",
+];
+
 /// One behavior, as run: a response's behaviors are an ordered program of these (issue #1198).
 #[derive(Debug, Clone)]
 pub enum BehaviorStep {
@@ -22,6 +35,8 @@ pub enum BehaviorStep {
     Lookup(LookupBehavior),
     Decorate(String),
     ShellTransform(String),
+    /// Array form only (issue #1850).
+    Chaos(ChaosBehavior),
 }
 
 /// A response's behaviors as Mountebank runs them: every step, in order, plus the `repeat` the
@@ -34,7 +49,8 @@ pub struct BehaviorProgram {
 
 impl BehaviorProgram {
     /// Parse a program from its elements, each a behaviors object; the steps of one element run in
-    /// [`CANONICAL_ORDER`], elements in the order given. The response's `repeat` is the first
+    /// [`CANONICAL_ORDER`], then its `chaos`, elements in the order given. A `chaos` that is not an
+    /// object is no step (issue #1850). The response's `repeat` is the first
     /// element's: a `repeat` in a later element is an inert custom key (issue #1672), as a `repeat`
     /// beside a behavior in a Mountebank `behaviors` element is, so it is neither read nor checked.
     ///
@@ -45,10 +61,16 @@ impl BehaviorProgram {
     ) -> Result<Self, serde_json::Error> {
         let mut program = Self::default();
         for (index, element) in elements.into_iter().enumerate() {
-            let behaviors = match element.as_object() {
-                Some(object) if index > 0 && object.contains_key("repeat") => {
+            let object = element.as_object();
+            let inert_repeat = index > 0 && object.is_some_and(|o| o.contains_key("repeat"));
+            let chaos = object.and_then(|o| o.get("chaos"));
+            let behaviors = match object {
+                Some(object) if inert_repeat || chaos.is_some() => {
                     let mut object = object.clone();
-                    object.remove("repeat");
+                    if inert_repeat {
+                        object.remove("repeat");
+                    }
+                    object.remove("chaos");
                     ResponseBehaviors::deserialize(&serde_json::Value::Object(object))?
                 }
                 _ => ResponseBehaviors::deserialize(element)?,
@@ -57,6 +79,13 @@ impl BehaviorProgram {
                 program.repeat = behaviors.repeat;
             }
             program.steps.extend(behaviors.into_steps());
+            // A compiled program holds only the array form's `chaos` (issue #1850); `chaos` sorts
+            // after the canonical keys, so it runs after them in a multi-key element.
+            program.steps.extend(
+                chaos
+                    .and_then(ChaosBehavior::from_value)
+                    .map(BehaviorStep::Chaos),
+            );
         }
         Ok(program)
     }
@@ -303,6 +332,23 @@ where
 mod tests {
     use super::*;
 
+    /// The array form knows every object-form behavior plus `chaos`, which only it has (#1850).
+    #[test]
+    fn array_element_behaviors_are_the_canonical_order_then_chaos() {
+        assert_eq!(
+            ARRAY_ELEMENT_BEHAVIORS,
+            [
+                "wait",
+                "lookup",
+                "copy",
+                "shellTransform",
+                "decorate",
+                "chaos"
+            ]
+        );
+        assert_eq!(ARRAY_ELEMENT_BEHAVIORS[..5], CANONICAL_ORDER);
+    }
+
     #[test]
     fn test_response_behaviors_serde() {
         let yaml = r#"
@@ -466,6 +512,23 @@ decorate: "response.body = 'decorated';"
         ])
         .expect("valid behaviors");
         assert_eq!(program.repeat, Some(2));
+    }
+
+    /// Issue #1850: a `chaos` element is a step when it is an object, and none otherwise.
+    #[test]
+    fn a_chaos_element_is_a_step_when_it_is_an_object() {
+        use serde_json::json;
+        let program = BehaviorProgram::from_elements(&[
+            json!({"chaos": {"errorRate": 1}}),
+            json!({"chaos": "x"}),
+            json!({"wait": 5}),
+        ])
+        .expect("valid behaviors");
+        assert!(matches!(
+            program.steps.as_slice(),
+            [BehaviorStep::Chaos(chaos), BehaviorStep::Wait(WaitBehavior::Fixed(5))]
+                if chaos.error_rate == 1.0
+        ));
     }
 
     /// Issue #1384: an owned `serde_json::Value` hands the visitor an owned `String`

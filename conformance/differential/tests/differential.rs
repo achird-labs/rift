@@ -176,7 +176,7 @@ async fn mountebank_is_the_oracle() {
         );
         eprintln!(
             "SKIP mountebank_is_the_oracle: no Mountebank found. Install it with \
-             `npm install --prefix ~/bench-mb @mbtest/mountebank@2.9.5` or set RIFT_MB_BIN."
+             `npm install --prefix ~/bench-mb @mbtest/mountebank@2.10.0` or set RIFT_MB_BIN."
         );
         return;
     };

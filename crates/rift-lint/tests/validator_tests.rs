@@ -1924,6 +1924,78 @@ fn e060_flags_an_element_with_no_behavior() {
     }
 }
 
+/// Issue #1850: `chaos` (Mountebank 2.10.0) is an array element's behavior, so it is no E060, and a
+/// field the engine refuses is E051 in Mountebank's words: the first, in spec order, that is not a
+/// number, or a status or latency bound below 0. The object form ignores `chaos`, unchecked.
+#[test]
+fn chaos_is_an_element_behavior_and_its_fields_are_checked() {
+    let errors = |response: Value| {
+        let mut r = LintResult::new();
+        validate_response(path(), &response, "loc", &mut r, &opts(), &Value::Null);
+        r.issues
+            .into_iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| (i.code, i.message, i.location.unwrap_or_default()))
+            .collect::<Vec<_>>()
+    };
+    let element =
+        |chaos: Value| json!({ "is": {}, "behaviors": [{ "wait": 1 }, { "chaos": chaos }] });
+    for chaos in [
+        json!({}),
+        json!("x"),
+        json!({ "errorRate": 0.5, "errorStatusCode": 1.5, "latencyRate": 2, "maxLatencyMs": 0 }),
+    ] {
+        assert_eq!(errors(element(chaos.clone())), vec![], "{chaos}");
+    }
+    for (chaos, field, said) in [
+        (
+            json!({ "latencyRate": "x", "errorRate": null }),
+            "errorRate",
+            "chaos behavior \"errorRate\" field must be a number, representing probability \
+             between 0 and 1 of injecting an error response",
+        ),
+        (
+            json!({ "maxLatencyMs": -1 }),
+            "maxLatencyMs",
+            "chaos behavior \"maxLatencyMs\" field must be an integer greater than or equal to 0",
+        ),
+        (
+            json!({ "errorStatusCode": -3 }),
+            "errorStatusCode",
+            "chaos behavior \"errorStatusCode\" field must be an integer greater than or equal \
+             to 0",
+        ),
+        (
+            json!({ "errorStatusCode": "503" }),
+            "errorStatusCode",
+            "chaos behavior \"errorStatusCode\" field must be a number, representing the status \
+             code to return when injecting an error (defaults to 500)",
+        ),
+        (
+            json!({ "latencyRate": true }),
+            "latencyRate",
+            "chaos behavior \"latencyRate\" field must be a number, representing probability \
+             between 0 and 1 of injecting random latency",
+        ),
+    ] {
+        let found = errors(element(chaos.clone()));
+        assert_eq!(found.len(), 1, "{chaos}: {found:?}");
+        let (code, message, location) = &found[0];
+        assert_eq!(code, "E051", "{chaos}");
+        assert!(message.contains(said), "{chaos}: {message}");
+        assert_eq!(location, &format!("loc.behaviors[1].chaos.{field}"));
+    }
+    let ignored = json!({ "is": {}, "_behaviors": { "chaos": { "errorRate": "x" } } });
+    assert_eq!(errors(ignored), vec![]);
+    let two = json!({ "is": {}, "behaviors": [{ "chaos": { "errorRate": 1 }, "wait": 5 }] });
+    assert!(
+        errors(two.clone())
+            .iter()
+            .any(|(_, message, _)| message.contains("only one behavior type")),
+        "{two}"
+    );
+}
+
 /// E061 (issue #1639): a `behaviors` array element whose `copy`, `lookup` or `shellTransform` is a
 /// list, empty included, is refused by the engine and by Mountebank, which validates the value as
 /// written. The `_behaviors` object form is upcast one element per item, so a list there is fine.

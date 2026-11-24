@@ -725,6 +725,53 @@ quoting, and trimmed every cell and header.
 
 ---
 
+## chaos
+
+`chaos` (Mountebank 2.10.0) injects faults into a share of responses, for resilience tests. It
+works only in the [array form](#alternative-format-behaviors-as-array): a `chaos` key in the
+`_behaviors` object is ignored, unvalidated, as in Mountebank, whose object-form upcast does not
+know it.
+
+An imposter stored by Rift v0.25.0 or earlier with a `chaos` key, beside another behavior or in
+`_behaviors` (which Rift writes back in the array form), runs that `chaos` when it is loaded again
+from a `--datadir`.
+
+```json
+{
+  "is": { "statusCode": 200, "body": "ok" },
+  "behaviors": [
+    { "chaos": { "errorRate": 0.1, "errorStatusCode": 503, "latencyRate": 0.2, "maxLatencyMs": 500 } }
+  ]
+}
+```
+
+| Field | Default | Effect |
+|---|---|---|
+| `errorRate` | `0` | The chance that the response becomes an error |
+| `errorStatusCode` | `500` | The error's status. `0` reads as unset, so it is `500` too |
+| `latencyRate` | `0` | The chance that the response is delayed |
+| `maxLatencyMs` | `1000` | The longest delay. Each delay is uniform in `[0, maxLatencyMs)`; `0` turns latency off |
+
+Every field is optional, so `{"chaos": {}}` does nothing. The two faults are independent: a
+response is delayed first, then may become an error. An error keeps the response's headers, sets
+the status, and empties the body; when the imposter has a `defaultResponse` body, that body is
+served instead, as Mountebank completes every response after its behaviors. Behaviors after `chaos` in the array still run, on the error
+response. Rates are not clamped, so `2` always fires and `0` or below never does.
+
+A field that is not a number is refused when the imposter is created, in Mountebank's words (`chaos
+behavior "errorRate" field must be a number, …`), as is a negative `errorStatusCode` or
+`maxLatencyMs`. A status outside 100–999, or one that is not a whole number, is admitted, as
+Mountebank admits it, and every injected error then answers `500` with
+`ERR_HTTP_INVALID_STATUS_CODE`.
+
+**Seeded chaos (Rift extension).** The rolls draw from the imposter's random stream. With
+`_rift.scriptEngine.seed` set, an imposter replays the same hits and delays after every create,
+recreate and restart, and `rngKey` gives each request a stream of its own (see
+[Randomness](../features/wasm-scripting.md#randomness)). Mountebank uses `Math.random()`, so its
+sequence never repeats.
+
+---
+
 ## repeat
 
 Control how many times a response is returned before cycling to the next response.
@@ -882,6 +929,8 @@ array element that sets several, they run in Mountebank's order:
 5. **decorate** - Transform the response last
 
 Earlier Rift releases ran copy before lookup and decorate before shellTransform.
+
+`chaos` exists only in the array form, so it always runs at its position in the array.
 
 To run them in another order, use the array form with one behavior per element. `repeat` is not a
 step here; it controls which response is chosen.

@@ -233,14 +233,15 @@ impl schemars::JsonSchema for BehaviorElement {
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let nullable = |schema: Schema| json!({ "anyOf": [schema, { "type": "null" }] });
         let mut properties = Map::new();
-        // Every key is matched explicitly; a key added to the canonical order without a shape here
-        // gets `true`, which `behavior_element_keys_are_the_canonical_order` refuses.
-        for key in crate::behaviors::CANONICAL_ORDER {
+        // Every key is matched explicitly; a key added to the element's behaviors without a shape
+        // here gets `true`, which `behavior_element_keys_are_the_canonical_order` refuses.
+        for key in crate::behaviors::ARRAY_ELEMENT_BEHAVIORS {
             let schema = match key {
                 "wait" => nullable(generator.subschema_for::<crate::behaviors::WaitBehavior>()),
                 "lookup" => nullable(generator.subschema_for::<crate::behaviors::LookupBehavior>()),
                 "copy" => nullable(generator.subschema_for::<crate::behaviors::CopyBehavior>()),
                 "shellTransform" | "decorate" => json!({ "type": ["string", "null"] }),
+                "chaos" => nullable(chaos_behavior()),
                 _ => Value::Bool(true),
             };
             properties.insert(key.to_owned(), schema);
@@ -251,6 +252,7 @@ impl schemars::JsonSchema for BehaviorElement {
                             `lookup` and `shellTransform` take one item here, never a list: write \
                             several as several elements, or use the `_behaviors` object form. \
                             `repeat` belongs on the response; inside an element it is never read. \
+                            `chaos` is an element behavior only, as in Mountebank 2.10.0. \
                             A `null` value removes the earlier steps of that behavior.",
             "type": "object",
             "properties": properties,
@@ -258,6 +260,43 @@ impl schemars::JsonSchema for BehaviorElement {
             "maxProperties": 1
         })
     }
+}
+
+/// A `chaos` element's value (issue #1850, Mountebank 2.10.0), as a config door checks it: every
+/// field optional and a number, the status and the latency bound at least `0`.
+fn chaos_behavior() -> Schema {
+    json_schema!({
+        "description": "Injects faults into a share of responses, as Mountebank 2.10.0's `chaos` \
+                        does: an error status with an empty body, keeping the headers, at \
+                        `errorRate`, and a delay below `maxLatencyMs` at `latencyRate`. Array form \
+                        only: `_behaviors` ignores it. Rift draws the rolls from the imposter's \
+                        random stream, so `_rift.scriptEngine.seed` replays them.",
+        "type": "object",
+        "properties": {
+            "errorRate": {
+                "description": "Probability between 0 and 1 of injecting an error response. \
+                                Default 0.",
+                "type": "number"
+            },
+            "errorStatusCode": {
+                "description": "The status code to return when injecting an error. Default (and \
+                                for 0) 500; one outside 100-999 answers 500 when served.",
+                "type": "number",
+                "minimum": 0
+            },
+            "latencyRate": {
+                "description": "Probability between 0 and 1 of injecting random latency. Default 0.",
+                "type": "number"
+            },
+            "maxLatencyMs": {
+                "description": "Maximum latency in milliseconds when injecting. Default 1000; 0 \
+                                injects none.",
+                "type": "number",
+                "minimum": 0
+            }
+        },
+        "additionalProperties": false
+    })
 }
 
 /// A response's `statusCode` as the imposter grammar reads it (issue #1558): a number within `u16`,

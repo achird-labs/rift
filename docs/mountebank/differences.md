@@ -1,6 +1,6 @@
 # Differences from Mountebank
 
-Rift answers the Mountebank API the way Mountebank 2.9.5 does, with the deliberate exceptions on
+Rift answers the Mountebank API the way Mountebank 2.10.0 does, with the deliberate exceptions on
 this page. Every one of them is pinned by the
 [differential harness](https://github.com/achird-labs/rift/tree/master/conformance/differential): it
 runs each test case on a real Mountebank and on Rift, and fails on any difference that its allow-list
@@ -197,6 +197,15 @@ it, which Mountebank admits when it ignores the block. And `GET /imposters`, `ri
 `--datadir` leave the ignored block out, where Mountebank echoes it: the saved file behaves the same
 in either. An object-form `behaviors` beside `_behaviors` is served by Rift; Mountebank answers
 `500` (its upcast treats `behaviors` as an array).
+
+## `chaos`
+
+Rift runs `chaos` (Mountebank 2.10.0) as Mountebank does, with two differences:
+
+- `{"chaos": null}` removes the earlier `chaos` steps, as `null` does for every behavior in Rift.
+  Mountebank answers `500` for it.
+- The rolls draw from the imposter's random stream, so `_rift.scriptEngine.seed` makes them
+  replay. Mountebank draws from `Math.random()`.
 
 ## `repeat` is a whole number
 

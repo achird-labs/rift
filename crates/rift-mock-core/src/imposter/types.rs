@@ -1943,7 +1943,11 @@ fn refuse_list_valued_element(
 ///   (issue #1639), in Mountebank's first error for it: an array has none of the fields a copy or
 ///   lookup requires, and a shellTransform must be one command string. The `_behaviors` object form
 ///   is upcast one element per list item first, so a list there is admitted;
-/// - a `repeat` of `0` or `null`, on the response or in an object-form block.
+/// - a `repeat` of `0` or `null`, on the response or in an object-form block;
+/// - in the `behaviors` array form, a `chaos` field Mountebank 2.10.0 refuses (issue #1850,
+///   [`check_chaos`](crate::behaviors::check_chaos)). Engines up to v0.25.0 stored `chaos` as an
+///   inert custom key with any value, so a replayed one keeps loading. The object form ignores
+///   `chaos`, as Mountebank's upcast does, so it is never checked there.
 ///
 /// The first key named is the first in the element's sorted keys, which is the written order for
 /// the one-key element this is almost always about.
@@ -1965,7 +1969,7 @@ fn refuse_door_only_behavior_shapes(
     let not_positive = |repeat: Option<&Value>| {
         repeat.is_some_and(|repeat| repeat.is_null() || repeat.as_u64() == Some(0))
     };
-    let known = |key: &String| crate::behaviors::CANONICAL_ORDER.contains(&key.as_str());
+    let known = |key: &String| crate::behaviors::ARRAY_ELEMENT_BEHAVIORS.contains(&key.as_str());
     let selected = if uses_underscore_behaviors(raw) {
         raw.underscore_behaviors.as_ref()
     } else {
@@ -1978,6 +1982,9 @@ fn refuse_door_only_behavior_shapes(
                 let Some(element) = element.as_object() else {
                     continue;
                 };
+                if let Some(chaos) = element.get("chaos") {
+                    crate::behaviors::check_chaos(chaos)?;
+                }
                 refuse_list_valued_element(element)?;
                 let behaviors = element.keys().filter(|key| known(key)).count();
                 if let (0, Some(first)) = (behaviors, element.keys().next()) {
@@ -2389,7 +2396,7 @@ fn behaviors_out(
         }
         let behavior = element
             .keys()
-            .any(|key| crate::behaviors::CANONICAL_ORDER.contains(&key.as_str()));
+            .any(|key| crate::behaviors::ARRAY_ELEMENT_BEHAVIORS.contains(&key.as_str()));
         match elements.last_mut() {
             Some(previous) if !behavior => previous.extend(element),
             _ if !behavior => leading.extend(element),
@@ -2413,10 +2420,12 @@ const LIST_BEHAVIORS: [&str; 3] = ["copy", "lookup", "shellTransform"];
 /// `--allowInjection` gate, stub analysis and the writer all read the program that runs.
 ///
 /// - The object form (`_behaviors`), and each element of the array form that sets several keys,
-///   contribute their keys in [`CANONICAL_ORDER`](crate::behaviors::CANONICAL_ORDER), then any
-///   other key alphabetically. Array elements contribute in array order.
+///   contribute their keys in [`CANONICAL_ORDER`](crate::behaviors::CANONICAL_ORDER), then
+///   `chaos`, then any other key alphabetically. Array elements contribute in array order.
 /// - A `copy`, `lookup` or `shellTransform` list is one step per item; an empty list is none.
 /// - A `null` for a key removes every earlier step of that key (issues #1093, #1098).
+/// - `chaos` is a step only in the array form (issue #1850): the object form drops it, as
+///   Mountebank's `compatibility.js` upcast does, whatever its value.
 /// - `repeat` is the response's in the object form, which Mountebank's upcast lifts to the response,
 ///   and in an array element that holds nothing else (refused at a door since #1582, but stored by
 ///   older engines). The last such `repeat` wins; a `null` one clears it. Beside a behavior in an
@@ -2438,7 +2447,14 @@ pub(crate) fn compile_behaviors(block: serde_json::Value) -> Option<serde_json::
         steps: &mut Vec<(String, Value)>,
         repeat: &mut Option<Value>,
     ) {
-        let order = crate::behaviors::CANONICAL_ORDER;
+        // The canonical order, then `chaos`, which only an array element keeps.
+        let order = crate::behaviors::ARRAY_ELEMENT_BEHAVIORS;
+        let mut object = object;
+        // Mountebank's `_behaviors` upcast ignores `chaos` (issue #1850), and a compiled program
+        // cannot tell the forms apart, so the object form's never becomes a step.
+        if !in_element {
+            object.remove("chaos");
+        }
         // Mountebank's test is key presence, so a `null` behavior counts.
         let beside_a_behavior =
             in_element && object.keys().any(|key| order.contains(&key.as_str()));
@@ -2450,7 +2466,6 @@ pub(crate) fn compile_behaviors(block: serde_json::Value) -> Option<serde_json::
             )
         });
         let keys: Vec<String> = keys.into_iter().cloned().collect();
-        let mut object = object;
         for key in keys {
             let Some(value) = object.remove(&key) else {
                 continue;
@@ -2459,7 +2474,7 @@ pub(crate) fn compile_behaviors(block: serde_json::Value) -> Option<serde_json::
                 *repeat = (!value.is_null()).then_some(value);
                 continue;
             }
-            let known = crate::behaviors::CANONICAL_ORDER.contains(&key.as_str());
+            let known = order.contains(&key.as_str());
             match value {
                 Value::Null => steps.retain(|(k, _)| *k != key),
                 // A list of items is one step per item. An item that is itself a list or `null` is
@@ -6688,6 +6703,53 @@ mod tests {
             let parsed = behaviors_parsed.expect("the merged block parses");
             assert_eq!(parsed.repeat, Some(3));
         }
+    }
+
+    /// Issue #1850: `chaos` is a step only in the array form. The object form drops it whatever its
+    /// value, as Mountebank's `compatibility.js` upcast does; a door checks its fields in the array
+    /// form, and a replay of what an older engine stored never does.
+    #[test]
+    fn chaos_is_a_step_only_in_the_array_form() {
+        let chaos = json!({ "errorRate": 1 });
+        assert_eq!(
+            compile_behaviors(json!({ "wait": 1, "chaos": chaos })),
+            Some(json!([{ "wait": 1 }]))
+        );
+        assert_eq!(compile_behaviors(json!({ "chaos": chaos })), None);
+        assert_eq!(
+            compile_behaviors(json!([{ "chaos": chaos }, { "wait": 1 }, { "chaos": [] }])),
+            Some(json!([{ "chaos": chaos }, { "wait": 1 }, { "chaos": [] }]))
+        );
+        assert_eq!(
+            compile_behaviors(json!([{ "chaos": chaos }, { "chaos": null }])),
+            None
+        );
+        // `repeat` beside `chaos` is an inert custom key, as beside any behavior (#1672).
+        assert_eq!(
+            compile_behaviors(json!([{ "wait": 1 }, { "chaos": chaos, "repeat": 2 }])),
+            Some(json!([{ "wait": 1 }, { "chaos": chaos }, { "repeat": 2 }]))
+        );
+
+        let invalid = json!({ "is": {}, "behaviors": [{ "chaos": { "errorRate": "x" } }] });
+        let door = serde_json::from_value::<StubResponse>(invalid.clone())
+            .expect_err("a door refuses the field")
+            .to_string();
+        assert!(
+            door.contains("chaos behavior \"errorRate\" field must be a number"),
+            "{door}"
+        );
+        let replayed: StubResponse = crate::imposter::deserialize_replayed(invalid)
+            .expect("a replay keeps what an older engine stored");
+        assert_eq!(
+            replayed
+                .behaviors_block()
+                .map(|program| program.to_string()),
+            Some(r#"[{"chaos":{"errorRate":"x"}}]"#.to_string())
+        );
+        serde_json::from_value::<StubResponse>(
+            json!({ "is": {}, "_behaviors": { "chaos": { "errorRate": "x" } } }),
+        )
+        .expect("the object form ignores chaos");
     }
 
     /// Issue #1639: the list-valued `behaviors` elements Mountebank refuses, with its first error.

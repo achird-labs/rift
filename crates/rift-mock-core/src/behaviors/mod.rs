@@ -11,7 +11,9 @@
 //! - `lookup` - Query external CSV data source
 //! - `shellTransform` - External program transforms response
 //! - `decorate` - Rhai script to post-process response
+//! - `chaos` - Inject an error status or latency into a share of responses (array form only)
 
+mod chaos;
 mod copy;
 mod cycler;
 mod extraction;
@@ -25,6 +27,8 @@ mod wait;
 pub(crate) use wait::thrown_message;
 
 // Re-export main types for library consumers
+pub(crate) use chaos::check_chaos;
+pub use chaos::{ChaosBehavior, ChaosStatus};
 #[allow(unused_imports)]
 pub use copy::{CopyBehavior, CopySource, apply_copy_behaviors};
 pub use cycler::{HasRepeatBehavior, RuleCycler};
@@ -57,6 +61,8 @@ pub use transform::{
     is_js_config_decorate, is_js_function_decorate, rewrite_js_config_to_rhai, shell_command_line,
     shell_request_json,
 };
-pub use types::{BehaviorProgram, BehaviorStep, CANONICAL_ORDER, ResponseBehaviors};
+pub use types::{
+    ARRAY_ELEMENT_BEHAVIORS, BehaviorProgram, BehaviorStep, CANONICAL_ORDER, ResponseBehaviors,
+};
 #[allow(unused_imports)]
 pub use wait::{WaitBehavior, WaitScriptError};
